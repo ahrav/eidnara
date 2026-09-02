@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Single classification registry for legacy identities, TypeScript ownership, persistent families, and authored destination files. Validated by `bun run eidnara:check registry migration/registry.json`. Identity classes: renamed (value leaves the tree, rename_to replaces it), frozen-durable (byte-level durable identity stays unchanged), external-protocol (wire, credential, schema, or tool-consumed identity stays unchanged), third-party. Family classes follow requirement R11. Entries seeded at U1 from commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0 and magic-context@696a0fc199f9534de736bd319f8d28cdf720c332; later waves add entries as their file inventories arrive.",
+  "description": "Single classification registry for legacy identities, TypeScript ownership, persistent families, and authored destination files. Validated by `bun run eidnara:check registry migration/registry.json`. Identity classes: renamed (value leaves the tree, rename_to replaces it), frozen-durable (byte-level durable identity stays unchanged), external-protocol (wire, credential, schema, or tool-consumed identity stays unchanged), third-party. Family classes follow requirement R11. Entries seeded at U1 from commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0 and magic-context@696a0fc199f9534de736bd319f8d28cdf720c332; later waves add entries as their file inventories arrive. U2 adds `fixture` entries: `byte-stable` paths keep their source bytes and are exempt from the identity scan; `generator` paths reproduce one such fixture; `external-record` paths are machine-produced records about external systems that name legacy identities as facts.",
   "entries": [
     {
       "kind": "identity",
@@ -286,6 +286,35 @@
     },
     {
       "kind": "identity",
+      "value": "cortexkit_fence",
+      "class": "frozen-durable",
+      "rationale": "SQLite table that stores the writer fence epoch (`id = 0`, `epoch`). Every current-format module database created by the predecessor `storage` crate contains it; a rename would make `storage::open_sqlite` read floor zero and reissue stored epochs.",
+      "evidence": [
+        "crates/storage/src/lib.rs",
+        "commons/docs/property-catalogs/cortexkit-lease/evidence/replacement-fence-is-claimed-before-old-writer-writes.md"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "cortexkit_schema_version",
+      "class": "frozen-durable",
+      "rationale": "SQLite table that records applied migrations per `(namespace, version)`. A rename would make `SqliteStore::migrate` re-run every migration against existing databases.",
+      "evidence": [
+        "crates/storage/src/lib.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "cortexkit_",
+      "class": "frozen-durable",
+      "rationale": "Prefix of the PostgreSQL database name derived by `storage_types::postgres_database_name`. No backend in this workspace opens PostgreSQL, but the byte-stable golden fixture `crates/storage-types/tests/golden/storage_vectors.json` pins the derived names (R18); changing the prefix needs a reviewed contract change that replaces that fixture.",
+      "evidence": [
+        "crates/storage-types/src/lib.rs",
+        "crates/storage-types/tests/golden/storage_vectors.json"
+      ]
+    },
+    {
+      "kind": "identity",
       "value": "cortexkit",
       "class": "frozen-durable",
       "rationale": "`MANAGED_DIR_NAME`: the data-root directory component under `XDG_DATA_HOME`. Renaming it relocates every family and breaks the lifetime fence with the predecessor.",
@@ -558,6 +587,46 @@
       ]
     },
     {
+      "kind": "fixture",
+      "path": "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
+      "role": "byte-stable",
+      "rationale": "Cache-stability golden vectors (schema_version 3). Byte-stable under R18; the provenance strings inside cite the predecessor repositories and stay as captured.",
+      "evidence": [
+        "migration/waves/U2/receipt.json",
+        "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/storage-types/tests/golden/storage_vectors.json",
+      "role": "byte-stable",
+      "rationale": "Storage descriptor golden vectors: database names, store paths, and descriptor wire shape for eight module ids. Byte-stable under R18; the sample module ids are fixture content.",
+      "evidence": [
+        "migration/waves/U2/receipt.json",
+        "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/storage-types/examples/golden-vectors.rs",
+      "role": "generator",
+      "fixture": "crates/storage-types/tests/golden/storage_vectors.json",
+      "rationale": "Generator for the storage golden vectors. Its module-id list is fixture content, so the sample ids that carry legacy names stay.",
+      "evidence": [
+        "crates/storage-types/tests/golden_vectors.rs"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "release/registry-gate.json",
+      "role": "external-record",
+      "rationale": "Generated by `scripts/eidnara-migration/registry-audit.ts`. It records raw `npm view` responses for every `@eidnara/*` and `@cortexkit/*` package name, so the legacy names it contains are facts about the external registry, not identities carried into the product.",
+      "evidence": [
+        "scripts/eidnara-migration/registry-audit.ts",
+        "migration/waves/U1/receipt.json"
+      ]
+    },
+    {
       "kind": "family",
       "name": "kernel-store",
       "class": "retained-authoritative-baseline",
@@ -750,11 +819,15 @@
       "kind": "family",
       "name": "test-fixtures",
       "class": "test-only",
-      "rationale": "Names that appear only in tests and fixtures.",
+      "rationale": "Names that appear only in tests and fixtures. `storage_types::sqlite_store_path` composes `<data_home>/cortexkit/<module_id>/store.db`; production opens `mc-store.db`, and the only consumer of that template is the magic-context dev descriptor, so the template and its test paths stay test-only. U4 confirms the disposition when the daemon migrates.",
       "literals": [
         "store.db",
         "claim-vector.db",
-        "embedding.bin"
+        "embedding.bin",
+        "{}/cortexkit/{}/store.db",
+        "/home/u/.local/share/cortexkit/alfonso-routing/store.db",
+        "/data/cortexkit/m/store.db",
+        "/data/cortexkit/alfonso-routing/store.db"
       ],
       "paths": [],
       "mismatch_behavior": "none"
@@ -888,6 +961,106 @@
       "kind": "authored",
       "path": "migration/waves/U1/review-notes.md",
       "rationale": "U1 per-file review evidence."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U2/receipt.json",
+      "rationale": "U2 wave receipt."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U2/waivers.json",
+      "rationale": "U2 waiver set (empty)."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U2/property-impact.json",
+      "rationale": "U2 property impact closure."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U2/architecture-impact.json",
+      "rationale": "U2 pre-port and post-integration architecture decisions."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U2/review-notes.md",
+      "rationale": "Per-file review evidence for the U2 receipt."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U2/source-crate-dispositions.json",
+      "rationale": "Disposition of the five unmigrated commons crates and their CI, publication, and catalog artifacts."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/defer-pass-replays-frozen-bytes-verbatim.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/hard-bust-drains-deferred-work.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/never-minted-boundary-is-not-reconcile-pending.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/anchor-holds-while-reconcile-pending.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/frozen-unit-order-is-preserved.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/migrations-apply-once-per-namespace.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/read-callbacks-cannot-write.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/callback-scope-is-restored-after-unwind.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/protected-transactions-pin-fence-durability.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/open-derives-lease-root-from-database-path.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/descriptor-wire-shape-round-trips.md",
+      "rationale": "Evidence for a record discovered at U2."
     }
   ]
 }

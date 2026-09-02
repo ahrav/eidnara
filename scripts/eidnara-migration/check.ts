@@ -92,6 +92,8 @@ export const LEGACY_IDENTITY_RE =
 
 export const PERSISTENT_LITERAL_RE = /"([^"\n]*\.(?:db|sqlite|bin|lock|jsonl|handle))"/g;
 
+export const FIXTURE_ROLES = ["byte-stable", "generator", "external-record"] as const;
+
 function isObject(value: unknown): value is JsonObject {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -489,6 +491,7 @@ interface RegistryShape {
     typescript: { path: string; class: string }[];
     families: { name: string; class: string; literals: string[] }[];
     authored: string[];
+    fixtures: { path: string; role: string }[];
 }
 
 function validateIdentityEntry(entry: JsonObject, path: string, errors: string[]): { value: string; class: string } | undefined {
@@ -593,12 +596,13 @@ function validateFamilyEntry(
 
 function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShape {
     validateSchemaVersion(root, errors);
-    const shape: RegistryShape = { identities: [], typescript: [], families: [], authored: [] };
+    const shape: RegistryShape = { identities: [], typescript: [], families: [], authored: [], fixtures: [] };
     const identityValues = new Set<string>();
     const typescriptPaths = new Set<string>();
     const familyNames = new Set<string>();
     const literals = new Map<string, string>();
     const authoredPaths = new Set<string>();
+    const fixturePaths = new Set<string>();
 
     const entries = requireArray(root, "entries", "$", errors);
     if (entries.length === 0) errors.push("$.entries must contain at least one entry");
@@ -606,7 +610,7 @@ function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShap
         const path = `$.entries[${index}]`;
         const entry = requireObject(raw, path, errors);
         if (entry === undefined) return;
-        const kind = requireEnum(entry, "kind", ["identity", "typescript", "family", "authored"], path, errors);
+        const kind = requireEnum(entry, "kind", ["identity", "typescript", "family", "authored", "fixture"], path, errors);
         switch (kind) {
             case "identity": {
                 const identity = validateIdentityEntry(entry, path, errors);
@@ -646,6 +650,18 @@ function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShap
                 if (authoredPaths.has(authoredPath)) errors.push(`${path}.path is duplicated`);
                 authoredPaths.add(authoredPath);
                 shape.authored.push(authoredPath);
+                break;
+            }
+            case "fixture": {
+                const fixturePath = requireString(entry, "path", path, errors);
+                const role = requireEnum(entry, "role", FIXTURE_ROLES, path, errors);
+                requireString(entry, "rationale", path, errors);
+                requireStringArray(entry, "evidence", path, errors, 1);
+                if (role === "generator") requireString(entry, "fixture", path, errors);
+                if (fixturePath === undefined || role === undefined) return;
+                if (fixturePaths.has(fixturePath)) errors.push(`${path}.path is duplicated`);
+                fixturePaths.add(fixturePath);
+                shape.fixtures.push({ path: fixturePath, role });
                 break;
             }
             default:
@@ -1250,6 +1266,10 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
         if (file.class === "new-authored" && registryShape !== undefined && !registryShape.authored.includes(file.destination)) {
             errors.push(`${file.path} is new-authored but the registry has no authored entry for ${file.destination}`);
         }
+        const fixtureRole = registryShape?.fixtures.find((fixture) => fixture.path === file.destination)?.role;
+        if (fixtureRole === "byte-stable" && file.transformation !== "verbatim") {
+            errors.push(`${file.path} is a byte-stable fixture but its transformation is ${file.transformation ?? "missing"}, not verbatim`);
+        }
     }
 
     const commitByRepo = new Map(shape.sources.map((source) => [source.repo, source.commit]));
@@ -1417,24 +1437,69 @@ function isTextFile(path: string): boolean {
     return dot >= 0 && TEXT_EXTENSIONS.has(path.slice(dot));
 }
 
+function occurrences(line: string, needle: string): [number, number][] {
+    const out: [number, number][] = [];
+    let from = 0;
+    for (;;) {
+        const at = line.indexOf(needle, from);
+        if (at < 0) return out;
+        out.push([at, at + needle.length]);
+        from = at + 1;
+    }
+}
+
+function containedIn(ranges: [number, number][], start: number, end: number): boolean {
+    return ranges.some(([from, to]) => from <= start && end <= to);
+}
+
 function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): void {
     const retained = shape.identities.filter((identity) => identity.class !== "renamed").map((identity) => identity.value);
-    const renamed = shape.identities.filter((identity) => identity.class === "renamed").map((identity) => identity.value);
+    // Rust paths spell crate names with underscores, so check both spellings of a renamed identity.
+    const renamed = shape.identities
+        .filter((identity) => identity.class === "renamed")
+        .flatMap((identity) => {
+            const snake = identity.value.replace(/-/g, "_");
+            return snake === identity.value ? [{ value: identity.value, spelling: identity.value }] : [
+                { value: identity.value, spelling: identity.value },
+                { value: identity.value, spelling: snake },
+            ];
+        });
+    const fixtures = new Set(shape.fixtures.map((fixture) => fixture.path));
+
+    // An occurrence within a retained identity does not count: `mc-store` within the frozen `mc-store.db`.
+    const scanLine = (line: string): string | undefined => {
+        const retainedRanges = retained.flatMap((value) => occurrences(line, value));
+        for (const entry of renamed) {
+            if (occurrences(line, entry.spelling).some(([start, end]) => !containedIn(retainedRanges, start, end))) {
+                return `renamed identity ${entry.value} still present`;
+            }
+        }
+        const legacy = new RegExp(LEGACY_IDENTITY_RE.source, "g");
+        for (const match of line.matchAll(legacy)) {
+            if (!containedIn(retainedRanges, match.index, match.index + match[0].length)) {
+                return "legacy identity not frozen by the registry";
+            }
+        }
+        return undefined;
+    };
 
     for (const scanRoot of IDENTITY_SCAN_ROOTS) {
         const full = join(ctx.root, scanRoot);
         if (!existsSync(full)) continue;
         const files = statSync(full).isDirectory() ? listFiles(full, skipVendored).map((rel) => join(scanRoot, rel)) : [scanRoot];
         for (const file of files) {
-            if (!isTextFile(file)) continue;
+            if (!isTextFile(file) || fixtures.has(file)) continue;
             const lines = readFileSync(join(ctx.root, file), "utf8").split("\n");
             lines.forEach((line, index) => {
-                if (!LEGACY_IDENTITY_RE.test(line)) return;
-                if (retained.some((value) => line.includes(value))) return;
-                const hit = renamed.find((value) => line.includes(value));
-                const detail = hit !== undefined ? `renamed identity ${hit} still present` : "legacy identity not frozen by the registry";
-                errors.push(`${file}:${index + 1}: ${detail}`);
+                const detail = scanLine(line);
+                if (detail !== undefined) errors.push(`${file}:${index + 1}: ${detail}`);
             });
+        }
+    }
+    for (const fixture of shape.fixtures) {
+        const full = join(ctx.root, fixture.path);
+        if (!existsSync(full) || !statSync(full).isFile()) {
+            errors.push(`fixture ${fixture.path} is registered but does not exist in the destination`);
         }
     }
 

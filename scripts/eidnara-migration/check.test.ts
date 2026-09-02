@@ -1041,6 +1041,74 @@ describe("evidence: git-backed receipts", () => {
         }
     });
 
+    test("renamed identities are caught before a retained substring can excuse them (AE7)", () => {
+        write(join(destination, "crates/lease/src/stale.rs"), "use cortexkit_lease::Lease;\nconst DB: &str = \"mc-store.db\";\nconst FENCE: &str = \"cortexkit_fence\";\n");
+        try {
+            const registry = copy("registry");
+            (registry.entries as Json[]).push(
+                { kind: "identity", value: "cortexkit", class: "frozen-durable", rationale: "managed dir", evidence: ["x"] },
+                { kind: "identity", value: "mc-store.db", class: "frozen-durable", rationale: "module store file", evidence: ["x"] },
+                { kind: "identity", value: "mc-store", class: "renamed", rename_to: "memory-store", rationale: "crate", evidence: ["x"] },
+            );
+            const errors = verify("registry", registry, ctx);
+            expect(errors).toContain("crates/lease/src/stale.rs:1: renamed identity cortexkit-lease still present");
+            expect(errors.some((error) => error.startsWith("crates/lease/src/stale.rs:2"))).toBe(false);
+            expect(errors.some((error) => error.startsWith("crates/lease/src/stale.rs:3"))).toBe(false);
+        } finally {
+            rmSync(join(destination, "crates/lease/src/stale.rs"));
+        }
+    });
+
+    test("registered fixtures are exempt from the identity scan and must stay verbatim", () => {
+        const fixturePath = "crates/lease/tests/golden/vectors.json";
+        const fixtureBytes = '{"provenance": "magic-context: inject.ts"}\n';
+        write(join(destination, fixturePath), fixtureBytes);
+        try {
+            const registry = copy("registry");
+            let errors = verify("registry", registry, ctx);
+            expect(errors).toContain(`${fixturePath}:1: legacy identity not frozen by the registry`);
+            (registry.entries as Json[]).push({
+                kind: "fixture",
+                path: fixturePath,
+                role: "byte-stable",
+                rationale: "golden vectors",
+                evidence: ["migration/waves/U2/receipt.json"],
+            });
+            errors = verify("registry", registry, ctx);
+            expect(errors.some((error) => error.startsWith(`${fixturePath}:`))).toBe(false);
+
+            (registry.entries as Json[]).push({
+                kind: "fixture",
+                path: "crates/lease/tests/golden/missing.json",
+                role: "generator",
+                rationale: "generator",
+                evidence: ["x"],
+            });
+            expect(validateShape("registry", registry)).toContain("$.entries[7].fixture must be a non-empty string");
+            ((registry.entries as Json[])[7] as Json).fixture = fixturePath;
+            errors = verify("registry", registry, ctx);
+            expect(errors).toContain("fixture crates/lease/tests/golden/missing.json is registered but does not exist in the destination");
+
+            (registry.entries as Json[]).pop();
+            writeFileSync(join(destination, "migration/registry.json"), JSON.stringify(registry));
+            const value = receipt();
+            files(value).push({
+                source: { repo: "commons", path: "crates/cortexkit-lease/tests/golden/vectors.json", blob_sha: blob },
+                destination: fixturePath,
+                destination_sha256: sha256(fixtureBytes),
+                transformation: "adapted",
+                class: "human-authored",
+                review_evidence: { doc_rigor: "x" },
+            });
+            expect(verify("receipt", value, ctx)).toContain(
+                `$.files[${files(value).length - 1}] is a byte-stable fixture but its transformation is adapted, not verbatim`,
+            );
+        } finally {
+            rmSync(join(destination, fixturePath));
+            writeFileSync(join(destination, "migration/registry.json"), JSON.stringify(valid.registry));
+        }
+    });
+
     test("shipped TypeScript needs a permanent or transitional registry entry", () => {
         write(join(destination, "packages/opencode-plugin/src/index.ts"), "export {};\n");
         write(join(destination, "packages/opencode-plugin/src/extra.ts"), "export {};\n");
