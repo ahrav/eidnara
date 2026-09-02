@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -171,6 +171,7 @@ const valid: Record<CheckKind, Json> = {
                 audit_verdict: "pass",
                 evidence_digest: digest,
                 code_hash: digest,
+                check_pointer: "crates/lease/src/lib.rs#L1",
                 check_hash: digest,
                 target_configurations: ["linux-x64"],
                 evidence_attempts: 1,
@@ -890,10 +891,10 @@ describe("evidence: git-backed receipts", () => {
         impact.destination_commit = destinationCommit;
         for (const record of records(impact)) {
             if (record.classification !== "core") continue;
-            const bytes = Buffer.concat((record.files as string[]).map((file) => require("node:fs").readFileSync(join(destination, file))));
+            const bytes = Buffer.concat((record.files as string[]).map((file) => readFileSync(join(destination, file))));
             record.code_hash = sha256(bytes);
             const checkFile = typeof record.check_pointer === "string" ? record.check_pointer.split("#")[0]! : undefined;
-            if (checkFile !== undefined) record.check_hash = sha256(require("node:fs").readFileSync(join(destination, checkFile)));
+            if (checkFile !== undefined) record.check_hash = sha256(readFileSync(join(destination, checkFile)));
         }
         return impact;
     }
@@ -972,6 +973,13 @@ describe("evidence: git-backed receipts", () => {
         (core.files as string[]).push("crates/lease/src/absent.rs");
         const errors = verify("property-impact", impact, ctx);
         expect(errors.some((error) => error.includes("absent.rs, which is not a file in the destination tree"))).toBe(true);
+    });
+
+    test("a core record without a check pointer is rejected rather than carrying an uncompared hash", () => {
+        const impact = impactFor(sourceCommit);
+        const core = records(impact).find((record) => record.classification === "core")!;
+        delete core.check_pointer;
+        expect(verify("property-impact", impact, ctx).some((error) => error.endsWith(".check_pointer must be a non-empty string"))).toBe(true);
     });
 
     test("a core record whose check pointer names a missing file is an error", () => {

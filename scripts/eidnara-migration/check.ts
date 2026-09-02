@@ -882,11 +882,14 @@ function validatePropertyImpactShape(root: JsonObject, errors: string[]): Proper
                 const auditVerdict = requireEnum(record, "audit_verdict", ["pass", "fail", "vacuous", "pending"], path, errors);
                 requireDigest(record, "evidence_digest", path, errors);
                 const codeHash = requireDigest(record, "code_hash", path, errors);
+                // `check_hash` is the digest of the file `check_pointer` names, so a core
+                // record without the pointer would carry a hash nothing is compared against.
+                const checkPointer = requireString(record, "check_pointer", path, errors);
                 const checkHash = requireDigest(record, "check_hash", path, errors);
                 cores.push({
                     path,
                     files,
-                    check_pointer: typeof record.check_pointer === "string" ? record.check_pointer : undefined,
+                    check_pointer: checkPointer,
                     code_hash: codeHash,
                     check_hash: checkHash,
                 });
@@ -1429,8 +1432,6 @@ function receiptDestinations(root: string): Set<string> {
     return out;
 }
 
-/// `destination_commit` must be an ancestor of the checked-out destination, so impact records
-/// cannot describe an unrelated tree. Skipped when the destination is not a git checkout.
 /**
  * Digest of every tracked file under the named module directories in the checked tree:
  * one `path\n<sha256 of bytes>\n` line per file, sorted by path. Tracked means listed by
@@ -1468,6 +1469,8 @@ export function modulesHash(root: string, modules: string[], path: string, error
     return sha256(lines.join(""));
 }
 
+/// `destination_commit` must be an ancestor of the checked-out destination, so impact records
+/// cannot describe an unrelated tree. Skipped when the destination is not a git checkout.
 function verifyDestinationCommit(commit: string, path: string, ctx: Context, errors: string[]): void {
     if (!existsSync(join(ctx.root, ".git"))) return;
     const result = spawnSync("git", ["merge-base", "--is-ancestor", commit, "HEAD"], { cwd: ctx.root, encoding: "utf8" });

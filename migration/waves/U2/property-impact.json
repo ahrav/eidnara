@@ -9,7 +9,7 @@
       "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
-  "destination_commit": "2e604ae3b62b44ac5842aff83fb713b2bd28f910",
+  "destination_commit": "8e910249616571ba0104a462c1d8c08ea3922f56",
   "touched_files": [
     "crates/cache-stability/src/lib.rs",
     "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
@@ -966,7 +966,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "b59741326fd476d9581b3af1744dffd8593cf130fd73e49ba8a0a7a03c0ae564",
+        "digest": "b5c53ac32566a05fac34eb68a4bad1c8222e24c3c7d6bccf5436640258605fec",
         "description": "`fresh_file_matches_the_baseline_inventory` compares a fresh file to `fixtures/schema/storage-inventory-v1.json`; `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, and `negative_database_fence_fails_closed` prove refusal leaves the bytes unchanged."
       }
     },
