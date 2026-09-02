@@ -16,17 +16,17 @@ Some prose with a colon: not a field.
 ### quarantine-authority-survives-peer-writes
 
 Type: safety
-Reachability: default-production — the ring transport is built unconditionally
+Reachability: default-production - the ring transport is built unconditionally
 (\`crates/mc-host/src/runtime.rs:741\`), so this code is on the shipped path.
 Status: active
-Exercised: not yet — needs a peer that writes the lifecycle page directly.
+Exercised: not yet - needs a peer that writes the lifecycle page directly.
 Guarantee: Once a direction is quarantined locally, no action by the peer can
 make it accept a reserve again.
-Check: \`always\` — after \`enter_quarantine()\`, every operation still returns
+Check: \`always\` - after \`enter_quarantine()\`, every operation still returns
 \`Quarantined\`.
 Fault/timing angle: the peer writes 0 to the flag between two gate reads.
 Required faults and enabling state: a quarantine trigger and a peer write.
-Confidence: high — [evidence](evidence/quarantine.md). Verified by reading the
+Confidence: high - [evidence](evidence/quarantine.md). Verified by reading the
 gate at \`ring.rs:12\`.
 Existing check: none
 Impact: a quarantined ring accepts traffic again.
@@ -37,16 +37,16 @@ Open questions:
 
 ### custody-terminal-transition-exactly-once
 
-Type: safety — revised from liveness after review.
+Type: safety - revised from liveness after review.
 Reachability: test-only. Invalidated rather than live: the backend is deleted.
 Reaches production: no
 Status: invalidated
-Exercised: yes — the former test drove both orders.
+Exercised: yes - the former test drove both orders.
 Guarantee: Each candidate's charges are released exactly once.
-Check: \`always\` — \`release(); assert!(!release())\`.
+Check: \`always\` - \`release(); assert!(!release())\`.
 Fault/timing angle: two terminal transitions racing.
 Required faults and enabling state: none constructible now.
-Confidence: high on the mechanism — [evidence](evidence/custody.md).
+Confidence: high on the mechanism - [evidence](evidence/custody.md).
 Existing check: none
 Impact: none; mechanism deleted.
 Open questions: None.
@@ -93,7 +93,7 @@ Check: always
 
 Type: safety
 Status: active
-Check: \`always\` — ok
+Check: \`always\` - ok
 `;
         const errors: string[] = [];
         parseCatalog(broken, errors);

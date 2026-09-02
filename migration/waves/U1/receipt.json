@@ -23,7 +23,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "b4a6ccbb4b2afc71148e0058d78d6bf49fdeaf41999e85df5f6dff102ea939e6",
+      "destination_sha256": "3f52ac35df3b410a925db25bf056308ea2b923a0f37789b625eeff9f5993b6b1",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -56,7 +56,7 @@
     {
       "source": null,
       "destination": "rust-toolchain.toml",
-      "destination_sha256": "984ae81dfe611befcd61bfeebd8fae0a6c0db9fb3f696c1f202668d933df5ffe",
+      "destination_sha256": "e7d66d0c170c645ce7e25793e99482e7bdea967732c2478d85dd98a55cda0bd1",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -122,7 +122,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "f2699269a67be565bb8d2ae603006f5dc1a1b80d3b6d1b0e066c5eb1d442c07d",
+      "destination_sha256": "f00e05a7560cf2c69d91d5d4444067ddce626007512f83fe3f94ce821ceb01a3",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -254,7 +254,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/generate-property-index.test.ts",
-      "destination_sha256": "27fce826e0a30b5f260f9075b264cea51eabc2769f48594e488c076c4ca517b7",
+      "destination_sha256": "3bb9374b0ed82ff42edba96461ab9ffe0ae6ad74d23c70778e1f8ec24cb17bd6",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -302,11 +302,11 @@
         "blob_sha": "995b0233c407ff3c2136cc68ea64f2663bd71755"
       },
       "destination": "docs/properties/METHOD.md",
-      "destination_sha256": "7e0a9bae271f22eea41ee5ea5109de72e63acbb9c691b7fc29ec32a5449d8190",
-      "transformation": "verbatim",
+      "destination_sha256": "5e0992a5c1edd11bbdf68060779070ae021f01493914f65df0b03e0b2248fd5c",
+      "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
-        "doc_rigor": "migration/waves/U1/review-notes.md#copied-files"
+        "doc_rigor": "migration/waves/U2/review-notes.md#method-template-connector"
       }
     },
     {

@@ -44,8 +44,8 @@
       "check_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
       "check_pointer": "crates/lease/src/lib.rs#L1206",
       "target_configurations": [
-        "x86_64-unknown-linux-gnu, Rust 1.89, --locked",
-        "x86_64-unknown-linux-gnu, Rust stable 1.98, --locked"
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
@@ -74,8 +74,8 @@
       "check_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
       "check_pointer": "crates/lease/src/lib.rs#L1264",
       "target_configurations": [
-        "x86_64-unknown-linux-gnu, Rust 1.89, --locked",
-        "x86_64-unknown-linux-gnu, Rust stable 1.98, --locked"
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
@@ -104,8 +104,8 @@
       "check_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
       "check_pointer": "crates/lease/src/lib.rs#L642",
       "target_configurations": [
-        "x86_64-unknown-linux-gnu, Rust 1.89, --locked",
-        "x86_64-unknown-linux-gnu, Rust stable 1.98, --locked"
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
@@ -131,13 +131,13 @@
       },
       "strategy_decision": "Byte-stable golden fixture: receipt-level byte identity to the source blob plus the fixture-driven test as an independent oracle; the near-tautological action assertion is recorded and the byte, boundary, flag, and queue assertions carry the claim.",
       "audit_verdict": "pass",
-      "evidence_digest": "91cf3ab5b6b00aea8bf14481fbfc1f5f08dd43cdc337ac2ae3bba410d0966051",
+      "evidence_digest": "bcf04fc9f1cba9e21c48f5fb4949c7aa36c798b7065bdbf4d5eeee963214e5f1",
       "code_hash": "25bc5de54de92488ed873c1b16a4d15df9af5f0bc151d7b8ad6ac28417722224",
       "check_hash": "243786b536ef077b7cdcdc765ca033a493dcaf5d52998056a70f77c59b94e13f",
       "check_pointer": "crates/cache-stability/tests/golden_vectors.rs#L160",
       "target_configurations": [
-        "x86_64-unknown-linux-gnu, Rust 1.89, --locked",
-        "x86_64-unknown-linux-gnu, Rust stable 1.98, --locked"
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
       ],
       "evidence_attempts": 1
     },
@@ -165,8 +165,8 @@
       "check_hash": "818565074cce03ed25c9d57557b5e826d2199c4fa7a910351b56727a31a0fa9b",
       "check_pointer": "crates/storage-types/tests/golden_vectors.rs#L12",
       "target_configurations": [
-        "x86_64-unknown-linux-gnu, Rust 1.89, --locked",
-        "x86_64-unknown-linux-gnu, Rust stable 1.98, --locked"
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
       ],
       "evidence_attempts": 1
     },

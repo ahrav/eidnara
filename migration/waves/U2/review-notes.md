@@ -103,15 +103,15 @@ Files under `docs/properties/shared-primitives/`.
 | `migration/waves/U2/architecture-impact.json` | pre-port and post-integration reports, four candidates, none Strong | `check.test.ts` architecture-impact suite (AE19-AE21) |
 | `migration/waves/U2/waivers.json` | empty | `check.test.ts` waivers suite (AE30) |
 | `migration/waves/U2/source-crate-dispositions.json` | five unmigrated crates and the source CI, publication, fuzz, probe, and catalog artifacts, with measured registry state | none; reviewed against `GET crates.io/api/v1/crates/<name>` responses whose digests it records |
-| `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml` | workspace members, resolver 3, inherited MSRV and `publish = false`, dependency pins | `cargo metadata` graph check in CI; `--locked` builds on 1.89 and stable |
-| `.github/workflows/ci.yml` | real workspace gates on 1.89 and stable, feature configurations, MSRV against unlocked dependencies, `cargo metadata` sibling and stub check | run locally step by step before commit |
+| `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml` | workspace members, resolver 3, inherited `rust-version = "1.98"` and `publish = false`, dependency pins | `cargo metadata` graph check in CI; `--locked` builds on 1.98 and stable |
+| `.github/workflows/ci.yml` | real workspace gates on the pinned 1.98 toolchain and stable, feature configurations, the pinned toolchain against unlocked dependencies, `cargo metadata` sibling and stub check | run locally step by step before commit |
 | `scripts/eidnara-migration/check.ts`, `check.test.ts` | renamed-identity-first scan with underscore spelling and range containment; `fixture` registry kind | two new tests; 68 tests pass |
 | `migration/registry.json` | frozen DDL names, database-name prefix, quoted production lease-key literals, fixtures, `store.db` template literal, U2 authored paths | `eidnara:check registry` |
 | `package.json` | `check:repo` covers the U2 receipt, waivers, property catalog, and impact records | `bun run check:repo` |
 
 ## Generated files
 
-- `Cargo.lock`: `cargo +1.89 generate-lockfile`; verified by every `--locked`
+- `Cargo.lock`: `cargo +1.98 generate-lockfile`; verified by every `--locked`
   build and by the MSRV job's unlocked comparison.
 - `docs/properties/shared-primitives/index.json`:
   `generate-property-index.ts docs/properties/shared-primitives`; CI runs it
@@ -122,3 +122,14 @@ Files under `docs/properties/shared-primitives/`.
 The source repository's three-OS matrix, live PostgreSQL job, push-seal
 version gate, and release tag resolver are recorded as `known_red` with
 `not_run`; `source-crate-dispositions.json` explains each.
+
+## METHOD template connector
+
+`docs/properties/METHOD.md` arrived verbatim from magic-context in U1. Its
+prose rule forbids em dashes as connectors, but its own record template used
+`—` between an enumerated field head and its note, and the U1 test fixture for
+the index generator did the same. U2 changes the template and the fixture to a
+spaced hyphen (`yes - <note>`), which the generator already accepts, and states
+that rule next to the prose rule. No parsing behavior changes; the em dash is
+still accepted for older content. The U1 receipt entry for `METHOD.md` is now
+`adapted` and points here.

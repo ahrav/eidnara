@@ -141,7 +141,7 @@
       "artifact": "CI: three-OS fmt/clippy/test matrix",
       "found": true,
       "disposition": "replaced",
-      "evidence": "`.github/workflows/ci.yml` runs Ubuntu, macOS, and Windows on stable. Eidnara's `ci.yml` runs Rust 1.89 and stable on `ubuntu-latest` only: the genesis release ships `linux-x64-gnu` only, and the Windows-only `cortexkit-paths` canonicalization vectors belong to a frozen crate."
+      "evidence": "`.github/workflows/ci.yml` runs Ubuntu, macOS, and Windows on stable. Eidnara's `ci.yml` runs the pinned Rust 1.98 toolchain and stable on `ubuntu-latest` only: the genesis release ships `linux-x64-gnu` only, and the Windows-only `cortexkit-paths` canonicalization vectors belong to a frozen crate."
     },
     {
       "artifact": "CI: live PostgreSQL job",

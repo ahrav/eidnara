@@ -73,49 +73,49 @@ jobs:
 
       - name: Rust toolchains
         run: |
-          rustup toolchain install 1.89 --profile minimal --component clippy,rustfmt
+          rustup toolchain install 1.98 --profile minimal --component clippy,rustfmt
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
 
       - name: Rust format
-        run: cargo +1.89 fmt --all -- --check
+        run: cargo +1.98 fmt --all -- --check
 
-      - name: Rust lint (1.89)
-        run: cargo +1.89 clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Rust lint (1.98)
+        run: cargo +1.98 clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Rust lint (stable)
         run: cargo +stable clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Rust tests (1.89)
-        run: cargo +1.89 test --workspace --all-targets --all-features --locked
+      - name: Rust tests (1.98)
+        run: cargo +1.98 test --workspace --all-targets --all-features --locked
 
-      - name: Rust doctests and docs (1.89)
+      - name: Rust doctests and docs (1.98)
         run: |
-          cargo +1.89 test --workspace --doc --all-features --locked
-          RUSTDOCFLAGS="-D warnings" cargo +1.89 doc --workspace --no-deps --all-features --locked
+          cargo +1.98 test --workspace --doc --all-features --locked
+          RUSTDOCFLAGS="-D warnings" cargo +1.98 doc --workspace --no-deps --all-features --locked
 
       - name: Rust tests (stable)
         run: cargo +stable test --workspace --all-targets --all-features --locked
 
-      - name: Feature configurations (1.89)
+      - name: Feature configurations (1.98)
         run: |
-          cargo +1.89 check --workspace --no-default-features --locked
-          cargo +1.89 check --workspace --all-features --locked
+          cargo +1.98 check --workspace --no-default-features --locked
+          cargo +1.98 check --workspace --all-features --locked
 
-      - name: MSRV with unlocked latest dependencies
+      - name: Pinned toolchain with unlocked latest dependencies
         run: |
           set -euo pipefail
           scratch=$(mktemp -d)
           git archive HEAD | tar -x -C "$scratch"
           cd "$scratch"
-          cargo +1.89 update
-          cargo +1.89 check --workspace --all-targets --all-features
+          cargo +1.98 update
+          cargo +1.98 check --workspace --all-targets --all-features
 
       - name: Workspace graph has no sibling checkout or metadata stub
         run: |
           set -euo pipefail
           # Every path dependency must resolve inside this checkout. A sibling
           # checkout (../commons) or a metadata-only stub resolves outside it.
-          cargo +1.89 metadata --locked --format-version 1 \
+          cargo +1.98 metadata --locked --format-version 1 \
             | bun -e '
               const meta = JSON.parse(await Bun.stdin.text());
               const root = meta.workspace_root + "/";
