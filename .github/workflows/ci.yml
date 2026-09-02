@@ -71,32 +71,72 @@ jobs:
             bun run eidnara:check property-catalog "$part/index.json"
           done
 
-      - name: Rust toolchain
-        if: hashFiles('crates/**/Cargo.toml') != ''
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.89"
-          components: clippy, rustfmt
+      - name: Rust toolchains
+        run: |
+          rustup toolchain install 1.89 --profile minimal --component clippy,rustfmt
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
 
       - name: Rust format
-        if: hashFiles('crates/**/Cargo.toml') != ''
-        run: cargo fmt --all -- --check
+        run: cargo +1.89 fmt --all -- --check
 
-      - name: Rust lint
-        if: hashFiles('crates/**/Cargo.toml') != ''
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Rust lint (1.89)
+        run: cargo +1.89 clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Rust tests
-        if: hashFiles('crates/**/Cargo.toml') != ''
-        run: cargo test --workspace --all-targets --all-features --locked
+      - name: Rust lint (stable)
+        run: cargo +stable clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Rust tests (1.89)
+        run: cargo +1.89 test --workspace --all-targets --all-features --locked
+
+      - name: Rust doctests and docs (1.89)
+        run: |
+          cargo +1.89 test --workspace --doc --all-features --locked
+          RUSTDOCFLAGS="-D warnings" cargo +1.89 doc --workspace --no-deps --all-features --locked
+
+      - name: Rust tests (stable)
+        run: cargo +stable test --workspace --all-targets --all-features --locked
+
+      - name: Feature configurations (1.89)
+        run: |
+          cargo +1.89 check --workspace --no-default-features --locked
+          cargo +1.89 check --workspace --all-features --locked
+
+      - name: MSRV with unlocked latest dependencies
+        run: |
+          set -euo pipefail
+          scratch=$(mktemp -d)
+          git archive HEAD | tar -x -C "$scratch"
+          cd "$scratch"
+          cargo +1.89 update
+          cargo +1.89 check --workspace --all-targets --all-features
+
+      - name: Workspace graph has no sibling checkout or metadata stub
+        run: |
+          set -euo pipefail
+          # Every path dependency must resolve inside this checkout. A sibling
+          # checkout (../commons) or a metadata-only stub resolves outside it.
+          cargo +1.89 metadata --locked --format-version 1 \
+            | bun -e '
+              const meta = JSON.parse(await Bun.stdin.text());
+              const root = meta.workspace_root + "/";
+              const outside = meta.packages
+                .filter((p) => p.source === null && !p.manifest_path.startsWith(root))
+                .map((p) => p.name + " -> " + p.manifest_path);
+              const stubs = meta.packages
+                .filter((p) => p.source === null && p.targets.length === 0)
+                .map((p) => p.name);
+              if (outside.length || stubs.length) {
+                console.error("path dependencies outside the workspace:", outside);
+                console.error("packages without targets:", stubs);
+                process.exit(1);
+              }
+              console.log("workspace graph: " + meta.packages.filter((p) => p.source === null).length + " local packages, all inside " + root);
+            '
 
       - name: Forbidden references
         run: |
           set -euo pipefail
-          # Sibling checkouts, CI stubs, and legacy backfill paths never enter the destination tree.
-          if grep -rnE 'path *= *"\.\./' --include=Cargo.toml . ; then
-            echo "sibling path dependency found"; exit 1
-          fi
-          if grep -rln 'provision-rust-ci-stubs\|storage-v22-backfill' --exclude-dir=.git --exclude-dir=node_modules --exclude=ci.yml . ; then
+          # Cross-repo CI stubs and legacy backfill paths never enter the destination tree.
+          if grep -rln 'provision-rust-ci-stubs\|storage-v22-backfill' --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target --exclude=ci.yml . ; then
             echo "cross-repo stub or backfill path found"; exit 1
           fi
