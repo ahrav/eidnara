@@ -111,7 +111,7 @@
     {
       "source": null,
       "destination": "README.md",
-      "destination_sha256": "c87d896bd5df5f8c536fed437f072d23a32a28696b277439ba74793c3232ed76",
+      "destination_sha256": "fdd530a8894e0c213619c0c76e1afc5081dac4e3adcc4ec4507dd7d868691db7",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
