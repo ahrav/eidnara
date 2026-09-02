@@ -570,7 +570,7 @@
         "blob_sha": "ac571ceba652df7ffc54c7f3424e305e5d274e36"
       },
       "destination": "docs/properties/shared-primitives/evidence/protected-write-set-is-fence-complete.md",
-      "destination_sha256": "0f162c6a5be548acde2cc3405319ed630a52e8b796e70fd28aedbfcdbfaafae6",
+      "destination_sha256": "7db5ba0059b9a3327f7024738fee9ab467d3487915054aa982d15ff0e7688a20",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
