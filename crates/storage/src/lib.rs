@@ -635,6 +635,7 @@ mod sqlite_backend {
             .unwrap_or_else(|| PathBuf::from("."));
         std::fs::create_dir_all(&parent).map_err(StoreError::Io)?;
 
+        refuse_hard_links(Path::new(&path))?;
         let epoch_floor = read_fence_epoch(Path::new(&path))?;
         let db_file_name = Path::new(&path)
             .file_name()
@@ -690,6 +691,35 @@ mod sqlite_backend {
             epoch,
             _lease: Some(lease),
         })
+    }
+
+    /// Two names for one database inode derive two leases and two `-wal`/`-shm` pairs,
+    /// so neither writer sees the other's fence claim or WAL frames. The database and its
+    /// sidecars must each have exactly one name.
+    fn refuse_hard_links(path: &Path) -> Result<(), StoreError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            for suffix in ["", "-wal", "-shm"] {
+                let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
+                match std::fs::symlink_metadata(&candidate) {
+                    // Directories always carry several names; `protect_file` refuses them.
+                    Ok(meta) if meta.is_file() && meta.nlink() > 1 => {
+                        return Err(StoreError::Baseline(format!(
+                            "{} has {} names; a store file must have exactly one",
+                            candidate.display(),
+                            meta.nlink()
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(StoreError::Io(e)),
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+        Ok(())
     }
 
     /// Creates the database file with mode `0600` when it does not exist.
@@ -805,6 +835,18 @@ mod sqlite_backend {
                 .execute_batch(&text)
                 .map_err(|e| StoreError::Baseline(format!("baseline text does not apply: {e}")))?;
             let objects = schema_inventory(&scratch)?;
+            // A temporary object exists only on the connection that created it, so a
+            // baseline that creates one presents a different schema after every reopen.
+            let temporary: i64 = scratch
+                .query_row("SELECT COUNT(*) FROM temp.sqlite_schema", [], |row| {
+                    row.get(0)
+                })
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            if temporary != 0 {
+                return Err(StoreError::Baseline(format!(
+                    "baseline creates {temporary} temporary object(s); every baseline object must be persistent"
+                )));
+            }
             // A trigger or index on `fence` or `format_marker` could rewrite the epoch
             // or the marker underneath the checks that read them.
             if let Some(hooked) = objects
@@ -1046,6 +1088,57 @@ mod tests {
 
     const INVENTORY_FIXTURE: &str =
         include_str!("../../../fixtures/schema/storage-inventory-v1.json");
+
+    /// A second name for the database inode would give a second store its own lease and
+    /// its own WAL, so a hard-linked database is refused before it is opened.
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_database_is_refused() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, "").expect("create the database"));
+        let alias = root.join("alias.db");
+        std::fs::hard_link(path, &alias).expect("hard link");
+        let via_alias = StorageDescriptor {
+            backend: StorageBackend::Sqlite {
+                path: alias.to_string_lossy().into_owned(),
+            },
+            ..d.clone()
+        };
+        for descriptor in [&d, &via_alias] {
+            match open_sqlite(descriptor, "").map(|_| ()) {
+                Err(StoreError::Baseline(m)) => assert!(m.contains("names"), "unexpected: {m}"),
+                other => panic!("a hard-linked database must be refused, got {other:?}"),
+            }
+        }
+        std::fs::remove_file(&alias).expect("remove alias");
+        drop(open_sqlite(&d, "").expect("a single name opens again"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A temporary object in a baseline would exist on the first open only.
+    #[test]
+    fn a_baseline_that_creates_temporary_objects_is_rejected() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        for ddl in [
+            "CREATE TEMP TABLE scratch (k TEXT);",
+            "CREATE TABLE kv (k TEXT); CREATE TEMP VIEW kv_view AS SELECT k FROM kv;",
+        ] {
+            match open_sqlite(&d, ddl).map(|_| ()) {
+                Err(StoreError::Baseline(m)) => {
+                    assert!(m.contains("temporary object"), "unexpected message: {m}")
+                }
+                other => panic!("{ddl} must be rejected, got {other:?}"),
+            }
+        }
+        assert!(!std::path::Path::new(path).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// A consumer baseline cannot hang a trigger or index on the fence or the marker.
     #[test]

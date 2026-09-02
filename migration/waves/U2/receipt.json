@@ -211,7 +211,7 @@
         "blob_sha": "95dc9c575f3ef72f6739719225bb78ea19f99dbb"
       },
       "destination": "crates/storage/src/lib.rs",
-      "destination_sha256": "d6a853cf506a3b186752515d53579235f6659b7cf992ef285e892ead611f2f2a",
+      "destination_sha256": "c8f3637c46577f4d08772b2ac336907277f44d6275ca7e7099c4de744df12faa",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -270,7 +270,7 @@
         "blob_sha": "d360c86177f779878d5b645bb31b1b06f0d0584c"
       },
       "destination": "docs/properties/shared-primitives/catalog.md",
-      "destination_sha256": "d696647d428c032ad1d6282495ff2119b3d5a9a1f7feab0e89694da08aa4630b",
+      "destination_sha256": "9118f185d5551db1d759d2bb1b73a1add5e32280a47c756f833a82555e308b44",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -283,7 +283,7 @@
         "blob_sha": "e1e9761f2a147ae3619dec612bf033fd7c8be1f2"
       },
       "destination": "docs/properties/shared-primitives/existing-checks.md",
-      "destination_sha256": "08f4c847f0ccefec2ea07d2abae12a48063c86f0422afc293dedfadf0c39016c",
+      "destination_sha256": "9f8af1d5caf4cad6f5f1f6a52dd11fadba72599f78304bf8e2ff5ea73e65798f",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -543,7 +543,7 @@
         "blob_sha": "b1e22cc64e6e7c435516c967df340232dc3c3b98"
       },
       "destination": "docs/properties/shared-primitives/evidence/logical-store-has-single-lease-identity.md",
-      "destination_sha256": "1ce415d9ee8faabf4f2e28509c1cc6a74f7f42183eaf23fe11a2f825f4a423ee",
+      "destination_sha256": "3a79120b4163b6e2896fcf7c36a15078352bb59e073d47784633240765ee2102",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -569,7 +569,7 @@
         "blob_sha": "ac571ceba652df7ffc54c7f3424e305e5d274e36"
       },
       "destination": "docs/properties/shared-primitives/evidence/protected-write-set-is-fence-complete.md",
-      "destination_sha256": "38b3373683c31fafde25c00499110a95fed41c8f0ac0cf5c2b9f082a0dc2469e",
+      "destination_sha256": "8143f5337fec96f06de991c85f20d8f8980bdda8d6ff7974a058b9e05085b256",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -582,7 +582,7 @@
         "blob_sha": "e2f4943057aea1ee96d8b671513dc67e02740ef3"
       },
       "destination": "docs/properties/shared-primitives/evidence/replacement-fence-is-claimed-before-old-writer-writes.md",
-      "destination_sha256": "d8858c2ded759f79839dd88ac9ebe3a93dfc321f9deb7b5a59b343f4fbea2645",
+      "destination_sha256": "d75bcdd8682357f0b0ff130a66be0774bea1308ce8cb00a21e13caa06b000592",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -647,7 +647,7 @@
         "blob_sha": "c42f7f9b97aa605f8d371046915575149d9e2372"
       },
       "destination": "docs/properties/shared-primitives/evidence/stale-writer-write-is-rejected.md",
-      "destination_sha256": "03f3e1332522ba7df379edcf0bb54ba84b4fa98ed8d1788a1b1ee5ce74ac9109",
+      "destination_sha256": "13dafa5e432be05e7ebbb7e8d049b88b65a7b674d04a528d09f90f95e25858e1",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -699,7 +699,7 @@
         "blob_sha": "a03f53d02800be76450858f79f9c74f9c1718eac"
       },
       "destination": "docs/properties/shared-primitives/portfolio-evaluation.md",
-      "destination_sha256": "2efa2228e9c3207ec051048f14992ead1441c0313f700b9e0fb8613cf8c7051a",
+      "destination_sha256": "184ad483f304d426d805d1dd2a0c3fe9eff09c5ee42495014525e083f387493d",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -756,7 +756,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "97ecdd0bc6c21baa43211410981bc8e359e515313c255448e42280617865e82e",
+      "destination_sha256": "9a20deeea2598a4a85b7a717499505291c073b319ef385fab7c9ace69d477ce1",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -778,7 +778,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "2ab7ae6f011a3f00ff69ee327313a1137d5166d79c434fbdcc9d66deba04f07b",
+      "destination_sha256": "04078f28b731fe3d93e4b15052bfee770bae39912a374895d3bda4c715d474c6",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -789,7 +789,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "87aad86db47e74da6134af771178fdf5b57daf9788ef1af3931fd877e1218d71",
+      "destination_sha256": "f3192c71783bc95a651ba88044d79156dd35b021597aab8e0f0895a54019bdcf",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -800,7 +800,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "3e6917a62c9921fbd2728fbb4ab6288723f24993b643e3f665585456c4ba8cfc",
+      "destination_sha256": "d1a2176de2588f394b47be5cd679705ef3945cf67042672ffbf99c65b916abfb",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -811,7 +811,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/property-impact.json",
-      "destination_sha256": "a1fbb5e97edf2dc03b5f455bbdae10c52184fd94e70d507c236eb4a2796ec877",
+      "destination_sha256": "474d5a67644152256051092579a732e57b9750c3a0f83117fef8285fd61aab26",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -822,7 +822,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/architecture-impact.json",
-      "destination_sha256": "d0bb675f0e565b31ae53e4289b610eb259db1fa1c204c2da11f3946d52bf0153",
+      "destination_sha256": "30beb51fde9ce39481a214137a2b09285413257dfe7cbe80e2849e82f01438af",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -855,7 +855,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/index.json",
-      "destination_sha256": "6c9e3a036eaec34cc57af5b8ec452b773d32a8cf05e7702369ee87f3cc69e366",
+      "destination_sha256": "f5a02426e8925b17c79c82a2b200ce91f0ab8597103c795bd80535b3b3d384a1",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -887,7 +887,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/callback-scope-is-restored-after-unwind.md",
-      "destination_sha256": "aa8f9abf1b7a46439ebcb8949de9dca6c7e47bf9b4a9e1c1b1753ca44a6f9084",
+      "destination_sha256": "d13f973c88af5eb35a2b68acdce90aa88df505c445f0b5c31041fd70d2d5fb3f",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -931,7 +931,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/fence-epoch-outside-sqlite-range-fails-closed.md",
-      "destination_sha256": "1c8cb8b6ac1ed9357d945740efa61555aea27c1e82c587990b33897a6a43c7cb",
+      "destination_sha256": "e67a74f2ae34c420da8c01ad0bca10112391fff0b950ee40e7a70ede184401a2",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -942,7 +942,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/store-schema-identity-matches-the-baseline.md",
-      "destination_sha256": "ad38cb84f12f72b38bb7a221e2030af024c2dc1776657733346a3f7b191b7387",
+      "destination_sha256": "b59741326fd476d9581b3af1744dffd8593cf130fd73e49ba8a0a7a03c0ae564",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -953,7 +953,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/fenced-write-is-atomic.md",
-      "destination_sha256": "4aa9c16fe86dc2782e3324024c33c49284a57ef887a7f6d9f9df84c507ed0a29",
+      "destination_sha256": "8f42f2141ddb02bd6eac85a8960bd01f04b0d1205150557cd62209bf9180a964",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -997,7 +997,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/protected-transactions-pin-fence-durability.md",
-      "destination_sha256": "836166df151f59d53ea143997b2c8a1faceeda5153b860181d2aa3d879adab28",
+      "destination_sha256": "cedea5390f34ac8a51cb67d0b6290199cd5a4bceb25e2f1b56f373841ff26f38",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -1008,7 +1008,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/read-callbacks-cannot-write.md",
-      "destination_sha256": "26c642adf6979d78633188ab08272cc0a4d5183a31fe7a4228fa905ef8300d66",
+      "destination_sha256": "96f2a41cfd06c9353856a84ec1f1f81898858a6361f3008d1986bd0228f4c8f8",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -1030,7 +1030,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/store-files-are-owner-only-after-open.md",
-      "destination_sha256": "63184e9dd87eb288936dc59d4e494d586b8d3c29f4c3e41ab1dabd1be1e37a66",
+      "destination_sha256": "dac00e6950c49eee4a35d83f0b95f95bad1bd2874fbea5051a2b38a8ee666e7e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

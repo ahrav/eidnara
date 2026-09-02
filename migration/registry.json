@@ -339,6 +339,7 @@
         "other.db",
         "fresh.db",
         "elsewhere.db",
+        "alias.db",
         "embedding.bin",
         "/home/u/.local/share/eidnara/module-a/store.db",
         "/data/eidnara/m/store.db",

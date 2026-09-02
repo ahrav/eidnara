@@ -14,6 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Impact records pin a destination commit that must be an ancestor of HEAD.
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@v2
         with:

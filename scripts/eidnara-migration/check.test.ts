@@ -845,7 +845,6 @@ describe("evidence: git-backed receipts", () => {
         write(join(destination, "migration/registry.json"), JSON.stringify(valid.registry));
         write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify({ schema_version: 1, wave: "U2", waivers: [] }));
         write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
-        write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(valid["architecture-impact"]));
         gitIn(destination, ["init", "-q", "-b", "main"]);
         gitIn(destination, ["config", "user.email", "t@example.com"]);
         gitIn(destination, ["config", "user.name", "t"]);
@@ -853,6 +852,11 @@ describe("evidence: git-backed receipts", () => {
         gitIn(destination, ["commit", "-q", "-m", "seed"]);
         destinationCommit = gitIn(destination, ["rev-parse", "HEAD"]);
         write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
+        const architecture = copy("architecture-impact");
+        for (const report of architecture.reports as Json[]) {
+            if (report.phase === "post-integration") (report.analyzed as Json).commit = destinationCommit;
+        }
+        write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(architecture));
         ctx = { root: destination, checkouts: { source } };
     });
 
@@ -864,6 +868,13 @@ describe("evidence: git-backed receipts", () => {
         const impact = copy("property-impact");
         (impact.provenance as Json[])[0] = { repo: "source", source_commit: pin, catalog_commit: pin };
         impact.destination_commit = destinationCommit;
+        for (const record of records(impact)) {
+            if (record.classification !== "core") continue;
+            const bytes = Buffer.concat((record.files as string[]).map((file) => require("node:fs").readFileSync(join(destination, file))));
+            record.code_hash = sha256(bytes);
+            const checkFile = typeof record.check_pointer === "string" ? record.check_pointer.split("#")[0]! : undefined;
+            if (checkFile !== undefined) record.check_hash = sha256(require("node:fs").readFileSync(join(destination, checkFile)));
+        }
         return impact;
     }
 
@@ -924,6 +935,30 @@ describe("evidence: git-backed receipts", () => {
         const value = receipt();
         (files(value)[0]!.source as Json).blob_sha = sourceCommit;
         expect(verify("receipt", value, ctx)).toContain(`$.files[0].source.blob_sha ${sourceCommit} is a commit, not a blob`);
+    });
+
+    test("a core record whose hashes do not match the checked tree is stale", () => {
+        const impact = impactFor(sourceCommit);
+        const core = records(impact).find((record) => record.classification === "core")!;
+        core.code_hash = "1".repeat(64);
+        const errors = verify("property-impact", impact, ctx);
+        expect(errors.some((error) => error.includes(".code_hash is stale"))).toBe(true);
+    });
+
+    test("a scope tree from an older commit is rejected even though it is reachable", () => {
+        write(join(source, "crates/lease/src/added.rs"), "pub fn added() {}\n");
+        gitIn(source, ["add", "-A"]);
+        gitIn(source, ["commit", "-q", "-m", "add a file"]);
+        const newer = gitIn(source, ["rev-parse", "HEAD"]);
+        try {
+            const value = receipt();
+            (value.sources as Json[])[0] = { repo: "source", commit: newer };
+            (value.catalogs as Json[])[0] = { repo: "source", commit: newer };
+            const errors = verify("receipt", value, ctx);
+            expect(errors).toContain(`$.scope[0].tree ${leaseTree} is not a tree of source@${newer}`);
+        } finally {
+            gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
     });
 
     test("an impact record pinned to an unrelated destination commit is rejected", () => {

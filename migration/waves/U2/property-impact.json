@@ -9,7 +9,7 @@
       "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
-  "destination_commit": "7e913969e4e1b982a75209a5f78b3839f533523f",
+  "destination_commit": "f635227b557e88292ddcdd24cd751e43697f1edb",
   "touched_files": [
     "crates/cache-stability/src/lib.rs",
     "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
@@ -956,9 +956,9 @@
       },
       "strategy_decision": "Fixture test plus refusal tests: a fresh file's application id, user version, format-marker digest, and sqlite_schema inventory are compared to a destination-captured fixture that the generator example produces, and non-pristine files with foreign objects, a different consumer baseline, or a bypassed fence constraint are refused with the file bytes unchanged. Chosen over a property test because the identity is one fixed byte contract.",
       "audit_verdict": "pass",
-      "evidence_digest": "ad38cb84f12f72b38bb7a221e2030af024c2dc1776657733346a3f7b191b7387",
-      "code_hash": "aa060420eab44ca681609f3e7156d6490f5992d54f260a65cd64e203ad393685",
-      "check_hash": "d6a853cf506a3b186752515d53579235f6659b7cf992ef285e892ead611f2f2a",
+      "evidence_digest": "b59741326fd476d9581b3af1744dffd8593cf130fd73e49ba8a0a7a03c0ae564",
+      "code_hash": "a8f4e5cf6c492c7ba02eb28a2e661ebb2704a90a7a53327fe15867a8b8a3de39",
+      "check_hash": "c8f3637c46577f4d08772b2ac336907277f44d6275ca7e7099c4de744df12faa",
       "check_pointer": "crates/storage/src/lib.rs#L1255",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
@@ -966,7 +966,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "ad38cb84f12f72b38bb7a221e2030af024c2dc1776657733346a3f7b191b7387",
+        "digest": "b59741326fd476d9581b3af1744dffd8593cf130fd73e49ba8a0a7a03c0ae564",
         "description": "`fresh_file_matches_the_baseline_inventory` compares a fresh file to `fixtures/schema/storage-inventory-v1.json`; `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, and `negative_database_fence_fails_closed` prove refusal leaves the bytes unchanged."
       }
     },

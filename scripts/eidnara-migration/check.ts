@@ -777,6 +777,8 @@ function validatePropertyCatalogShape(root: JsonObject, errors: string[]): void 
 
 interface PropertyImpactShape {
     pointers: { path: string; pointer: string }[];
+    /// Core records whose hashes must match the destination bytes they claim to cover.
+    cores: { path: string; files: string[]; check_pointer: string | undefined; code_hash: string | undefined; check_hash: string | undefined }[];
 }
 
 const SOURCE_EXERCISED = ["yes", "partial", "not-yet"] as const;
@@ -855,6 +857,7 @@ function validatePropertyImpactShape(root: JsonObject, errors: string[]): Proper
 
     const covered = new Set<string>();
     const seen = new Set<string>();
+    const cores: PropertyImpactShape["cores"] = [];
     const records = requireArray(root, "records", "$", errors);
     if (records.length === 0) errors.push("$.records must contain at least one disposition");
     records.forEach((entry, index) => {
@@ -878,8 +881,15 @@ function validatePropertyImpactShape(root: JsonObject, errors: string[]): Proper
                 requireString(record, "strategy_decision", path, errors);
                 const auditVerdict = requireEnum(record, "audit_verdict", ["pass", "fail", "vacuous", "pending"], path, errors);
                 requireDigest(record, "evidence_digest", path, errors);
-                requireDigest(record, "code_hash", path, errors);
-                requireDigest(record, "check_hash", path, errors);
+                const codeHash = requireDigest(record, "code_hash", path, errors);
+                const checkHash = requireDigest(record, "check_hash", path, errors);
+                cores.push({
+                    path,
+                    files,
+                    check_pointer: typeof record.check_pointer === "string" ? record.check_pointer : undefined,
+                    code_hash: codeHash,
+                    check_hash: checkHash,
+                });
                 const targets = requireStringArray(record, "target_configurations", path, errors);
                 const attempts = requireInteger(record, "evidence_attempts", path, errors);
                 if (targets.length === 0) {
@@ -942,7 +952,7 @@ function validatePropertyImpactShape(root: JsonObject, errors: string[]): Proper
             errors.push(`$.touched_files has uncovered file: ${file}; run property discovery for it before approval`);
         }
     }
-    return { pointers };
+    return { pointers, cores };
 }
 
 function describeSourceStatus(status: SourceStatus): string {
@@ -1194,6 +1204,17 @@ function objectTypes(checkout: string, ids: Iterable<string>): Map<string, strin
     return types;
 }
 
+/// Tree ids that are part of the pinned commit's own snapshot, including its root tree.
+function snapshotTrees(checkout: string, commit: string): Set<string> | string {
+    const root = git(checkout, ["rev-parse", `${commit}^{tree}`]);
+    if (!root.ok) return root.error;
+    const listed = git(checkout, ["ls-tree", "-r", "-d", "--object-only", commit]);
+    if (!listed.ok) return listed.error;
+    const trees = new Set(listed.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== ""));
+    trees.add(root.stdout.trim());
+    return trees;
+}
+
 /// Blob ids under a tree, without their paths.
 function treeBlobs(checkout: string, tree: string): Set<string> | string {
     const result = git(checkout, ["ls-tree", "-r", "--object-only", tree]);
@@ -1346,12 +1367,26 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
         if (file.source !== null) disposed.add(`${file.source.repo}\u0000${file.source.blob_sha}`);
     }
     for (const entry of shape.excluded) disposed.add(`${entry.repo}\u0000${entry.blob_sha}`);
+    const snapshotCache = new Map<string, Set<string> | undefined>();
     shape.scope.forEach((entry, index) => {
         const checkout = checkoutFor(ctx, entry.repo);
         if (!existsSync(checkout)) return;
-        const reachable = reachableFor(entry.repo);
-        if (reachable !== undefined && !reachable.has(entry.tree)) {
-            errors.push(`$.scope[${index}].tree ${entry.tree} is not reachable from ${entry.repo}@${commitByRepo.get(entry.repo)}`);
+        const commit = commitByRepo.get(entry.repo);
+        if (commit === undefined) return;
+        // A tree from an older commit is reachable too, so the tree must sit in the pinned
+        // commit's own snapshot or a stale crate version could pass as complete.
+        if (!snapshotCache.has(entry.repo)) {
+            const trees = snapshotTrees(checkout, commit);
+            if (typeof trees === "string") {
+                errors.push(`git ls-tree failed for ${entry.repo}@${commit}: ${trees}`);
+                snapshotCache.set(entry.repo, undefined);
+            } else {
+                snapshotCache.set(entry.repo, trees);
+            }
+        }
+        const snapshot = snapshotCache.get(entry.repo);
+        if (snapshot !== undefined && !snapshot.has(entry.tree)) {
+            errors.push(`$.scope[${index}].tree ${entry.tree} is not a tree of ${entry.repo}@${commit}`);
             return;
         }
         const blobs = treeBlobs(checkout, entry.tree);
@@ -1566,6 +1601,33 @@ function verifyKind(kind: CheckKind, root: JsonObject, ctx: Context): string[] {
             if (errors.length === 0 && typeof root.destination_commit === "string") {
                 verifyDestinationCommit(root.destination_commit, "$.destination_commit", ctx, errors);
             }
+            // Evidence binds to bytes, not to a commit: a core record's hashes must equal the
+            // hashes of the files it covers in the checked tree.
+            for (const core of shape.cores) {
+                const bytes: Buffer[] = [];
+                let complete = true;
+                for (const file of core.files) {
+                    const full = join(ctx.root, file);
+                    if (existsSync(full) && statSync(full).isFile()) bytes.push(readFileSync(full));
+                    else complete = false;
+                }
+                if (complete) {
+                    const actual = sha256(Buffer.concat(bytes));
+                    if (core.code_hash !== undefined && actual !== core.code_hash) {
+                        errors.push(`${core.path}.code_hash is stale: the covered files hash to ${actual}; regenerate the record against the checked tree`);
+                    }
+                }
+                const checkFile = core.check_pointer?.split("#")[0];
+                if (checkFile !== undefined) {
+                    const full = join(ctx.root, checkFile);
+                    if (existsSync(full) && statSync(full).isFile()) {
+                        const actual = sha256(readFileSync(full));
+                        if (core.check_hash !== undefined && actual !== core.check_hash) {
+                            errors.push(`${core.path}.check_hash is stale: ${checkFile} hashes to ${actual}; regenerate the record against the checked tree`);
+                        }
+                    }
+                }
+            }
             for (const pointer of shape.pointers) {
                 if (!pointerResolves(ctx.root, pointer.pointer)) {
                     errors.push(`${pointer.path} ${pointer.pointer} does not resolve in the destination tree; reclassify the record as core or excluded`);
@@ -1575,6 +1637,14 @@ function verifyKind(kind: CheckKind, root: JsonObject, ctx: Context): string[] {
         }
         case "architecture-impact":
             validateArchitectureImpactShape(root, errors);
+            if (errors.length === 0) {
+                (Array.isArray(root.reports) ? root.reports : []).forEach((entry, index) => {
+                    if (!isObject(entry) || entry.phase !== "post-integration" || !isObject(entry.analyzed)) return;
+                    if (typeof entry.analyzed.commit === "string") {
+                        verifyDestinationCommit(entry.analyzed.commit, `$.reports[${index}].analyzed.commit`, ctx, errors);
+                    }
+                });
+            }
             break;
     }
     return errors;

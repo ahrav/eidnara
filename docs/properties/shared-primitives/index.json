@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shared-primitives",
   "source": "catalog.md",
-  "source_sha256": "d696647d428c032ad1d6282495ff2119b3d5a9a1f7feab0e89694da08aa4630b",
+  "source_sha256": "9118f185d5551db1d759d2bb1b73a1add5e32280a47c756f833a82555e308b44",
   "records": [
     {
       "slug": "at-most-one-exclusive-holder-per-key",
@@ -510,20 +510,20 @@
       "status": "active",
       "exercised": {
         "state": "partial",
-        "note": "sibling databases in one directory and symlink aliases are covered; same-database descriptor disagreement and hardlink aliases are not."
+        "note": "sibling databases in one directory, symlink aliases, and hardlink aliases are covered; same-database descriptor disagreement is not."
       },
       "guarantee": "All cooperative writers for one logical store derive the same `(base_dir, LeaseKey)`, while distinct stores that must write independently derive different identities.",
       "check": {
         "semantics": "always",
         "condition": "`always(same_logical_store => lease_identity_a == lease_identity_b)` and `always(independent_stores => lease_identity_a != lease_identity_b)`, where identity includes canonical root plus all three key fields."
       },
-      "fault_timing": "The lease key includes the database file name and the root is the database parent, so sibling files with equal descriptors get distinct leases. Every open refuses a symlink anywhere in the database path (`SQLITE_OPEN_NOFOLLOW` plus `O_NOFOLLOW` at creation), so neither a directory alias nor a file alias reaches the bytes. One database opened with differing module or namespace values, or through a hardlink alias, still splits into independent locks.",
+      "fault_timing": "The lease key includes the database file name and the root is the database parent, so sibling files with equal descriptors get distinct leases. Every open refuses a symlink anywhere in the database path (`SQLITE_OPEN_NOFOLLOW` plus `O_NOFOLLOW` at creation), so neither a directory alias nor a file alias reaches the bytes. A database file with more than one name is refused before any open, so a hardlink alias cannot reach the bytes either. One database opened with differing module or namespace values still splits into independent locks.",
       "required_faults": "Open the same SQLite database through descriptors differing in module or namespace; open it through a hardlink alias; open it through directory or file symlink aliases; open two sibling database files under one parent with equal key fields.",
       "confidence": {
         "level": "high",
         "evidence": "[evidence](evidence/logical-store-has-single-lease-identity.md). High on derivation facts (`crates/storage/src/lib.rs:62-74,565-661`); unknown whether descriptor authority prevents these combinations in deployment."
       },
-      "existing_check": "`distinct_databases_do_not_falsely_contend` (`crates/storage/src/lib.rs:1599-1608`) uses different parent directories; `distinct_databases_in_one_directory_do_not_falsely_contend` (`:1610-1621`) proves sibling files in one directory do not contend; `symlinked_database_paths_are_refused_never_aliased` (`:1111-1167`) proves both a directory-symlink alias and a file-symlink alias are refused, with and without a live holder. No test covers descriptor disagreement or hardlink aliases; status **unaudited**.",
+      "existing_check": "`distinct_databases_do_not_falsely_contend` (`crates/storage/src/lib.rs:1692-1701`) uses different parent directories; `distinct_databases_in_one_directory_do_not_falsely_contend` (`:1703-1714`) proves sibling files in one directory do not contend; `symlinked_database_paths_are_refused_never_aliased` (`:1204-1260`) proves both a directory-symlink alias and a file-symlink alias are refused, with and without a live holder. `a_hard_linked_database_is_refused` (`:1092-1119`) proves a second name for the database inode is refused through either name. No test covers descriptor disagreement; status **unaudited**.",
       "impact": "One store can have two writers, or independent stores can falsely block each other.",
       "open_questions": [],
       "extra": {}
@@ -627,7 +627,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/protected-write-set-is-fence-complete.md). High that the SQLite and PostgreSQL ordinary callbacks reject writes, that a callback cannot lift the SQLite guard or lower fence durability, that each unfenced maintenance surface is reachable only by name, that a callback escaping either the checked or the read-only transaction is rejected rather than reported as success, and that a negative epoch fails closed on both backends. Both limits are PostgreSQL-only, because SQLite withdraws the capability and denies the escape before it executes: on PostgreSQL a callback that ends the transaction and opens a replacement is not detected, and an escape that autocommits before the check can only be reported, while a mode switch that keeps the transaction open rolls back. A PostgreSQL equivalent of the SQLite capability withdrawal does not exist, so narrowing what its callback receives remains the structural fix there. The authoritative protected write set and the consumer upgrade to the fenced APIs still need external ownership."
       },
-      "existing_check": "backend tests cover fenced callbacks, fenced DDL, SQLite and PostgreSQL read-only rejection, and both autocommit maintenance paths. `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1805-1825`) leaves later fenced writes authorized; `a_read_callback_cannot_lower_fence_durability` (`:1827-1893`) pins `synchronous=FULL` and a WAL journal; `a_read_callback_cannot_clear_the_read_only_guard` (`:1895-1943`) denies every pragma write; `a_callback_cannot_end_the_fence_checked_transaction` (`:1945-1990`) denies the transaction escape and `a_callback_that_ends_the_transaction_is_rejected` (`primitives@89abb40`) reports it; `a_read_callback_cannot_escape_read_only_mode` (`primitives@89abb40`) covers ending and switching a read transaction; `a_negative_epoch_fails_closed` (`primitives@89abb40`) and `a_regressed_positive_epoch_fails_closed` (`primitives@89abb40`) fail closed on an unreconcilable epoch; `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` (`primitives@89abb40`), `a_suppressed_epoch_increment_is_rejected` (`primitives@89abb40`), and `open_verifies_the_stored_epoch_matches_the_issued_one` (`primitives@89abb40`) protect the lease row and its issuance; `a_callback_cannot_damage_the_fence_row_it_is_checked_against` (`crates/storage/src/lib.rs:1992-2095`) refuses DML, triggers, indexes, views, and renames onto the `fence` and `format_marker` tables; and `a_fenced_callback_cannot_rewrite_the_format_marker` (`:2097-2153`) refuses an update of, or a rename onto, the marker row. The [durable consumer inventory](durable-consumer-inventory.md) records source receipts; no source-level completeness gate exists.",
+      "existing_check": "backend tests cover fenced callbacks, fenced DDL, SQLite and PostgreSQL read-only rejection, and both autocommit maintenance paths. `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1898-1918`) leaves later fenced writes authorized; `a_read_callback_cannot_lower_fence_durability` (`:1920-1986`) pins `synchronous=FULL` and a WAL journal; `a_read_callback_cannot_clear_the_read_only_guard` (`:1988-2036`) denies every pragma write; `a_callback_cannot_end_the_fence_checked_transaction` (`:2038-2083`) denies the transaction escape and `a_callback_that_ends_the_transaction_is_rejected` (`primitives@89abb40`) reports it; `a_read_callback_cannot_escape_read_only_mode` (`primitives@89abb40`) covers ending and switching a read transaction; `a_negative_epoch_fails_closed` (`primitives@89abb40`) and `a_regressed_positive_epoch_fails_closed` (`primitives@89abb40`) fail closed on an unreconcilable epoch; `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` (`primitives@89abb40`), `a_suppressed_epoch_increment_is_rejected` (`primitives@89abb40`), and `open_verifies_the_stored_epoch_matches_the_issued_one` (`primitives@89abb40`) protect the lease row and its issuance; `a_callback_cannot_damage_the_fence_row_it_is_checked_against` (`crates/storage/src/lib.rs:2085-2188`) refuses DML, triggers, indexes, views, and renames onto the `fence` and `format_marker` tables; and `a_fenced_callback_cannot_rewrite_the_format_marker` (`:2190-2246`) refuses an update of, or a rename onto, the marker row. The [durable consumer inventory](durable-consumer-inventory.md) records source receipts; no source-level completeness gate exists.",
       "impact": "Enforcement converts a silent unfenced commit into a loud failure on SQLite, where the capability can be withdrawn. On PostgreSQL the residual risk is unbounded by validation: callback SQL retains the privilege to attach triggers to the infrastructure tables and to release this session's advisory lease, so an effect can always be scheduled after the last check and single-writer itself is reachable, and consumers may also break on upgrade or reroute a mutation through the unfenced surface.",
       "open_questions": [],
       "extra": {}
@@ -1015,9 +1015,9 @@
       "required_faults": "A pre-existing file with a foreign object, a second baseline text for the same path, and a bypassed `CHECK` on the fence row.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/store-schema-identity-matches-the-baseline.md). `ExpectedIdentity::for_baseline` (`crates/storage/src/lib.rs:796-824`), `classify` (`:826-876`), and `apply` (`:878-910`) implement the contract inside `open_sqlite` (`:589-693`); `fresh_file_matches_the_baseline_inventory` (`:1409-1473`) pins the fixture, and `a_file_with_foreign_objects_is_refused_without_mutation` (`:1534-1560`), `a_consumer_baseline_is_applied_once_and_verified_on_reopen` (`:1475-1515`), `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched` (`:1517-1532`), and `negative_database_fence_fails_closed` (`:2199-2227`) cover the refusals."
+        "evidence": "[evidence](evidence/store-schema-identity-matches-the-baseline.md). `ExpectedIdentity::for_baseline` (`crates/storage/src/lib.rs:826-866`), `classify` (`:868-918`), and `apply` (`:920-952`) implement the contract inside `open_sqlite` (`:589-694`); `fresh_file_matches_the_baseline_inventory` (`:1502-1566`) pins the fixture, and `a_file_with_foreign_objects_is_refused_without_mutation` (`:1627-1653`), `a_consumer_baseline_is_applied_once_and_verified_on_reopen` (`:1568-1608`), `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched` (`:1610-1625`), and `negative_database_fence_fails_closed` (`:2292-2320`) cover the refusals."
       },
-      "existing_check": "`fresh_file_matches_the_baseline_inventory`, `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched`, `a_baseline_that_hooks_an_infrastructure_table_is_rejected`, `fenced_callbacks_cannot_change_the_schema_so_the_store_stays_reopenable`, `negative_database_fence_fails_closed`; audited at U2.",
+      "existing_check": "`fresh_file_matches_the_baseline_inventory`, `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched`, `a_baseline_that_hooks_an_infrastructure_table_is_rejected`, `a_baseline_that_creates_temporary_objects_is_rejected`, `fenced_callbacks_cannot_change_the_schema_so_the_store_stays_reopenable`, `negative_database_fence_fails_closed`; audited at U2.",
       "impact": "A foreign or half-formed file is written to as if it were this store, or a renamed table makes the fence read return floor zero and reissue a superseded epoch.",
       "open_questions": [],
       "extra": {}
@@ -1041,7 +1041,7 @@
       "required_faults": "A callback that attempts DML, one that attempts `PRAGMA query_only = OFF`, and one that runs `VACUUM`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/read-callbacks-cannot-write.md). `CallbackScope::read_only` (`crates/storage/src/lib.rs:379-387`) sets `query_only` and installs `deny_scope_escapes` (`crates/storage/src/lib.rs:464-508`); `GuardedConn` (`crates/storage/src/lib.rs:219-331`) omits the escapes; `unfenced_connection_rejects_writes` (`crates/storage/src/lib.rs:1769-1792`), `a_read_callback_cannot_clear_the_read_only_guard` (`crates/storage/src/lib.rs:1895-1943`), and `maintenance_runs_through_the_unfenced_path` (`crates/storage/src/lib.rs:2155-2168`) pin the three denials."
+        "evidence": "[evidence](evidence/read-callbacks-cannot-write.md). `CallbackScope::read_only` (`crates/storage/src/lib.rs:379-387`) sets `query_only` and installs `deny_scope_escapes` (`crates/storage/src/lib.rs:464-508`); `GuardedConn` (`crates/storage/src/lib.rs:219-331`) omits the escapes; `unfenced_connection_rejects_writes` (`crates/storage/src/lib.rs:1862-1885`), `a_read_callback_cannot_clear_the_read_only_guard` (`crates/storage/src/lib.rs:1988-2036`), and `maintenance_runs_through_the_unfenced_path` (`crates/storage/src/lib.rs:2248-2261`) pin the three denials."
       },
       "existing_check": "`unfenced_connection_rejects_writes`, `a_read_callback_cannot_clear_the_read_only_guard`, `maintenance_runs_through_the_unfenced_path`; audited at U2.",
       "impact": "A consumer mutation bypasses the fence and commits while a newer writer owns the database.",
@@ -1067,7 +1067,7 @@
       "required_faults": "A callback that panics inside `with_conn`, then a `with_conn_fenced` and a `with_conn_unfenced` on the same store.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/callback-scope-is-restored-after-unwind.md). `CallbackScope::drop` (`crates/storage/src/lib.rs:456-461`) restores when `release` did not run; `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1805-1825`) exercises the unwind."
+        "evidence": "[evidence](evidence/callback-scope-is-restored-after-unwind.md). `CallbackScope::drop` (`crates/storage/src/lib.rs:456-461`) restores when `release` did not run; `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1898-1918`) exercises the unwind."
       },
       "existing_check": "`a_panicking_read_does_not_strand_the_connection_read_only`; audited at U2.",
       "impact": "One panicking read makes the store permanently read-only for the rest of the process lifetime.",
@@ -1093,7 +1093,7 @@
       "required_faults": "A maintenance callback that lowers `synchronous` or changes the journal mode, followed by a fenced write.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/protected-transactions-pin-fence-durability.md). `pin_fence_durability` (`crates/storage/src/lib.rs:572-587`) runs before each protected transaction; `open_pins_full_synchronous` (`crates/storage/src/lib.rs:1794-1803`) and `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:1827-1893`) observe the pinned values. Power loss itself is not injected."
+        "evidence": "[evidence](evidence/protected-transactions-pin-fence-durability.md). `pin_fence_durability` (`crates/storage/src/lib.rs:572-587`) runs before each protected transaction; `open_pins_full_synchronous` (`crates/storage/src/lib.rs:1887-1896`) and `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:1920-1986`) observe the pinned values. Power loss itself is not injected."
       },
       "existing_check": "`open_pins_full_synchronous`, `a_read_callback_cannot_lower_fence_durability`; audited at U2.",
       "impact": "A fence claim that looked committed disappears after power loss and two writers hold equal epochs.",
@@ -1119,7 +1119,7 @@
       "required_faults": "A pre-existing permissive database, WAL, and SHM, then a reopen; a fresh open under a permissive umask.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/store-files-are-owner-only-after-open.md). `open_sqlite` (`crates/storage/src/lib.rs:589-693`) creates the database owner-only and calls `protect_file` on all three paths before WAL setup; `reopening_a_permissive_store_protects_the_database_and_its_wal` (`crates/storage/src/lib.rs:1225-1275`) asserts all three modes on reopen and `fresh_open_creates_owner_only_sidecars_under_a_permissive_umask` (`crates/storage/src/lib.rs:1677-1705`) asserts them on a fresh open."
+        "evidence": "[evidence](evidence/store-files-are-owner-only-after-open.md). `open_sqlite` (`crates/storage/src/lib.rs:589-694`) creates the database owner-only and calls `protect_file` on all three paths before WAL setup; `reopening_a_permissive_store_protects_the_database_and_its_wal` (`crates/storage/src/lib.rs:1318-1368`) asserts all three modes on reopen and `fresh_open_creates_owner_only_sidecars_under_a_permissive_umask` (`crates/storage/src/lib.rs:1770-1798`) asserts them on a fresh open."
       },
       "existing_check": "`reopening_a_permissive_store_protects_the_database_and_its_wal`, `new_database_file_is_owner_only_at_creation`, `fresh_open_creates_owner_only_sidecars_under_a_permissive_umask` (Unix only); audited at U2.",
       "impact": "Another local user can read committed rows from the WAL or forge the fence row.",
@@ -1145,9 +1145,9 @@
       "required_faults": "A holder epoch above the stored fence, a callback that inserts a row and returns `Err`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/fenced-write-is-atomic.md). `with_conn_fenced` (`crates/storage/src/lib.rs:170-216`) claims and runs inside one transaction and commits only on `Ok`; `fenced_write_rolls_back_on_error` (`crates/storage/src/lib.rs:2170-2197`) checks both the row and the fence."
+        "evidence": "[evidence](evidence/fenced-write-is-atomic.md). `with_conn_fenced` (`crates/storage/src/lib.rs:170-216`) claims and runs inside one transaction and commits only on `Ok`; `fenced_write_rolls_back_on_error` (`crates/storage/src/lib.rs:2263-2290`) checks both the row and the fence."
       },
-      "existing_check": "`fenced_write_rolls_back_on_error`, `fenced_write_commits_and_persists` (`crates/storage/src/lib.rs:1752-1767`); audited at U2.",
+      "existing_check": "`fenced_write_rolls_back_on_error`, `fenced_write_commits_and_persists` (`crates/storage/src/lib.rs:1845-1860`); audited at U2.",
       "impact": "A failed write leaves half of a domain mutation committed, or advances the fence without the write it authorized.",
       "open_questions": [],
       "extra": {}
@@ -1171,7 +1171,7 @@
       "required_faults": "A database whose fence row was written without the `CHECK (epoch >= 0)` constraint, and a store constructed with a holder epoch above `i64::MAX`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/fence-epoch-outside-sqlite-range-fails-closed.md). `decode_fence_epoch` (`crates/storage/src/lib.rs:1000-1003`) and `fence_epoch_sql_value` (`crates/storage/src/lib.rs:961-968`) use checked conversions; `negative_database_fence_fails_closed` (`crates/storage/src/lib.rs:2199-2227`) and `epoch_above_sqlite_integer_range_fails` (`crates/storage/src/lib.rs:2307-2323`) cover both directions."
+        "evidence": "[evidence](evidence/fence-epoch-outside-sqlite-range-fails-closed.md). `decode_fence_epoch` (`crates/storage/src/lib.rs:1042-1045`) and `fence_epoch_sql_value` (`crates/storage/src/lib.rs:1003-1010`) use checked conversions; `negative_database_fence_fails_closed` (`crates/storage/src/lib.rs:2292-2320`) and `epoch_above_sqlite_integer_range_fails` (`crates/storage/src/lib.rs:2400-2416`) cover both directions."
       },
       "existing_check": "`negative_database_fence_fails_closed`, `epoch_above_sqlite_integer_range_fails`; audited at U2.",
       "impact": "A corrupt fence row authorizes a superseded writer.",
