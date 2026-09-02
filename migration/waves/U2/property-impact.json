@@ -9,7 +9,7 @@
       "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
-  "destination_commit": "55425055867a2ad6ab05da8377cc143491bff1de",
+  "destination_commit": "7e913969e4e1b982a75209a5f78b3839f533523f",
   "touched_files": [
     "crates/cache-stability/src/lib.rs",
     "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",

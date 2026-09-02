@@ -16,6 +16,40 @@
   "readiness": "migration/upstream-readiness.json",
   "registry": "migration/registry.json",
   "waivers": "migration/waves/U2/waivers.json",
+  "scope": [
+    {
+      "repo": "primitives",
+      "tree": "93c77aac984ec5ee433ae9957c18382dcec1dbaa"
+    },
+    {
+      "repo": "primitives",
+      "tree": "2d82e97cd6008b91a4db1819dd80551032878030"
+    },
+    {
+      "repo": "primitives",
+      "tree": "5cef7e34fe4cac574a44d72c2e737e102012b5c3"
+    },
+    {
+      "repo": "primitives",
+      "tree": "231e8d989aa881f21b096b7854a314e54d8de0e1"
+    },
+    {
+      "repo": "primitives",
+      "tree": "c1f46d75a5065e27289a60c076fe3983cf439936"
+    }
+  ],
+  "excluded": [
+    {
+      "repo": "primitives",
+      "blob_sha": "67b5ec9fabce080bf1d37b35df41fe20d9dd5565",
+      "reason": "cache-stability golden vectors are authored in the destination (crates/cache-stability/tests/golden/cache-stability-golden-vectors.json)"
+    },
+    {
+      "repo": "primitives",
+      "blob_sha": "6aa91fa1ca848ccb1d3641a428887072501ed964",
+      "reason": "storage descriptor golden vectors are authored in the destination by the registered generator (crates/storage-types/tests/golden/storage_vectors.json)"
+    }
+  ],
   "property_impact": "migration/waves/U2/property-impact.json",
   "architecture_impact": "migration/waves/U2/architecture-impact.json",
   "files": [
@@ -38,7 +72,7 @@
         "blob_sha": "668de98e86598eca1ba50a051328db583460a274"
       },
       "destination": "crates/cache-stability/src/lib.rs",
-      "destination_sha256": "5acf6c657acadc3d258539ef801e835f0b3fd079691f84b28bcab240ea1824ea",
+      "destination_sha256": "c9dfe143c368e3ef7ffa9af225a34c1e3f6a01e3d4c24152749cfc5219bbf05a",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -177,7 +211,7 @@
         "blob_sha": "95dc9c575f3ef72f6739719225bb78ea19f99dbb"
       },
       "destination": "crates/storage/src/lib.rs",
-      "destination_sha256": "761158888f0a48ae5a808747b5909328ada6cc0c3fdf1a1681780cbfd980b4b2",
+      "destination_sha256": "c23557453bd558c6260f5dac4ce55adc97fcf3c1cb4cf6a0b2765ef801c95be8",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -236,7 +270,7 @@
         "blob_sha": "d360c86177f779878d5b645bb31b1b06f0d0584c"
       },
       "destination": "docs/properties/shared-primitives/catalog.md",
-      "destination_sha256": "8a4715f61c587b398af77fa66d9a301d55aef2f47e4bb32ad9baed4599230e3d",
+      "destination_sha256": "6a07cbf2bd6a3f3c6ada4689f076a4cbc65db7dd4a63f55938f0891414847d69",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -249,7 +283,7 @@
         "blob_sha": "e1e9761f2a147ae3619dec612bf033fd7c8be1f2"
       },
       "destination": "docs/properties/shared-primitives/existing-checks.md",
-      "destination_sha256": "2fc971ff37680264e6fcdc3766edeb783774733dc83352c0923ae5bd3600a44c",
+      "destination_sha256": "45405db728e61c6e5c8ec43b9a10e344a62cffd20b284d054d8ba3539044b39a",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -509,7 +543,7 @@
         "blob_sha": "b1e22cc64e6e7c435516c967df340232dc3c3b98"
       },
       "destination": "docs/properties/shared-primitives/evidence/logical-store-has-single-lease-identity.md",
-      "destination_sha256": "150273b3c112fb996aa37b0e6437d76dde74614372638207fe14439e2eca4450",
+      "destination_sha256": "af026b1ccc78ef4634c7d1433f9725762f6e421b6a2d751838f6aa391caa7df6",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -535,7 +569,7 @@
         "blob_sha": "ac571ceba652df7ffc54c7f3424e305e5d274e36"
       },
       "destination": "docs/properties/shared-primitives/evidence/protected-write-set-is-fence-complete.md",
-      "destination_sha256": "5d520135e91f85def6b5b4e2df7d57a9c26afe7246ad59bf95be1d656035862d",
+      "destination_sha256": "9c8aa065ae060a4f8f650e775bed7ce148c838bcd3b79704e9b3b47588b657b0",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -548,7 +582,7 @@
         "blob_sha": "e2f4943057aea1ee96d8b671513dc67e02740ef3"
       },
       "destination": "docs/properties/shared-primitives/evidence/replacement-fence-is-claimed-before-old-writer-writes.md",
-      "destination_sha256": "bdaed147081731cb51987707bd5eb570f64e5e68ef20401ac1233cc41fef06e4",
+      "destination_sha256": "5c0815ce6b0fabdb919bd9637cc9d346c32c142370299ad4a8762627e406377b",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -613,7 +647,7 @@
         "blob_sha": "c42f7f9b97aa605f8d371046915575149d9e2372"
       },
       "destination": "docs/properties/shared-primitives/evidence/stale-writer-write-is-rejected.md",
-      "destination_sha256": "2f5c449df58d12628fd4df0c2ec014d8d39ffd3ac9ab515a25e4ff01f2c34b2e",
+      "destination_sha256": "593e261c912519f6585d67780e0ae16cf7d5c3d96541a9f9bd1a5f48d4a318b5",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -755,7 +789,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "8e2ef9442056925cae88b153b37f7c58837fb3cb3425bc75a58829e6bd6cbc2a",
+      "destination_sha256": "87aad86db47e74da6134af771178fdf5b57daf9788ef1af3931fd877e1218d71",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -766,7 +800,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "da631a2f4ed8b0e347e0a9be8a18f279a9676a8c786140b90d4f4f2106920784",
+      "destination_sha256": "3e6917a62c9921fbd2728fbb4ab6288723f24993b643e3f665585456c4ba8cfc",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -777,7 +811,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/property-impact.json",
-      "destination_sha256": "6d52b34e2bd5f22358ba2f1c5c947aec5019f2a1590a3024782bc20a19c303fd",
+      "destination_sha256": "76cb74511ab6a2594b8d0ebaf24f1e4a959d6108304ccb6fbc04756cc2c60fd3",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -788,7 +822,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/architecture-impact.json",
-      "destination_sha256": "ede4804fbed9f06f649c49770f01b1462080bfa557dfaeb46f9e01ba19a7fa61",
+      "destination_sha256": "60498e704f1e4b62535fbd5e89409d7f75dd5378cf50a32f0a1e1ac68692bf2a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -821,7 +855,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/index.json",
-      "destination_sha256": "de7ed0333251b317225092808cfc144195994634cf75afe03a07afd25fa6e9b4",
+      "destination_sha256": "f2477a85769c2042f57d277b9f779cce3991f77081c0b3730e02c6ee44e889be",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -831,7 +865,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/anchor-holds-while-reconcile-pending.md",
-      "destination_sha256": "11027f4995dd3415fcfc7c9151bd77f3b4687fcc96b2e897b5a0fc81b89749a9",
+      "destination_sha256": "0a28b83bfc91b7e53202a7f9bc3783c7f919b49e973a756b79c388b3e0807a0c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -853,7 +887,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/callback-scope-is-restored-after-unwind.md",
-      "destination_sha256": "4daf370e0d52bd26d179ba0ca53d1cef39575772ee47742c85e543f2dcbadcfe",
+      "destination_sha256": "05b7c2706ef0066231075c0876ad4126326c628bac05ab8037cba22a5158f161",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -864,7 +898,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/defer-pass-replays-frozen-bytes-verbatim.md",
-      "destination_sha256": "8516b7d7a28abdcc94faf21e9b5ada18f158e8b4630e638472611256f1a0f94b",
+      "destination_sha256": "6f609246ebd4a0d3f6d03ddaaac094c7f5a1eb1c9282f48b2cf5d51eff8f3236",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -886,7 +920,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/episode-units-reset-at-run-boundary.md",
-      "destination_sha256": "f17fcba10e40fc54dadf844da1cee89b54a959680e96c6262c846ad524b09c0d",
+      "destination_sha256": "228d3560c8c7ecc317579f5e2934f5ebef5b696b315a03c9902fb522d30dc13f",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -897,7 +931,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/fence-epoch-outside-sqlite-range-fails-closed.md",
-      "destination_sha256": "ac8d856ff0b1268db7d8567c6ef4a64bd385acbcb1532f5013a4539452cefe33",
+      "destination_sha256": "a5076e75726e4b5e57c3c9017ca53754f929da2dd40f40430e75e4deb5962080",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -908,7 +942,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/store-schema-identity-matches-the-baseline.md",
-      "destination_sha256": "fb60d5a77f0f48c927d887747c4ab1a176df2f62187c14106d5100501f93d30a",
+      "destination_sha256": "29fc554d934e21775f91ded4850d29753fae98473430001d09f16037f5d9d7fd",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -919,7 +953,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/fenced-write-is-atomic.md",
-      "destination_sha256": "1ab39eebdd0b4da5db87c54be1a9f08723d64924cf79eef4fbe7c7d3956cf070",
+      "destination_sha256": "d41d7e6ac0d4aa88a979d56ddbf36c9f319ec48d8837148f389182f89d3c694c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -930,7 +964,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/frozen-unit-order-is-preserved.md",
-      "destination_sha256": "bf5aaf5bc11f5a8958a884a6723c40a85b2384d2487a8749f0fc50fa59cc77d1",
+      "destination_sha256": "b384f5d61f747734915b44101b5f45a72fd1a637529867bfdb9c7c255946805a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -941,7 +975,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/hard-bust-drains-deferred-work.md",
-      "destination_sha256": "9890889d1e1a483873ba15b97b5a3f0330cf40da89032b916f2884c9fe57b572",
+      "destination_sha256": "13d1f56e537163f2801c2cea28352360f8319751077afcd84d333143b0b4291e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -952,7 +986,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/never-minted-boundary-is-not-reconcile-pending.md",
-      "destination_sha256": "38ece74e0ae19667d6e14b1d15362344781e1cb706b573829bc65b412506b5be",
+      "destination_sha256": "e9d7c8246d44312cb65f50587a2dafb2b6e3039ca43ea82a9ee50c8f7368f1d8",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -963,7 +997,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/protected-transactions-pin-fence-durability.md",
-      "destination_sha256": "17122a5abb71d1b548493f2e89d5cf6b0928ab71fdb35ac91798c83cd8f4535b",
+      "destination_sha256": "1b9eabaa5e8f428057a609ccfd74b564758f37a909f98056d07f90fc6f07e0d2",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -974,7 +1008,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/read-callbacks-cannot-write.md",
-      "destination_sha256": "fa079616e3e5c89c10962b255180a8c87d81e9264a8291db60fce80952faf29a",
+      "destination_sha256": "4aedc734cb427fd8a714c26ccbb8c56d281a94a8fef1c9d69016df178e8d1173",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -996,7 +1030,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/store-files-are-owner-only-after-open.md",
-      "destination_sha256": "b4b82267037c8d93230762405bf242f1485e06768cfda8385226f39e8d9de136",
+      "destination_sha256": "52ed15268ffdd5765db79149a0efe6740791387f24ba7b13729471c8d0cff6d8",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

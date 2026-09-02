@@ -35,6 +35,7 @@ const valid: Record<CheckKind, Json> = {
         readiness: "migration/upstream-readiness.json",
         registry: "migration/registry.json",
         waivers: "migration/waves/U2/waivers.json",
+        scope: [{ repo: "source", tree: "d".repeat(40) }],
         property_impact: "migration/waves/U2/property-impact.json",
         architecture_impact: "migration/waves/U2/architecture-impact.json",
         files: [
@@ -318,6 +319,7 @@ describe("shape: receipt", () => {
         u1.wave = "U1";
         u1.sources = [];
         u1.catalogs = [];
+        u1.scope = [];
         u1.property_impact = NOT_APPLICABLE;
         u1.architecture_impact = NOT_APPLICABLE;
         files(u1)[0] = {
@@ -423,10 +425,16 @@ describe("shape: receipt", () => {
         );
     });
 
-    test("file sources must name a pinned repository", () => {
+    test("file sources and scope trees must name a pinned repository", () => {
         const value = copy("receipt");
         (files(value)[0]!.source as Json).repo = "elsewhere";
-        expect(validateShape("receipt", value)).toContain("$.files[0].source.repo elsewhere has no pinned source commit");
+        (value.scope as Json[]).push({ repo: "elsewhere", tree: "e".repeat(40) });
+        const errors = validateShape("receipt", value);
+        expect(errors).toContain("$.files[0].source.repo elsewhere has no pinned source commit");
+        expect(errors).toContain("$.scope[1].repo elsewhere has no pinned source commit");
+        const empty = copy("receipt");
+        empty.scope = [];
+        expect(validateShape("receipt", empty)).toContain("$.scope must declare at least one source tree");
     });
 });
 
@@ -774,8 +782,10 @@ describe("evidence: git-backed receipts", () => {
     let source: string;
     let destination: string;
     let sourceCommit: string;
+    let leaseTree: string;
     let leaseBlob: string;
     let keyBlob: string;
+    let destinationCommit: string;
     let ctx: Context;
 
     function gitIn(cwd: string, args: string[]): string {
@@ -807,6 +817,7 @@ describe("evidence: git-backed receipts", () => {
         gitIn(source, ["add", "-A"]);
         gitIn(source, ["commit", "-q", "-m", "seed"]);
         sourceCommit = gitIn(source, ["rev-parse", "HEAD"]);
+        leaseTree = gitIn(source, ["rev-parse", "HEAD:crates/lease"]);
         leaseBlob = gitIn(source, ["rev-parse", `HEAD:crates/lease/src/lib.rs`]);
         keyBlob = gitIn(source, ["rev-parse", `HEAD:crates/lease/src/key.rs`]);
 
@@ -835,6 +846,13 @@ describe("evidence: git-backed receipts", () => {
         write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify({ schema_version: 1, wave: "U2", waivers: [] }));
         write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
         write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(valid["architecture-impact"]));
+        gitIn(destination, ["init", "-q", "-b", "main"]);
+        gitIn(destination, ["config", "user.email", "t@example.com"]);
+        gitIn(destination, ["config", "user.name", "t"]);
+        gitIn(destination, ["add", "-A"]);
+        gitIn(destination, ["commit", "-q", "-m", "seed"]);
+        destinationCommit = gitIn(destination, ["rev-parse", "HEAD"]);
+        write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
         ctx = { root: destination, checkouts: { source } };
     });
 
@@ -845,6 +863,7 @@ describe("evidence: git-backed receipts", () => {
     function impactFor(pin: string): Json {
         const impact = copy("property-impact");
         (impact.provenance as Json[])[0] = { repo: "source", source_commit: pin, catalog_commit: pin };
+        impact.destination_commit = destinationCommit;
         return impact;
     }
 
@@ -857,7 +876,9 @@ describe("evidence: git-backed receipts", () => {
             readiness: "migration/upstream-readiness.json",
             registry: "migration/registry.json",
             waivers: "migration/waves/U2/waivers.json",
-                property_impact: "migration/waves/U2/property-impact.json",
+            scope: [{ repo: "source", tree: leaseTree }],
+            excluded: [{ repo: "source", blob_sha: gitIn(source, ["rev-parse", "HEAD:crates/lease/Cargo.toml"]), reason: "regenerated as crates/lease/Cargo.toml" }],
+            property_impact: "migration/waves/U2/property-impact.json",
             architecture_impact: "migration/waves/U2/architecture-impact.json",
             files: [
                 {
@@ -891,6 +912,25 @@ describe("evidence: git-backed receipts", () => {
 
     test("a complete synthetic wave passes every evidence check", () => {
         expect(verify("receipt", receipt(), ctx)).toEqual([]);
+    });
+
+    test("a scoped tree with a blob missing from the receipt fails and names the blob (AE26)", () => {
+        const value = receipt();
+        files(value).splice(1, 1);
+        expect(verify("receipt", value, ctx)).toContain(`$.scope[0] source tree ${leaseTree} has blob ${keyBlob} missing from the receipt`);
+    });
+
+    test("a commit or tree id in place of a blob id is rejected", () => {
+        const value = receipt();
+        (files(value)[0]!.source as Json).blob_sha = sourceCommit;
+        expect(verify("receipt", value, ctx)).toContain(`$.files[0].source.blob_sha ${sourceCommit} is a commit, not a blob`);
+    });
+
+    test("an impact record pinned to an unrelated destination commit is rejected", () => {
+        const impact = impactFor(sourceCommit);
+        impact.destination_commit = "f".repeat(40);
+        expect(verify("property-impact", impact, ctx)).toContain(`$.destination_commit ${"f".repeat(40)} is not an ancestor of the destination HEAD`);
+        expect(verify("property-impact", impactFor(sourceCommit), ctx)).toEqual([]);
     });
 
     test("a source blob the pinned commit does not reach marks the receipt stale (AE6)", () => {
@@ -1013,7 +1053,19 @@ describe("evidence: git-backed receipts", () => {
                 evidence: ["migration/waves/U2/receipt.json"],
             });
             let errors = verify("registry", registry, ctx);
-            expect(errors.some((error) => error.startsWith(`${fixturePath}:`))).toBe(false);
+            expect(errors).toContain(`fixture ${fixturePath} is byte-stable but no receipt pins its bytes`);
+            const pinning = receipt();
+            files(pinning).push({
+                source: null,
+                destination: fixturePath,
+                destination_sha256: sha256(fixtureBytes),
+                transformation: "authored",
+                class: "new-authored",
+                review_evidence: { design_review: "x", negative_tests: "y" },
+            });
+            writeFileSync(join(destination, "migration/waves/U2/receipt.json"), JSON.stringify(pinning));
+            errors = verify("registry", registry, ctx);
+            expect(errors.some((error) => error.startsWith(`fixture ${fixturePath}`))).toBe(false);
 
             (registry.entries as Json[]).push({
                 kind: "fixture",
@@ -1043,6 +1095,7 @@ describe("evidence: git-backed receipts", () => {
             );
         } finally {
             rmSync(join(destination, fixturePath));
+            rmSync(join(destination, "migration/waves/U2/receipt.json"), { force: true });
             writeFileSync(join(destination, "migration/registry.json"), JSON.stringify(valid.registry));
         }
     });

@@ -263,6 +263,9 @@ interface ReceiptFile {
 interface ReceiptShape {
     wave: Wave | undefined;
     sources: RepoCommit[];
+    /// Source trees whose every blob must be listed in `files` or `excluded`.
+    scope: { repo: string; tree: string }[];
+    excluded: { repo: string; blob_sha: string }[];
     files: ReceiptFile[];
     readiness: string | undefined;
     registry: string | undefined;
@@ -421,6 +424,37 @@ function validateReceiptShape(root: JsonObject, errors: string[]): ReceiptShape 
     const propertyImpact = impactField("property_impact");
     const architectureImpact = impactField("architecture_impact");
 
+    const scope: ReceiptShape["scope"] = [];
+    requireArray(root, "scope", "$", errors).forEach((entry, index) => {
+        const path = `$.scope[${index}]`;
+        const item = requireObject(entry, path, errors);
+        if (item === undefined) return;
+        const repo = requireString(item, "repo", path, errors);
+        const tree = requireString(item, "tree", path, errors);
+        if (tree !== undefined && !BLOB_RE.test(tree)) errors.push(`${path}.tree must be a git tree id`);
+        if (repo !== undefined && !sourceRepos.has(repo)) {
+            errors.push(`${path}.repo ${repo} has no pinned source commit`);
+        }
+        if (repo !== undefined && tree !== undefined) scope.push({ repo, tree });
+    });
+    if (!controlOnly && scope.length === 0) {
+        errors.push("$.scope must declare at least one source tree");
+    }
+
+    const excluded: ReceiptShape["excluded"] = [];
+    if (root.excluded !== undefined) {
+        requireArray(root, "excluded", "$", errors).forEach((entry, index) => {
+            const path = `$.excluded[${index}]`;
+            const item = requireObject(entry, path, errors);
+            if (item === undefined) return;
+            const repo = requireString(item, "repo", path, errors);
+            const blob = requireString(item, "blob_sha", path, errors);
+            requireString(item, "reason", path, errors);
+            if (blob !== undefined && !BLOB_RE.test(blob)) errors.push(`${path}.blob_sha must be a git blob id`);
+            if (repo !== undefined && blob !== undefined) excluded.push({ repo, blob_sha: blob });
+        });
+    }
+
     const destinations = new Set<string>();
     const files: ReceiptFile[] = [];
     const rawFiles = requireArray(root, "files", "$", errors);
@@ -442,6 +476,8 @@ function validateReceiptShape(root: JsonObject, errors: string[]): ReceiptShape 
     return {
         wave,
         sources,
+        scope,
+        excluded,
         files,
         readiness,
         registry,
@@ -1143,6 +1179,28 @@ function pointerResolves(root: string, pointer: string): boolean {
 }
 
 
+/// Object types for `ids` in one `git cat-file --batch-check` call; missing ids are absent.
+function objectTypes(checkout: string, ids: Iterable<string>): Map<string, string> | string {
+    const input = [...ids].join("\n");
+    if (input === "") return new Map();
+    const result = spawnSync("git", ["cat-file", "--batch-check"], { cwd: checkout, input: `${input}\n`, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+    if (result.error) return String(result.error);
+    if (result.status !== 0) return result.stderr.trim() || `git exited ${result.status}`;
+    const types = new Map<string, string>();
+    for (const line of result.stdout.split("\n")) {
+        const [id, type] = line.trim().split(/\s+/);
+        if (id !== undefined && type !== undefined && type !== "missing") types.set(id, type);
+    }
+    return types;
+}
+
+/// Blob ids under a tree, without their paths.
+function treeBlobs(checkout: string, tree: string): Set<string> | string {
+    const result = git(checkout, ["ls-tree", "-r", "--object-only", tree]);
+    if (!result.ok) return result.error;
+    return new Set(result.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== ""));
+}
+
 function blobBytes(checkout: string, blob: string): Buffer | string {
     const result = spawnSync("git", ["cat-file", "blob", blob], { cwd: checkout, maxBuffer: 256 * 1024 * 1024 });
     if (result.error) return String(result.error);
@@ -1247,12 +1305,28 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
         return result;
     };
 
+    // A commit or tree id is reachable too, so the type is checked as well as the reach.
+    const typesByRepo = new Map<string, Map<string, string>>();
+    for (const repo of commitByRepo.keys()) {
+        const checkout = checkoutFor(ctx, repo);
+        if (!existsSync(checkout)) continue;
+        const ids = shape.files.flatMap((file) => (file.source?.repo === repo ? [file.source.blob_sha] : []));
+        const types = objectTypes(checkout, ids);
+        if (typeof types === "string") errors.push(`git cat-file --batch-check failed for ${repo}: ${types}`);
+        else typesByRepo.set(repo, types);
+    }
+
     for (const file of shape.files) {
         if (file.source === null) continue;
         const reachable = reachableFor(file.source.repo);
         if (reachable === undefined) continue;
         if (!reachable.has(file.source.blob_sha)) {
             errors.push(`${file.path}.source.blob_sha ${file.source.blob_sha} is not reachable from ${file.source.repo}@${commitByRepo.get(file.source.repo)}`);
+            continue;
+        }
+        const type = typesByRepo.get(file.source.repo)?.get(file.source.blob_sha);
+        if (type !== undefined && type !== "blob") {
+            errors.push(`${file.path}.source.blob_sha ${file.source.blob_sha} is a ${type}, not a blob`);
             continue;
         }
         if (file.transformation === "verbatim" && file.destination_sha256 !== undefined) {
@@ -1263,6 +1337,66 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
                 errors.push(`${file.path} is verbatim but destination bytes differ from source blob ${file.source.blob_sha}`);
             }
         }
+    }
+
+    // Every blob under a scoped source tree is either carried or explicitly excluded, so a
+    // file dropped from a source crate cannot pass unnoticed.
+    const disposed = new Set<string>();
+    for (const file of shape.files) {
+        if (file.source !== null) disposed.add(`${file.source.repo}\u0000${file.source.blob_sha}`);
+    }
+    for (const entry of shape.excluded) disposed.add(`${entry.repo}\u0000${entry.blob_sha}`);
+    shape.scope.forEach((entry, index) => {
+        const checkout = checkoutFor(ctx, entry.repo);
+        if (!existsSync(checkout)) return;
+        const reachable = reachableFor(entry.repo);
+        if (reachable !== undefined && !reachable.has(entry.tree)) {
+            errors.push(`$.scope[${index}].tree ${entry.tree} is not reachable from ${entry.repo}@${commitByRepo.get(entry.repo)}`);
+            return;
+        }
+        const blobs = treeBlobs(checkout, entry.tree);
+        if (typeof blobs === "string") {
+            errors.push(`git ls-tree failed for ${entry.repo} tree ${entry.tree}: ${blobs}`);
+            return;
+        }
+        if (blobs.size === 0) errors.push(`$.scope[${index}].tree ${entry.tree} lists no blobs`);
+        for (const blob of blobs) {
+            if (!disposed.has(`${entry.repo}\u0000${blob}`)) {
+                errors.push(`$.scope[${index}] ${entry.repo} tree ${entry.tree} has blob ${blob} missing from the receipt`);
+            }
+        }
+    });
+}
+
+/// Destinations named by every wave receipt under the destination root.
+function receiptDestinations(root: string): Set<string> {
+    const out = new Set<string>();
+    const waves = join(root, "migration", "waves");
+    if (!existsSync(waves)) return out;
+    for (const wave of readdirSync(waves)) {
+        const path = join(waves, wave, "receipt.json");
+        if (!existsSync(path)) continue;
+        try {
+            const receipt = JSON.parse(readFileSync(path, "utf8")) as JsonObject;
+            for (const entry of Array.isArray(receipt.files) ? receipt.files : []) {
+                if (isObject(entry) && typeof entry.destination === "string") out.add(entry.destination);
+            }
+        } catch {
+            // A malformed receipt fails its own check; the registry check does not double-report it.
+        }
+    }
+    return out;
+}
+
+/// `destination_commit` must be an ancestor of the checked-out destination, so impact records
+/// cannot describe an unrelated tree. Skipped when the destination is not a git checkout.
+function verifyDestinationCommit(commit: string, path: string, ctx: Context, errors: string[]): void {
+    if (!existsSync(join(ctx.root, ".git"))) return;
+    const result = spawnSync("git", ["merge-base", "--is-ancestor", commit, "HEAD"], { cwd: ctx.root, encoding: "utf8" });
+    if (result.error) {
+        errors.push(`${path}: git merge-base failed: ${String(result.error)}`);
+    } else if (result.status !== 0) {
+        errors.push(`${path} ${commit} is not an ancestor of the destination HEAD`);
     }
 }
 
@@ -1360,10 +1494,15 @@ export function validateReadinessShape(root: JsonObject, errors: string[]): void
 
 
 function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): void {
+    const pinned = receiptDestinations(ctx.root);
     for (const fixture of shape.fixtures) {
         const full = join(ctx.root, fixture.path);
         if (!existsSync(full) || !statSync(full).isFile()) {
             errors.push(`fixture ${fixture.path} is registered but does not exist in the destination`);
+        }
+        // Only a receipt entry pins bytes, so a byte-stable fixture outside every receipt is unpinned.
+        if (fixture.role === "byte-stable" && !pinned.has(fixture.path)) {
+            errors.push(`fixture ${fixture.path} is byte-stable but no receipt pins its bytes`);
         }
     }
 
@@ -1424,6 +1563,9 @@ function verifyKind(kind: CheckKind, root: JsonObject, ctx: Context): string[] {
             break;
         case "property-impact": {
             const shape = validatePropertyImpactShape(root, errors);
+            if (errors.length === 0 && typeof root.destination_commit === "string") {
+                verifyDestinationCommit(root.destination_commit, "$.destination_commit", ctx, errors);
+            }
             for (const pointer of shape.pointers) {
                 if (!pointerResolves(ctx.root, pointer.pointer)) {
                     errors.push(`${pointer.path} ${pointer.pointer} does not resolve in the destination tree; reclassify the record as core or excluded`);

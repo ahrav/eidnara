@@ -79,10 +79,14 @@ pub struct FrozenUnit {
     pub reset_rule: String,
 }
 
-/// The core's durable per-pass state. One atomic value: the harness CAS-writes it back
-/// whole (units + boundary + version), never per-field.
+/// The core's durable per-pass state. One atomic value: the harness writes it back
+/// whole (units + boundary + version), never per-field, under the store's single-writer
+/// lease. Any compare-and-swap tag belongs to the storage layer, not to a field here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoreState {
+    /// Counts prefix rebuilds: it advances on `Soft` and `Hard` and stays fixed on a
+    /// defer, so two states with equal `version` can differ in `pending_changes` and
+    /// `reconcile_pending`. It is not a revision of the whole value.
     pub version: u64,
     /// The coverage descriptor: the id the covered prefix is spliced out at. A CAS-retry
     /// re-splices the SAME id. Compared for equality against `boundary_present`.

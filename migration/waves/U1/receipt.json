@@ -16,6 +16,7 @@
   "readiness": "migration/upstream-readiness.json",
   "registry": "migration/registry.json",
   "waivers": "migration/waves/U1/waivers.json",
+  "scope": [],
   "property_impact": "not-applicable",
   "architecture_impact": "not-applicable",
   "files": [
@@ -198,7 +199,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "8e2ef9442056925cae88b153b37f7c58837fb3cb3425bc75a58829e6bd6cbc2a",
+      "destination_sha256": "87aad86db47e74da6134af771178fdf5b57daf9788ef1af3931fd877e1218d71",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -209,7 +210,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "da631a2f4ed8b0e347e0a9be8a18f279a9676a8c786140b90d4f4f2106920784",
+      "destination_sha256": "3e6917a62c9921fbd2728fbb4ab6288723f24993b643e3f665585456c4ba8cfc",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

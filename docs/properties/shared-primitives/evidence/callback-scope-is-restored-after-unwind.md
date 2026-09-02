@@ -1,8 +1,8 @@
 # `callback-scope-is-restored-after-unwind`
 
 - **Discovery:** storage callback-capability pass.
-- **Primary evidence:** `CallbackScope::drop` (`crates/storage/src/lib.rs:448-453`) restores the connection when `release` did not run; `with_conn` recovers a poisoned mutex with `into_inner` (`crates/storage/src/lib.rs:142`).
-- **Existing evidence:** `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1650-1670`) panics inside `with_conn`, catches the unwind, then performs a fenced write and a maintenance statement on the same store.
+- **Primary evidence:** `CallbackScope::drop` (`crates/storage/src/lib.rs:456-461`) restores the connection when `release` did not run; `with_conn` recovers a poisoned mutex with `into_inner` (`crates/storage/src/lib.rs:142`).
+- **Existing evidence:** `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1699-1719`) panics inside `with_conn`, catches the unwind, then performs a fenced write and a maintenance statement on the same store.
 - **Failure scenario:** a leaked `query_only` turns every later fenced write into `SQLITE_READONLY` for the process lifetime.
 - **Timing window:** the unwind path.
 - **Instrumentation:** none.

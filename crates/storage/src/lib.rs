@@ -341,8 +341,9 @@ mod sqlite_backend {
         /// `None` once released, so `Drop` never repeats a release whose failure
         /// [`Self::release`] already reported.
         conn: Option<&'c Connection>,
-        /// Reads additionally run under `query_only`; a fenced transaction must write.
-        read_only: bool,
+        /// The `query_only` value to restore: `Some(prior)` when the scope switched it on
+        /// for a read, `None` when the scope left it alone.
+        query_only_before: Option<bool>,
         /// Infrastructure-named schema objects at install, compared again at release.
         infrastructure_before: Vec<String>,
     }
@@ -377,21 +378,27 @@ mod sqlite_backend {
     impl<'c> CallbackScope<'c> {
         /// Denies writes as well as the escapes, for a callback that must not mutate.
         fn read_only(conn: &'c Connection) -> Result<Self, StoreError> {
+            let prior: bool = conn
+                .query_row("PRAGMA query_only", [], |row| row.get(0))
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
             conn.pragma_update(None, "query_only", "ON")
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
-            Self::install(conn, true)
+            Self::install(conn, Some(prior))
         }
 
         /// Denies the escapes only, for a callback inside a fence-checked transaction.
         fn writable(conn: &'c Connection) -> Result<Self, StoreError> {
-            Self::install(conn, false)
+            Self::install(conn, None)
         }
 
-        fn install(conn: &'c Connection, read_only: bool) -> Result<Self, StoreError> {
+        fn install(
+            conn: &'c Connection,
+            query_only_before: Option<bool>,
+        ) -> Result<Self, StoreError> {
             let infrastructure_before = infrastructure_objects(conn)?;
             let scope = Self {
                 conn: Some(conn),
-                read_only,
+                query_only_before,
                 infrastructure_before,
             };
             conn.authorizer(Some(deny_scope_escapes))
@@ -405,7 +412,7 @@ mod sqlite_backend {
                 Some(conn) => {
                     let unchanged =
                         Self::require_infrastructure_unchanged(conn, &self.infrastructure_before);
-                    Self::restore(conn, self.read_only).and(unchanged)
+                    Self::restore(conn, self.query_only_before).and(unchanged)
                 }
                 None => Ok(()),
             }
@@ -429,14 +436,15 @@ mod sqlite_backend {
             Ok(())
         }
 
-        fn restore(conn: &Connection, read_only: bool) -> Result<(), StoreError> {
+        /// Puts `query_only` back to the value the scope found, so a connection that
+        /// maintenance left read-only stays read-only.
+        fn restore(conn: &Connection, query_only_before: Option<bool>) -> Result<(), StoreError> {
             let cleared = conn.authorizer(
                 None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
             );
-            let unlocked = if read_only {
-                conn.pragma_update(None, "query_only", "OFF")
-            } else {
-                Ok(())
+            let unlocked = match query_only_before {
+                Some(prior) => conn.pragma_update(None, "query_only", prior),
+                None => Ok(()),
             };
             cleared.and(unlocked).map_err(|e| {
                 StoreError::Backend(format!("failed to release the callback scope: {e}"))
@@ -448,7 +456,7 @@ mod sqlite_backend {
         fn drop(&mut self) {
             if let Some(conn) = self.conn.take() {
                 // Drop ignores cleanup errors because it cannot return them.
-                let _ = Self::restore(conn, self.read_only);
+                let _ = Self::restore(conn, self.query_only_before);
             }
         }
     }
@@ -623,7 +631,15 @@ mod sqlite_backend {
 
         // Owner-only from creation: SQLite gives sidecars the database file's mode.
         create_database_file_owner_only(Path::new(&path)).map_err(StoreError::Io)?;
-        let mut conn = Connection::open(&path).map_err(|e| StoreError::Backend(e.to_string()))?;
+        // `SQLITE_OPEN_NOFOLLOW` closes the window between the owner-only creation and this
+        // open, so a symlink swapped in between is refused rather than followed.
+        let mut conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
         // Pre-existing permissive files are narrowed before the fence claim writes any bytes.
         for suffix in ["", "-wal", "-shm"] {
             protect_file(Path::new(&format!("{path}{suffix}")))
@@ -687,8 +703,11 @@ mod sqlite_backend {
         if !path.try_exists().map_err(StoreError::Io)? {
             return Ok(0);
         }
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let has_fence: bool = conn
@@ -950,16 +969,44 @@ mod tests {
     use super::sqlite_backend::{claim_fence, claim_fence_strict, create_database_file_owner_only};
     use super::*;
 
+    #[test]
+    fn a_read_scope_restores_the_query_only_value_it_found() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, "").expect("open");
+        store
+            .with_conn_unfenced(|c| c.pragma_update(None, "query_only", true))
+            .expect("maintenance sets query_only");
+        store
+            .with_conn(|c| c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)))
+            .expect("read");
+        let still_on: bool = store
+            .with_conn_unfenced(|c| c.query_row("PRAGMA query_only", [], |r| r.get(0)))
+            .expect("read pragma");
+        assert!(
+            still_on,
+            "a read scope must not clear a query_only that maintenance set"
+        );
+        store
+            .with_conn_unfenced(|c| c.pragma_update(None, "query_only", false))
+            .expect("maintenance clears query_only");
+        let off: bool = store
+            .with_conn_unfenced(|c| c.query_row("PRAGMA query_only", [], |r| r.get(0)))
+            .expect("read pragma");
+        assert!(!off);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     const KV_BASELINE: &str = "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);";
 
     const INVENTORY_FIXTURE: &str =
         include_str!("../../../fixtures/schema/storage-inventory-v1.json");
 
-    /// A directory symlink resolves to the same lease file and contends;
-    /// `O_NOFOLLOW` refuses file symlinks.
+    /// Any symlink in the database path, whether a directory component or the file
+    /// itself, is refused, so no alias can reach the bytes or a second lease.
     #[cfg(unix)]
     #[test]
-    fn symlinked_database_paths_contend_or_are_refused_never_aliased() {
+    fn symlinked_database_paths_are_refused_never_aliased() {
         let (root, real) = tmp();
         let StorageBackend::Sqlite { path: real_path } = &real.backend else {
             panic!("sqlite descriptor");
@@ -975,11 +1022,13 @@ mod tests {
             },
             ..real.clone()
         };
-        match open_sqlite(&via_dir, "").map(|_| ()) {
-            Err(StoreError::Lease(lease::LeaseError::Held { .. })) => {}
-            Ok(()) => panic!("a directory-symlink alias must contend on the same lease"),
-            Err(other) => panic!("expected Held through the directory alias, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                open_sqlite(&via_dir, "").map(|_| ()),
+                Err(StoreError::Backend(_))
+            ),
+            "a directory-symlink alias must be refused"
+        );
 
         let file_alias_dir = root.join("file-alias");
         std::fs::create_dir_all(&file_alias_dir).expect("alias dir");
@@ -991,26 +1040,26 @@ mod tests {
             },
             ..real.clone()
         };
-        match open_sqlite(&via_file, "").map(|_| ()) {
-            Err(StoreError::Io(e)) => {
-                assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "unexpected error: {e}")
-            }
-            Ok(()) => panic!("a file-symlink alias must be refused, but it opened"),
-            Err(other) => panic!("expected an O_NOFOLLOW refusal, got {other:?}"),
-        }
-        drop(held);
         assert!(
             matches!(
                 open_sqlite(&via_file, "").map(|_| ()),
-                Err(StoreError::Io(_))
+                Err(StoreError::Backend(_))
             ),
-            "a file-symlink alias must be refused even with no holder"
+            "a file-symlink alias must be refused"
         );
+        drop(held);
+        // Refusal does not depend on contention: both aliases stay refused once free.
+        assert!(matches!(
+            open_sqlite(&via_dir, "").map(|_| ()),
+            Err(StoreError::Backend(_))
+        ));
+        assert!(matches!(
+            open_sqlite(&via_file, "").map(|_| ()),
+            Err(StoreError::Backend(_))
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A dangling symlink at the database path must not make creation land at the
-    /// link's target; `O_NOFOLLOW` refuses the open before any file exists.
     #[cfg(unix)]
     #[test]
     fn dangling_symlink_at_the_database_path_is_refused_without_creating_the_target() {
