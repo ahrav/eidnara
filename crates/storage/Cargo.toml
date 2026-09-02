@@ -16,3 +16,6 @@ sqlite = ["dep:rusqlite"]
 storage-types = { workspace = true }
 lease = { workspace = true }
 rusqlite = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }

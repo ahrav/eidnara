@@ -312,6 +312,7 @@ name = "storage"
 version = "0.3.1"
 dependencies = [
  "lease",
+ "libc",
  "rusqlite",
  "storage-types",
 ]

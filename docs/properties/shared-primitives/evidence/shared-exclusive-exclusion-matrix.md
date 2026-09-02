@@ -6,4 +6,4 @@
 - **Failure scenario:** process-scoped lock emulation or premature unlock lets exclusive coexist with a remaining shared holder.
 - **Timing window:** exclusive attempt after the first shared holder drops but before the last drops.
 - **Instrumentation:** partial; tests observe API outcomes but not live-holder counts or inode identity.
-- **Open-question log:** locking uses the standard library's `File::try_lock` and `File::try_lock_shared`, with contention and other failures classified through `TryLockError`. These APIs set the workspace MSRV to Rust 1.89 (`Cargo.toml:14-15`). Deployment filesystem support beyond exercised platforms needs human confirmation.
+- **Open-question log:** locking uses the standard library's `File::try_lock` and `File::try_lock_shared`, with contention and other failures classified through `TryLockError`. These APIs need Rust 1.89 or later; the workspace pins `rust-version = "1.98"` (`Cargo.toml:12`) and CI runs on that toolchain and on moving stable. Deployment filesystem support beyond exercised platforms needs human confirmation.

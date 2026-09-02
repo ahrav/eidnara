@@ -40,13 +40,13 @@ Fresh-context evaluation ran after the initial 22-record catalog was written. It
 - Added exercised-state status to every fault-map row.
 - Routed kernel/filesystem and crash properties to real process, deployment, or crash-consistency evidence rather than modeling away the mechanism under test.
 - Replaced copied PostgreSQL lease identity/hash logic with the shared public `LeaseKey::identity` and `fnv1a` derivation, and recorded the stability-vector tests introduced across `bed0bb7` and `8da6d42` and the numeric hash API finalized in `f2107e5`.
-- Recorded the standard-library lock migration and Rust 1.89 MSRV declaration from `bed0bb7`, plus the 0.1.1 version bump from `94c65ec`; CI still has no MSRV job.
+- Recorded the standard-library lock migration and Rust 1.89 MSRV declaration from `bed0bb7`, plus the 0.1.1 version bump from `94c65ec`. The destination workspace pins `rust-version = "1.98"` and `rust-toolchain.toml` to 1.98; CI runs format, clippy with `-D warnings`, tests, doctests and docs, and feature configurations on that pinned toolchain, runs clippy and tests on moving stable, and checks the pinned toolchain against a regenerated lockfile of latest dependencies.
 
 ## Biases requiring human judgment
 
 ### Shared-root topology
 
-The lease crate requires a shared root (`crates/lease/src/lib.rs:10-14`), the in-repo SQLite consumer derives a root from each database parent (`crates/storage/src/lib.rs:234-250`), and the density measurement implies an external high-cardinality shared root (`lease-store-density.md:7-11`). This unresolved topology changes the impact of key aliasing, density, and filesystem-scope properties.
+The lease crate requires a shared root (`crates/lease/src/lib.rs:11-15`), the in-repo SQLite consumer derives a root from each database parent in `open_sqlite` (`crates/storage/src/lib.rs:594-607`, ending at `FileLeaseStore::new(&parent)`), and the density measurement implies an external high-cardinality shared root (`lease-store-density.md:7-11`). This unresolved topology changes the impact of key aliasing, density, and filesystem-scope properties.
 
 ### Contract catalog versus current implementation
 
@@ -54,8 +54,8 @@ The catalog intentionally includes desired contracts that current code contradic
 
 | Disposition | Properties |
 |---|---|
-| **Known violated by code under the recorded enabling state** | `at-most-one-exclusive-holder-per-key` under live path replacement, `distinct-lease-keys-do-not-alias`, `lease-inode-remains-stable-while-held` under replacement, `logical-store-has-single-lease-identity` for permitted sibling/path-alias inputs, `failed-acquisition-does-not-mutate-lease-state`, `replacement-fence-is-claimed-before-old-writer-writes`. |
-| **Believed satisfied on currently exercised local paths** | `shared-exclusive-exclusion-matrix`, `shared-acquisition-is-epoch-neutral`, `contention-is-classified-as-held`, `handle-drop-releases-lease`, `invalid-epoch-fails-closed`, `epoch-input-size-is-bounded`, `lease-file-creation-is-never-permissive` on Unix, `acquisition-does-not-follow-symlink` on Unix, descriptor-relative lease permission hardening, and `stale-writer-write-is-rejected` on the SQLite and PostgreSQL synthetic fenced paths. |
+| **Known violated by code under the recorded enabling state** | `at-most-one-exclusive-holder-per-key` under live path replacement, `lease-inode-remains-stable-while-held` under replacement, `logical-store-has-single-lease-identity` for permitted sibling/path-alias inputs, `failed-acquisition-does-not-mutate-lease-state`, `replacement-fence-is-claimed-before-old-writer-writes`. |
+| **Believed satisfied on currently exercised local paths** | `shared-exclusive-exclusion-matrix`, `shared-acquisition-is-epoch-neutral`, `contention-is-classified-as-held`, `handle-drop-releases-lease`, `invalid-epoch-fails-closed`, `epoch-input-size-is-bounded`, `distinct-lease-keys-do-not-alias` for separator-bearing fields (FNV collisions remain unhandled), `lease-file-creation-is-never-permissive` on Unix, `acquisition-does-not-follow-symlink` on Unix, descriptor-relative lease permission hardening, and `stale-writer-write-is-rejected` on the SQLite and PostgreSQL synthetic fenced paths. |
 | **Unknown or deployment-dependent** | `failed-acquire-preserves-prior-epoch` under real partial `File` errors, `writer-epoch-strictly-increases` under arbitrary restore or machine power loss outside SQLite's resource-floor recovery, `returned-epoch-is-crash-durable`, `dead-holder-lease-is-reclaimable`, `shared-epoch-never-authorizes-write`, `filesystem-lock-scope-matches-deployment`, `lease-file-growth-trigger-is-observed`, `lease-path-format-is-version-stable`, `protected-write-set-is-fence-complete`, Windows reparse-point runtime behavior, and other non-Unix symlink behavior. |
 | **Campaign coverage requirements, not implementation verdicts** | `cross-process-exclusive-race-is-reached`, `epoch-update-interruption-window-is-reached`, `live-lease-file-replacement-is-reached`. |
 

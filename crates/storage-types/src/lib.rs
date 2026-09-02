@@ -129,12 +129,27 @@ pub fn postgres_database_name(module_id: &str) -> String {
 /// The conventional SQLite store path under a data-home root:
 /// `<data_home>/cortexkit/<module_id>/store.db`. Trailing `/` characters in
 /// `data_home` do not produce duplicate separators.
+///
+/// # Panics
+///
+/// Panics when `module_id` is not a single path component: empty, `.`, `..`,
+/// or containing `/` or `\`. A module id must be one path component so each
+/// module maps to exactly one directory under `<data_home>/cortexkit/`.
+/// Rejecting rather than encoding keeps every valid id's path byte-stable.
 pub fn sqlite_store_path(data_home: &str, module_id: &str) -> String {
+    assert!(
+        is_single_path_component(module_id),
+        "module_id {module_id:?} is not a single path component"
+    );
     format!(
         "{}/cortexkit/{}/store.db",
         data_home.trim_end_matches('/'),
         module_id
     )
+}
+
+fn is_single_path_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
 /// FNV-1a 64-bit, hex: a dependency-free deterministic hash for name disambiguation.
@@ -176,6 +191,20 @@ mod tests {
         assert_eq!(
             sqlite_store_path("/data/", "m"),
             "/data/cortexkit/m/store.db"
+        );
+    }
+
+    /// A module id carrying a path component resolves outside `<data_home>/cortexkit/`.
+    #[test]
+    fn sqlite_path_rejects_module_ids_that_escape_the_cortexkit_root() {
+        for bad in ["../other", "a/b", "a\\b", "..", ".", ""] {
+            let outcome = std::panic::catch_unwind(|| sqlite_store_path("/data", bad));
+            assert!(outcome.is_err(), "module_id {bad:?} must be rejected");
+        }
+        // A dot inside a name is an ordinary character, not a traversal.
+        assert_eq!(
+            sqlite_store_path("/data", "a.b"),
+            "/data/cortexkit/a.b/store.db"
         );
     }
 

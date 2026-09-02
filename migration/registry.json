@@ -856,10 +856,12 @@
         "store.db",
         "claim-vector.db",
         "other.db",
+        "fresh.db",
         "embedding.bin",
         "{}/cortexkit/{}/store.db",
         "/home/u/.local/share/cortexkit/alfonso-routing/store.db",
         "/data/cortexkit/m/store.db",
+        "/data/cortexkit/a.b/store.db",
         "/data/cortexkit/alfonso-routing/store.db"
       ],
       "paths": [],

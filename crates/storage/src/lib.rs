@@ -607,8 +607,10 @@ mod sqlite_backend {
             .map_err(StoreError::Lease)?;
         let epoch = lease.epoch();
 
+        // Owner-only from creation: SQLite gives sidecars the database file's mode.
+        create_database_file_owner_only(Path::new(&path)).map_err(StoreError::Io)?;
         let mut conn = Connection::open(&path).map_err(|e| StoreError::Backend(e.to_string()))?;
-        // Owner-only permissions apply before the fence claim below writes any bytes.
+        // Pre-existing permissive files are narrowed before the fence claim writes any bytes.
         for suffix in ["", "-wal", "-shm"] {
             protect_file(Path::new(&format!("{path}{suffix}")))
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -639,6 +641,26 @@ mod sqlite_backend {
             epoch,
             _lease: Some(lease),
         })
+    }
+
+    /// Creates the database file with mode `0600` when it does not exist.
+    ///
+    /// Does nothing to an existing file. On non-Unix targets this is a no-op;
+    /// SQLite creates the file itself.
+    pub(crate) fn create_database_file_owner_only(path: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(path)?;
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+        Ok(())
     }
 
     fn read_fence_epoch(path: &Path) -> Result<u64, StoreError> {
@@ -827,12 +849,21 @@ mod sqlite_backend {
                     m.version
                 ))
             })?;
-            tx.execute(
-                "INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) \
-                 VALUES (?1, ?2, ?3)",
-                rusqlite::params![namespace, m.version, now_unix()],
-            )
-            .map_err(|e| StoreError::Migration(e.to_string()))?;
+            let recorded = tx
+                .execute(
+                    "INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) \
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![namespace, m.version, now_unix()],
+                )
+                .map_err(|e| StoreError::Migration(e.to_string()))?;
+            // A trigger running `RAISE(IGNORE)` reports success with zero inserted
+            // rows; committing the migration without its record would re-run it.
+            if recorded != 1 {
+                return Err(StoreError::Migration(format!(
+                    "namespace '{namespace}' migration {}: version record affected {recorded} rows; expected 1",
+                    m.version
+                )));
+            }
             tx.commit()
                 .map_err(|e| StoreError::Migration(e.to_string()))?;
         }
@@ -852,8 +883,151 @@ pub use sqlite_backend::{GuardedConn, MaintenanceConn, SqliteStore, open_sqlite}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
-    use super::sqlite_backend::{claim_fence, claim_fence_strict};
+    use super::sqlite_backend::{claim_fence, claim_fence_strict, create_database_file_owner_only};
     use super::*;
+
+    /// A database reached through a directory symlink resolves to the same lease
+    /// file, so it contends. A database reached through a file symlink is refused
+    /// outright: `protect_file` rejects non-regular paths, so an alias can never
+    /// hold a second lease on the same bytes.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_database_paths_contend_or_are_refused_never_aliased() {
+        let (root, real) = tmp();
+        let StorageBackend::Sqlite { path: real_path } = &real.backend else {
+            panic!("sqlite descriptor");
+        };
+        let real_path = std::path::PathBuf::from(real_path);
+        let held = open_sqlite(&real).expect("hold the real path");
+
+        let dir_alias = root.join("dir-alias");
+        std::os::unix::fs::symlink(real_path.parent().unwrap(), &dir_alias).expect("dir symlink");
+        let via_dir = StorageDescriptor {
+            backend: StorageBackend::Sqlite {
+                path: dir_alias.join("store.db").to_string_lossy().into_owned(),
+            },
+            ..real.clone()
+        };
+        match open_sqlite(&via_dir).map(|_| ()) {
+            Err(StoreError::Lease(lease::LeaseError::Held { .. })) => {}
+            Ok(()) => panic!("a directory-symlink alias must contend on the same lease"),
+            Err(other) => panic!("expected Held through the directory alias, got {other:?}"),
+        }
+
+        let file_alias_dir = root.join("file-alias");
+        std::fs::create_dir_all(&file_alias_dir).expect("alias dir");
+        let file_alias = file_alias_dir.join("other.db");
+        std::os::unix::fs::symlink(&real_path, &file_alias).expect("file symlink");
+        let via_file = StorageDescriptor {
+            backend: StorageBackend::Sqlite {
+                path: file_alias.to_string_lossy().into_owned(),
+            },
+            ..real.clone()
+        };
+        match open_sqlite(&via_file).map(|_| ()) {
+            Err(StoreError::Backend(m)) => {
+                assert!(m.contains("not a regular file"), "unexpected message: {m}")
+            }
+            Ok(()) => panic!("a file-symlink alias must be refused, but it opened"),
+            Err(other) => panic!("expected a non-regular-file refusal, got {other:?}"),
+        }
+        drop(held);
+        // Refusal does not depend on contention: the alias stays refused once free.
+        assert!(
+            matches!(
+                open_sqlite(&via_file).map(|_| ()),
+                Err(StoreError::Backend(_))
+            ),
+            "a file-symlink alias must be refused even with no holder"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The helper performs no `chmod`, so the file it creates has mode `0600`
+    /// when umask is `022` only if the mode is applied at creation.
+    #[cfg(unix)]
+    #[test]
+    fn new_database_file_is_owner_only_at_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, _) = tmp();
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("fresh.db");
+        // Restores the process-wide umask before asserting the created file's mode.
+        let previous = unsafe { libc::umask(0o022) };
+        let created = create_database_file_owner_only(&path);
+        unsafe { libc::umask(previous) };
+        created.expect("create database file");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "created with umask 022, got {mode:o}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `RAISE(IGNORE)` trigger can make the version insert affect zero rows.
+    /// Committing the migration without its record would re-run it on the next
+    /// open, so the whole migration transaction must fail instead.
+    #[test]
+    fn suppressed_version_record_fails_the_migration_instead_of_committing_it() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let path = path.clone();
+        let store = open_sqlite(&d).expect("open");
+        store
+            .migrate(
+                "ns",
+                &[Migration {
+                    version: 1,
+                    statements: "CREATE TABLE first (k TEXT);",
+                }],
+            )
+            .expect("first migration creates the version table");
+
+        let raw = rusqlite::Connection::open(&path).expect("reopen raw");
+        raw.execute_batch(
+            "CREATE TRIGGER version_suppressor BEFORE INSERT ON cortexkit_schema_version \
+             BEGIN SELECT RAISE(IGNORE); END",
+        )
+        .expect("install suppressing trigger");
+        drop(raw);
+
+        match store.migrate(
+            "ns",
+            &[
+                Migration {
+                    version: 1,
+                    statements: "CREATE TABLE first (k TEXT);",
+                },
+                Migration {
+                    version: 2,
+                    statements: "CREATE TABLE second (k TEXT);",
+                },
+            ],
+        ) {
+            Err(StoreError::Migration(m)) => {
+                assert!(m.contains("affected 0 rows"), "unexpected message: {m}")
+            }
+            other => panic!("a suppressed version record must fail the migration, got {other:?}"),
+        }
+        let (second_exists, max_version): (i64, i64) = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT (SELECT COUNT(*) FROM sqlite_schema WHERE name = 'second'), \
+                            (SELECT MAX(version) FROM cortexkit_schema_version WHERE namespace = 'ns')",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .expect("inspect");
+        assert_eq!(
+            second_exists, 0,
+            "migration 2 must roll back with its record"
+        );
+        assert_eq!(max_version, 1, "the recorded watermark must stay at 1");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Reopening covers pre-existing permissive files. A first open cannot test
     /// permissive WAL repair because a fresh WAL inherits the restricted database

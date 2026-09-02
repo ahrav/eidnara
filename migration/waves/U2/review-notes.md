@@ -35,24 +35,32 @@ What was checked:
 - Durable bytes are unchanged: `cortexkit_fence` and `cortexkit_schema_version`
   DDL, the `cortexkit/` path component in `sqlite_store_path`, the `cortexkit_`
   database-name prefix, `LeaseKey::identity` and `fnv1a_hex`, the `.lease`
-  suffix, `EPOCH_WIDTH`, and both golden fixtures. `fence_and_version_tables_keep_their_ddl`
-  and `lease_path_vectors_are_version_stable` pin the first and the fifth.
+  suffix, `EPOCH_WIDTH`, and both golden fixtures.
+  `fence_and_version_tables_keep_their_ddl` pins the `cortexkit_fence` and
+  `cortexkit_schema_version` DDL. `lease_path_vectors_are_version_stable` pins
+  `LeaseKey::identity`, the `fnv1a_hex` digest, and the `.lease` filename that
+  acquisition creates.
 - Comments state mechanism in the present tense. The one comment that named a
   consumer path (`llm-runner`) in a test message now describes the case
   itself.
-- Line counts of the four `lib.rs` files match the source up to the appended
-  tests (lease: seven inserted lines inside one test table plus two appended
-  tests; storage: one appended test), so the catalog's line citations were
-  re-derived by diff rather than guessed.
+- The four `lib.rs` files differ from the source by the review fixes and their
+  tests, so line citations into them are re-derived by diff against the
+  current tree rather than guessed. Relative to the source, `lease` has seven
+  inserted lines inside the `invalid_epoch_states_fail_closed` table plus four
+  appended tests (`lease_path_vectors_are_version_stable`,
+  `epoch_read_is_bounded_regardless_of_file_size`,
+  `concurrent_exclusive_acquisitions_admit_exactly_one_holder`,
+  `separator_in_a_key_field_fails_closed_instead_of_aliasing`); `storage` has
+  nine appended tests; `storage-types` has two; `cache-stability` has three.
 
 Adaptations beyond renames, each recorded in the receipt as `adapted`:
 
 | File | Change |
 | --- | --- |
 | `crates/cache-stability/src/lib.rs` | module doc; one test message; nested `if let` in `step_soft` collapsed into a let chain (same condition) |
-| `crates/lease/src/lib.rs` | first doc line; `fnv1a` doc; six malformed-epoch cases; two appended tests |
-| `crates/storage-types/src/lib.rs` | module doc; `StorageBackend::Postgres` doc; `StorageDescriptor` doc |
-| `crates/storage/src/lib.rs` | module doc first line; test temp-dir prefix; re-export of `GuardedConn` and `MaintenanceConn`; one appended test |
+| `crates/lease/src/lib.rs` | first doc line; `fnv1a` doc; six malformed-epoch cases; `LeaseKey::identity` rejects the `U+001F` separator; four appended tests |
+| `crates/storage-types/src/lib.rs` | module doc; `StorageBackend::Postgres` doc; `StorageDescriptor` doc; `Debug` redacts the DSN; `sqlite_store_path` rejects path components in `module_id`; two appended tests |
+| `crates/storage/src/lib.rs` | module doc first line; test temp-dir prefix; re-export of `GuardedConn` and `MaintenanceConn`; review fixes; nine appended tests |
 | `crates/*/Cargo.toml` | crate names, `publish` and `rust-version` inherited, workspace dependency pins, descriptions without product branding |
 | `crates/storage-types/examples/golden-vectors.rs`, `tests/golden_vectors.rs` | doc comments describe the byte-stable fixture |
 
@@ -112,7 +120,8 @@ Files under `docs/properties/shared-primitives/`.
 ## Generated files
 
 - `Cargo.lock`: `cargo +1.98 generate-lockfile`; verified by every `--locked`
-  build and by the MSRV job's unlocked comparison.
+  build and by the pinned-toolchain step that regenerates the lockfile against
+  latest dependencies.
 - `docs/properties/shared-primitives/index.json`:
   `generate-property-index.ts docs/properties/shared-primitives`; CI runs it
   with `--check`.

@@ -37,7 +37,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Golden-vector test: eight externally computed identity, digest, and filename vectors plus an acquisition that must create the pinned file. Chosen over a property test because the contract is a fixed byte derivation; an independent implementation is the oracle.",
+      "strategy_decision": "Golden-vector test: six externally computed identity, digest, and filename vectors plus an acquisition that must create the pinned file. Chosen over a property test because the contract is a fixed byte derivation; an independent implementation is the oracle.",
       "audit_verdict": "pass",
       "evidence_digest": "ada5aed5377341fc7b5e6d12c32f7663f9c2e1ab1d717b3805b70cc7bf3ddf4e",
       "code_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
@@ -50,7 +50,7 @@
       "evidence_attempts": 1,
       "new_evidence": {
         "digest": "ada5aed5377341fc7b5e6d12c32f7663f9c2e1ab1d717b3805b70cc7bf3ddf4e",
-        "description": "`lease_path_vectors_are_version_stable`: eight externally computed vectors including both production keys and the created filename; mutants for suffix and separator fail."
+        "description": "`lease_path_vectors_are_version_stable`: six externally computed vectors including both production keys and the created filename; mutants for suffix and separator fail."
       }
     },
     {

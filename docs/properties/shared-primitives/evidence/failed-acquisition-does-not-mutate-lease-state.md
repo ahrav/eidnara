@@ -1,7 +1,7 @@
 # `failed-acquisition-does-not-mutate-lease-state`
 
 - **Discovery:** targeted pre-lock side-effect pass after portfolio evaluation.
-- **Primary evidence:** file-backed exclusive and shared acquisition call `open_lease_file`, including descriptor hardening, before attempting the lock. PostgreSQL tries its session advisory lock before creating infrastructure tables or bumping the epoch (`commons@89abb40 crates/`commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:242-261`).
+- **Primary evidence:** file-backed exclusive and shared acquisition call `open_lease_file`, including descriptor hardening, before attempting the lock. PostgreSQL's `open_postgres` tries its session advisory lock before creating infrastructure tables or bumping the epoch (`commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:355-389`).
 - **Existing evidence:** file contention tests assert returned errors and later acquisition behavior, not file bytes or metadata.
 - **Failure scenario:** losing acquirer changes mode or creates the file before returning `Held`; foreign ownership or read-only access returns undifferentiated `Io` before contention is known.
 - **Timing window:** incumbent live; competitor reaches hardening before try-lock.

@@ -165,13 +165,13 @@ Open questions:
 Type: safety
 Reachability: default-production - every kernel and module-store open acquires an exclusive file lease through this crate.
 Status: active
-Exercised: not yet - for adversarial values; simple separator-free examples exist.
+Exercised: partial - `separator_in_a_key_field_fails_closed_instead_of_aliasing` places `U+001F` in each field and asserts that `LeaseKey::identity` panics naming that field; `distinct_identity_axes_do_not_conflict` covers separator-free keys that differ in one axis; no check covers FNV-1a-64 collisions.
 Guarantee: Distinct `LeaseKey` values never map to the same lease file unless a collision is detected and rejected.
-Check: `always` - Inside the crate, `always(k1 == k2 || lease_path(k1) != lease_path(k2))` for generated and adversarial pairs. The file stores no identity, so collision detection by stored-key verification is a design follow-up, not an available check.
-Fault/timing angle: No timing fault is needed. A field containing `U+001F` makes the tuple encoding ambiguous; FNV-1a-64 also has no collision handling.
+Check: `always` - Inside the crate, `always(k1 == k2 || lease_path(k1) != lease_path(k2))` for generated and adversarial pairs, where a key that carries the separator is rejected before it reaches a path. The file stores no identity, so collision detection by stored-key verification is a design follow-up, not an available check.
+Fault/timing angle: No timing fault is needed. A field containing `U+001F` would make the tuple encoding ambiguous; `LeaseKey::identity` refuses such a field with a panic. FNV-1a-64 has no collision handling.
 Required faults and enabling state: Construct keys containing the separator in different fields. A targeted FNV collision is a separate enabling state whose practical cost remains open.
-Confidence: high - [evidence](evidence/distinct-lease-keys-do-not-alias.md). High for the separator witness; high that collision handling is absent; low on practical targeted-FNV cost.
-Existing check: `distinct_identity_axes_do_not_conflict` covers distinct scope, module, and backend axes; status **unaudited**.
+Confidence: high - [evidence](evidence/distinct-lease-keys-do-not-alias.md). High that the separator is rejected in every field (`LeaseKey::identity`, `crates/lease/src/lib.rs:179-194`); high that collision handling is absent; low on practical targeted-FNV cost.
+Existing check: `distinct_identity_axes_do_not_conflict` covers distinct scope, module, and backend axes; `separator_in_a_key_field_fails_closed_instead_of_aliasing` (`crates/lease/src/lib.rs:1404-1422`) covers the separator in each field; status **unaudited**.
 Impact: Unrelated stores falsely contend and share one epoch sequence.
 Open questions:
 
@@ -199,7 +199,7 @@ Open questions:
 Type: safety
 Reachability: default-production - every kernel and module-store open acquires an exclusive file lease through this crate.
 Status: active
-Exercised: yes - including synchronized concurrent shared-first acquisitions on a fresh key.
+Exercised: partial - `shared_acquisition_does_not_bump_the_write_epoch` holds a nonzero writer epoch with sequential shared holders; `concurrent_shared_first_acquisitions_coexist` and `shared_holders_coexist_but_block_exclusive` hold simultaneous shared holders only at epoch zero; no history combines a nonzero writer epoch with simultaneous shared holders.
 Guarantee: Shared acquisition over an existing valid lease file does not change its persisted writer epoch. Shared-first creation initializes canonical epoch zero and does not issue a writer epoch.
 Check: `always` - For existing files, `always(epoch_bytes_after_shared_acquire == epoch_bytes_before_shared_acquire)`. For first creation, assert canonical zero and require the first exclusive acquisition to return one.
 Fault/timing angle: Concurrent shared holders matter because a future refactor that writes metadata into the file can create lost updates or consume fence values.
@@ -231,7 +231,7 @@ Open questions:
 Type: safety
 Reachability: default-production - every kernel and module-store open acquires an exclusive file lease through this crate.
 Status: active
-Exercised: yes - on Unix for an exclusive acquisition over a pre-existing permissive file; shared acquisition and creation-window coverage remain absent.
+Exercised: partial - `an_acquired_lease_file_is_owner_only` covers an exclusive acquisition over a pre-existing `0644` file on Unix; shared acquisition over a pre-existing permissive file, replacement after descriptor open, and the creation window are not exercised.
 Guarantee: After a successful Unix acquisition, the locked lease file's permission bits are exactly `0600`.
 Check: `always` - `always(mode(locked_inode) & 0o777 == 0o600)` after both exclusive and shared acquisition. Platform qualification is explicit; non-Unix behavior is not imported into this claim.
 Fault/timing angle: Pre-existing `0644` files, restores, and copies. Creation-window exposure is a separate property.
@@ -265,7 +265,7 @@ Open questions:
 Type: safety
 Reachability: default-production - every kernel and module-store open acquires an exclusive file lease through this crate.
 Status: active
-Exercised: yes - on the local platform for ordinary contention; non-contention lock errors and all supported targets remain incomplete.
+Exercised: partial - the positive arm is covered by same-process, cross-process, and eight-way racing contention tests on the local platform; the negative arm has no test, because no injected non-contention lock error (`EACCES`, `ENOLCK`, `EOPNOTSUPP`) reaches `TryLockError::Error`, and other supported targets are not exercised.
 Guarantee: A contended try-lock returns `LeaseError::Held`, while every other lock failure returns `LeaseError::Io`.
 Check: `always` - Positive arm: while a known live holder exists, `always(matches!(result, Err(LeaseError::Held { .. })))`. Negative arm: for each injected non-contention lock error, `always(matches!(result, Err(LeaseError::Io(_))))`. The arms use different ground-truth mechanisms and are not collapsed into one biconditional.
 Fault/timing angle: Platform-specific raw OS codes and filesystems that report unsupported/exhausted lock resources rather than the normal contention code.
@@ -333,13 +333,13 @@ Open questions:
 Type: safety
 Reachability: default-production - every kernel and module-store open acquires an exclusive file lease through this crate.
 Status: active
-Exercised: partial - eight identity/hash/path vectors computed outside the crate pin the `identity()` encoding, the FNV-1a-64 digest, and the `.lease` filename, and acquisition is shown to create the pinned file; cross-version overlap and the dropped PostgreSQL advisory-key vector remain unchecked.
+Exercised: partial - six identity/hash/path vectors computed outside the crate pin the `identity()` encoding, the FNV-1a-64 digest, and the `.lease` filename, and acquisition is shown to create the pinned file; cross-version overlap and the dropped PostgreSQL advisory-key vector remain unchecked.
 Guarantee: Binaries that may overlap in one deployment derive the same lease path for the same key, or reject mixed-version operation before either acquires.
-Check: `always` - Expand the checked-in vectors to representative keys, including empty, non-ASCII, and `U+001F` fields, and assert `always(derived_filename == golden_filename)`. Pin the PostgreSQL advisory bigint from the same public `LeaseKey::identity` and `fnv1a` derivation.
+Check: `always` - Expand the checked-in vectors to representative keys, including empty and non-ASCII fields, and assert `always(derived_filename == golden_filename)`; a `U+001F` field is rejected by `LeaseKey::identity` and cannot carry a vector. Pin the PostgreSQL advisory bigint from the same public `LeaseKey::identity` and `fnv1a` derivation.
 Fault/timing angle: Changing field order, separator, hash, suffix, or normalization while old and new processes overlap.
 Required faults and enabling state: Two versions running concurrently against one lease root, including rolling restart and rollback.
 Confidence: high - [evidence](evidence/lease-path-format-is-version-stable.md). High that `FileLeaseStore::lease_path` is a de facto persisted protocol. Crate version `0.3.0` changes only the source API; the path and 0.2 state format remain unchanged, and compatibility remains a manual convention rather than an automated gate.
-Existing check: `identity_hash_derivation_is_stable` pins one identity and filename hash; `lease_path_vectors_are_version_stable` pins eight externally computed vectors and the created filename; status **audited** at U2. The PostgreSQL `advisory_key_derivation_is_stable` vector stays in the archived `commons` source with the dropped backend.
+Existing check: `identity_hash_derivation_is_stable` pins one identity and filename hash; `lease_path_vectors_are_version_stable` pins six externally computed vectors and the created filename; status **audited** at U2. The PostgreSQL `advisory_key_derivation_is_stable` vector stays in the archived `commons` source with the dropped backend.
 Impact: Old and new binaries lock different files and can both write.
 Open questions:
 
@@ -356,7 +356,7 @@ Check: `always` - `always(effects_begin => holder_epoch >= authoritative_epoch)`
 Fault/timing angle: A stale connection remains usable after its lease is released and a replacement acquires a newer epoch.
 Required faults and enabling state: Real handover, retained old connection, replacement fence claim, then a late old-writer mutation. Run for every path declared fence-protected; fence-coverage completeness is a separate property.
 Confidence: high - [evidence](evidence/stale-writer-write-is-rejected.md). High that both concrete fenced callbacks compare the persisted epoch and bind the comparison and callback effects to one transaction.
-Existing check: `superseded_writer_is_fenced_out_after_handover`, `crates/storage/src/lib.rs:1632-1670`, and `superseded_writer_is_rejected_after_reopen`, `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1144-1175`; both use synthetic stale stores and remain **unaudited**.
+Existing check: `superseded_writer_is_fenced_out_after_handover`, `crates/storage/src/lib.rs:1990-2028`, and `superseded_writer_is_rejected_after_reopen`, `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1144-1175`; both use synthetic stale stores and remain **unaudited**.
 Impact: A superseded process can overwrite state owned by its replacement.
 Open questions:
 
@@ -367,13 +367,13 @@ Open questions:
 Type: safety
 Reachability: default-production - `open_sqlite` derives the lease root from the database path.
 Status: active
-Exercised: not yet - for same-database descriptor disagreement or sibling databases in one directory.
+Exercised: partial - sibling databases in one directory and symlink aliases are covered; same-database descriptor disagreement and hardlink aliases are not.
 Guarantee: All cooperative writers for one logical store derive the same `(base_dir, LeaseKey)`, while distinct stores that must write independently derive different identities.
 Check: `always` - `always(same_logical_store => lease_identity_a == lease_identity_b)` and `always(independent_stores => lease_identity_a != lease_identity_b)`, where identity includes canonical root plus all three key fields.
-Fault/timing angle: The lease key excludes the SQLite database path, while the root is only its parent. Sibling databases with equal descriptors alias; one database opened with differing module or namespace values splits into independent locks.
-Required faults and enabling state: Open the same SQLite database through descriptors differing in module or namespace; open it through cross-parent symlink or hardlink aliases; open two sibling database files under one parent with equal key fields.
-Confidence: high - [evidence](evidence/logical-store-has-single-lease-identity.md). High on derivation facts (`crates/storage/src/lib.rs:80-86,570-622`); unknown whether descriptor authority prevents these combinations in deployment.
-Existing check: `distinct_databases_do_not_falsely_contend`, `crates/storage/src/lib.rs:1057-1065`, uses different parent directories and does not exercise sibling files; status **unaudited**.
+Fault/timing angle: The lease key includes the database file name and the root is the database parent, so sibling files with equal descriptors get distinct leases and a directory-symlink alias resolves to the same lease file. One database opened with differing module or namespace values, or through a hardlink alias, still splits into independent locks; a file-symlink alias is refused rather than aliased.
+Required faults and enabling state: Open the same SQLite database through descriptors differing in module or namespace; open it through a hardlink alias; open it through directory or file symlink aliases; open two sibling database files under one parent with equal key fields.
+Confidence: high - [evidence](evidence/logical-store-has-single-lease-identity.md). High on derivation facts (`crates/storage/src/lib.rs:89-101,588-647`); unknown whether descriptor authority prevents these combinations in deployment.
+Existing check: `distinct_databases_do_not_falsely_contend` (`crates/storage/src/lib.rs:1305-1314`) uses different parent directories; `distinct_databases_in_one_directory_do_not_falsely_contend` (`:1316-1329`) proves sibling files in one directory do not contend; `symlinked_database_paths_contend_or_are_refused_never_aliased` (`:891-944`) proves a directory-symlink alias contends and a file-symlink alias is refused. No test covers descriptor disagreement or hardlink aliases; status **unaudited**.
 Impact: One store can have two writers, or independent stores can falsely block each other.
 Open questions:
 
@@ -405,13 +405,13 @@ Exercised: yes - on current CI-style local filesystems; toolchain and target var
 Guarantee: After the last handle for a root and key is dropped, a retrying cooperative acquirer succeeds within configured bound `B`.
 Check: `always` - A competitor first observes `Held`, then retries on a fixed campaign schedule. Drop the last handle and assert `always(acquired_by(drop_time + B))`, under the stated scheduler-fairness assumption.
 Fault/timing angle: `Drop` discards errors from standard-library `File::unlock`; descriptor close is the final release mechanism.
-Required faults and enabling state: A competitor that has observed `Held` and continues retrying, last-handle drop, injected unlock error where possible, and every supported target/toolchain family.
-Confidence: high - [evidence](evidence/handle-drop-releases-lease.md). High for current Linux/macOS/Windows close semantics. The destination pins Rust 1.98, above the 1.89 release that stabilized `File::try_lock`, `File::try_lock_shared`, and `File::unlock`, but CI has no MSRV job.
+Required faults and enabling state: A competitor that has observed `Held` and continues retrying, last-handle drop, injected `File::unlock` error where possible, and every supported target/toolchain family.
+Confidence: high - [evidence](evidence/handle-drop-releases-lease.md). High for current Linux/macOS/Windows close semantics. The destination pins Rust 1.98, above the 1.89 release that stabilized `File::try_lock`, `File::try_lock_shared`, and `File::unlock`; CI formats, lints, tests, and documents the workspace on the pinned 1.98 toolchain and lints and tests it on moving stable.
 Existing check: the contention and cross-process tests reacquire after clean drop/exit; status **unaudited**.
 Impact: A cleanly stopped module can leave its successor unable to start.
 Open questions:
 
-- Resolved at U2: the workspace pins `rust-version = "1.98"` and `rust-toolchain.toml` to 1.98; CI builds and tests on that pinned toolchain and on moving stable, and checks the pinned toolchain against unlocked latest dependencies. `File::try_lock` and `File::lock_shared` (stable since 1.89) are inside the pinned version.
+- Resolved at U2: the workspace pins `rust-version = "1.98"` and `rust-toolchain.toml` to 1.98; CI formats, lints, tests, and documents the workspace on that pinned toolchain, lints and tests it on moving stable, and checks the pinned toolchain against a regenerated lockfile of latest dependencies. `File::try_lock` and `File::try_lock_shared` (stable since 1.89) are inside the pinned version.
 
 ### replacement-fence-is-claimed-before-old-writer-writes
 
@@ -423,8 +423,8 @@ Guarantee: On declared fence-protected paths, from the instant a replacement's e
 Check: `always` - `always(old_epoch_effect_commits => replacement_not_yet_acquired_at_commit)`. After replacement acquisition, every old-epoch attempt or in-flight transaction must abort as fenced and leave application state unchanged.
 Fault/timing angle: `open_sqlite` acquires the file lease before it obtains the SQLite `IMMEDIATE` transaction used to claim the database fence. A retained old transaction can race inside that internal interval, although no replacement store is exposed before the claim commits. The floor is also read before the lease is held, so a fence advance in that interval makes the issued epoch equal to the stored one; `claim_fence_strict` fails the open rather than duplicating an epoch.
 Required faults and enabling state: Retain an old connection after releasing its lease, pause replacement open after lease acquisition, and race an old transaction against the replacement's `IMMEDIATE` claim.
-Confidence: high - [evidence](evidence/replacement-fence-is-claimed-before-old-writer-writes.md). High that every returned store has claimed a strictly greater epoch (`crates/storage/src/lib.rs:570-622,689-703`); the stronger acquisition-instant guarantee remains unproved.
-Existing check: `open_claims_fence_before_return`, `crates/storage/src/lib.rs:922-934`, observes the claim before domain setup, and `open_claim_rejects_an_epoch_the_database_already_stores`, `:941-977`, pins the strict-advance rule at the helper rather than through two racing opens; status **unaudited**.
+Confidence: high - [evidence](evidence/replacement-fence-is-claimed-before-old-writer-writes.md). High that every returned store has claimed a strictly greater epoch (`crates/storage/src/lib.rs:588-647,730-745`); the stronger acquisition-instant guarantee remains unproved.
+Existing check: `open_claims_fence_before_return`, `crates/storage/src/lib.rs:1171-1183`, observes the claim before domain setup, and `open_claim_rejects_an_epoch_the_database_already_stores`, `:1190-1226`, pins the strict-advance rule at the helper rather than through two racing opens; status **unaudited**.
 Impact: A superseded writer can commit during the handover window the fence is meant to close.
 Open questions:
 
@@ -441,7 +441,7 @@ Check: `always` - For the enumerated protected write-site set, `always(protected
 Fault/timing angle: `storage` runs `with_conn` under `PRAGMA query_only`, so an unfenced write fails `SQLITE_READONLY` instead of committing; `with_conn_unfenced` carries the maintenance statements the guard and the fenced transaction both reject. `cortexkit-store-postgres` (dropped backend, archived in `commons`) mirrors this with a read-only transaction plus `with_client_unfenced`. Both backends fence migration SQL in the migration transaction. Four effects escape a naive binding. Enforcement is connection state rather than statement state, so a read scope that ends by unwinding must still clear the pragma. The callback can also reach that state itself: A callback holding `&Connection` can call `Connection::authorizer` and remove any guard installed for it, so no statement rule survives on its own; SQLite therefore hands guarded callbacks a `GuardedConn` that omits authorizer control, pragma writes, statement batches, and transaction control, and additionally denies at the statement level pragma writes, transaction control, savepoints, `ATTACH`/`DETACH`, and every non-read action naming the fence or version tables, including the triggers, indexes, virtual tables, and views that reach those rows without naming them in DML. A rename is authorized on its source name alone, so a temporary table renamed onto an infrastructure name is caught after the callback and before commit. Authorizer control is absent from the maintenance handle as well, so releasing a scope cannot discard a policy a caller installed. Protected transactions re-pin `synchronous=FULL` and a WAL journal behind the unrestricted maintenance path. A callback that sends `COMMIT`, or on PostgreSQL `SET TRANSACTION READ WRITE`, escapes its transaction, after which its statements run unfenced; SQLite denies the statement, while PostgreSQL, lacking an authorizer, can only verify afterwards. A persisted epoch that cannot be reconciled with the holder's - negative, or on PostgreSQL below the epoch stamped at open - authorizes a superseded writer under a one-sided comparison, so both backends fail closed instead. Nothing reserves the PostgreSQL lease table against callback SQL, so a callback can delete or lower the very row its write was fenced against.
 Required faults and enabling state: Exercise or inspect every public durable-write boundary and classify whether fencing is required by its contract. Include a panicking read callback, a read callback that sets `query_only` or `synchronous`, a callback that sends transaction-control SQL or changes the access mode, and a negative persisted epoch.
 Confidence: high - [evidence](evidence/protected-write-set-is-fence-complete.md). High that the SQLite and PostgreSQL ordinary callbacks now reject writes, that a callback cannot lift the SQLite guard or lower fence durability, that each unfenced maintenance surface is reachable only by name, that a callback escaping either the checked or the read-only transaction is rejected rather than reported as success, and that a negative epoch fails closed on both backends. Both limits are PostgreSQL-only, because SQLite withdraws the capability and denies the escape before it executes: on PostgreSQL a callback that ends the transaction and opens a replacement is not detected, and an escape that autocommits before the check can only be reported, while a mode switch that keeps the transaction open rolls back. A PostgreSQL equivalent of the SQLite capability withdrawal does not exist, so narrowing what its callback receives remains the structural fix there. The authoritative protected write set and the consumer migration still need external ownership.
-Existing check: backend tests cover fenced callbacks, fenced migrations, SQLite and PostgreSQL read-only rejection, and both autocommit maintenance paths. `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1209-1229`) leaves later fenced writes authorized; `a_read_callback_cannot_lower_fence_durability` (`:1232-1296`) pins `synchronous=FULL` and a WAL journal; `a_read_callback_cannot_clear_the_read_only_guard` (`:1299-1352`) denies every pragma write; `a_callback_cannot_end_the_fence_checked_transaction` (`:1355-1411`) denies the transaction escape and `a_callback_that_ends_the_transaction_is_rejected` (`commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:647-689`) reports it; `a_read_callback_cannot_escape_read_only_mode` (`:795-854`) covers ending and switching a read transaction; `a_negative_epoch_fails_closed` (`:857-887`) and `a_regressed_positive_epoch_fails_closed` (`:890-932`) fail closed on an unreconcilable epoch; `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` (`:935-979`), `a_suppressed_epoch_increment_is_rejected` (`:982-999`), and `open_verifies_the_stored_epoch_matches_the_issued_one` (`:1002-1026`) protect the lease row and its issuance; and `a_callback_cannot_damage_the_fence_row_it_is_checked_against` (`crates/storage/src/lib.rs:1414-1522`) refuses DML, triggers, indexes, views, and renames onto the fence table. The [durable consumer inventory](durable-consumer-inventory.md) records source receipts; no source-level completeness gate exists.
+Existing check: backend tests cover fenced callbacks, fenced migrations, SQLite and PostgreSQL read-only rejection, and both autocommit maintenance paths. `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1567-1587`) leaves later fenced writes authorized; `a_read_callback_cannot_lower_fence_durability` (`:1590-1654`) pins `synchronous=FULL` and a WAL journal; `a_read_callback_cannot_clear_the_read_only_guard` (`:1657-1710`) denies every pragma write; `a_callback_cannot_end_the_fence_checked_transaction` (`:1713-1769`) denies the transaction escape and `a_callback_that_ends_the_transaction_is_rejected` (`commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:647-689`) reports it; `a_read_callback_cannot_escape_read_only_mode` (`:795-854`) covers ending and switching a read transaction; `a_negative_epoch_fails_closed` (`:857-887`) and `a_regressed_positive_epoch_fails_closed` (`:890-932`) fail closed on an unreconcilable epoch; `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` (`:935-979`), `a_suppressed_epoch_increment_is_rejected` (`:982-999`), and `open_verifies_the_stored_epoch_matches_the_issued_one` (`:1002-1026`) protect the lease row and its issuance; and `a_callback_cannot_damage_the_fence_row_it_is_checked_against` (`crates/storage/src/lib.rs:1772-1880`) refuses DML, triggers, indexes, views, and renames onto the fence table. The [durable consumer inventory](durable-consumer-inventory.md) records source receipts; no source-level completeness gate exists.
 Impact: Enforcement converts a silent unfenced commit into a loud failure on SQLite, where the capability can be withdrawn. On PostgreSQL the residual risk is unbounded by validation: callback SQL retains the privilege to attach triggers to the infrastructure tables and to release this session's advisory lease, so an effect can always be scheduled after the last check and single-writer itself is reachable, and consumers may also break on upgrade or reroute a mutation through the unfenced surface.
 Open questions:
 
@@ -538,13 +538,13 @@ behavior of the SQLite store.
 Type: safety
 Reachability: default-production - every `SoftPlus` pass in the observer path takes this branch.
 Status: active
-Exercised: yes - a defer pass with no rendered units against a matching boundary, and the eleven golden vectors, which assert the cached prefix after every pass.
-Guarantee: A `SoftPlus` pass never changes `cached_prefix_bytes()` or `version`, whatever units are queued and whether or not the boundary is present.
-Check: `always` - `always(bytes_after == bytes_before && version_after == version_before)` around every `step` whose `proposed` is `SoftPlus`; the state machine proves it structurally because `step_defer` touches only `pending_changes`, `reconcile_pending`, and the episode filter.
+Exercised: yes - a defer pass with no rendered units against a matching boundary, a defer against an absent boundary, a `run_started` defer over a lineage and an episode unit, and the eleven golden vectors, which assert the cached prefix after every pass.
+Guarantee: A `SoftPlus` pass never re-renders, never changes `version`, and never changes the `frozen_payload` bytes or relative order of any frozen unit it retains, whatever units are queued and whether or not the boundary is present. When `run_started` is false, `cached_prefix_bytes()` is unchanged. When `run_started` is true, `CoreState::step` removes `DurabilityClass::Episode` units from `frozen_units` and `pending_changes` before any arm runs, so `cached_prefix_bytes()` can shrink by exactly the removed episode payloads while every retained lineage payload stays byte-identical.
+Check: `always` - Without `run_started`: `always(bytes_after == bytes_before && version_after == version_before)` around every `step` whose `proposed` is `SoftPlus`. With `run_started`: `always(version_after == version_before && retained_lineage_payloads_after == lineage_payloads_before)`, where the retained set is the pre-step lineage units in their pre-step order. The state machine proves it structurally because `step_defer` touches only `pending_changes` and `reconcile_pending`, and the run-boundary filter in `step` only removes whole units.
 Fault/timing angle: A defer pass that lost its boundary must keep replaying rather than rebuild in the same pass; a `run_started` defer drops episode units but must leave lineage bytes untouched.
-Required faults and enabling state: A frozen set with at least one unit; a defer with the boundary present, one with it absent, and one with `run_started` set.
-Confidence: high - [evidence](evidence/defer-pass-replays-frozen-bytes-verbatim.md). `step_defer` (`crates/cache-stability/src/lib.rs:181-212`) never reads `rendered_units` and mutates no frozen unit; `defer_does_not_mutate_frozen_bytes_or_render` (`crates/cache-stability/src/lib.rs:313-330`) and `run_started_keeps_lineage_resets_episode` (`crates/cache-stability/src/lib.rs:568-589`) pin both arms, and every golden vector compares `cached_prefix_bytes()` after each pass.
-Existing check: `defer_does_not_mutate_frozen_bytes_or_render`, `run_started_keeps_lineage_resets_episode`, `all_golden_vectors_pass` (`crates/cache-stability/tests/golden_vectors.rs:160-166`); audited at U2 as an independent oracle: the byte and version assertions do not derive from the action under test.
+Required faults and enabling state: A frozen set with at least one unit; a defer with the boundary present, one with it absent, and one with `run_started` set over a frozen set that holds both durability classes.
+Confidence: high - [evidence](evidence/defer-pass-replays-frozen-bytes-verbatim.md). `step_defer` (`crates/cache-stability/src/lib.rs:187-213`) never reads `rendered_units` and mutates no frozen unit; the run-boundary filter in `CoreState::step` (`crates/cache-stability/src/lib.rs:164-185`) is the only path that removes units on a defer. `defer_does_not_mutate_frozen_bytes_or_render` (`crates/cache-stability/src/lib.rs:316-335`), `defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending` (`crates/cache-stability/src/lib.rs:372-388`), and `run_started_keeps_lineage_resets_episode` (`crates/cache-stability/src/lib.rs:571-593`) pin the three arms, and every golden vector compares `cached_prefix_bytes()` after each pass.
+Existing check: `defer_does_not_mutate_frozen_bytes_or_render`, `defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending`, `run_started_keeps_lineage_resets_episode`, `all_golden_vectors_pass` (`crates/cache-stability/tests/golden_vectors.rs:160-166`); audited at U2 as an independent oracle: the byte and version assertions do not derive from the action under test.
 Impact: A defer pass that re-renders breaks provider prefix-cache stability on every turn, which is the cost the whole mechanism exists to avoid.
 Open questions: None.
 
@@ -558,7 +558,7 @@ Guarantee: After a `Hard` pass, `pending_changes` is empty, every unit queued be
 Check: `always` - `always(pending_changes.is_empty() && queued_before ⊆ frozen_units && !reconcile_pending)` after every `Hard` step, plus `boundary_id == new_boundary_id` when the input supplies one.
 Fault/timing angle: A hard bust from any cause must drain deferred work; a bust that only froze its rendered units would leave queued drops invisible until a later bust.
 Required faults and enabling state: At least one unit queued through a `SoftPlus` pass before the `Hard` pass, and a rendered baseline that does not itself include the queued unit.
-Confidence: high - [evidence](evidence/hard-bust-drains-deferred-work.md). `step_hard` (`crates/cache-stability/src/lib.rs:253-265`) appends `pending_changes` into the rendered set before `apply_units`; `hard_drains_pending_changes_into_the_bust` (`crates/cache-stability/src/lib.rs:387-418`) asserts the drain, the mint, and the cleared flag.
+Confidence: high - [evidence](evidence/hard-bust-drains-deferred-work.md). `step_hard` (`crates/cache-stability/src/lib.rs:253-265`) appends `pending_changes` into the rendered set before `apply_units`; `hard_drains_pending_changes_into_the_bust` (`crates/cache-stability/src/lib.rs:390-423`) asserts the drain, the mint, and the cleared flag.
 Existing check: `hard_drains_pending_changes_into_the_bust`, golden vectors with `queued` units; audited at U2.
 Impact: A dropped compartment reappears in the cached prefix or never leaves it, so the rendered context and the recorded state disagree.
 Open questions: None.
@@ -573,8 +573,8 @@ Guarantee: A defer pass sets `reconcile_pending` only when a non-empty boundary 
 Check: `always` - `always(reconcile_pending == (!boundary_match && !boundary_id.is_empty()))` after every `SoftPlus` step.
 Fault/timing angle: Without the guard an unseeded session oscillates `Hard` → defer → `Hard` forever, cache-neutral but with a permanently dishonest flag.
 Required faults and enabling state: A state with `boundary_id == ""` and a defer whose `boundary_present` is any other token; then a `Hard` that mints a non-empty id and a defer that omits it.
-Confidence: high - [evidence](evidence/never-minted-boundary-is-not-reconcile-pending.md). The guard is one expression in `step_defer` (`crates/cache-stability/src/lib.rs:206`); `defer_on_never_minted_boundary_is_stable_not_reconcile_pending` (`crates/cache-stability/src/lib.rs:334-365`) covers both the vacuous and the non-vacuous arm.
-Existing check: `defer_on_never_minted_boundary_is_stable_not_reconcile_pending`, `defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending` (`crates/cache-stability/src/lib.rs:369-383`); audited at U2.
+Confidence: high - [evidence](evidence/never-minted-boundary-is-not-reconcile-pending.md). The guard is one expression in `step_defer` (`crates/cache-stability/src/lib.rs:207`); `defer_on_never_minted_boundary_is_stable_not_reconcile_pending` (`crates/cache-stability/src/lib.rs:337-370`) covers both the vacuous and the non-vacuous arm.
+Existing check: `defer_on_never_minted_boundary_is_stable_not_reconcile_pending`, `defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending` (`crates/cache-stability/src/lib.rs:372-388`); audited at U2.
 Impact: Every fresh store busts hard on alternate passes, or a real revert is never reconciled.
 Open questions: None.
 
@@ -588,7 +588,7 @@ Guarantee: A `Soft` pass advances `boundary_id` only when the prior anchor is pr
 Check: `always` - `always(boundary_after == boundary_before || (boundary_match && !reconcile_pending_before))` and `always(reconcile_pending_after == reconcile_pending_before)` after every `Soft` step.
 Fault/timing angle: A misclassified coverage-extending `Soft` while m0 is stale would strand the stale baseline under a fresh anchor, so the needed `Hard` never fires.
 Required faults and enabling state: A revert that sets `reconcile_pending`, then a `Soft` with `new_boundary_id` set; and, separately, a `Soft` with `new_boundary_id` at a live anchor.
-Confidence: high - [evidence](evidence/anchor-holds-while-reconcile-pending.md). The guard in `step_soft` (`crates/cache-stability/src/lib.rs:236-241`) is a let chain over both conditions; `soft_does_not_advance_anchor_while_reconcile_pending` (`crates/cache-stability/src/lib.rs:529-564`) and `coverage_extending_soft_advances_anchor_keeps_m0_frozen` (`crates/cache-stability/src/lib.rs:459-525`) pin both outcomes.
+Confidence: high - [evidence](evidence/anchor-holds-while-reconcile-pending.md). The guard in `step_soft` (`crates/cache-stability/src/lib.rs:236-241`) is a let chain over both conditions; `soft_does_not_advance_anchor_while_reconcile_pending` (`crates/cache-stability/src/lib.rs:533-568`) and `coverage_extending_soft_advances_anchor_keeps_m0_frozen` (`crates/cache-stability/src/lib.rs:463-529`) pin both outcomes.
 Existing check: `soft_does_not_advance_anchor_while_reconcile_pending`, `coverage_extending_soft_advances_anchor_keeps_m0_frozen`; audited at U2.
 Impact: The stale m0 is never rematerialized, so the cached prefix summarizes content that the live array no longer contains.
 Open questions: None.
@@ -603,7 +603,7 @@ Guarantee: Applying rendered units replaces a unit with the same key in its exis
 Check: `always` - `always(keys_after == keys_before ++ new_keys_in_input_order && replaced_units_keep_index)` after every `apply_units` call.
 Fault/timing angle: None; the order is a pure function of the prior set and the input.
 Required faults and enabling state: A frozen set with two units and a rendered set that replaces the second and adds a third.
-Confidence: high - [evidence](evidence/frozen-unit-order-is-preserved.md). `apply_units` (`crates/cache-stability/src/lib.rs:271-279`) is a find-or-push loop; `soft_replaces_by_key_keeps_slot_appends_new` (`crates/cache-stability/src/lib.rs:422-455`) asserts the resulting key order and the untouched first unit.
+Confidence: high - [evidence](evidence/frozen-unit-order-is-preserved.md). `apply_units` (`crates/cache-stability/src/lib.rs:275-283`) is a find-or-push loop; `soft_replaces_by_key_keeps_slot_appends_new` (`crates/cache-stability/src/lib.rs:426-459`) asserts the resulting key order and the untouched first unit.
 Existing check: `soft_replaces_by_key_keeps_slot_appends_new`; the golden vectors compare `cached_prefix_bytes()`, which is order-sensitive; audited at U2.
 Impact: A reordered prefix is a cache bust at the first moved byte on every later pass.
 Open questions: None.
@@ -618,7 +618,7 @@ Guarantee: On a `run_started` pass, every `Episode` unit leaves the frozen set a
 Check: `always` - `always(frozen_units_after == frozen_units_before.filter(Lineage))` after every step with `run_started`.
 Fault/timing angle: The cache set is all-lineage in current consumers, so the filter is a no-op in practice and only the test exercises the `Episode` arm.
 Required faults and enabling state: A frozen set containing at least one `Episode` unit and a `SoftPlus` pass with `run_started` set.
-Confidence: high - [evidence](evidence/episode-units-reset-at-run-boundary.md). `step_defer` (`crates/cache-stability/src/lib.rs:186-192`) retains by `durability_class`; `run_started_keeps_lineage_resets_episode` (`crates/cache-stability/src/lib.rs:568-589`) and `cross_episode_lineage_reproduces_byte_identical` (`crates/cache-stability/tests/golden_vectors.rs:263`) cover both classes.
+Confidence: high - [evidence](evidence/episode-units-reset-at-run-boundary.md). `step_defer` (`crates/cache-stability/src/lib.rs:187-213`) retains by `durability_class`; `run_started_keeps_lineage_resets_episode` (`crates/cache-stability/src/lib.rs:572-593`) and `cross_episode_lineage_reproduces_byte_identical` (`crates/cache-stability/tests/golden_vectors.rs:275`) cover both classes.
 Existing check: `run_started_keeps_lineage_resets_episode`, `cross_episode_lineage_reproduces_byte_identical`; audited at U2.
 Impact: A run-scoped unit survives into the next episode, or a lineage unit is dropped and the prefix un-compacts.
 Open questions: None.
@@ -648,7 +648,7 @@ Guarantee: `tests/golden/storage_vectors.json` keeps the exact bytes captured at
 Check: `always` - `always(sha256(fixture) == source_blob_sha256)` at receipt verification and `always(derived == fixture)` for each of the three derivations per vector.
 Fault/timing angle: The generator example reproduces the fixture from the same code, so it cannot detect drift on its own; the checked-in bytes are the oracle.
 Required faults and enabling state: A verbatim receipt entry with the source blob hash, plus `helpers_reproduce_the_golden_vectors` against the destination crate.
-Confidence: high - [evidence](evidence/storage-descriptor-golden-vectors-are-byte-stable.md). Receipt verification compares destination bytes to the source blob; `helpers_reproduce_the_golden_vectors` (`crates/storage-types/tests/golden_vectors.rs:12-43`) and `golden_vectors_break_slug_collisions` (`crates/storage-types/tests/golden_vectors.rs:45`) assert every derivation. The `cortexkit_` prefix and the `cortexkit/` path component are frozen identities in the registry.
+Confidence: high - [evidence](evidence/storage-descriptor-golden-vectors-are-byte-stable.md). Receipt verification compares destination bytes to the source blob; `helpers_reproduce_the_golden_vectors` (`crates/storage-types/tests/golden_vectors.rs:11-42`) and `golden_vectors_break_slug_collisions` (`crates/storage-types/tests/golden_vectors.rs:45`) assert every derivation. The `cortexkit_` prefix and the `cortexkit/` path component are frozen identities in the registry.
 Existing check: `helpers_reproduce_the_golden_vectors`, `golden_vectors_break_slug_collisions`; audited at U2 as an independent oracle.
 Impact: A renamed prefix or path component makes a store open under a new path with an empty database while the old one keeps the data.
 Open questions: None.
@@ -663,7 +663,7 @@ Guarantee: A `StorageDescriptor` serializes with field names `module_id`, `stora
 Check: `always` - `always(from_json(to_json(d)) == d)` for every descriptor, and `always(to_json(sqlite_descriptor) == pinned_string)` for the SQLite shape.
 Fault/timing angle: None; serde attributes fix the shape at compile time.
 Required faults and enabling state: A descriptor of each backend variant.
-Confidence: high - [evidence](evidence/descriptor-wire-shape-round-trips.md). `#[serde(rename_all = "snake_case", tag = ...)]` on `Isolation` and `StorageBackend` (`crates/storage-types/src/lib.rs:40-62`); `sqlite_descriptor_golden_json` (`crates/storage-types/src/lib.rs:167-183`) pins the exact string and `postgres_descriptor_golden_json` (`crates/storage-types/src/lib.rs:186-200`) the round trip; the golden fixture reserialization covers eight more.
+Confidence: high - [evidence](evidence/descriptor-wire-shape-round-trips.md). `#[serde(rename_all = "snake_case", tag = ...)]` on `Isolation` and `StorageBackend` (`crates/storage-types/src/lib.rs:49-62`); `sqlite_descriptor_golden_json` (`crates/storage-types/src/lib.rs:213-230`) pins the exact string and `postgres_descriptor_golden_json` (`crates/storage-types/src/lib.rs:233-247`) the round trip; the golden fixture reserialization covers eight more.
 Existing check: `sqlite_descriptor_golden_json`, `postgres_descriptor_golden_json`, `helpers_reproduce_the_golden_vectors`; audited at U2.
 Impact: A host and a module built from different revisions disagree on the descriptor and the module opens the wrong database or none.
 Open questions: None.
@@ -678,7 +678,7 @@ Guarantee: The tables `cortexkit_fence` and `cortexkit_schema_version` keep the 
 Check: `always` - `always(sqlite_schema rows for both tables == pinned DDL text)` after open and `always(count(cortexkit_fence) == 1 && fence.id == 0)` after every fence claim.
 Fault/timing angle: A renamed or re-typed table is invisible to the fence read, so `read_fence_epoch` returns floor zero for a database that already recorded a higher epoch.
 Required faults and enabling state: A pristine open followed by one migration, then a `sqlite_schema` read on the same connection.
-Confidence: high - [evidence](evidence/fence-tables-keep-their-durable-identity.md). `ensure_fence_table` (`crates/storage/src/lib.rs:657-664`) and `run_migrations` (`crates/storage/src/lib.rs:750-758`) emit the DDL; `fence_and_version_tables_keep_their_ddl` (`crates/storage/src/lib.rs:1755`) compares the recorded SQL text and the fence row. Both names are `frozen-durable` in `migration/registry.json`.
+Confidence: high - [evidence](evidence/fence-tables-keep-their-durable-identity.md). `ensure_fence_table` (`crates/storage/src/lib.rs:699-706`) and `run_migrations` (`crates/storage/src/lib.rs:800-808`) emit the DDL; `fence_and_version_tables_keep_their_ddl` (`crates/storage/src/lib.rs:2113`) compares the recorded SQL text and the fence row. Both names are `frozen-durable` in `migration/registry.json`.
 Existing check: `fence_and_version_tables_keep_their_ddl`; audited at U2.
 Impact: Existing databases are reopened at floor zero and a superseded epoch is reissued.
 Open questions: None.
@@ -693,7 +693,7 @@ Guarantee: Within a namespace, each migration version applies at most once, vers
 Check: `always` - `always(applied(namespace, version) ⇒ recorded(namespace, version))` and `always(recorded(namespace, version) ⇒ not re-executed)` across reopen; ordering `always(version_i < version_j ⇒ applied_i before applied_j)`.
 Fault/timing angle: A crash between the SQL batch and its version record must leave the migration unrecorded so it re-runs; the two are one transaction.
 Required faults and enabling state: A chain with two versions applied across two opens, and two chains sharing a database.
-Confidence: high - [evidence](evidence/migrations-apply-once-per-namespace.md). `run_migrations` (`crates/storage/src/lib.rs:739-806`) reads `MAX(version)` per namespace, sorts, skips `<= current`, and commits SQL and record together; `migrations_seed_once_across_reopen` (`crates/storage/src/lib.rs:980`), `later_migration_applies_on_top_of_earlier` (`crates/storage/src/lib.rs:1068`), and `independent_namespace_chains_in_one_database` (`crates/storage/src/lib.rs:1098`) cover the three clauses.
+Confidence: high - [evidence](evidence/migrations-apply-once-per-namespace.md). `run_migrations` (`crates/storage/src/lib.rs:789-871`) reads `MAX(version)` per namespace, sorts, skips `<= current`, and commits SQL and record together; `migrations_seed_once_across_reopen` (`crates/storage/src/lib.rs:1229`), `later_migration_applies_on_top_of_earlier` (`crates/storage/src/lib.rs:1426`), and `independent_namespace_chains_in_one_database` (`crates/storage/src/lib.rs:1455-1486`) cover the three clauses.
 Existing check: `migrations_seed_once_across_reopen`, `later_migration_applies_on_top_of_earlier`, `independent_namespace_chains_in_one_database`; audited at U2. The crash window itself is not injected.
 Impact: A migration re-runs against live data or a chain skips a version, leaving the schema and the recorded version out of step.
 Open questions: None.
@@ -708,7 +708,7 @@ Guarantee: A `with_conn` callback cannot commit a durable write: writes fail wit
 Check: `always` - `always(with_conn(f) ⇒ database_bytes_unchanged)` for every callback `f`, with the denial observed as an error rather than a silent no-op.
 Fault/timing angle: The guard is connection state (`query_only` plus an authorizer), so it must be installed before the callback and cleared after it, including on unwind.
 Required faults and enabling state: A callback that attempts DML, one that attempts `PRAGMA query_only = OFF`, and one that runs `VACUUM`.
-Confidence: high - [evidence](evidence/read-callbacks-cannot-write.md). `CallbackScope::read_only` (`crates/storage/src/lib.rs:369-373`) sets `query_only` and installs `deny_scope_escapes` (`crates/storage/src/lib.rs:457-475`); `GuardedConn` (`crates/storage/src/lib.rs:243-350`) omits the escapes; `unfenced_connection_rejects_writes` (`crates/storage/src/lib.rs:1172`), `a_read_callback_cannot_clear_the_read_only_guard` (`crates/storage/src/lib.rs:1299`), and `maintenance_runs_through_the_unfenced_path` (`crates/storage/src/lib.rs:1525`) pin the three denials.
+Confidence: high - [evidence](evidence/read-callbacks-cannot-write.md). `CallbackScope::read_only` (`crates/storage/src/lib.rs:387-391`) sets `query_only` and installs `deny_scope_escapes` (`crates/storage/src/lib.rs:475-493`); `GuardedConn` (`crates/storage/src/lib.rs:256-368`) omits the escapes; `unfenced_connection_rejects_writes` (`crates/storage/src/lib.rs:1530`), `a_read_callback_cannot_clear_the_read_only_guard` (`crates/storage/src/lib.rs:1657`), and `maintenance_runs_through_the_unfenced_path` (`crates/storage/src/lib.rs:1883`) pin the three denials.
 Existing check: `unfenced_connection_rejects_writes`, `a_read_callback_cannot_clear_the_read_only_guard`, `maintenance_runs_through_the_unfenced_path`; audited at U2.
 Impact: A consumer mutation bypasses the fence and commits while a newer writer owns the database.
 Open questions: None.
@@ -723,7 +723,7 @@ Guarantee: When a guarded callback unwinds, the connection it ran on is returned
 Check: `always` - `always(scope_dropped ⇒ query_only == OFF && authorizer == None)` for every `CallbackScope`, including the unwinding path.
 Fault/timing angle: A poisoned mutex is recovered and hands the same connection to the next caller, so a leaked `query_only` would strand every later write.
 Required faults and enabling state: A callback that panics inside `with_conn`, then a `with_conn_fenced` and a `with_conn_unfenced` on the same store.
-Confidence: high - [evidence](evidence/callback-scope-is-restored-after-unwind.md). `CallbackScope::drop` (`crates/storage/src/lib.rs:443-450`) restores when `release` did not run; `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1209`) exercises the unwind.
+Confidence: high - [evidence](evidence/callback-scope-is-restored-after-unwind.md). `CallbackScope::drop` (`crates/storage/src/lib.rs:462-467`) restores when `release` did not run; `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1567`) exercises the unwind.
 Existing check: `a_panicking_read_does_not_strand_the_connection_read_only`; audited at U2.
 Impact: One panicking read makes the store permanently read-only for the rest of the process lifetime.
 Open questions: None.
@@ -738,7 +738,7 @@ Guarantee: Every fence-checked transaction runs with `synchronous = FULL` and a 
 Check: `always` - `always(synchronous == FULL && journal_mode == wal)` at the start of every `with_conn_fenced` and `migrate` transaction.
 Fault/timing angle: With WAL and `synchronous = NORMAL`, power loss can roll back a committed fence claim, which reissues a superseded epoch.
 Required faults and enabling state: A maintenance callback that lowers `synchronous` or changes the journal mode, followed by a fenced write.
-Confidence: high - [evidence](evidence/protected-transactions-pin-fence-durability.md). `pin_fence_durability` (`crates/storage/src/lib.rs:530-542`) runs before each protected transaction; `open_pins_full_synchronous` (`crates/storage/src/lib.rs:1198`) and `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:1232`) observe the pinned values. Power loss itself is not injected.
+Confidence: high - [evidence](evidence/protected-transactions-pin-fence-durability.md). `pin_fence_durability` (`crates/storage/src/lib.rs:548-560`) runs before each protected transaction; `open_pins_full_synchronous` (`crates/storage/src/lib.rs:1556`) and `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:1590`) observe the pinned values. Power loss itself is not injected.
 Existing check: `open_pins_full_synchronous`, `a_read_callback_cannot_lower_fence_durability`; audited at U2.
 Impact: A fence claim that looked committed disappears after power loss and two writers hold equal epochs.
 Open questions: None.
@@ -753,7 +753,7 @@ Guarantee: After `open_sqlite` returns on Unix, the database file and any existi
 Check: `always` - `always(mode(path) & 0o777 == 0o600)` for each of `path`, `path-wal`, and `path-shm` that exists after open.
 Fault/timing angle: WAL and SHM files may be created by the journal-mode switch during open, so hardening runs after it; a file that appears later inherits the database mode.
 Required faults and enabling state: A pre-existing permissive database and WAL, then a reopen; the first open cannot exercise WAL repair because a fresh WAL inherits the restricted mode.
-Confidence: high - [evidence](evidence/store-files-are-owner-only-after-open.md). `open_sqlite` (`crates/storage/src/lib.rs:612-615`) calls `protect_file` on all three paths after enabling WAL; `reopening_a_permissive_store_protects_the_database_and_its_wal` (`crates/storage/src/lib.rs:829`) asserts both modes.
+Confidence: high - [evidence](evidence/store-files-are-owner-only-after-open.md). `open_sqlite` (`crates/storage/src/lib.rs:610-616`) calls `protect_file` on all three paths after enabling WAL; `reopening_a_permissive_store_protects_the_database_and_its_wal` (`crates/storage/src/lib.rs:1037`) asserts both modes.
 Existing check: `reopening_a_permissive_store_protects_the_database_and_its_wal` (Unix only); audited at U2.
 Impact: Another local user can read committed rows from the WAL or forge the fence row.
 Open questions: None.
@@ -768,8 +768,8 @@ Guarantee: A `with_conn_fenced` callback that returns an error leaves the databa
 Check: `always` - `always(callback_returns_err ⇒ database_after == database_before)` for the domain rows and the fence row.
 Fault/timing angle: The fence claim and the callback run in one transaction, so a rolled-back callback must also roll back the claim.
 Required faults and enabling state: A holder epoch above the stored fence, a callback that inserts a row and returns `Err`.
-Confidence: high - [evidence](evidence/fenced-write-is-atomic.md). `with_conn_fenced` (`crates/storage/src/lib.rs:198-217`) claims and runs inside one transaction and commits only on `Ok`; `fenced_write_rolls_back_on_error` (`crates/storage/src/lib.rs:1541`) checks both the row and the fence.
-Existing check: `fenced_write_rolls_back_on_error`, `fenced_write_commits_and_persists` (`crates/storage/src/lib.rs:1154`); audited at U2.
+Confidence: high - [evidence](evidence/fenced-write-is-atomic.md). `with_conn_fenced` (`crates/storage/src/lib.rs:213-235`) claims and runs inside one transaction and commits only on `Ok`; `fenced_write_rolls_back_on_error` (`crates/storage/src/lib.rs:1899`) checks both the row and the fence.
+Existing check: `fenced_write_rolls_back_on_error`, `fenced_write_commits_and_persists` (`crates/storage/src/lib.rs:1512`); audited at U2.
 Impact: A failed write leaves half of a domain mutation committed, or advances the fence without the write it authorized.
 Open questions: None.
 
@@ -783,7 +783,7 @@ Guarantee: A stored fence epoch below zero refuses the open with `FenceCorrupt`,
 Check: `always` - `always(stored < 0 ⇒ open == Err(FenceCorrupt))` and `always(holder > i64::MAX ⇒ fenced_write == Err(Backend) && database_unchanged)`.
 Fault/timing angle: A wrapped conversion would turn a corrupt negative row into a huge valid epoch and let any writer pass.
 Required faults and enabling state: A database whose fence row was written without the `CHECK (epoch >= 0)` constraint, and a store constructed with a holder epoch above `i64::MAX`.
-Confidence: high - [evidence](evidence/fence-epoch-outside-sqlite-range-fails-closed.md). `decode_fence_epoch` (`crates/storage/src/lib.rs:728-730`) and `fence_epoch_sql_value` (`crates/storage/src/lib.rs:706-712`) use checked conversions; `legacy_negative_database_fence_fails_closed` (`crates/storage/src/lib.rs:1602`) and `epoch_above_sqlite_integer_range_fails` (`crates/storage/src/lib.rs:1729`) cover both directions.
+Confidence: high - [evidence](evidence/fence-epoch-outside-sqlite-range-fails-closed.md). `decode_fence_epoch` (`crates/storage/src/lib.rs:778-780`) and `fence_epoch_sql_value` (`crates/storage/src/lib.rs:748-754`) use checked conversions; `legacy_negative_database_fence_fails_closed` (`crates/storage/src/lib.rs:1960`) and `epoch_above_sqlite_integer_range_fails` (`crates/storage/src/lib.rs:2087`) cover both directions.
 Existing check: `legacy_negative_database_fence_fails_closed`, `epoch_above_sqlite_integer_range_fails`; audited at U2.
 Impact: A corrupt fence row authorizes a superseded writer.
 Open questions: None.
@@ -801,7 +801,7 @@ boundary selection. Additional routing:
 | `writer-epoch-strictly-increases` | `/testing:crash-consistency-and-failpoint-testing`; `/testing:invariant-test-review` for T5/T13 |
 | `returned-epoch-is-crash-durable` | `/testing:crash-consistency-and-failpoint-testing` for power-loss and crash-image evidence |
 | `failed-acquire-preserves-prior-epoch` | `/testing:crash-consistency-and-failpoint-testing` for real `File` errors and process interruption beyond the injected ordered-prefix model |
-| `distinct-lease-keys-do-not-alias` | `/testing:invariant-test-review` for T6-T8; the separator ambiguity needs an interface decision before an expected-green test |
+| `distinct-lease-keys-do-not-alias` | `/testing:invariant-test-review` for T6-T8 and the separator rejection test; FNV collision handling needs an interface decision before an expected-green test |
 | `lease-inode-remains-stable-while-held` | `/testing:test-strategy` for a real two-process replacement ordering test |
 | `shared-epoch-never-authorizes-write` | `/testing:test-strategy` at the consumer boundary; interface design is a separate follow-up |
 | `permission-hardening-never-follows-replacement` | `/testing:invariant-test-review` for descriptor-relative hardening and the static symlink test |
