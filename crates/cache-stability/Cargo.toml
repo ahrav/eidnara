@@ -9,7 +9,7 @@ publish.workspace = true
 description = "Prompt-cache-stability core: the frozen-set per-pass state machine (boundary-presence anchor, render-on-bust, replay-verbatim-on-defer) shared by every harness that pins a render config across turns."
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 
 [dev-dependencies]
-serde_json = "1"
+serde_json = { workspace = true }
