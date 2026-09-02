@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shared-primitives",
   "source": "catalog.md",
-  "source_sha256": "98698eeec04286936a4ef1232bbc9ee53d60377d406270f5c234a4333ebe7c7e",
+  "source_sha256": "30faa716efbbfb23e7555ff5dcd6379cd378bc98a936443c13ae078fa5da56bd",
   "records": [
     {
       "slug": "at-most-one-exclusive-holder-per-key",
@@ -27,9 +27,7 @@
       },
       "existing_check": "`acquire_then_second_holder_is_rejected`, same process and sequential, and `concurrent_exclusive_acquisitions_admit_exactly_one_holder`, same process, eight racers behind a barrier (added at U2); status **unaudited** for the record because the cross-process race is still not exercised.",
       "impact": "Two writers can mutate one logical store. This is the crate's primary prohibited state.",
-      "open_questions": [
-        "See the Claustrum blocker in the [durable consumer inventory](durable-consumer-inventory.md). `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -55,9 +53,7 @@
       },
       "existing_check": "`shared_holders_coexist_but_block_exclusive`, `exclusive_holder_blocks_shared`, `concurrent_shared_first_acquisitions_coexist`, and `shared_lease_across_processes_blocks_exclusive`; status **unaudited**.",
       "impact": "A GC can delete a resource under a live reader, or readers can enter while an exclusive mutator is active.",
-      "open_questions": [
-        "Are Solaris or network filesystems supported, where the lock primitive may be process-scoped or host-scoped? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -83,9 +79,7 @@
       },
       "existing_check": "`shared_lease_across_processes_blocks_exclusive` exits normally; status **unaudited**.",
       "impact": "A dead writer can permanently prevent module restart.",
-      "open_questions": [
-        "What recovery bound is operationally required? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -111,9 +105,7 @@
       },
       "existing_check": "`exclusive_epoch_exceeds_resource_floor`, `database_epoch_survives_repeated_lease_sidecar_loss`, `invalid_epoch_states_fail_closed`, and `interrupted_persist_never_leaves_a_lower_parseable_epoch`, plus clean acquisition checks; status **unaudited**.",
       "impact": "Reused or regressed epochs let a superseded writer pass an equal-or-older fence or can permanently reject legitimate writers.",
-      "open_questions": [
-        "What recovery behavior is required after an older valid lease file is restored?"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -139,9 +131,7 @@
       },
       "existing_check": "`epoch_persists_across_store_instances`; status **unaudited**.",
       "impact": "A post-reboot writer can reuse a superseded writer's token.",
-      "open_questions": [
-        "Is machine-power-loss durability required? If so, the write and directory-entry protocol needs a separate design and crash test. `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -195,9 +185,7 @@
       },
       "existing_check": "`interrupted_persist_never_leaves_a_lower_parseable_epoch`; status **unaudited**.",
       "impact": "A transient storage error turns into permanent fence regression.",
-      "open_questions": [
-        "Which real filesystem fault mechanism can exercise the same positive-prefix error through `File` without adding a production failpoint?"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -223,9 +211,7 @@
       },
       "existing_check": "`distinct_identity_axes_do_not_conflict` covers distinct scope, module, and backend axes; status **unaudited**.",
       "impact": "Unrelated stores falsely contend and share one epoch sequence.",
-      "open_questions": [
-        "Are key fields attacker-controlled in any external consumer? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -251,9 +237,7 @@
       },
       "existing_check": "none.",
       "impact": "Two exclusive locks can succeed on two inodes for one logical key, and both epoch sequences can restart.",
-      "open_questions": [
-        "Which deployed actors can unlink or replace lease files? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -307,9 +291,7 @@
       },
       "existing_check": "`shared_acquisition_does_not_bump_the_write_epoch` pins equal epoch values but not their use; status **unaudited**.",
       "impact": "A reader can present the live writer's epoch as write authority.",
-      "open_questions": [
-        "Which external repository consumes shared mode, and should the interface split reader and writer handles or expose mode? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -335,9 +317,7 @@
       },
       "existing_check": "`an_acquired_lease_file_is_owner_only`, Unix-only; status **unaudited**.",
       "impact": "A writable lease file allows fence-token forgery. A readable file exposes key activity, though filenames are hashed.",
-      "open_questions": [
-        "Windows acquisition rejects reparse points but does not provide Unix owner-only mode semantics. The public `protect_file` remains a no-op on Windows. `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -363,9 +343,7 @@
       },
       "existing_check": "acquisition and public-helper symlink tests cover static links only; status **unaudited**.",
       "impact": "Permission changes can land on a file the caller never named; acquisition may also create a symlink target before refusal.",
-      "open_questions": [
-        "Which deployment actors can replace lease or SQLite/WAL/SHM paths during hardening? Lease acquisition retains its descriptor, while public `protect_file` intentionally avoids opening caller-owned files."
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -391,9 +369,7 @@
       },
       "existing_check": "same-process and cross-process contention tests; status **unaudited**.",
       "impact": "Callers can mistake a live holder for storage failure or a broken lock facility for ordinary contention.",
-      "open_questions": [
-        "Is the CI matrix the complete supported platform set? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -419,9 +395,7 @@
       },
       "existing_check": "local-temp-directory cross-process shared contention in `shared_lease_across_processes_blocks_exclusive`; status **unaudited**.",
       "impact": "Both hosts can believe they exclusively own one store.",
-      "open_questions": [
-        "Where does each external consumer place its lease root, and with what mount options? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -447,9 +421,7 @@
       },
       "existing_check": "`invalid_epoch_states_fail_closed` (21-byte file) and `epoch_read_is_bounded_regardless_of_file_size` (1 MiB file, counting reader, all three acquisition paths); status **audited** at U2.",
       "impact": "Opening a store can exhaust process memory before the database is opened.",
-      "open_questions": [
-        "A future versioned format must revise the 20-byte bound deliberately."
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -475,9 +447,7 @@
       },
       "existing_check": "none in the crate.",
       "impact": "Unbounded file and inode growth can exhaust the filesystem; an unsafe cleanup can then trigger the unlink-inode race.",
-      "open_questions": [
-        "Is the watcher still armed, and who watches inode availability? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -503,9 +473,7 @@
       },
       "existing_check": "`identity_hash_derivation_is_stable` pins one identity and filename hash; `lease_path_vectors_are_version_stable` pins eight externally computed vectors and the created filename; status **audited** at U2. The PostgreSQL `advisory_key_derivation_is_stable` vector stays in the archived `commons` source with the dropped backend.",
       "impact": "Old and new binaries lock different files and can both write.",
-      "open_questions": [
-        "Is mixed-version overlap supported for all consumers? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -531,9 +499,7 @@
       },
       "existing_check": "`superseded_writer_is_fenced_out_after_handover`, `crates/storage/src/lib.rs:1632-1670`, and `superseded_writer_is_rejected_after_reopen`, `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1144-1175`; both use synthetic stale stores and remain **unaudited**.",
       "impact": "A superseded process can overwrite state owned by its replacement.",
-      "open_questions": [
-        "Which external write sites remain outside the concrete fenced callbacks? See `protected-write-set-is-fence-complete`."
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -559,9 +525,7 @@
       },
       "existing_check": "`distinct_databases_do_not_falsely_contend`, `crates/storage/src/lib.rs:1057-1065`, uses different parent directories and does not exercise sibling files; status **unaudited**.",
       "impact": "One store can have two writers, or independent stores can falsely block each other.",
-      "open_questions": [
-        "What component guarantees descriptor uniqueness and canonical database paths? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -587,9 +551,7 @@
       },
       "existing_check": "none.",
       "impact": "A rejected actor mutates state it never owned; foreign-owned or read-only roots also collapse into undifferentiated `Io` failures.",
-      "open_questions": [
-        "Is single-UID ownership a supported precondition or merely a deployment habit? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -611,13 +573,11 @@
       "required_faults": "A competitor that has observed `Held` and continues retrying, last-handle drop, injected unlock error where possible, and every supported target/toolchain family.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/handle-drop-releases-lease.md). High for current Linux/macOS/Windows close semantics. Rust 1.89 is the declared MSRV because it stabilized `File::try_lock`, `File::try_lock_shared`, and `File::unlock`, but CI has no MSRV job."
+        "evidence": "[evidence](evidence/handle-drop-releases-lease.md). High for current Linux/macOS/Windows close semantics. The destination pins Rust 1.98, above the 1.89 release that stabilized `File::try_lock`, `File::try_lock_shared`, and `File::unlock`, but CI has no MSRV job."
       },
       "existing_check": "the contention and cross-process tests reacquire after clean drop/exit; status **unaudited**.",
       "impact": "A cleanly stopped module can leave its successor unable to start.",
-      "open_questions": [
-        "Should CI add an explicit Rust 1.89 job to enforce the declared MSRV? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -643,9 +603,7 @@
       },
       "existing_check": "`open_claims_fence_before_return`, `crates/storage/src/lib.rs:922-934`, observes the claim before domain setup, and `open_claim_rejects_an_epoch_the_database_already_stores`, `:941-977`, pins the strict-advance rule at the helper rather than through two racing opens; status **unaudited**.",
       "impact": "A superseded writer can commit during the handover window the fence is meant to close.",
-      "open_questions": [
-        "Does the guarantee begin at internal file-lease acquisition or when `open_sqlite` returns? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -663,7 +621,7 @@
         "semantics": "always",
         "condition": "For the enumerated protected write-site set, `always(protected_effect_commits => authoritative_atomic_fence_checks >= 1)`, with a source-level inventory proving no protected write path bypasses the checked transaction."
       },
-      "fault_timing": "`storage` runs `with_conn` under `PRAGMA query_only`, so an unfenced write fails `SQLITE_READONLY` instead of committing; `with_conn_unfenced` carries the maintenance statements the guard and the fenced transaction both reject. `cortexkit-store-postgres` (dropped backend, archived in `commons`) mirrors this with a read-only transaction plus `with_client_unfenced`. Both backends fence migration SQL in the migration transaction. Four effects escape a naive binding. Enforcement is connection state rather than statement state, so a read scope that ends by unwinding must still clear the pragma. The callback can also reach that state itself: A callback holding `&Connection` can call `Connection::authorizer` and remove any guard installed for it, so no statement rule survives on its own; SQLite therefore hands guarded callbacks a `GuardedConn` that omits authorizer control, pragma writes, statement batches, and transaction control, and additionally denies at the statement level pragma writes, transaction control, savepoints, `ATTACH`/`DETACH`, and every non-read action naming the fence or version tables, including the triggers, indexes, virtual tables, and views that reach those rows without naming them in DML. A rename is authorized on its source name alone, so a temporary table renamed onto an infrastructure name is caught after the callback and before commit. Authorizer control is absent from the maintenance handle as well, so releasing a scope cannot discard a policy a caller installed. Protected transactions re-pin `synchronous=FULL` and a WAL journal behind the unrestricted maintenance path. A callback that sends `COMMIT`, or on PostgreSQL `SET TRANSACTION READ WRITE`, escapes its transaction, after which its statements run unfenced; SQLite denies the statement, while PostgreSQL, lacking an authorizer, can only verify afterwards. A persisted epoch that cannot be reconciled with the holder's — negative, or on PostgreSQL below the epoch stamped at open — authorizes a superseded writer under a one-sided comparison, so both backends fail closed instead. Nothing reserves the PostgreSQL lease table against callback SQL, so a callback can delete or lower the very row its write was fenced against.",
+      "fault_timing": "`storage` runs `with_conn` under `PRAGMA query_only`, so an unfenced write fails `SQLITE_READONLY` instead of committing; `with_conn_unfenced` carries the maintenance statements the guard and the fenced transaction both reject. `cortexkit-store-postgres` (dropped backend, archived in `commons`) mirrors this with a read-only transaction plus `with_client_unfenced`. Both backends fence migration SQL in the migration transaction. Four effects escape a naive binding. Enforcement is connection state rather than statement state, so a read scope that ends by unwinding must still clear the pragma. The callback can also reach that state itself: A callback holding `&Connection` can call `Connection::authorizer` and remove any guard installed for it, so no statement rule survives on its own; SQLite therefore hands guarded callbacks a `GuardedConn` that omits authorizer control, pragma writes, statement batches, and transaction control, and additionally denies at the statement level pragma writes, transaction control, savepoints, `ATTACH`/`DETACH`, and every non-read action naming the fence or version tables, including the triggers, indexes, virtual tables, and views that reach those rows without naming them in DML. A rename is authorized on its source name alone, so a temporary table renamed onto an infrastructure name is caught after the callback and before commit. Authorizer control is absent from the maintenance handle as well, so releasing a scope cannot discard a policy a caller installed. Protected transactions re-pin `synchronous=FULL` and a WAL journal behind the unrestricted maintenance path. A callback that sends `COMMIT`, or on PostgreSQL `SET TRANSACTION READ WRITE`, escapes its transaction, after which its statements run unfenced; SQLite denies the statement, while PostgreSQL, lacking an authorizer, can only verify afterwards. A persisted epoch that cannot be reconciled with the holder's - negative, or on PostgreSQL below the epoch stamped at open - authorizes a superseded writer under a one-sided comparison, so both backends fail closed instead. Nothing reserves the PostgreSQL lease table against callback SQL, so a callback can delete or lower the very row its write was fenced against.",
       "required_faults": "Exercise or inspect every public durable-write boundary and classify whether fencing is required by its contract. Include a panicking read callback, a read callback that sets `query_only` or `synchronous`, a callback that sends transaction-control SQL or changes the access mode, and a negative persisted epoch.",
       "confidence": {
         "level": "high",
@@ -671,9 +629,7 @@
       },
       "existing_check": "backend tests cover fenced callbacks, fenced migrations, SQLite and PostgreSQL read-only rejection, and both autocommit maintenance paths. `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1209-1229`) leaves later fenced writes authorized; `a_read_callback_cannot_lower_fence_durability` (`:1232-1296`) pins `synchronous=FULL` and a WAL journal; `a_read_callback_cannot_clear_the_read_only_guard` (`:1299-1352`) denies every pragma write; `a_callback_cannot_end_the_fence_checked_transaction` (`:1355-1411`) denies the transaction escape and `a_callback_that_ends_the_transaction_is_rejected` (`commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:647-689`) reports it; `a_read_callback_cannot_escape_read_only_mode` (`:795-854`) covers ending and switching a read transaction; `a_negative_epoch_fails_closed` (`:857-887`) and `a_regressed_positive_epoch_fails_closed` (`:890-932`) fail closed on an unreconcilable epoch; `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` (`:935-979`), `a_suppressed_epoch_increment_is_rejected` (`:982-999`), and `open_verifies_the_stored_epoch_matches_the_issued_one` (`:1002-1026`) protect the lease row and its issuance; and `a_callback_cannot_damage_the_fence_row_it_is_checked_against` (`crates/storage/src/lib.rs:1414-1522`) refuses DML, triggers, indexes, views, and renames onto the fence table. The [durable consumer inventory](durable-consumer-inventory.md) records source receipts; no source-level completeness gate exists.",
       "impact": "Enforcement converts a silent unfenced commit into a loud failure on SQLite, where the capability can be withdrawn. On PostgreSQL the residual risk is unbounded by validation: callback SQL retains the privilege to attach triggers to the infrastructure tables and to release this session's advisory lease, so an effect can always be scheduled after the last check and single-writer itself is reachable, and consumers may also break on upgrade or reroute a mutation through the unfenced surface.",
-      "open_questions": [
-        "The PostgreSQL infrastructure tables must be reserved from callback DDL rather than validated afterwards, and this is now the blocking decision rather than one option among several. Validation has been moved after the callback, after the increment, and to the committed row, and each position was defeated by moving the effect one step later: a `DEFERRABLE INITIALLY DEFERRED` constraint trigger fires at `COMMIT`, after any in-transaction re-read, and the store's own version-record insert runs after the last lease-row check. No check placed inside the transaction can be last. Reserving the tables needs a decision this catalog cannot make, because the candidates — running callback SQL under a restricted role through `SET LOCAL ROLE`, moving the tables to a schema the connection role cannot create objects in, or reaching them only through a `SECURITY DEFINER` function — all require role or schema provisioning outside the crate and change what a consumer's own migrations may do. Also unresolved: which SQLite writes are contractually fence-protected, do maintenance statements through `with_conn_unfenced` and `with_client_unfenced` count as protected writes, should the callbacks receive a capability-narrowed handle rather than one that can execute arbitrary SQL and pragmas, should the infrastructure tables be schema-qualified so a callback's session `search_path` cannot redirect the fence check, and who owns the Magic Context migration now that the mutations fail rather than commit? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -699,9 +655,7 @@
       },
       "existing_check": "T1 checks only post-acquisition steady state; status **unaudited**.",
       "impact": "A racing process can retain access acquired before chmod.",
-      "open_questions": [
-        "What umasks do supported deployments use? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -727,9 +681,7 @@
       },
       "existing_check": "`acquisition_refuses_symlink_and_leaves_target_untouched` exercises exclusive and shared acquisition; status **unaudited**.",
       "impact": "The lease can protect and overwrite an attacker-chosen inode or create an unintended file.",
-      "open_questions": [
-        "Is Windows a supported deployment target? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -807,9 +759,7 @@
       },
       "existing_check": "none.",
       "impact": "Without this witness, inode-stability checks say nothing about the race documented in `lease-store-density.md:22-24`.",
-      "open_questions": [
-        "Which production actor can create this state? `(needs human input)`"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {

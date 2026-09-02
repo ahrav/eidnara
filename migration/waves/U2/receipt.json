@@ -248,7 +248,7 @@
         "blob_sha": "d360c86177f779878d5b645bb31b1b06f0d0584c"
       },
       "destination": "docs/properties/shared-primitives/catalog.md",
-      "destination_sha256": "98698eeec04286936a4ef1232bbc9ee53d60377d406270f5c234a4333ebe7c7e",
+      "destination_sha256": "30faa716efbbfb23e7555ff5dcd6379cd378bc98a936443c13ae078fa5da56bd",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -444,7 +444,7 @@
         "blob_sha": "b2acebc09c76b3a7b67d6cf93b440205b7e4a5cd"
       },
       "destination": "docs/properties/shared-primitives/evidence/handle-drop-releases-lease.md",
-      "destination_sha256": "358b660c92052257065552bf8ba97368fb896599bdb70ce9e4fae9c9cfc71af9",
+      "destination_sha256": "a7d757b1c4eb8cfa3beabe434a9eb11bbcad9f83222c1075211382938cf126a8",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -748,12 +748,12 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "b4a6ccbb4b2afc71148e0058d78d6bf49fdeaf41999e85df5f6dff102ea939e6",
+      "destination_sha256": "3f52ac35df3b410a925db25bf056308ea2b923a0f37789b625eeff9f5993b6b1",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -763,18 +763,18 @@
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
-        "regeneration": "cargo +1.89 generate-lockfile; every `--locked` build verifies it"
+        "regeneration": "cargo +1.98 generate-lockfile; every `--locked` build verifies it"
       }
     },
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "f2699269a67be565bb8d2ae603006f5dc1a1b80d3b6d1b0e066c5eb1d442c07d",
+      "destination_sha256": "f00e05a7560cf2c69d91d5d4444067ddce626007512f83fe3f94ce821ceb01a3",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -785,7 +785,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -796,7 +796,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -807,7 +807,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -818,18 +818,18 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
       "source": null,
       "destination": "migration/waves/U2/property-impact.json",
-      "destination_sha256": "0787e2f7c8a2e5ffc361d78b2421d1faa528b08f750977d49873c7ce2ab59951",
+      "destination_sha256": "1cf24a48d0b6f0ac299fec60b5ecad4b634920a0f2c8bc8a3bfff75b13adc7de",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -840,7 +840,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -851,35 +851,35 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
       "source": null,
       "destination": "migration/waves/U2/source-crate-dispositions.json",
-      "destination_sha256": "ce4d82a8a7035c886f3e223eb7988ad64b0ea8c33aef330e7edffd81995ad10f",
+      "destination_sha256": "31f845aa5e7c93d740797d9c23b76e213f866e500dc4738588ea29393ef015d6",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
       "source": null,
       "destination": "migration/waves/U2/review-notes.md",
-      "destination_sha256": "87657079b9b8dc9b297743005b08a8f8cb6786d2bcc1dd76baa6e1d99485a9d3",
+      "destination_sha256": "be314fc13ba3611d524a665d937eb26d53777791097a2bb82a92565095fdd434",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/index.json",
-      "destination_sha256": "42a053b9a672762b427a27dfe7ebb240cfd04b0ba85bf72fa2b01eda21ab9776",
+      "destination_sha256": "8145514261f1077a6521940d8db705d42cc2cc0bd5322d458ad74d324e74c625",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -894,18 +894,18 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md",
-      "destination_sha256": "91cf3ab5b6b00aea8bf14481fbfc1f5f08dd43cdc337ac2ae3bba410d0966051",
+      "destination_sha256": "bcf04fc9f1cba9e21c48f5fb4949c7aa36c798b7065bdbf4d5eeee963214e5f1",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -916,7 +916,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -927,7 +927,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -938,7 +938,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -949,7 +949,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -960,7 +960,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -971,7 +971,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -982,7 +982,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -993,7 +993,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -1004,7 +1004,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -1015,7 +1015,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -1026,7 +1026,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -1037,7 +1037,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -1048,7 +1048,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -1059,7 +1059,7 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
@@ -1070,19 +1070,19 @@
       "class": "new-authored",
       "review_evidence": {
         "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.89 and stable"
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     }
   ],
   "gates": {
     "rust-format": "pass",
-    "rust-lint-1.89": "pass",
+    "rust-lint-1.98": "pass",
     "rust-lint-stable": "pass",
-    "rust-tests-1.89": "pass",
+    "rust-tests-1.98": "pass",
     "rust-tests-stable": "pass",
     "rust-doctests-and-docs": "pass",
     "feature-configurations": "pass",
-    "msrv-unlocked-latest": "pass",
+    "pinned-toolchain-unlocked-latest": "pass",
     "workspace-graph": "pass",
     "golden-vectors-byte-identical": "pass",
     "typecheck": "pass",
