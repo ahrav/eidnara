@@ -166,7 +166,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/waivers.json",
-      "destination_sha256": "ebdaaf0caeae1b17b038aa55ece56bfc917df1cbc40eb3daf6ec0d54d7350a96",
+      "destination_sha256": "065537d0d55de6ca27cf5457503cf9bb03353aad9086c28d7197a236b8c66654",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -337,7 +337,7 @@
     "waivers": "pass",
     "crate-name-collision-check": "pass",
     "registry-audit-fresh": "pass",
-    "github-repository-created": "not_run",
+    "github-repository-created": "pass",
     "npm-scope-reservation": "not_run"
   }
 }
