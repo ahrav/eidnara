@@ -189,6 +189,7 @@ fn run_vector(vector: &Vector) {
             .collect();
         let input = pass_to_input(pass, &pending_keys);
         let before_bytes = state.cached_prefix_bytes();
+        let boundary_before = state.boundary_id.clone();
         let result = state.step(input);
 
         assert_eq!(
@@ -246,7 +247,18 @@ fn run_vector(vector: &Vector) {
                         "{}: pass {i} bust must advance the boundary to the fixture id",
                         vector.name
                     );
+                } else {
+                    assert_eq!(
+                        state.boundary_id, boundary_before,
+                        "{}: pass {i} bust without new_boundary_id must leave the anchor unchanged",
+                        vector.name
+                    );
                 }
+                assert_eq!(
+                    result.reconcile_pending, pass.reconcile_pending,
+                    "{}: pass {i} bust reconcile_pending mismatch",
+                    vector.name
+                );
                 if pass.expect_action == Action::Hard {
                     assert!(
                         state.pending_changes.is_empty(),

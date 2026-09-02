@@ -603,6 +603,7 @@ function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShap
     const literals = new Map<string, string>();
     const authoredPaths = new Set<string>();
     const fixturePaths = new Set<string>();
+    const generatorTargets: { target: string; path: string }[] = [];
 
     const entries = requireArray(root, "entries", "$", errors);
     if (entries.length === 0) errors.push("$.entries must contain at least one entry");
@@ -657,7 +658,10 @@ function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShap
                 const role = requireEnum(entry, "role", FIXTURE_ROLES, path, errors);
                 requireString(entry, "rationale", path, errors);
                 requireStringArray(entry, "evidence", path, errors, 1);
-                if (role === "generator") requireString(entry, "fixture", path, errors);
+                if (role === "generator") {
+                    const target = requireString(entry, "fixture", path, errors);
+                    if (target !== undefined) generatorTargets.push({ target, path });
+                }
                 if (fixturePath === undefined || role === undefined) return;
                 if (fixturePaths.has(fixturePath)) errors.push(`${path}.path is duplicated`);
                 fixturePaths.add(fixturePath);
@@ -668,6 +672,15 @@ function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShap
                 break;
         }
     });
+    // Each generator target must name a registered byte-stable fixture.
+    const byteStable = new Set(
+        shape.fixtures.filter((fixture) => fixture.role === "byte-stable").map((fixture) => fixture.path),
+    );
+    for (const { target, path } of generatorTargets) {
+        if (!byteStable.has(target)) {
+            errors.push(`${path}.fixture ${target} is not a registered byte-stable fixture`);
+        }
+    }
     return shape;
 }
 

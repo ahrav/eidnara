@@ -66,7 +66,7 @@
         "blob_sha": "668de98e86598eca1ba50a051328db583460a274"
       },
       "destination": "crates/cache-stability/src/lib.rs",
-      "destination_sha256": "30588dc0ffa613ae446b8fab96759c979f06d892525b05c2a123b7a9adb07822",
+      "destination_sha256": "8b81b016c96e85326ee740b9c1c2b41cc0187c750b1ff6b43027587469adc7b5",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -94,7 +94,7 @@
         "blob_sha": "cfa66afee8e2e5e7cf67ba49be02f452bdd83bb9"
       },
       "destination": "crates/cache-stability/tests/golden_vectors.rs",
-      "destination_sha256": "243786b536ef077b7cdcdc765ca033a493dcaf5d52998056a70f77c59b94e13f",
+      "destination_sha256": "49c095fee21e88a0ee5785d3a82b068bb6e900e7891e1fba976cfd6c1e4775a6",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -122,7 +122,7 @@
         "blob_sha": "2699b575864d0d1823d7531aa9a0e53bcfa98c1f"
       },
       "destination": "crates/lease/src/lib.rs",
-      "destination_sha256": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
+      "destination_sha256": "1073c55bce119d34dc18d0296d5b0834be3dbe3757666cd8e66975bf7f8e5ba8",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -164,7 +164,7 @@
         "blob_sha": "b32580688f10cf68de7e767031f4ac732fdda245"
       },
       "destination": "crates/storage-types/src/lib.rs",
-      "destination_sha256": "258fcc1a63b826967f410454046c2afb9b4daf8876b660a16f14843b717f6abc",
+      "destination_sha256": "b9e33f12f888256d7dc30fe6de8727941cbb8ae564f7c96c2fe22d83248db600",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -220,7 +220,7 @@
         "blob_sha": "95dc9c575f3ef72f6739719225bb78ea19f99dbb"
       },
       "destination": "crates/storage/src/lib.rs",
-      "destination_sha256": "886977417c27fe52b5a91e6748af17b6100e54a299389dcdc375ab4596844909",
+      "destination_sha256": "6e88bc0845995da12aa427c3de8bb4645c8498305c1a9e45745cceebd842e10a",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -791,7 +791,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "ed2d441b76144fea795400ac5e1235e322df03376054dcfb0b09b7cc7a561b0b",
+      "destination_sha256": "5fa888f3f849830c5689b8d8998929808c63521f49e9f2f6213f8bae1f803eea",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -802,7 +802,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "2caf0822e2ff9118858e55d064310eaa3642296c150ab6dd353ac2980695ac3d",
+      "destination_sha256": "c191ef4ec416956abb08d157209e5470cecfcf32441c9f70283dca25d240e984",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -813,7 +813,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "65dd25b1a1f58040b492c58daa9a808a57969722a04d159f389f218a199738a8",
+      "destination_sha256": "023c6652c72aa2a0837374d145ab775d83bd0102baa569fc48431b96dce21946",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

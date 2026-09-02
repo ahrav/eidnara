@@ -855,6 +855,7 @@
       "literals": [
         "store.db",
         "claim-vector.db",
+        "other.db",
         "embedding.bin",
         "{}/cortexkit/{}/store.db",
         "/home/u/.local/share/cortexkit/alfonso-routing/store.db",

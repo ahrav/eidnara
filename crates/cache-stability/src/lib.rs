@@ -166,29 +166,30 @@ impl CoreState {
     pub fn step(&mut self, input: PassInput) -> StepResult {
         let boundary_match = input.boundary_present == self.boundary_id;
 
+        if input.run_started {
+            // The run boundary applies to EVERY action, not only defer: lineage
+            // units survive byte-identical, episode units reset — both in the
+            // frozen set and in the deferred queue (a queued episode unit must
+            // never survive into the next bust).
+            self.frozen_units
+                .retain(|u| u.durability_class == DurabilityClass::Lineage);
+            self.pending_changes
+                .retain(|u| u.durability_class == DurabilityClass::Lineage);
+        }
+
         match input.proposed {
             Action::SoftPlus => self.step_defer(input, boundary_match),
             Action::Soft => self.step_soft(input, boundary_match),
-            Action::Hard => self.step_hard(input),
+            Action::Hard => self.step_hard(input, boundary_match),
         }
     }
 
     /// Defer: no render call, replay frozen bytes verbatim. Queue any drop-queued units into
     /// `pending_changes`. If the boundary is absent (a revert removed it), keep replaying the
     /// frozen bytes this pass and mark `reconcile_pending` — NEVER a blind same-pass rebuild.
-    /// On a `RunStarted` boundary, lineage units carry forward byte-identical and episode
-    /// units reset.
     fn step_defer(&mut self, input: PassInput, boundary_match: bool) -> StepResult {
         for unit in input.queued {
             self.pending_changes.push(unit);
-        }
-
-        if input.run_started {
-            // Lineage units survive byte-identical (their frozen_payload is untouched);
-            // episode units reset at the run boundary. The cache set is all-lineage today,
-            // so this is a no-op in practice, but the reset rule is enforced structurally.
-            self.frozen_units
-                .retain(|u| u.durability_class == DurabilityClass::Lineage);
         }
 
         // boundary_match => the covered prefix splices/replaces and frozen bytes replay.
@@ -248,20 +249,23 @@ impl CoreState {
 
     /// Hard bust: the whole prefix rebuilds into a new frozen baseline. Freeze the rendered
     /// units AND drain ALL deferred work into this one bust (a HARD from any cause drains the
-    /// coordinator). Mint the new boundary id; clear `reconcile_pending` (the rematerialize
-    /// reconciles any earlier boundary loss).
-    fn step_hard(&mut self, input: PassInput) -> StepResult {
+    /// coordinator). Mint the new boundary id. `reconcile_pending` clears only when the pass
+    /// re-establishes a live anchor — it minted one, or the prior anchor is still present. A
+    /// HARD that mints nothing while the anchor is absent has not reconciled anything; the
+    /// same vacuous empty-boundary carve-out as `step_defer` applies.
+    fn step_hard(&mut self, input: PassInput, boundary_match: bool) -> StepResult {
         let mut units = input.rendered_units;
         units.append(&mut self.pending_changes);
         self.apply_units(units);
+        let minted = input.new_boundary_id.is_some();
         if let Some(new_boundary) = input.new_boundary_id {
             self.boundary_id = new_boundary;
         }
-        self.reconcile_pending = false;
+        self.reconcile_pending = !minted && !boundary_match && !self.boundary_id.is_empty();
         self.version += 1;
         StepResult {
             action: Action::Hard,
-            reconcile_pending: false,
+            reconcile_pending: self.reconcile_pending,
         }
     }
 
@@ -585,6 +589,102 @@ mod tests {
         assert_eq!(
             state.frozen_units[0].frozen_payload, "<h>BASE</h>",
             "lineage byte-identical"
+        );
+    }
+
+    #[test]
+    fn run_started_resets_episode_units_on_every_action() {
+        // The reset rule is a property of the RUN BOUNDARY, not of the defer action:
+        // a run can just as well begin with a Soft or Hard pass.
+        for action in [Action::SoftPlus, Action::Soft, Action::Hard] {
+            let mut state = state_with(
+                vec![
+                    unit("m0", "<h>BASE</h>", DurabilityClass::Lineage),
+                    unit("ep", "run-scoped", DurabilityClass::Episode),
+                ],
+                "b0",
+            );
+            let mut pass = PassInput::new(action, "b0");
+            pass.run_started = true;
+            state.step(pass);
+            assert!(
+                state
+                    .frozen_units
+                    .iter()
+                    .all(|u| u.durability_class == DurabilityClass::Lineage),
+                "{action:?}: episode unit must reset at the run boundary"
+            );
+            assert!(
+                !state.cached_prefix_bytes().contains("run-scoped"),
+                "{action:?}: reset episode bytes must not stay in the prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn run_started_resets_queued_episode_units() {
+        // An Episode unit sitting in pending_changes must not survive the run
+        // boundary and get frozen into the prefix by the next bust.
+        let mut state = state_with(
+            vec![unit("m0", "<h>BASE</h>", DurabilityClass::Lineage)],
+            "b0",
+        );
+        let mut defer = PassInput::new(Action::SoftPlus, "b0");
+        defer.queued = vec![unit("ep", "run-scoped", DurabilityClass::Episode)];
+        state.step(defer);
+        assert_eq!(state.pending_changes.len(), 1);
+
+        let mut run = PassInput::new(Action::SoftPlus, "b0");
+        run.run_started = true;
+        state.step(run);
+        assert!(
+            state.pending_changes.is_empty(),
+            "queued episode unit must reset at the run boundary"
+        );
+
+        let mut hard = PassInput::new(Action::Hard, "b0");
+        hard.new_boundary_id = Some("b1".into());
+        state.step(hard);
+        assert!(
+            !state.cached_prefix_bytes().contains("run-scoped"),
+            "a reset queued unit must never reach the frozen prefix"
+        );
+    }
+
+    #[test]
+    fn hard_without_mint_on_absent_boundary_keeps_reconcile_pending() {
+        let mut state = state_with(
+            vec![unit("m0", "<h>BASE</h>", DurabilityClass::Lineage)],
+            "b0",
+        );
+        let r = state.step(PassInput::new(Action::SoftPlus, "-"));
+        assert!(r.reconcile_pending, "revert must flag reconcile");
+
+        // A reconcile-forced HARD that mints NO boundary while the anchor is still
+        // absent has not reconciled anything: the stored anchor is still stale.
+        let mut hard = PassInput::new(Action::Hard, "-");
+        hard.rendered_units = vec![unit("m0", "<h>REMAT</h>", DurabilityClass::Lineage)];
+        let r = state.step(hard);
+        assert!(
+            r.reconcile_pending,
+            "a HARD that leaves the anchor absent must not report reconciled"
+        );
+        assert!(state.reconcile_pending, "stored flag must also survive");
+
+        // Minting a boundary reconciles.
+        let mut hard = PassInput::new(Action::Hard, "-");
+        hard.new_boundary_id = Some("b1".into());
+        let r = state.step(hard);
+        assert!(!r.reconcile_pending, "a minting HARD reconciles");
+
+        // A HARD at a live anchor (no mint) also reconciles.
+        let r2 = state.step(PassInput::new(Action::SoftPlus, "-"));
+        assert!(r2.reconcile_pending);
+        let hard = PassInput::new(Action::Hard, "b1");
+        let r3 = state.step(hard);
+        assert!(
+            !r3.reconcile_pending,
+            "a HARD at the live anchor reconciles without minting"
         );
     }
 }

@@ -166,7 +166,27 @@ impl LeaseKey {
     }
 
     /// Field order and separators are stable because they determine lock identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a field contains U+001F, the field separator: joining such a
+    /// field would let two distinct key tuples collapse into one lock identity.
+    /// Keys are program-supplied identifiers, so a separator inside one is a
+    /// programming error; failing loudly beats aliasing silently. Rejecting the
+    /// separator (rather than escaping it) keeps every existing durable identity
+    /// byte-stable; switch to a length-prefixed encoding if separator characters
+    /// ever become legitimate field content.
     pub fn identity(&self) -> String {
+        for (name, field) in [
+            ("module_id", &self.module_id),
+            ("backend", &self.backend),
+            ("scope_key", &self.scope_key),
+        ] {
+            assert!(
+                !field.contains('\u{1f}'),
+                "LeaseKey {name} contains U+001F, the lock-identity separator: {field:?}"
+            );
+        }
         format!(
             "{}\u{1f}{}\u{1f}{}",
             self.module_id, self.backend, self.scope_key
@@ -1145,14 +1165,18 @@ mod tests {
             entry.path()
         };
 
-        // Child: hold a SHARED flock on the lease file for 2 seconds.
-        // `flock(1)` from util-linux is absent on macOS, so use a tiny python
-        // child — python is available on every dev/CI platform we run.
+        // The child holds a SHARED flock on the lease file until the parent
+        // closes its stdin. `flock(1)` from util-linux is absent on macOS, so a
+        // tiny python child does it — python is available on every dev/CI
+        // platform we run. Blocking on stdin instead of a fixed sleep removes
+        // the scheduler-timing dependency (a stalled parent cannot outlive the
+        // child's hold).
         let mut child = std::process::Command::new("python3")
             .arg("-c")
             .arg(format!(
-                "import fcntl,time\nf=open({lock_path:?},'r+')\nfcntl.flock(f,fcntl.LOCK_SH)\nprint('held',flush=True)\ntime.sleep(2)",
+                "import fcntl,sys\nf=open({lock_path:?},'r+')\nfcntl.flock(f,fcntl.LOCK_SH)\nprint('held',flush=True)\nsys.stdin.readline()",
             ))
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("spawn shared-holder child");
@@ -1181,6 +1205,8 @@ mod tests {
             .expect("shared coexists with cross-process shared holder");
         drop(s);
 
+        // Closing stdin unblocks the child, which exits and drops its shared lock.
+        drop(child.stdin.take());
         child.wait().expect("child exit");
         let g = store.acquire(&k).expect("exclusive after child released");
         drop(g);
@@ -1224,9 +1250,8 @@ mod tests {
                 LeaseKey::new("módulo", "sqlite", "ключ"),
                 "266f8eae208be1ca",
             ),
-            // The separator inside a field gives these two keys one identity.
-            (LeaseKey::new("a\u{1f}b", "sqlite", "c"), "604e08b680b90474"),
-            (LeaseKey::new("a", "b\u{1f}sqlite", "c"), "604e08b680b90474"),
+            // LeaseKey::identity rejects U+001F in every field, so no vector
+            // can contain the separator.
             (
                 LeaseKey::new(long.as_str(), "sqlite", "y"),
                 "8ab902ac85c82726",
@@ -1372,5 +1397,27 @@ mod tests {
             .acquire(&key("exclusive-race"))
             .expect("acquire after release");
         assert_eq!(next.epoch(), 2);
+    }
+    /// ("a\u{1f}b", "c", "d") and ("a", "b\u{1f}c", "d") would join to the
+    /// same identity bytes. `identity` rejects the separator in every field
+    /// position instead of producing colliding identity bytes.
+    #[test]
+    fn separator_in_a_key_field_fails_closed_instead_of_aliasing() {
+        let cases = [
+            (LeaseKey::new("a\u{1f}b", "c", "d"), "module_id"),
+            (LeaseKey::new("a", "b\u{1f}c", "d"), "backend"),
+            (LeaseKey::new("a", "b", "c\u{1f}d"), "scope_key"),
+        ];
+        for (key, field) in cases {
+            let panic = std::panic::catch_unwind(|| key.identity())
+                .expect_err("separator in {field} must panic");
+            let message = panic
+                .downcast_ref::<String>()
+                .expect("panic carries a message");
+            assert!(
+                message.contains(field) && message.contains("U+001F"),
+                "panic must name the offending field, got: {message}"
+            );
+        }
     }
 }

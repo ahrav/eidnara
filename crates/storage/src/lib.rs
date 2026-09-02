@@ -72,16 +72,31 @@ impl std::fmt::Display for StoreError {
     }
 }
 
-impl std::error::Error for StoreError {}
+impl std::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StoreError::Lease(e) => Some(e),
+            StoreError::Io(e) => Some(e),
+            StoreError::UnsupportedBackend(_)
+            | StoreError::Migration(_)
+            | StoreError::Backend(_)
+            | StoreError::Fenced { .. }
+            | StoreError::FenceCorrupt { .. } => None,
+        }
+    }
+}
 
-/// The lease key includes the module, backend, and storage namespace so stores
-/// sharing a lease root cannot collide.
+/// The lease key includes the module, backend, storage namespace, and the
+/// database file name. The lease root is the database's parent directory, so
+/// two distinct database files in one directory need distinct keys or they
+/// falsely contend. File names cannot contain `/`, so the `namespace/file`
+/// join is unambiguous.
 #[cfg(feature = "sqlite")]
-fn lease_key(descriptor: &StorageDescriptor) -> LeaseKey {
+fn lease_key(descriptor: &StorageDescriptor, db_file_name: &str) -> LeaseKey {
     LeaseKey::new(
         &descriptor.module_id,
         descriptor.backend.label(),
-        &descriptor.storage_namespace,
+        format!("{}/{}", descriptor.storage_namespace, db_file_name),
     )
 }
 
@@ -209,8 +224,11 @@ mod sqlite_backend {
 
             let scope = CallbackScope::writable(&tx)?;
             let out = f(&GuardedConn::new(&tx));
-            scope.release()?;
+            // The callback error outranks a release error: losing the reason the
+            // write failed is worse than losing the scope-release failure.
+            let released = scope.release();
             let out = out.map_err(|e| StoreError::Backend(e.to_string()))?;
+            released?;
             tx.commit()
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             Ok(out)
@@ -580,12 +598,21 @@ mod sqlite_backend {
         std::fs::create_dir_all(&parent).map_err(StoreError::Io)?;
 
         let epoch_floor = read_fence_epoch(Path::new(&path))?;
+        let db_file_name = Path::new(&path)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
         let lease = FileLeaseStore::new(&parent)
-            .acquire_above(&lease_key(descriptor), epoch_floor)
+            .acquire_above(&lease_key(descriptor, &db_file_name), epoch_floor)
             .map_err(StoreError::Lease)?;
         let epoch = lease.epoch();
 
         let mut conn = Connection::open(&path).map_err(|e| StoreError::Backend(e.to_string()))?;
+        // Owner-only permissions apply before the fence claim below writes any bytes.
+        for suffix in ["", "-wal", "-shm"] {
+            protect_file(Path::new(&format!("{path}{suffix}")))
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+        }
         // WAL permits concurrent readers. The busy timeout makes transient locks
         // wait rather than fail, and foreign-key enforcement is enabled.
         conn.pragma_update(None, "journal_mode", "WAL")
@@ -606,13 +633,6 @@ mod sqlite_backend {
         claim_fence_strict(&tx, epoch)?;
         tx.commit()
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-
-        // Apply owner-only permissions after enabling WAL, which may create sibling
-        // files. WAL can hold recently committed rows before checkpointing.
-        for suffix in ["", "-wal", "-shm"] {
-            protect_file(Path::new(&format!("{path}{suffix}")))
-                .map_err(|e| StoreError::Backend(e.to_string()))?;
-        }
 
         Ok(SqliteStore {
             conn: Mutex::new(conn),
@@ -715,13 +735,21 @@ mod sqlite_backend {
         tx: &rusqlite::Transaction<'_>,
         holder_epoch_sql: i64,
     ) -> Result<(), StoreError> {
-        tx.execute(
-            "INSERT INTO cortexkit_fence (id, epoch) VALUES (0, ?1) \
-             ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch",
-            rusqlite::params![holder_epoch_sql],
-        )
-        .map(|_| ())
-        .map_err(|e| StoreError::Backend(e.to_string()))
+        let rows = tx
+            .execute(
+                "INSERT INTO cortexkit_fence (id, epoch) VALUES (0, ?1) \
+                 ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch",
+                rusqlite::params![holder_epoch_sql],
+            )
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // A trigger running `RAISE(IGNORE)` reports success with zero changed
+        // rows; proceeding without the persisted epoch would break fencing.
+        if rows != 1 {
+            return Err(StoreError::Backend(format!(
+                "fence epoch write affected {rows} rows; expected 1"
+            )));
+        }
+        Ok(())
     }
 
     /// Rejects negative SQLite integers instead of wrapping them into writer epochs.
@@ -769,6 +797,12 @@ mod sqlite_backend {
 
         let mut ordered: Vec<&Migration> = migrations.iter().collect();
         ordered.sort_by_key(|m| m.version);
+        if let Some(pair) = ordered.windows(2).find(|w| w[0].version == w[1].version) {
+            return Err(StoreError::Migration(format!(
+                "namespace '{namespace}' declares migration version {} more than once",
+                pair[0].version
+            )));
+        }
 
         for m in ordered {
             if m.version <= current {
@@ -835,6 +869,7 @@ mod tests {
         };
         let path = std::path::PathBuf::from(path);
         let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
+        let shm = std::path::PathBuf::from(format!("{}-shm", path.display()));
 
         {
             let store = open_sqlite(&descriptor).expect("first open");
@@ -849,11 +884,10 @@ mod tests {
                 .expect("migrate");
         }
 
-        // A clean close removes the WAL. Recreate it to model a file left by an
-        // unclean shutdown.
         std::fs::write(&wal, b"").expect("leave a WAL behind");
+        std::fs::write(&shm, b"").expect("leave an SHM behind");
 
-        for file in [&path, &wal] {
+        for file in [&path, &wal, &shm] {
             std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644))
                 .expect("set permissive mode");
         }
@@ -877,8 +911,49 @@ mod tests {
             0o600,
             "the WAL stayed group/world readable while the database looked correct"
         );
+        assert_eq!(
+            mode(&shm),
+            0o600,
+            "the SHM stayed group/world readable while the database looked correct"
+        );
 
         drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Protection runs before the fence write. A reopen whose `-shm` path is a
+    /// directory fails `protect_file`; the fence epoch must still hold the
+    /// seeded value, proving no fence bytes were written before protection.
+    #[cfg(unix)]
+    #[test]
+    fn protection_failure_aborts_open_before_the_fence_write() {
+        let (root, descriptor) = tmp();
+        let StorageBackend::Sqlite { path } = &descriptor.backend else {
+            panic!("sqlite descriptor");
+        };
+        let path = path.clone();
+        let seeded = open_sqlite(&descriptor).expect("seed").epoch();
+
+        let shm = format!("{path}-shm");
+        std::fs::create_dir(&shm).expect("plant a directory at the shm path");
+        match open_sqlite(&descriptor) {
+            Err(StoreError::Backend(_)) => {}
+            Err(other) => panic!("protection failure must abort the open, got {other}"),
+            Ok(_) => panic!("protection failure must abort the open, got a store"),
+        }
+
+        let conn = rusqlite::Connection::open(&path).expect("inspect fence");
+        let epoch: i64 = conn
+            .query_row("SELECT epoch FROM cortexkit_fence WHERE id = 0", [], |r| {
+                r.get(0)
+            })
+            .expect("read fence epoch");
+        assert_eq!(
+            epoch as u64, seeded,
+            "the aborted open wrote a fence epoch before protecting the files"
+        );
+        drop(conn);
+        std::fs::remove_dir(&shm).expect("remove planted directory");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1062,6 +1137,115 @@ mod tests {
         drop((held_a, held_b));
         let _ = std::fs::remove_dir_all(&root_a);
         let _ = std::fs::remove_dir_all(&root_b);
+    }
+
+    /// Two distinct database files in ONE directory share a lease root, so the
+    /// lease key must include the database file identity or they falsely contend.
+    #[test]
+    fn distinct_databases_in_one_directory_do_not_falsely_contend() {
+        let (root, a) = tmp();
+        let mut b = a.clone();
+        b.backend = StorageBackend::Sqlite {
+            path: root.join("other.db").to_string_lossy().into_owned(),
+        };
+        let held_a = open_sqlite(&a).expect("open a");
+        let held_b = open_sqlite(&b).expect("open b - distinct db in the same directory as a");
+        drop((held_a, held_b));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `RAISE(IGNORE)` trigger can make the fence upsert affect zero rows.
+    /// Accepting a zero-row fence update would let a writer proceed without
+    /// persisting its claimed epoch.
+    #[test]
+    fn suppressed_fence_update_is_an_error_not_a_silent_success() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let path = path.clone();
+        drop(open_sqlite(&d).expect("seed database at epoch 1"));
+
+        let mut conn = rusqlite::Connection::open(&path).expect("reopen raw");
+        conn.execute_batch(
+            "CREATE TRIGGER fence_suppressor BEFORE UPDATE ON cortexkit_fence \
+             BEGIN SELECT RAISE(IGNORE); END",
+        )
+        .expect("install suppressing trigger");
+        let tx = conn.transaction().expect("tx");
+        match claim_fence(&tx, 99) {
+            Err(StoreError::Backend(m)) => {
+                assert!(m.contains("affected 0 rows"), "unexpected message: {m}")
+            }
+            other => panic!("suppressed fence write must fail, got {other:?}"),
+        }
+        drop(tx);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `StoreError` must preserve underlying io errors via `source()`,
+    /// including the errno two hops down a `Lease` chain.
+    #[test]
+    fn store_error_source_preserves_the_underlying_errno() {
+        let err = StoreError::Io(std::io::Error::from_raw_os_error(28));
+        let source = std::error::Error::source(&err).expect("Io must expose a source");
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("source is the io error");
+        assert_eq!(io.raw_os_error(), Some(28));
+
+        let err = StoreError::Lease(lease::LeaseError::Io(std::io::Error::from_raw_os_error(
+            122,
+        )));
+        let mut cursor: &dyn std::error::Error = &err;
+        let mut errno = None;
+        while let Some(next) = cursor.source() {
+            if let Some(io) = next.downcast_ref::<std::io::Error>() {
+                errno = io.raw_os_error();
+            }
+            cursor = next;
+        }
+        assert_eq!(
+            errno,
+            Some(122),
+            "errno unreachable through the Lease chain"
+        );
+    }
+
+    /// Duplicate migration versions must be rejected before applying any migration.
+    #[test]
+    fn duplicate_migration_versions_are_rejected_before_any_apply() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d).expect("open");
+        let dup: &[Migration] = &[
+            Migration {
+                version: 1,
+                statements: "CREATE TABLE dup_a (k TEXT);",
+            },
+            Migration {
+                version: 1,
+                statements: "CREATE TABLE dup_b (k TEXT);",
+            },
+        ];
+        match store.migrate("dup", dup) {
+            Err(StoreError::Migration(m)) => {
+                assert!(m.contains("more than once"), "unexpected message: {m}")
+            }
+            other => panic!("duplicate versions must be rejected, got {other:?}"),
+        }
+        let applied: i64 = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('dup_a', 'dup_b')",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("inspect schema");
+        assert_eq!(applied, 0, "a duplicate batch must apply nothing");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

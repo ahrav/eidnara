@@ -1109,6 +1109,25 @@ describe("evidence: git-backed receipts", () => {
         }
     });
 
+    test("a generator fixture must target a registered byte-stable fixture", () => {
+        const registry = copy("registry");
+        (registry.entries as Json[]).push({
+            kind: "fixture",
+            path: "scripts/gen.ts",
+            role: "generator",
+            fixture: "crates/lease/tests/golden/unregistered.json",
+            rationale: "generator",
+            evidence: ["x"],
+        });
+        expect(validateShape("registry", registry)).toContain(
+            "$.entries[6].fixture crates/lease/tests/golden/unregistered.json is not a registered byte-stable fixture",
+        );
+        ((registry.entries as Json[])[6] as Json).fixture = "release/registry-gate.json";
+        expect(validateShape("registry", registry)).toContain(
+            "$.entries[6].fixture release/registry-gate.json is not a registered byte-stable fixture",
+        );
+    });
+
     test("shipped TypeScript needs a permanent or transitional registry entry", () => {
         write(join(destination, "packages/opencode-plugin/src/index.ts"), "export {};\n");
         write(join(destination, "packages/opencode-plugin/src/extra.ts"), "export {};\n");

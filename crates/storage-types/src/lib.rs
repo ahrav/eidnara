@@ -50,7 +50,7 @@ pub enum Isolation {
 ///
 /// Backend variants preserve existing descriptor meanings. Module code delegates
 /// backend handling to `storage`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "backend")]
 pub enum StorageBackend {
     /// A local sqlite file at `path` (absolute).
@@ -59,6 +59,24 @@ pub enum StorageBackend {
     /// reaches only `database` (never an admin or `CREATEDB` DSN). No backend in
     /// this workspace opens this variant; `storage::open_sqlite` rejects it.
     Postgres { dsn: String, database: String },
+}
+
+/// `dsn` carries a credential, so `Debug` redacts it: any log line, panic
+/// message, or assertion failure that formats a descriptor would otherwise
+/// write the password out verbatim.
+impl std::fmt::Debug for StorageBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageBackend::Sqlite { path } => {
+                f.debug_struct("Sqlite").field("path", path).finish()
+            }
+            StorageBackend::Postgres { database, .. } => f
+                .debug_struct("Postgres")
+                .field("dsn", &"<redacted>")
+                .field("database", database)
+                .finish(),
+        }
+    }
 }
 
 impl StorageBackend {
@@ -197,6 +215,25 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         let back: StorageDescriptor = serde_json::from_str(&json).unwrap();
         assert_eq!(back, d);
+    }
+
+    /// The debug form of a descriptor reaches logs and panic messages, so the
+    /// DSN credential must never appear in it.
+    #[test]
+    fn debug_output_redacts_the_postgres_dsn() {
+        let d = StorageDescriptor {
+            module_id: "alfonso-routing".into(),
+            storage_namespace: "route-state".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Postgres {
+                dsn: "postgres://routing:hunter2@localhost/db".into(),
+                database: "db".into(),
+            },
+        };
+        let debug = format!("{d:?}");
+        assert!(!debug.contains("hunter2"), "credential leaked: {debug}");
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("db"), "non-sensitive fields stay visible");
     }
 
     #[test]
