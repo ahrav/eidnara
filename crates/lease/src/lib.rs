@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn concurrent_shared_first_acquisitions_coexist() {
-        use std::sync::{mpsc, Arc, Barrier, Condvar, Mutex};
+        use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 
         const HOLDERS: usize = 8;
         // libtest has no per-test timeout, so an unbounded wait turns a worker

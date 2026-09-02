@@ -5,7 +5,7 @@
 //!
 //! Run: `cargo run -p storage-types --example golden-vectors`
 
-use storage_types::{postgres_database_name, sqlite_store_path, StorageDescriptor};
+use storage_types::{StorageDescriptor, postgres_database_name, sqlite_store_path};
 
 fn main() {
     // Slug collisions exercise the hash suffix; overlong IDs exercise the slug bound.

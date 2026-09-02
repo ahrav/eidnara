@@ -3,8 +3,8 @@
 //! `cargo run -p storage-types --example golden-vectors` only as part of a
 //! reviewed contract change.
 
-use storage_types::{postgres_database_name, sqlite_store_path, StorageDescriptor};
 use serde_json::Value;
+use storage_types::{StorageDescriptor, postgres_database_name, sqlite_store_path};
 
 const VECTORS: &str = include_str!("golden/storage_vectors.json");
 

@@ -13,8 +13,8 @@
 //! epoch-checked writes.
 
 pub use storage_types::{
-    postgres_database_name, sqlite_store_path, Isolation, Migration, StorageBackend,
-    StorageDescriptor,
+    Isolation, Migration, StorageBackend, StorageDescriptor, postgres_database_name,
+    sqlite_store_path,
 };
 
 use lease::LeaseError;
@@ -94,7 +94,7 @@ mod sqlite_backend {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use lease::{protect_file, FileLeaseStore, HeldFileLease};
+    use lease::{FileLeaseStore, HeldFileLease, protect_file};
     use rusqlite::{Connection, OpenFlags};
 
     /// A lease-guarded SQLite store. The lease remains held for the store's lifetime.
@@ -814,7 +814,7 @@ mod sqlite_backend {
 }
 
 #[cfg(feature = "sqlite")]
-pub use sqlite_backend::{open_sqlite, GuardedConn, MaintenanceConn, SqliteStore};
+pub use sqlite_backend::{GuardedConn, MaintenanceConn, SqliteStore, open_sqlite};
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
