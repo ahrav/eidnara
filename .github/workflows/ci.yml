@@ -40,15 +40,21 @@ jobs:
       - name: Source checkouts for receipt verification
         run: |
           set -euo pipefail
-          for repo in commons magic-context; do
+          repos=$(bun -e 'const fs=require("fs");const s=new Set();for(const f of fs.readdirSync("migration/waves")){const p=`migration/waves/${f}/receipt.json`;if(!fs.existsSync(p))continue;for(const r of JSON.parse(fs.readFileSync(p,"utf8")).sources??[])s.add(r.repo)}console.log([...s].join(" "))')
+          for repo in $repos; do
             git clone --quiet --no-checkout "https://github.com/ahrav/${repo}.git" "../${repo}"
           done
 
       - name: Receipts
         run: |
           set -euo pipefail
+          args=()
+          for dir in ../*/; do
+            name=$(basename "$dir")
+            [ -d "$dir/.git" ] && [ "$name" != "$(basename "$PWD")" ] && args+=(--checkout "${name}=${dir%/}")
+          done
           for file in migration/waves/*/receipt.json; do
-            bun run eidnara:check receipt "$file" --checkout commons=../commons --checkout magic-context=../magic-context
+            bun run eidnara:check receipt "$file" "${args[@]}"
           done
 
       - name: Property catalog indexes

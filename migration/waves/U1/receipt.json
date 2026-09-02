@@ -111,7 +111,7 @@
     {
       "source": null,
       "destination": "README.md",
-      "destination_sha256": "4ab01ec2c284745477971fedf9e31bd7cbb645f348af1324efc38b3501d91b91",
+      "destination_sha256": "fdd530a8894e0c213619c0c76e1afc5081dac4e3adcc4ec4507dd7d868691db7",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -122,7 +122,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "621c97e6c1d0f665fe005c82c39a407f38b76fad0239cc2f52d96c301fc2a222",
+      "destination_sha256": "c17dd42b349f7688b31c5d97eab70f39b0e6661369321d1738436ba5221fb4ae",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
