@@ -461,15 +461,30 @@ mod sqlite_backend {
         }
     }
 
-    /// A baseline addresses the main schema only. An attached database is outside the
-    /// file and outside the identity comparison, and a file-backed attachment reaches a
-    /// database the store holds no lease on.
-    fn deny_attachments(
+    /// A baseline is DDL for the main schema and nothing else. An attached database is
+    /// outside the file and outside the identity comparison, and a file-backed attachment
+    /// reaches a database the store holds no lease on. A pragma write outlives the
+    /// baseline: `writable_schema` or `ignore_check_constraints` set here would stay in
+    /// force on the connection handed to callbacks, whose authorizer denies pragma writes
+    /// only from that point on. Transaction control would break out of the `IMMEDIATE`
+    /// transaction the baseline is applied inside.
+    fn deny_baseline_escapes(
         context: rusqlite::hooks::AuthContext<'_>,
     ) -> rusqlite::hooks::Authorization {
         use rusqlite::hooks::{AuthAction, Authorization};
         match context.action {
-            AuthAction::Attach { .. } | AuthAction::Detach { .. } => Authorization::Deny,
+            AuthAction::Attach { .. }
+            | AuthAction::Detach { .. }
+            | AuthAction::Transaction { .. }
+            | AuthAction::Savepoint { .. }
+            | AuthAction::Pragma {
+                pragma_value: Some(_),
+                ..
+            } => Authorization::Deny,
+            AuthAction::Pragma {
+                pragma_name,
+                pragma_value: None,
+            } if is_side_effecting_pragma(pragma_name) => Authorization::Deny,
             _ => Authorization::Allow,
         }
     }
@@ -851,9 +866,10 @@ mod sqlite_backend {
             let scratch =
                 Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
             // The authorizer runs before each statement, so an `ATTACH` is refused before
-            // it can open a file, and a `DETACH` cannot hide one that ran.
+            // it can open a file, a `DETACH` cannot hide one that ran, and a pragma write
+            // never reaches the connection state.
             scratch
-                .authorizer(Some(deny_attachments))
+                .authorizer(Some(deny_baseline_escapes))
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             scratch
                 .execute_batch(&text)
@@ -1205,8 +1221,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A baseline may address the main schema only: no attachments, and the store's own
-    /// tables keep the definitions `baseline.sql` gives them.
+    /// A baseline may address the main schema only: no attachments, no pragma writes, no
+    /// transaction control, and the store's own tables keep the definitions `baseline.sql`
+    /// gives them.
     #[test]
     fn a_baseline_that_attaches_or_redefines_infrastructure_is_rejected() {
         let (root, d) = tmp();
@@ -1222,6 +1239,11 @@ mod tests {
                 "ATTACH ':memory:' AS aux; CREATE TABLE aux.t (k TEXT); DETACH aux;",
                 "not authorized",
             ),
+            ("PRAGMA writable_schema = ON;", "not authorized"),
+            ("PRAGMA ignore_check_constraints = ON;", "not authorized"),
+            ("PRAGMA foreign_keys = OFF;", "not authorized"),
+            ("PRAGMA shrink_memory;", "not authorized"),
+            ("BEGIN; CREATE TABLE t (k TEXT); COMMIT;", "not authorized"),
             (
                 "DROP TABLE fence; CREATE TABLE fence (id INTEGER PRIMARY KEY CHECK (id = 0), epoch INTEGER NOT NULL CHECK (epoch = 1));",
                 "redefines infrastructure object `fence`",

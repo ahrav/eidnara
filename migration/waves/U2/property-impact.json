@@ -9,7 +9,7 @@
       "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
-  "destination_commit": "c250400debdf328a7fb3365f1a4739aa81c7dde4",
+  "destination_commit": "2e604ae3b62b44ac5842aff83fb713b2bd28f910",
   "touched_files": [
     "crates/cache-stability/src/lib.rs",
     "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
@@ -131,9 +131,9 @@
       },
       "strategy_decision": "Byte-stable golden fixture: receipt-level byte identity to the source blob plus the fixture-driven test as an independent oracle; the near-tautological action assertion is recorded and the byte, boundary, flag, and queue assertions carry the claim.",
       "audit_verdict": "pass",
-      "evidence_digest": "74f972396f700368c6772943d96d35f4110dacb1cbe507e01b4b4118cf2369ac",
-      "code_hash": "b519f2b4d2a10b4b43b30e159fd1e62a90ca006dc47d0f4eb41d247381ad7562",
-      "check_hash": "49c095fee21e88a0ee5785d3a82b068bb6e900e7891e1fba976cfd6c1e4775a6",
+      "evidence_digest": "b23b39071961d128c9009e8b66af7b2201564cd478f6082a238901070bcd17df",
+      "code_hash": "8fd022b17a963a5c5ce47f429a079c2e659bc515c35240f7b29f48f2aa68ccd4",
+      "check_hash": "99e14b67056563ad68e9941936172f44f7618ecdfe9b074c7316fa5857fb73ea",
       "check_pointer": "crates/cache-stability/tests/golden_vectors.rs#L160",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
@@ -956,9 +956,9 @@
       },
       "strategy_decision": "Fixture test plus refusal tests: a fresh file's application id, user version, format-marker digest, and sqlite_schema inventory are compared to a destination-captured fixture that the generator example produces, and non-pristine files with foreign objects, a different consumer baseline, or a bypassed fence constraint are refused with the file bytes unchanged. Chosen over a property test because the identity is one fixed byte contract.",
       "audit_verdict": "pass",
-      "evidence_digest": "3a449828d9f81a2c7d7be960cfe28bbe5912c193403fbb0cf25b9123378ac584",
-      "code_hash": "226d64ccd86a964375f1e28aa86daf259c0a6152909bca54575ab2bb52b0f764",
-      "check_hash": "d4c37492c7803d0a65954dc7028142bb1fbd56053ecac0c84f08aa6f2eace70d",
+      "evidence_digest": "b5c53ac32566a05fac34eb68a4bad1c8222e24c3c7d6bccf5436640258605fec",
+      "code_hash": "859a41dcfbe07a7cbca3486a378a9db1e629a26bc4cd73cac5387a7d4296cc1c",
+      "check_hash": "81a69adb3dc31c376fbef101f85996ecbc6cfab4c45d819fd2401ddb68077964",
       "check_pointer": "crates/storage/src/lib.rs#L1255",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",

@@ -55,4 +55,6 @@ A `no` means every safety check threatened by that fault can pass without the fa
 | A permissive database, WAL, or SHM file at reopen | `store-files-are-owner-only-after-open` |
 | A callback error after a fence claim | `fenced-write-is-atomic` |
 | A negative stored epoch or a holder epoch above `i64::MAX` | `fence-epoch-outside-sqlite-range-fails-closed` |
+| A baseline text that attaches a database, writes a pragma, or opens a transaction | `store-schema-identity-matches-the-baseline` |
+| A stored cache `version` of `u64::MAX` before a rebuild | none; `CoreState::step` returns `VersionExhausted` with the state unchanged (`an_exhausted_version_refuses_a_rebuild_and_leaves_the_state_unchanged`) |
 

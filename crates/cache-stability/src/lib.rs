@@ -79,6 +79,13 @@ pub struct FrozenUnit {
     pub reset_rule: String,
 }
 
+/// The rebuild counter holds `u64::MAX`, so a `Soft` or `Hard` pass has no distinct
+/// version left to stamp. The state is returned unchanged; the harness must not write it
+/// back as if the pass had run.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("cache version {0} is exhausted; no further rebuild can be stamped")]
+pub struct VersionExhausted(pub u64);
+
 /// The core's durable per-pass state. One atomic value: the harness writes it back
 /// whole (units + boundary + version), never per-field, under the store's single-writer
 /// lease. Any compare-and-swap tag belongs to the storage layer, not to a field here.
@@ -167,7 +174,14 @@ impl CoreState {
 
     /// Apply one pass. Returns the executed [`StepResult`] and mutates `self` in place
     /// (the harness then CAS-writes the whole value back).
-    pub fn step(&mut self, input: PassInput) -> StepResult {
+    ///
+    /// A `Soft` or `Hard` pass stamps `version + 1`; when no such value exists the pass is
+    /// refused before any field changes, since a wrapped counter would reuse a version the
+    /// harness has already seen.
+    pub fn step(&mut self, input: PassInput) -> Result<StepResult, VersionExhausted> {
+        if matches!(input.proposed, Action::Soft | Action::Hard) && self.version == u64::MAX {
+            return Err(VersionExhausted(self.version));
+        }
         let boundary_match = input.boundary_present == self.boundary_id;
 
         if input.run_started {
@@ -181,11 +195,11 @@ impl CoreState {
                 .retain(|u| u.durability_class == DurabilityClass::Lineage);
         }
 
-        match input.proposed {
+        Ok(match input.proposed {
             Action::SoftPlus => self.step_defer(input, boundary_match),
             Action::Soft => self.step_soft(input, boundary_match),
             Action::Hard => self.step_hard(input, boundary_match),
-        }
+        })
     }
 
     /// Defer: no render call, replay frozen bytes verbatim. Queue any drop-queued units into
@@ -337,7 +351,9 @@ mod tests {
         );
         let before = state.cached_prefix_bytes();
         // A defer pass carries NO rendered_units; the core must replay verbatim.
-        let r = state.step(PassInput::new(Action::SoftPlus, "b0"));
+        let r = state
+            .step(PassInput::new(Action::SoftPlus, "b0"))
+            .expect("version headroom");
         assert_eq!(r.action, Action::SoftPlus);
         assert!(!r.reconcile_pending);
         assert_eq!(state.cached_prefix_bytes(), before, "defer changed bytes");
@@ -362,7 +378,9 @@ mod tests {
         );
         let before = state.cached_prefix_bytes();
         for _ in 0..3 {
-            let r = state.step(PassInput::new(Action::SoftPlus, "-"));
+            let r = state
+                .step(PassInput::new(Action::SoftPlus, "-"))
+                .expect("version headroom");
             assert_eq!(r.action, Action::SoftPlus);
             assert!(
                 !r.reconcile_pending,
@@ -374,8 +392,10 @@ mod tests {
         // boundary exists still reconciles (the non-vacuous arm below is unaffected).
         let mut hard = PassInput::new(Action::Hard, "-");
         hard.new_boundary_id = Some("b1".into());
-        state.step(hard);
-        let r = state.step(PassInput::new(Action::SoftPlus, "-"));
+        state.step(hard).expect("version headroom");
+        let r = state
+            .step(PassInput::new(Action::SoftPlus, "-"))
+            .expect("version headroom");
         assert!(
             r.reconcile_pending,
             "absence of a REAL minted boundary must still reconcile"
@@ -390,7 +410,9 @@ mod tests {
         );
         let before = state.cached_prefix_bytes();
         // Boundary removed by a revert: '-' != 'b0'. The core must NOT rebuild this pass.
-        let r = state.step(PassInput::new(Action::SoftPlus, "-"));
+        let r = state
+            .step(PassInput::new(Action::SoftPlus, "-"))
+            .expect("version headroom");
         assert_eq!(r.action, Action::SoftPlus, "revert pass must not bust");
         assert!(r.reconcile_pending, "boundary absent must flag reconcile");
         assert_eq!(
@@ -414,7 +436,7 @@ mod tests {
         let mut hard = PassInput::new(Action::Hard, "b0");
         hard.rendered_units = vec![unit("m0", "<h>KEEP2</h>", DurabilityClass::Lineage)];
         hard.new_boundary_id = Some("b1".into());
-        state.step(hard);
+        state.step(hard).expect("version headroom");
         let keys: Vec<&str> = state.frozen_units.iter().map(|u| u.key.as_str()).collect();
         assert_eq!(keys, vec!["m0"], "a key the render omits leaves the set");
         assert!(
@@ -433,12 +455,12 @@ mod tests {
         );
         let mut defer = PassInput::new(Action::SoftPlus, "b0");
         defer.queued = vec![unit("m0", "<h>STALE</h>", DurabilityClass::Lineage)];
-        state.step(defer);
+        state.step(defer).expect("version headroom");
 
         let mut hard = PassInput::new(Action::Hard, "b0");
         hard.rendered_units = vec![unit("m0", "<h>FRESH</h>", DurabilityClass::Lineage)];
         hard.new_boundary_id = Some("b1".into());
-        state.step(hard);
+        state.step(hard).expect("version headroom");
 
         let m0 = state
             .frozen_units
@@ -461,7 +483,7 @@ mod tests {
         // SOFT+ with a drop queued: accumulates in pending_changes, no bust.
         let mut defer = PassInput::new(Action::SoftPlus, "b0");
         defer.queued = vec![unit("drop1", "[dropped 1]", DurabilityClass::Lineage)];
-        state.step(defer);
+        state.step(defer).expect("version headroom");
         assert_eq!(state.pending_changes.len(), 1, "drop must queue");
         assert!(
             !state.cached_prefix_bytes().contains("[dropped 1]"),
@@ -472,7 +494,7 @@ mod tests {
         let mut hard = PassInput::new(Action::Hard, "b0");
         hard.rendered_units = vec![unit("m0", "<h>FOLDED</h>", DurabilityClass::Lineage)];
         hard.new_boundary_id = Some("b1".into());
-        let r = state.step(hard);
+        let r = state.step(hard).expect("version headroom");
 
         assert_eq!(r.action, Action::Hard);
         assert!(
@@ -502,7 +524,7 @@ mod tests {
             unit("m1", "<delta>X</delta>", DurabilityClass::Lineage),
             unit("d1", "<add>Y</add>", DurabilityClass::Lineage),
         ];
-        state.step(soft);
+        state.step(soft).expect("version headroom");
         let keys: Vec<&str> = state.frozen_units.iter().map(|u| u.key.as_str()).collect();
         assert_eq!(
             keys,
@@ -545,7 +567,7 @@ mod tests {
             DurabilityClass::Lineage,
         )];
         soft.new_boundary_id = Some("b1".into());
-        let r = state.step(soft);
+        let r = state.step(soft).expect("version headroom");
 
         assert_eq!(r.action, Action::Soft);
         assert_eq!(
@@ -559,7 +581,9 @@ mod tests {
 
         // A defer at the NEW anchor replays byte-identical, no reconcile.
         let before = state.cached_prefix_bytes();
-        let r = state.step(PassInput::new(Action::SoftPlus, "b1"));
+        let r = state
+            .step(PassInput::new(Action::SoftPlus, "b1"))
+            .expect("version headroom");
         assert_eq!(r.action, Action::SoftPlus);
         assert!(
             !r.reconcile_pending,
@@ -573,7 +597,9 @@ mod tests {
 
         // A revert that removes the new boundary from the live array -> reconcile (the anchor
         // moved to b1, so a revert below b1 makes b1 absent).
-        let r = state.step(PassInput::new(Action::SoftPlus, "-"));
+        let r = state
+            .step(PassInput::new(Action::SoftPlus, "-"))
+            .expect("version headroom");
         assert!(
             r.reconcile_pending,
             "a revert below the new anchor must flag reconcile"
@@ -584,7 +610,7 @@ mod tests {
         let mut hard = PassInput::new(Action::Hard, "-");
         hard.rendered_units = vec![unit("m0", "<h>REMAT</h>", DurabilityClass::Lineage)];
         hard.new_boundary_id = Some("b2".into());
-        let r = state.step(hard);
+        let r = state.step(hard).expect("version headroom");
         assert_eq!(r.action, Action::Hard);
         assert!(!r.reconcile_pending, "HARD clears the pending reconcile");
         assert_eq!(state.boundary_id, "b2", "HARD re-mints the anchor");
@@ -608,7 +634,9 @@ mod tests {
         );
 
         // A revert removes b0 -> defer reuses this pass and sets reconcile_pending.
-        let r = state.step(PassInput::new(Action::SoftPlus, "-"));
+        let r = state
+            .step(PassInput::new(Action::SoftPlus, "-"))
+            .expect("version headroom");
         assert!(r.reconcile_pending, "revert must flag reconcile");
 
         // An erroneous coverage-extending SOFT while reconcile is pending: the anchor must hold.
@@ -619,14 +647,16 @@ mod tests {
             DurabilityClass::Lineage,
         )];
         soft.new_boundary_id = Some("b1".into());
-        state.step(soft);
+        state.step(soft).expect("version headroom");
         assert_eq!(
             state.boundary_id, "b0",
             "anchor must NOT advance on a SOFT while reconcile is pending (no stranded stale m0)"
         );
 
         // The next absent pass still forces reconcile against the original anchor (not stranded).
-        let r = state.step(PassInput::new(Action::SoftPlus, "-"));
+        let r = state
+            .step(PassInput::new(Action::SoftPlus, "-"))
+            .expect("version headroom");
         assert!(
             r.reconcile_pending,
             "the needed reconcile must still fire — it was not stranded under a moved anchor"
@@ -644,7 +674,7 @@ mod tests {
         );
         let mut run = PassInput::new(Action::SoftPlus, "b0");
         run.run_started = true;
-        state.step(run);
+        state.step(run).expect("version headroom");
         let keys: Vec<&str> = state.frozen_units.iter().map(|u| u.key.as_str()).collect();
         assert_eq!(
             keys,
@@ -671,7 +701,7 @@ mod tests {
             );
             let mut pass = PassInput::new(action, "b0");
             pass.run_started = true;
-            state.step(pass);
+            state.step(pass).expect("version headroom");
             assert!(
                 state
                     .frozen_units
@@ -696,12 +726,12 @@ mod tests {
         );
         let mut defer = PassInput::new(Action::SoftPlus, "b0");
         defer.queued = vec![unit("ep", "run-scoped", DurabilityClass::Episode)];
-        state.step(defer);
+        state.step(defer).expect("version headroom");
         assert_eq!(state.pending_changes.len(), 1);
 
         let mut run = PassInput::new(Action::SoftPlus, "b0");
         run.run_started = true;
-        state.step(run);
+        state.step(run).expect("version headroom");
         assert!(
             state.pending_changes.is_empty(),
             "queued episode unit must reset at the run boundary"
@@ -709,7 +739,7 @@ mod tests {
 
         let mut hard = PassInput::new(Action::Hard, "b0");
         hard.new_boundary_id = Some("b1".into());
-        state.step(hard);
+        state.step(hard).expect("version headroom");
         assert!(
             !state.cached_prefix_bytes().contains("run-scoped"),
             "a reset queued unit must never reach the frozen prefix"
@@ -722,14 +752,16 @@ mod tests {
             vec![unit("m0", "<h>BASE</h>", DurabilityClass::Lineage)],
             "b0",
         );
-        let r = state.step(PassInput::new(Action::SoftPlus, "-"));
+        let r = state
+            .step(PassInput::new(Action::SoftPlus, "-"))
+            .expect("version headroom");
         assert!(r.reconcile_pending, "revert must flag reconcile");
 
         // A reconcile-forced HARD that mints NO boundary while the anchor is still
         // absent has not reconciled anything: the stored anchor is still stale.
         let mut hard = PassInput::new(Action::Hard, "-");
         hard.rendered_units = vec![unit("m0", "<h>REMAT</h>", DurabilityClass::Lineage)];
-        let r = state.step(hard);
+        let r = state.step(hard).expect("version headroom");
         assert!(
             r.reconcile_pending,
             "a HARD that leaves the anchor absent must not report reconciled"
@@ -739,17 +771,45 @@ mod tests {
         // Minting a boundary reconciles.
         let mut hard = PassInput::new(Action::Hard, "-");
         hard.new_boundary_id = Some("b1".into());
-        let r = state.step(hard);
+        let r = state.step(hard).expect("version headroom");
         assert!(!r.reconcile_pending, "a minting HARD reconciles");
 
         // A HARD at a live anchor (no mint) also reconciles.
-        let r2 = state.step(PassInput::new(Action::SoftPlus, "-"));
+        let r2 = state
+            .step(PassInput::new(Action::SoftPlus, "-"))
+            .expect("version headroom");
         assert!(r2.reconcile_pending);
         let hard = PassInput::new(Action::Hard, "b1");
-        let r3 = state.step(hard);
+        let r3 = state.step(hard).expect("version headroom");
         assert!(
             !r3.reconcile_pending,
             "a HARD at the live anchor reconciles without minting"
         );
+    }
+
+    /// A stored counter at `u64::MAX` refuses the next rebuild with the state untouched; a
+    /// defer stamps nothing and still runs.
+    #[test]
+    fn an_exhausted_version_refuses_a_rebuild_and_leaves_the_state_unchanged() {
+        let mut state = CoreState {
+            version: u64::MAX,
+            boundary_id: "b0".into(),
+            frozen_units: vec![],
+            pending_changes: vec![],
+            reconcile_pending: false,
+        };
+        let before = state.clone();
+        for action in [Action::Soft, Action::Hard] {
+            let err = state
+                .step(PassInput::new(action, "b0"))
+                .expect_err("an exhausted version must refuse a rebuild");
+            assert_eq!(err, VersionExhausted(u64::MAX));
+            assert_eq!(state, before, "a refused pass leaves every field as it was");
+        }
+        let r = state
+            .step(PassInput::new(Action::SoftPlus, "b0"))
+            .expect("a defer stamps no version");
+        assert_eq!(r.action, Action::SoftPlus);
+        assert_eq!(state.version, u64::MAX);
     }
 }

@@ -190,7 +190,7 @@ fn run_vector(vector: &Vector) {
         let input = pass_to_input(pass, &pending_keys);
         let before_bytes = state.cached_prefix_bytes();
         let boundary_before = state.boundary_id.clone();
-        let result = state.step(input);
+        let result = state.step(input).expect("version headroom");
 
         assert_eq!(
             result.action, pass.expect_action,
@@ -302,7 +302,9 @@ fn cross_episode_lineage_reproduces_byte_identical() {
             .map(|u| u.key.clone())
             .collect();
         let before = state.cached_prefix_bytes();
-        state.step(pass_to_input(pass, &pending_keys));
+        state
+            .step(pass_to_input(pass, &pending_keys))
+            .expect("version headroom");
         if run_started {
             assert_eq!(
                 state.cached_prefix_bytes(),
