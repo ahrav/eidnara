@@ -615,14 +615,12 @@ mod sqlite_backend {
             protect_file(Path::new(&format!("{path}{suffix}")))
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
         }
-        // WAL permits concurrent readers. The busy timeout makes transient locks
-        // wait rather than fail, and foreign-key enforcement is enabled.
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-        // In WAL mode, `synchronous=NORMAL` may lose the most recent commits
-        // after power loss, which would roll the persisted fence epoch backward.
-        conn.pragma_update(None, "synchronous", "FULL")
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // A VFS that cannot switch to WAL answers the pragma with the unchanged
+        // mode; the fence claim must not commit under a journal mode every later
+        // fenced write would reject.
+        pin_fence_durability(&conn)?;
+        // The busy timeout makes transient locks wait rather than fail, and
+        // foreign-key enforcement is enabled.
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         conn.pragma_update(None, "foreign_keys", "ON")
@@ -771,6 +769,15 @@ mod sqlite_backend {
                 "fence epoch write affected {rows} rows; expected 1"
             )));
         }
+        // An AFTER trigger can undo the row while leaving the change count at one.
+        let stored: i64 = tx
+            .query_row(FENCE_EPOCH_SQL, [], |row| row.get(0))
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        if stored != holder_epoch_sql {
+            return Err(StoreError::Backend(format!(
+                "fence epoch reads back as {stored} after writing {holder_epoch_sql}"
+            )));
+        }
         Ok(())
     }
 
@@ -861,6 +868,20 @@ mod sqlite_backend {
             if recorded != 1 {
                 return Err(StoreError::Migration(format!(
                     "namespace '{namespace}' migration {}: version record affected {recorded} rows; expected 1",
+                    m.version
+                )));
+            }
+            // An AFTER trigger can undo the row while leaving the change count at one.
+            let present: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM cortexkit_schema_version WHERE namespace = ?1 AND version = ?2",
+                    rusqlite::params![namespace, m.version],
+                    |r| r.get(0),
+                )
+                .map_err(|e| StoreError::Migration(e.to_string()))?;
+            if present != 1 {
+                return Err(StoreError::Migration(format!(
+                    "namespace '{namespace}' migration {}: version record missing after insert",
                     m.version
                 )));
             }
@@ -1355,6 +1376,135 @@ mod tests {
         }
         drop(tx);
         drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An `AFTER UPDATE` trigger that restores the old epoch leaves the change
+    /// count at one, so only reading the stored value back exposes the undo.
+    #[test]
+    fn undone_fence_update_is_an_error_not_a_silent_success() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let path = path.clone();
+        drop(open_sqlite(&d).expect("seed database at epoch 1"));
+
+        let mut conn = rusqlite::Connection::open(&path).expect("reopen raw");
+        conn.execute_batch(
+            "CREATE TRIGGER fence_undo AFTER UPDATE ON cortexkit_fence \
+             BEGIN UPDATE cortexkit_fence SET epoch = OLD.epoch WHERE id = 0; END",
+        )
+        .expect("install undoing trigger");
+        let tx = conn.transaction().expect("tx");
+        match claim_fence(&tx, 99) {
+            Err(StoreError::Backend(m)) => {
+                assert!(m.contains("reads back as 1"), "unexpected message: {m}")
+            }
+            other => panic!("undone fence write must fail, got {other:?}"),
+        }
+        drop(tx);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An `AFTER INSERT` trigger that deletes the version row leaves the change
+    /// count at one; the migration must still fail rather than commit unrecorded.
+    #[test]
+    fn undone_version_record_fails_the_migration_instead_of_committing_it() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let path = path.clone();
+        let store = open_sqlite(&d).expect("open");
+        store
+            .migrate(
+                "ns",
+                &[Migration {
+                    version: 1,
+                    statements: "CREATE TABLE first (k TEXT);",
+                }],
+            )
+            .expect("first migration creates the version table");
+
+        let raw = rusqlite::Connection::open(&path).expect("reopen raw");
+        raw.execute_batch(
+            "CREATE TRIGGER version_undo AFTER INSERT ON cortexkit_schema_version \
+             BEGIN DELETE FROM cortexkit_schema_version \
+             WHERE namespace = NEW.namespace AND version = NEW.version; END",
+        )
+        .expect("install undoing trigger");
+        drop(raw);
+
+        match store.migrate(
+            "ns",
+            &[
+                Migration {
+                    version: 1,
+                    statements: "CREATE TABLE first (k TEXT);",
+                },
+                Migration {
+                    version: 2,
+                    statements: "CREATE TABLE second (k TEXT);",
+                },
+            ],
+        ) {
+            Err(StoreError::Migration(m)) => {
+                assert!(
+                    m.contains("missing after insert"),
+                    "unexpected message: {m}"
+                )
+            }
+            other => panic!("an undone version record must fail the migration, got {other:?}"),
+        }
+        let second_exists: i64 = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'second'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("inspect");
+        assert_eq!(
+            second_exists, 0,
+            "migration 2 must roll back with its record"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Sidecars SQLite creates take the database file's mode, so a fresh open
+    /// under a permissive umask still yields owner-only `-wal` and `-shm` files
+    /// without any later `chmod` on them.
+    #[cfg(unix)]
+    #[test]
+    fn fresh_open_creates_owner_only_sidecars_under_a_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let path = path.clone();
+        let previous = unsafe { libc::umask(0o022) };
+        let opened = open_sqlite(&d);
+        unsafe { libc::umask(previous) };
+        let store = opened.expect("fresh open");
+        for suffix in ["", "-wal", "-shm"] {
+            let sidecar = format!("{path}{suffix}");
+            let mode = std::fs::metadata(&sidecar)
+                .unwrap_or_else(|e| panic!("{sidecar} must exist after open: {e}"))
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "{sidecar} created under umask 022 has mode {mode:o}"
+            );
+        }
+        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 

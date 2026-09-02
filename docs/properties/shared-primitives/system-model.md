@@ -12,7 +12,7 @@ System path: `crates/lease` at revision `9e871ce`, plus the U8 working-tree chan
 
 `open_lease_file` first opens an existing final path with Unix `O_NOFOLLOW | O_NONBLOCK` or Windows `FILE_FLAG_OPEN_REPARSE_POINT`. On `NotFound`, it creates a same-directory `NamedTempFile`, writes canonical epoch zero, and calls `persist_noclobber`; an `AlreadyExists` race reopens the winner within three attempts. A successful publication returns the already-open temporary-file inode. Descriptor metadata rejects nonregular files and Windows reparse points (`crates/lease/src/lib.rs:56-77,106-143,250-330`). Exclusive and shared acquisition then use only `File::try_lock` or `File::try_lock_shared`. Both methods classify `TryLockError::WouldBlock` as `LeaseError::Held` and unwrap `TryLockError::Error` into `LeaseError::Io` (`crates/lease/src/lib.rs:89-104`).
 
-The crate has no network or database boundary. Its authority boundaries are the filesystem path and kernel lock table. `storage` reads the SQLite fence as a resource floor, acquires above it, claims a strictly greater epoch before exposure, and rechecks it in fenced writes and migrations (`crates/storage/src/lib.rs:189-235,588-647,708-745,782-871`).
+The crate has no network or database boundary. Its authority boundaries are the filesystem path and kernel lock table. `storage` reads the SQLite fence as a resource floor, acquires above it, claims a strictly greater epoch before exposure, and rechecks it in fenced writes and migrations (`crates/storage/src/lib.rs:189-235,588-645,706-743,789-892`).
 
 ## State and persistence
 

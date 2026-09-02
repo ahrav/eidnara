@@ -51,7 +51,7 @@ What was checked:
   `epoch_read_is_bounded_regardless_of_file_size`,
   `concurrent_exclusive_acquisitions_admit_exactly_one_holder`,
   `separator_in_a_key_field_fails_closed_instead_of_aliasing`); `storage` has
-  nine appended tests; `storage-types` has two; `cache-stability` has three.
+  twelve appended tests; `storage-types` has two; `cache-stability` has three.
 
 Adaptations beyond renames, each recorded in the receipt as `adapted`:
 
@@ -60,7 +60,7 @@ Adaptations beyond renames, each recorded in the receipt as `adapted`:
 | `crates/cache-stability/src/lib.rs` | module doc; one test message; nested `if let` in `step_soft` collapsed into a let chain (same condition) |
 | `crates/lease/src/lib.rs` | first doc line; `fnv1a` doc; six malformed-epoch cases; `LeaseKey::identity` rejects the `U+001F` separator; four appended tests |
 | `crates/storage-types/src/lib.rs` | module doc; `StorageBackend::Postgres` doc; `StorageDescriptor` doc; `Debug` redacts the DSN; `sqlite_store_path` rejects path components in `module_id`; two appended tests |
-| `crates/storage/src/lib.rs` | module doc first line; test temp-dir prefix; re-export of `GuardedConn` and `MaintenanceConn`; review fixes; nine appended tests |
+| `crates/storage/src/lib.rs` | module doc first line; test temp-dir prefix; re-export of `GuardedConn` and `MaintenanceConn`; review fixes; twelve appended tests |
 | `crates/*/Cargo.toml` | crate names, `publish` and `rust-version` inherited, workspace dependency pins, descriptions without product branding |
 | `crates/storage-types/examples/golden-vectors.rs`, `tests/golden_vectors.rs` | doc comments describe the byte-stable fixture |
 

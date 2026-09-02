@@ -1122,6 +1122,14 @@ describe("evidence: git-backed receipts", () => {
         expect(validateShape("registry", registry)).toContain(
             "$.entries[6].fixture crates/lease/tests/golden/unregistered.json is not a registered byte-stable fixture",
         );
+        // A registered fixture whose role is not byte-stable is rejected too.
+        (registry.entries as Json[]).push({
+            kind: "fixture",
+            path: "release/registry-gate.json",
+            role: "external-record",
+            rationale: "external record",
+            evidence: ["x"],
+        });
         ((registry.entries as Json[])[6] as Json).fixture = "release/registry-gate.json";
         expect(validateShape("registry", registry)).toContain(
             "$.entries[6].fixture release/registry-gate.json is not a registered byte-stable fixture",

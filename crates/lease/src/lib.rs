@@ -1409,8 +1409,10 @@ mod tests {
             (LeaseKey::new("a", "b", "c\u{1f}d"), "scope_key"),
         ];
         for (key, field) in cases {
-            let panic = std::panic::catch_unwind(|| key.identity())
-                .expect_err("separator in {field} must panic");
+            let panic = match std::panic::catch_unwind(|| key.identity()) {
+                Err(payload) => payload,
+                Ok(identity) => panic!("separator in {field} must panic, got {identity:?}"),
+            };
             let message = panic
                 .downcast_ref::<String>()
                 .expect("panic carries a message");
