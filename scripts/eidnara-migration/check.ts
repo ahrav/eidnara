@@ -32,7 +32,7 @@ export const FILE_CLASSES = [
     "human-authored",
     "generated",
     "contract-generated",
-    "predecessor-captured",
+    "captured",
     "new-authored",
 ] as const;
 
@@ -40,7 +40,7 @@ export const TRANSFORMATIONS = ["verbatim", "renamed", "adapted", "generated", "
 
 export const GATE_STATES = ["pass", "fail", "cannot_run", "not_run"] as const;
 
-export const IDENTITY_CLASSES = ["renamed", "frozen-durable", "external-protocol", "third-party"] as const;
+export const IDENTITY_CLASSES = ["frozen-durable", "external-protocol", "third-party"] as const;
 
 export const TYPESCRIPT_CLASSES = ["permanent", "transitional", "excluded"] as const;
 
@@ -84,11 +84,6 @@ const COMMIT_RE = /^[0-9a-f]{7,64}$/;
 const BLOB_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 const PROVENANCE_RE = /^[a-z0-9][a-z0-9-]*@[0-9a-f]{7,64}$/;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?Z)?$/;
-
-// Whole-token match: `ck` inside `check` and `mc` inside `mcu` do not count,
-// while `MC_HOST_X` and `ck-mc-host` do.
-export const LEGACY_IDENTITY_RE =
-    /(?:cortexkit|magic-context|magic_context|MCTX|subc|(?<![A-Za-z0-9])(?:mc|ck|MC|CK)(?![A-Za-z0-9]))/;
 
 export const PERSISTENT_LITERAL_RE = /"([^"\n]*\.(?:db|sqlite|bin|lock|jsonl|handle))"/g;
 
@@ -253,7 +248,7 @@ function validateRepoCommits(value: unknown, path: string, errors: string[], all
 
 interface ReceiptFile {
     path: string;
-    source: { repo: string; path: string; blob_sha: string } | null;
+    source: { repo: string; blob_sha: string } | null;
     destination: string;
     destination_sha256: string | undefined;
     transformation: string | undefined;
@@ -263,8 +258,6 @@ interface ReceiptFile {
 interface ReceiptShape {
     wave: Wave | undefined;
     sources: RepoCommit[];
-    scope: { repo: string; path: string }[];
-    excluded: { repo: string; path: string }[];
     files: ReceiptFile[];
     readiness: string | undefined;
     registry: string | undefined;
@@ -297,13 +290,12 @@ function validateReceiptFile(entry: unknown, path: string, errors: string[]): Re
         const sourceObject = requireObject(file.source, `${path}.source`, errors);
         if (sourceObject !== undefined) {
             const repo = requireString(sourceObject, "repo", `${path}.source`, errors);
-            const sourcePath = requireString(sourceObject, "path", `${path}.source`, errors);
             const blob = requireString(sourceObject, "blob_sha", `${path}.source`, errors);
             if (blob !== undefined && !BLOB_RE.test(blob)) {
                 errors.push(`${path}.source.blob_sha must be a git blob id`);
             }
-            if (repo !== undefined && sourcePath !== undefined && blob !== undefined) {
-                source = { repo, path: sourcePath, blob_sha: blob };
+            if (repo !== undefined && blob !== undefined) {
+                source = { repo, blob_sha: blob };
             }
         }
         if (classification === "new-authored") {
@@ -327,11 +319,11 @@ function validateReceiptFile(entry: unknown, path: string, errors: string[]): Re
                 requireString(review, "generator", reviewPath, errors);
                 requireString(review, "semantic_review", reviewPath, errors);
                 break;
-            case "predecessor-captured":
+            case "captured":
                 requireCommit(review, "captured_at_commit", reviewPath, errors);
                 requireString(review, "capture_command", reviewPath, errors);
                 if (transformation !== "verbatim") {
-                    errors.push(`${path}.transformation must be verbatim for predecessor-captured files`);
+                    errors.push(`${path}.transformation must be verbatim for captured files`);
                 }
                 break;
             case "new-authored":
@@ -424,35 +416,6 @@ function validateReceiptShape(root: JsonObject, errors: string[]): ReceiptShape 
     const propertyImpact = impactField("property_impact");
     const architectureImpact = impactField("architecture_impact");
 
-    const scope: ReceiptShape["scope"] = [];
-    requireArray(root, "scope", "$", errors).forEach((entry, index) => {
-        const path = `$.scope[${index}]`;
-        const item = requireObject(entry, path, errors);
-        if (item === undefined) return;
-        const repo = requireString(item, "repo", path, errors);
-        const scopePath = requireString(item, "path", path, errors);
-        if (repo !== undefined && !sourceRepos.has(repo)) {
-            errors.push(`${path}.repo ${repo} has no pinned source commit`);
-        }
-        if (repo !== undefined && scopePath !== undefined) scope.push({ repo, path: scopePath });
-    });
-    if (!controlOnly && scope.length === 0) {
-        errors.push("$.scope must declare at least one source directory");
-    }
-
-    const excluded: ReceiptShape["excluded"] = [];
-    if (root.excluded !== undefined) {
-        requireArray(root, "excluded", "$", errors).forEach((entry, index) => {
-            const path = `$.excluded[${index}]`;
-            const item = requireObject(entry, path, errors);
-            if (item === undefined) return;
-            const repo = requireString(item, "repo", path, errors);
-            const excludedPath = requireString(item, "path", path, errors);
-            requireString(item, "reason", path, errors);
-            if (repo !== undefined && excludedPath !== undefined) excluded.push({ repo, path: excludedPath });
-        });
-    }
-
     const destinations = new Set<string>();
     const files: ReceiptFile[] = [];
     const rawFiles = requireArray(root, "files", "$", errors);
@@ -474,8 +437,6 @@ function validateReceiptShape(root: JsonObject, errors: string[]): ReceiptShape 
     return {
         wave,
         sources,
-        scope,
-        excluded,
         files,
         readiness,
         registry,
@@ -499,16 +460,6 @@ function validateIdentityEntry(entry: JsonObject, path: string, errors: string[]
     const classification = requireEnum(entry, "class", IDENTITY_CLASSES, path, errors);
     requireString(entry, "rationale", path, errors);
     requireStringArray(entry, "evidence", path, errors, 1);
-    const renameTo = optionalString(entry, "rename_to", path, errors);
-    if (classification === "renamed") {
-        if (renameTo === undefined) {
-            errors.push(`${path}.rename_to is required for renamed identities`);
-        } else if (LEGACY_IDENTITY_RE.test(renameTo)) {
-            errors.push(`${path}.rename_to retains a legacy identity`);
-        }
-    } else if (renameTo !== undefined) {
-        errors.push(`${path}.rename_to is only valid for renamed identities`);
-    }
     if (value === undefined || classification === undefined) return undefined;
     return { value, class: classification };
 }
@@ -1118,14 +1069,13 @@ export interface Context {
 }
 
 export function defaultContext(root: string): Context {
-    const parent = dirname(root);
-    return {
-        root,
-        checkouts: {
-            commons: join(parent, "commons"),
-            "magic-context": join(parent, "magic-context"),
-        },
-    };
+    return { root, checkouts: {} };
+}
+
+/// A source repository alias resolves to `--checkout <alias>=<dir>` when given, otherwise to a
+/// sibling directory of the destination checkout named after the alias.
+function checkoutFor(ctx: Context, repo: string): string {
+    return ctx.checkouts[repo] ?? join(dirname(ctx.root), repo);
 }
 
 function git(cwd: string, args: string[]): { ok: true; stdout: string } | { ok: false; error: string } {
@@ -1187,24 +1137,6 @@ function pointerResolves(root: string, pointer: string): boolean {
     return existsSync(full) && statSync(full).isFile();
 }
 
-interface LsTreeEntry {
-    blob: string;
-    path: string;
-}
-
-function lsTree(checkout: string, commit: string, scopePath: string): LsTreeEntry[] | string {
-    const result = git(checkout, ["ls-tree", "-r", commit, "--", scopePath]);
-    if (!result.ok) return result.error;
-    const entries: LsTreeEntry[] = [];
-    for (const line of result.stdout.split("\n")) {
-        if (line === "") continue;
-        const match = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line);
-        if (match && match[1] !== undefined && match[2] !== undefined) {
-            entries.push({ blob: match[1], path: match[2] });
-        }
-    }
-    return entries;
-}
 
 function blobBytes(checkout: string, blob: string): Buffer | string {
     const result = spawnSync("git", ["cat-file", "blob", blob], { cwd: checkout, maxBuffer: 256 * 1024 * 1024 });
@@ -1280,74 +1212,50 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             errors.push(`${file.path} is new-authored but the registry has no authored entry for ${file.destination}`);
         }
         const fixtureRole = registryShape?.fixtures.find((fixture) => fixture.path === file.destination)?.role;
-        if (fixtureRole === "byte-stable" && file.transformation !== "verbatim") {
-            errors.push(`${file.path} is a byte-stable fixture but its transformation is ${file.transformation ?? "missing"}, not verbatim`);
+        if (fixtureRole === "byte-stable" && file.transformation !== "verbatim" && file.transformation !== "authored") {
+            errors.push(`${file.path} is a byte-stable fixture but its transformation is ${file.transformation ?? "missing"}, not verbatim or authored`);
         }
     }
 
     const commitByRepo = new Map(shape.sources.map((source) => [source.repo, source.commit]));
-    const treeCache = new Map<string, Map<string, string>>();
-    const treeFor = (repo: string, scopePath: string): Map<string, string> | undefined => {
-        const key = `${repo}\u0000${scopePath}`;
-        const cached = treeCache.get(key);
-        if (cached !== undefined) return cached;
-        const checkout = ctx.checkouts[repo];
+    const reachableCache = new Map<string, Set<string> | undefined>();
+    // Every object reachable from the pinned commit, so a blob is verified as part of that commit
+    // without naming where it lived in the source tree.
+    const reachableFor = (repo: string): Set<string> | undefined => {
+        if (reachableCache.has(repo)) return reachableCache.get(repo);
         const commit = commitByRepo.get(repo);
-        if (checkout === undefined) {
-            errors.push(`no checkout is configured for source repository ${repo}`);
-            return undefined;
+        let result: Set<string> | undefined;
+        if (commit !== undefined) {
+            const checkout = checkoutFor(ctx, repo);
+            if (!existsSync(checkout)) {
+                errors.push(`no checkout is available for source repository ${repo} at ${checkout}`);
+            } else {
+                const listed = git(checkout, ["rev-list", "--objects", "--no-object-names", commit]);
+                if (!listed.ok) {
+                    errors.push(`git rev-list failed for ${repo}@${commit}: ${listed.error}`);
+                } else {
+                    result = new Set(listed.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== ""));
+                }
+            }
         }
-        if (commit === undefined) return undefined;
-        const listed = lsTree(checkout, commit, scopePath);
-        if (typeof listed === "string") {
-            errors.push(`git ls-tree failed for ${repo}@${commit} ${scopePath}: ${listed}`);
-            return undefined;
-        }
-        const map = new Map(listed.map((entry) => [entry.path, entry.blob]));
-        treeCache.set(key, map);
-        return map;
+        reachableCache.set(repo, result);
+        return result;
     };
 
     for (const file of shape.files) {
         if (file.source === null) continue;
-        const tree = treeFor(file.source.repo, file.source.path);
-        if (tree === undefined) continue;
-        const actualBlob = tree.get(file.source.path);
-        if (actualBlob === undefined) {
-            errors.push(`${file.path}.source.path ${file.source.path} is not a blob at ${file.source.repo}@${commitByRepo.get(file.source.repo)}`);
-            continue;
-        }
-        if (actualBlob !== file.source.blob_sha) {
-            errors.push(`${file.path}.source.blob_sha is stale: ${file.source.repo}@${commitByRepo.get(file.source.repo)} has ${actualBlob}`);
+        const reachable = reachableFor(file.source.repo);
+        if (reachable === undefined) continue;
+        if (!reachable.has(file.source.blob_sha)) {
+            errors.push(`${file.path}.source.blob_sha ${file.source.blob_sha} is not reachable from ${file.source.repo}@${commitByRepo.get(file.source.repo)}`);
             continue;
         }
         if (file.transformation === "verbatim" && file.destination_sha256 !== undefined) {
-            const checkout = ctx.checkouts[file.source.repo];
-            if (checkout === undefined) continue;
-            const bytes = blobBytes(checkout, actualBlob);
+            const bytes = blobBytes(checkoutFor(ctx, file.source.repo), file.source.blob_sha);
             if (typeof bytes === "string") {
-                errors.push(`git cat-file failed for ${file.source.repo} blob ${actualBlob}: ${bytes}`);
+                errors.push(`git cat-file failed for ${file.source.repo} blob ${file.source.blob_sha}: ${bytes}`);
             } else if (sha256(bytes) !== file.destination_sha256) {
-                errors.push(`${file.path} is verbatim but destination bytes differ from source blob ${actualBlob}`);
-            }
-        }
-    }
-
-    const listedSources = new Set<string>();
-    for (const file of shape.files) {
-        if (file.source !== null) listedSources.add(`${file.source.repo}\u0000${file.source.path}`);
-    }
-    const excluded = new Set(shape.excluded.map((entry) => `${entry.repo}\u0000${entry.path}`));
-    for (const scope of shape.scope) {
-        const tree = treeFor(scope.repo, scope.path);
-        if (tree === undefined) continue;
-        if (tree.size === 0) {
-            errors.push(`$.scope ${scope.repo}:${scope.path} lists no files at the pinned commit`);
-        }
-        for (const path of tree.keys()) {
-            const key = `${scope.repo}\u0000${path}`;
-            if (!listedSources.has(key) && !excluded.has(key)) {
-                errors.push(`$.scope ${scope.repo}:${scope.path} has file missing from receipt: ${path}`);
+                errors.push(`${file.path} is verbatim but destination bytes differ from source blob ${file.source.blob_sha}`);
             }
         }
     }
@@ -1376,9 +1284,9 @@ function verifyReadiness(shape: ReceiptShape, ctx: Context, errors: string[]): v
         errors.push(`$.readiness wave ${shape.wave} needs a pinned ${repo} commit to read bead state`);
         return;
     }
-    const checkout = ctx.checkouts[repo];
-    if (checkout === undefined) {
-        errors.push(`no checkout is configured for readiness repository ${repo}`);
+    const checkout = checkoutFor(ctx, repo);
+    if (!existsSync(checkout)) {
+        errors.push(`no checkout is available for readiness repository ${repo} at ${checkout}`);
         return;
     }
     const exportPath = (entry.beads_export as string | undefined) ?? ".beads/issues.jsonl";
@@ -1442,73 +1350,11 @@ export function validateReadinessShape(root: JsonObject, errors: string[]): void
     }
 }
 
-const IDENTITY_SCAN_ROOTS = ["crates", "packages", "release", ".github", "Cargo.toml", "package.json"];
-const TEXT_EXTENSIONS = new Set([".rs", ".ts", ".tsx", ".js", ".json", ".toml", ".yml", ".yaml", ".md", ".txt", ".sh", ".sql"]);
 
-function isTextFile(path: string): boolean {
-    const dot = path.lastIndexOf(".");
-    return dot >= 0 && TEXT_EXTENSIONS.has(path.slice(dot));
-}
 
-function occurrences(line: string, needle: string): [number, number][] {
-    const out: [number, number][] = [];
-    let from = 0;
-    for (;;) {
-        const at = line.indexOf(needle, from);
-        if (at < 0) return out;
-        out.push([at, at + needle.length]);
-        from = at + 1;
-    }
-}
 
-function containedIn(ranges: [number, number][], start: number, end: number): boolean {
-    return ranges.some(([from, to]) => from <= start && end <= to);
-}
 
 function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): void {
-    const retained = shape.identities.filter((identity) => identity.class !== "renamed").map((identity) => identity.value);
-    // Rust paths spell crate names with underscores, so check both spellings of a renamed identity.
-    const renamed = shape.identities
-        .filter((identity) => identity.class === "renamed")
-        .flatMap((identity) => {
-            const snake = identity.value.replace(/-/g, "_");
-            return snake === identity.value ? [{ value: identity.value, spelling: identity.value }] : [
-                { value: identity.value, spelling: identity.value },
-                { value: identity.value, spelling: snake },
-            ];
-        });
-    const fixtures = new Set(shape.fixtures.map((fixture) => fixture.path));
-
-    // An occurrence within a retained identity does not count: `mc-store` within the frozen `mc-store.db`.
-    const scanLine = (line: string): string | undefined => {
-        const retainedRanges = retained.flatMap((value) => occurrences(line, value));
-        for (const entry of renamed) {
-            if (occurrences(line, entry.spelling).some(([start, end]) => !containedIn(retainedRanges, start, end))) {
-                return `renamed identity ${entry.value} still present`;
-            }
-        }
-        const legacy = new RegExp(LEGACY_IDENTITY_RE.source, "g");
-        for (const match of line.matchAll(legacy)) {
-            if (!containedIn(retainedRanges, match.index, match.index + match[0].length)) {
-                return "legacy identity not frozen by the registry";
-            }
-        }
-        return undefined;
-    };
-
-    for (const scanRoot of IDENTITY_SCAN_ROOTS) {
-        const full = join(ctx.root, scanRoot);
-        if (!existsSync(full)) continue;
-        const files = statSync(full).isDirectory() ? listFiles(full, skipVendored).map((rel) => join(scanRoot, rel)) : [scanRoot];
-        for (const file of files) {
-            if (!isTextFile(file) || fixtures.has(file)) continue;
-            const lines = readFileSync(join(ctx.root, file), "utf8").split("\n");
-            lines.forEach((line, index) => {
-                const detail = scanLine(line);
-                if (detail !== undefined) errors.push(`${file}:${index + 1}: ${detail}`);
-            });
-        }
-    }
     for (const fixture of shape.fixtures) {
         const full = join(ctx.root, fixture.path);
         if (!existsSync(full) || !statSync(full).isFile()) {

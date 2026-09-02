@@ -608,12 +608,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_decimal_epoch_is_canonicalized() {
+    fn variable_width_decimal_epoch_is_canonicalized() {
         let (store, _dir) = tmp_store();
-        let k = key("legacy");
+        let k = key("variable-width");
         let path = seed_epoch(&store, &k, b"41");
 
-        let guard = store.acquire(&k).expect("acquire legacy state");
+        let guard = store.acquire(&k).expect("acquire variable-width state");
         assert_eq!(guard.epoch(), 42);
         drop(guard);
         assert_eq!(
@@ -1202,12 +1202,12 @@ mod tests {
                 "51a7eaa424b9fd8f",
             ),
             (
-                LeaseKey::new("magic-context-kernel", "sqlite", "core"),
-                "1a0ede79732fcf81",
+                LeaseKey::new("module-a", "sqlite", "core"),
+                "0160e3525823870e",
             ),
             (
-                LeaseKey::new("magic-context", "sqlite", "mc_cache"),
-                "3af1f17c55068a4d",
+                LeaseKey::new("module-b", "sqlite", "cache"),
+                "b9ebf913322ef03a",
             ),
             (LeaseKey::new("", "", ""), "0879e907b5281763"),
             (
@@ -1235,8 +1235,8 @@ mod tests {
         }
 
         // The path the store computes is the file acquisition creates.
-        let k = LeaseKey::new("magic-context-kernel", "sqlite", "core");
-        let guard = store.acquire(&k).expect("acquire production key");
+        let k = LeaseKey::new("module-a", "sqlite", "core");
+        let guard = store.acquire(&k).expect("acquire vector key");
         drop(guard);
         let created: Vec<_> = std::fs::read_dir(dir.path())
             .expect("lease dir")
@@ -1244,7 +1244,7 @@ mod tests {
             .collect();
         assert_eq!(
             created,
-            vec![std::ffi::OsString::from("1a0ede79732fcf81.lease")]
+            vec![std::ffi::OsString::from("0160e3525823870e.lease")]
         );
     }
 

@@ -2,7 +2,7 @@
 
 - **Discovery:** storage fence-decoding pass.
 - **Primary evidence:** `decode_fence_epoch` (`crates/storage/src/lib.rs:756-758`) uses `u64::try_from` and maps failure to `FenceCorrupt`; `fence_epoch_sql_value` (`crates/storage/src/lib.rs:717-723`) uses `i64::try_from` before any statement runs.
-- **Existing evidence:** `legacy_negative_database_fence_fails_closed` (`crates/storage/src/lib.rs:2081`) writes `-1` without the `CHECK` constraint and asserts the open fails and the row is unchanged; `epoch_above_sqlite_integer_range_fails` (`crates/storage/src/lib.rs:2208`) constructs a store at `i64::MAX + 1` and asserts the fenced write fails with the range message.
+- **Existing evidence:** `negative_database_fence_fails_closed` (`crates/storage/src/lib.rs:2075-2102`) writes `-1` without the `CHECK` constraint and asserts the open fails and the row is unchanged; `epoch_above_sqlite_integer_range_fails` (`crates/storage/src/lib.rs:2202`) constructs a store at `i64::MAX + 1` and asserts the fenced write fails with the range message.
 - **Failure scenario:** an `as` cast turns `-1` into `u64::MAX` and authorizes any writer.
 - **Timing window:** none.
 - **Instrumentation:** none.

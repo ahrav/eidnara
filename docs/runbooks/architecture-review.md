@@ -95,7 +95,7 @@ post-integration report.
     {
       "phase": "pre-port",
       "iteration": 0,
-      "analyzed": { "repo": "commons", "commit": "<sha>", "scope_hash": "<sha256>" },
+      "analyzed": { "repo": "primitives", "commit": "<sha>", "scope_hash": "<sha256>" },
       "report_hash": "<sha256>",
       "skill_sha256": "<sha256>",
       "candidates": []

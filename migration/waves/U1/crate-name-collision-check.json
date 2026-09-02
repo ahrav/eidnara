@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "check": "cargo metadata --format-version 1 --locked in commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0 and in the magic-context working tree at 696a0fc199f9534de736bd319f8d28cdf720c332 (plus the uncommitted mc-kernel member present in that tree); union of package names in both resolved graphs compared with every destination member name",
+  "check": "cargo metadata --format-version 1 --locked in primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0 and in the host working tree at 696a0fc199f9534de736bd319f8d28cdf720c332 (plus the uncommitted kernel member present in that tree); union of package names in both resolved graphs compared with every destination member name",
   "resolved_graph_package_count": 370,
   "destination_members": [
     "cache-stability",

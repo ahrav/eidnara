@@ -3,52 +3,25 @@
   "wave": "U2",
   "sources": [
     {
-      "repo": "commons",
+      "repo": "primitives",
       "commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
   "catalogs": [
     {
-      "repo": "commons",
+      "repo": "primitives",
       "commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
   "readiness": "migration/upstream-readiness.json",
   "registry": "migration/registry.json",
   "waivers": "migration/waves/U2/waivers.json",
-  "scope": [
-    {
-      "repo": "commons",
-      "path": "crates/cortexkit-cache-core"
-    },
-    {
-      "repo": "commons",
-      "path": "crates/cortexkit-lease"
-    },
-    {
-      "repo": "commons",
-      "path": "crates/cortexkit-store-types"
-    },
-    {
-      "repo": "commons",
-      "path": "crates/cortexkit-store"
-    },
-    {
-      "repo": "commons",
-      "path": "docs/property-catalogs/cortexkit-lease"
-    },
-    {
-      "repo": "commons",
-      "path": "docs/lease-store-density.md"
-    }
-  ],
   "property_impact": "migration/waves/U2/property-impact.json",
   "architecture_impact": "migration/waves/U2/architecture-impact.json",
   "files": [
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-cache-core/Cargo.toml",
+        "repo": "primitives",
         "blob_sha": "835d282a3fa172c12816735ecafc8f021a35019e"
       },
       "destination": "crates/cache-stability/Cargo.toml",
@@ -61,8 +34,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-cache-core/src/lib.rs",
+        "repo": "primitives",
         "blob_sha": "668de98e86598eca1ba50a051328db583460a274"
       },
       "destination": "crates/cache-stability/src/lib.rs",
@@ -74,23 +46,19 @@
       }
     },
     {
-      "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-cache-core/tests/golden/cache-stability-golden-vectors.json",
-        "blob_sha": "67b5ec9fabce080bf1d37b35df41fe20d9dd5565"
-      },
+      "source": null,
       "destination": "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
-      "destination_sha256": "3a3b65fab99cd50c81ac2a1956e14652d1a635b091f6f7841229065800c5c11e",
-      "transformation": "verbatim",
-      "class": "human-authored",
+      "destination_sha256": "7018f937836d4776e29ad779ff41f88d89cac0c27427d9fee0faef44d07a3fec",
+      "transformation": "authored",
+      "class": "new-authored",
       "review_evidence": {
-        "doc_rigor": "migration/waves/U2/review-notes.md#byte-stable-fixtures"
+        "design_review": "migration/waves/U2/review-notes.md#byte-stable-fixtures",
+        "negative_tests": "crates/cache-stability/tests/golden_vectors.rs and crates/storage-types/tests/golden_vectors.rs; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-cache-core/tests/golden_vectors.rs",
+        "repo": "primitives",
         "blob_sha": "cfa66afee8e2e5e7cf67ba49be02f452bdd83bb9"
       },
       "destination": "crates/cache-stability/tests/golden_vectors.rs",
@@ -103,8 +71,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-lease/Cargo.toml",
+        "repo": "primitives",
         "blob_sha": "0d572fbc4f158559017ddb129729f4da97985d1c"
       },
       "destination": "crates/lease/Cargo.toml",
@@ -117,12 +84,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-lease/src/lib.rs",
+        "repo": "primitives",
         "blob_sha": "2699b575864d0d1823d7531aa9a0e53bcfa98c1f"
       },
       "destination": "crates/lease/src/lib.rs",
-      "destination_sha256": "b60f6d261ec45ab268936d8561fc56bc358a7e6bf3aaec415b4c7e67dca83d71",
+      "destination_sha256": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -131,8 +97,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-store-types/Cargo.toml",
+        "repo": "primitives",
         "blob_sha": "a2c18e5a2730669c3088e00757ecd73d8b14fc3a"
       },
       "destination": "crates/storage-types/Cargo.toml",
@@ -145,12 +110,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-store-types/examples/golden-vectors.rs",
+        "repo": "primitives",
         "blob_sha": "8def626a0de42b432ffd4804c8f60ab5ac2849a0"
       },
       "destination": "crates/storage-types/examples/golden-vectors.rs",
-      "destination_sha256": "1c5282744b763929c78d0b8c53ad21e7e2e96de21b336830aae8784378a22485",
+      "destination_sha256": "1d4a59249157b77a87c07c8dd77ebed370787656c9a923dafe478bfb21446b7c",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -159,12 +123,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-store-types/src/lib.rs",
+        "repo": "primitives",
         "blob_sha": "b32580688f10cf68de7e767031f4ac732fdda245"
       },
       "destination": "crates/storage-types/src/lib.rs",
-      "destination_sha256": "7a86776c3d6a9a138f5995d9d4b2ddf964ff400c3f114db5fc1b26ceffb85089",
+      "destination_sha256": "3f9dc0aa2c1db2b4e28f36749f1418b8f568ffd9e81b451fe527cb2a229f7057",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -172,23 +135,19 @@
       }
     },
     {
-      "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-store-types/tests/golden/storage_vectors.json",
-        "blob_sha": "6aa91fa1ca848ccb1d3641a428887072501ed964"
-      },
+      "source": null,
       "destination": "crates/storage-types/tests/golden/storage_vectors.json",
-      "destination_sha256": "d3c2d773d8b8d35e0216463ba2408e35d5d83e9dc2c7d1d60ef112103648ecd8",
-      "transformation": "verbatim",
-      "class": "human-authored",
+      "destination_sha256": "180856114b2f3a1d638e66fe9f9c1bdc90b8a55d0a6562945f93d7e6aa06e53c",
+      "transformation": "authored",
+      "class": "new-authored",
       "review_evidence": {
-        "doc_rigor": "migration/waves/U2/review-notes.md#byte-stable-fixtures"
+        "design_review": "migration/waves/U2/review-notes.md#byte-stable-fixtures",
+        "negative_tests": "crates/cache-stability/tests/golden_vectors.rs and crates/storage-types/tests/golden_vectors.rs; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
       }
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-store-types/tests/golden_vectors.rs",
+        "repo": "primitives",
         "blob_sha": "706c05544a65ef8b79cc4a1cf3ceaba489d23024"
       },
       "destination": "crates/storage-types/tests/golden_vectors.rs",
@@ -201,8 +160,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-store/Cargo.toml",
+        "repo": "primitives",
         "blob_sha": "35a35fb60da85e09e9ad7887a846739073e57af6"
       },
       "destination": "crates/storage/Cargo.toml",
@@ -215,12 +173,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "crates/cortexkit-store/src/lib.rs",
+        "repo": "primitives",
         "blob_sha": "95dc9c575f3ef72f6739719225bb78ea19f99dbb"
       },
       "destination": "crates/storage/src/lib.rs",
-      "destination_sha256": "fdd1598effb0db6e125adab95bdf33e511a349a8705dbd8640cd894cd27d767e",
+      "destination_sha256": "a5c54d21346aa062f2e9c19d056862f000b74b725b58e3fc924a10e43e978466",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -229,12 +186,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/lease-store-density.md",
+        "repo": "primitives",
         "blob_sha": "ef1e855d950cbf947eb9702fd048b60672034244"
       },
       "destination": "docs/properties/shared-primitives/lease-store-density.md",
-      "destination_sha256": "7a17001e8c1ed247a5e0e600b4c2a2b0e38b4295ba72acb05a754e8a43d2705c",
+      "destination_sha256": "75c0d725793fdfbe32dc6e7a80faa7a750b778684a9558593c7376e2e9334eb5",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -243,12 +199,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/README.md",
+        "repo": "primitives",
         "blob_sha": "d360c86177f779878d5b645bb31b1b06f0d0584c"
       },
       "destination": "docs/properties/shared-primitives/catalog.md",
-      "destination_sha256": "77413e59d87c9f6195e40472573b42996b2be4a96559cb5052f72d71903d2085",
+      "destination_sha256": "914140dd19160385e43deb1af5975d33c8be65beb8963538c76098597f61fb00",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -257,12 +212,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/checks.md",
+        "repo": "primitives",
         "blob_sha": "e1e9761f2a147ae3619dec612bf033fd7c8be1f2"
       },
       "destination": "docs/properties/shared-primitives/existing-checks.md",
-      "destination_sha256": "1c9ad1c0ed05368616d33d427d7a8f8684ca59cf8281b8c2c4c660d23b60dcd0",
+      "destination_sha256": "ba3da26b49322b208917a265f5bf70c5cb2e44cc2162a47f30193e1dd81834c3",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -271,12 +225,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/durable-consumer-inventory.md",
+        "repo": "primitives",
         "blob_sha": "6446f25ed59d345a4cd303db65907ddd8c4f02b5"
       },
       "destination": "docs/properties/shared-primitives/durable-consumer-inventory.md",
-      "destination_sha256": "57fc5880843c41cc3f576f2fb70c09e0aa912a184c1878062bd7314b9daf0bd3",
+      "destination_sha256": "e3610d869ee7682da1aacee7b5f4606a5148580723581da5949470e2d003dd96",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -285,8 +238,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/acquisition-does-not-follow-symlink.md",
+        "repo": "primitives",
         "blob_sha": "16cae3cc425e5a49285f520b96defab43a2f2e96"
       },
       "destination": "docs/properties/shared-primitives/evidence/acquisition-does-not-follow-symlink.md",
@@ -299,12 +251,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/at-most-one-exclusive-holder-per-key.md",
+        "repo": "primitives",
         "blob_sha": "b2064e5eb5fda817eb039c7e8c0379264f0cb9e8"
       },
       "destination": "docs/properties/shared-primitives/evidence/at-most-one-exclusive-holder-per-key.md",
-      "destination_sha256": "2a905e6a200597690c59dbdf8725290d4ac821a4c56935e9d8d38bebcd384a49",
+      "destination_sha256": "7d2a0d588ffa49afcebf909279b7bba44429a9886b8837fded89d228b19f859f",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -313,12 +264,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/contention-is-classified-as-held.md",
+        "repo": "primitives",
         "blob_sha": "a818c1d126726c5de0cab0ec798c1286b069e071"
       },
       "destination": "docs/properties/shared-primitives/evidence/contention-is-classified-as-held.md",
-      "destination_sha256": "6cea0c761bda901fe9074a11012b9d9abf1863ce9bc3b914b5a124ff19ca3a08",
+      "destination_sha256": "7b19247debee0ff96179e9a5164e6e9127a41893748beec27b4d1a201c2245b5",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -327,8 +277,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/cross-process-exclusive-race-is-reached.md",
+        "repo": "primitives",
         "blob_sha": "04a9cc331a493e9faea856358b68ca7ae24d83b3"
       },
       "destination": "docs/properties/shared-primitives/evidence/cross-process-exclusive-race-is-reached.md",
@@ -341,12 +290,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/dead-holder-lease-is-reclaimable.md",
+        "repo": "primitives",
         "blob_sha": "699b2118f8d521929037199941f65e097e13054e"
       },
       "destination": "docs/properties/shared-primitives/evidence/dead-holder-lease-is-reclaimable.md",
-      "destination_sha256": "90b8aa365e23882ef2e7a7e6cef707d1c8705711ac0d01ab75d0706dcb35d35e",
+      "destination_sha256": "5440cfedb6c65f93b54cb2256331cb76f9957bddbb1588613edc04906ea59146",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -355,12 +303,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/distinct-lease-keys-do-not-alias.md",
+        "repo": "primitives",
         "blob_sha": "c228f5611c9d04f21a2336a673deac658bf46211"
       },
       "destination": "docs/properties/shared-primitives/evidence/distinct-lease-keys-do-not-alias.md",
-      "destination_sha256": "e9b6243caa66143e89e6bcb783b253e3134be2dff84c900dec71797212eba9ce",
+      "destination_sha256": "71ce313f7f48919a8efc03a9fb29e7eadd0b546314ded24eccd831aa7adbbb70",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -369,8 +316,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/epoch-input-size-is-bounded.md",
+        "repo": "primitives",
         "blob_sha": "9313ae64c111a794261660b09da2f5dfcefc0e64"
       },
       "destination": "docs/properties/shared-primitives/evidence/epoch-input-size-is-bounded.md",
@@ -383,8 +329,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/epoch-update-interruption-window-is-reached.md",
+        "repo": "primitives",
         "blob_sha": "789988184a0d75dac0c198d118b558dce46f476a"
       },
       "destination": "docs/properties/shared-primitives/evidence/epoch-update-interruption-window-is-reached.md",
@@ -397,12 +342,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/failed-acquire-preserves-prior-epoch.md",
+        "repo": "primitives",
         "blob_sha": "1e68a07d4f01a910a5a0bc43969b6c0aa3c72ddc"
       },
       "destination": "docs/properties/shared-primitives/evidence/failed-acquire-preserves-prior-epoch.md",
-      "destination_sha256": "23a0f192ead865854695d7f1f20baad3fa1ffcbb437e7ea7b39a1d0cfb19bf15",
+      "destination_sha256": "1046af34c6d2861550a5334937dbfd4b0fc9c660d6150e9a7b8957520b36ac9f",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -411,12 +355,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/failed-acquisition-does-not-mutate-lease-state.md",
+        "repo": "primitives",
         "blob_sha": "9f2ed272fb5217af5b44f84f55dcaacd6e42d50d"
       },
       "destination": "docs/properties/shared-primitives/evidence/failed-acquisition-does-not-mutate-lease-state.md",
-      "destination_sha256": "7dceedcd67e3c6e62d19c945f189f353498addc5e670ac6a17eef875f52ea316",
+      "destination_sha256": "15c99544db36695bad8b898a7a0cdb714d3b2ea6ec6a26d28c9333bae623ab52",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -425,12 +368,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/filesystem-lock-scope-matches-deployment.md",
+        "repo": "primitives",
         "blob_sha": "071210f91103c9dcc870e3d59192be8a094423ba"
       },
       "destination": "docs/properties/shared-primitives/evidence/filesystem-lock-scope-matches-deployment.md",
-      "destination_sha256": "5c0269dbb47771907bebeba52d4a65c1827bf1635bbf2753931d8d0b4cbb38fd",
+      "destination_sha256": "8327048489a35d09dfdc3a47e0b682bdc9960ccc7822bb588fca2a5458bb22b4",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -439,12 +381,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/handle-drop-releases-lease.md",
+        "repo": "primitives",
         "blob_sha": "b2acebc09c76b3a7b67d6cf93b440205b7e4a5cd"
       },
       "destination": "docs/properties/shared-primitives/evidence/handle-drop-releases-lease.md",
-      "destination_sha256": "8352d4a3c9f97ded2490644ca1fae86bd6b940cab8888bec4f05db3a614cd060",
+      "destination_sha256": "06f290b96c34a961e01f2a9001e79940e70c40b6d74d1e5b670de6da220f966c",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -453,8 +394,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/invalid-epoch-fails-closed.md",
+        "repo": "primitives",
         "blob_sha": "49aaf7b2004052cbe7fc73b989863b3da130db30"
       },
       "destination": "docs/properties/shared-primitives/evidence/invalid-epoch-fails-closed.md",
@@ -467,8 +407,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/lease-file-creation-is-never-permissive.md",
+        "repo": "primitives",
         "blob_sha": "9e6d87629fa62230896f28e844b5248c64fea706"
       },
       "destination": "docs/properties/shared-primitives/evidence/lease-file-creation-is-never-permissive.md",
@@ -481,8 +420,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/lease-file-growth-trigger-is-observed.md",
+        "repo": "primitives",
         "blob_sha": "a2b6a576ba3b2c67f2c3dcd37e6cd943054c1895"
       },
       "destination": "docs/properties/shared-primitives/evidence/lease-file-growth-trigger-is-observed.md",
@@ -495,8 +433,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/lease-inode-remains-stable-while-held.md",
+        "repo": "primitives",
         "blob_sha": "242f27c583dea77e41dbbb6f33da8ea4001df429"
       },
       "destination": "docs/properties/shared-primitives/evidence/lease-inode-remains-stable-while-held.md",
@@ -509,12 +446,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/lease-path-format-is-version-stable.md",
+        "repo": "primitives",
         "blob_sha": "7930fa5e9794d85ac7d66b07b7e1040324606299"
       },
       "destination": "docs/properties/shared-primitives/evidence/lease-path-format-is-version-stable.md",
-      "destination_sha256": "94b63013447dec3ce8c67c47fdf64d022225820301179d31e0dd4eef0aea0832",
+      "destination_sha256": "6cf16afd5e4ff915df1011c5d606d508a3d9f08bc4a8c29f2081237011f60865",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -523,8 +459,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/live-lease-file-replacement-is-reached.md",
+        "repo": "primitives",
         "blob_sha": "db48fb08448a52cc564a5b7eaf621cc72e37fe1d"
       },
       "destination": "docs/properties/shared-primitives/evidence/live-lease-file-replacement-is-reached.md",
@@ -537,8 +472,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/logical-store-has-single-lease-identity.md",
+        "repo": "primitives",
         "blob_sha": "b1e22cc64e6e7c435516c967df340232dc3c3b98"
       },
       "destination": "docs/properties/shared-primitives/evidence/logical-store-has-single-lease-identity.md",
@@ -551,8 +485,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/permission-hardening-never-follows-replacement.md",
+        "repo": "primitives",
         "blob_sha": "014d7675776b9a2c54d87fe530d256c82dfe0cfe"
       },
       "destination": "docs/properties/shared-primitives/evidence/permission-hardening-never-follows-replacement.md",
@@ -565,12 +498,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/protected-write-set-is-fence-complete.md",
+        "repo": "primitives",
         "blob_sha": "ac571ceba652df7ffc54c7f3424e305e5d274e36"
       },
       "destination": "docs/properties/shared-primitives/evidence/protected-write-set-is-fence-complete.md",
-      "destination_sha256": "0dc23d0b2bc3c082ada9ceb1bf1a6e544b86c014b1f5deaed56e0af5cb7c1864",
+      "destination_sha256": "cae81aa94e079f56a9bcf9fd3d889b9b69ed856ec80a1fc44cbfc1abd6f79504",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -579,8 +511,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/replacement-fence-is-claimed-before-old-writer-writes.md",
+        "repo": "primitives",
         "blob_sha": "e2f4943057aea1ee96d8b671513dc67e02740ef3"
       },
       "destination": "docs/properties/shared-primitives/evidence/replacement-fence-is-claimed-before-old-writer-writes.md",
@@ -593,8 +524,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/returned-epoch-is-crash-durable.md",
+        "repo": "primitives",
         "blob_sha": "87ed0880cb2095abfcb2bd084fd92af08444ac3c"
       },
       "destination": "docs/properties/shared-primitives/evidence/returned-epoch-is-crash-durable.md",
@@ -607,8 +537,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/shared-acquisition-is-epoch-neutral.md",
+        "repo": "primitives",
         "blob_sha": "3dfe44ad9e957c5b8b7f8982b9c0fb6fc8b273d5"
       },
       "destination": "docs/properties/shared-primitives/evidence/shared-acquisition-is-epoch-neutral.md",
@@ -621,8 +550,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/shared-epoch-never-authorizes-write.md",
+        "repo": "primitives",
         "blob_sha": "3e1182c7616f58b2ae7d264e4a03fe9d11e23457"
       },
       "destination": "docs/properties/shared-primitives/evidence/shared-epoch-never-authorizes-write.md",
@@ -635,8 +563,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/shared-exclusive-exclusion-matrix.md",
+        "repo": "primitives",
         "blob_sha": "2dc014c3ba8820c1f1c0ec86972ff480fdd32be8"
       },
       "destination": "docs/properties/shared-primitives/evidence/shared-exclusive-exclusion-matrix.md",
@@ -649,12 +576,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/stale-writer-write-is-rejected.md",
+        "repo": "primitives",
         "blob_sha": "c42f7f9b97aa605f8d371046915575149d9e2372"
       },
       "destination": "docs/properties/shared-primitives/evidence/stale-writer-write-is-rejected.md",
-      "destination_sha256": "553d00710297aad25f1412a2798c2caccdd8afab0d69fd58b14767c53f4fbd1a",
+      "destination_sha256": "0d4dab690453ac58e9115c7ea0327274141f5ed29ecb5ac33ae1e1f01eed6661",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -663,8 +589,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/unix-lease-file-is-owner-only.md",
+        "repo": "primitives",
         "blob_sha": "de430703b0d2826eab03358a003914072d234f1e"
       },
       "destination": "docs/properties/shared-primitives/evidence/unix-lease-file-is-owner-only.md",
@@ -677,8 +602,7 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/evidence/writer-epoch-strictly-increases.md",
+        "repo": "primitives",
         "blob_sha": "de56d55fd4b31e305f658baea91902980b3ab78c"
       },
       "destination": "docs/properties/shared-primitives/evidence/writer-epoch-strictly-increases.md",
@@ -691,12 +615,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/fault-map.md",
+        "repo": "primitives",
         "blob_sha": "a8bec0e2687e27fbb7611b11c6e22c91da98305f"
       },
       "destination": "docs/properties/shared-primitives/fault-map.md",
-      "destination_sha256": "3744aa2735a9fe5c7669f3d59f49cd5ef865571076ce12cbe6a2414856f78347",
+      "destination_sha256": "3e1f6deea64dccd43a2f4ec7aecbe21576d5de14852b915231a93d23c5d1d8c2",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -705,12 +628,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/portfolio.md",
+        "repo": "primitives",
         "blob_sha": "a03f53d02800be76450858f79f9c74f9c1718eac"
       },
       "destination": "docs/properties/shared-primitives/portfolio-evaluation.md",
-      "destination_sha256": "ac1fdda877a9a87ad6f6487a85710fd18a1d12f911bbe0a6c2cd3c19e84a2473",
+      "destination_sha256": "594d80d99d77293fac440133e44b988584f6872c2c4a83954f135e475f4a98c7",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -719,12 +641,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/relationships.md",
+        "repo": "primitives",
         "blob_sha": "a27c6bf42e29fd186ab5aa7cc580c158f14f3044"
       },
       "destination": "docs/properties/shared-primitives/relationships.md",
-      "destination_sha256": "722d3190855c69585de7bb55a8ea8e0b6bff90e0d71908076619c2d0b699ce2b",
+      "destination_sha256": "00d6a7a04d099e9807b6b82be9ef6cc22995fb3a94f37e54007fa6ce84e87b9d",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -733,12 +654,11 @@
     },
     {
       "source": {
-        "repo": "commons",
-        "path": "docs/property-catalogs/cortexkit-lease/system-model.md",
+        "repo": "primitives",
         "blob_sha": "c840cdf8ed0f6c0743d29d88f22b140ecca6ab1f"
       },
       "destination": "docs/properties/shared-primitives/system-model.md",
-      "destination_sha256": "f20dd73c17ca055e2b8ace0e6f9c554e90b52c46d62384ba8754a70fd660ee4b",
+      "destination_sha256": "fd60f81cc8d982821aba12196a6ce926319724c18019892e0b46ecdf73664dbb",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -769,7 +689,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "f00e05a7560cf2c69d91d5d4444067ddce626007512f83fe3f94ce821ceb01a3",
+      "destination_sha256": "97ecdd0bc6c21baa43211410981bc8e359e515313c255448e42280617865e82e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -791,7 +711,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "9a0f92206dc60e66aefb79444b796e03892edd9184192577222225d2cb8ec17a",
+      "destination_sha256": "e3056b00c53c25627ae88da68ec78fe09ddc340ba8fd95cb94b8dae11041a576",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -802,7 +722,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "c191ef4ec416956abb08d157209e5470cecfcf32441c9f70283dca25d240e984",
+      "destination_sha256": "64547fa049d7048982194952e7926a8ba2a0c8f77b513c2ea43a16dc96b5160e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -813,7 +733,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "467864c727034683d380e082962114c01fb9987b242e9de8092c77a12c1e25fa",
+      "destination_sha256": "99260d6f0e654a1736268daab09872673f430890ffa57ca6f18946967a822dc6",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -824,7 +744,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/property-impact.json",
-      "destination_sha256": "0e11141c0aec5695ac5ae4b1d3fba2ec35d3d119955c75bb8bc2d93f35b9d255",
+      "destination_sha256": "8fb14f860192354b221f6de0d418d86840279fa0c5930eaafd5e5dc4049dfb81",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -835,7 +755,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/architecture-impact.json",
-      "destination_sha256": "255493ed766eaf02bd9b816501e0c0faebe1ddc37ed42493c11d8df98ce707e2",
+      "destination_sha256": "ce53c4c891dd6ffedff107bd08f85d30e471639acefed5bbbcded86fd5d867c0",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -856,19 +776,8 @@
     },
     {
       "source": null,
-      "destination": "migration/waves/U2/source-crate-dispositions.json",
-      "destination_sha256": "31f845aa5e7c93d740797d9c23b76e213f866e500dc4738588ea29393ef015d6",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
-      }
-    },
-    {
-      "source": null,
       "destination": "migration/waves/U2/review-notes.md",
-      "destination_sha256": "932e481376a63fb9dfbc9c7ae2597636199e4f89e476d02791a014fb0d3a7405",
+      "destination_sha256": "8a39d8fb70741856b1fb4abf7b0cfaf7b122f5f7fe46becf49f5647af26a45d8",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -879,7 +788,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/index.json",
-      "destination_sha256": "830b4eed6da8374713d207b9fd04beb8ca6e99f1f0b4eebaeedb9538d4e11ffe",
+      "destination_sha256": "4868ac6381c0db6d636c9f180f2c5d5c4ab5ac5885a21116ba90592f06c130df",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -900,7 +809,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md",
-      "destination_sha256": "f98a6b5168ffd9ca12091eef329f52eb2be7dba52f4da206d71eeb089056e26f",
+      "destination_sha256": "230cdb4b974c2f7564968d4ea6905a11920af251bb78a9ad3f29fa941068c225",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -911,7 +820,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/callback-scope-is-restored-after-unwind.md",
-      "destination_sha256": "31a2fa8e87da59629f57e6f03c4b6302c33737cb4ca70fba5528259c387dd789",
+      "destination_sha256": "f5e69f24e2afd094c53518c3f4a7a7c83bde9dd1c3bc133d31bf3b2513639833",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -933,7 +842,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/descriptor-wire-shape-round-trips.md",
-      "destination_sha256": "1a06fb18395322464510d58975a6724cc86c825abf349f99c4e207952c680294",
+      "destination_sha256": "34c1685f26b1b5f79233132e74a0e499dc70365d46bbb0bc30d57cf7d309abd6",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -955,7 +864,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/fence-epoch-outside-sqlite-range-fails-closed.md",
-      "destination_sha256": "51795592560f1439e55b52d9da55d64372f9a1e09074c8bc7e36bf070bc7c7ed",
+      "destination_sha256": "5c12abb52bd1d036b6155028bcf99ff516c00a75b66b0212245a80192e208c72",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -966,7 +875,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md",
-      "destination_sha256": "5d776d8eb17f4db53189603442d4d14e9eff3ebb2d692dbdec60306e5990096e",
+      "destination_sha256": "eff13cba17dedf341e1bc6a414f759b841f7419b2db898d334851c09ca77a15c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -977,7 +886,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/fenced-write-is-atomic.md",
-      "destination_sha256": "328438673a44af93a89092a44c4d9f56ffe74b94d02ec107f99104aa282b6edc",
+      "destination_sha256": "e13ff82f531838d647745ed42b7454457057bff3ef4cbe2b5291612ff90e6cf0",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -1010,7 +919,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/migrations-apply-once-per-namespace.md",
-      "destination_sha256": "d44832869b66f9351c2056bf7c2c4fa8ec974d4cde72f8fcb68a109a51fa3a7e",
+      "destination_sha256": "5d957aaff1c55ac854778d5cec9bcff13ad79126d70442ca3b9e38c53535a7bc",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -1032,7 +941,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/protected-transactions-pin-fence-durability.md",
-      "destination_sha256": "7e860c49526bb2ffcffd007d8b3ebbc93a2a6a9aed220bd0d8aa8f014f2c4bd8",
+      "destination_sha256": "89113f498ccbf116116e6d840c6665b4a667dec740694b228f6885bbb5477761",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -1043,7 +952,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/read-callbacks-cannot-write.md",
-      "destination_sha256": "1ec0b5c996ee20a67c1f7d03bb1d0486d55f1dd13a5b2a21cd7962139a88c0f3",
+      "destination_sha256": "008cdb2a84d58dc911c1f9a343135a44a6ec2d6c8f38b9ec26d0e7824e227942",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -1054,7 +963,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md",
-      "destination_sha256": "04d4066b1eb1508cfd71b82dfd2e8b1d21191c367af1325c99ed27dfdcc8548e",
+      "destination_sha256": "16daba3173ab419f1f42c384d6ed7521a441ce5329ff046719152f7c4603d443",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -1065,7 +974,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/store-files-are-owner-only-after-open.md",
-      "destination_sha256": "f98e59722075407e8e9ba22cf3f0ac618e72546d88ff343ab5583b916c8692a6",
+      "destination_sha256": "593d8053b8228ec4833abe6cbdc264845657e7eb8436e0db10b9e522f214c694",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -1099,28 +1008,28 @@
       "gate": "source-three-os-matrix",
       "kind": "repo",
       "status": "not_run",
-      "source_repo": "commons",
-      "justification": "The source CI runs macOS and Windows; the genesis release ships linux-x64-gnu only and the Windows-only vectors belong to the frozen cortexkit-paths crate. See migration/waves/U2/source-crate-dispositions.json."
+      "source_repo": "primitives",
+      "justification": "The source CI runs macOS and Windows; the genesis release ships linux-x64-gnu only, and the Windows-only vectors belong to a source crate that is not carried."
     },
     {
       "gate": "source-postgres-live",
       "kind": "repo",
       "status": "not_run",
-      "source_repo": "commons",
-      "justification": "Tests the dropped cortexkit-store-postgres backend against a service container."
+      "source_repo": "primitives",
+      "justification": "Tests the dropped PostgreSQL storage backend against a service container."
     },
     {
       "gate": "source-push-seal-version-gate",
       "kind": "repo",
       "status": "not_run",
-      "source_repo": "commons",
-      "justification": "Belongs to the dropped cortexkit-push-seal crate."
+      "source_repo": "primitives",
+      "justification": "Belongs to a dropped source crate."
     },
     {
       "gate": "source-release-tag-resolver",
       "kind": "release",
       "status": "not_run",
-      "source_repo": "commons",
+      "source_repo": "primitives",
       "justification": "Publishes crates from tags; every Eidnara crate is publish = false (R21)."
     }
   ]

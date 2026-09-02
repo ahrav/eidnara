@@ -3,20 +3,19 @@
   "wave": "U1",
   "sources": [
     {
-      "repo": "magic-context",
+      "repo": "host",
       "commit": "b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825"
     }
   ],
   "catalogs": [
     {
-      "repo": "magic-context",
+      "repo": "host",
       "commit": "b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825"
     }
   ],
   "readiness": "migration/upstream-readiness.json",
   "registry": "migration/registry.json",
   "waivers": "migration/waves/U1/waivers.json",
-  "scope": [],
   "property_impact": "not-applicable",
   "architecture_impact": "not-applicable",
   "files": [
@@ -122,7 +121,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "f00e05a7560cf2c69d91d5d4444067ddce626007512f83fe3f94ce821ceb01a3",
+      "destination_sha256": "97ecdd0bc6c21baa43211410981bc8e359e515313c255448e42280617865e82e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -133,7 +132,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "9a0f92206dc60e66aefb79444b796e03892edd9184192577222225d2cb8ec17a",
+      "destination_sha256": "e3056b00c53c25627ae88da68ec78fe09ddc340ba8fd95cb94b8dae11041a576",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -144,7 +143,7 @@
     {
       "source": null,
       "destination": "migration/upstream-readiness.json",
-      "destination_sha256": "f5c9f903b470824b39cc3750a6ce67181d5a132ceaae976beab1599b378860e9",
+      "destination_sha256": "9db1ecb6b4c05b5d299a900224bf4290305450e6d36a7e26fd4865e578d9d870",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -155,7 +154,7 @@
     {
       "source": null,
       "destination": "migration/owners.json",
-      "destination_sha256": "6c5ffe7af4ec2ad02fb3ecbedcdde32ce2e1d655c206329f629fba26a2f46605",
+      "destination_sha256": "01addd7f92e816ce0311014fc6d640e9e37b7105ebc890bfebf33c34bc22a32f",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -177,7 +176,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/crate-name-collision-check.json",
-      "destination_sha256": "9eb58243cddbf29d6284ee1710fdecb41ce6b02392dbe3d1a148aeb8f08048f5",
+      "destination_sha256": "302a2c975b8afb4005688e9dd97be5001b9da2aaac30f48288b0810652852b2c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -188,7 +187,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/review-notes.md",
-      "destination_sha256": "c9796a68d3d3b76aabdd36c0fcf470aa842dca5d62cf65aa8a2a03d9dbddd73c",
+      "destination_sha256": "af01b1fa77b77432eaddab7f5c77a4e66bf3f7fb9da08f805df53e74d22a6766",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -199,7 +198,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "c191ef4ec416956abb08d157209e5470cecfcf32441c9f70283dca25d240e984",
+      "destination_sha256": "64547fa049d7048982194952e7926a8ba2a0c8f77b513c2ea43a16dc96b5160e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -210,7 +209,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "467864c727034683d380e082962114c01fb9987b242e9de8092c77a12c1e25fa",
+      "destination_sha256": "99260d6f0e654a1736268daab09872673f430890ffa57ca6f18946967a822dc6",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -221,7 +220,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/registry-audit.ts",
-      "destination_sha256": "0355f6c8e19a094344b2447e862791bf45c723705d48ece4fe4aeb37ba421138",
+      "destination_sha256": "d532e31642f58bbbb2a06788873760001b981f9f21afcd70192bcbb6105fa511",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -232,7 +231,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/registry-audit.test.ts",
-      "destination_sha256": "9211516f888146ca5d673a79f7061e095ec1d919a1e23e2ae586986156b97cb6",
+      "destination_sha256": "8b6eb17ec411ddd4b3eeb6b47bcc86d0f9a383d12a21dd451a934dab60dc6e71",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -254,7 +253,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/generate-property-index.test.ts",
-      "destination_sha256": "3bb9374b0ed82ff42edba96461ab9ffe0ae6ad74d23c70778e1f8ec24cb17bd6",
+      "destination_sha256": "2c08afe86621929af8fddebf50dd33820ce5b9107b9bf04d61c7c93f959b3d14",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -265,7 +264,7 @@
     {
       "source": null,
       "destination": "docs/properties/README.md",
-      "destination_sha256": "b6998233ba476b322df4c9f849e15b9e572666da2b3afe459c1043a925a6681a",
+      "destination_sha256": "e6d6167cdbf9ae11e06b15b3681192c61bfa6077833179f8947fdf0054b61ebc",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -276,7 +275,7 @@
     {
       "source": null,
       "destination": "docs/runbooks/architecture-review.md",
-      "destination_sha256": "7cacee36c86867ee5101c6875d9ffb08777fa0c90829a0db12dd1d0f71287bc8",
+      "destination_sha256": "3ed875d91d7eae01aab603c045b79410c142dc154e4b167f9510d48384331355",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -287,7 +286,7 @@
     {
       "source": null,
       "destination": "fixtures/vocabulary/README.md",
-      "destination_sha256": "bca9ce224d2d1ebc4e51ba10b572f0e477849fb9d5c33f81a51762f4954a450b",
+      "destination_sha256": "dc779bbe65fb341441b631ab53c070f4258bfeb5e6aa2cb5191a138b3a9652d0",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -297,8 +296,7 @@
     },
     {
       "source": {
-        "repo": "magic-context",
-        "path": "docs/properties/METHOD.md",
+        "repo": "host",
         "blob_sha": "995b0233c407ff3c2136cc68ea64f2663bd71755"
       },
       "destination": "docs/properties/METHOD.md",
@@ -322,7 +320,7 @@
     {
       "source": null,
       "destination": "release/registry-gate.json",
-      "destination_sha256": "a3a95500b8fa53bb0fa6b9ac4de3b08ea63a1f08844f82861d229197ba1c8f2b",
+      "destination_sha256": "0f8180cd48a5bd7695cfc5acce71017d0af2377996a9aa90d103d6120378d6c3",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {

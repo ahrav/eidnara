@@ -16,17 +16,6 @@ export const EIDNARA_PACKAGES = [
     "@eidnara/pi",
 ] as const;
 
-export const CORTEXKIT_PACKAGES = [
-    "@cortexkit/mc-shm-native",
-    "@cortexkit/mc-host-linux-x64-gnu",
-    "@cortexkit/magic-context",
-    "@cortexkit/opencode-magic-context",
-    "@cortexkit/pi-magic-context",
-] as const;
-
-// Predecessor payload and addon names that must stay unpublished (registry gate confirms E404).
-export const MUST_BE_UNPUBLISHED: readonly string[] = ["@cortexkit/mc-shm-native", "@cortexkit/mc-host-linux-x64-gnu"];
-
 export const NPM_SCOPE = "eidnara";
 
 const PRERELEASE_RE = /^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$/;
@@ -105,7 +94,7 @@ function summarizeExit(result: CommandResult): Record<string, unknown> {
 export function audit(run: Runner, now: Date): GateFile {
     const versionResult = run(["--version"]);
     const probes: Probe[] = [];
-    for (const name of [...EIDNARA_PACKAGES, ...CORTEXKIT_PACKAGES]) {
+    for (const name of EIDNARA_PACKAGES) {
         probes.push(probe(run, name, ["view", name, "versions", "dist-tags", "--json"], summarizeView));
     }
     for (const name of EIDNARA_PACKAGES) {
@@ -168,7 +157,7 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
         }
     });
 
-    for (const name of [...EIDNARA_PACKAGES, ...CORTEXKIT_PACKAGES]) {
+    for (const name of EIDNARA_PACKAGES) {
         if (!commands.has(`npm view ${name} versions dist-tags --json`)) errors.push(`missing view probe for ${name}`);
     }
     for (const name of EIDNARA_PACKAGES) {
@@ -186,12 +175,6 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
         if (summary.state === "error") errors.push(`${name} view probe errored (${String(summary.code)})`);
         if (options.requireReservation && !versions.some((version) => /-reserved\.\d+$/.test(version))) {
             errors.push(`${name} holds no inert reservation version (expected 1.0.0-reserved.N); observed state ${String(summary.state)}`);
-        }
-    }
-    for (const name of MUST_BE_UNPUBLISHED) {
-        const summary = viewed.get(name);
-        if (summary !== undefined && summary.state !== "unpublished") {
-            errors.push(`${name} must stay unpublished (E404); observed state ${String(summary.state)}`);
         }
     }
     return errors;

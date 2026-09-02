@@ -1,10 +1,10 @@
 # `storage-descriptor-golden-vectors-are-byte-stable`
 
 - **Discovery:** golden-vector pass at U2.
-- **Primary evidence:** destination `crates/storage-types/tests/golden/storage_vectors.json` sha256 `d3c2d773d8b8d35e0216463ba2408e35d5d83e9dc2c7d1d60ef112103648ecd8`; source blob `6aa91fa1ca848ccb1d3641a428887072501ed964` at `commons@89abb40` has the same content sha256. The receipt entry is `verbatim`, the registry lists the fixture as `byte-stable` and `examples/golden-vectors.rs` as its generator.
-- **Existing evidence:** `helpers_reproduce_the_golden_vectors` (`crates/storage-types/tests/golden_vectors.rs:11-42`) asserts `postgres_database_name`, `sqlite_store_path`, and descriptor reserialization for all eight vectors; `golden_vectors_break_slug_collisions` (`crates/storage-types/tests/golden_vectors.rs:45`) asserts `a-b` and `a_b` differ.
-- **Failure scenario:** a changed `cortexkit_` prefix, `cortexkit/` path component, or serde tag passes a regenerated fixture and fails only the byte comparison.
+- **Primary evidence:** `crates/storage-types/tests/golden/storage_vectors.json` is authored in this tree (`source: null`) by `cargo run -p storage-types --example golden-vectors` for seven sample module ids (`module-a`, `module-b`, `module-c`, `module-d`, `a-b`, `a_b`, and one overlong id). Its receipt entry in `migration/waves/U2/receipt.json` records `destination_sha256`, which pins the bytes; the registry lists the fixture as `byte-stable` and `examples/golden-vectors.rs` as its generator, so the receipt checker accepts only `verbatim` or `authored` as its transformation. Changing the file is a reviewed contract change under R18.
+- **Existing evidence:** `helpers_reproduce_the_golden_vectors` (`crates/storage-types/tests/golden_vectors.rs:12-42`) asserts `postgres_database_name`, `sqlite_store_path`, and descriptor reserialization for all seven vectors; `golden_vectors_break_slug_collisions` (`crates/storage-types/tests/golden_vectors.rs:45`) asserts `a-b` and `a_b` differ.
+- **Failure scenario:** a changed `eidnara_` prefix, `eidnara/` path component, or serde tag passes a regenerated fixture and fails only the receipt hash comparison.
 - **Timing window:** none.
-- **Instrumentation:** receipt verification recomputes both hashes.
+- **Instrumentation:** receipt verification recomputes the destination hash and compares it to the receipt.
 - **Audit verdict (U2): pass. The fixture is read with `include_str!` and parsed independently of the helpers; each derivation is compared to a literal from the file, not to another call of the same helper.
 - **Open-question log:** the PostgreSQL name derivation has no consumer in this workspace; retiring it is a contract change that must replace this fixture (architecture candidate C1 in `migration/waves/U2/architecture-impact.json`).

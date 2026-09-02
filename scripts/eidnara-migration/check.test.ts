@@ -4,7 +4,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
-    LEGACY_IDENTITY_RE,
     NOT_APPLICABLE,
     sha256,
     validateShape,
@@ -31,17 +30,16 @@ const valid: Record<CheckKind, Json> = {
     receipt: {
         schema_version: 1,
         wave: "U2",
-        sources: [{ repo: "commons", commit }],
-        catalogs: [{ repo: "commons", commit }],
+        sources: [{ repo: "source", commit }],
+        catalogs: [{ repo: "source", commit }],
         readiness: "migration/upstream-readiness.json",
         registry: "migration/registry.json",
         waivers: "migration/waves/U2/waivers.json",
-        scope: [{ repo: "commons", path: "crates/cortexkit-lease" }],
         property_impact: "migration/waves/U2/property-impact.json",
         architecture_impact: "migration/waves/U2/architecture-impact.json",
         files: [
             {
-                source: { repo: "commons", path: "crates/cortexkit-lease/src/lib.rs", blob_sha: blob },
+                source: { repo: "source", blob_sha: blob },
                 destination: "crates/lease/src/lib.rs",
                 destination_sha256: digest,
                 transformation: "adapted",
@@ -55,7 +53,7 @@ const valid: Record<CheckKind, Json> = {
                 gate: "source-release",
                 kind: "release",
                 status: "not_run",
-                source_repo: "commons",
+                source_repo: "source",
                 justification: "Owner-hosted source release gate unavailable",
             },
         ],
@@ -65,18 +63,17 @@ const valid: Record<CheckKind, Json> = {
         entries: [
             {
                 kind: "identity",
-                value: ".mc-host-coordination",
+                value: ".coordination",
                 class: "frozen-durable",
-                rationale: "Existing writer exclusion path",
-                evidence: ["release/mc-host-release.json"],
+                rationale: "Writer exclusion path",
+                evidence: ["release/host-release.json"],
             },
             {
                 kind: "identity",
-                value: "cortexkit-lease",
-                class: "renamed",
-                rename_to: "lease",
-                rationale: "Crate name",
-                evidence: ["Cargo.toml"],
+                value: "eidnara.store/v1",
+                class: "external-protocol",
+                rationale: "Store wire schema id",
+                evidence: ["crates/storage-types/src/lib.rs"],
             },
             {
                 kind: "typescript",
@@ -123,7 +120,7 @@ const valid: Record<CheckKind, Json> = {
                 kind: "release",
                 owner: "ahrav",
                 approver: "ahrav",
-                bead_id: "magic-context-abc",
+                bead_id: "upstream-abc",
                 created_at: "2026-09-02",
                 expires_by_wave: "U3",
                 closure_condition: "owner-hosted chain repointed",
@@ -157,7 +154,7 @@ const valid: Record<CheckKind, Json> = {
     "property-impact": {
         schema_version: 1,
         wave: "U2",
-        provenance: [{ repo: "commons", source_commit: commit, catalog_commit: commit }],
+        provenance: [{ repo: "source", source_commit: commit, catalog_commit: commit }],
         destination_commit: commit,
         touched_files: ["crates/lease/src/lib.rs", "crates/lease/src/key.rs"],
         records: [
@@ -181,7 +178,7 @@ const valid: Record<CheckKind, Json> = {
                 classification: "carried-forward",
                 relationship: "mapped",
                 files: ["crates/lease/src/key.rs"],
-                provenance: `commons@${commit}`,
+                provenance: `source@${commit}`,
                 source_status: { exercised: "partial", check_status: "unaudited", portfolio_verdict: "not-evaluated", known_violation: false },
                 destination_status: { exercised: "partial", check_status: "unaudited", portfolio_verdict: "not-evaluated", known_violation: false },
                 check_pointer: "crates/lease/src/key.rs#L10",
@@ -196,7 +193,7 @@ const valid: Record<CheckKind, Json> = {
             {
                 phase: "pre-port",
                 iteration: 0,
-                analyzed: { repo: "commons", commit, scope_hash: digest },
+                analyzed: { repo: "source", commit, scope_hash: digest },
                 report_hash: digest,
                 skill_sha256: digest,
                 candidates: [],
@@ -321,7 +318,6 @@ describe("shape: receipt", () => {
         u1.wave = "U1";
         u1.sources = [];
         u1.catalogs = [];
-        u1.scope = [];
         u1.property_impact = NOT_APPLICABLE;
         u1.architecture_impact = NOT_APPLICABLE;
         files(u1)[0] = {
@@ -355,7 +351,7 @@ describe("shape: receipt", () => {
         const unknownClass = copy("receipt");
         files(unknownClass)[0]!.class = "mystery";
         expect(validateShape("receipt", unknownClass)).toContain(
-            "$.files[0].class must be one of: human-authored, generated, contract-generated, predecessor-captured, new-authored",
+            "$.files[0].class must be one of: human-authored, generated, contract-generated, captured, new-authored",
         );
 
         const noneString = copy("receipt");
@@ -413,27 +409,24 @@ describe("shape: receipt", () => {
         expect(validateShape("receipt", humanNull)).toContain("$.files[0].source may be null only for new-authored or generated files");
     });
 
-    test("predecessor-captured files must be verbatim with capture evidence", () => {
+    test("captured files must be verbatim with capture evidence", () => {
         const value = copy("receipt");
         const file = files(value)[0]!;
-        file.class = "predecessor-captured";
+        file.class = "captured";
         file.transformation = "adapted";
         file.review_evidence = { captured_at_commit: commit };
         expect(validateShape("receipt", value)).toEqual(
             expect.arrayContaining([
-                "$.files[0].transformation must be verbatim for predecessor-captured files",
+                "$.files[0].transformation must be verbatim for captured files",
                 "$.files[0].review_evidence.capture_command must be a non-empty string",
             ]),
         );
     });
 
-    test("scope entries and file sources must name a pinned repository", () => {
+    test("file sources must name a pinned repository", () => {
         const value = copy("receipt");
-        (value.scope as Json[]).push({ repo: "magic-context", path: "crates/mc-host" });
-        expect(validateShape("receipt", value)).toContain("$.scope[1].repo magic-context has no pinned source commit");
-        const empty = copy("receipt");
-        empty.scope = [];
-        expect(validateShape("receipt", empty)).toContain("$.scope must declare at least one source directory");
+        (files(value)[0]!.source as Json).repo = "elsewhere";
+        expect(validateShape("receipt", value)).toContain("$.files[0].source.repo elsewhere has no pinned source commit");
     });
 });
 
@@ -445,17 +438,6 @@ describe("shape: registry", () => {
         expect(validateShape("registry", value)).toContain("$.entries[6].value is duplicated");
     });
 
-    test("renamed identities need a legacy-free rename target", () => {
-        const value = copy("registry");
-        const renamed = (value.entries as Json[])[1]!;
-        delete renamed.rename_to;
-        expect(validateShape("registry", value)).toContain("$.entries[1].rename_to is required for renamed identities");
-        renamed.rename_to = "mc-lease";
-        expect(validateShape("registry", value)).toContain("$.entries[1].rename_to retains a legacy identity");
-        const frozen = (value.entries as Json[])[0]!;
-        frozen.rename_to = "x";
-        expect(validateShape("registry", value)).toContain("$.entries[0].rename_to is only valid for renamed identities");
-    });
 
     test("identity and family evidence cannot be empty", () => {
         const value = copy("registry");
@@ -539,14 +521,6 @@ describe("shape: registry", () => {
         );
     });
 
-    test("legacy identity regex matches whole tokens only", () => {
-        expect(LEGACY_IDENTITY_RE.test("check.ts")).toBe(false);
-        expect(LEGACY_IDENTITY_RE.test("mcu-board")).toBe(false);
-        expect(LEGACY_IDENTITY_RE.test("ck-mc-host")).toBe(true);
-        expect(LEGACY_IDENTITY_RE.test("MC_HOST_RING_PROFILE")).toBe(true);
-        expect(LEGACY_IDENTITY_RE.test("cortexkit/magic-context")).toBe(true);
-        expect(LEGACY_IDENTITY_RE.test("eidnara-host")).toBe(false);
-    });
 });
 
 describe("shape: waivers", () => {
@@ -676,7 +650,7 @@ describe("shape: property impact", () => {
         expect(validateShape("property-impact", value)).toContain(
             "$.records[1] carried-forward record changed status; destination_status must equal source_status",
         );
-        record.provenance = "commons";
+        record.provenance = "source";
         expect(validateShape("property-impact", value)).toContain("$.records[1].provenance must have the form <repo>@<sha>");
     });
 
@@ -692,7 +666,7 @@ describe("shape: property impact", () => {
         record.disposition = "blocked";
         record.evidence_attempts = 2;
         expect(validateShape("property-impact", value)).toContain("$.records[0] needs a scope decision after 2 failed evidence attempts");
-        value.scope_decisions = [{ slug: "lease-single-writer", decision: "mechanism-left-scope", evidence: "lease fencing stays in commons this wave" }];
+        value.scope_decisions = [{ slug: "lease-single-writer", decision: "mechanism-left-scope", evidence: "lease fencing stays in the source repository this wave" }];
         expect(validateShape("property-impact", value)).toEqual(["$.records[0] blocks the wave"]);
     });
 
@@ -817,24 +791,24 @@ describe("evidence: git-backed receipts", () => {
 
     beforeAll(() => {
         work = mkdtempSync(join(tmpdir(), "eidnara-check-"));
-        source = join(work, "commons");
+        source = join(work, "source");
         destination = join(work, "eidnara");
         mkdirSync(source);
         gitIn(source, ["init", "-q", "-b", "main"]);
         gitIn(source, ["config", "user.email", "t@example.com"]);
         gitIn(source, ["config", "user.name", "t"]);
-        write(join(source, "crates/cortexkit-lease/src/lib.rs"), "pub fn lease() {}\n");
-        write(join(source, "crates/cortexkit-lease/src/key.rs"), "pub struct LeaseKey;\n");
-        write(join(source, "crates/cortexkit-lease/Cargo.toml"), "[package]\nname = \"cortexkit-lease\"\n");
+        write(join(source, "crates/lease/src/lib.rs"), "pub fn lease() {}\n");
+        write(join(source, "crates/lease/src/key.rs"), "pub struct LeaseKey;\n");
+        write(join(source, "crates/lease/Cargo.toml"), "[package]\nname = \"lease\"\n");
         write(
             join(source, ".beads/issues.jsonl"),
-            `${JSON.stringify({ id: "commons-abc", status: "closed" })}\n${JSON.stringify({ id: "commons-open", status: "open" })}\n`,
+            `${JSON.stringify({ id: "source-abc", status: "closed" })}\n${JSON.stringify({ id: "source-open", status: "open" })}\n`,
         );
         gitIn(source, ["add", "-A"]);
         gitIn(source, ["commit", "-q", "-m", "seed"]);
         sourceCommit = gitIn(source, ["rev-parse", "HEAD"]);
-        leaseBlob = gitIn(source, ["rev-parse", `HEAD:crates/cortexkit-lease/src/lib.rs`]);
-        keyBlob = gitIn(source, ["rev-parse", `HEAD:crates/cortexkit-lease/src/key.rs`]);
+        leaseBlob = gitIn(source, ["rev-parse", `HEAD:crates/lease/src/lib.rs`]);
+        keyBlob = gitIn(source, ["rev-parse", `HEAD:crates/lease/src/key.rs`]);
 
         write(join(destination, "crates/lease/src/lib.rs"), "pub fn lease() {}\n");
         write(join(destination, "crates/lease/src/key.rs"), "pub struct LeaseKey; // adapted\n");
@@ -848,8 +822,8 @@ describe("evidence: git-backed receipts", () => {
                     ["U1", "U2", "U3", "U4", "U5", "U7", "U8"].map((wave) => [
                         wave,
                         {
-                            repo: "commons",
-                            bead_ids: wave === "U2" ? ["commons-abc"] : [],
+                            repo: "source",
+                            bead_ids: wave === "U2" ? ["source-abc"] : [],
                             required_status: "closed",
                             acceptance_check: "test",
                         },
@@ -861,7 +835,7 @@ describe("evidence: git-backed receipts", () => {
         write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify({ schema_version: 1, wave: "U2", waivers: [] }));
         write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
         write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(valid["architecture-impact"]));
-        ctx = { root: destination, checkouts: { commons: source } };
+        ctx = { root: destination, checkouts: { source } };
     });
 
     afterAll(() => {
@@ -870,7 +844,7 @@ describe("evidence: git-backed receipts", () => {
 
     function impactFor(pin: string): Json {
         const impact = copy("property-impact");
-        (impact.provenance as Json[])[0] = { repo: "commons", source_commit: pin, catalog_commit: pin };
+        (impact.provenance as Json[])[0] = { repo: "source", source_commit: pin, catalog_commit: pin };
         return impact;
     }
 
@@ -878,18 +852,16 @@ describe("evidence: git-backed receipts", () => {
         return {
             schema_version: 1,
             wave: "U2",
-            sources: [{ repo: "commons", commit: sourceCommit }],
-            catalogs: [{ repo: "commons", commit: sourceCommit }],
+            sources: [{ repo: "source", commit: sourceCommit }],
+            catalogs: [{ repo: "source", commit: sourceCommit }],
             readiness: "migration/upstream-readiness.json",
             registry: "migration/registry.json",
             waivers: "migration/waves/U2/waivers.json",
-            scope: [{ repo: "commons", path: "crates/cortexkit-lease" }],
-            excluded: [{ repo: "commons", path: "crates/cortexkit-lease/Cargo.toml", reason: "regenerated as crates/lease/Cargo.toml" }],
-            property_impact: "migration/waves/U2/property-impact.json",
+                property_impact: "migration/waves/U2/property-impact.json",
             architecture_impact: "migration/waves/U2/architecture-impact.json",
             files: [
                 {
-                    source: { repo: "commons", path: "crates/cortexkit-lease/src/lib.rs", blob_sha: leaseBlob },
+                    source: { repo: "source", blob_sha: leaseBlob },
                     destination: "crates/lease/src/lib.rs",
                     destination_sha256: sha256("pub fn lease() {}\n"),
                     transformation: "verbatim",
@@ -897,7 +869,7 @@ describe("evidence: git-backed receipts", () => {
                     review_evidence: { doc_rigor: "review/U2/lib.json" },
                 },
                 {
-                    source: { repo: "commons", path: "crates/cortexkit-lease/src/key.rs", blob_sha: keyBlob },
+                    source: { repo: "source", blob_sha: keyBlob },
                     destination: "crates/lease/src/key.rs",
                     destination_sha256: sha256("pub struct LeaseKey; // adapted\n"),
                     transformation: "adapted",
@@ -921,11 +893,11 @@ describe("evidence: git-backed receipts", () => {
         expect(verify("receipt", receipt(), ctx)).toEqual([]);
     });
 
-    test("stale source blob hash marks the receipt stale (AE6)", () => {
+    test("a source blob the pinned commit does not reach marks the receipt stale (AE6)", () => {
         const value = receipt();
         (files(value)[0]!.source as Json).blob_sha = "e".repeat(40);
         const errors = verify("receipt", value, ctx);
-        expect(errors.some((error) => error.startsWith("$.files[0].source.blob_sha is stale"))).toBe(true);
+        expect(errors).toContain(`$.files[0].source.blob_sha ${"e".repeat(40)} is not reachable from source@${sourceCommit}`);
     });
 
     test("stale destination hash and missing destination fail", () => {
@@ -945,30 +917,18 @@ describe("evidence: git-backed receipts", () => {
         expect(verify("receipt", value, ctx).some((error) => error.includes("is verbatim but destination bytes differ"))).toBe(true);
     });
 
-    test("scope file missing from the receipt fails and names the path (AE26)", () => {
-        const value = receipt();
-        files(value).splice(1, 1);
-        expect(verify("receipt", value, ctx)).toContain(
-            "$.scope commons:crates/cortexkit-lease has file missing from receipt: crates/cortexkit-lease/src/key.rs",
-        );
-    });
 
-    test("unpinned source path is rejected", () => {
-        const value = receipt();
-        (files(value)[0]!.source as Json).path = "crates/cortexkit-lease/src/nope.rs";
-        expect(verify("receipt", value, ctx).some((error) => error.includes("is not a blob at commons@"))).toBe(true);
-    });
 
     test("open readiness bead refuses the SHA pin (AE32)", () => {
         const value = receipt();
         const readinessPath = join(destination, "migration/upstream-readiness.json");
         const original = JSON.parse(require("node:fs").readFileSync(readinessPath, "utf8")) as Json;
         const modified = structuredClone(original);
-        ((modified.waves as Json).U2 as Json).bead_ids = ["commons-abc", "commons-open", "commons-missing"];
+        ((modified.waves as Json).U2 as Json).bead_ids = ["source-abc", "source-open", "source-missing"];
         writeFileSync(readinessPath, JSON.stringify(modified));
         try {
             const errors = verify("receipt", value, ctx);
-            expect(errors.some((error) => error.includes("beads not closed: commons-open=open, commons-missing=missing"))).toBe(true);
+            expect(errors.some((error) => error.includes("beads not closed: source-open=open, source-missing=missing"))).toBe(true);
         } finally {
             writeFileSync(readinessPath, JSON.stringify(original));
         }
@@ -1013,60 +973,24 @@ describe("evidence: git-backed receipts", () => {
         expect(verify("property-impact", impactFor(sourceCommit), ctx)).toEqual([]);
     });
 
-    test("registry scans catch unfrozen legacy identities and unowned persistent literals (AE7)", () => {
-        write(join(destination, "crates/lease/src/paths.rs"), 'const ROOT: &str = "cortexkit";\nconst DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\n');
-        write(join(destination, "crates/lease/src/old.rs"), 'use cortexkit_lease::Lease;\n');
+    test("registry scans catch unowned persistent literals (AE7)", () => {
+        write(join(destination, "crates/lease/src/paths.rs"), 'const DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\n');
         try {
-            const registry = copy("registry");
-            let errors = verify("registry", registry, ctx);
-            expect(errors).toEqual(
-                expect.arrayContaining([
-                    "crates/lease/src/paths.rs:1: legacy identity not frozen by the registry",
-                    'crates/lease/src/paths.rs: persistent literal "mystery.db" has no family entry in the registry',
-                ]),
-            );
-            expect(errors.some((error) => error.startsWith("crates/lease/src/old.rs:1"))).toBe(true);
-            (registry.entries as Json[]).push({
-                kind: "identity",
-                value: "cortexkit",
-                class: "frozen-durable",
-                rationale: "managed dir",
-                evidence: ["x"],
-            });
-            errors = verify("registry", registry, ctx);
-            expect(errors).not.toContain("crates/lease/src/paths.rs:1: legacy identity not frozen by the registry");
+            const errors = verify("registry", copy("registry"), ctx);
+            expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "mystery.db" has no family entry in the registry');
+            expect(errors.some((error) => error.includes('"core.sqlite"'))).toBe(false);
         } finally {
             rmSync(join(destination, "crates/lease/src/paths.rs"));
-            rmSync(join(destination, "crates/lease/src/old.rs"));
         }
     });
 
-    test("renamed identities are caught before a retained substring can excuse them (AE7)", () => {
-        write(join(destination, "crates/lease/src/stale.rs"), "use cortexkit_lease::Lease;\nconst DB: &str = \"mc-store.db\";\nconst FENCE: &str = \"cortexkit_fence\";\n");
-        try {
-            const registry = copy("registry");
-            (registry.entries as Json[]).push(
-                { kind: "identity", value: "cortexkit", class: "frozen-durable", rationale: "managed dir", evidence: ["x"] },
-                { kind: "identity", value: "mc-store.db", class: "frozen-durable", rationale: "module store file", evidence: ["x"] },
-                { kind: "identity", value: "mc-store", class: "renamed", rename_to: "memory-store", rationale: "crate", evidence: ["x"] },
-            );
-            const errors = verify("registry", registry, ctx);
-            expect(errors).toContain("crates/lease/src/stale.rs:1: renamed identity cortexkit-lease still present");
-            expect(errors.some((error) => error.startsWith("crates/lease/src/stale.rs:2"))).toBe(false);
-            expect(errors.some((error) => error.startsWith("crates/lease/src/stale.rs:3"))).toBe(false);
-        } finally {
-            rmSync(join(destination, "crates/lease/src/stale.rs"));
-        }
-    });
 
-    test("registered fixtures are exempt from the identity scan and must stay verbatim", () => {
+    test("registered fixtures must exist and byte-stable fixtures must be verbatim or authored", () => {
         const fixturePath = "crates/lease/tests/golden/vectors.json";
-        const fixtureBytes = '{"provenance": "magic-context: inject.ts"}\n';
+        const fixtureBytes = '{"vectors": []}\n';
         write(join(destination, fixturePath), fixtureBytes);
         try {
             const registry = copy("registry");
-            let errors = verify("registry", registry, ctx);
-            expect(errors).toContain(`${fixturePath}:1: legacy identity not frozen by the registry`);
             (registry.entries as Json[]).push({
                 kind: "fixture",
                 path: fixturePath,
@@ -1074,7 +998,7 @@ describe("evidence: git-backed receipts", () => {
                 rationale: "golden vectors",
                 evidence: ["migration/waves/U2/receipt.json"],
             });
-            errors = verify("registry", registry, ctx);
+            let errors = verify("registry", registry, ctx);
             expect(errors.some((error) => error.startsWith(`${fixturePath}:`))).toBe(false);
 
             (registry.entries as Json[]).push({
@@ -1093,7 +1017,7 @@ describe("evidence: git-backed receipts", () => {
             writeFileSync(join(destination, "migration/registry.json"), JSON.stringify(registry));
             const value = receipt();
             files(value).push({
-                source: { repo: "commons", path: "crates/cortexkit-lease/tests/golden/vectors.json", blob_sha: blob },
+                source: { repo: "source", blob_sha: blob },
                 destination: fixturePath,
                 destination_sha256: sha256(fixtureBytes),
                 transformation: "adapted",
@@ -1101,7 +1025,7 @@ describe("evidence: git-backed receipts", () => {
                 review_evidence: { doc_rigor: "x" },
             });
             expect(verify("receipt", value, ctx)).toContain(
-                `$.files[${files(value).length - 1}] is a byte-stable fixture but its transformation is adapted, not verbatim`,
+                `$.files[${files(value).length - 1}] is a byte-stable fixture but its transformation is adapted, not verbatim or authored`,
             );
         } finally {
             rmSync(join(destination, fixturePath));

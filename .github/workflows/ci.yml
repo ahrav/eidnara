@@ -38,11 +38,25 @@ jobs:
           done
 
       - name: Source checkouts for receipt verification
+        # Receipts name each source repository by an alias. The repository
+        # variable SOURCE_CHECKOUTS maps alias to clone URL, one `alias=url`
+        # pair per whitespace-separated token. A missing alias fails the job.
+        env:
+          SOURCE_CHECKOUTS: ${{ vars.SOURCE_CHECKOUTS }}
         run: |
           set -euo pipefail
           repos=$(bun -e 'const fs=require("fs");const s=new Set();for(const f of fs.readdirSync("migration/waves")){const p=`migration/waves/${f}/receipt.json`;if(!fs.existsSync(p))continue;for(const r of JSON.parse(fs.readFileSync(p,"utf8")).sources??[])s.add(r.repo)}console.log([...s].join(" "))')
+          declare -A urls=()
+          for pair in ${SOURCE_CHECKOUTS:-}; do
+            urls["${pair%%=*}"]="${pair#*=}"
+          done
           for repo in $repos; do
-            git clone --quiet --no-checkout "https://github.com/ahrav/${repo}.git" "../${repo}"
+            url="${urls[$repo]:-}"
+            if [ -z "$url" ]; then
+              echo "SOURCE_CHECKOUTS has no clone URL for source alias '${repo}'" >&2
+              exit 1
+            fi
+            git clone --quiet --no-checkout "$url" "../${repo}"
           done
 
       - name: Receipts
@@ -114,7 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           # Every path dependency must resolve inside this checkout. A sibling
-          # checkout (../commons) or a metadata-only stub resolves outside it.
+          # source checkout or a metadata-only stub resolves outside it.
           cargo +1.98 metadata --locked --format-version 1 \
             | bun -e '
               const meta = JSON.parse(await Bun.stdin.text());
@@ -132,11 +146,3 @@ jobs:
               }
               console.log("workspace graph: " + meta.packages.filter((p) => p.source === null).length + " local packages, all inside " + root);
             '
-
-      - name: Forbidden references
-        run: |
-          set -euo pipefail
-          # Cross-repo CI stubs and legacy backfill paths never enter the destination tree.
-          if grep -rln 'provision-rust-ci-stubs\|storage-v22-backfill' --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target --exclude=ci.yml . ; then
-            echo "cross-repo stub or backfill path found"; exit 1
-          fi

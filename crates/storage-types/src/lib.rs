@@ -106,12 +106,12 @@ pub struct StorageDescriptor {
     pub backend: StorageBackend,
 }
 
-/// Build the per-module postgres database name: `cortexkit_<slug>_<16hex>`.
+/// Build the per-module postgres database name: `eidnara_<slug>_<16hex>`.
 ///
 /// The 16-hex suffix hashes `module_id`; `a-b` and `a_b` generate different names.
 /// The 36-character slug limit keeps generated names within 63 bytes.
 pub fn postgres_database_name(module_id: &str) -> String {
-    const MAX_SLUG: usize = 36; // 63 - len("cortexkit_") - len("_") - 16
+    const MAX_SLUG: usize = 36; // 63 - len("eidnara_") - len("_") - 16
     let slug: String = module_id
         .chars()
         .map(|c| {
@@ -123,18 +123,18 @@ pub fn postgres_database_name(module_id: &str) -> String {
         })
         .take(MAX_SLUG)
         .collect();
-    format!("cortexkit_{slug}_{}", fnv1a_hex(module_id))
+    format!("eidnara_{slug}_{}", fnv1a_hex(module_id))
 }
 
 /// The conventional SQLite store path under a data-home root:
-/// `<data_home>/cortexkit/<module_id>/store.db`. Trailing `/` characters in
+/// `<data_home>/eidnara/<module_id>/store.db`. Trailing `/` characters in
 /// `data_home` do not produce duplicate separators.
 ///
 /// # Panics
 ///
 /// Panics when `module_id` is not a single path component: empty, `.`, `..`,
 /// or containing `/` or `\`. A module id must be one path component so each
-/// module maps to exactly one directory under `<data_home>/cortexkit/`.
+/// module maps to exactly one directory under `<data_home>/eidnara/`.
 /// Rejecting rather than encoding keeps every valid id's path byte-stable.
 pub fn sqlite_store_path(data_home: &str, module_id: &str) -> String {
     assert!(
@@ -142,7 +142,7 @@ pub fn sqlite_store_path(data_home: &str, module_id: &str) -> String {
         "module_id {module_id:?} is not a single path component"
     );
     format!(
-        "{}/cortexkit/{}/store.db",
+        "{}/eidnara/{}/store.db",
         data_home.trim_end_matches('/'),
         module_id
     )
@@ -171,8 +171,8 @@ mod tests {
         let a = postgres_database_name("a-b");
         let b = postgres_database_name("a_b");
         assert_ne!(a, b, "distinct module ids must not share a database name");
-        assert!(a.starts_with("cortexkit_a_b_"));
-        assert!(b.starts_with("cortexkit_a_b_"));
+        assert!(a.starts_with("eidnara_a_b_"));
+        assert!(b.starts_with("eidnara_a_b_"));
     }
 
     #[test]
@@ -185,18 +185,15 @@ mod tests {
     #[test]
     fn sqlite_path_follows_convention() {
         assert_eq!(
-            sqlite_store_path("/home/u/.local/share", "alfonso-routing"),
-            "/home/u/.local/share/cortexkit/alfonso-routing/store.db"
+            sqlite_store_path("/home/u/.local/share", "module-a"),
+            "/home/u/.local/share/eidnara/module-a/store.db"
         );
-        assert_eq!(
-            sqlite_store_path("/data/", "m"),
-            "/data/cortexkit/m/store.db"
-        );
+        assert_eq!(sqlite_store_path("/data/", "m"), "/data/eidnara/m/store.db");
     }
 
-    /// A module id carrying a path component resolves outside `<data_home>/cortexkit/`.
+    /// A module id carrying a path component resolves outside `<data_home>/eidnara/`.
     #[test]
-    fn sqlite_path_rejects_module_ids_that_escape_the_cortexkit_root() {
+    fn sqlite_path_rejects_module_ids_that_escape_the_store_root() {
         for bad in ["../other", "a/b", "a\\b", "..", ".", ""] {
             let outcome = std::panic::catch_unwind(|| sqlite_store_path("/data", bad));
             assert!(outcome.is_err(), "module_id {bad:?} must be rejected");
@@ -204,7 +201,7 @@ mod tests {
         // A dot inside a name is an ordinary character, not a traversal.
         assert_eq!(
             sqlite_store_path("/data", "a.b"),
-            "/data/cortexkit/a.b/store.db"
+            "/data/eidnara/a.b/store.db"
         );
     }
 
@@ -213,17 +210,17 @@ mod tests {
     #[test]
     fn sqlite_descriptor_golden_json() {
         let d = StorageDescriptor {
-            module_id: "alfonso-routing".into(),
+            module_id: "module-a".into(),
             storage_namespace: "route-state".into(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: "/data/cortexkit/alfonso-routing/store.db".into(),
+                path: "/data/eidnara/module-a/store.db".into(),
             },
         };
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(
             json,
-            r#"{"module_id":"alfonso-routing","storage_namespace":"route-state","isolation":{"kind":"module"},"backend":{"backend":"sqlite","path":"/data/cortexkit/alfonso-routing/store.db"}}"#
+            r#"{"module_id":"module-a","storage_namespace":"route-state","isolation":{"kind":"module"},"backend":{"backend":"sqlite","path":"/data/eidnara/module-a/store.db"}}"#
         );
         let back: StorageDescriptor = serde_json::from_str(&json).unwrap();
         assert_eq!(back, d);
@@ -232,13 +229,12 @@ mod tests {
     #[test]
     fn postgres_descriptor_golden_json() {
         let d = StorageDescriptor {
-            module_id: "alfonso-routing".into(),
+            module_id: "module-a".into(),
             storage_namespace: "route-state".into(),
             isolation: Isolation::Module,
             backend: StorageBackend::Postgres {
-                dsn: "postgres://routing:scoped@localhost/cortexkit_alfonso_routing_0badc0de"
-                    .into(),
-                database: "cortexkit_alfonso_routing_0badc0de".into(),
+                dsn: "postgres://routing:scoped@localhost/eidnara_module_a_0badc0de".into(),
+                database: "eidnara_module_a_0badc0de".into(),
             },
         };
         let json = serde_json::to_string(&d).unwrap();
@@ -251,7 +247,7 @@ mod tests {
     #[test]
     fn debug_output_redacts_the_postgres_dsn() {
         let d = StorageDescriptor {
-            module_id: "alfonso-routing".into(),
+            module_id: "module-a".into(),
             storage_namespace: "route-state".into(),
             isolation: Isolation::Module,
             backend: StorageBackend::Postgres {

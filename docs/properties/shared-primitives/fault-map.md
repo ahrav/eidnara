@@ -1,6 +1,6 @@
 # Fault-to-property map
 
-Provenance: `commons@89abb40`, extended at U2 with faults for the discovered
+Provenance: `primitives@89abb40`, extended at U2 with faults for the discovered
 records.
 
 Safety checks apply while faults are active. Liveness checks run after the stated bounded fault-free recovery window. Coverage records verify that vulnerable preconditions occurred.

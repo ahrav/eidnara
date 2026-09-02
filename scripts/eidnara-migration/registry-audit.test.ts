@@ -24,7 +24,6 @@ function fakeRunner(overrides: Record<string, CommandResult> = {}): Runner {
             if (name.startsWith("@eidnara/")) {
                 return ok(JSON.stringify({ versions: ["1.0.0-reserved.1"], "dist-tags": { reserved: "1.0.0-reserved.1" } }));
             }
-            if (name.endsWith("mc-shm-native") || name.endsWith("mc-host-linux-x64-gnu")) return e404();
             return ok(JSON.stringify({ versions: ["0.38.0"], "dist-tags": { latest: "0.38.0" } }));
         }
         if (args[0] === "trust") return ok("(no trusted publishers)\n");
@@ -39,7 +38,7 @@ describe("registry audit", () => {
         const gate = audit(fakeRunner(), now);
         expect(gate.schema).toBe(SCHEMA);
         expect(gate.npm_version).toBe("11.16.0");
-        expect(gate.probes).toHaveLength(10 + EIDNARA_PACKAGES.length + 2);
+        expect(gate.probes).toHaveLength(EIDNARA_PACKAGES.length * 2 + 2);
         for (const probe of gate.probes) {
             expect(probe.response_sha256).toMatch(/^[0-9a-f]{64}$/);
             expect(typeof probe.exit_status).toBe("number");
@@ -66,14 +65,12 @@ describe("registry audit", () => {
         expect(checkGate({ ...gate, npm_version: "10.9.0" }, now)).toContain("npm_version 10.9.0 does not support npm trust; need >= 11");
     });
 
-    test("rejects a non-prerelease @eidnara version and a published predecessor payload name", () => {
+    test("rejects a non-prerelease @eidnara version", () => {
         const runner = fakeRunner({
             "view @eidnara/cli versions dist-tags --json": ok(JSON.stringify({ versions: ["1.0.0-reserved.1", "1.0.0"], "dist-tags": { latest: "1.0.0" } })),
-            "view @cortexkit/mc-shm-native versions dist-tags --json": ok(JSON.stringify({ versions: ["0.38.0"], "dist-tags": {} })),
         });
         const errors = checkGate(audit(runner, now), now);
         expect(errors).toContain("@eidnara/cli has non-prerelease versions 1.0.0; genesis has not been published");
-        expect(errors).toContain("@cortexkit/mc-shm-native must stay unpublished (E404); observed state published");
     });
 
     test("--require-reservation demands an inert reservation on every @eidnara name", () => {

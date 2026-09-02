@@ -17,7 +17,7 @@ Some prose with a colon: not a field.
 
 Type: safety
 Reachability: default-production - the ring transport is built unconditionally
-(\`crates/mc-host/src/runtime.rs:741\`), so this code is on the shipped path.
+(\`crates/host-runtime/src/runtime.rs:741\`), so this code is on the shipped path.
 Status: active
 Exercised: not yet - needs a peer that writes the lifecycle page directly.
 Guarantee: Once a direction is quarantined locally, no action by the peer can
@@ -62,7 +62,7 @@ describe("property index generator", () => {
         expect(first.slug).toBe("quarantine-authority-survives-peer-writes");
         expect(first.type).toBe("safety");
         expect(first.reachability).toBe("default-production");
-        expect(first.reachability_note).toContain("built unconditionally (`crates/mc-host/src/runtime.rs:741`)");
+        expect(first.reachability_note).toContain("built unconditionally (`crates/host-runtime/src/runtime.rs:741`)");
         expect(first.exercised).toEqual({ state: "not-yet", note: "needs a peer that writes the lifecycle page directly." });
         expect(first.check.semantics).toBe("always");
         expect(first.check.condition).toContain("every operation still returns `Quarantined`.");

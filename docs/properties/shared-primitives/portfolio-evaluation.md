@@ -1,10 +1,11 @@
 # Portfolio evaluation
 
-Provenance: `commons@89abb40`. This is the source portfolio evaluation for the
-lease and fence records, carried forward verbatim in substance. The fresh
+Provenance: `primitives@89abb40`. This is the source portfolio evaluation for
+the lease and fence records, carried forward verbatim in substance. The fresh
 evaluation over this wave's `core` subset is in
 `migration/waves/U2/property-impact.json` and the per-record evidence files.
-PostgreSQL statements describe the dropped backend.
+PostgreSQL statements describe the PostgreSQL backend in the source
+(`primitives@89abb40`), which is not carried.
 
 Fresh-context evaluation ran after the initial 22-record catalog was written. It compared harness fit, coverage balance, implementability, and wildcard framing against source, then was restamped against `fa975843afd4b3122288149968ea5d6ff46322b3`.
 
@@ -68,7 +69,7 @@ The following cannot be settled from this repository:
 - External shared-mode consumers.
 - Per-consumer lease-root paths, mount options, and host access topology.
 - External blockers and draft status are tracked in the [durable consumer inventory](durable-consumer-inventory.md).
-- BROCA watcher health and owner acknowledgement.
+- Deployment-owner watcher health and owner acknowledgement.
 - The intended machine-crash model.
 - The authoritative set of fence-protected write sites.
 

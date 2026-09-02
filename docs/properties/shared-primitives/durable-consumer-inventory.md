@@ -1,30 +1,33 @@
 # Durable store consumer inventory
 
-Provenance: captured at `commons@89abb40` for the four crates before they moved
-here. Of the consumers below, only `magic-context` is in migration scope; it
+Provenance: captured at `primitives@89abb40` for the four crates, from
+default-branch reads of each consumer source taken on 2026-09-01. Of the
+consumers below, only the host source's module store is in migration scope; it
 becomes `crates/memory-store`, `crates/daemon`, and the kernel crates in U4 and
-U5, and its unfenced `with_conn` mutations are the open upstream bead
-`magic-context-cu2l`. `claustrum`, `synapse`, and the two `broca` repositories
-are outside Eidnara; the claustrum review duty is released to the single
-maintainer in `migration/owners.json`. The PostgreSQL backend is dropped, so
+U5, and its unfenced `with_conn` mutations are an open issue in the `host`
+source. The credentials store, the sibling module store, and the two
+repositories that returned 404 are outside Eidnara; the credentials-store
+review duty is released to the single maintainer in `migration/owners.json`.
+The PostgreSQL backend in the source (`primitives@89abb40`) is not carried, so
 the "PostgreSQL consumers" row is closed by removal rather than migration.
 
-This inventory records default-branch source receipts captured on 2026-09-01.
-Commit-pinned links keep the evidence stable as consumer branches move.
+Receipts are reads of consumer sources outside this tree. Docs cite only
+in-tree code plus a source alias and commit, so the rows below carry the
+finding and the read date, not paths or line ranges into those sources.
 
 | Consumer | Receipt | Finding |
 |---|---|---|
-| `cortexkit/claustrum` | [`crates/credentials-core/src/store.rs:572-580`](https://github.com/cortexkit/claustrum/blob/67a6f22067ee36a44b8cc12ceac8360debc65093/crates/credentials-core/src/store.rs#L572-L580) | `fenced_write` delegates durable writes to `with_conn_fenced`. Unfenced `with_conn` remains in the file for reads and connection setup. |
-| `cortexkit/synapse` | [`crates/synapse-module/src/store.rs:1768-1794`](https://github.com/cortexkit/synapse/blob/912467bb6d681f29f8c7d56ee2d8ccfadeba57c0/crates/synapse-module/src/store.rs#L1768-L1794) | Open and migration use the SQLite store; the first read-modify-write shown uses `with_conn_fenced`. The file contains additional fenced writes and unfenced reads. |
-| `cortexkit/magic-context` | [`crates/mc-store/src/lib.rs`](https://github.com/cortexkit/magic-context/blob/44ac1982223d9464fa8fb23cf5ff872b1e6f3ac3/crates/mc-store/src/lib.rs) | The store has many uses of both callback APIs. Unfenced durable mutations include the delete at [6523-6530](https://github.com/cortexkit/magic-context/blob/44ac1982223d9464fa8fb23cf5ff872b1e6f3ac3/crates/mc-store/src/lib.rs#L6523-L6530) and inserts at [7479-7617](https://github.com/cortexkit/magic-context/blob/44ac1982223d9464fa8fb23cf5ff872b1e6f3ac3/crates/mc-store/src/lib.rs#L7479-L7617). Fenced paths include [6617](https://github.com/cortexkit/magic-context/blob/44ac1982223d9464fa8fb23cf5ff872b1e6f3ac3/crates/mc-store/src/lib.rs#L6617) and [7018](https://github.com/cortexkit/magic-context/blob/44ac1982223d9464fa8fb23cf5ff872b1e6f3ac3/crates/mc-store/src/lib.rs#L7018). Removing unrestricted SQLite access would break this default branch. |
-| PostgreSQL consumers | GitHub code search, query `org:cortexkit PostgresStore` (type: code), run on 2026-09-01 and recorded in source commit `commons@ed7ccd1`; [live query link](https://github.com/search?q=org%3Acortexkit+PostgresStore&type=code) | The 2026-09-01 result showed no downstream `PostgresStore` or `with_client` use. A live search is not commit-pinned: it reflects the default branches at query time and no snapshot of the result set is stored, so the "no downstream use" conclusion is unverified until a pinned snapshot (result list with each repository's commit) exists. Version 0.3.0 replaces the unrestricted callback with read-only and fenced transaction APIs without a known consumer migration. |
-| `broca`, `broca-tagref` | Repository lookup returned HTTP 404 | Source was unavailable, so this inventory makes no claim about either repository. |
+| A credentials store outside Eidnara | Commit-pinned source read, 2026-09-01 | `fenced_write` delegates durable writes to `with_conn_fenced`. Unfenced `with_conn` remains in the file for reads and connection setup. |
+| A module store in a sibling repository outside Eidnara | Commit-pinned source read, 2026-09-01 | Open and migration use the SQLite store; the first read-modify-write shown uses `with_conn_fenced`. The file contains additional fenced writes and unfenced reads. |
+| The host source's module store (`host`) | Commit-pinned source read, 2026-09-01 | The store has many uses of both callback APIs. Unfenced durable mutations include a delete and a block of inserts; other write paths are fenced. Removing unrestricted SQLite access breaks this default branch. |
+| PostgreSQL consumers | A code search of the source organization for the PostgreSQL store type, run 2026-09-01, not commit-pinned | The result showed no downstream `PostgresStore` or `with_client` use. A live search reflects the default branches at query time and no snapshot of the result set is stored, so the no-downstream-use conclusion is unverified until a pinned snapshot (result list with each repository's commit) exists. The PostgreSQL backend in the source (`primitives@89abb40`) exposes read-only and fenced transaction APIs in place of an unrestricted callback, with no known consumer of either. |
+| Two further repositories | Repository lookup returned HTTP 404 | Source was unavailable, so this inventory makes no claim about either repository. |
 
-Two external blockers remain. Magic Context has durable mutations through
-`with_conn`, which now fails `SQLITE_READONLY` rather than committing unfenced, so
-upgrading that consumer requires moving those mutations to `with_conn_fenced`
-before the version bump reaches it. Defining the complete protected write set is
-a separate owner decision, because `with_conn_unfenced` can carry the same
-mutations without a fence check.
-Claustrum has no supplied receipt for its real-daemon two-process review. The
-backend-fencing PR remains draft until both blockers are resolved.
+Two external blockers remain. The host source's module store has durable
+mutations through `with_conn`, which fails `SQLITE_READONLY` rather than
+committing unfenced, so upgrading that consumer requires moving those mutations
+to `with_conn_fenced` before the version bump reaches it. Defining the complete
+protected write set is a separate owner decision, because `with_conn_unfenced`
+can carry the same mutations without a fence check. The credentials store has
+no supplied receipt for its real-daemon two-process review. Both blockers stay
+open.

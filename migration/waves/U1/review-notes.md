@@ -6,9 +6,9 @@ verbatim from a pinned source commit.
 
 ## Authored files
 
-Each authored file implements a numbered U1 step from
-`docs/plans/2026-09-01-0633-refactor-eidnara-repository-migration-plan.md` in
-the commons repository. The mapping is:
+Each authored file implements a numbered U1 step from the repository plan
+`2026-09-01-0633-refactor-eidnara-repository-migration-plan` in the `primitives`
+source. The mapping is:
 
 | File | Plan step |
 | --- | --- |
@@ -33,8 +33,8 @@ list. The checker exercises the control-record JSON files with
 
 ## Copied files
 
-`docs/properties/METHOD.md` is a verbatim copy of
-`magic-context@b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825:docs/properties/METHOD.md`.
+`docs/properties/METHOD.md` is a verbatim copy of the method document at
+`host@b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825`.
 The plan pins this revision as the method for every catalog. The U1 review read
 its prose in full and left it unchanged. Editing it would change the pinned
 method and is out of scope for this wave. Any wording change to METHOD requires

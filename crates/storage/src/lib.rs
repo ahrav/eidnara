@@ -49,10 +49,10 @@ pub enum StoreError {
     )]
     Fenced { holder_epoch: u64, db_epoch: u64 },
     /// An out-of-range database epoch prevents proving monotonic fencing. The store
-    /// refuses to open until an operator resets `cortexkit_fence.epoch`.
+    /// refuses to open until an operator resets `eidnara_fence.epoch`.
     #[error(
         "database fence epoch {db_epoch} is outside the supported range; reset \
-         cortexkit_fence.epoch to at least the highest epoch a writer has used"
+         eidnara_fence.epoch to at least the highest epoch a writer has used"
     )]
     FenceCorrupt { db_epoch: i64 },
 }
@@ -396,7 +396,7 @@ mod sqlite_backend {
             let shadow: Option<String> = conn
                 .query_row(
                     "SELECT name FROM temp.sqlite_schema \
-                     WHERE lower(name) IN ('cortexkit_fence', 'cortexkit_schema_version') \
+                     WHERE lower(name) IN ('eidnara_fence', 'eidnara_schema_version') \
                      LIMIT 1",
                     [],
                     |row| row.get(0),
@@ -494,7 +494,7 @@ mod sqlite_backend {
             | AuthAction::CreateVtable { table_name, .. }
             | AuthAction::DropVtable { table_name, .. } => table_name,
             // A view resolves ahead of the table it shadows on this connection, so a
-            // forged `cortexkit_fence` would let a stale writer read its own epoch.
+            // forged `eidnara_fence` would let a stale writer read its own epoch.
             AuthAction::CreateView { view_name }
             | AuthAction::CreateTempView { view_name }
             | AuthAction::DropView { view_name }
@@ -509,8 +509,8 @@ mod sqlite_backend {
     /// schema reaching either, would let a superseded writer reclaim the database or
     /// re-run a migration.
     fn is_infrastructure_table(table_name: &str) -> bool {
-        table_name.eq_ignore_ascii_case("cortexkit_fence")
-            || table_name.eq_ignore_ascii_case("cortexkit_schema_version")
+        table_name.eq_ignore_ascii_case("eidnara_fence")
+            || table_name.eq_ignore_ascii_case("eidnara_schema_version")
     }
 
     /// `with_conn_unfenced` remains unrestricted by contract, so `synchronous` and the
@@ -537,7 +537,7 @@ mod sqlite_backend {
     ///
     /// The stored database fence becomes the lease floor. Deleting or restoring an
     /// old lease sidecar cannot reissue an epoch represented in the database.
-    /// Databases created by older versions without a fence table use floor zero.
+    /// A database without a fence table opens at floor zero.
     ///
     /// The lease lives next to the database file (its parent directory), derived
     /// from the descriptor's path rather than passed in. This makes the
@@ -642,7 +642,7 @@ mod sqlite_backend {
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let has_fence: bool = conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'cortexkit_fence')",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'eidnara_fence')",
                 [],
                 |row| row.get(0),
             )
@@ -654,9 +654,9 @@ mod sqlite_backend {
     }
 
     const FENCE_EPOCH_SQL: &str =
-        "SELECT COALESCE((SELECT epoch FROM cortexkit_fence WHERE id = 0), 0)";
+        "SELECT COALESCE((SELECT epoch FROM eidnara_fence WHERE id = 0), 0)";
 
-    /// The caller guarantees that `cortexkit_fence` exists.
+    /// The caller guarantees that `eidnara_fence` exists.
     fn read_fence_epoch_in(conn: &Connection) -> Result<u64, StoreError> {
         let epoch: i64 = conn
             .query_row(FENCE_EPOCH_SQL, [], |row| row.get(0))
@@ -667,7 +667,7 @@ mod sqlite_backend {
     /// Initializes fence storage before `SqliteStore` is exposed.
     fn ensure_fence_table(tx: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
         tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS cortexkit_fence (\
+            "CREATE TABLE IF NOT EXISTS eidnara_fence (\
                  id INTEGER PRIMARY KEY CHECK (id = 0), \
                  epoch INTEGER NOT NULL CHECK (epoch >= 0))",
         )
@@ -728,7 +728,7 @@ mod sqlite_backend {
     ) -> Result<(), StoreError> {
         let rows = tx
             .execute(
-                "INSERT INTO cortexkit_fence (id, epoch) VALUES (0, ?1) \
+                "INSERT INTO eidnara_fence (id, epoch) VALUES (0, ?1) \
                  ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch",
                 rusqlite::params![holder_epoch_sql],
             )
@@ -776,7 +776,7 @@ mod sqlite_backend {
             .map_err(|e| StoreError::Migration(e.to_string()))?;
         claim_fence(&tx, holder_epoch)?;
         tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS cortexkit_schema_version (\
+            "CREATE TABLE IF NOT EXISTS eidnara_schema_version (\
                  namespace TEXT NOT NULL, \
                  version INTEGER NOT NULL, \
                  applied_at_unix INTEGER NOT NULL, \
@@ -787,7 +787,7 @@ mod sqlite_backend {
 
         let current: u32 = tx
             .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM cortexkit_schema_version WHERE namespace = ?1",
+                "SELECT COALESCE(MAX(version), 0) FROM eidnara_schema_version WHERE namespace = ?1",
                 rusqlite::params![namespace],
                 |r| r.get(0),
             )
@@ -829,7 +829,7 @@ mod sqlite_backend {
             })?;
             let recorded = tx
                 .execute(
-                    "INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) \
+                    "INSERT INTO eidnara_schema_version (namespace, version, applied_at_unix) \
                      VALUES (?1, ?2, ?3)",
                     rusqlite::params![namespace, m.version, now_unix()],
                 )
@@ -845,7 +845,7 @@ mod sqlite_backend {
             // An AFTER trigger can undo the row while leaving the change count at one.
             let present: i64 = tx
                 .query_row(
-                    "SELECT COUNT(*) FROM cortexkit_schema_version WHERE namespace = ?1 AND version = ?2",
+                    "SELECT COUNT(*) FROM eidnara_schema_version WHERE namespace = ?1 AND version = ?2",
                     rusqlite::params![namespace, m.version],
                     |r| r.get(0),
                 )
@@ -978,7 +978,7 @@ mod tests {
 
         let raw = rusqlite::Connection::open(&path).expect("reopen raw");
         raw.execute_batch(
-            "CREATE TRIGGER version_suppressor BEFORE INSERT ON cortexkit_schema_version \
+            "CREATE TRIGGER version_suppressor BEFORE INSERT ON eidnara_schema_version \
              BEGIN SELECT RAISE(IGNORE); END",
         )
         .expect("install suppressing trigger");
@@ -1006,7 +1006,7 @@ mod tests {
             .with_conn(|c| {
                 c.query_row(
                     "SELECT (SELECT COUNT(*) FROM sqlite_schema WHERE name = 'second'), \
-                            (SELECT MAX(version) FROM cortexkit_schema_version WHERE namespace = 'ns')",
+                            (SELECT MAX(version) FROM eidnara_schema_version WHERE namespace = 'ns')",
                     [],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -1110,7 +1110,7 @@ mod tests {
 
         let conn = rusqlite::Connection::open(&path).expect("inspect fence");
         let epoch: i64 = conn
-            .query_row("SELECT epoch FROM cortexkit_fence WHERE id = 0", [], |r| {
+            .query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |r| {
                 r.get(0)
             })
             .expect("read fence epoch");
@@ -1165,7 +1165,7 @@ mod tests {
         let store = open_sqlite(&d).expect("open");
         let claimed: i64 = store
             .with_conn(|c| {
-                c.query_row("SELECT epoch FROM cortexkit_fence WHERE id = 0", [], |r| {
+                c.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |r| {
                     r.get(0)
                 })
             })
@@ -1186,11 +1186,9 @@ mod tests {
 
         let mut conn = rusqlite::Connection::open(&path).expect("reopen database");
         let stored: u64 = conn
-            .query_row(
-                "SELECT epoch FROM cortexkit_fence WHERE id = 0",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
+            .query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .map(|epoch| epoch as u64)
             .expect("stored fence");
 
@@ -1259,11 +1257,9 @@ mod tests {
         assert!(third.epoch() > second_epoch);
         let db_epoch: i64 = third
             .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT epoch FROM cortexkit_fence WHERE id = 0",
-                    [],
-                    |row| row.get(0),
-                )
+                conn.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |row| {
+                    row.get(0)
+                })
             })
             .expect("database fence");
         assert_eq!(db_epoch as u64, third.epoch());
@@ -1334,7 +1330,7 @@ mod tests {
 
         let mut conn = rusqlite::Connection::open(&path).expect("reopen raw");
         conn.execute_batch(
-            "CREATE TRIGGER fence_suppressor BEFORE UPDATE ON cortexkit_fence \
+            "CREATE TRIGGER fence_suppressor BEFORE UPDATE ON eidnara_fence \
              BEGIN SELECT RAISE(IGNORE); END",
         )
         .expect("install suppressing trigger");
@@ -1363,8 +1359,8 @@ mod tests {
 
         let mut conn = rusqlite::Connection::open(&path).expect("reopen raw");
         conn.execute_batch(
-            "CREATE TRIGGER fence_undo AFTER UPDATE ON cortexkit_fence \
-             BEGIN UPDATE cortexkit_fence SET epoch = OLD.epoch WHERE id = 0; END",
+            "CREATE TRIGGER fence_undo AFTER UPDATE ON eidnara_fence \
+             BEGIN UPDATE eidnara_fence SET epoch = OLD.epoch WHERE id = 0; END",
         )
         .expect("install undoing trigger");
         let tx = conn.transaction().expect("tx");
@@ -1401,8 +1397,8 @@ mod tests {
 
         let raw = rusqlite::Connection::open(&path).expect("reopen raw");
         raw.execute_batch(
-            "CREATE TRIGGER version_undo AFTER INSERT ON cortexkit_schema_version \
-             BEGIN DELETE FROM cortexkit_schema_version \
+            "CREATE TRIGGER version_undo AFTER INSERT ON eidnara_schema_version \
+             BEGIN DELETE FROM eidnara_schema_version \
              WHERE namespace = NEW.namespace AND version = NEW.version; END",
         )
         .expect("install undoing trigger");
@@ -1868,7 +1864,7 @@ mod tests {
         let recorded: i64 = store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT COUNT(*) FROM cortexkit_schema_version WHERE namespace = 'escape'",
+                    "SELECT COUNT(*) FROM eidnara_schema_version WHERE namespace = 'escape'",
                     [],
                     |r| r.get(0),
                 )
@@ -1897,20 +1893,20 @@ mod tests {
         let epoch = store.epoch();
 
         for sql in [
-            "UPDATE cortexkit_fence SET epoch = 0 WHERE id = 0",
-            "DELETE FROM cortexkit_fence WHERE id = 0",
-            "INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) \
+            "UPDATE eidnara_fence SET epoch = 0 WHERE id = 0",
+            "DELETE FROM eidnara_fence WHERE id = 0",
+            "INSERT INTO eidnara_schema_version (namespace, version, applied_at_unix) \
              VALUES ('kv', 99, 0)",
             // A trigger reaches the row without naming it in a DML statement: raising
             // IGNORE on update suppresses a later opener's claim while it still succeeds.
-            "CREATE TRIGGER freeze_fence BEFORE UPDATE ON cortexkit_fence \
+            "CREATE TRIGGER freeze_fence BEFORE UPDATE ON eidnara_fence \
              BEGIN SELECT RAISE(IGNORE); END",
-            "DROP TABLE cortexkit_fence",
-            "CREATE INDEX fence_idx ON cortexkit_fence (epoch)",
+            "DROP TABLE eidnara_fence",
+            "CREATE INDEX fence_idx ON eidnara_fence (epoch)",
             // A view resolves ahead of the table it shadows, so a stale connection could
             // read its own epoch and skip the claim entirely.
-            "CREATE TEMP VIEW cortexkit_fence AS SELECT 0 AS id, 1 AS epoch",
-            "CREATE VIEW cortexkit_schema_version AS SELECT 1",
+            "CREATE TEMP VIEW eidnara_fence AS SELECT 0 AS id, 1 AS epoch",
+            "CREATE VIEW eidnara_schema_version AS SELECT 1",
         ] {
             let r = store.with_conn_fenced(|tx| tx.execute(sql, []).map(|_| ()));
             assert!(
@@ -1923,7 +1919,7 @@ mod tests {
             .with_conn(|c| {
                 c.query_row(
                     "SELECT COUNT(*) FROM sqlite_schema WHERE name IN \
-                     ('freeze_fence', 'fence_idx', 'cortexkit_schema_version') \
+                     ('freeze_fence', 'fence_idx', 'eidnara_schema_version') \
                      AND type <> 'table'",
                     [],
                     |r| r.get(0),
@@ -1934,7 +1930,7 @@ mod tests {
         let shadow: i64 = store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'cortexkit_fence'",
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'eidnara_fence'",
                     [],
                     |r| r.get(0),
                 )
@@ -1944,7 +1940,7 @@ mod tests {
 
         let stored: i64 = store
             .with_conn(|c| {
-                c.query_row("SELECT epoch FROM cortexkit_fence WHERE id = 0", [], |r| {
+                c.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |r| {
                     r.get(0)
                 })
             })
@@ -1956,7 +1952,7 @@ mod tests {
 
         let migration = &[Migration {
             version: 8,
-            statements: "UPDATE cortexkit_fence SET epoch = 0 WHERE id = 0;",
+            statements: "UPDATE eidnara_fence SET epoch = 0 WHERE id = 0;",
         }];
         let m = store.migrate("fencerow", migration);
         assert!(
@@ -1967,7 +1963,7 @@ mod tests {
         // `AuthAction::AlterTable` reports the source name, so the rename is authorized
         // and has to be caught by name once the callback returns.
         // SQLite resolves identifiers case-insensitively, so the check must too.
-        for target in ["cortexkit_fence", "CORTEXKIT_FENCE", "CortexKit_Fence"] {
+        for target in ["eidnara_fence", "EIDNARA_FENCE", "Eidnara_Fence"] {
             let renamed = store.with_conn_fenced(|tx| {
                 tx.execute("CREATE TEMP TABLE benign (id INTEGER, epoch INTEGER)", [])?;
                 tx.execute(&format!("ALTER TABLE benign RENAME TO {target}"), [])
@@ -1981,7 +1977,7 @@ mod tests {
         let shadow_after: i64 = store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'cortexkit_fence'",
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'eidnara_fence'",
                     [],
                     |r| r.get(0),
                 )
@@ -2040,7 +2036,7 @@ mod tests {
         assert_eq!(n, 0, "the failed fenced write rolled back");
         let claimed: i64 = store
             .with_conn(|c| {
-                c.query_row("SELECT epoch FROM cortexkit_fence WHERE id = 0", [], |r| {
+                c.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |r| {
                     r.get(0)
                 })
             })
@@ -2053,24 +2049,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_database_without_fence_table_uses_zero_floor() {
+    fn database_without_fence_table_uses_zero_floor() {
         let (root, d) = tmp();
         let path = sqlite_path(&d);
         std::fs::create_dir_all(&root).expect("create store directory");
-        let conn = rusqlite::Connection::open(&path).expect("create legacy database");
-        conn.execute_batch("CREATE TABLE legacy_data (id INTEGER PRIMARY KEY);")
-            .expect("create legacy schema");
+        let conn =
+            rusqlite::Connection::open(&path).expect("create database without a fence table");
+        conn.execute_batch("CREATE TABLE unfenced_data (id INTEGER PRIMARY KEY);")
+            .expect("create schema");
         drop(conn);
 
-        let store = open_sqlite(&d).expect("open legacy database");
+        let store = open_sqlite(&d).expect("open database without a fence table");
         assert_eq!(store.epoch(), 1, "missing fence table must use floor zero");
         let claimed: i64 = store
             .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT epoch FROM cortexkit_fence WHERE id = 0",
-                    [],
-                    |row| row.get(0),
-                )
+                conn.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |row| {
+                    row.get(0)
+                })
             })
             .expect("read claimed fence");
         assert_eq!(claimed, 1);
@@ -2078,14 +2073,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_negative_database_fence_fails_closed() {
+    fn negative_database_fence_fails_closed() {
         let (root, d) = tmp();
         let path = sqlite_path(&d);
         std::fs::create_dir_all(&root).expect("create store directory");
-        let conn = rusqlite::Connection::open(&path).expect("create legacy database");
+        let conn =
+            rusqlite::Connection::open(&path).expect("create database without a fence table");
         conn.execute_batch(
-            "CREATE TABLE cortexkit_fence (id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL); \
-             INSERT INTO cortexkit_fence (id, epoch) VALUES (0, -1);",
+            "CREATE TABLE eidnara_fence (id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL); \
+             INSERT INTO eidnara_fence (id, epoch) VALUES (0, -1);",
         )
         .expect("seed pre-fence-validation database");
         drop(conn);
@@ -2096,12 +2092,10 @@ mod tests {
         };
         assert!(matches!(error, StoreError::FenceCorrupt { db_epoch } if db_epoch == -1));
         let persisted: i64 = rusqlite::Connection::open(&path)
-            .expect("reopen legacy database")
-            .query_row(
-                "SELECT epoch FROM cortexkit_fence WHERE id = 0",
-                [],
-                |row| row.get(0),
-            )
+            .expect("reopen database")
+            .query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |row| {
+                row.get(0)
+            })
             .expect("read unchanged negative fence");
         assert_eq!(persisted, -1);
         let _ = std::fs::remove_dir_all(&root);
@@ -2247,7 +2241,7 @@ mod tests {
             .with_conn(|c| {
                 let mut statement = c.prepare(
                     "SELECT name, sql FROM sqlite_schema \
-                     WHERE type = 'table' AND name LIKE 'cortexkit%' ORDER BY name",
+                     WHERE type = 'table' AND name LIKE 'eidnara%' ORDER BY name",
                 )?;
                 let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
                 rows.collect()
@@ -2257,14 +2251,14 @@ mod tests {
             schema,
             vec![
                 (
-                    "cortexkit_fence".to_string(),
-                    "CREATE TABLE cortexkit_fence (id INTEGER PRIMARY KEY CHECK (id = 0), \
+                    "eidnara_fence".to_string(),
+                    "CREATE TABLE eidnara_fence (id INTEGER PRIMARY KEY CHECK (id = 0), \
                      epoch INTEGER NOT NULL CHECK (epoch >= 0))"
                         .to_string(),
                 ),
                 (
-                    "cortexkit_schema_version".to_string(),
-                    "CREATE TABLE cortexkit_schema_version (namespace TEXT NOT NULL, \
+                    "eidnara_schema_version".to_string(),
+                    "CREATE TABLE eidnara_schema_version (namespace TEXT NOT NULL, \
                      version INTEGER NOT NULL, applied_at_unix INTEGER NOT NULL, \
                      PRIMARY KEY (namespace, version))"
                         .to_string(),
@@ -2274,8 +2268,8 @@ mod tests {
         let (epoch, rows): (i64, i64) = store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT (SELECT epoch FROM cortexkit_fence WHERE id = 0), \
-                     (SELECT COUNT(*) FROM cortexkit_fence)",
+                    "SELECT (SELECT epoch FROM eidnara_fence WHERE id = 0), \
+                     (SELECT COUNT(*) FROM eidnara_fence)",
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )

@@ -1,8 +1,8 @@
 # System model
 
-Provenance: `commons@89abb40`. Crate names are the destination names; the
-PostgreSQL backend is described where the source described it and is not part
-of this workspace.
+Provenance: `primitives@89abb40`. Crate names are the workspace names; the
+PostgreSQL backend in the source (`primitives@89abb40`) is described where the
+source described it and is not part of this workspace.
 
 System path: `crates/lease` at revision `9e871ce`, plus the U8 working-tree changes documented here.
 
@@ -18,7 +18,7 @@ The crate has no network or database boundary. Its authority boundaries are the 
 
 One file per derived key stores a decimal `u64`. Published files start with canonical epoch zero; ordinary acquisition rejects existing empty files. `acquire_above` treats an empty sidecar as its caller-supplied resource floor, which must cover every durable epoch previously authorized for the key. Existing nonempty content must contain 1-20 ASCII decimal digits; any longer, non-decimal, or out-of-range state fails closed (`read_epoch`, `crates/lease/src/lib.rs:379-407`). Existing variable-width decimal files remain readable. Successful updates write exactly 20 decimal digits and use checked increment above the persisted epoch and optional resource floor, so `u64::MAX` is terminal (`bump_epoch_above` and `persist_epoch`, `crates/lease/src/lib.rs:410-435`). There is no magic, key binding, checksum, format version, or generation.
 
-The update does not truncate. An empty or 1-19 byte legacy input is extended to 20 bytes with non-decimal markers before the canonical overwrite. For canonical 20-byte values, every prefix splice from the next epoch is either equal to or greater than the prior value. `interrupted_persist_never_leaves_a_lower_parseable_epoch` injects ordered prefix-write failures through `persist_epoch` for all three widths and parses aftermath through production `read_epoch`; the canonical case is where every prefix stays parseable, so the count of parseable aftermaths is asserted to keep the monotonicity oracle non-vacuous. It does not prove `File`, device, process-interruption, or power-loss behavior (`crates/lease/src/lib.rs:379-435,735-853`).
+The update does not truncate. An empty or 1-19 byte variable-width input is extended to 20 bytes with non-decimal markers before the canonical overwrite. For canonical 20-byte values, every prefix splice from the next epoch is either equal to or greater than the prior value. `interrupted_persist_never_leaves_a_lower_parseable_epoch` injects ordered prefix-write failures through `persist_epoch` for all three widths and parses aftermath through production `read_epoch`; the canonical case is where every prefix stays parseable, so the count of parseable aftermaths is asserted to keep the monotonicity oracle non-vacuous. It does not prove `File`, device, process-interruption, or power-loss behavior (`crates/lease/src/lib.rs:379-435,735-853`).
 
 `flush` is not `sync_data` or `sync_all`. The crate makes no claim about exact partial-`File` I/O outcomes, process interruption, machine power loss, storage-cache loss, torn sectors, or filesystem reordering.
 
@@ -62,7 +62,7 @@ No issue or incident tracker was supplied, so history cannot establish additiona
 
 ## Existing test strategy
 
-Twenty-six inline unit tests cover ordinary exclusivity, a same-process eight-way exclusive race, resource-floor issuance, synchronized concurrent shared-first acquisition, shared/exclusive behavior, simple key separation, separator-bearing key fields failing closed, new and legacy epoch initialization, fail-closed epoch states, bounded epoch reads, injected ordered prefix-write failure, Unix symlink/FIFO refusal, permissions, two identity/hash/path stability vector sets, and one cross-process shared-lock case. There are no crash-image tests, fuzz targets, model checkers, or situation-coverage assertions. See [existing-checks.md](existing-checks.md).
+Twenty-six inline unit tests cover ordinary exclusivity, a same-process eight-way exclusive race, resource-floor issuance, synchronized concurrent shared-first acquisition, shared/exclusive behavior, simple key separation, separator-bearing key fields failing closed, new and variable-width epoch initialization, fail-closed epoch states, bounded epoch reads, injected ordered prefix-write failure, Unix symlink/FIFO refusal, permissions, two identity/hash/path stability vector sets, and one cross-process shared-lock case. There are no crash-image tests, fuzz targets, model checkers, or situation-coverage assertions. See [existing-checks.md](existing-checks.md).
 
 ## Failure and degradation
 

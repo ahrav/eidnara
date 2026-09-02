@@ -6,7 +6,7 @@
       "phase": "pre-port",
       "iteration": 0,
       "analyzed": {
-        "repo": "commons",
+        "repo": "primitives",
         "commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0",
         "scope_hash": "060ee421f6ef3ba6b62b4ce2ef6d8b1b83e87dd694dc03f4d7cf8a32e2e39a0d"
       },
@@ -28,7 +28,7 @@
           "implementation": "`label()` arm, `open_sqlite` unsupported-backend arm, `postgres_database_name` and its private `fnv1a_hex`, five `#[cfg(feature = \"sqlite\")]` sites",
           "deletion_test": {
             "concentrates_complexity": true,
-            "rationale": "Deleting the variation makes the complexity vanish rather than move: no call site in magic-context constructs `StorageBackend::Postgres` (0 hits), and no adapter exists in this workspace once cortexkit-store-postgres is dropped."
+            "rationale": "Deleting the variation makes the complexity vanish rather than move: no call site in the host source constructs `StorageBackend::Postgres` (0 hits), and no adapter exists in this workspace once the PostgreSQL backend is dropped."
           },
           "benefits": {
             "locality": true,
@@ -40,7 +40,7 @@
             "storage::sqlite_backend"
           ],
           "specialist_routes": [],
-          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for eight module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `cortexkit_` prefix is frozen in the registry until then.",
+          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for eight module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `eidnara_` prefix is frozen in the registry until then.",
           "follow_up": "contract change after U2; no bead exists yet because the source repositories stay authoritative until U8"
         },
         {
@@ -90,7 +90,7 @@
           "claims_flexibility": false,
           "adapters": [],
           "specialist_routes": [],
-          "rationale": "Call sites that show the complexity moves rather than concentrates: every consumer callback in magic-context mc-store passes through `with_conn` or `with_conn_fenced` and must not gain batch or pragma capability; merging the handles reshuffles the same forwarding while widening the guarded surface."
+          "rationale": "Call sites that show the complexity moves rather than concentrates: every consumer callback in the host source's store passes through `with_conn` or `with_conn_fenced` and must not gain batch or pragma capability; merging the handles reshuffles the same forwarding while widening the guarded surface."
         },
         {
           "title": "Move Migration into storage",
@@ -115,7 +115,7 @@
           "claims_flexibility": false,
           "adapters": [],
           "specialist_routes": [],
-          "rationale": "Pure move; consumers (`mc-store`) import `Migration` through `storage`'s re-export, so the move changes no call site and deepens nothing."
+          "rationale": "Pure move; the host source's store consumer imports `Migration` through `storage`'s re-export, so the move changes no call site and deepens nothing."
         }
       ]
     },
@@ -145,7 +145,7 @@
           "implementation": "`label()` arm, `open_sqlite` unsupported-backend arm, `postgres_database_name` and its private `fnv1a_hex`, five `#[cfg(feature = \"sqlite\")]` sites",
           "deletion_test": {
             "concentrates_complexity": true,
-            "rationale": "Deleting the variation makes the complexity vanish rather than move: no call site in magic-context constructs `StorageBackend::Postgres` (0 hits), and no adapter exists in this workspace once cortexkit-store-postgres is dropped."
+            "rationale": "Deleting the variation makes the complexity vanish rather than move: no call site in the host source constructs `StorageBackend::Postgres` (0 hits), and no adapter exists in this workspace once the PostgreSQL backend is dropped."
           },
           "benefits": {
             "locality": true,
@@ -157,7 +157,7 @@
             "storage::sqlite_backend"
           ],
           "specialist_routes": [],
-          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for eight module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `cortexkit_` prefix is frozen in the registry until then.",
+          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for eight module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `eidnara_` prefix is frozen in the registry until then.",
           "follow_up": "contract change after U2; no bead exists yet because the source repositories stay authoritative until U8"
         },
         {
@@ -207,7 +207,7 @@
           "claims_flexibility": false,
           "adapters": [],
           "specialist_routes": [],
-          "rationale": "Call sites that show the complexity moves rather than concentrates: every consumer callback in magic-context mc-store passes through `with_conn` or `with_conn_fenced` and must not gain batch or pragma capability; merging the handles reshuffles the same forwarding while widening the guarded surface."
+          "rationale": "Call sites that show the complexity moves rather than concentrates: every consumer callback in the host source's store passes through `with_conn` or `with_conn_fenced` and must not gain batch or pragma capability; merging the handles reshuffles the same forwarding while widening the guarded surface."
         },
         {
           "title": "Move Migration into storage",
@@ -232,7 +232,7 @@
           "claims_flexibility": false,
           "adapters": [],
           "specialist_routes": [],
-          "rationale": "Pure move; consumers (`mc-store`) import `Migration` through `storage`'s re-export, so the move changes no call site and deepens nothing."
+          "rationale": "Pure move; the host source's store consumer imports `Migration` through `storage`'s re-export, so the move changes no call site and deepens nothing."
         }
       ]
     }

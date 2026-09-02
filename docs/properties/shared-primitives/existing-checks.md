@@ -15,7 +15,7 @@ No production `assert!`, `debug_assert!`, `panic!`, or equivalent invariant batt
 | `FileLeaseStore::acquire_shared` (`crates/lease/src/lib.rs:289-311`) | Shared acquisition | Uses `try_lock_shared` and reads without mutation. | Concurrent shared-first acquisition and exclusion matrix. |
 | `HeldFileLease::drop` (`crates/lease/src/lib.rs:336-338`) | Guard `Drop` | Best-effort `File::unlock`; error discarded; descriptor then closes. | Drop releases lease. |
 | `read_epoch` (`crates/lease/src/lib.rs:379-407`) | Bounded epoch parse | Reads at most 21 bytes into a bounded vector; existing empty state and anything except 1-20 ASCII digits in `u64` range are rejected. | Malformed, empty, oversized, and overflowing state fails closed outside floor-based acquisition. |
-| `bump_epoch_above`, `persist_epoch` (`crates/lease/src/lib.rs:410-435`) | Epoch update | Checked increment above both persisted state and floor; no truncate; fixed-width decimal overwrite with invalid-marker conversion for empty and 1-19 byte legacy states. | Exhaustion errors; ordered prefix writes cannot leave a lower parseable value in the injected model. |
+| `bump_epoch_above`, `persist_epoch` (`crates/lease/src/lib.rs:410-435`) | Epoch update | Checked increment above both persisted state and floor; no truncate; fixed-width decimal overwrite with invalid-marker conversion for empty and 1-19 byte variable-width states. | Exhaustion errors; ordered prefix writes cannot leave a lower parseable value in the injected model. |
 | `LeaseKey::identity`, `FileLeaseStore::lease_path`, `fnv1a`, `fnv1a_hex` | Identity/path derivation | Public separator-joined identity and FNV functions feed the private `.lease` path helper. | Stable namespaced identity. |
 | `HeldFileLease`, `FileLeaseStore` | Concrete public types | The guard owns the locked file; both types are `Send + Sync`. | Lock lifetime and cross-thread use compile without trait erasure. |
 
@@ -27,15 +27,15 @@ No production `assert!`, `debug_assert!`, `panic!`, or equivalent invariant batt
 | `exclusive_epoch_exceeds_resource_floor` | `crates/lease/src/lib.rs:506-524` | Persisted epoch 41 with floor 100 issues 101; ordinary reacquisition then issues 102; an empty sidecar with floor 41 issues 42. | All | unaudited |
 | `shared_first_initializes_canonical_zero` | `crates/lease/src/lib.rs:527-543` | Shared-first creation observes canonical zero, blocks exclusive, then permits writer epoch 1 after drop. | All | unaudited |
 | `concurrent_shared_first_acquisitions_coexist` | `crates/lease/src/lib.rs:546-608` | Eight synchronized fresh-key shared acquisitions all coexist at epoch zero. Report collection and holder release are both deadline-bounded, so a holder that dies before reporting fails the check instead of hanging the suite. | All | unaudited |
-| `legacy_decimal_epoch_is_canonicalized` | `crates/lease/src/lib.rs:611-623` | Variable-width decimal 41 becomes epoch 42 in fixed-width form. | All | unaudited |
+| `variable_width_decimal_epoch_is_canonicalized` | `crates/lease/src/lib.rs:612-623` | Variable-width decimal 41 becomes epoch 42 in fixed-width form. | All | unaudited |
 | `invalid_epoch_states_fail_closed` | `crates/lease/src/lib.rs:626-678` | Empty, malformed, oversized, and overflowing states return `LeaseError::Io(InvalidData)` through ordinary acquisition; nonempty invalid states also fail through floor-based acquisition and preserve bytes. | All | audited (U2) |
-| `lease_path_vectors_are_version_stable` | `crates/lease/src/lib.rs:1195-1249` | Six externally computed identity/digest/path vectors, including both production keys; acquisition creates exactly the pinned filename. | All | audited (U2) |
+| `lease_path_vectors_are_version_stable` | `crates/lease/src/lib.rs:1195-1249` | Six identity/digest/path vectors for sample keys, with digests computed by an FNV-1a implementation outside the crate; acquisition creates exactly the pinned filename. | All | audited (U2) |
 | `epoch_read_is_bounded_regardless_of_file_size` | `crates/lease/src/lib.rs:1251-1303` | A 1 MiB epoch is rejected with at most 21 bytes read through a counting in-memory reader, and through all three acquisition paths against a real file. | All | audited (U2) |
 | `concurrent_exclusive_acquisitions_admit_exactly_one_holder` | `crates/lease/src/lib.rs:1307-1364` | Eight threads open independent descriptors and race exclusive acquisition behind a barrier; exactly one holds epoch 1, the rest are `Held`, and the next acquisition after release is epoch 2. Same process; the cross-process race remains unexercised. | All | audited (U2) |
 | `separator_in_a_key_field_fails_closed_instead_of_aliasing` | `crates/lease/src/lib.rs:1368-1388` | `LeaseKey::identity` panics when `module_id`, `backend`, or `scope_key` contains `U+001F`, and the message names the field and the separator. | All | unaudited |
 | `epoch_errors_keep_the_underlying_os_error` | `crates/lease/src/lib.rs:681-706` | Epoch error context preserves the original `io::Error` and raw OS error through the source chain. | All | unaudited |
 | `maximum_epoch_is_readable_but_exhausted` | `crates/lease/src/lib.rs:709-732` | Shared acquisition reads `u64::MAX`; exclusive acquisition reports exhaustion and preserves bytes. | All | unaudited |
-| `interrupted_persist_never_leaves_a_lower_parseable_epoch` | `crates/lease/src/lib.rs:735-853` | Injected ordered prefix-write failures exercise production `persist_epoch` and `read_epoch` for empty, legacy-width, and canonical-width prior states, including a carry; any parseable aftermath is not lower, completion is fixed-width, and the count of parseable aftermaths is asserted per case. | All, in-memory `Read + Write + Seek` seam | unaudited |
+| `interrupted_persist_never_leaves_a_lower_parseable_epoch` | `crates/lease/src/lib.rs:735-853` | Injected ordered prefix-write failures exercise production `persist_epoch` and `read_epoch` for empty, variable-width, and canonical-width prior states, including a carry; any parseable aftermath is not lower, completion is fixed-width, and the count of parseable aftermaths is asserted per case. | All, in-memory `Read + Write + Seek` seam | unaudited |
 | `acquisition_refuses_symlink_and_leaves_target_untouched` | `crates/lease/src/lib.rs:857-882` | Exclusive and shared acquisition fail; target content and mode remain unchanged. | Unix | unaudited |
 | `acquisition_refuses_fifo_without_blocking` | `crates/lease/src/lib.rs:886-904` | Both modes reject a Unix FIFO opened with `O_NONBLOCK`. | Unix | unaudited |
 | `an_acquired_lease_file_is_owner_only` | `crates/lease/src/lib.rs:910-934` | `mode == 0600`; message: lease stayed group/world writable. | Unix | unaudited |
@@ -54,60 +54,60 @@ No production `assert!`, `debug_assert!`, `panic!`, or equivalent invariant batt
 
 These are outside the target crate but explicitly exercise or consume its contract.
 
-The PostgreSQL backend is not migrated. Its rows stay as archived provenance; the paths point into `commons@89abb40`, not into this tree.
+The PostgreSQL backend in the source (`primitives@89abb40`) is not carried. Its rows stay as source provenance: the location is the source alias and commit only, because receipts verify source blobs by hash and docs cite no paths into the source tree.
 
 | Test | Location | Claim | Status |
 |---|---|---|---|
 | `reopening_a_permissive_store_protects_the_database_and_its_wal` | `crates/storage/src/lib.rs:1024-1088` | Database and WAL are `0600` on reopen. | unaudited |
 | `open_claims_fence_before_return` | `crates/storage/src/lib.rs:1163-1175` | Open stamps the lease epoch before exposing the store. | unaudited |
-| `open_claim_rejects_an_epoch_the_database_already_stores` | `crates/storage/src/lib.rs:1182-1218` | The open claim rejects an epoch equal to the stored fence; `claim_fence` still authorizes it. | unaudited |
-| `migrations_seed_once_across_reopen` | `crates/storage/src/lib.rs:1221-1242` | Migrations and seeds run once; clean reopen issues a greater epoch. | unaudited |
-| `database_epoch_survives_repeated_lease_sidecar_loss` | `crates/storage/src/lib.rs:1245-1271` | Two repeated sidecar losses each issue an epoch above the database fence. | unaudited |
-| `second_live_writer_is_rejected` | `crates/storage/src/lib.rs:1286-1295` | Second same-process store open is rejected as a lease error. | unaudited |
-| `distinct_databases_do_not_falsely_contend` | `crates/storage/src/lib.rs:1297-1306` | Distinct database paths coexist. | unaudited |
-| `unfenced_connection_rejects_writes` | `crates/storage/src/lib.rs:1651-1674` | `with_conn` rejects a write with `SQLITE_READONLY`, leaves no row, and still permits a later fenced write. | unaudited |
-| `open_pins_full_synchronous` | `crates/storage/src/lib.rs:1677-1685` | `PRAGMA synchronous` reads back `2` (`FULL`) on a freshly opened store. The test observes the pragma value only; whether a committed fence epoch survives machine power loss in WAL mode is unverified (see `writer-epoch-strictly-increases.md`). | unaudited |
-| `a_panicking_read_does_not_strand_the_connection_read_only` | `crates/storage/src/lib.rs:1688-1708` | A panicking `with_conn` callback still clears `query_only`, so later fenced writes and maintenance remain authorized. | unaudited |
-| `a_read_callback_cannot_lower_fence_durability` | `crates/storage/src/lib.rs:1711-1775` | A read callback is denied lowering `synchronous`, and a fenced write and a migration re-pin `FULL` and a WAL journal after the maintenance path changes them. | unaudited |
-| `a_read_callback_cannot_clear_the_read_only_guard` | `crates/storage/src/lib.rs:1778-1831` | A read callback is denied every pragma write, in any letter case, and writes nothing. | unaudited |
-| `a_callback_cannot_damage_the_fence_row_it_is_checked_against` | `crates/storage/src/lib.rs:1893-2001` | A fenced callback or migration that lowers, deletes, or forges the fence and version rows is denied, and the row keeps its epoch. | unaudited |
-| `a_callback_cannot_end_the_fence_checked_transaction` | `crates/storage/src/lib.rs:1834-1890` | `COMMIT`, `ROLLBACK`, `SAVEPOINT`, and `BEGIN` are denied inside a fenced callback and a migration, and nothing commits or is created unfenced. | unaudited |
-| `maintenance_runs_through_the_unfenced_path` | `crates/storage/src/lib.rs:2004-2017` | `VACUUM` fails the read-only guard and succeeds through `with_conn_unfenced`. | unaudited |
-| `fenced_write_rolls_back_on_error` | `crates/storage/src/lib.rs:2020-2053` | Callback failure rolls back both domain mutation and a newer fence claim. | unaudited |
-| `legacy_database_without_fence_table_uses_zero_floor` | `crates/storage/src/lib.rs:2056-2078` | A pre-fence-table database opens at floor zero and receives epoch 1. | unaudited |
-| `legacy_negative_database_fence_fails_closed` | `crates/storage/src/lib.rs:2081-2108` | A pre-constraint negative fence is rejected and remains unchanged. | unaudited |
-| `superseded_writer_is_fenced_out_after_handover` | `crates/storage/src/lib.rs:2111-2149` | Synthetic epoch-1 writer cannot overwrite epoch-2 state. | unaudited |
-| `superseded_writer_cannot_migrate` | `crates/storage/src/lib.rs:2152-2182` | Synthetic stale migration is fenced before its schema SQL executes. | unaudited |
-| `equal_epoch_writer_is_not_fenced` | `crates/storage/src/lib.rs:2185-2205` | Equal epoch can continue writing. | unaudited |
-| `epoch_above_sqlite_integer_range_fails` | `crates/storage/src/lib.rs:2208-2223` | Epochs above SQLite's signed integer range fail instead of wrapping. | unaudited |
-| `fence_and_version_tables_keep_their_ddl` | `crates/storage/src/lib.rs:2232-2287` | `sqlite_schema` records the pinned names and DDL of both infrastructure tables and one fence row. | audited (U2) |
-| `distinct_databases_in_one_directory_do_not_falsely_contend` | `crates/storage/src/lib.rs:1308-1321` | Two database files in one directory, with equal module and namespace, open concurrently; the lease key carries the file name. | audited (U2) |
+| `open_claim_rejects_an_epoch_the_database_already_stores` | `crates/storage/src/lib.rs:1182-1216` | The open claim rejects an epoch equal to the stored fence; `claim_fence` still authorizes it. | unaudited |
+| `migrations_seed_once_across_reopen` | `crates/storage/src/lib.rs:1219-1240` | Migrations and seeds run once; clean reopen issues a greater epoch. | unaudited |
+| `database_epoch_survives_repeated_lease_sidecar_loss` | `crates/storage/src/lib.rs:1243-1267` | Two repeated sidecar losses each issue an epoch above the database fence. | unaudited |
+| `second_live_writer_is_rejected` | `crates/storage/src/lib.rs:1282-1291` | Second same-process store open is rejected as a lease error. | unaudited |
+| `distinct_databases_do_not_falsely_contend` | `crates/storage/src/lib.rs:1293-1302` | Distinct database paths coexist. | unaudited |
+| `unfenced_connection_rejects_writes` | `crates/storage/src/lib.rs:1647-1670` | `with_conn` rejects a write with `SQLITE_READONLY`, leaves no row, and still permits a later fenced write. | unaudited |
+| `open_pins_full_synchronous` | `crates/storage/src/lib.rs:1673-1681` | `PRAGMA synchronous` reads back `2` (`FULL`) on a freshly opened store. The test observes the pragma value only; whether a committed fence epoch survives machine power loss in WAL mode is unverified (see `writer-epoch-strictly-increases.md`). | unaudited |
+| `a_panicking_read_does_not_strand_the_connection_read_only` | `crates/storage/src/lib.rs:1684-1704` | A panicking `with_conn` callback still clears `query_only`, so later fenced writes and maintenance remain authorized. | unaudited |
+| `a_read_callback_cannot_lower_fence_durability` | `crates/storage/src/lib.rs:1707-1771` | A read callback is denied lowering `synchronous`, and a fenced write and a migration re-pin `FULL` and a WAL journal after the maintenance path changes them. | unaudited |
+| `a_read_callback_cannot_clear_the_read_only_guard` | `crates/storage/src/lib.rs:1774-1827` | A read callback is denied every pragma write, in any letter case, and writes nothing. | unaudited |
+| `a_callback_cannot_damage_the_fence_row_it_is_checked_against` | `crates/storage/src/lib.rs:1889-1997` | A fenced callback or migration that lowers, deletes, or forges the fence and version rows is denied, and the row keeps its epoch. | unaudited |
+| `a_callback_cannot_end_the_fence_checked_transaction` | `crates/storage/src/lib.rs:1830-1886` | `COMMIT`, `ROLLBACK`, `SAVEPOINT`, and `BEGIN` are denied inside a fenced callback and a migration, and nothing commits or is created unfenced. | unaudited |
+| `maintenance_runs_through_the_unfenced_path` | `crates/storage/src/lib.rs:2000-2013` | `VACUUM` fails the read-only guard and succeeds through `with_conn_unfenced`. | unaudited |
+| `fenced_write_rolls_back_on_error` | `crates/storage/src/lib.rs:2016-2049` | Callback failure rolls back both domain mutation and a newer fence claim. | unaudited |
+| `database_without_fence_table_uses_zero_floor` | `crates/storage/src/lib.rs:2053-2073` | A pre-fence-table database opens at floor zero and receives epoch 1. | unaudited |
+| `negative_database_fence_fails_closed` | `crates/storage/src/lib.rs:2077-2102` | A pre-constraint negative fence is rejected and remains unchanged. | unaudited |
+| `superseded_writer_is_fenced_out_after_handover` | `crates/storage/src/lib.rs:2105-2143` | Synthetic epoch-1 writer cannot overwrite epoch-2 state. | unaudited |
+| `superseded_writer_cannot_migrate` | `crates/storage/src/lib.rs:2146-2176` | Synthetic stale migration is fenced before its schema SQL executes. | unaudited |
+| `equal_epoch_writer_is_not_fenced` | `crates/storage/src/lib.rs:2179-2199` | Equal epoch can continue writing. | unaudited |
+| `epoch_above_sqlite_integer_range_fails` | `crates/storage/src/lib.rs:2202-2217` | Epochs above SQLite's signed integer range fail instead of wrapping. | unaudited |
+| `fence_and_version_tables_keep_their_ddl` | `crates/storage/src/lib.rs:2226-2281` | `sqlite_schema` records the pinned names and DDL of both infrastructure tables and one fence row. | audited (U2) |
+| `distinct_databases_in_one_directory_do_not_falsely_contend` | `crates/storage/src/lib.rs:1304-1317` | Two database files in one directory, with equal module and namespace, open concurrently; the lease key carries the file name. | audited (U2) |
 | `symlinked_database_paths_contend_or_are_refused_never_aliased` | `crates/storage/src/lib.rs:881-936` | A directory-symlink alias of a held database returns `Held`; a file-symlink alias is refused as a non-regular file, with and without a holder. | audited (U2) |
 | `protection_failure_aborts_open_before_the_fence_write` | `crates/storage/src/lib.rs:1090-1124` | A sidecar path that `protect_file` rejects aborts `open_sqlite` before any fence byte is written. | audited (U2) |
 | `new_database_file_is_owner_only_at_creation` | `crates/storage/src/lib.rs:938-956` | Under umask `022`, the database file the open path creates is `0600` with no `chmod`. | audited (U2) |
-| `fresh_open_creates_owner_only_sidecars_under_a_permissive_umask` | `crates/storage/src/lib.rs:1449-1480` | Under umask `022`, a fresh open leaves the database, `-wal`, and `-shm` files at `0600`; the sidecars inherit the database mode. | audited (U2) |
-| `suppressed_fence_update_is_an_error_not_a_silent_success` | `crates/storage/src/lib.rs:1323-1351` | A `BEFORE UPDATE ... RAISE(IGNORE)` trigger makes the fence upsert affect zero rows; the claim fails instead of returning success. | audited (U2) |
-| `undone_fence_update_is_an_error_not_a_silent_success` | `crates/storage/src/lib.rs:1353-1380` | An `AFTER UPDATE` trigger that restores the old epoch leaves the change count at one; the read-back rejects the claim. | audited (U2) |
-| `duplicate_migration_versions_are_rejected_before_any_apply` | `crates/storage/src/lib.rs:1511-1544` | Two migrations with one version are rejected up front and neither applies. | audited (U2) |
+| `fresh_open_creates_owner_only_sidecars_under_a_permissive_umask` | `crates/storage/src/lib.rs:1445-1476` | Under umask `022`, a fresh open leaves the database, `-wal`, and `-shm` files at `0600`; the sidecars inherit the database mode. | audited (U2) |
+| `suppressed_fence_update_is_an_error_not_a_silent_success` | `crates/storage/src/lib.rs:1319-1347` | A `BEFORE UPDATE ... RAISE(IGNORE)` trigger makes the fence upsert affect zero rows; the claim fails instead of returning success. | audited (U2) |
+| `undone_fence_update_is_an_error_not_a_silent_success` | `crates/storage/src/lib.rs:1349-1376` | An `AFTER UPDATE` trigger that restores the old epoch leaves the change count at one; the read-back rejects the claim. | audited (U2) |
+| `duplicate_migration_versions_are_rejected_before_any_apply` | `crates/storage/src/lib.rs:1507-1540` | Two migrations with one version are rejected up front and neither applies. | audited (U2) |
 | `suppressed_version_record_fails_the_migration_instead_of_committing_it` | `crates/storage/src/lib.rs:958-1022` | A `BEFORE INSERT ... RAISE(IGNORE)` trigger on the version table fails the migration transaction; the migration rolls back and the watermark holds. | audited (U2) |
-| `undone_version_record_fails_the_migration_instead_of_committing_it` | `crates/storage/src/lib.rs:1382-1447` | An `AFTER INSERT` trigger that deletes the version row fails the migration transaction; the migration rolls back. | audited (U2) |
-| `store_error_source_preserves_the_underlying_errno` | `crates/storage/src/lib.rs:1482-1509` | `StoreError::source` reaches the `io::Error` and its errno through `Io` and through `Lease(LeaseError::Io)`. | audited (U2) |
-| `open_migrate_and_single_writer` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:613-644` | Live PostgreSQL covers migration and session exclusion. Requires `CORTEXKIT_TEST_PG_DSN`; CI has a required live job. | unaudited |
-| `read_only_callback_rejects_mutation_without_rows` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1051-1083` | Read-only mutation reports SQLSTATE `25006` and leaves rows unchanged. | unaudited |
-| `open_verifies_the_stored_epoch_matches_the_issued_one` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1002-1026` | Open re-reads the committed lease row and requires it to carry the epoch it issued. | unaudited |
-| `a_suppressed_epoch_increment_is_rejected` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:982-999` | Issuing an epoch that did not advance past the stored row is rejected. | unaudited |
-| `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:935-979` | A fenced callback that deletes or lowers its own lease row is rejected and rolled back. | unaudited |
-| `a_callback_that_ends_the_transaction_is_rejected` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:647-689` | A fenced callback or migration that sends `COMMIT` is rejected instead of reporting success. | unaudited |
-| `a_read_callback_cannot_escape_read_only_mode` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:795-854` | A read callback that sends `COMMIT` or `SET TRANSACTION READ WRITE` is rejected; only the autocommitted write survives. | unaudited |
-| `a_regressed_positive_epoch_fails_closed` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:890-932` | A stored epoch below the one stamped at open fails closed for the holder and for a superseded writer above it. | unaudited |
-| `a_negative_epoch_fails_closed` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:857-887` | The lease table rejects a negative epoch, and a negative epoch reaching the fence returns `FenceCorrupt`. | unaudited |
-| `unfenced_callback_runs_statements_a_transaction_forbids` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1029-1048` | `VACUUM` reports SQLSTATE `25001` inside a fenced transaction and succeeds through the autocommit callback. | unaudited |
-| `fenced_callback_error_rolls_back_rows` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1086-1119` | Callback failure rolls back domain rows. | unaudited |
-| `repeated_fenced_writes_at_current_epoch_succeed` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1122-1141` | Repeated writes at the current lease epoch succeed. | unaudited |
-| `superseded_writer_is_rejected_after_reopen` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1144-1175` | Synthetic stale callback is rejected after reopen. | unaudited |
-| `superseded_writer_cannot_migrate` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1178-1213` | Synthetic stale migration is fenced before its schema SQL executes. | unaudited |
-| `independent_namespace_chains` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1216-1245` | Independent migrations both apply. | unaudited |
-| `advisory_key_derivation_is_stable` | `commons@89abb40 crates/cortexkit-store-postgres/src/lib.rs:1250-1253` | Pins one advisory bigint derived through public `LeaseKey::identity` and `fnv1a`. | unaudited |
+| `undone_version_record_fails_the_migration_instead_of_committing_it` | `crates/storage/src/lib.rs:1378-1443` | An `AFTER INSERT` trigger that deletes the version row fails the migration transaction; the migration rolls back. | audited (U2) |
+| `store_error_source_preserves_the_underlying_errno` | `crates/storage/src/lib.rs:1478-1505` | `StoreError::source` reaches the `io::Error` and its errno through `Io` and through `Lease(LeaseError::Io)`. | audited (U2) |
+| `open_migrate_and_single_writer` | `primitives@89abb40` | Live PostgreSQL covers migration and session exclusion. Requires a live PostgreSQL DSN from the environment; the source CI has a required live job. | unaudited |
+| `read_only_callback_rejects_mutation_without_rows` | `primitives@89abb40` | Read-only mutation reports SQLSTATE `25006` and leaves rows unchanged. | unaudited |
+| `open_verifies_the_stored_epoch_matches_the_issued_one` | `primitives@89abb40` | Open re-reads the committed lease row and requires it to carry the epoch it issued. | unaudited |
+| `a_suppressed_epoch_increment_is_rejected` | `primitives@89abb40` | Issuing an epoch that did not advance past the stored row is rejected. | unaudited |
+| `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` | `primitives@89abb40` | A fenced callback that deletes or lowers its own lease row is rejected and rolled back. | unaudited |
+| `a_callback_that_ends_the_transaction_is_rejected` | `primitives@89abb40` | A fenced callback or migration that sends `COMMIT` is rejected instead of reporting success. | unaudited |
+| `a_read_callback_cannot_escape_read_only_mode` | `primitives@89abb40` | A read callback that sends `COMMIT` or `SET TRANSACTION READ WRITE` is rejected; only the autocommitted write survives. | unaudited |
+| `a_regressed_positive_epoch_fails_closed` | `primitives@89abb40` | A stored epoch below the one stamped at open fails closed for the holder and for a superseded writer above it. | unaudited |
+| `a_negative_epoch_fails_closed` | `primitives@89abb40` | The lease table rejects a negative epoch, and a negative epoch reaching the fence returns `FenceCorrupt`. | unaudited |
+| `unfenced_callback_runs_statements_a_transaction_forbids` | `primitives@89abb40` | `VACUUM` reports SQLSTATE `25001` inside a fenced transaction and succeeds through the autocommit callback. | unaudited |
+| `fenced_callback_error_rolls_back_rows` | `primitives@89abb40` | Callback failure rolls back domain rows. | unaudited |
+| `repeated_fenced_writes_at_current_epoch_succeed` | `primitives@89abb40` | Repeated writes at the current lease epoch succeed. | unaudited |
+| `superseded_writer_is_rejected_after_reopen` | `primitives@89abb40` | Synthetic stale callback is rejected after reopen. | unaudited |
+| `superseded_writer_cannot_migrate` | `primitives@89abb40` | Synthetic stale migration is fenced before its schema SQL executes. | unaudited |
+| `independent_namespace_chains` | `primitives@89abb40` | Independent migrations both apply. | unaudited |
+| `advisory_key_derivation_is_stable` | `primitives@89abb40` | Pins one advisory bigint derived through public `LeaseKey::identity` and `fnv1a`. | unaudited |
 
 The handover checks use synthetic stores that bypass real lease acquisition. They check fence logic against real database transactions, not an end-to-end retained-connection handover.
 

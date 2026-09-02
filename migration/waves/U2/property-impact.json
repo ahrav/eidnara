@@ -4,7 +4,7 @@
   "description": "Property impact closure for the four shared primitive crates. `core` records are those whose evidence the crate rename and tree re-layout could invalidate: byte-level lease path derivation, the epoch byte grammar, and the two byte-stable golden fixtures. Every other touched record is `carried-forward` with its source or discovery status verbatim. No record is `excluded`: no source record is PostgreSQL-only; the dropped backend's checks are archived provenance in the catalog.",
   "provenance": [
     {
-      "repo": "commons",
+      "repo": "primitives",
       "source_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
@@ -177,7 +177,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
@@ -200,7 +200,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "unaudited",
@@ -223,7 +223,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
@@ -247,7 +247,7 @@
         "crates/lease/src/lib.rs",
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "unaudited",
@@ -270,7 +270,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
@@ -293,7 +293,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "partial",
         "check_status": "unaudited",
@@ -316,7 +316,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
@@ -339,7 +339,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "none",
@@ -362,7 +362,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "unaudited",
@@ -385,7 +385,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
@@ -408,7 +408,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "unaudited",
@@ -431,7 +431,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "partial",
         "check_status": "unaudited",
@@ -454,7 +454,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "unaudited",
@@ -477,7 +477,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
@@ -500,7 +500,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "none",
@@ -524,7 +524,7 @@
         "crates/lease/src/lib.rs",
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "partial",
         "check_status": "unaudited",
@@ -548,7 +548,7 @@
         "crates/lease/src/lib.rs",
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
@@ -571,7 +571,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "none",
@@ -594,7 +594,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "unaudited",
@@ -618,7 +618,7 @@
         "crates/lease/src/lib.rs",
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "partial",
         "check_status": "unaudited",
@@ -642,7 +642,7 @@
         "crates/lease/src/lib.rs",
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "partial",
         "check_status": "unaudited",
@@ -665,7 +665,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
@@ -688,7 +688,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "unaudited",
@@ -711,7 +711,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "none",
@@ -734,7 +734,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
@@ -757,7 +757,7 @@
       "files": [
         "crates/lease/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "not-yet",
         "check_status": "none",
@@ -782,7 +782,7 @@
         "crates/cache-stability/tests/golden_vectors.rs",
         "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -805,7 +805,7 @@
       "files": [
         "crates/cache-stability/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -828,7 +828,7 @@
       "files": [
         "crates/cache-stability/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -851,7 +851,7 @@
       "files": [
         "crates/cache-stability/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -874,7 +874,7 @@
       "files": [
         "crates/cache-stability/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -898,7 +898,7 @@
         "crates/cache-stability/src/lib.rs",
         "crates/cache-stability/tests/golden_vectors.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -922,7 +922,7 @@
         "crates/storage-types/src/lib.rs",
         "crates/storage-types/tests/golden_vectors.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -945,7 +945,7 @@
       "files": [
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -968,7 +968,7 @@
       "files": [
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -991,7 +991,7 @@
       "files": [
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -1014,7 +1014,7 @@
       "files": [
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -1037,7 +1037,7 @@
       "files": [
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -1060,7 +1060,7 @@
       "files": [
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -1083,7 +1083,7 @@
       "files": [
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
@@ -1106,7 +1106,7 @@
       "files": [
         "crates/storage/src/lib.rs"
       ],
-      "provenance": "commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",

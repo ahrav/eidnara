@@ -1,313 +1,60 @@
 {
   "schema_version": 1,
-  "description": "Single classification registry for legacy identities, TypeScript ownership, persistent families, and authored destination files. Validated by `bun run eidnara:check registry migration/registry.json`. Identity classes: renamed (value leaves the tree, rename_to replaces it), frozen-durable (byte-level durable identity stays unchanged), external-protocol (wire, credential, schema, or tool-consumed identity stays unchanged), third-party. Family classes follow requirement R11. Entries seeded at U1 from commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0 and magic-context@696a0fc199f9534de736bd319f8d28cdf720c332; later waves add entries as their file inventories arrive. U2 adds `fixture` entries: `byte-stable` paths keep their source bytes and are exempt from the identity scan; `generator` paths reproduce one such fixture; `external-record` paths are machine-produced records about external systems that name legacy identities as facts.",
+  "description": "Single classification registry for durable identities, TypeScript ownership, persistent families, and authored destination files. Validated by `bun run eidnara:check registry migration/registry.json`. Identity classes: frozen-durable (byte-level durable identity stays unchanged), external-protocol (wire, credential, schema, or tool-consumed identity stays unchanged), third-party. Family classes follow requirement R11. Waves add entries as their file inventories arrive. `fixture` entries: `byte-stable` paths change only through a reviewed contract change; `generator` paths reproduce one such fixture; `external-record` paths are machine-produced records about external systems.",
   "entries": [
-    {
-      "kind": "identity",
-      "value": "cortexkit-cache-core",
-      "class": "renamed",
-      "rename_to": "cache-stability",
-      "rationale": "Crate name is a source identity; no durable bytes depend on it.",
-      "evidence": [
-        "commons/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "cortexkit-lease",
-      "class": "renamed",
-      "rename_to": "lease",
-      "rationale": "Crate name is a source identity. Lease key derivation and `.lease` path suffix are frozen separately.",
-      "evidence": [
-        "commons/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "cortexkit-store-types",
-      "class": "renamed",
-      "rename_to": "storage-types",
-      "rationale": "Crate name is a source identity.",
-      "evidence": [
-        "commons/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "cortexkit-store",
-      "class": "renamed",
-      "rename_to": "storage",
-      "rationale": "Crate name is a source identity.",
-      "evidence": [
-        "commons/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-core",
-      "class": "renamed",
-      "rename_to": "context-core",
-      "rationale": "Crate name is a source identity.",
-      "evidence": [
-        "magic-context/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-secret-scanner",
-      "class": "renamed",
-      "rename_to": "secret-scanner",
-      "rationale": "Crate name is a source identity. Rule files and NOTICE move unchanged.",
-      "evidence": [
-        "magic-context/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-store",
-      "class": "renamed",
-      "rename_to": "memory-store",
-      "rationale": "Crate name is a source identity. The `mc-store.db` file name it opens is frozen separately.",
-      "evidence": [
-        "magic-context/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-module",
-      "class": "renamed",
-      "rename_to": "daemon",
-      "rationale": "Crate name is a source identity.",
-      "evidence": [
-        "magic-context/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-host",
-      "class": "renamed",
-      "rename_to": "host-runtime",
-      "rationale": "Crate name is a source identity. The authenticated daemon version string `mc-host/0.1.0` is frozen separately.",
-      "evidence": [
-        "magic-context/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-shm-transport",
-      "class": "renamed",
-      "rename_to": "shm-transport",
-      "rationale": "Crate name is a source identity.",
-      "evidence": [
-        "magic-context/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-tokenizer",
-      "class": "renamed",
-      "rename_to": "tokenizer",
-      "rationale": "Crate name is a source identity. Byte-determinism pins are frozen by their golden vectors.",
-      "evidence": [
-        "magic-context/Cargo.toml",
-        "migration/waves/U1/crate-name-collision-check.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "@cortexkit/opencode-magic-context",
-      "class": "renamed",
-      "rename_to": "@eidnara/opencode",
-      "rationale": "Published package name; the old name stays installable and is deprecated one exact version at a time after cutover.",
-      "evidence": [
-        "magic-context/scripts/generate-mc-host-release-manifest.ts",
-        "magic-context/release/mc-host-registry-gate.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "@cortexkit/pi-magic-context",
-      "class": "renamed",
-      "rename_to": "@eidnara/pi",
-      "rationale": "Published package name; deprecated after cutover.",
-      "evidence": [
-        "magic-context/scripts/generate-mc-host-release-manifest.ts",
-        "magic-context/release/mc-host-registry-gate.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "@cortexkit/magic-context",
-      "class": "renamed",
-      "rename_to": "@eidnara/cli",
-      "rationale": "Published package name; deprecated after cutover.",
-      "evidence": [
-        "magic-context/scripts/generate-mc-host-release-manifest.ts",
-        "magic-context/release/mc-host-registry-gate.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "@cortexkit/mc-shm-native",
-      "class": "renamed",
-      "rename_to": "@eidnara/shm-native",
-      "rationale": "Never published (registry gate records E404); the successor name is the first publication.",
-      "evidence": [
-        "magic-context/release/mc-host-registry-gate.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "@cortexkit/mc-host-linux-x64-gnu",
-      "class": "renamed",
-      "rename_to": "@eidnara/host-linux-x64-gnu",
-      "rationale": "Never published (registry gate records E404); the successor name is the first publication.",
-      "evidence": [
-        "magic-context/release/mc-host-registry-gate.json",
-        "magic-context/release/mc-host-payload-index.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "ck-mc-host",
-      "class": "renamed",
-      "rename_to": "eidnara-host",
-      "rationale": "Daemon binary name. The predecessor binary keeps its name in the source repositories and is stopped, not renamed, at cutover.",
-      "evidence": [
-        "magic-context/crates/mc-module/Cargo.toml"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "packages/mc-shm-native",
-      "class": "renamed",
-      "rename_to": "packages/shm-native",
-      "rationale": "Source path of the native addon package.",
-      "evidence": [
-        "magic-context/Cargo.toml"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "packages/mc-host-linux-x64-gnu",
-      "class": "renamed",
-      "rename_to": "packages/host-linux-x64-gnu",
-      "rationale": "Source path of the payload package.",
-      "evidence": [
-        "magic-context/release/mc-host-payload-index.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "MC_HOST_RING_PROFILE",
-      "class": "renamed",
-      "rename_to": "EIDNARA_HOST_RING_PROFILE",
-      "rationale": "User-facing runtime configuration variable; renamed with the product.",
-      "evidence": [
-        "magic-context/crates/mc-host/src"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "MC_HOST_RING_DEPTH",
-      "class": "renamed",
-      "rename_to": "EIDNARA_HOST_RING_DEPTH",
-      "rationale": "User-facing runtime configuration variable; renamed with the product.",
-      "evidence": [
-        "magic-context/crates/mc-host/src"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "MC_HOST_CANARY_",
-      "class": "external-protocol",
-      "rationale": "Prefix of the owner-hosted release-gate inputs (`MC_HOST_CANARY_DATA_ROOT`, `_LAUNCHER`, `_OPENCODE`, `_NODE`, `_PI_ENTRYPOINT`, `_BROCA_MODEL`, `_PAYLOAD_DIR`, `_PAYLOAD_MANIFEST_SHA256`). The canary host configuration is external to the repository and stays up through cutover.",
-      "evidence": [
-        "magic-context/docs/mc-host-release-gates.md",
-        "magic-context/release/mc-host-production-inputs.lock.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "0x4d435458",
-      "class": "frozen-durable",
-      "rationale": "`PRAGMA application_id` of every current-format SQLite family (`MCTX` in ASCII). Changing it makes existing databases unreadable.",
-      "evidence": [
-        "magic-context/docs/migration-version-lanes.md",
-        "magic-context/crates/mc-store/src/kernel/sqlite_runtime.rs"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "MCTX",
-      "class": "frozen-durable",
-      "rationale": "ASCII spelling of the application id; appears in doc comments and diagnostics that name the pragma value.",
-      "evidence": [
-        "magic-context/docs/migration-version-lanes.md"
-      ]
-    },
     {
       "kind": "identity",
       "value": "user_version = 1",
       "class": "frozen-durable",
       "rationale": "`PRAGMA user_version` of the direct format epoch.",
       "evidence": [
-        "magic-context/docs/migration-version-lanes.md"
+        "fixtures/vocabulary/README.md"
       ]
     },
     {
       "kind": "identity",
-      "value": "mc_format_marker",
-      "class": "frozen-durable",
-      "rationale": "Immutable marker table name inside every current-format database; part of the exact `sqlite_schema` inventory.",
+      "value": "XDG_DATA_HOME",
+      "class": "external-protocol",
+      "rationale": "Data-home environment variable that roots every persistent family path.",
       "evidence": [
-        "magic-context/docs/migration-version-lanes.md",
-        "magic-context/crates/mc-store/src/kernel/sqlite_runtime.rs"
+        "migration/registry.json"
       ]
     },
     {
       "kind": "identity",
-      "value": "mc_pass_trace",
+      "value": ".lease",
       "class": "frozen-durable",
-      "rationale": "Frozen DDL object name; part of the exact `sqlite_schema` inventory.",
+      "rationale": "Lease sidecar file suffix; `FileLeaseStore::lease_path` appends it to the identity digest.",
       "evidence": [
-        "docs/plans/2026-09-01-0633-refactor-eidnara-repository-migration-plan.md R3"
+        "crates/lease/src/lib.rs",
+        "docs/properties/shared-primitives/evidence/lease-path-format-is-version-stable.md"
       ]
     },
     {
       "kind": "identity",
-      "value": "cortexkit_fence",
+      "value": "eidnara_fence",
       "class": "frozen-durable",
-      "rationale": "SQLite table that stores the writer fence epoch (`id = 0`, `epoch`). Every current-format module database created by the predecessor `storage` crate contains it; a rename would make `storage::open_sqlite` read floor zero and reissue stored epochs.",
+      "rationale": "Fence table holding the single writer-epoch row that every fenced write and migration checks.",
       "evidence": [
         "crates/storage/src/lib.rs",
-        "commons/docs/property-catalogs/cortexkit-lease/evidence/replacement-fence-is-claimed-before-old-writer-writes.md"
+        "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md"
       ]
     },
     {
       "kind": "identity",
-      "value": "cortexkit_schema_version",
+      "value": "eidnara_schema_version",
       "class": "frozen-durable",
-      "rationale": "SQLite table that records applied migrations per `(namespace, version)`. A rename would make `SqliteStore::migrate` re-run every migration against existing databases.",
+      "rationale": "Per-namespace migration watermark table; a rename re-runs every migration.",
       "evidence": [
-        "crates/storage/src/lib.rs"
+        "crates/storage/src/lib.rs",
+        "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md"
       ]
     },
     {
       "kind": "identity",
-      "value": "cortexkit_",
+      "value": "eidnara_",
       "class": "frozen-durable",
-      "rationale": "Prefix of the PostgreSQL database name derived by `storage_types::postgres_database_name`. No backend in this workspace opens PostgreSQL, but the byte-stable golden fixture `crates/storage-types/tests/golden/storage_vectors.json` pins the derived names (R18); changing the prefix needs a reviewed contract change that replaces that fixture.",
+      "rationale": "Prefix of every per-module PostgreSQL database name (`eidnara_<slug>_<16hex>`).",
       "evidence": [
         "crates/storage-types/src/lib.rs",
         "crates/storage-types/tests/golden/storage_vectors.json"
@@ -315,314 +62,19 @@
     },
     {
       "kind": "identity",
-      "value": "cortexkit",
+      "value": "eidnara",
       "class": "frozen-durable",
-      "rationale": "`MANAGED_DIR_NAME`: the data-root directory component under `XDG_DATA_HOME`. Renaming it relocates every family and breaks the lifetime fence with the predecessor.",
+      "rationale": "Directory under the data home that holds every module store (`<data_home>/eidnara/<module_id>/store.db`).",
       "evidence": [
-        "magic-context/crates/mc-host/src/instance.rs:156",
-        "magic-context/crates/mc-host/src/lifecycle.rs:166"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "cortexkit/magic-context",
-      "class": "frozen-durable",
-      "rationale": "Data-root path of `context.db` (`$XDG_DATA_HOME/cortexkit/magic-context/context.db`).",
-      "evidence": [
-        "magic-context/packages/plugin/src"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": ".mc-host-coordination",
-      "class": "frozen-durable",
-      "rationale": "`COORDINATION_DIR_NAME`: directory holding `transaction.lock`; shared with the predecessor during handoff.",
-      "evidence": [
-        "magic-context/crates/mc-host/src/lifecycle.rs:33"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "lifetime.lock",
-      "class": "frozen-durable",
-      "rationale": "Exclusive flock that fences daemon incarnations; lives outside the managed directory and is never renamed.",
-      "evidence": [
-        "magic-context/crates/mc-host/src/lifecycle.rs:39"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "transaction.lock",
-      "class": "frozen-durable",
-      "rationale": "Version-neutral cross-process store mutation lock.",
-      "evidence": [
-        "magic-context/crates/mc-host/src/lifecycle.rs:36"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "XDG_DATA_HOME",
-      "class": "external-protocol",
-      "rationale": "Data-root resolution input. Relative values are ignored and `$HOME/.local/share` is the fallback; the successor must resolve the same root as the predecessor.",
-      "evidence": [
-        "magic-context/crates/mc-host/src/instance.rs"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-store.db",
-      "class": "frozen-durable",
-      "rationale": "Module store file name opened in production (`docs/migration-version-lanes.md` still says `store.db`; the code opens `mc-store.db`).",
-      "evidence": [
-        "magic-context/crates/mc-store/src"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": ".lease",
-      "class": "frozen-durable",
-      "rationale": "File suffix of lease records; the path is derived from the FNV-1a hash of the lease key triple `(module_id, backend, scope_key)`.",
-      "evidence": [
-        "commons/docs/property-catalogs/cortexkit-lease/README.md",
-        "commons/crates/cortexkit-lease/src/lib.rs"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "\"magic-context-kernel\"",
-      "class": "frozen-durable",
-      "rationale": "`module_id` field of the kernel store's lease key `(\"magic-context-kernel\", \"sqlite\", \"core\")`. The lease file name is `fnv1a_hex(identity)` = `1a0ede79732fcf81.lease` under `<data-root>/leases/`; changing the literal orphans that file and restarts the epoch sequence.",
-      "evidence": [
-        "magic-context/crates/mc-kernel/src/open.rs",
-        "crates/lease/src/lib.rs"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "\"magic-context\"",
-      "class": "frozen-durable",
-      "rationale": "`module_id` of the production module-store descriptor (`DEFAULT_MODULE_ID`); with backend `sqlite` and namespace `mc_cache` it forms the lease key whose file is `3af1f17c55068a4d.lease` next to `mc-store.db`. Only the quoted literal is frozen; the bare token stays a legacy identity.",
-      "evidence": [
-        "magic-context/crates/mc-module/src/lib.rs",
-        "magic-context/crates/mc-module/src/bin/ck_mc_host/serve.rs",
-        "crates/lease/src/lib.rs"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "\"mc_cache\"",
-      "class": "frozen-durable",
-      "rationale": "`storage_namespace` of the production module-store descriptor (`STORAGE_NAMESPACE`). It is the third field of the module-store lease key and the namespace column of its `cortexkit_schema_version` rows.",
-      "evidence": [
-        "magic-context/crates/mc-module/src/lib.rs",
-        "crates/lease/src/lib.rs",
-        "crates/storage/src/lib.rs"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-host/0.1.0",
-      "class": "external-protocol",
-      "rationale": "Authenticated `daemon_ver` transcript field bound by the proof MAC; changing it breaks client compatibility decisions.",
-      "evidence": [
-        "magic-context/release/mc-host-release.json",
-        "magic-context/scripts/generate-mc-host-release-manifest.ts"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-host-active-selection-credential-v1",
-      "class": "external-protocol",
-      "rationale": "Credential domain separator.",
-      "evidence": [
-        "magic-context/crates/mc-host/src"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-m1-claim-external-v1",
-      "class": "external-protocol",
-      "rationale": "Claim domain separator.",
-      "evidence": [
-        "magic-context/crates/mc-module/src"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-m1-claim-in-session-v1",
-      "class": "external-protocol",
-      "rationale": "Claim domain separator.",
-      "evidence": [
-        "magic-context/crates/mc-module/src"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "mc-synapse-fingerprint-v2",
-      "class": "external-protocol",
-      "rationale": "Synapse fingerprint domain separator.",
-      "evidence": [
-        "magic-context/crates/mc-host/src"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.daemon/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id consumed by clients and tooling.",
-      "evidence": [
-        "magic-context/release/mc-host-release.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-release/v1",
-      "class": "external-protocol",
-      "rationale": "Release contract schema id; its canonical-JSON digest is embedded in Rust and TypeScript outputs.",
-      "evidence": [
-        "magic-context/release/mc-host-release.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-harness-closure/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of pinned harness closures.",
-      "evidence": [
-        "magic-context/release/mc-host-harness-closures"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-harness-closure/v2",
-      "class": "external-protocol",
-      "rationale": "Schema id of pinned harness closures.",
-      "evidence": [
-        "magic-context/scripts/run-mc-host-closure-qualification.ts"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-payload-manifest/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of the payload manifest.",
-      "evidence": [
-        "magic-context/scripts/build-mc-host-payload.ts"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-payload-index/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of the payload index.",
-      "evidence": [
-        "magic-context/release/mc-host-payload-index.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-production-inputs-lock/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of the production-inputs lock.",
-      "evidence": [
-        "magic-context/release/mc-host-production-inputs.lock.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-production-input-sources/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of the production-input sources record.",
-      "evidence": [
-        "magic-context/release/mc-host-production-input-sources.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-provider-credentials/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of the provider-credentials record.",
-      "evidence": [
-        "magic-context/release/mc-host-provider-credentials.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-registry-gate/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of the predecessor registry gate.",
-      "evidence": [
-        "magic-context/release/mc-host-registry-gate.json"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-registry-gate/v2",
-      "class": "external-protocol",
-      "rationale": "Schema id of the predecessor registry gate.",
-      "evidence": [
-        "magic-context/scripts/generate-mc-host-release-manifest.ts"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-installed-release-evidence/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of installed-release evidence.",
-      "evidence": [
-        "magic-context/scripts/verify-mc-host-release-evidence.ts"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-release-proof/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of release proof records.",
-      "evidence": [
-        "magic-context/scripts"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-release-qualification/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of release qualification records.",
-      "evidence": [
-        "magic-context/scripts/qualify-mc-host-production-inputs.ts"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-synapse-smoke/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of Synapse smoke records.",
-      "evidence": [
-        "magic-context/scripts"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-test-report/v0",
-      "class": "external-protocol",
-      "rationale": "Schema id of test reports.",
-      "evidence": [
-        "magic-context/scripts"
-      ]
-    },
-    {
-      "kind": "identity",
-      "value": "magic-context.mc-host-test-report/v1",
-      "class": "external-protocol",
-      "rationale": "Schema id of test reports.",
-      "evidence": [
-        "magic-context/scripts"
+        "crates/storage-types/src/lib.rs",
+        "crates/storage-types/tests/golden/storage_vectors.json"
       ]
     },
     {
       "kind": "fixture",
       "path": "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
       "role": "byte-stable",
-      "rationale": "Cache-stability golden vectors (schema_version 3). Byte-stable under R18; the provenance strings inside cite the predecessor repositories and stay as captured.",
+      "rationale": "Cache-stability golden vectors (schema_version 3). Byte-stable under R18: the bytes change only through a reviewed contract change.",
       "evidence": [
         "migration/waves/U2/receipt.json",
         "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md"
@@ -632,7 +84,7 @@
       "kind": "fixture",
       "path": "crates/storage-types/tests/golden/storage_vectors.json",
       "role": "byte-stable",
-      "rationale": "Storage descriptor golden vectors: database names, store paths, and descriptor wire shape for eight module ids. Byte-stable under R18; the sample module ids are fixture content.",
+      "rationale": "Storage descriptor golden vectors: database names, store paths, and descriptor wire shape for eight sample module ids. Byte-stable under R18; regenerated only by the registered generator as part of a reviewed contract change.",
       "evidence": [
         "migration/waves/U2/receipt.json",
         "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md"
@@ -643,7 +95,7 @@
       "path": "crates/storage-types/examples/golden-vectors.rs",
       "role": "generator",
       "fixture": "crates/storage-types/tests/golden/storage_vectors.json",
-      "rationale": "Generator for the storage golden vectors. Its module-id list is fixture content, so the sample ids that carry legacy names stay.",
+      "rationale": "Generator for the storage golden vectors; its module-id list is fixture content.",
       "evidence": [
         "crates/storage-types/tests/golden_vectors.rs"
       ]
@@ -652,7 +104,7 @@
       "kind": "fixture",
       "path": "release/registry-gate.json",
       "role": "external-record",
-      "rationale": "Generated by `scripts/eidnara-migration/registry-audit.ts`. It records raw `npm view` responses for every `@eidnara/*` and `@cortexkit/*` package name, so the legacy names it contains are facts about the external registry, not identities carried into the product.",
+      "rationale": "Generated by `scripts/eidnara-migration/registry-audit.ts`. It records raw `npm view`, `npm trust`, `npm token`, and `npm org` responses for the `@eidnara/*` package names.",
       "evidence": [
         "scripts/eidnara-migration/registry-audit.ts",
         "migration/waves/U1/receipt.json"
@@ -670,9 +122,9 @@
         "<data-root>/core.sqlite"
       ],
       "mismatch_behavior": "refuse-without-mutation",
-      "probe": "non-mutating open: PRAGMA application_id == 0x4d435458, PRAGMA user_version == 1, one mc_format_marker row, sqlite_schema inventory equals fixtures/vocabulary/kernel-format-vocabulary-v1.json",
-      "baseline_source": "U4 composes one final baseline from the kernel schema components at the pinned magic-context commit and compares its identities to the predecessor-captured vocabulary fixture",
-      "restore_policy": "current-format backup and restore only; legacy-format import and every backfill path are excluded"
+      "probe": "non-mutating open: PRAGMA application_id equals the registered Eidnara application id, PRAGMA user_version == 1, one format-marker row, sqlite_schema inventory equals fixtures/vocabulary/kernel-format-vocabulary-v1.json",
+      "baseline_source": "U4 composes one final baseline from the kernel schema components at the pinned host source commit and compares its identities to the captured vocabulary fixture",
+      "restore_policy": "current-format backup and restore only; no format import and no backfill path"
     },
     {
       "kind": "family",
@@ -681,15 +133,14 @@
       "rationale": "Harness-facing context database. Written by transitional TypeScript storage until U5 moves authority to the daemon; keeps the U4 baseline and authoritative disposition through that move.",
       "literals": [
         "context.db",
-        "database/context.db",
-        "cortexkit/magic-context/context.db"
+        "database/context.db"
       ],
       "paths": [
-        "$XDG_DATA_HOME/cortexkit/magic-context/context.db"
+        "$XDG_DATA_HOME/eidnara/context.db"
       ],
       "mismatch_behavior": "refuse-without-mutation",
-      "probe": "non-mutating open: PRAGMA application_id == 0x4d435458, PRAGMA user_version == 1, one mc_format_marker row, sqlite_schema inventory equals fixtures/vocabulary/direct-format-vocabulary-v1.json",
-      "baseline_source": "U4 final baseline; direct-format vocabulary copied verbatim from packages/plugin/src/features/magic-context/fixtures/direct-format-vocabulary-v1.json at the pinned commit",
+      "probe": "non-mutating open: PRAGMA application_id equals the registered Eidnara application id, PRAGMA user_version == 1, one format-marker row, sqlite_schema inventory equals fixtures/vocabulary/direct-format-vocabulary-v1.json",
+      "baseline_source": "U4 final baseline; direct-format vocabulary copied verbatim from the host source at the pinned commit",
       "restore_policy": "current-format backup and restore only; reset is an explicit Doctor operation that quarantines, never a startup branch"
     },
     {
@@ -712,16 +163,17 @@
       "kind": "family",
       "name": "module-store",
       "class": "retained-authoritative-baseline",
-      "rationale": "Module store opened by the daemon. Production opens `mc-store.db`; the `store.db` name in docs/migration-version-lanes.md is stale.",
+      "rationale": "Module store opened by the daemon at `sqlite_store_path(data_home, module_id)`; U4 fixes its schema baseline.",
       "literals": [
-        "mc-store.db"
+        "store.db",
+        "{}/eidnara/{}/store.db"
       ],
       "paths": [
-        "<data-root>/mc-store.db"
+        "<data_home>/eidnara/<module_id>/store.db"
       ],
       "mismatch_behavior": "refuse-without-mutation",
-      "probe": "non-mutating open: PRAGMA application_id == 0x4d435458, PRAGMA user_version == 1, one mc_format_marker row, sqlite_schema inventory equals the captured kernel-format vocabulary",
-      "baseline_source": "U4 final baseline composed at the pinned magic-context commit",
+      "probe": "non-mutating open: PRAGMA application_id equals the registered Eidnara application id, PRAGMA user_version == 1, one format-marker row, sqlite_schema inventory equals the captured kernel-format vocabulary",
+      "baseline_source": "U4 final baseline composed at the pinned host source commit",
       "restore_policy": "current-format backup and restore only"
     },
     {
@@ -737,7 +189,7 @@
       ],
       "mismatch_behavior": "refuse-without-mutation",
       "probe": "digest of each artifact equals its address; layout version marker matches",
-      "baseline_source": "U4 records the CAS layout at the pinned magic-context commit",
+      "baseline_source": "U4 records the CAS layout at the pinned host source commit",
       "restore_policy": "included in current-format backup; referenced artifacts restore with the kernel store"
     },
     {
@@ -798,14 +250,14 @@
       "kind": "family",
       "name": "host-locks",
       "class": "retained-coordination-state",
-      "rationale": "Lifetime fence and transaction lock shared with the predecessor during handoff; identities frozen in the identity entries.",
+      "rationale": "Lifetime fence and transaction lock for the host process.",
       "literals": [
         "lifetime.lock",
         "transaction.lock"
       ],
       "paths": [
-        "$XDG_DATA_HOME/lifetime.lock",
-        "$XDG_DATA_HOME/cortexkit/.mc-host-coordination/transaction.lock"
+        "$XDG_DATA_HOME/eidnara/lifetime.lock",
+        "$XDG_DATA_HOME/eidnara/transaction.lock"
       ],
       "mismatch_behavior": "recreate"
     },
@@ -813,14 +265,13 @@
       "kind": "family",
       "name": "retina-fenced-state",
       "class": "retained-coordination-state",
-      "rationale": "Path-fenced Retina coordination state.",
+      "rationale": "Path-fenced coordination state for the retina subsystem.",
       "literals": [
         ".handle",
         "operator.handle"
       ],
       "paths": [
         "plexus/",
-        "claustrum/",
         "staging/",
         "*.handle",
         "binding-key"
@@ -851,18 +302,16 @@
       "kind": "family",
       "name": "test-fixtures",
       "class": "test-only",
-      "rationale": "Names that appear only in tests and fixtures. `storage_types::sqlite_store_path` composes `<data_home>/cortexkit/<module_id>/store.db`; production opens `mc-store.db`, and the only consumer of that template is the magic-context dev descriptor, so the template and its test paths stay test-only. U4 confirms the disposition when the daemon migrates.",
+      "rationale": "Names that appear only in tests and fixtures: sample database files and the rendered store paths the storage-types tests assert.",
       "literals": [
-        "store.db",
         "claim-vector.db",
         "other.db",
         "fresh.db",
         "embedding.bin",
-        "{}/cortexkit/{}/store.db",
-        "/home/u/.local/share/cortexkit/alfonso-routing/store.db",
-        "/data/cortexkit/m/store.db",
-        "/data/cortexkit/a.b/store.db",
-        "/data/cortexkit/alfonso-routing/store.db"
+        "/home/u/.local/share/eidnara/module-a/store.db",
+        "/data/eidnara/m/store.db",
+        "/data/eidnara/a.b/store.db",
+        "/data/eidnara/module-a/store.db"
       ],
       "paths": [],
       "mismatch_behavior": "none"
@@ -990,7 +439,7 @@
     {
       "kind": "authored",
       "path": "fixtures/vocabulary/README.md",
-      "rationale": "Placeholder describing the predecessor-captured fixtures U4 adds."
+      "rationale": "Placeholder describing the captured vocabulary fixtures U4 adds."
     },
     {
       "kind": "authored",
@@ -1021,11 +470,6 @@
       "kind": "authored",
       "path": "migration/waves/U2/review-notes.md",
       "rationale": "Per-file review evidence for the U2 receipt."
-    },
-    {
-      "kind": "authored",
-      "path": "migration/waves/U2/source-crate-dispositions.json",
-      "rationale": "Disposition of the five unmigrated commons crates and their CI, publication, and catalog artifacts."
     },
     {
       "kind": "authored",
@@ -1111,6 +555,16 @@
       "kind": "authored",
       "path": "docs/properties/shared-primitives/evidence/store-files-are-owner-only-after-open.md",
       "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
+      "rationale": "Destination-authored golden vectors; byte-stable fixture."
+    },
+    {
+      "kind": "authored",
+      "path": "crates/storage-types/tests/golden/storage_vectors.json",
+      "rationale": "Destination-authored golden vectors produced by the registered generator; byte-stable fixture."
     }
   ]
 }

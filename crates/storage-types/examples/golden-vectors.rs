@@ -10,10 +10,10 @@ use storage_types::{StorageDescriptor, postgres_database_name, sqlite_store_path
 fn main() {
     // Slug collisions exercise the hash suffix; overlong IDs exercise the slug bound.
     let ids = [
-        "alfonso-routing",
-        "llm-runner",
-        "magic-context",
-        "ai-provider-quota",
+        "module-a",
+        "module-b",
+        "module-c",
+        "module-d",
         "a-b",
         "a_b",
         "a-very-long-module-id-that-exceeds-the-postgres-identifier-byte-limit-by-a-lot",
