@@ -1,0 +1,15 @@
+[package]
+name = "lease"
+version = "0.3.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Single-writer lease with OS advisory locking and monotonic epoch fencing for module storage."
+
+[dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

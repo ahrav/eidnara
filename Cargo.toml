@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = []
+members = [
+    "crates/cache-stability",
+    "crates/lease",
+    "crates/storage-types",
+    "crates/storage",
+]
 
 [workspace.package]
 edition = "2024"
@@ -8,3 +13,7 @@ rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/ahrav/eidnara"
 publish = false
+
+[workspace.dependencies]
+storage-types = { path = "crates/storage-types" }
+lease = { path = "crates/lease" }
