@@ -1,11 +1,14 @@
 //! Backend mechanics for module storage: open a database from a
-//! [`StorageDescriptor`], guard it with the single-writer lease, and apply
-//! versioned migrations once.
+//! [`StorageDescriptor`], guard it with the single-writer lease, and give it
+//! exactly one schema.
 //!
-//! Modules pass a resolved descriptor and ordered migrations here, then run domain
-//! queries against the lease-guarded, migrated connection. Backends are
-//! feature-gated, so module code does not branch on the descriptor's backend. Each
-//! module owns its store trait, migrations, and queries.
+//! Modules pass a resolved descriptor and one baseline DDL text here, then run
+//! domain queries against the lease-guarded connection. A pristine file receives
+//! the baseline once; any other file must already carry the baseline's identity
+//! (application id, user version, format-marker digest, and `sqlite_schema`
+//! inventory) or the open is refused without mutation. There is no version
+//! ledger and no code path that upgrades one schema into another. Backends are
+//! feature-gated, so module code does not branch on the descriptor's backend.
 //!
 //! The single-writer lease ([`lease`]) is keyed by
 //! `(module_id, backend, storage_namespace)`, preventing collisions between stores
@@ -13,8 +16,7 @@
 //! epoch-checked writes.
 
 pub use storage_types::{
-    Isolation, Migration, StorageBackend, StorageDescriptor, postgres_database_name,
-    sqlite_store_path,
+    Isolation, StorageBackend, StorageDescriptor, postgres_database_name, sqlite_store_path,
 };
 
 use lease::LeaseError;
@@ -29,9 +31,9 @@ pub enum StoreError {
     /// The descriptor asked for a backend this build was not compiled with.
     #[error("storage backend '{0}' is not supported by this build (missing feature)")]
     UnsupportedBackend(String),
-    /// A migration or schema-version operation failed.
-    #[error("migration: {0}")]
-    Migration(String),
+    /// The file is neither pristine nor identical to the baseline identity.
+    #[error("database does not match the baseline: {0}")]
+    Baseline(String),
     /// A backend (database driver) operation failed.
     #[error("storage backend: {0}")]
     Backend(String),
@@ -49,10 +51,10 @@ pub enum StoreError {
     )]
     Fenced { holder_epoch: u64, db_epoch: u64 },
     /// An out-of-range database epoch prevents proving monotonic fencing. The store
-    /// refuses to open until an operator resets `eidnara_fence.epoch`.
+    /// refuses to open until an operator resets `fence.epoch`.
     #[error(
         "database fence epoch {db_epoch} is outside the supported range; reset \
-         eidnara_fence.epoch to at least the highest epoch a writer has used"
+         fence.epoch to at least the highest epoch a writer has used"
     )]
     FenceCorrupt { db_epoch: i64 },
 }
@@ -77,11 +79,19 @@ mod sqlite_backend {
     use std::{
         path::{Path, PathBuf},
         sync::Mutex,
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::Duration,
     };
 
     use lease::{FileLeaseStore, HeldFileLease, protect_file};
     use rusqlite::{Connection, OpenFlags};
+    use sha2::{Digest, Sha256};
+
+    /// `PRAGMA application_id` of every Eidnara-owned SQLite file (`EIDN` in ASCII).
+    pub const APPLICATION_ID: u32 = 0x4549_444E;
+    /// `PRAGMA user_version` of every Eidnara-owned SQLite file.
+    pub const USER_VERSION: u32 = 1;
+    /// The objects every store carries ahead of the consumer's baseline.
+    const STORE_BASELINE: &str = include_str!("../baseline.sql");
 
     /// A lease-guarded SQLite store. The lease remains held for the store's lifetime.
     /// A single mutexed connection preserves connection-local configuration and transaction scope.
@@ -119,7 +129,7 @@ mod sqlite_backend {
         /// than the connection, so it cannot replace the guard, set pragmas, run
         /// statement batches, or control transactions. Statements that reach the database
         /// are additionally checked: pragma writes, transaction control, savepoints,
-        /// `ATTACH`/`DETACH`, and writes to the fence and version tables are denied.
+        /// `ATTACH`/`DETACH`, and writes to the fence and format-marker tables are denied.
         ///
         /// # Errors
         ///
@@ -173,7 +183,7 @@ mod sqlite_backend {
         /// The callback receives a [`GuardedConn`], so it holds neither the transaction
         /// nor the connection and cannot commit, replace the guard, or set pragmas.
         /// Transaction control, savepoints, `ATTACH`/`DETACH`, and writes to the fence
-        /// and version tables are denied for its duration, so no statement of its can
+        /// and format-marker tables are denied for its duration, so no statement of its can
         /// commit outside the checked transaction or alter the authority that checked
         /// it.
         ///
@@ -203,24 +213,6 @@ mod sqlite_backend {
             tx.commit()
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             Ok(out)
-        }
-
-        /// Applies a `namespace`'s migration chain using its recorded maximum as a
-        /// watermark.
-        ///
-        /// Each namespace has an independent migration history. Versions at or
-        /// below its watermark are silently skipped.
-        /// Every transaction checks the persisted fence before executing schema
-        /// changes.
-        ///
-        /// # Errors
-        ///
-        /// Returns [`StoreError::Fenced`] when a newer writer owns the database.
-        /// Returns [`StoreError::Backend`] when the fence check fails.
-        /// Returns [`StoreError::Migration`] if migration setup, SQL execution, recording, or commit fails.
-        pub fn migrate(&self, namespace: &str, migrations: &[Migration]) -> Result<(), StoreError> {
-            let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-            run_migrations(&mut guard, self.epoch, namespace, migrations)
         }
     }
 
@@ -338,7 +330,7 @@ mod sqlite_backend {
         }
     }
 
-    /// The connection is shared by reads, fenced writes, migrations, and maintenance, so
+    /// The connection is shared by reads, fenced writes, and maintenance, so
     /// a callback that keeps the full capability of the connection can leave the scope it
     /// was given: any pragma write reconfigures every later statement, and transaction
     /// control ends the transaction whose fence check authorized the callback.
@@ -361,10 +353,10 @@ mod sqlite_backend {
         let mut statement = conn
             .prepare(
                 "SELECT 'main', type, name FROM main.sqlite_schema \
-                 WHERE lower(name) IN ('eidnara_fence', 'eidnara_schema_version') \
+                 WHERE lower(name) IN ('fence', 'format_marker') \
                  UNION ALL \
                  SELECT 'temp', type, name FROM temp.sqlite_schema \
-                 WHERE lower(name) IN ('eidnara_fence', 'eidnara_schema_version') \
+                 WHERE lower(name) IN ('fence', 'format_marker') \
                  ORDER BY 1, 2, 3",
             )
             .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -421,7 +413,7 @@ mod sqlite_backend {
 
         /// `AuthAction::AlterTable` reports the source name, so a rename cannot be judged
         /// when it is authorized: a table the callback created and renamed to an
-        /// infrastructure name is trusted by the next fence claim or migration. The set of
+        /// infrastructure name is trusted by the next fence claim. The set of
         /// infrastructure-named objects in the main and temp schemas is compared before
         /// and after the callback, before its transaction commits.
         fn require_infrastructure_unchanged(
@@ -535,7 +527,7 @@ mod sqlite_backend {
             | AuthAction::CreateVtable { table_name, .. }
             | AuthAction::DropVtable { table_name, .. } => table_name,
             // A view resolves ahead of the table it shadows on this connection, so a
-            // forged `eidnara_fence` would let a stale writer read its own epoch.
+            // forged `fence` would let a stale writer read its own epoch.
             AuthAction::CreateView { view_name }
             | AuthAction::CreateTempView { view_name }
             | AuthAction::DropView { view_name }
@@ -546,12 +538,11 @@ mod sqlite_backend {
     }
 
     /// The fence row carries the authority a fenced write is checked against, and the
-    /// version table records which migrations ran. A callback that changed either, or the
-    /// schema reaching either, would let a superseded writer reclaim the database or
-    /// re-run a migration.
+    /// format marker carries the file's schema identity. A callback that changed
+    /// either, or the schema reaching either, would let a superseded writer reclaim the
+    /// database or pass a foreign file off as this baseline.
     fn is_infrastructure_table(table_name: &str) -> bool {
-        table_name.eq_ignore_ascii_case("eidnara_fence")
-            || table_name.eq_ignore_ascii_case("eidnara_schema_version")
+        table_name.eq_ignore_ascii_case("fence") || table_name.eq_ignore_ascii_case("format_marker")
     }
 
     /// `with_conn_unfenced` remains unrestricted by contract, so `synchronous` and the
@@ -571,14 +562,20 @@ mod sqlite_backend {
         Ok(())
     }
 
-    /// Open a module's SQLite store from its descriptor.
+    /// Open a module's SQLite store from its descriptor and its baseline DDL.
     ///
-    /// The returned store has already claimed its lease epoch in the database.
-    /// Call [`SqliteStore::migrate`] separately for each domain migration chain.
+    /// `baseline` is the consumer's complete schema as one DDL text; the store's own
+    /// objects (the fence and the format marker from `baseline.sql`) precede it. A
+    /// pristine file (no schema, zero `application_id`, zero `user_version`) receives
+    /// the whole baseline once, together with [`APPLICATION_ID`], [`USER_VERSION`],
+    /// and a format-marker row holding the SHA-256 of the baseline text. Any other
+    /// file must carry exactly that identity, object for object, or the open returns
+    /// [`StoreError::Baseline`] before writing a byte. No file is upgraded, adopted,
+    /// or repaired.
     ///
-    /// The stored database fence becomes the lease floor. Deleting or restoring an
-    /// old lease sidecar cannot reissue an epoch represented in the database.
-    /// A database without a fence table opens at floor zero.
+    /// The returned store has already claimed its lease epoch in the database. The
+    /// stored database fence becomes the lease floor, so deleting or restoring an old
+    /// lease sidecar cannot reissue an epoch represented in the database.
     ///
     /// The lease lives next to the database file (its parent directory), derived
     /// from the descriptor's path rather than passed in, and its key carries the
@@ -592,12 +589,17 @@ mod sqlite_backend {
     /// # Errors
     ///
     /// Returns [`StoreError::UnsupportedBackend`] for non-SQLite descriptors.
-    /// Returns [`StoreError::Io`] when the parent directory cannot be created.
+    /// Returns [`StoreError::Io`] when the parent directory or file cannot be created.
     /// Returns [`StoreError::Lease`] when lease acquisition fails.
+    /// Returns [`StoreError::Baseline`] when the file is neither pristine nor identical to the baseline identity.
     /// Returns [`StoreError::Fenced`] if the database advances during open.
     /// Returns [`StoreError::FenceCorrupt`] if the stored fence epoch is out of range.
     /// Returns [`StoreError::Backend`] when SQLite inspection, setup, or fence claim fails.
-    pub fn open_sqlite(descriptor: &StorageDescriptor) -> Result<SqliteStore, StoreError> {
+    pub fn open_sqlite(
+        descriptor: &StorageDescriptor,
+        baseline: &str,
+    ) -> Result<SqliteStore, StoreError> {
+        let expected = ExpectedIdentity::for_baseline(baseline)?;
         let path = match &descriptor.backend {
             StorageBackend::Sqlite { path } => path.clone(),
             other => return Err(StoreError::UnsupportedBackend(other.label().to_string())),
@@ -627,6 +629,9 @@ mod sqlite_backend {
             protect_file(Path::new(&format!("{path}{suffix}")))
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
         }
+        // Identity is settled before any pragma or transaction can touch the file, so
+        // a refused file keeps every byte it had.
+        let state = expected.classify(&conn)?;
         // A VFS that cannot switch to WAL answers the pragma with the unchanged
         // mode; the fence claim must not commit under a journal mode every later
         // fenced write would reject.
@@ -641,7 +646,9 @@ mod sqlite_backend {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        ensure_fence_table(&tx)?;
+        if state == FileState::Pristine {
+            expected.apply(&tx)?;
+        }
         claim_fence_strict(&tx, epoch)?;
         tx.commit()
             .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -686,7 +693,7 @@ mod sqlite_backend {
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let has_fence: bool = conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'eidnara_fence')",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'fence')",
                 [],
                 |row| row.get(0),
             )
@@ -697,10 +704,9 @@ mod sqlite_backend {
         read_fence_epoch_in(&conn)
     }
 
-    const FENCE_EPOCH_SQL: &str =
-        "SELECT COALESCE((SELECT epoch FROM eidnara_fence WHERE id = 0), 0)";
+    const FENCE_EPOCH_SQL: &str = "SELECT COALESCE((SELECT epoch FROM fence WHERE id = 0), 0)";
 
-    /// The caller guarantees that `eidnara_fence` exists.
+    /// The caller guarantees that `fence` exists.
     fn read_fence_epoch_in(conn: &Connection) -> Result<u64, StoreError> {
         let epoch: i64 = conn
             .query_row(FENCE_EPOCH_SQL, [], |row| row.get(0))
@@ -708,14 +714,145 @@ mod sqlite_backend {
         decode_fence_epoch(epoch)
     }
 
-    /// Initializes fence storage before `SqliteStore` is exposed.
-    fn ensure_fence_table(tx: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
-        tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS eidnara_fence (\
-                 id INTEGER PRIMARY KEY CHECK (id = 0), \
-                 epoch INTEGER NOT NULL CHECK (epoch >= 0))",
-        )
-        .map_err(|e| StoreError::Backend(e.to_string()))
+    /// One row of `sqlite_schema` without its root page, which varies with allocation
+    /// order and carries no identity.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct SchemaObject {
+        pub kind: String,
+        pub name: String,
+        pub table: String,
+        pub sql: Option<String>,
+    }
+
+    /// `sqlite_schema` of `conn`'s main database in a fixed order.
+    pub fn schema_inventory(conn: &Connection) -> Result<Vec<SchemaObject>, StoreError> {
+        let mut statement = conn
+            .prepare("SELECT type, name, tbl_name, sql FROM main.sqlite_schema ORDER BY type, name")
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(SchemaObject {
+                    kind: row.get(0)?,
+                    name: row.get(1)?,
+                    table: row.get(2)?,
+                    sql: row.get(3)?,
+                })
+            })
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    /// Whether an opened file may receive the baseline or already carries it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FileState {
+        Pristine,
+        Baseline,
+    }
+
+    /// The identity every file opened against one baseline text must present.
+    struct ExpectedIdentity {
+        text: String,
+        digest: String,
+        objects: Vec<SchemaObject>,
+    }
+
+    impl ExpectedIdentity {
+        /// The inventory comes from applying the text to an in-memory database, so
+        /// the comparison uses SQLite's own normalization of the DDL rather than a
+        /// second parser.
+        fn for_baseline(consumer: &str) -> Result<Self, StoreError> {
+            let text = format!("{STORE_BASELINE}\n{consumer}");
+            let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+            let scratch =
+                Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
+            scratch
+                .execute_batch(&text)
+                .map_err(|e| StoreError::Baseline(format!("baseline text does not apply: {e}")))?;
+            let objects = schema_inventory(&scratch)?;
+            Ok(Self {
+                text,
+                digest,
+                objects,
+            })
+        }
+
+        /// Reads only: a file that is refused keeps every byte it had.
+        fn classify(&self, conn: &Connection) -> Result<FileState, StoreError> {
+            let application_id: u32 = pragma_u32(conn, "application_id")?;
+            let user_version: u32 = pragma_u32(conn, "user_version")?;
+            let objects = schema_inventory(conn)?;
+            if application_id == 0 && user_version == 0 && objects.is_empty() {
+                return Ok(FileState::Pristine);
+            }
+            if application_id != APPLICATION_ID {
+                return Err(StoreError::Baseline(format!(
+                    "application_id is {application_id:#x}, expected {APPLICATION_ID:#x}"
+                )));
+            }
+            if user_version != USER_VERSION {
+                return Err(StoreError::Baseline(format!(
+                    "user_version is {user_version}, expected {USER_VERSION}"
+                )));
+            }
+            if objects != self.objects {
+                let names = |list: &[SchemaObject]| {
+                    list.iter()
+                        .map(|o| o.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                return Err(StoreError::Baseline(format!(
+                    "schema objects [{}] differ from the baseline objects [{}]",
+                    names(&objects),
+                    names(&self.objects)
+                )));
+            }
+            let stored: Option<String> = conn
+                .query_row(
+                    "SELECT baseline_sha256 FROM format_marker WHERE id = 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            match stored {
+                Some(found) if found == self.digest => Ok(FileState::Baseline),
+                Some(found) => Err(StoreError::Baseline(format!(
+                    "format marker {found} does not match the baseline digest {}",
+                    self.digest
+                ))),
+                None => Err(StoreError::Baseline("format marker row is missing".into())),
+            }
+        }
+
+        /// Applies the baseline to a pristine file inside the caller's transaction.
+        fn apply(&self, tx: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+            tx.execute_batch(&self.text)
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            tx.pragma_update(None, "application_id", APPLICATION_ID)
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            tx.pragma_update(None, "user_version", USER_VERSION)
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO format_marker (id, baseline_sha256) VALUES (0, ?1)",
+                rusqlite::params![self.digest],
+            )
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+            Ok(())
+        }
+    }
+
+    fn pragma_u32(conn: &Connection, name: &str) -> Result<u32, StoreError> {
+        let value: i64 = conn
+            .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // SQLite stores both pragmas as 32-bit words; a negative read is the signed view
+        // of a value above `i32::MAX`.
+        Ok(value as u32)
     }
 
     /// Binds fence comparison and claim to the caller's protected transaction.
@@ -772,7 +909,7 @@ mod sqlite_backend {
     ) -> Result<(), StoreError> {
         let rows = tx
             .execute(
-                "INSERT INTO eidnara_fence (id, epoch) VALUES (0, ?1) \
+                "INSERT INTO fence (id, epoch) VALUES (0, ?1) \
                  ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch",
                 rusqlite::params![holder_epoch_sql],
             )
@@ -800,132 +937,26 @@ mod sqlite_backend {
     fn decode_fence_epoch(epoch: i64) -> Result<u64, StoreError> {
         u64::try_from(epoch).map_err(|_| StoreError::FenceCorrupt { db_epoch: epoch })
     }
-
-    /// Apply un-applied migrations for one `namespace` in ascending version order,
-    /// each in its own transaction together with its version record, so a migration
-    /// and the record that it ran commit atomically (a crash mid-migration leaves
-    /// it un-recorded and it re-runs cleanly next open).
-    ///
-    /// Applied migrations are keyed by `(namespace, version)`, so independent
-    /// domain chains in one database never collide or re-run each other.
-    fn run_migrations(
-        conn: &mut Connection,
-        holder_epoch: u64,
-        namespace: &str,
-        migrations: &[Migration],
-    ) -> Result<(), StoreError> {
-        pin_fence_durability(conn)?;
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| StoreError::Migration(e.to_string()))?;
-        claim_fence(&tx, holder_epoch)?;
-        tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS eidnara_schema_version (\
-                 namespace TEXT NOT NULL, \
-                 version INTEGER NOT NULL, \
-                 applied_at_unix INTEGER NOT NULL, \
-                 PRIMARY KEY (namespace, version)\
-             )",
-        )
-        .map_err(|e| StoreError::Migration(e.to_string()))?;
-
-        let current: u32 = tx
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM eidnara_schema_version WHERE namespace = ?1",
-                rusqlite::params![namespace],
-                |r| r.get(0),
-            )
-            .map_err(|e| StoreError::Migration(e.to_string()))?;
-        tx.commit()
-            .map_err(|e| StoreError::Migration(e.to_string()))?;
-
-        let mut ordered: Vec<&Migration> = migrations.iter().collect();
-        ordered.sort_by_key(|m| m.version);
-        if let Some(pair) = ordered.windows(2).find(|w| w[0].version == w[1].version) {
-            return Err(StoreError::Migration(format!(
-                "namespace '{namespace}' declares migration version {} more than once",
-                pair[0].version
-            )));
-        }
-
-        for m in ordered {
-            if m.version <= current {
-                continue;
-            }
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(|e| StoreError::Migration(e.to_string()))?;
-            claim_fence(&tx, holder_epoch)?;
-            let scope = CallbackScope::writable(&tx)?;
-            let applied = tx.execute_batch(m.statements);
-            let released = scope.release();
-            applied.map_err(|e| {
-                StoreError::Migration(format!(
-                    "namespace '{namespace}' migration {}: {e}",
-                    m.version
-                ))
-            })?;
-            released.map_err(|e| {
-                StoreError::Migration(format!(
-                    "namespace '{namespace}' migration {}: {e}",
-                    m.version
-                ))
-            })?;
-            let recorded = tx
-                .execute(
-                    "INSERT INTO eidnara_schema_version (namespace, version, applied_at_unix) \
-                     VALUES (?1, ?2, ?3)",
-                    rusqlite::params![namespace, m.version, now_unix()],
-                )
-                .map_err(|e| StoreError::Migration(e.to_string()))?;
-            // A trigger running `RAISE(IGNORE)` reports success with zero inserted
-            // rows; committing the migration without its record would re-run it.
-            if recorded != 1 {
-                return Err(StoreError::Migration(format!(
-                    "namespace '{namespace}' migration {}: version record affected {recorded} rows; expected 1",
-                    m.version
-                )));
-            }
-            // An AFTER trigger can undo the row while leaving the change count at one.
-            let present: i64 = tx
-                .query_row(
-                    "SELECT COUNT(*) FROM eidnara_schema_version WHERE namespace = ?1 AND version = ?2",
-                    rusqlite::params![namespace, m.version],
-                    |r| r.get(0),
-                )
-                .map_err(|e| StoreError::Migration(e.to_string()))?;
-            if present != 1 {
-                return Err(StoreError::Migration(format!(
-                    "namespace '{namespace}' migration {}: version record missing after insert",
-                    m.version
-                )));
-            }
-            tx.commit()
-                .map_err(|e| StoreError::Migration(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    fn now_unix() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
-    }
 }
 
 #[cfg(feature = "sqlite")]
-pub use sqlite_backend::{GuardedConn, MaintenanceConn, SqliteStore, open_sqlite};
+pub use sqlite_backend::{
+    APPLICATION_ID, GuardedConn, MaintenanceConn, SchemaObject, SqliteStore, USER_VERSION,
+    open_sqlite, schema_inventory,
+};
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::sqlite_backend::{claim_fence, claim_fence_strict, create_database_file_owner_only};
     use super::*;
 
-    /// A database reached through a directory symlink resolves to the same lease
-    /// file, so it contends. A database reached through a file symlink is refused
-    /// outright: the owner-only creation opens with `O_NOFOLLOW`, so an alias can
-    /// never hold a second lease on the same bytes.
+    const KV_BASELINE: &str = "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);";
+
+    const INVENTORY_FIXTURE: &str =
+        include_str!("../../../fixtures/schema/storage-inventory-v1.json");
+
+    /// A directory symlink resolves to the same lease file and contends;
+    /// `O_NOFOLLOW` refuses file symlinks.
     #[cfg(unix)]
     #[test]
     fn symlinked_database_paths_contend_or_are_refused_never_aliased() {
@@ -934,7 +965,7 @@ mod tests {
             panic!("sqlite descriptor");
         };
         let real_path = std::path::PathBuf::from(real_path);
-        let held = open_sqlite(&real).expect("hold the real path");
+        let held = open_sqlite(&real, "").expect("hold the real path");
 
         let dir_alias = root.join("dir-alias");
         std::os::unix::fs::symlink(real_path.parent().unwrap(), &dir_alias).expect("dir symlink");
@@ -944,7 +975,7 @@ mod tests {
             },
             ..real.clone()
         };
-        match open_sqlite(&via_dir).map(|_| ()) {
+        match open_sqlite(&via_dir, "").map(|_| ()) {
             Err(StoreError::Lease(lease::LeaseError::Held { .. })) => {}
             Ok(()) => panic!("a directory-symlink alias must contend on the same lease"),
             Err(other) => panic!("expected Held through the directory alias, got {other:?}"),
@@ -960,7 +991,7 @@ mod tests {
             },
             ..real.clone()
         };
-        match open_sqlite(&via_file).map(|_| ()) {
+        match open_sqlite(&via_file, "").map(|_| ()) {
             Err(StoreError::Io(e)) => {
                 assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "unexpected error: {e}")
             }
@@ -968,9 +999,11 @@ mod tests {
             Err(other) => panic!("expected an O_NOFOLLOW refusal, got {other:?}"),
         }
         drop(held);
-        // Refusal does not depend on contention: the alias stays refused once free.
         assert!(
-            matches!(open_sqlite(&via_file).map(|_| ()), Err(StoreError::Io(_))),
+            matches!(
+                open_sqlite(&via_file, "").map(|_| ()),
+                Err(StoreError::Io(_))
+            ),
             "a file-symlink alias must be refused even with no holder"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -988,7 +1021,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("root");
         let target = root.join("elsewhere.db");
         std::os::unix::fs::symlink(&target, path).expect("dangling symlink");
-        match open_sqlite(&d).map(|_| ()) {
+        match open_sqlite(&d, "").map(|_| ()) {
             Err(StoreError::Io(e)) => {
                 assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "unexpected error: {e}")
             }
@@ -999,11 +1032,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `query_only` does not stop an argumentless checkpoint, so the read scope must.
     #[test]
     fn a_read_callback_cannot_checkpoint_the_wal() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
+        let store = open_sqlite(&d, "").expect("open");
         let denied =
             store.with_conn(|c| c.query_row("PRAGMA wal_checkpoint", [], |r| r.get::<_, i64>(0)));
         assert!(
@@ -1018,53 +1050,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Before the first `migrate`, the version table does not exist, so a callback
-    /// could create a main-schema table and rename it to that name. The infrastructure
-    /// object set is compared before and after the callback, so the forgery fails and
-    /// the following migration still runs.
-    #[test]
-    fn a_callback_cannot_forge_the_version_table_before_the_first_migration() {
-        let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        let forged = store.with_conn_fenced(|tx| {
-            tx.execute(
-                "CREATE TABLE benign (namespace TEXT NOT NULL, version INTEGER NOT NULL, \
-                 applied_at_unix INTEGER NOT NULL, PRIMARY KEY (namespace, version))",
-                [],
-            )?;
-            tx.execute("INSERT INTO benign VALUES ('ns', 999, 0)", [])?;
-            tx.execute("ALTER TABLE benign RENAME TO eidnara_schema_version", [])
-                .map(|_| ())
-        });
-        assert!(
-            matches!(&forged, Err(StoreError::Backend(m)) if m.contains("changed the infrastructure schema objects")),
-            "a rename onto the version table must be rejected, got {forged:?}"
-        );
-        store
-            .migrate(
-                "ns",
-                &[Migration {
-                    version: 1,
-                    statements: "CREATE TABLE first (k TEXT);",
-                }],
-            )
-            .expect("migration 1 runs because the forged watermark rolled back");
-        let applied: i64 = store
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'first'",
-                    [],
-                    |r| r.get(0),
-                )
-            })
-            .expect("inspect");
-        assert_eq!(applied, 1, "migration 1 must have applied");
-        drop(store);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The helper performs no `chmod`, so the file it creates has mode `0600`
-    /// when umask is `022` only if the mode is applied at creation.
     #[cfg(unix)]
     #[test]
     fn new_database_file_is_owner_only_at_creation() {
@@ -1073,7 +1058,6 @@ mod tests {
         let (root, _) = tmp();
         std::fs::create_dir_all(&root).expect("root");
         let path = root.join("fresh.db");
-        // Restores the process-wide umask before asserting the created file's mode.
         let previous = unsafe { libc::umask(0o022) };
         let created = create_database_file_owner_only(&path);
         unsafe { libc::umask(previous) };
@@ -1083,75 +1067,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A `RAISE(IGNORE)` trigger can make the version insert affect zero rows.
-    /// Committing the migration without its record would re-run it on the next
-    /// open, so the whole migration transaction must fail instead.
-    #[test]
-    fn suppressed_version_record_fails_the_migration_instead_of_committing_it() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        let path = path.clone();
-        let store = open_sqlite(&d).expect("open");
-        store
-            .migrate(
-                "ns",
-                &[Migration {
-                    version: 1,
-                    statements: "CREATE TABLE first (k TEXT);",
-                }],
-            )
-            .expect("first migration creates the version table");
-
-        let raw = rusqlite::Connection::open(&path).expect("reopen raw");
-        raw.execute_batch(
-            "CREATE TRIGGER version_suppressor BEFORE INSERT ON eidnara_schema_version \
-             BEGIN SELECT RAISE(IGNORE); END",
-        )
-        .expect("install suppressing trigger");
-        drop(raw);
-
-        match store.migrate(
-            "ns",
-            &[
-                Migration {
-                    version: 1,
-                    statements: "CREATE TABLE first (k TEXT);",
-                },
-                Migration {
-                    version: 2,
-                    statements: "CREATE TABLE second (k TEXT);",
-                },
-            ],
-        ) {
-            Err(StoreError::Migration(m)) => {
-                assert!(m.contains("affected 0 rows"), "unexpected message: {m}")
-            }
-            other => panic!("a suppressed version record must fail the migration, got {other:?}"),
-        }
-        let (second_exists, max_version): (i64, i64) = store
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT (SELECT COUNT(*) FROM sqlite_schema WHERE name = 'second'), \
-                            (SELECT MAX(version) FROM eidnara_schema_version WHERE namespace = 'ns')",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-            })
-            .expect("inspect");
-        assert_eq!(
-            second_exists, 0,
-            "migration 2 must roll back with its record"
-        );
-        assert_eq!(max_version, 1, "the recorded watermark must stay at 1");
-        drop(store);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Reopening covers pre-existing permissive files. A first open cannot test
-    /// permissive WAL repair because a fresh WAL inherits the restricted database
-    /// mode.
     #[cfg(unix)]
     #[test]
     fn reopening_a_permissive_store_protects_the_database_and_its_wal() {
@@ -1165,18 +1080,7 @@ mod tests {
         let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
         let shm = std::path::PathBuf::from(format!("{}-shm", path.display()));
 
-        {
-            let store = open_sqlite(&descriptor).expect("first open");
-            store
-                .migrate(
-                    "perm",
-                    &[Migration {
-                        version: 1,
-                        statements: "CREATE TABLE t (k TEXT);",
-                    }],
-                )
-                .expect("migrate");
-        }
+        drop(open_sqlite(&descriptor, KV_BASELINE).expect("first open"));
 
         std::fs::write(&wal, b"").expect("leave a WAL behind");
         std::fs::write(&shm, b"").expect("leave an SHM behind");
@@ -1186,7 +1090,7 @@ mod tests {
                 .expect("set permissive mode");
         }
 
-        let store = open_sqlite(&descriptor).expect("reopen");
+        let store = open_sqlite(&descriptor, KV_BASELINE).expect("reopen");
 
         let mode = |p: &std::path::Path| {
             std::fs::metadata(p)
@@ -1215,9 +1119,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Protection runs before the fence write. A reopen whose `-shm` path is a
-    /// directory fails `protect_file`; the fence epoch must still hold the
-    /// seeded value, proving no fence bytes were written before protection.
     #[cfg(unix)]
     #[test]
     fn protection_failure_aborts_open_before_the_fence_write() {
@@ -1226,11 +1127,11 @@ mod tests {
             panic!("sqlite descriptor");
         };
         let path = path.clone();
-        let seeded = open_sqlite(&descriptor).expect("seed").epoch();
+        let seeded = open_sqlite(&descriptor, "").expect("seed").epoch();
 
         let shm = format!("{path}-shm");
         std::fs::create_dir(&shm).expect("plant a directory at the shm path");
-        match open_sqlite(&descriptor) {
+        match open_sqlite(&descriptor, "") {
             Err(StoreError::Backend(_)) => {}
             Err(other) => panic!("protection failure must abort the open, got {other}"),
             Ok(_) => panic!("protection failure must abort the open, got a store"),
@@ -1238,9 +1139,7 @@ mod tests {
 
         let conn = rusqlite::Connection::open(&path).expect("inspect fence");
         let epoch: i64 = conn
-            .query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |r| {
-                r.get(0)
-            })
+            .query_row("SELECT epoch FROM fence WHERE id = 0", [], |r| r.get(0))
             .expect("read fence epoch");
         assert_eq!(
             epoch as u64, seeded,
@@ -1254,8 +1153,6 @@ mod tests {
     fn tmp() -> (std::path::PathBuf, StorageDescriptor) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        // Per-call atomic counter (not a clock) guarantees a unique dir even when
-        // tests run in parallel and the clock resolution is coarse.
         let root = std::env::temp_dir().join(format!(
             "storage-{}-{}-{}",
             std::process::id(),
@@ -1281,40 +1178,51 @@ mod tests {
             .as_nanos()
     }
 
-    const M1: &[Migration] = &[Migration {
-        version: 1,
-        statements: "CREATE TABLE facts (id INTEGER PRIMARY KEY, name TEXT NOT NULL); \
-                     INSERT INTO facts (id, name) VALUES (1, 'seed-a'), (2, 'seed-b');",
-    }];
+    fn sqlite_path(d: &StorageDescriptor) -> String {
+        match &d.backend {
+            StorageBackend::Sqlite { path } => path.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn remove_lease_sidecar(root: &std::path::Path) {
+        let lease = std::fs::read_dir(root)
+            .expect("read store directory")
+            .map(|entry| entry.expect("directory entry").path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "lease")
+            })
+            .expect("lease sidecar");
+        std::fs::remove_file(lease).expect("remove lease sidecar");
+    }
 
     #[test]
     fn open_claims_fence_before_return() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        let claimed: i64 = store
+        let store = open_sqlite(&d, "").expect("open");
+        let (claimed, rows): (i64, i64) = store
             .with_conn(|c| {
-                c.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |r| {
-                    r.get(0)
-                })
+                c.query_row(
+                    "SELECT (SELECT epoch FROM fence WHERE id = 0), (SELECT COUNT(*) FROM fence)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
             })
             .expect("open claimed fence");
-        assert_eq!(claimed as u64, store.epoch());
+        assert_eq!((claimed as u64, rows), (store.epoch(), 1));
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Models the interleaving where a floor read before lease acquisition goes stale:
-    /// an opener issues the epoch the database already stores. `claim_fence` authorizes
-    /// that equal epoch, which would place two holders on one epoch, so open uses
-    /// `claim_fence_strict` instead.
     #[test]
     fn open_claim_rejects_an_epoch_the_database_already_stores() {
         let (root, d) = tmp();
         let path = sqlite_path(&d);
-        open_sqlite(&d).expect("seed database");
+        open_sqlite(&d, "").expect("seed database");
 
         let mut conn = rusqlite::Connection::open(&path).expect("reopen database");
         let stored: u64 = conn
-            .query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |row| {
+            .query_row("SELECT epoch FROM fence WHERE id = 0", [], |row| {
                 row.get::<_, i64>(0)
             })
             .map(|epoch| epoch as u64)
@@ -1344,25 +1252,154 @@ mod tests {
     }
 
     #[test]
-    fn migrations_seed_once_across_reopen() {
+    fn fresh_file_matches_the_baseline_inventory() {
         let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        drop(open_sqlite(&d, "").expect("open a fresh store"));
+
+        let conn = rusqlite::Connection::open(&path).expect("reopen the fresh file");
+        let application_id: i64 = conn
+            .query_row("PRAGMA application_id", [], |r| r.get(0))
+            .expect("application_id");
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("user_version");
+        assert_eq!(application_id as u32, APPLICATION_ID);
+        assert_eq!(user_version as u32, USER_VERSION);
+        let (marker_rows, marker): (i64, String) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM format_marker), \
+                 (SELECT baseline_sha256 FROM format_marker WHERE id = 0)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("format marker");
+        assert_eq!(marker_rows, 1, "exactly one format-marker row");
+        let inventory = schema_inventory(&conn).expect("schema inventory");
+        drop(conn);
+
+        let fixture: serde_json::Value =
+            serde_json::from_str(INVENTORY_FIXTURE).expect("fixture parses");
+        assert_eq!(
+            fixture["application_id"].as_u64(),
+            Some(u64::from(APPLICATION_ID))
+        );
+        assert_eq!(
+            fixture["user_version"].as_u64(),
+            Some(u64::from(USER_VERSION))
+        );
+        assert_eq!(
+            fixture["baseline_sha256"].as_str(),
+            Some(marker.as_str()),
+            "the format marker matches the fixture digest"
+        );
+        let expected = fixture["objects"].as_array().expect("objects array");
+        assert_eq!(
+            inventory.len(),
+            expected.len(),
+            "object count differs from the fixture: {inventory:?}"
+        );
+        for (found, wanted) in inventory.iter().zip(expected) {
+            assert_eq!(Some(found.kind.as_str()), wanted["type"].as_str());
+            assert_eq!(Some(found.name.as_str()), wanted["name"].as_str());
+            assert_eq!(Some(found.table.as_str()), wanted["tbl_name"].as_str());
+            assert_eq!(found.sql.as_deref(), wanted["sql"].as_str());
+        }
+        for object in &inventory {
+            for token in ["schema_version", "migration"] {
+                assert!(
+                    !object.name.contains(token),
+                    "object `{}` names a version ledger (`{token}`)",
+                    object.name
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_consumer_baseline_is_applied_once_and_verified_on_reopen() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
         {
-            let store = open_sqlite(&d).expect("open");
-            store.migrate("facts", M1).expect("migrate");
-            let n: i64 = store
-                .with_conn(|c| c.query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0)))
-                .expect("count");
-            assert_eq!(n, 2, "seed rows inserted");
+            let store = open_sqlite(&d, KV_BASELINE).expect("first open applies the baseline");
             assert_eq!(store.epoch(), 1);
+            store
+                .with_conn_fenced(|tx| {
+                    tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])
+                        .map(|_| ())
+                })
+                .expect("fenced write");
         }
         {
-            let store = open_sqlite(&d).expect("reopen");
-            store.migrate("facts", M1).expect("migrate again");
-            let n: i64 = store
-                .with_conn(|c| c.query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0)))
-                .expect("count");
-            assert_eq!(n, 2, "seed not re-inserted on reopen (run-once)");
-            assert_eq!(store.epoch(), 2, "lease epoch is monotonic across opens");
+            let store = open_sqlite(&d, KV_BASELINE).expect("reopen with the same baseline");
+            assert_eq!(
+                store.epoch(),
+                2,
+                "the lease epoch is monotonic across opens"
+            );
+            let v: String = store
+                .with_conn(|c| c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0)))
+                .expect("the row survives the reopen");
+            assert_eq!(v, "1");
+        }
+
+        let before = std::fs::read(&path).expect("read the file before the refused open");
+        let refused = open_sqlite(
+            &d,
+            "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, extra TEXT);",
+        );
+        assert!(
+            matches!(refused, Err(StoreError::Baseline(_))),
+            "a different baseline is refused, got {:?}",
+            refused.map(|_| ())
+        );
+        let after = std::fs::read(&path).expect("read the file after the refused open");
+        assert!(before == after, "the refused open changed the file's bytes");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let refused = open_sqlite(&d, "CREATE TABLE (");
+        assert!(
+            matches!(refused, Err(StoreError::Baseline(_))),
+            "an unparseable baseline is refused, got {:?}",
+            refused.map(|_| ())
+        );
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "the refused open must not create the database file"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_with_foreign_objects_is_refused_without_mutation() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        std::fs::create_dir_all(&root).expect("create store directory");
+        let conn = rusqlite::Connection::open(&path).expect("create a foreign database");
+        conn.execute_batch("CREATE TABLE unfenced_data (id INTEGER PRIMARY KEY);")
+            .expect("create schema");
+        drop(conn);
+        let before = std::fs::read(&path).expect("read the foreign file");
+
+        let refused = open_sqlite(&d, "");
+        assert!(
+            matches!(refused, Err(StoreError::Baseline(_))),
+            "a foreign file is refused, got {:?}",
+            refused.map(|_| ())
+        );
+        let after = std::fs::read(&path).expect("read the foreign file again");
+        assert!(before == after, "the refused open changed the file's bytes");
+        for suffix in ["-wal", "-shm"] {
+            assert!(
+                !std::path::Path::new(&format!("{path}{suffix}")).exists(),
+                "the refused open left a {suffix} sidecar behind"
+            );
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1370,47 +1407,33 @@ mod tests {
     #[test]
     fn database_epoch_survives_repeated_lease_sidecar_loss() {
         let (root, d) = tmp();
-        let first = open_sqlite(&d).expect("first open");
+        let first = open_sqlite(&d, "").expect("first open");
         let first_epoch = first.epoch();
         drop(first);
 
         remove_lease_sidecar(&root);
-        let second = open_sqlite(&d).expect("open after first sidecar loss");
+        let second = open_sqlite(&d, "").expect("open after first sidecar loss");
         assert!(second.epoch() > first_epoch);
         let second_epoch = second.epoch();
         drop(second);
 
         remove_lease_sidecar(&root);
-        let third = open_sqlite(&d).expect("open after second sidecar loss");
+        let third = open_sqlite(&d, "").expect("open after second sidecar loss");
         assert!(third.epoch() > second_epoch);
         let db_epoch: i64 = third
             .with_conn(|conn| {
-                conn.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |row| {
-                    row.get(0)
-                })
+                conn.query_row("SELECT epoch FROM fence WHERE id = 0", [], |row| row.get(0))
             })
             .expect("database fence");
         assert_eq!(db_epoch as u64, third.epoch());
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    fn remove_lease_sidecar(root: &std::path::Path) {
-        let lease = std::fs::read_dir(root)
-            .expect("read store directory")
-            .map(|entry| entry.expect("directory entry").path())
-            .find(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "lease")
-            })
-            .expect("lease sidecar");
-        std::fs::remove_file(lease).expect("remove lease sidecar");
-    }
-
     #[test]
     fn second_live_writer_is_rejected() {
         let (root, d) = tmp();
-        let _held = open_sqlite(&d).expect("first open");
-        match open_sqlite(&d) {
+        let _held = open_sqlite(&d, "").expect("first open");
+        match open_sqlite(&d, "") {
             Err(StoreError::Lease(_)) => {}
             Err(e) => panic!("expected Lease(Held), got {e}"),
             Ok(_) => panic!("expected Lease(Held), got a second open"),
@@ -1422,15 +1445,13 @@ mod tests {
     fn distinct_databases_do_not_falsely_contend() {
         let (root_a, a) = tmp();
         let (root_b, b) = tmp();
-        let held_a = open_sqlite(&a).expect("open a");
-        let held_b = open_sqlite(&b).expect("open b - distinct db, must not contend with a");
+        let held_a = open_sqlite(&a, "").expect("open a");
+        let held_b = open_sqlite(&b, "").expect("open b - distinct db, must not contend with a");
         drop((held_a, held_b));
         let _ = std::fs::remove_dir_all(&root_a);
         let _ = std::fs::remove_dir_all(&root_b);
     }
 
-    /// Two distinct database files in ONE directory share a lease root, so the
-    /// lease key must include the database file identity or they falsely contend.
     #[test]
     fn distinct_databases_in_one_directory_do_not_falsely_contend() {
         let (root, a) = tmp();
@@ -1438,15 +1459,12 @@ mod tests {
         b.backend = StorageBackend::Sqlite {
             path: root.join("other.db").to_string_lossy().into_owned(),
         };
-        let held_a = open_sqlite(&a).expect("open a");
-        let held_b = open_sqlite(&b).expect("open b - distinct db in the same directory as a");
+        let held_a = open_sqlite(&a, "").expect("open a");
+        let held_b = open_sqlite(&b, "").expect("open b - distinct db in the same directory as a");
         drop((held_a, held_b));
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A `RAISE(IGNORE)` trigger can make the fence upsert affect zero rows.
-    /// Accepting a zero-row fence update would let a writer proceed without
-    /// persisting its claimed epoch.
     #[test]
     fn suppressed_fence_update_is_an_error_not_a_silent_success() {
         let (root, d) = tmp();
@@ -1454,11 +1472,11 @@ mod tests {
             panic!("sqlite descriptor");
         };
         let path = path.clone();
-        drop(open_sqlite(&d).expect("seed database at epoch 1"));
+        drop(open_sqlite(&d, "").expect("seed database at epoch 1"));
 
         let mut conn = rusqlite::Connection::open(&path).expect("reopen raw");
         conn.execute_batch(
-            "CREATE TRIGGER fence_suppressor BEFORE UPDATE ON eidnara_fence \
+            "CREATE TRIGGER fence_suppressor BEFORE UPDATE ON fence \
              BEGIN SELECT RAISE(IGNORE); END",
         )
         .expect("install suppressing trigger");
@@ -1474,8 +1492,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// An `AFTER UPDATE` trigger that restores the old epoch leaves the change
-    /// count at one, so only reading the stored value back exposes the undo.
     #[test]
     fn undone_fence_update_is_an_error_not_a_silent_success() {
         let (root, d) = tmp();
@@ -1483,12 +1499,12 @@ mod tests {
             panic!("sqlite descriptor");
         };
         let path = path.clone();
-        drop(open_sqlite(&d).expect("seed database at epoch 1"));
+        drop(open_sqlite(&d, "").expect("seed database at epoch 1"));
 
         let mut conn = rusqlite::Connection::open(&path).expect("reopen raw");
         conn.execute_batch(
-            "CREATE TRIGGER fence_undo AFTER UPDATE ON eidnara_fence \
-             BEGIN UPDATE eidnara_fence SET epoch = OLD.epoch WHERE id = 0; END",
+            "CREATE TRIGGER fence_undo AFTER UPDATE ON fence \
+             BEGIN UPDATE fence SET epoch = OLD.epoch WHERE id = 0; END",
         )
         .expect("install undoing trigger");
         let tx = conn.transaction().expect("tx");
@@ -1503,76 +1519,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// An `AFTER INSERT` trigger that deletes the version row leaves the change
-    /// count at one; the migration must still fail rather than commit unrecorded.
-    #[test]
-    fn undone_version_record_fails_the_migration_instead_of_committing_it() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        let path = path.clone();
-        let store = open_sqlite(&d).expect("open");
-        store
-            .migrate(
-                "ns",
-                &[Migration {
-                    version: 1,
-                    statements: "CREATE TABLE first (k TEXT);",
-                }],
-            )
-            .expect("first migration creates the version table");
-
-        let raw = rusqlite::Connection::open(&path).expect("reopen raw");
-        raw.execute_batch(
-            "CREATE TRIGGER version_undo AFTER INSERT ON eidnara_schema_version \
-             BEGIN DELETE FROM eidnara_schema_version \
-             WHERE namespace = NEW.namespace AND version = NEW.version; END",
-        )
-        .expect("install undoing trigger");
-        drop(raw);
-
-        match store.migrate(
-            "ns",
-            &[
-                Migration {
-                    version: 1,
-                    statements: "CREATE TABLE first (k TEXT);",
-                },
-                Migration {
-                    version: 2,
-                    statements: "CREATE TABLE second (k TEXT);",
-                },
-            ],
-        ) {
-            Err(StoreError::Migration(m)) => {
-                assert!(
-                    m.contains("missing after insert"),
-                    "unexpected message: {m}"
-                )
-            }
-            other => panic!("an undone version record must fail the migration, got {other:?}"),
-        }
-        let second_exists: i64 = store
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'second'",
-                    [],
-                    |r| r.get(0),
-                )
-            })
-            .expect("inspect");
-        assert_eq!(
-            second_exists, 0,
-            "migration 2 must roll back with its record"
-        );
-        drop(store);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Sidecars SQLite creates take the database file's mode, so a fresh open
-    /// under a permissive umask still yields owner-only `-wal` and `-shm` files
-    /// without any later `chmod` on them.
     #[cfg(unix)]
     #[test]
     fn fresh_open_creates_owner_only_sidecars_under_a_permissive_umask() {
@@ -1584,7 +1530,7 @@ mod tests {
         };
         let path = path.clone();
         let previous = unsafe { libc::umask(0o022) };
-        let opened = open_sqlite(&d);
+        let opened = open_sqlite(&d, "");
         unsafe { libc::umask(previous) };
         let store = opened.expect("fresh open");
         for suffix in ["", "-wal", "-shm"] {
@@ -1603,8 +1549,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `StoreError` must preserve underlying io errors via `source()`,
-    /// including the errno two hops down a `Lease` chain.
     #[test]
     fn store_error_source_preserves_the_underlying_errno() {
         let err = StoreError::Io(std::io::Error::from_raw_os_error(28));
@@ -1632,104 +1576,6 @@ mod tests {
         );
     }
 
-    /// Duplicate migration versions must be rejected before applying any migration.
-    #[test]
-    fn duplicate_migration_versions_are_rejected_before_any_apply() {
-        let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        let dup: &[Migration] = &[
-            Migration {
-                version: 1,
-                statements: "CREATE TABLE dup_a (k TEXT);",
-            },
-            Migration {
-                version: 1,
-                statements: "CREATE TABLE dup_b (k TEXT);",
-            },
-        ];
-        match store.migrate("dup", dup) {
-            Err(StoreError::Migration(m)) => {
-                assert!(m.contains("more than once"), "unexpected message: {m}")
-            }
-            other => panic!("duplicate versions must be rejected, got {other:?}"),
-        }
-        let applied: i64 = store
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('dup_a', 'dup_b')",
-                    [],
-                    |r| r.get(0),
-                )
-            })
-            .expect("inspect schema");
-        assert_eq!(applied, 0, "a duplicate batch must apply nothing");
-        drop(store);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn later_migration_applies_on_top_of_earlier() {
-        let (root, d) = tmp();
-        {
-            let s = open_sqlite(&d).expect("v1");
-            s.migrate("facts", M1).expect("v1 migrate");
-        }
-        const M2: &[Migration] = &[
-            Migration {
-                version: 1,
-                statements: "CREATE TABLE facts (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
-            },
-            Migration {
-                version: 2,
-                statements: "ALTER TABLE facts ADD COLUMN weight REAL NOT NULL DEFAULT 0;",
-            },
-        ];
-        let store = open_sqlite(&d).expect("v2");
-        store.migrate("facts", M2).expect("v2 migrate");
-        let ok: i64 = store
-            .with_conn(|c| {
-                c.query_row("SELECT COUNT(*) FROM facts WHERE weight = 0", [], |r| {
-                    r.get(0)
-                })
-            })
-            .expect("weight column queryable");
-        assert_eq!(ok, 2);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn independent_namespace_chains_in_one_database() {
-        let (root, d) = tmp();
-        const WORK_GRAPH: &[Migration] = &[Migration {
-            version: 1,
-            statements: "CREATE TABLE wg_nodes (id INTEGER PRIMARY KEY);",
-        }];
-        const HIRES: &[Migration] = &[Migration {
-            version: 1,
-            statements: "CREATE TABLE hires (id INTEGER PRIMARY KEY);",
-        }];
-        let store = open_sqlite(&d).expect("open");
-        store.migrate("work_graph", WORK_GRAPH).expect("work_graph");
-        store.migrate("hires", HIRES).expect("hires");
-        store
-            .migrate("work_graph", WORK_GRAPH)
-            .expect("work_graph again");
-        let tables: i64 = store
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('wg_nodes','hires')",
-                    [],
-                    |r| r.get(0),
-                )
-            })
-            .expect("count tables");
-        assert_eq!(
-            tables, 2,
-            "both domains' tables exist; version 1 did not collide across namespaces"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     #[test]
     fn unsupported_backend_is_rejected() {
         let d = StorageDescriptor {
@@ -1741,23 +1587,17 @@ mod tests {
                 database: "y".into(),
             },
         };
-        match open_sqlite(&d) {
+        match open_sqlite(&d, "") {
             Err(StoreError::UnsupportedBackend(b)) => assert_eq!(b, "postgres"),
             Err(e) => panic!("expected UnsupportedBackend, got {e}"),
             Ok(_) => panic!("expected UnsupportedBackend, got an open store"),
         }
     }
 
-    const FENCE_SCHEMA: &[Migration] = &[Migration {
-        version: 1,
-        statements: "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);",
-    }];
-
     #[test]
     fn fenced_write_commits_and_persists() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        store.migrate("kv", FENCE_SCHEMA).expect("migrate");
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
         store
             .with_conn_fenced(|tx| {
                 tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])?;
@@ -1774,8 +1614,7 @@ mod tests {
     #[test]
     fn unfenced_connection_rejects_writes() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        store.migrate("kv", FENCE_SCHEMA).expect("migrate");
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
         let r = store.with_conn(|c| {
             c.execute("INSERT INTO kv (k, v) VALUES ('sneak', '1')", [])
                 .map(|_| ())
@@ -1800,7 +1639,7 @@ mod tests {
     #[test]
     fn open_pins_full_synchronous() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
+        let store = open_sqlite(&d, "").expect("open");
         let sync: i64 = store
             .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
             .expect("read synchronous");
@@ -1811,8 +1650,7 @@ mod tests {
     #[test]
     fn a_panicking_read_does_not_strand_the_connection_read_only() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        store.migrate("kv", FENCE_SCHEMA).expect("migrate");
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
 
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             store.with_conn(|_| -> rusqlite::Result<()> { panic!("callback panics") })
@@ -1834,8 +1672,7 @@ mod tests {
     #[test]
     fn a_read_callback_cannot_lower_fence_durability() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        store.migrate("kv", FENCE_SCHEMA).expect("migrate");
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
 
         let lowered = store.with_conn(|c| c.execute("PRAGMA synchronous = OFF", []));
         assert!(
@@ -1847,8 +1684,6 @@ mod tests {
             .expect("reading a pragma stays allowed");
         assert_eq!(unchanged, 2, "the denied pragma left synchronous=FULL");
 
-        // The fenced write restores `synchronous=FULL` after unrestricted maintenance
-        // changes it.
         store
             .with_conn_unfenced(|c| c.pragma_update(None, "synchronous", "OFF"))
             .expect("maintenance may lower it");
@@ -1869,15 +1704,19 @@ mod tests {
         store
             .with_conn_unfenced(|c| c.pragma_update(None, "synchronous", "NORMAL"))
             .expect("lower again");
-        let second = &[Migration {
-            version: 1,
-            statements: "CREATE TABLE kv2 (k TEXT PRIMARY KEY);",
-        }];
-        store.migrate("kv2", second).expect("migrate");
-        let after_migrate: i64 = store
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("CREATE TABLE kv2 (k TEXT PRIMARY KEY)", [])
+                    .map(|_| ())
+            })
+            .expect("fenced schema change");
+        let after_ddl: i64 = store
             .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
             .expect("read synchronous");
-        assert_eq!(after_migrate, 2, "migration re-pinned synchronous=FULL");
+        assert_eq!(
+            after_ddl, 2,
+            "the fenced schema change re-pinned synchronous=FULL"
+        );
 
         store
             .with_conn_unfenced(|c| c.pragma_update(None, "journal_mode", "MEMORY"))
@@ -1901,8 +1740,7 @@ mod tests {
     #[test]
     fn a_read_callback_cannot_clear_the_read_only_guard() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        store.migrate("kv", FENCE_SCHEMA).expect("migrate");
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
 
         let bypass = store.with_conn(|c| {
             c.execute("PRAGMA query_only = OFF", [])?;
@@ -1921,7 +1759,6 @@ mod tests {
                 "setting {pragma} from a read callback is denied, got {denied:?}"
             );
         }
-        // SQLite pragma names are case-insensitive.
         for spelling in ["QUERY_ONLY", "Query_Only", "qUeRy_OnLy"] {
             let denied = store.with_conn(|c| {
                 c.execute(&format!("PRAGMA {spelling} = OFF"), [])?;
@@ -1940,10 +1777,6 @@ mod tests {
             rows, 0,
             "no spelling of the guard pragma let a write through"
         );
-        let n: i64 = store
-            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
-            .expect("count");
-        assert_eq!(n, 0, "the denied callback wrote nothing");
 
         store
             .with_conn_fenced(|tx| {
@@ -1957,8 +1790,7 @@ mod tests {
     #[test]
     fn a_callback_cannot_end_the_fence_checked_transaction() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        store.migrate("kv", FENCE_SCHEMA).expect("migrate");
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
 
         for control in ["COMMIT", "ROLLBACK", "SAVEPOINT s", "BEGIN"] {
             let r = store.with_conn_fenced(|tx| {
@@ -1980,26 +1812,15 @@ mod tests {
             "denial happens before the statement runs, so nothing commits unfenced"
         );
 
-        let migration = &[Migration {
-            version: 9,
-            statements: "COMMIT; CREATE TABLE escaped_ddl (v TEXT);",
-        }];
-        let m = store.migrate("escape", migration);
+        let ddl = store.with_conn_fenced(|tx| {
+            tx.execute("COMMIT", [])?;
+            tx.execute("CREATE TABLE escaped_ddl (v TEXT)", [])
+                .map(|_| ())
+        });
         assert!(
-            matches!(&m, Err(StoreError::Migration(msg)) if msg.contains("not authorized")),
-            "a migration that ends its transaction is denied, got {m:?}"
+            matches!(&ddl, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "a callback that ends its transaction before DDL is denied, got {ddl:?}"
         );
-        let recorded: i64 = store
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT COUNT(*) FROM eidnara_schema_version WHERE namespace = 'escape'",
-                    [],
-                    |r| r.get(0),
-                )
-            })
-            .expect("count");
-        assert_eq!(recorded, 0, "the rejected migration recorded no version");
-
         let ddl_exists: bool = store
             .with_conn(|c| {
                 c.query_row(
@@ -2009,32 +1830,28 @@ mod tests {
                 )
             })
             .expect("schema lookup");
-        assert!(!ddl_exists, "the denied migration created no table");
+        assert!(!ddl_exists, "the denied callback created no table");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_callback_cannot_damage_the_fence_row_it_is_checked_against() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        store.migrate("kv", FENCE_SCHEMA).expect("migrate");
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
         let epoch = store.epoch();
 
         for sql in [
-            "UPDATE eidnara_fence SET epoch = 0 WHERE id = 0",
-            "DELETE FROM eidnara_fence WHERE id = 0",
-            "INSERT INTO eidnara_schema_version (namespace, version, applied_at_unix) \
-             VALUES ('kv', 99, 0)",
-            // A trigger reaches the row without naming it in a DML statement: raising
-            // IGNORE on update suppresses a later opener's claim while it still succeeds.
-            "CREATE TRIGGER freeze_fence BEFORE UPDATE ON eidnara_fence \
+            "UPDATE fence SET epoch = 0 WHERE id = 0",
+            "DELETE FROM fence WHERE id = 0",
+            "INSERT INTO format_marker (id, baseline_sha256) VALUES (0, 'forged')",
+            "DELETE FROM format_marker WHERE id = 0",
+            "CREATE TRIGGER freeze_fence BEFORE UPDATE ON fence \
              BEGIN SELECT RAISE(IGNORE); END",
-            "DROP TABLE eidnara_fence",
-            "CREATE INDEX fence_idx ON eidnara_fence (epoch)",
-            // A view resolves ahead of the table it shadows, so a stale connection could
-            // read its own epoch and skip the claim entirely.
-            "CREATE TEMP VIEW eidnara_fence AS SELECT 0 AS id, 1 AS epoch",
-            "CREATE VIEW eidnara_schema_version AS SELECT 1",
+            "DROP TABLE fence",
+            "DROP TABLE format_marker",
+            "CREATE INDEX fence_idx ON fence (epoch)",
+            "CREATE TEMP VIEW fence AS SELECT 0 AS id, 1 AS epoch",
+            "CREATE TEMP VIEW format_marker AS SELECT 0 AS id, 'forged' AS baseline_sha256",
         ] {
             let r = store.with_conn_fenced(|tx| tx.execute(sql, []).map(|_| ()));
             assert!(
@@ -2047,8 +1864,8 @@ mod tests {
             .with_conn(|c| {
                 c.query_row(
                     "SELECT COUNT(*) FROM sqlite_schema WHERE name IN \
-                     ('freeze_fence', 'fence_idx', 'eidnara_schema_version') \
-                     AND type <> 'table'",
+                     ('freeze_fence', 'fence_idx') \
+                     OR (name IN ('fence', 'format_marker') AND type <> 'table')",
                     [],
                     |r| r.get(0),
                 )
@@ -2058,40 +1875,27 @@ mod tests {
         let shadow: i64 = store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'eidnara_fence'",
+                    "SELECT COUNT(*) FROM temp.sqlite_schema \
+                     WHERE name IN ('fence', 'format_marker')",
                     [],
                     |r| r.get(0),
                 )
             })
             .expect("temp schema lookup");
-        assert_eq!(shadow, 0, "no temporary object shadows the fence table");
+        assert_eq!(
+            shadow, 0,
+            "no temporary object shadows an infrastructure table"
+        );
 
         let stored: i64 = store
-            .with_conn(|c| {
-                c.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |r| {
-                    r.get(0)
-                })
-            })
+            .with_conn(|c| c.query_row("SELECT epoch FROM fence WHERE id = 0", [], |r| r.get(0)))
             .expect("read the fence row");
         assert_eq!(
             stored, epoch as i64,
             "the fence row still carries the epoch the callbacks were checked against"
         );
 
-        let migration = &[Migration {
-            version: 8,
-            statements: "UPDATE eidnara_fence SET epoch = 0 WHERE id = 0;",
-        }];
-        let m = store.migrate("fencerow", migration);
-        assert!(
-            matches!(&m, Err(StoreError::Migration(msg)) if msg.contains("not authorized")),
-            "a migration that lowers the fence row is denied, got {m:?}"
-        );
-
-        // `AuthAction::AlterTable` reports the source name, so the rename is authorized
-        // and has to be caught by name once the callback returns.
-        // SQLite resolves identifiers case-insensitively, so the check must too.
-        for target in ["eidnara_fence", "EIDNARA_FENCE", "Eidnara_Fence"] {
+        for target in ["fence", "FENCE", "Fence"] {
             let renamed = store.with_conn_fenced(|tx| {
                 tx.execute("CREATE TEMP TABLE benign (id INTEGER, epoch INTEGER)", [])?;
                 tx.execute(&format!("ALTER TABLE benign RENAME TO {target}"), [])
@@ -2105,7 +1909,7 @@ mod tests {
         let shadow_after: i64 = store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'eidnara_fence'",
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'fence'",
                     [],
                     |r| r.get(0),
                 )
@@ -2125,10 +1929,67 @@ mod tests {
     }
 
     #[test]
+    fn a_fenced_callback_cannot_rewrite_the_format_marker() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, "").expect("open");
+        let before: String = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT baseline_sha256 FROM format_marker WHERE id = 0",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("read the marker");
+
+        let forged = "f".repeat(64);
+        let rewritten = store.with_conn_fenced(|tx| {
+            tx.execute(
+                "UPDATE format_marker SET baseline_sha256 = ?1 WHERE id = 0",
+                rusqlite::params![forged],
+            )
+            .map(|_| ())
+        });
+        assert!(
+            matches!(&rewritten, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "rewriting the format marker is denied, got {rewritten:?}"
+        );
+
+        let renamed = store.with_conn_fenced(|tx| {
+            tx.execute(
+                "CREATE TEMP TABLE benign (id INTEGER, baseline_sha256 TEXT)",
+                [],
+            )?;
+            tx.execute("ALTER TABLE benign RENAME TO format_marker", [])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&renamed, Err(StoreError::Backend(m)) if m.contains("changed the infrastructure schema objects")),
+            "a temporary table renamed onto the marker is rejected, got {renamed:?}"
+        );
+
+        let (after, rows): (String, i64) = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT (SELECT baseline_sha256 FROM format_marker WHERE id = 0), \
+                     (SELECT COUNT(*) FROM format_marker)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .expect("read the marker again");
+        assert_eq!(
+            (after, rows),
+            (before, 1),
+            "the format marker row is unchanged"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn maintenance_runs_through_the_unfenced_path() {
         let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        store.migrate("kv", FENCE_SCHEMA).expect("migrate");
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
         let r = store.with_conn(|c| c.execute("VACUUM", []));
         assert!(
             matches!(&r, Err(StoreError::Backend(m)) if m.contains("authorization denied")),
@@ -2144,10 +2005,7 @@ mod tests {
     fn fenced_write_rolls_back_on_error() {
         let (root, d) = tmp();
         let path = sqlite_path(&d);
-        open_sqlite(&d)
-            .expect("open")
-            .migrate("kv", FENCE_SCHEMA)
-            .expect("migrate");
+        drop(open_sqlite(&d, KV_BASELINE).expect("open"));
         let store = SqliteStore::for_test(rusqlite::Connection::open(path).unwrap(), 2);
         let r: Result<(), StoreError> = store.with_conn_fenced(|tx| {
             tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])?;
@@ -2163,11 +2021,7 @@ mod tests {
             .expect("count");
         assert_eq!(n, 0, "the failed fenced write rolled back");
         let claimed: i64 = store
-            .with_conn(|c| {
-                c.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |r| {
-                    r.get(0)
-                })
-            })
+            .with_conn(|c| c.query_row("SELECT epoch FROM fence WHERE id = 0", [], |r| r.get(0)))
             .expect("read fence");
         assert_eq!(
             claimed, 1,
@@ -2177,53 +2031,30 @@ mod tests {
     }
 
     #[test]
-    fn database_without_fence_table_uses_zero_floor() {
-        let (root, d) = tmp();
-        let path = sqlite_path(&d);
-        std::fs::create_dir_all(&root).expect("create store directory");
-        let conn =
-            rusqlite::Connection::open(&path).expect("create database without a fence table");
-        conn.execute_batch("CREATE TABLE unfenced_data (id INTEGER PRIMARY KEY);")
-            .expect("create schema");
-        drop(conn);
-
-        let store = open_sqlite(&d).expect("open database without a fence table");
-        assert_eq!(store.epoch(), 1, "missing fence table must use floor zero");
-        let claimed: i64 = store
-            .with_conn(|conn| {
-                conn.query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |row| {
-                    row.get(0)
-                })
-            })
-            .expect("read claimed fence");
-        assert_eq!(claimed, 1);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn negative_database_fence_fails_closed() {
         let (root, d) = tmp();
         let path = sqlite_path(&d);
-        std::fs::create_dir_all(&root).expect("create store directory");
-        let conn =
-            rusqlite::Connection::open(&path).expect("create database without a fence table");
+        drop(open_sqlite(&d, "").expect("seed database"));
+
+        let conn = rusqlite::Connection::open(&path).expect("reopen raw");
         conn.execute_batch(
-            "CREATE TABLE eidnara_fence (id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL); \
-             INSERT INTO eidnara_fence (id, epoch) VALUES (0, -1);",
+            "PRAGMA ignore_check_constraints = ON; \
+             UPDATE fence SET epoch = -1 WHERE id = 0;",
         )
-        .expect("seed pre-fence-validation database");
+        .expect("corrupt the fence through the constraint bypass");
         drop(conn);
 
-        let error = match open_sqlite(&d) {
+        let error = match open_sqlite(&d, "") {
             Err(error) => error,
             Ok(_) => panic!("negative fence must fail closed"),
         };
-        assert!(matches!(error, StoreError::FenceCorrupt { db_epoch } if db_epoch == -1));
+        assert!(
+            matches!(error, StoreError::FenceCorrupt { db_epoch } if db_epoch == -1),
+            "expected FenceCorrupt, got {error:?}"
+        );
         let persisted: i64 = rusqlite::Connection::open(&path)
             .expect("reopen database")
-            .query_row("SELECT epoch FROM eidnara_fence WHERE id = 0", [], |row| {
-                row.get(0)
-            })
+            .query_row("SELECT epoch FROM fence WHERE id = 0", [], |row| row.get(0))
             .expect("read unchanged negative fence");
         assert_eq!(persisted, -1);
         let _ = std::fs::remove_dir_all(&root);
@@ -2231,15 +2062,10 @@ mod tests {
 
     #[test]
     fn superseded_writer_is_fenced_out_after_handover() {
-        // Model the post-handover state directly: the OS lock prevents two live
-        // lease holders, but a stale connection can persist after releasing its lease.
         let (root, d) = tmp();
         let path = sqlite_path(&d);
 
-        open_sqlite(&d)
-            .expect("seed schema")
-            .migrate("kv", FENCE_SCHEMA)
-            .expect("migrate");
+        drop(open_sqlite(&d, KV_BASELINE).expect("seed schema"));
 
         let new = SqliteStore::for_test(rusqlite::Connection::open(&path).unwrap(), 2);
         new.with_conn_fenced(|tx| {
@@ -2262,44 +2088,33 @@ mod tests {
             }
             other => panic!("expected Fenced, got {other:?}"),
         }
+        assert!(
+            matches!(
+                stale.with_conn_fenced(|tx| {
+                    tx.execute("CREATE TABLE stale_schema (id INTEGER PRIMARY KEY)", [])
+                        .map(|_| ())
+                }),
+                Err(StoreError::Fenced { .. })
+            ),
+            "a superseded writer cannot change the schema"
+        );
 
-        let v: String = new
-            .with_conn(|c| c.query_row("SELECT v FROM kv WHERE k = 'owner'", [], |r| r.get(0)))
-            .expect("read");
-        assert_eq!(v, "new", "stale writer was fenced out, no clobber");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn superseded_writer_cannot_migrate() {
-        let (root, d) = tmp();
-        let path = sqlite_path(&d);
-        open_sqlite(&d).expect("seed database");
-
-        let replacement = SqliteStore::for_test(rusqlite::Connection::open(&path).unwrap(), 2);
-        replacement
-            .with_conn_fenced(|_| Ok(()))
-            .expect("replacement claim");
-        let stale = SqliteStore::for_test(rusqlite::Connection::open(&path).unwrap(), 1);
-        let migration = [Migration {
-            version: 1,
-            statements: "CREATE TABLE stale_schema (id INTEGER PRIMARY KEY);",
-        }];
-        assert!(matches!(
-            stale.migrate("stale", &migration),
-            Err(StoreError::Fenced { .. })
-        ));
-
-        let tables: i64 = replacement
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'stale_schema'",
+        let (v, stale_tables): (String, i64) = new
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT (SELECT v FROM kv WHERE k = 'owner'), \
+                     (SELECT COUNT(*) FROM sqlite_schema \
+                      WHERE type = 'table' AND name = 'stale_schema')",
                     [],
-                    |row| row.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
             })
-            .expect("schema state");
-        assert_eq!(tables, 0);
+            .expect("read");
+        assert_eq!(v, "new", "stale writer was fenced out, no clobber");
+        assert_eq!(
+            stale_tables, 0,
+            "the fenced-out schema change left no table"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2307,10 +2122,7 @@ mod tests {
     fn equal_epoch_writer_is_not_fenced() {
         let (root, d) = tmp();
         let path = sqlite_path(&d);
-        open_sqlite(&d)
-            .expect("seed")
-            .migrate("kv", FENCE_SCHEMA)
-            .expect("migrate");
+        drop(open_sqlite(&d, KV_BASELINE).expect("seed"));
         let s = SqliteStore::for_test(rusqlite::Connection::open(&path).unwrap(), 5);
         s.with_conn_fenced(|tx| {
             tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])
@@ -2330,7 +2142,7 @@ mod tests {
     fn epoch_above_sqlite_integer_range_fails() {
         let (root, d) = tmp();
         let path = sqlite_path(&d);
-        open_sqlite(&d).expect("seed database");
+        drop(open_sqlite(&d, "").expect("seed database"));
         let too_large = SqliteStore::for_test(
             rusqlite::Connection::open(&path).unwrap(),
             (i64::MAX as u64) + 1,
@@ -2341,70 +2153,6 @@ mod tests {
         assert!(
             matches!(error, StoreError::Backend(message) if message.contains("exceeds SQLite INTEGER maximum"))
         );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    fn sqlite_path(d: &StorageDescriptor) -> String {
-        match &d.backend {
-            StorageBackend::Sqlite { path } => path.clone(),
-            _ => unreachable!(),
-        }
-    }
-
-    /// Existing databases require these exact table names and definitions.
-    #[test]
-    fn fence_and_version_tables_keep_their_ddl() {
-        let (root, d) = tmp();
-        let store = open_sqlite(&d).expect("open");
-        store
-            .migrate(
-                "ddl",
-                &[Migration {
-                    version: 1,
-                    statements: "CREATE TABLE t (k TEXT);",
-                }],
-            )
-            .expect("migrate");
-        let schema: Vec<(String, String)> = store
-            .with_conn(|c| {
-                let mut statement = c.prepare(
-                    "SELECT name, sql FROM sqlite_schema \
-                     WHERE type = 'table' AND name LIKE 'eidnara%' ORDER BY name",
-                )?;
-                let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                rows.collect()
-            })
-            .expect("read schema");
-        assert_eq!(
-            schema,
-            vec![
-                (
-                    "eidnara_fence".to_string(),
-                    "CREATE TABLE eidnara_fence (id INTEGER PRIMARY KEY CHECK (id = 0), \
-                     epoch INTEGER NOT NULL CHECK (epoch >= 0))"
-                        .to_string(),
-                ),
-                (
-                    "eidnara_schema_version".to_string(),
-                    "CREATE TABLE eidnara_schema_version (namespace TEXT NOT NULL, \
-                     version INTEGER NOT NULL, applied_at_unix INTEGER NOT NULL, \
-                     PRIMARY KEY (namespace, version))"
-                        .to_string(),
-                ),
-            ]
-        );
-        let (epoch, rows): (i64, i64) = store
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT (SELECT epoch FROM eidnara_fence WHERE id = 0), \
-                     (SELECT COUNT(*) FROM eidnara_fence)",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-            })
-            .expect("read fence row");
-        assert_eq!((epoch, rows), (store.epoch() as i64, 1));
-        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

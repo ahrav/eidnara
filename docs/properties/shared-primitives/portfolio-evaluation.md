@@ -17,7 +17,7 @@ Fresh-context evaluation ran after the initial 22-record catalog was written. It
 | Effects performed before lock success were absent. | Added `failed-acquisition-does-not-mutate-lease-state`. |
 | Drop-time release was claimed in the model but had no record. | Added `handle-drop-releases-lease`. |
 | SQLite had a post-acquire, pre-fence-claim stale-write window. | Added `replacement-fence-is-claimed-before-old-writer-writes`. Open now claims a strictly greater epoch before exposure, so a stale floor cannot reissue a stored epoch; the stronger acquisition-instant property remains unresolved. |
-| Unfenced write APIs made the protected write set unclear. | Added `protected-write-set-is-fence-complete` and narrowed `stale-writer-write-is-rejected`. PostgreSQL now separates read-only, fenced, and explicitly unfenced maintenance callbacks; SQLite consumer migration remains open. |
+| Unfenced write APIs made the protected write set unclear. | Added `protected-write-set-is-fence-complete` and narrowed `stale-writer-write-is-rejected`. PostgreSQL separates read-only, fenced, and explicitly unfenced maintenance callbacks; moving the SQLite consumers' unfenced mutations onto the fenced APIs remains open. |
 | Steady-state mode, creation-window exposure, and symlink following were conflated. | Added `lease-file-creation-is-never-permissive` and `acquisition-does-not-follow-symlink`; narrowed the original permission records. |
 | Parked dual-store migration rule was inconsistently in scope. | Explicitly excluded the unbuilt migration and linked its durability prerequisite in `relationships.md`. |
 
@@ -41,13 +41,13 @@ Fresh-context evaluation ran after the initial 22-record catalog was written. It
 - Added exercised-state status to every fault-map row.
 - Routed kernel/filesystem and crash properties to real process, deployment, or crash-consistency evidence rather than modeling away the mechanism under test.
 - Replaced copied PostgreSQL lease identity/hash logic with the shared public `LeaseKey::identity` and `fnv1a` derivation, and recorded the stability-vector tests introduced across `bed0bb7` and `8da6d42` and the numeric hash API finalized in `f2107e5`.
-- Recorded the standard-library lock migration and Rust 1.89 MSRV declaration from `bed0bb7`, plus the 0.1.1 version bump from `94c65ec`. The destination workspace pins `rust-version = "1.98"` and `rust-toolchain.toml` to 1.98; CI runs format, clippy with `-D warnings`, tests, doctests and docs, and feature configurations on that pinned toolchain, runs clippy and tests on moving stable, and checks the pinned toolchain against a regenerated lockfile of latest dependencies.
+- Recorded the move to standard-library file locking and the Rust 1.89 MSRV declaration from `bed0bb7`, plus the 0.1.1 version bump from `94c65ec`. The destination workspace pins `rust-version = "1.98"` and `rust-toolchain.toml` to 1.98; CI runs format, clippy with `-D warnings`, tests, doctests and docs, and feature configurations on that pinned toolchain, runs clippy and tests on moving stable, and checks the pinned toolchain against a regenerated lockfile of latest dependencies.
 
 ## Biases requiring human judgment
 
 ### Shared-root topology
 
-The lease crate requires a shared root (`crates/lease/src/lib.rs:11-15`), the in-repo SQLite consumer derives a root from each database parent in `open_sqlite` (`crates/storage/src/lib.rs:606-619`, ending at `FileLeaseStore::new(&parent)`), and the density measurement implies an external high-cardinality shared root (`lease-store-density.md:7-11`). This unresolved topology changes the impact of key aliasing, density, and filesystem-scope properties.
+The lease crate requires a shared root (`crates/lease/src/lib.rs:11-15`), the in-repo SQLite consumer derives a root from each database parent in `open_sqlite` (`crates/storage/src/lib.rs:608-619`, ending at `FileLeaseStore::new(&parent)`), and the density measurement implies an external high-cardinality shared root (`lease-store-density.md:7-11`). This unresolved topology changes the impact of key aliasing, density, and filesystem-scope properties.
 
 ### Contract catalog versus current implementation
 

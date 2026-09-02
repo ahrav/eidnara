@@ -93,29 +93,39 @@
           "rationale": "Call sites that show the complexity moves rather than concentrates: every consumer callback in the host source's store passes through `with_conn` or `with_conn_fenced` and must not gain batch or pragma capability; merging the handles reshuffles the same forwarding while widening the guarded surface."
         },
         {
-          "title": "Move Migration into storage",
-          "strength": "Speculative",
+          "title": "Remove the migration runner",
+          "strength": "Strong",
           "origin": "original-scope",
-          "decision": "rejected",
+          "decision": "accepted",
           "modules": [
             "crates/storage-types",
             "crates/storage"
           ],
-          "interface": "`storage_types::Migration` re-exported by `storage`",
-          "implementation": "one two-field struct",
+          "interface": "`storage::open_sqlite(descriptor, baseline)`: one DDL text per store",
+          "implementation": "pristine detection, baseline application, identity verification, and refusal without mutation",
           "deletion_test": {
-            "concentrates_complexity": false,
-            "rationale": "Moving a type between crates neither concentrates nor removes complexity."
+            "concentrates_complexity": true,
+            "rationale": "Deleting the runner removes the version ledger, the per-namespace watermark, ordering rules, and three authorizer targets; what remains is one identity check the open already needed."
           },
           "benefits": {
-            "locality": false,
-            "leverage": false,
-            "testability": false
+            "locality": true,
+            "leverage": true,
+            "testability": true
           },
           "claims_flexibility": false,
           "adapters": [],
-          "specialist_routes": [],
-          "rationale": "Pure move; the host source's store consumer imports `Migration` through `storage`'s re-export, so the move changes no call site and deepens nothing."
+          "specialist_routes": [
+            "/software-design:persistence-boundary-and-transaction-design"
+          ],
+          "rationale": "Accepted: a store has exactly one schema, so the runner, the `Migration` type, and the version ledger are surface without a second implementation. The open applies the baseline to a pristine file and refuses any other identity, which is smaller than the runner it replaces and closes the forged-ledger class of escapes.",
+          "affected_properties": [
+            "store-schema-identity-matches-the-baseline",
+            "protected-write-set-is-fence-complete",
+            "read-callbacks-cannot-write"
+          ],
+          "property_impact": "`store-schema-identity-matches-the-baseline` replaces the fence-table identity record and the per-namespace migration record: a fresh file equals the inventory fixture and a mismatched file is refused without mutation. `protected-write-set-is-fence-complete` and `read-callbacks-cannot-write` lose their migration arms and gain the format_marker target.",
+          "implementation_evidence": "`crates/storage/src/lib.rs`: `open_sqlite(descriptor, baseline)`, `ExpectedIdentity::{for_baseline, classify, apply}`, `crates/storage/baseline.sql`; tests `fresh_file_matches_the_baseline_inventory`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, `a_file_with_foreign_objects_is_refused_without_mutation`, `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched`; `scripts/eidnara-migration/check.ts` rejects migration machinery tokens in non-test code.",
+          "final_verdict": "Implemented: `storage` has no `Migration` type, runner, or version ledger; a fresh file's identity equals `fixtures/schema/storage-inventory-v1.json` and a mismatched file is refused without mutation."
         }
       ]
     },
@@ -210,29 +220,39 @@
           "rationale": "Call sites that show the complexity moves rather than concentrates: every consumer callback in the host source's store passes through `with_conn` or `with_conn_fenced` and must not gain batch or pragma capability; merging the handles reshuffles the same forwarding while widening the guarded surface."
         },
         {
-          "title": "Move Migration into storage",
-          "strength": "Speculative",
+          "title": "Remove the migration runner",
+          "strength": "Strong",
           "origin": "original-scope",
-          "decision": "rejected",
+          "decision": "accepted",
           "modules": [
             "crates/storage-types",
             "crates/storage"
           ],
-          "interface": "`storage_types::Migration` re-exported by `storage`",
-          "implementation": "one two-field struct",
+          "interface": "`storage::open_sqlite(descriptor, baseline)`: one DDL text per store",
+          "implementation": "pristine detection, baseline application, identity verification, and refusal without mutation",
           "deletion_test": {
-            "concentrates_complexity": false,
-            "rationale": "Moving a type between crates neither concentrates nor removes complexity."
+            "concentrates_complexity": true,
+            "rationale": "Deleting the runner removes the version ledger, the per-namespace watermark, ordering rules, and three authorizer targets; what remains is one identity check the open already needed."
           },
           "benefits": {
-            "locality": false,
-            "leverage": false,
-            "testability": false
+            "locality": true,
+            "leverage": true,
+            "testability": true
           },
           "claims_flexibility": false,
           "adapters": [],
-          "specialist_routes": [],
-          "rationale": "Pure move; the host source's store consumer imports `Migration` through `storage`'s re-export, so the move changes no call site and deepens nothing."
+          "specialist_routes": [
+            "/software-design:persistence-boundary-and-transaction-design"
+          ],
+          "rationale": "Accepted: a store has exactly one schema, so the runner, the `Migration` type, and the version ledger are surface without a second implementation. The open applies the baseline to a pristine file and refuses any other identity, which is smaller than the runner it replaces and closes the forged-ledger class of escapes.",
+          "affected_properties": [
+            "store-schema-identity-matches-the-baseline",
+            "protected-write-set-is-fence-complete",
+            "read-callbacks-cannot-write"
+          ],
+          "property_impact": "`store-schema-identity-matches-the-baseline` replaces the fence-table identity record and the per-namespace migration record: a fresh file equals the inventory fixture and a mismatched file is refused without mutation. `protected-write-set-is-fence-complete` and `read-callbacks-cannot-write` lose their migration arms and gain the format_marker target.",
+          "implementation_evidence": "`crates/storage/src/lib.rs`: `open_sqlite(descriptor, baseline)`, `ExpectedIdentity::{for_baseline, classify, apply}`, `crates/storage/baseline.sql`; tests `fresh_file_matches_the_baseline_inventory`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, `a_file_with_foreign_objects_is_refused_without_mutation`, `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched`; `scripts/eidnara-migration/check.ts` rejects migration machinery tokens in non-test code.",
+          "final_verdict": "Implemented: `storage` has no `Migration` type, runner, or version ledger; a fresh file's identity equals `fixtures/schema/storage-inventory-v1.json` and a mismatched file is refused without mutation."
         }
       ]
     }

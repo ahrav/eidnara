@@ -6,9 +6,10 @@
       "kind": "identity",
       "value": "user_version = 1",
       "class": "frozen-durable",
-      "rationale": "`PRAGMA user_version` of the direct format epoch.",
+      "rationale": "`PRAGMA user_version` of every Eidnara-owned SQLite file; a file with any other value is refused without mutation.",
       "evidence": [
-        "fixtures/vocabulary/README.md"
+        "crates/storage/src/lib.rs",
+        "fixtures/schema/storage-inventory-v1.json"
       ]
     },
     {
@@ -32,22 +33,32 @@
     },
     {
       "kind": "identity",
-      "value": "eidnara_fence",
+      "value": "fence",
       "class": "frozen-durable",
-      "rationale": "Fence table holding the single writer-epoch row that every fenced write and migration checks.",
+      "rationale": "Fence table holding the single writer-epoch row that every fenced write and every open checks.",
       "evidence": [
-        "crates/storage/src/lib.rs",
-        "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md"
+        "crates/storage/baseline.sql",
+        "fixtures/schema/storage-inventory-v1.json"
       ]
     },
     {
       "kind": "identity",
-      "value": "eidnara_schema_version",
+      "value": "format_marker",
       "class": "frozen-durable",
-      "rationale": "Per-namespace migration watermark table; a rename re-runs every migration.",
+      "rationale": "Table holding the single row whose `baseline_sha256` is the SHA-256 of the complete baseline text; the open compares it before trusting a file.",
+      "evidence": [
+        "crates/storage/baseline.sql",
+        "fixtures/schema/storage-inventory-v1.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "0x4549444e",
+      "class": "frozen-durable",
+      "rationale": "`PRAGMA application_id` of every Eidnara-owned SQLite file (`EIDN` in ASCII); a file with any other value is refused without mutation.",
       "evidence": [
         "crates/storage/src/lib.rs",
-        "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md"
+        "fixtures/schema/storage-inventory-v1.json"
       ]
     },
     {
@@ -111,6 +122,26 @@
       ]
     },
     {
+      "kind": "fixture",
+      "path": "fixtures/schema/storage-inventory-v1.json",
+      "role": "byte-stable",
+      "rationale": "Fresh-file identity of a store opened against an empty consumer baseline: application id, user version, baseline digest, and the fence and format_marker DDL. Byte-stable under R18; regenerated only by the registered generator as part of a reviewed contract change.",
+      "evidence": [
+        "migration/waves/U2/receipt.json",
+        "docs/properties/shared-primitives/evidence/store-schema-identity-matches-the-baseline.md"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/storage/examples/schema-inventory.rs",
+      "role": "generator",
+      "fixture": "fixtures/schema/storage-inventory-v1.json",
+      "rationale": "Generator for the storage schema inventory.",
+      "evidence": [
+        "crates/storage/src/lib.rs"
+      ]
+    },
+    {
       "kind": "family",
       "name": "kernel-store",
       "class": "retained-authoritative-baseline",
@@ -122,8 +153,8 @@
         "<data-root>/core.sqlite"
       ],
       "mismatch_behavior": "refuse-without-mutation",
-      "probe": "non-mutating open: PRAGMA application_id equals the registered Eidnara application id, PRAGMA user_version == 1, one format-marker row, sqlite_schema inventory equals fixtures/vocabulary/kernel-format-vocabulary-v1.json",
-      "baseline_source": "U4 composes one final baseline from the kernel schema components at the pinned host source commit and compares its identities to the captured vocabulary fixture",
+      "probe": "non-mutating open: PRAGMA application_id == 0x4549444e, PRAGMA user_version == 1, one format-marker row, sqlite_schema inventory equals fixtures/schema/kernel-inventory-v1.json",
+      "baseline_source": "U4 authors one baseline.sql for the kernel store and captures its fresh-file inventory as fixtures/schema/kernel-inventory-v1.json",
       "restore_policy": "current-format backup and restore only; no format import and no backfill path"
     },
     {
@@ -139,8 +170,8 @@
         "$XDG_DATA_HOME/eidnara/context.db"
       ],
       "mismatch_behavior": "refuse-without-mutation",
-      "probe": "non-mutating open: PRAGMA application_id equals the registered Eidnara application id, PRAGMA user_version == 1, one format-marker row, sqlite_schema inventory equals fixtures/vocabulary/direct-format-vocabulary-v1.json",
-      "baseline_source": "U4 final baseline; direct-format vocabulary copied verbatim from the host source at the pinned commit",
+      "probe": "non-mutating open: PRAGMA application_id == 0x4549444e, PRAGMA user_version == 1, one format-marker row, sqlite_schema inventory equals fixtures/schema/context-inventory-v1.json",
+      "baseline_source": "U4 authors one baseline.sql for the context store and captures its fresh-file inventory as fixtures/schema/context-inventory-v1.json",
       "restore_policy": "current-format backup and restore only; reset is an explicit Doctor operation that quarantines, never a startup branch"
     },
     {
@@ -172,8 +203,8 @@
         "<data_home>/eidnara/<module_id>/store.db"
       ],
       "mismatch_behavior": "refuse-without-mutation",
-      "probe": "non-mutating open: PRAGMA application_id equals the registered Eidnara application id, PRAGMA user_version == 1, one format-marker row, sqlite_schema inventory equals the captured kernel-format vocabulary",
-      "baseline_source": "U4 final baseline composed at the pinned host source commit",
+      "probe": "non-mutating open through `storage::open_sqlite`: PRAGMA application_id == 0x4549444e, PRAGMA user_version == 1, one format_marker row whose digest equals the baseline digest, sqlite_schema inventory equals the baseline inventory",
+      "baseline_source": "`crates/storage/baseline.sql` plus the module baseline U4 authors; the storage-owned part is captured as fixtures/schema/storage-inventory-v1.json",
       "restore_policy": "current-format backup and restore only"
     },
     {
@@ -439,11 +470,6 @@
     },
     {
       "kind": "authored",
-      "path": "fixtures/vocabulary/README.md",
-      "rationale": "Placeholder describing the captured vocabulary fixtures U4 adds."
-    },
-    {
-      "kind": "authored",
       "path": "migration/waves/U1/review-notes.md",
       "rationale": "U1 per-file review evidence."
     },
@@ -509,7 +535,7 @@
     },
     {
       "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md",
+      "path": "docs/properties/shared-primitives/evidence/store-schema-identity-matches-the-baseline.md",
       "rationale": "Evidence for a record discovered at U2."
     },
     {
@@ -525,11 +551,6 @@
     {
       "kind": "authored",
       "path": "docs/properties/shared-primitives/evidence/hard-bust-drains-deferred-work.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/migrations-apply-once-per-namespace.md",
       "rationale": "Evidence for a record discovered at U2."
     },
     {
@@ -566,6 +587,21 @@
       "kind": "authored",
       "path": "crates/storage-types/tests/golden/storage_vectors.json",
       "rationale": "Destination-authored golden vectors produced by the registered generator; byte-stable fixture."
+    },
+    {
+      "kind": "authored",
+      "path": "crates/storage/baseline.sql",
+      "rationale": "The storage-owned baseline: fence and format_marker DDL that precedes every consumer baseline."
+    },
+    {
+      "kind": "authored",
+      "path": "fixtures/schema/storage-inventory-v1.json",
+      "rationale": "Destination-captured fresh-file inventory produced by the registered generator; byte-stable fixture."
+    },
+    {
+      "kind": "authored",
+      "path": "crates/storage/examples/schema-inventory.rs",
+      "rationale": "Generator for the storage schema inventory fixture."
     }
   ]
 }

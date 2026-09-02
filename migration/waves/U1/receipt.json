@@ -22,7 +22,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "9106f32e2471b8ccea11eb70ee223e2b83380b2003177deb2c5b91d8f6cd123b",
+      "destination_sha256": "17edbcfe8d9885e675a9a05babc254119cca1428add3357b748122022ca9068c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -132,7 +132,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "792e4fc2dadd15f55598d00386f60796936929b129c7f7c92bab89dcd2fb59a0",
+      "destination_sha256": "8a79fc956ee80bc24adad8259fb116a638f857d452bd3b0601fd53aa172e2a5e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -187,7 +187,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/review-notes.md",
-      "destination_sha256": "af01b1fa77b77432eaddab7f5c77a4e66bf3f7fb9da08f805df53e74d22a6766",
+      "destination_sha256": "94776b44bc320dca836a6025b5e1ad26bb9851092608c1afe5d03928e0ff078a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -198,7 +198,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "64547fa049d7048982194952e7926a8ba2a0c8f77b513c2ea43a16dc96b5160e",
+      "destination_sha256": "8e2ef9442056925cae88b153b37f7c58837fb3cb3425bc75a58829e6bd6cbc2a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -209,7 +209,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "99260d6f0e654a1736268daab09872673f430890ffa57ca6f18946967a822dc6",
+      "destination_sha256": "da631a2f4ed8b0e347e0a9be8a18f279a9676a8c786140b90d4f4f2106920784",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -264,7 +264,7 @@
     {
       "source": null,
       "destination": "docs/properties/README.md",
-      "destination_sha256": "e6d6167cdbf9ae11e06b15b3681192c61bfa6077833179f8947fdf0054b61ebc",
+      "destination_sha256": "e942569343612378928ac701a2e48050fcd1b6817bae5b274b72b8786940f82c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -276,17 +276,6 @@
       "source": null,
       "destination": "docs/runbooks/architecture-review.md",
       "destination_sha256": "3ed875d91d7eae01aab603c045b79410c142dc154e4b167f9510d48384331355",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U1/review-notes.md#authored-files",
-        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
-      }
-    },
-    {
-      "source": null,
-      "destination": "fixtures/vocabulary/README.md",
-      "destination_sha256": "dc779bbe65fb341441b631ab53c070f4258bfeb5e6aa2cb5191a138b3a9652d0",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

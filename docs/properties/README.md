@@ -33,7 +33,7 @@ bun run eidnara:check property-catalog docs/properties/<part>/index.json
 `property-catalog` checker then enforces METHOD's vocabulary on the generated
 index. `Type`, `Reachability`, `Status`, `Exercised`, `Check` semantics, and
 `Confidence` must use the enumerated values. Records that deviate in source
-catalogs fail here. The wave that migrates them must reconcile those records.
+catalogs fail here. The wave that carries them must reconcile those records.
 
 ## Coverage authority
 

@@ -62,7 +62,7 @@ The steady-state mode property does not dominate path-target stability. A test c
 
 ### Lease-root topology (unresolved shared dependency)
 
-`distinct-lease-keys-do-not-alias`, `lease-file-growth-trigger-is-observed`, `filesystem-lock-scope-matches-deployment`, and `logical-store-has-single-lease-identity` depend on whether a consumer places many logical stores under one root. The lease crate describes a shared root (`crates/lease/src/lib.rs:11-15`); the in-repo SQLite consumer derives one root per database parent in `open_sqlite` (`crates/storage/src/lib.rs:606-619`, ending at `FileLeaseStore::new(&parent)`); the density measurement implies at least one external consumer uses a high-cardinality shared root (`lease-store-density.md:7-11`). Impact remains conditional until deployment topology is supplied.
+`distinct-lease-keys-do-not-alias`, `lease-file-growth-trigger-is-observed`, `filesystem-lock-scope-matches-deployment`, and `logical-store-has-single-lease-identity` depend on whether a consumer places many logical stores under one root. The lease crate describes a shared root (`crates/lease/src/lib.rs:11-15`); the in-repo SQLite consumer derives one root per database parent in `open_sqlite` (`crates/storage/src/lib.rs:608-619`, ending at `FileLeaseStore::new(&parent)`); the density measurement implies at least one external consumer uses a high-cardinality shared root (`lease-store-density.md:7-11`). Impact remains conditional until deployment topology is supplied.
 
 ### Resource mechanism
 
@@ -104,8 +104,7 @@ The golden-vector record depends on the six mechanism records: a vector reproduc
 
 ### SQLite fence and callback scope
 
-- `fence-tables-keep-their-durable-identity`
-- `migrations-apply-once-per-namespace`
+- `store-schema-identity-matches-the-baseline`
 - `read-callbacks-cannot-write`
 - `callback-scope-is-restored-after-unwind`
 - `protected-transactions-pin-fence-durability`
@@ -113,5 +112,5 @@ The golden-vector record depends on the six mechanism records: a vector reproduc
 - `fenced-write-is-atomic`
 - `fence-epoch-outside-sqlite-range-fails-closed`
 
-`fence-tables-keep-their-durable-identity` is a prerequisite for `stale-writer-write-is-rejected`, `replacement-fence-is-claimed-before-old-writer-writes`, and `protected-write-set-is-fence-complete`: every fence read and claim names those two tables. `read-callbacks-cannot-write` and `callback-scope-is-restored-after-unwind` are the SQLite half of `protected-write-set-is-fence-complete`.
+`store-schema-identity-matches-the-baseline` is a prerequisite for `stale-writer-write-is-rejected`, `replacement-fence-is-claimed-before-old-writer-writes`, and `protected-write-set-is-fence-complete`: every fence read and claim names the `fence` table, and the baseline gate is what guarantees that the table an open finds is the one `crates/storage/baseline.sql` defines. `read-callbacks-cannot-write` and `callback-scope-is-restored-after-unwind` are the SQLite half of `protected-write-set-is-fence-complete`.
 

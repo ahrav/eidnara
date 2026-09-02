@@ -12,7 +12,7 @@ System path: `crates/lease` at revision `9e871ce`, plus the U8 working-tree chan
 
 `open_lease_file` first opens an existing final path with Unix `O_NOFOLLOW | O_NONBLOCK` or Windows `FILE_FLAG_OPEN_REPARSE_POINT`. On `NotFound`, it creates a same-directory `NamedTempFile`, writes canonical epoch zero, and calls `persist_noclobber`; an `AlreadyExists` race reopens the winner within three attempts. A successful publication returns the already-open temporary-file inode. Descriptor metadata rejects nonregular files and Windows reparse points (`crates/lease/src/lib.rs:56-77,106-143,231-311`). Exclusive and shared acquisition then use only `File::try_lock` or `File::try_lock_shared`. Both methods classify `TryLockError::WouldBlock` as `LeaseError::Held` and unwrap `TryLockError::Error` into `LeaseError::Io` (`crates/lease/src/lib.rs:231-311`).
 
-The crate has no network or database boundary. Its authority boundaries are the filesystem path and kernel lock table. `storage` reads the SQLite fence as a resource floor, acquires above it, claims a strictly greater epoch before exposure, and rechecks it in fenced writes and migrations (`crates/storage/src/lib.rs:160-206,600-657,721-758,804-907`).
+The crate has no network or database boundary. Its authority boundaries are the filesystem path and kernel lock table. `storage` reads the SQLite fence as a resource floor, acquires above it, claims a strictly greater epoch before exposure, and rechecks it in every fenced write, DDL included (`crates/storage/src/lib.rs:170-216,565-661,858-895`).
 
 ## State and persistence
 
@@ -52,7 +52,7 @@ These remain claims under test. Code disagreements are retained in the catalog.
 - `8abefe8` extracted the lease and names a prior Windows contention-classification bug class.
 - `16aed47` added shared mode.
 - `49bcaa2` hardens file modes after a measured deployment had permissive files. Its commit message records an initial adjacent `storage` WAL test that could not fail, direct evidence that vacuity has occurred in this subsystem's check history.
-- `bed0bb7` migrated file locking to the standard library, declared Rust 1.89 as the workspace MSRV, and added the lease identity/hash stability vector.
+- `bed0bb7` moved file locking to the standard library, declared Rust 1.89 as the workspace MSRV, and added the lease identity/hash stability vector.
 - `8da6d42` made lease identity and hexadecimal hashing public so PostgreSQL could share the derivation, then added the advisory-key stability vector.
 - `f2107e5` exposed numeric `fnv1a`, retained `fnv1a_hex` for filenames, and removed PostgreSQL's hex format/parse round trip.
 - `94c65ec` bumped `lease` to 0.1.1 for the public API and MSRV change.

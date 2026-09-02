@@ -39,17 +39,17 @@
       },
       "strategy_decision": "Golden-vector test: six externally computed identity, digest, and filename vectors plus an acquisition that must create the pinned file. Chosen over a property test because the contract is a fixed byte derivation; an independent implementation is the oracle.",
       "audit_verdict": "pass",
-      "evidence_digest": "ada5aed5377341fc7b5e6d12c32f7663f9c2e1ab1d717b3805b70cc7bf3ddf4e",
-      "code_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
-      "check_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
-      "check_pointer": "crates/lease/src/lib.rs#L1206",
+      "evidence_digest": "1672fe4891dc67e131173de5fba01db4ca888f5809cb90b07274243be3e554fe",
+      "code_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
+      "check_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
+      "check_pointer": "crates/lease/src/lib.rs#L1196",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
         "x86_64-unknown-linux-gnu, Rust stable, --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "ada5aed5377341fc7b5e6d12c32f7663f9c2e1ab1d717b3805b70cc7bf3ddf4e",
+        "digest": "1672fe4891dc67e131173de5fba01db4ca888f5809cb90b07274243be3e554fe",
         "description": "`lease_path_vectors_are_version_stable`: six externally computed vectors including both production keys and the created filename; mutants for suffix and separator fail."
       }
     },
@@ -69,17 +69,17 @@
       },
       "strategy_decision": "Example test with an instrumented reader: the check `bytes_read <= 21` is asserted directly on a 1 MiB input, then the same input is driven through every acquisition path against a real file.",
       "audit_verdict": "pass",
-      "evidence_digest": "bf7af584a90cde2d728e1a97225dda3535704b02e67e69bcdc5017fc25e81d89",
-      "code_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
-      "check_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
-      "check_pointer": "crates/lease/src/lib.rs#L1264",
+      "evidence_digest": "6a2e6208055e3ed66311d065637daa987df49240ed1dbcd82be134c42e652b8a",
+      "code_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
+      "check_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
+      "check_pointer": "crates/lease/src/lib.rs#L1253",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
         "x86_64-unknown-linux-gnu, Rust stable, --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "bf7af584a90cde2d728e1a97225dda3535704b02e67e69bcdc5017fc25e81d89",
+        "digest": "6a2e6208055e3ed66311d065637daa987df49240ed1dbcd82be134c42e652b8a",
         "description": "`epoch_read_is_bounded_regardless_of_file_size`: counting reader observes <= 21 bytes on a 1 MiB epoch; all three acquisition paths reject the same file unchanged; the unbounded-read mutant fails."
       }
     },
@@ -99,17 +99,17 @@
       },
       "strategy_decision": "Example table extended with the inputs a lenient parser accepts (`+1`, padding, hex, digit separator); each body is asserted with exact error kind, path in message, and unchanged bytes through every applicable acquisition mode.",
       "audit_verdict": "pass",
-      "evidence_digest": "3d8958bac2adf41c138359d80f3093161b405ed7298811eaa272c7e9353bddd7",
-      "code_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
-      "check_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
-      "check_pointer": "crates/lease/src/lib.rs#L642",
+      "evidence_digest": "a7b656df787a04d2bf98f76c47978a8138b030ed266c1e8cf322b958df48bf9b",
+      "code_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
+      "check_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
+      "check_pointer": "crates/lease/src/lib.rs#L626",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
         "x86_64-unknown-linux-gnu, Rust stable, --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "3d8958bac2adf41c138359d80f3093161b405ed7298811eaa272c7e9353bddd7",
+        "digest": "a7b656df787a04d2bf98f76c47978a8138b030ed266c1e8cf322b958df48bf9b",
         "description": "`invalid_epoch_states_fail_closed` extended with `+1`, `-1`, ` 1`, `1 `, `0x1f`, `1_0`; the parse-based mutant fails."
       }
     },
@@ -131,9 +131,9 @@
       },
       "strategy_decision": "Byte-stable golden fixture: receipt-level byte identity to the source blob plus the fixture-driven test as an independent oracle; the near-tautological action assertion is recorded and the byte, boundary, flag, and queue assertions carry the claim.",
       "audit_verdict": "pass",
-      "evidence_digest": "bcf04fc9f1cba9e21c48f5fb4949c7aa36c798b7065bdbf4d5eeee963214e5f1",
-      "code_hash": "25bc5de54de92488ed873c1b16a4d15df9af5f0bc151d7b8ad6ac28417722224",
-      "check_hash": "243786b536ef077b7cdcdc765ca033a493dcaf5d52998056a70f77c59b94e13f",
+      "evidence_digest": "74f972396f700368c6772943d96d35f4110dacb1cbe507e01b4b4118cf2369ac",
+      "code_hash": "52918109a9757701c91a1a35a5772480ec4d32ba1eba2e85d1b26c123678c7fb",
+      "check_hash": "49c095fee21e88a0ee5785d3a82b068bb6e900e7891e1fba976cfd6c1e4775a6",
       "check_pointer": "crates/cache-stability/tests/golden_vectors.rs#L160",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
@@ -160,8 +160,8 @@
       },
       "strategy_decision": "Byte-stable golden fixture: receipt-level byte identity to the source blob plus per-vector derivation checks read from the fixture, independent of the helpers under test.",
       "audit_verdict": "pass",
-      "evidence_digest": "79f8db32d3f7cd97a4f43582721b3c5ccea63c861b2cb92d8f9717e24bfd41d1",
-      "code_hash": "2172c2e0018caf975b174c352ad0b69ffe8045fda1414d8e86ec11339f5f456b",
+      "evidence_digest": "c975b75ac2d5f02add4caae7f65ef653b3de70e646bff29b72de711ea9cf126f",
+      "code_hash": "21c99d2e69e68fbcdcf32a46c323cca4dda436db11afbf518982ab74e41e6881",
       "check_hash": "818565074cce03ed25c9d57557b5e826d2199c4fa7a910351b56727a31a0fa9b",
       "check_pointer": "crates/storage-types/tests/golden_vectors.rs#L12",
       "target_configurations": [
@@ -190,7 +190,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": true
       },
-      "check_pointer": "crates/lease/src/lib.rs#L1009",
+      "check_pointer": "crates/lease/src/lib.rs#L993",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/at-most-one-exclusive-holder-per-key.md"
     },
     {
@@ -213,7 +213,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L1048",
+      "check_pointer": "crates/lease/src/lib.rs#L1032",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/shared-exclusive-exclusion-matrix.md"
     },
     {
@@ -236,7 +236,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L1129",
+      "check_pointer": "crates/lease/src/lib.rs#L1113",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/dead-holder-lease-is-reclaimable.md"
     },
     {
@@ -260,7 +260,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L522",
+      "check_pointer": "crates/lease/src/lib.rs#L506",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/writer-epoch-strictly-increases.md"
     },
     {
@@ -283,7 +283,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L1190",
+      "check_pointer": "crates/lease/src/lib.rs#L1180",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/returned-epoch-is-crash-durable.md"
     },
     {
@@ -306,7 +306,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L751",
+      "check_pointer": "crates/lease/src/lib.rs#L735",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/failed-acquire-preserves-prior-epoch.md"
     },
     {
@@ -329,7 +329,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": true
       },
-      "check_pointer": "crates/lease/src/lib.rs#L1026",
+      "check_pointer": "crates/lease/src/lib.rs#L1010",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/distinct-lease-keys-do-not-alias.md"
     },
     {
@@ -375,7 +375,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L543",
+      "check_pointer": "crates/lease/src/lib.rs#L527",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/shared-acquisition-is-epoch-neutral.md"
     },
     {
@@ -398,7 +398,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L1098",
+      "check_pointer": "crates/lease/src/lib.rs#L1082",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/shared-epoch-never-authorizes-write.md"
     },
     {
@@ -421,7 +421,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L926",
+      "check_pointer": "crates/lease/src/lib.rs#L910",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/unix-lease-file-is-owner-only.md"
     },
     {
@@ -490,7 +490,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L1129",
+      "check_pointer": "crates/lease/src/lib.rs#L1113",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/filesystem-lock-scope-matches-deployment.md"
     },
     {
@@ -537,7 +537,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/storage/src/lib.rs#L1632",
+      "check_pointer": "crates/storage/src/lib.rs#L2064",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/stale-writer-write-is-rejected.md"
     },
     {
@@ -561,7 +561,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": true
       },
-      "check_pointer": "crates/storage/src/lib.rs#L1057",
+      "check_pointer": "crates/storage/src/lib.rs#L1445",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/logical-store-has-single-lease-identity.md"
     },
     {
@@ -631,7 +631,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": true
       },
-      "check_pointer": "crates/storage/src/lib.rs#L922",
+      "check_pointer": "crates/storage/src/lib.rs#L1201",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/replacement-fence-is-claimed-before-old-writer-writes.md"
     },
     {
@@ -655,7 +655,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/storage/src/lib.rs#L1209",
+      "check_pointer": "crates/storage/src/lib.rs#L1651",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/protected-write-set-is-fence-complete.md"
     },
     {
@@ -701,7 +701,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L873",
+      "check_pointer": "crates/lease/src/lib.rs#L857",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/acquisition-does-not-follow-symlink.md"
     },
     {
@@ -747,7 +747,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/lease/src/lib.rs#L751",
+      "check_pointer": "crates/lease/src/lib.rs#L735",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/epoch-update-interruption-window-is-reached.md"
     },
     {
@@ -795,7 +795,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/cache-stability/src/lib.rs#L313",
+      "check_pointer": "crates/cache-stability/src/lib.rs#L324",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/defer-pass-replays-frozen-bytes-verbatim.md"
     },
     {
@@ -818,7 +818,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/cache-stability/src/lib.rs#L387",
+      "check_pointer": "crates/cache-stability/src/lib.rs#L427",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/hard-bust-drains-deferred-work.md"
     },
     {
@@ -841,7 +841,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/cache-stability/src/lib.rs#L334",
+      "check_pointer": "crates/cache-stability/src/lib.rs#L345",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/never-minted-boundary-is-not-reconcile-pending.md"
     },
     {
@@ -864,7 +864,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/cache-stability/src/lib.rs#L529",
+      "check_pointer": "crates/cache-stability/src/lib.rs#L569",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/anchor-holds-while-reconcile-pending.md"
     },
     {
@@ -887,7 +887,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/cache-stability/src/lib.rs#L422",
+      "check_pointer": "crates/cache-stability/src/lib.rs#L462",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/frozen-unit-order-is-preserved.md"
     },
     {
@@ -911,7 +911,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/cache-stability/src/lib.rs#L568",
+      "check_pointer": "crates/cache-stability/src/lib.rs#L608",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/episode-units-reset-at-run-boundary.md"
     },
     {
@@ -935,54 +935,40 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/storage-types/src/lib.rs#L167",
+      "check_pointer": "crates/storage-types/src/lib.rs#L211",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/descriptor-wire-shape-round-trips.md"
     },
     {
-      "slug": "fence-tables-keep-their-durable-identity",
-      "classification": "carried-forward",
+      "slug": "store-schema-identity-matches-the-baseline",
+      "classification": "core",
+      "disposition": "pass",
       "relationship": "mapped",
       "files": [
-        "crates/storage/src/lib.rs"
+        "crates/storage/src/lib.rs",
+        "crates/storage/baseline.sql",
+        "fixtures/schema/storage-inventory-v1.json"
       ],
-      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
       "source_status": {
         "exercised": "yes",
         "check_status": "audited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "destination_status": {
-        "exercised": "yes",
-        "check_status": "audited",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/storage/src/lib.rs#L1755",
-      "evidence_pointer": "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md"
-    },
-    {
-      "slug": "migrations-apply-once-per-namespace",
-      "classification": "carried-forward",
-      "relationship": "mapped",
-      "files": [
-        "crates/storage/src/lib.rs"
+      "strategy_decision": "Fixture test plus refusal tests: a fresh file's application id, user version, format-marker digest, and sqlite_schema inventory are compared to a destination-captured fixture that the generator example produces, and non-pristine files with foreign objects, a different consumer baseline, or a bypassed fence constraint are refused with the file bytes unchanged. Chosen over a property test because the identity is one fixed byte contract.",
+      "audit_verdict": "pass",
+      "evidence_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "code_hash": "0a7a229c78b51da96e1095bff1d4d9aac64569f38786d8b9bc4b3d450185c1a0",
+      "check_hash": "761158888f0a48ae5a808747b5909328ada6cc0c3fdf1a1681780cbfd980b4b2",
+      "check_pointer": "crates/storage/src/lib.rs#L1255",
+      "target_configurations": [
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
       ],
-      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
-      "source_status": {
-        "exercised": "yes",
-        "check_status": "audited",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "yes",
-        "check_status": "audited",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/storage/src/lib.rs#L980",
-      "evidence_pointer": "docs/properties/shared-primitives/evidence/migrations-apply-once-per-namespace.md"
+      "evidence_attempts": 1,
+      "new_evidence": {
+        "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "description": "`fresh_file_matches_the_baseline_inventory` compares a fresh file to `fixtures/schema/storage-inventory-v1.json`; `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, and `negative_database_fence_fails_closed` prove refusal leaves the bytes unchanged."
+      }
     },
     {
       "slug": "read-callbacks-cannot-write",
@@ -1004,7 +990,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/storage/src/lib.rs#L1172",
+      "check_pointer": "crates/storage/src/lib.rs#L1615",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/read-callbacks-cannot-write.md"
     },
     {
@@ -1027,7 +1013,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/storage/src/lib.rs#L1209",
+      "check_pointer": "crates/storage/src/lib.rs#L1651",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/callback-scope-is-restored-after-unwind.md"
     },
     {
@@ -1050,7 +1036,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/storage/src/lib.rs#L1198",
+      "check_pointer": "crates/storage/src/lib.rs#L1640",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/protected-transactions-pin-fence-durability.md"
     },
     {
@@ -1073,7 +1059,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/storage/src/lib.rs#L829",
+      "check_pointer": "crates/storage/src/lib.rs#L1072",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/store-files-are-owner-only-after-open.md"
     },
     {
@@ -1096,7 +1082,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/storage/src/lib.rs#L1541",
+      "check_pointer": "crates/storage/src/lib.rs#L2005",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/fenced-write-is-atomic.md"
     },
     {
@@ -1119,7 +1105,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/storage/src/lib.rs#L1602",
+      "check_pointer": "crates/storage/src/lib.rs#L2034",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/fence-epoch-outside-sqlite-range-fails-closed.md"
     }
   ]

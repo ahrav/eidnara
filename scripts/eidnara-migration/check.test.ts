@@ -973,6 +973,20 @@ describe("evidence: git-backed receipts", () => {
         expect(verify("property-impact", impactFor(sourceCommit), ctx)).toEqual([]);
     });
 
+    test("registry scans catch migration machinery in non-test code (AE11)", () => {
+        write(join(destination, "crates/lease/src/ledger.rs"), "pub struct Migration { pub version: u32 }\npub fn migrate() {}\n");
+        write(join(destination, "crates/lease/src/tests/ledger.rs"), "fn run_migrations() {}\n");
+        try {
+            const errors = verify("registry", copy("registry"), ctx);
+            expect(errors).toContain('crates/lease/src/ledger.rs:1: migration machinery "Migration {"; a family has one baseline and no version ledger');
+            expect(errors).toContain('crates/lease/src/ledger.rs:2: migration machinery "fn migrate"; a family has one baseline and no version ledger');
+            expect(errors.some((error) => error.startsWith("crates/lease/src/tests/"))).toBe(false);
+        } finally {
+            rmSync(join(destination, "crates/lease/src/ledger.rs"));
+            rmSync(join(destination, "crates/lease/src/tests"), { recursive: true });
+        }
+    });
+
     test("registry scans catch unowned persistent literals (AE7)", () => {
         write(join(destination, "crates/lease/src/paths.rs"), 'const DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\n');
         try {

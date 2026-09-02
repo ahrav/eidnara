@@ -87,6 +87,11 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?Z)?$/;
 
 export const PERSISTENT_LITERAL_RE = /"([^"\n]*\.(?:db|sqlite|bin|lock|jsonl|handle))"/g;
 
+// Every Eidnara-owned SQL family has exactly one baseline; a version ledger or a
+// runner that upgrades one schema into another has no place in destination code.
+export const MIGRATION_MACHINERY_RE =
+    /schema_migrations|\bMIGRATIONS\b|LATEST_MIGRATION_VERSION|BOOTSTRAP_MIGRATION_VERSION|ensureColumn|\bMigration \{|\bfn migrate\b|run_migrations/g;
+
 export const FIXTURE_ROLES = ["byte-stable", "generator", "external-record"] as const;
 
 function isObject(value: unknown): value is JsonObject {
@@ -1377,6 +1382,11 @@ function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): v
                 if (literal === undefined || literalOwners.has(literal)) continue;
                 errors.push(`${tree}/${rel}: persistent literal "${literal}" has no family entry in the registry`);
             }
+            text.split("\n").forEach((line, index) => {
+                for (const match of line.matchAll(MIGRATION_MACHINERY_RE)) {
+                    errors.push(`${tree}/${rel}:${index + 1}: migration machinery "${match[0]}"; a family has one baseline and no version ledger`);
+                }
+            });
         }
     }
 

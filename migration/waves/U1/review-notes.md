@@ -22,7 +22,7 @@ source. The mapping is:
 | `scripts/eidnara-migration/registry-audit.ts`, `registry-audit.test.ts` | step 11 |
 | `scripts/eidnara-migration/generate-property-index.ts`, `generate-property-index.test.ts` | step 12 (KTD14) |
 | `docs/runbooks/architecture-review.md` | step 9 |
-| `docs/properties/README.md`, `fixtures/vocabulary/README.md` | U1 files list |
+| `docs/properties/README.md` | U1 files list |
 
 The negative tests in `scripts/eidnara-migration/check.test.ts` (56 tests),
 `registry-audit.test.ts` (6 tests), and `generate-property-index.test.ts` (4

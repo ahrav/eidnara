@@ -4,7 +4,7 @@
 - **Primary evidence:** `read_epoch` accepts only 1-20 ASCII digits in `u64` range (`crates/lease/src/lib.rs:378-407`).
 - **Discriminating fact:** ordinary and shared acquisition reject empty state, and every acquisition mode rejects nonempty, non-decimal, oversized, or out-of-range state with `InvalidData`; `open_lease_file` publishes only initialized canonical zero.
 - **Existing evidence:** `invalid_epoch_states_fail_closed` exercises ordinary and floor-based acquisition for parser-invalid states and preserves bytes (`crates/lease/src/lib.rs:625-678`). `maximum_epoch_is_readable_but_exhausted` separates valid shared reads from exclusive exhaustion (`crates/lease/src/lib.rs:708-732`). Floor-based empty-state recovery is separately pinned by `exclusive_epoch_exceeds_resource_floor` at `crates/lease/src/lib.rs:505-524`.
-- **Failure scenario:** future formats without an explicit migration fail closed rather than silently issuing epoch 1.
+- **Failure scenario:** a lease file in any format other than 1-20 ASCII decimal digits fails closed rather than silently issuing epoch 1.
 - **Instrumentation:** a corruption-specific public error remains absent; callers see `LeaseError::Io`.
 - **Open-question log:** none for the current decimal format.
 
