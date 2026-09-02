@@ -1749,4 +1749,61 @@ mod tests {
             _ => unreachable!(),
         }
     }
+
+    /// Existing databases require these exact table names and definitions.
+    #[test]
+    fn fence_and_version_tables_keep_their_ddl() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d).expect("open");
+        store
+            .migrate(
+                "ddl",
+                &[Migration {
+                    version: 1,
+                    statements: "CREATE TABLE t (k TEXT);",
+                }],
+            )
+            .expect("migrate");
+        let schema: Vec<(String, String)> = store
+            .with_conn(|c| {
+                let mut statement = c.prepare(
+                    "SELECT name, sql FROM sqlite_schema \
+                     WHERE type = 'table' AND name LIKE 'cortexkit%' ORDER BY name",
+                )?;
+                let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect()
+            })
+            .expect("read schema");
+        assert_eq!(
+            schema,
+            vec![
+                (
+                    "cortexkit_fence".to_string(),
+                    "CREATE TABLE cortexkit_fence (id INTEGER PRIMARY KEY CHECK (id = 0), \
+                     epoch INTEGER NOT NULL CHECK (epoch >= 0))"
+                        .to_string(),
+                ),
+                (
+                    "cortexkit_schema_version".to_string(),
+                    "CREATE TABLE cortexkit_schema_version (namespace TEXT NOT NULL, \
+                     version INTEGER NOT NULL, applied_at_unix INTEGER NOT NULL, \
+                     PRIMARY KEY (namespace, version))"
+                        .to_string(),
+                ),
+            ]
+        );
+        let (epoch, rows): (i64, i64) = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT (SELECT epoch FROM cortexkit_fence WHERE id = 0), \
+                     (SELECT COUNT(*) FROM cortexkit_fence)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("read fence row");
+        assert_eq!((epoch, rows), (store.epoch() as i64, 1));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
