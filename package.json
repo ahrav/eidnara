@@ -1,0 +1,20 @@
+{
+  "name": "eidnara",
+  "private": true,
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/bun": "1.3.14"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test:eidnara-migration": "bun test scripts/eidnara-migration",
+    "eidnara:check": "bun scripts/eidnara-migration/check.ts",
+    "eidnara:registry-audit": "bun scripts/eidnara-migration/registry-audit.ts",
+    "eidnara:property-index": "bun scripts/eidnara-migration/generate-property-index.ts",
+    "check:repo": "bun run typecheck && bun run test:eidnara-migration && bun run eidnara:check registry migration/registry.json && bun run eidnara:check waivers migration/waves/U1/waivers.json && bun run eidnara:check receipt migration/waves/U1/receipt.json"
+  }
+}

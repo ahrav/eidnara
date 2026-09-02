@@ -1,0 +1,343 @@
+{
+  "schema_version": 1,
+  "wave": "U1",
+  "sources": [
+    {
+      "repo": "magic-context",
+      "commit": "b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825"
+    }
+  ],
+  "catalogs": [
+    {
+      "repo": "magic-context",
+      "commit": "b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825"
+    }
+  ],
+  "readiness": "migration/upstream-readiness.json",
+  "registry": "migration/registry.json",
+  "waivers": "migration/waves/U1/waivers.json",
+  "scope": [],
+  "property_impact": "not-applicable",
+  "architecture_impact": "not-applicable",
+  "files": [
+    {
+      "source": null,
+      "destination": "Cargo.toml",
+      "destination_sha256": "5a750de1690cce077ff2aa1cdefa95639c94f553331f656e81fbf870b082d36f",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "package.json",
+      "destination_sha256": "8e1bad7ff7d85a79eebbfa864823a006d7085cec687fe3f9b9822f492c2a6704",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "tsconfig.json",
+      "destination_sha256": "d50b385e0f68e05ba32e17ad6f37d41e500f38f36331673006336b535e7c7f20",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "rust-toolchain.toml",
+      "destination_sha256": "984ae81dfe611befcd61bfeebd8fae0a6c0db9fb3f696c1f202668d933df5ffe",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "rustfmt.toml",
+      "destination_sha256": "903c8aaa927b68e1397573dd6f5da449c2a6c125dc4a8489df2a7cd7a577a1dc",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": ".gitignore",
+      "destination_sha256": "93337f9cb022d881608d97016ae5debc16173aca323a5fd8f7fc6d9b80d51e43",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "LICENSE",
+      "destination_sha256": "96afec54cd8f9e6497c91826a6f9576e7ae92c3c3dd68c4c0b170d9b996e2e2d",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "NOTICE",
+      "destination_sha256": "d191ea0aa656c07081a140bb3de38c4408378ae7bcc0bc8b809e589061b08d04",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "README.md",
+      "destination_sha256": "fdd530a8894e0c213619c0c76e1afc5081dac4e3adcc4ec4507dd7d868691db7",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": ".github/workflows/ci.yml",
+      "destination_sha256": "c17dd42b349f7688b31c5d97eab70f39b0e6661369321d1738436ba5221fb4ae",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/registry.json",
+      "destination_sha256": "50fbe0a5d7b9aa4e224413aab799f2fcb4674c01999ef233492da04588c7ec3b",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/upstream-readiness.json",
+      "destination_sha256": "f5c9f903b470824b39cc3750a6ce67181d5a132ceaae976beab1599b378860e9",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/owners.json",
+      "destination_sha256": "6c5ffe7af4ec2ad02fb3ecbedcdde32ce2e1d655c206329f629fba26a2f46605",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/waves/U1/waivers.json",
+      "destination_sha256": "065537d0d55de6ca27cf5457503cf9bb03353aad9086c28d7197a236b8c66654",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/waves/U1/crate-name-collision-check.json",
+      "destination_sha256": "9eb58243cddbf29d6284ee1710fdecb41ce6b02392dbe3d1a148aeb8f08048f5",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/waves/U1/review-notes.md",
+      "destination_sha256": "c9796a68d3d3b76aabdd36c0fcf470aa842dca5d62cf65aa8a2a03d9dbddd73c",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "scripts/eidnara-migration/check.ts",
+      "destination_sha256": "62e67fad55370490a9ea15363f28c9659423ad1c46c0464d0ff1d4f0026bfece",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "scripts/eidnara-migration/check.test.ts",
+      "destination_sha256": "262e8eeeb7baa05c44857de551960f53b55ea5fa65e459d003022549ee05f4b8",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "scripts/eidnara-migration/registry-audit.ts",
+      "destination_sha256": "0355f6c8e19a094344b2447e862791bf45c723705d48ece4fe4aeb37ba421138",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "scripts/eidnara-migration/registry-audit.test.ts",
+      "destination_sha256": "9211516f888146ca5d673a79f7061e095ec1d919a1e23e2ae586986156b97cb6",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "scripts/eidnara-migration/generate-property-index.ts",
+      "destination_sha256": "5686e97ef6fbba34b6af31a8382b18d5d37410a222c1696b5acba76b02e7e506",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "scripts/eidnara-migration/generate-property-index.test.ts",
+      "destination_sha256": "27fce826e0a30b5f260f9075b264cea51eabc2769f48594e488c076c4ca517b7",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/README.md",
+      "destination_sha256": "b6998233ba476b322df4c9f849e15b9e572666da2b3afe459c1043a925a6681a",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/runbooks/architecture-review.md",
+      "destination_sha256": "7cacee36c86867ee5101c6875d9ffb08777fa0c90829a0db12dd1d0f71287bc8",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": null,
+      "destination": "fixtures/vocabulary/README.md",
+      "destination_sha256": "bca9ce224d2d1ebc4e51ba10b572f0e477849fb9d5c33f81a51762f4954a450b",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U1/review-notes.md#authored-files",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts, registry-audit.test.ts, generate-property-index.test.ts"
+      }
+    },
+    {
+      "source": {
+        "repo": "magic-context",
+        "path": "docs/properties/METHOD.md",
+        "blob_sha": "995b0233c407ff3c2136cc68ea64f2663bd71755"
+      },
+      "destination": "docs/properties/METHOD.md",
+      "destination_sha256": "7e0a9bae271f22eea41ee5ea5109de72e63acbb9c691b7fc29ec32a5449d8190",
+      "transformation": "verbatim",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U1/review-notes.md#copied-files"
+      }
+    },
+    {
+      "source": null,
+      "destination": "bun.lock",
+      "destination_sha256": "45583d9e02c9b346333f1c7f159948af707e2fba38fc91de525b28595390fa74",
+      "transformation": "generated",
+      "class": "generated",
+      "review_evidence": {
+        "regeneration": "bun install --frozen-lockfile"
+      }
+    },
+    {
+      "source": null,
+      "destination": "release/registry-gate.json",
+      "destination_sha256": "a3a95500b8fa53bb0fa6b9ac4de3b08ea63a1f08844f82861d229197ba1c8f2b",
+      "transformation": "generated",
+      "class": "generated",
+      "review_evidence": {
+        "regeneration": "bun run eidnara:registry-audit"
+      }
+    }
+  ],
+  "gates": {
+    "typecheck": "pass",
+    "migration-tooling-tests": "pass",
+    "registry": "pass",
+    "waivers": "pass",
+    "crate-name-collision-check": "pass",
+    "registry-audit-fresh": "pass",
+    "github-repository-created": "pass",
+    "npm-scope-reservation": "not_run"
+  }
+}

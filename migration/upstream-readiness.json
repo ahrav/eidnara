@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "description": "Wave readiness. A wave may pin its source commit only when every listed bead has required_status at that commit's .beads/issues.jsonl export. bead_ids are full beads identifiers. Issue count never changes wave count.",
+  "waves": {
+    "U1": {
+      "repo": "magic-context",
+      "bead_ids": [],
+      "required_status": "closed",
+      "acceptance_check": "Destination-authored control files only; no upstream dependency."
+    },
+    "U2": {
+      "repo": "commons",
+      "bead_ids": [],
+      "required_status": "closed",
+      "acceptance_check": "Four active commons crates compile and test through the destination workspace; golden vectors byte-identical."
+    },
+    "U3": {
+      "repo": "magic-context",
+      "bead_ids": ["magic-context-c50", "magic-context-ymc"],
+      "required_status": "closed",
+      "acceptance_check": "Rust module host epic (c50) and shared-memory IPC epic (ymc) closed; host-runtime, transport, tokenizer vectors pass from destination-only sources."
+    },
+    "U4": {
+      "repo": "magic-context",
+      "bead_ids": ["magic-context-kh8", "magic-context-kh8.8", "magic-context-kh8.9"],
+      "required_status": "closed",
+      "acceptance_check": "Semantic kernel epic closed through daemon routes (kh8.8) and rip-out (kh8.9); every persistent family has a class contract."
+    },
+    "U5": {
+      "repo": "magic-context",
+      "bead_ids": ["magic-context-pml", "magic-context-3q5"],
+      "required_status": "closed",
+      "acceptance_check": "Rust parity epic (pml) and retrieval epic (3q5) closed; no unclassified TypeScript mutation path remains."
+    },
+    "U7": {
+      "repo": "magic-context",
+      "bead_ids": [],
+      "required_status": "closed",
+      "acceptance_check": "No readiness beads beyond U5; permanent TypeScript surfaces and packaging land."
+    },
+    "U8": {
+      "repo": "magic-context",
+      "bead_ids": [],
+      "required_status": "closed",
+      "acceptance_check": "All gating beads of U3, U4, U5 closed at the final reconciled commit."
+    }
+  },
+  "non_gating": [
+    { "bead_id": "magic-context-9o6", "rationale": "Action-triggered memory epic; code migrates only if closed before its owning wave pins, else work continues in Eidnara after cutover." },
+    { "bead_id": "magic-context-bx3", "rationale": "GPU Synapse epic; genesis release ships linux-x64-gnu CPU only." }
+  ]
+}

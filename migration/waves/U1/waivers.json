@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "wave": "U1",
+  "waivers": [
+    {
+      "id": "W-U1-npm-reservation",
+      "gate": "npm-scope-reservation",
+      "kind": "release",
+      "owner": "ahrav",
+      "approver": "ahrav",
+      "bead_id": "U1-npm-reservation",
+      "created_at": "2026-09-02",
+      "expires_by_wave": "U2",
+      "closure_condition": "1.0.0-reserved.1 published for all five @eidnara names and `bun run eidnara:registry-audit --check --require-reservation` passes; then set gates.npm-scope-reservation to pass and delete this waiver.",
+      "evidence": [
+        "release/registry-gate.json: npm org ls eidnara returned E404 and every @eidnara name returned E404 on 2026-09-02, so the scope is free and the U1 stop condition is not triggered.",
+        "Maintainer directive 2026-09-02: no npm login or publish from this host during U1."
+      ]
+    }
+  ]
+}
