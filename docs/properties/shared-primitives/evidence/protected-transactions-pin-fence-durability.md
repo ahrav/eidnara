@@ -1,8 +1,8 @@
 # `protected-transactions-pin-fence-durability`
 
 - **Discovery:** storage durability pass.
-- **Primary evidence:** `pin_fence_durability` (`crates/storage/src/lib.rs:519-531`) runs at the start of `with_conn_fenced` and `run_migrations`; `open_sqlite` (`crates/storage/src/lib.rs:592`) calls the same function before the fence claim, so an open on a VFS that cannot switch to WAL fails instead of committing a claim every later fenced write would reject.
-- **Existing evidence:** `open_pins_full_synchronous` (`crates/storage/src/lib.rs:1673`), `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:1707`).
+- **Primary evidence:** `pin_fence_durability` (`crates/storage/src/lib.rs:557-572`) runs at the start of `with_conn_fenced` and `run_migrations`; `open_sqlite` (`crates/storage/src/lib.rs:574-654`) calls the same function before the fence claim, so an open on a VFS that cannot switch to WAL fails instead of committing a claim every later fenced write would reject.
+- **Existing evidence:** `open_pins_full_synchronous` (`crates/storage/src/lib.rs:1800-1809`), `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:1834-1899`).
 - **Failure scenario:** WAL with `synchronous = NORMAL` can lose the most recent commits after power loss, rolling the fence epoch back.
 - **Timing window:** power loss after a fence claim; not injected.
 - **Instrumentation:** `PRAGMA synchronous` and `PRAGMA journal_mode` reads.

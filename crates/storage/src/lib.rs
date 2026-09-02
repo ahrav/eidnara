@@ -351,6 +351,35 @@ mod sqlite_backend {
         conn: Option<&'c Connection>,
         /// Reads additionally run under `query_only`; a fenced transaction must write.
         read_only: bool,
+        /// Infrastructure-named schema objects at install, compared again at release.
+        infrastructure_before: Vec<String>,
+    }
+
+    /// Every main- or temp-schema object whose name is an infrastructure table name,
+    /// tagged with its schema and type so a swap of table for view is visible.
+    fn infrastructure_objects(conn: &Connection) -> Result<Vec<String>, StoreError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT 'main', type, name FROM main.sqlite_schema \
+                 WHERE lower(name) IN ('eidnara_fence', 'eidnara_schema_version') \
+                 UNION ALL \
+                 SELECT 'temp', type, name FROM temp.sqlite_schema \
+                 WHERE lower(name) IN ('eidnara_fence', 'eidnara_schema_version') \
+                 ORDER BY 1, 2, 3",
+            )
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(format!(
+                    "{}.{} {}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(1)?
+                ))
+            })
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
     impl<'c> CallbackScope<'c> {
@@ -367,9 +396,11 @@ mod sqlite_backend {
         }
 
         fn install(conn: &'c Connection, read_only: bool) -> Result<Self, StoreError> {
+            let infrastructure_before = infrastructure_objects(conn)?;
             let scope = Self {
                 conn: Some(conn),
                 read_only,
+                infrastructure_before,
             };
             conn.authorizer(Some(deny_scope_escapes))
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -380,38 +411,30 @@ mod sqlite_backend {
         fn release(mut self) -> Result<(), StoreError> {
             match self.conn.take() {
                 Some(conn) => {
-                    let shadowed = Self::require_no_shadow(conn);
-                    Self::restore(conn, self.read_only).and(shadowed)
+                    let unchanged =
+                        Self::require_infrastructure_unchanged(conn, &self.infrastructure_before);
+                    Self::restore(conn, self.read_only).and(unchanged)
                 }
                 None => Ok(()),
             }
         }
 
         /// `AuthAction::AlterTable` reports the source name, so a rename cannot be judged
-        /// when it is authorized: a benign temporary table renamed to an infrastructure
-        /// name shadows the real one on this connection, and a later fence claim would
-        /// read the callback's own epoch. The name is checked once the callback returns,
-        /// before its transaction commits.
-        fn require_no_shadow(conn: &Connection) -> Result<(), StoreError> {
-            let shadow: Option<String> = conn
-                .query_row(
-                    "SELECT name FROM temp.sqlite_schema \
-                     WHERE lower(name) IN ('eidnara_fence', 'eidnara_schema_version') \
-                     LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                })
-                .map_err(|e| StoreError::Backend(e.to_string()))?;
-            match shadow {
-                Some(name) => Err(StoreError::Backend(format!(
-                    "a temporary `{name}` shadows the infrastructure table of the same name"
-                ))),
-                None => Ok(()),
+        /// when it is authorized: a table the callback created and renamed to an
+        /// infrastructure name is trusted by the next fence claim or migration. The set of
+        /// infrastructure-named objects in the main and temp schemas is compared before
+        /// and after the callback, before its transaction commits.
+        fn require_infrastructure_unchanged(
+            conn: &Connection,
+            before: &[String],
+        ) -> Result<(), StoreError> {
+            let after = infrastructure_objects(conn)?;
+            if after != before {
+                return Err(StoreError::Backend(format!(
+                    "the callback changed the infrastructure schema objects from {before:?} to {after:?}"
+                )));
             }
+            Ok(())
         }
 
         fn restore(conn: &Connection, read_only: bool) -> Result<(), StoreError> {
@@ -442,7 +465,8 @@ mod sqlite_backend {
     /// disables the fence table's constraint, `defer_foreign_keys` and `writable_schema`
     /// reach schema invariants, and pragma names are case-insensitive. Denying the whole
     /// capability class avoids that race. A pragma read carries no value and stays
-    /// allowed, as do the ordinary statements a callback exists to run.
+    /// allowed, as do the ordinary statements a callback exists to run. The argumentless
+    /// pragmas that still perform work are denied by name.
     fn deny_scope_escapes(
         context: rusqlite::hooks::AuthContext<'_>,
     ) -> rusqlite::hooks::Authorization {
@@ -456,11 +480,28 @@ mod sqlite_backend {
             | AuthAction::Savepoint { .. }
             | AuthAction::Attach { .. }
             | AuthAction::Detach { .. } => Authorization::Deny,
+            AuthAction::Pragma {
+                pragma_name,
+                pragma_value: None,
+            } if is_side_effecting_pragma(pragma_name) => Authorization::Deny,
             action => match infrastructure_target(&action) {
                 Some(_) => Authorization::Deny,
                 None => Authorization::Allow,
             },
         }
+    }
+
+    /// `PRAGMA query_only` does not stop these: they take no value yet checkpoint, vacuum,
+    /// reorganize, or release memory on the shared connection.
+    fn is_side_effecting_pragma(name: &str) -> bool {
+        [
+            "wal_checkpoint",
+            "incremental_vacuum",
+            "optimize",
+            "shrink_memory",
+        ]
+        .iter()
+        .any(|pragma| name.eq_ignore_ascii_case(pragma))
     }
 
     /// Reads leave the row's authority intact, so they stay allowed. Every other action
@@ -540,13 +581,13 @@ mod sqlite_backend {
     /// A database without a fence table opens at floor zero.
     ///
     /// The lease lives next to the database file (its parent directory), derived
-    /// from the descriptor's path rather than passed in. This makes the
-    /// one-lease-per-database invariant structural: two distinct database paths get
-    /// distinct leases (correct isolation), and the same database path gets one
-    /// lease (the single-writer guarantee). A caller cannot accidentally point a
-    /// shared lease directory at several distinct databases (which would falsely
-    /// make them contend) or split one database across lease directories (which
-    /// would break single-writer).
+    /// from the descriptor's path rather than passed in, and its key carries the
+    /// module, namespace, and file name. Two distinct database paths get distinct
+    /// leases, and descriptors that agree on module and namespace get one lease per
+    /// database path, so a second such open returns [`StoreError::Lease`].
+    /// Descriptors for one path that disagree on module or namespace derive
+    /// separate leases; the fence row, not the lease, is what stops the superseded
+    /// store from writing.
     ///
     /// # Errors
     ///
@@ -620,11 +661,14 @@ mod sqlite_backend {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
+            // `O_NOFOLLOW` refuses a symlink at the database path, so a dangling
+            // link cannot make creation land outside the store directory.
             std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(false)
                 .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
                 .open(path)?;
         }
         #[cfg(not(unix))]
@@ -880,8 +924,8 @@ mod tests {
 
     /// A database reached through a directory symlink resolves to the same lease
     /// file, so it contends. A database reached through a file symlink is refused
-    /// outright: `protect_file` rejects non-regular paths, so an alias can never
-    /// hold a second lease on the same bytes.
+    /// outright: the owner-only creation opens with `O_NOFOLLOW`, so an alias can
+    /// never hold a second lease on the same bytes.
     #[cfg(unix)]
     #[test]
     fn symlinked_database_paths_contend_or_are_refused_never_aliased() {
@@ -917,21 +961,105 @@ mod tests {
             ..real.clone()
         };
         match open_sqlite(&via_file).map(|_| ()) {
-            Err(StoreError::Backend(m)) => {
-                assert!(m.contains("not a regular file"), "unexpected message: {m}")
+            Err(StoreError::Io(e)) => {
+                assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "unexpected error: {e}")
             }
             Ok(()) => panic!("a file-symlink alias must be refused, but it opened"),
-            Err(other) => panic!("expected a non-regular-file refusal, got {other:?}"),
+            Err(other) => panic!("expected an O_NOFOLLOW refusal, got {other:?}"),
         }
         drop(held);
         // Refusal does not depend on contention: the alias stays refused once free.
         assert!(
-            matches!(
-                open_sqlite(&via_file).map(|_| ()),
-                Err(StoreError::Backend(_))
-            ),
+            matches!(open_sqlite(&via_file).map(|_| ()), Err(StoreError::Io(_))),
             "a file-symlink alias must be refused even with no holder"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A dangling symlink at the database path must not make creation land at the
+    /// link's target; `O_NOFOLLOW` refuses the open before any file exists.
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_at_the_database_path_is_refused_without_creating_the_target() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        std::fs::create_dir_all(&root).expect("root");
+        let target = root.join("elsewhere.db");
+        std::os::unix::fs::symlink(&target, path).expect("dangling symlink");
+        match open_sqlite(&d).map(|_| ()) {
+            Err(StoreError::Io(e)) => {
+                assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "unexpected error: {e}")
+            }
+            Ok(()) => panic!("open through a dangling symlink must fail"),
+            Err(other) => panic!("expected an O_NOFOLLOW refusal, got {other:?}"),
+        }
+        assert!(!target.exists(), "the link target must not be created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `query_only` does not stop an argumentless checkpoint, so the read scope must.
+    #[test]
+    fn a_read_callback_cannot_checkpoint_the_wal() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d).expect("open");
+        let denied =
+            store.with_conn(|c| c.query_row("PRAGMA wal_checkpoint", [], |r| r.get::<_, i64>(0)));
+        assert!(
+            matches!(&denied, Err(StoreError::Backend(m)) if m.contains("authorization denied") || m.contains("not authorized")),
+            "wal_checkpoint must be denied inside a read callback, got {denied:?}"
+        );
+        let mode: String = store
+            .with_conn(|c| c.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
+            .expect("reading a pragma stays allowed");
+        assert!(mode.eq_ignore_ascii_case("wal"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Before the first `migrate`, the version table does not exist, so a callback
+    /// could create a main-schema table and rename it to that name. The infrastructure
+    /// object set is compared before and after the callback, so the forgery fails and
+    /// the following migration still runs.
+    #[test]
+    fn a_callback_cannot_forge_the_version_table_before_the_first_migration() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d).expect("open");
+        let forged = store.with_conn_fenced(|tx| {
+            tx.execute(
+                "CREATE TABLE benign (namespace TEXT NOT NULL, version INTEGER NOT NULL, \
+                 applied_at_unix INTEGER NOT NULL, PRIMARY KEY (namespace, version))",
+                [],
+            )?;
+            tx.execute("INSERT INTO benign VALUES ('ns', 999, 0)", [])?;
+            tx.execute("ALTER TABLE benign RENAME TO eidnara_schema_version", [])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&forged, Err(StoreError::Backend(m)) if m.contains("changed the infrastructure schema objects")),
+            "a rename onto the version table must be rejected, got {forged:?}"
+        );
+        store
+            .migrate(
+                "ns",
+                &[Migration {
+                    version: 1,
+                    statements: "CREATE TABLE first (k TEXT);",
+                }],
+            )
+            .expect("migration 1 runs because the forged watermark rolled back");
+        let applied: i64 = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'first'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("inspect");
+        assert_eq!(applied, 1, "migration 1 must have applied");
+        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1970,7 +2098,7 @@ mod tests {
                     .map(|_| ())
             });
             assert!(
-                matches!(&renamed, Err(StoreError::Backend(m)) if m.contains("shadows the infrastructure table")),
+                matches!(&renamed, Err(StoreError::Backend(m)) if m.contains("changed the infrastructure schema objects")),
                 "a temporary table renamed to `{target}` is rejected, got {renamed:?}"
             );
         }

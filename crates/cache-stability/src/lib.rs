@@ -254,8 +254,15 @@ impl CoreState {
     /// HARD that mints nothing while the anchor is absent has not reconciled anything; the
     /// same vacuous empty-boundary carve-out as `step_defer` applies.
     fn step_hard(&mut self, input: PassInput, boundary_match: bool) -> StepResult {
+        // A deferred copy of a key the bust re-rendered is stale; the rendered bytes win.
         let mut units = input.rendered_units;
-        units.append(&mut self.pending_changes);
+        let rendered_keys: Vec<String> = units.iter().map(|u| u.key.clone()).collect();
+        let pending = std::mem::take(&mut self.pending_changes);
+        units.extend(
+            pending
+                .into_iter()
+                .filter(|queued| !rendered_keys.contains(&queued.key)),
+        );
         self.apply_units(units);
         let minted = input.new_boundary_id.is_some();
         if let Some(new_boundary) = input.new_boundary_id {
@@ -384,6 +391,35 @@ mod tests {
             state.cached_prefix_bytes(),
             before,
             "revert must keep frozen bytes"
+        );
+    }
+
+    /// A key that was queued on a defer and then re-rendered by the bust keeps the
+    /// rendered bytes; the older deferred copy must not overwrite them.
+    #[test]
+    fn hard_prefers_rendered_units_over_deferred_copies_of_the_same_key() {
+        let mut state = state_with(
+            vec![unit("m0", "<h>BASE</h>", DurabilityClass::Lineage)],
+            "b0",
+        );
+        let mut defer = PassInput::new(Action::SoftPlus, "b0");
+        defer.queued = vec![unit("m0", "<h>STALE</h>", DurabilityClass::Lineage)];
+        state.step(defer);
+
+        let mut hard = PassInput::new(Action::Hard, "b0");
+        hard.rendered_units = vec![unit("m0", "<h>FRESH</h>", DurabilityClass::Lineage)];
+        hard.new_boundary_id = Some("b1".into());
+        state.step(hard);
+
+        let m0 = state
+            .frozen_units
+            .iter()
+            .find(|u| u.key == "m0")
+            .expect("m0 stays frozen");
+        assert_eq!(m0.frozen_payload, "<h>FRESH</h>", "rendered bytes win");
+        assert!(
+            state.pending_changes.is_empty(),
+            "HARD drains deferred work"
         );
     }
 

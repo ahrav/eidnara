@@ -307,6 +307,7 @@
         "claim-vector.db",
         "other.db",
         "fresh.db",
+        "elsewhere.db",
         "embedding.bin",
         "/home/u/.local/share/eidnara/module-a/store.db",
         "/data/eidnara/m/store.db",

@@ -132,11 +132,14 @@ pub fn postgres_database_name(module_id: &str) -> String {
 ///
 /// # Panics
 ///
-/// Panics when `module_id` is not a single path component: empty, `.`, `..`,
-/// or containing `/` or `\`. A module id must be one path component so each
-/// module maps to exactly one directory under `<data_home>/eidnara/`.
-/// Rejecting rather than encoding keeps every valid id's path byte-stable.
+/// Panics when `data_home` is empty, because the composed path would then start
+/// at the filesystem root instead of the configured location. Panics when
+/// `module_id` is not a single path component: empty, `.`, `..`, or containing
+/// `/` or `\`. A module id must be one path component so each module maps to
+/// exactly one directory under `<data_home>/eidnara/`. Rejecting rather than
+/// encoding keeps every valid id's path byte-stable.
 pub fn sqlite_store_path(data_home: &str, module_id: &str) -> String {
+    assert!(!data_home.is_empty(), "data_home must not be empty");
     assert!(
         is_single_path_component(module_id),
         "module_id {module_id:?} is not a single path component"
@@ -189,6 +192,14 @@ mod tests {
             "/home/u/.local/share/eidnara/module-a/store.db"
         );
         assert_eq!(sqlite_store_path("/data/", "m"), "/data/eidnara/m/store.db");
+    }
+
+    /// An empty data home would root the store at `/eidnara/` instead of the
+    /// configured location.
+    #[test]
+    fn sqlite_path_rejects_an_empty_data_home() {
+        let outcome = std::panic::catch_unwind(|| sqlite_store_path("", "module-a"));
+        assert!(outcome.is_err(), "an empty data_home must be rejected");
     }
 
     /// A module id carrying a path component resolves outside `<data_home>/eidnara/`.

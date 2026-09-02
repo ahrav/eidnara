@@ -53,7 +53,7 @@ A `no` means every safety check threatened by that fault can pass without the fa
 | A renamed or re-typed fence or version table | `fence-tables-keep-their-durable-identity` |
 | A crash between a migration batch and its version record | `migrations-apply-once-per-namespace` |
 | A callback that writes, lowers a pragma, or panics | `read-callbacks-cannot-write`, `callback-scope-is-restored-after-unwind`, `protected-transactions-pin-fence-durability` |
-| A permissive database or WAL file at reopen | `store-files-are-owner-only-after-open` |
+| A permissive database, WAL, or SHM file at reopen | `store-files-are-owner-only-after-open` |
 | A callback error after a fence claim | `fenced-write-is-atomic` |
 | A negative stored epoch or a holder epoch above `i64::MAX` | `fence-epoch-outside-sqlite-range-fails-closed` |
 

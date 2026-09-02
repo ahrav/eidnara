@@ -18,5 +18,5 @@ lease = { workspace = true }
 thiserror = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 
-[target.'cfg(unix)'.dev-dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
