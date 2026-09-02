@@ -1,0 +1,10 @@
+# `callback-scope-is-restored-after-unwind`
+
+- **Discovery:** storage callback-capability pass.
+- **Primary evidence:** `CallbackScope::drop` (`crates/storage/src/lib.rs:443-450`) restores the connection when `release` did not run; `with_conn` recovers a poisoned mutex with `into_inner` (`crates/storage/src/lib.rs:146`).
+- **Existing evidence:** `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1209`) panics inside `with_conn`, catches the unwind, then performs a fenced write and a maintenance statement on the same store.
+- **Failure scenario:** a leaked `query_only` turns every later fenced write into `SQLITE_READONLY` for the process lifetime.
+- **Timing window:** the unwind path.
+- **Instrumentation:** none.
+- **Audit verdict (U2): pass. The follow-up write succeeds only if both the pragma and the authorizer were cleared, so the test observes the restore through its effect.
+- **Open-question log:** none.
