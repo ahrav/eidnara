@@ -40,8 +40,8 @@
       "strategy_decision": "Golden-vector test: eight externally computed identity, digest, and filename vectors plus an acquisition that must create the pinned file. Chosen over a property test because the contract is a fixed byte derivation; an independent implementation is the oracle.",
       "audit_verdict": "pass",
       "evidence_digest": "ada5aed5377341fc7b5e6d12c32f7663f9c2e1ab1d717b3805b70cc7bf3ddf4e",
-      "code_hash": "ad3330aecfd683ba9174e58dd7abae670de74223975f2c3d4fff3da5965be888",
-      "check_hash": "ad3330aecfd683ba9174e58dd7abae670de74223975f2c3d4fff3da5965be888",
+      "code_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
+      "check_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
       "check_pointer": "crates/lease/src/lib.rs#L1206",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.89, --locked",
@@ -70,8 +70,8 @@
       "strategy_decision": "Example test with an instrumented reader: the check `bytes_read <= 21` is asserted directly on a 1 MiB input, then the same input is driven through every acquisition path against a real file.",
       "audit_verdict": "pass",
       "evidence_digest": "bf7af584a90cde2d728e1a97225dda3535704b02e67e69bcdc5017fc25e81d89",
-      "code_hash": "ad3330aecfd683ba9174e58dd7abae670de74223975f2c3d4fff3da5965be888",
-      "check_hash": "ad3330aecfd683ba9174e58dd7abae670de74223975f2c3d4fff3da5965be888",
+      "code_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
+      "check_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
       "check_pointer": "crates/lease/src/lib.rs#L1264",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.89, --locked",
@@ -100,8 +100,8 @@
       "strategy_decision": "Example table extended with the inputs a lenient parser accepts (`+1`, padding, hex, digit separator); each body is asserted with exact error kind, path in message, and unchanged bytes through every applicable acquisition mode.",
       "audit_verdict": "pass",
       "evidence_digest": "3d8958bac2adf41c138359d80f3093161b405ed7298811eaa272c7e9353bddd7",
-      "code_hash": "ad3330aecfd683ba9174e58dd7abae670de74223975f2c3d4fff3da5965be888",
-      "check_hash": "ad3330aecfd683ba9174e58dd7abae670de74223975f2c3d4fff3da5965be888",
+      "code_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
+      "check_hash": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
       "check_pointer": "crates/lease/src/lib.rs#L642",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.89, --locked",

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shared-primitives",
   "source": "catalog.md",
-  "source_sha256": "53567f0aecf99a4cc22b696e5cddbbfe4a3b83d49c4cc9f1adfc6291f05a8efd",
+  "source_sha256": "98698eeec04286936a4ef1232bbc9ee53d60377d406270f5c234a4333ebe7c7e",
   "records": [
     {
       "slug": "at-most-one-exclusive-holder-per-key",
@@ -25,7 +25,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/at-most-one-exclusive-holder-per-key.md). The contract is explicit at `crates/lease/src/lib.rs:2-6`; `FileLeaseStore::acquire` delegates exclusion to `File::try_lock`."
       },
-      "existing_check": "`acquire_then_second_holder_is_rejected`, same process and sequential; status **unaudited**.",
+      "existing_check": "`acquire_then_second_holder_is_rejected`, same process and sequential, and `concurrent_exclusive_acquisitions_admit_exactly_one_holder`, same process, eight racers behind a barrier (added at U2); status **unaudited** for the record because the cross-process race is still not exercised.",
       "impact": "Two writers can mutate one logical store. This is the crate's primary prohibited state.",
       "open_questions": [
         "See the Claustrum blocker in the [durable consumer inventory](durable-consumer-inventory.md). `(needs human input)`"

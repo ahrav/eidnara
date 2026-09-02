@@ -1312,4 +1312,65 @@ mod tests {
         }
         assert_eq!(std::fs::read(&path).expect("read epoch"), state);
     }
+
+    /// Each thread opens its own descriptor, so the kernel sees independent
+    /// lock requests; the barrier makes them race rather than serialize.
+    #[test]
+    fn concurrent_exclusive_acquisitions_admit_exactly_one_holder() {
+        use std::sync::{Arc, Barrier, mpsc};
+
+        const RACERS: usize = 8;
+        const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+        let (store, _dir) = tmp_store();
+        let store = Arc::new(store);
+        let start = Arc::new(Barrier::new(RACERS + 1));
+        let (tx, rx) = mpsc::channel();
+        let mut threads = Vec::new();
+        for _ in 0..RACERS {
+            let store = Arc::clone(&store);
+            let start = Arc::clone(&start);
+            let tx = tx.clone();
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                let result = store.acquire(&key("exclusive-race"));
+                let outcome = match &result {
+                    Ok(guard) => Ok(guard.epoch()),
+                    Err(LeaseError::Held { .. }) => Err("held"),
+                    Err(LeaseError::Io(_)) => Err("io"),
+                };
+                tx.send(outcome).expect("report acquisition");
+                // Hold the lease until every racer has reported.
+                start.wait();
+                drop(result);
+            }));
+        }
+        drop(tx);
+        start.wait();
+        let outcomes: Vec<_> = (0..RACERS)
+            .map(|_| rx.recv_timeout(WAIT_LIMIT).expect("racer report"))
+            .collect();
+        start.wait();
+        for thread in threads {
+            thread.join().expect("racer thread");
+        }
+
+        let winners: Vec<u64> = outcomes
+            .iter()
+            .filter_map(|o| o.as_ref().ok().copied())
+            .collect();
+        assert_eq!(
+            winners,
+            vec![1],
+            "exactly one racer holds the lease at epoch 1"
+        );
+        assert_eq!(
+            outcomes.iter().filter(|o| **o == Err("held")).count(),
+            RACERS - 1,
+            "every other racer is classified as Held: {outcomes:?}"
+        );
+        let next = store
+            .acquire(&key("exclusive-race"))
+            .expect("acquire after release");
+        assert_eq!(next.epoch(), 2);
+    }
 }

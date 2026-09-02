@@ -122,7 +122,7 @@
         "blob_sha": "2699b575864d0d1823d7531aa9a0e53bcfa98c1f"
       },
       "destination": "crates/lease/src/lib.rs",
-      "destination_sha256": "ad3330aecfd683ba9174e58dd7abae670de74223975f2c3d4fff3da5965be888",
+      "destination_sha256": "0a062269ee685314d540bfb4c1731216f268cd391bd50e1302014a5d13ce4534",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -248,7 +248,7 @@
         "blob_sha": "d360c86177f779878d5b645bb31b1b06f0d0584c"
       },
       "destination": "docs/properties/shared-primitives/catalog.md",
-      "destination_sha256": "53567f0aecf99a4cc22b696e5cddbbfe4a3b83d49c4cc9f1adfc6291f05a8efd",
+      "destination_sha256": "98698eeec04286936a4ef1232bbc9ee53d60377d406270f5c234a4333ebe7c7e",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -262,7 +262,7 @@
         "blob_sha": "e1e9761f2a147ae3619dec612bf033fd7c8be1f2"
       },
       "destination": "docs/properties/shared-primitives/existing-checks.md",
-      "destination_sha256": "e4a31e9ace3c5d199080df26a5e7b93ef3beca3da1d87958723b515a2a0d8087",
+      "destination_sha256": "2c67029126e463081caed47065b49836f36eea5a37c22af12c7b574eeb16aeb7",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -824,7 +824,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/property-impact.json",
-      "destination_sha256": "cb5f881a6aef3b48fa1005950e6c74c1807087c2143b87e9f5d61f92f0480463",
+      "destination_sha256": "0787e2f7c8a2e5ffc361d78b2421d1faa528b08f750977d49873c7ce2ab59951",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -879,7 +879,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/index.json",
-      "destination_sha256": "4e6ba6039b05017d5507d9acbf17aa418d5248778e3cf0f04688d2723262008b",
+      "destination_sha256": "42a053b9a672762b427a27dfe7ebb240cfd04b0ba85bf72fa2b01eda21ab9776",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {

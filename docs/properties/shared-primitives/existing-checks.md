@@ -31,6 +31,7 @@ No production `assert!`, `debug_assert!`, `panic!`, or equivalent invariant batt
 | `invalid_epoch_states_fail_closed` | `crates/lease/src/lib.rs:642-694` | Empty, malformed, oversized, and overflowing states return `LeaseError::Io(InvalidData)` through ordinary acquisition; nonempty invalid states also fail through floor-based acquisition and preserve bytes. | All | audited (U2) |
 | `lease_path_vectors_are_version_stable` | `crates/lease/src/lib.rs:1206-1260` | Eight externally computed identity/digest/path vectors, including both production keys; acquisition creates exactly the pinned filename. | audited (U2) |
 | `epoch_read_is_bounded_regardless_of_file_size` | `crates/lease/src/lib.rs:1264-1314` | A 1 MiB epoch is rejected with at most 21 bytes read, through all three acquisition paths. | audited (U2) |
+| `concurrent_exclusive_acquisitions_admit_exactly_one_holder` | `crates/lease/src/lib.rs:1316-1375` | Eight threads open independent descriptors and race exclusive acquisition behind a barrier; exactly one holds epoch 1, the rest are `Held`, and the next acquisition after release is epoch 2. Same process; the cross-process race remains unexercised. | audited (U2) |
 | `epoch_errors_keep_the_underlying_os_error` | `crates/lease/src/lib.rs:697-722` | Epoch error context preserves the original `io::Error` and raw OS error through the source chain. | All | unaudited |
 | `maximum_epoch_is_readable_but_exhausted` | `crates/lease/src/lib.rs:725-748` | Shared acquisition reads `u64::MAX`; exclusive acquisition reports exhaustion and preserves bytes. | All | unaudited |
 | `interrupted_persist_never_leaves_a_lower_parseable_epoch` | `crates/lease/src/lib.rs:751-869` | Injected ordered prefix-write failures exercise production `persist_epoch` and `read_epoch` for empty, legacy-width, and canonical-width prior states, including a carry; any parseable aftermath is not lower, completion is fixed-width, and the count of parseable aftermaths is asserted per case. | All, in-memory `Read + Write + Seek` seam | unaudited |
@@ -106,7 +107,7 @@ The handover checks use synthetic stores that bypass real lease acquisition. The
 - Runtime Windows reparse-point and lock-conversion behavior; Windows is compile-checked only.
 - Restored older valid epoch files.
 - Live lease-file unlink or replacement.
-- Cross-process exclusive-versus-exclusive contention.
+- Cross-process exclusive-versus-exclusive contention (same-process concurrent contention is exercised).
 - Adversarial key fields or hash collisions.
 - Deployed network/overlay filesystem semantics.
 - Shared-handle epoch use at consumer write sites.

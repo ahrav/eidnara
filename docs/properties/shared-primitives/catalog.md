@@ -54,7 +54,7 @@ Check: `always` — `always(exclusive_live_count[(physical_root_identity, module
 Fault/timing angle: Two acquirers race from separate processes; path aliasing, inode replacement, or degraded filesystem lock semantics can let both return `Ok`.
 Required faults and enabling state: Two processes must have the same lease file open concurrently and both must attempt exclusive locking. For faulted histories, also inject path aliasing, file replacement, or the deployed filesystem's lock-degradation mode.
 Confidence: high — [evidence](evidence/at-most-one-exclusive-holder-per-key.md). The contract is explicit at `crates/lease/src/lib.rs:2-6`; `FileLeaseStore::acquire` delegates exclusion to `File::try_lock`.
-Existing check: `acquire_then_second_holder_is_rejected`, same process and sequential; status **unaudited**.
+Existing check: `acquire_then_second_holder_is_rejected`, same process and sequential, and `concurrent_exclusive_acquisitions_admit_exactly_one_holder`, same process, eight racers behind a barrier (added at U2); status **unaudited** for the record because the cross-process race is still not exercised.
 Impact: Two writers can mutate one logical store. This is the crate's primary prohibited state.
 Open questions: 
 - See the Claustrum blocker in the [durable consumer inventory](durable-consumer-inventory.md). `(needs human input)`
