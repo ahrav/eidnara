@@ -111,7 +111,7 @@
     {
       "source": null,
       "destination": "README.md",
-      "destination_sha256": "fdd530a8894e0c213619c0c76e1afc5081dac4e3adcc4ec4507dd7d868691db7",
+      "destination_sha256": "c87d896bd5df5f8c536fed437f072d23a32a28696b277439ba74793c3232ed76",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -188,7 +188,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/review-notes.md",
-      "destination_sha256": "dd932c10b70ca027b659df795ec382fa9a26bb104bdc14946e4b6099758873b5",
+      "destination_sha256": "c9796a68d3d3b76aabdd36c0fcf470aa842dca5d62cf65aa8a2a03d9dbddd73c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -265,7 +265,7 @@
     {
       "source": null,
       "destination": "docs/properties/README.md",
-      "destination_sha256": "c5e393a9ea361e73b57c3cc96f8a667050a667ddc8d02fc75b48ae4a04106824",
+      "destination_sha256": "b6998233ba476b322df4c9f849e15b9e572666da2b3afe459c1043a925a6681a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -276,7 +276,7 @@
     {
       "source": null,
       "destination": "docs/runbooks/architecture-review.md",
-      "destination_sha256": "ea504c93ec57ac681d89db1bb008807d0dd4c405b6030a7f922e448acde369e0",
+      "destination_sha256": "7cacee36c86867ee5101c6875d9ffb08777fa0c90829a0db12dd1d0f71287bc8",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -287,7 +287,7 @@
     {
       "source": null,
       "destination": "fixtures/vocabulary/README.md",
-      "destination_sha256": "e02eabb5b5e9a16b48754e81f58695e3dd2342d616a5f8bb673698d49d501146",
+      "destination_sha256": "bca9ce224d2d1ebc4e51ba10b572f0e477849fb9d5c33f81a51762f4954a450b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
