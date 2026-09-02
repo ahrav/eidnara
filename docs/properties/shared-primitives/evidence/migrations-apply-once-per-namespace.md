@@ -1,8 +1,8 @@
 # `migrations-apply-once-per-namespace`
 
 - **Discovery:** storage migration pass.
-- **Primary evidence:** `run_migrations` (`crates/storage/src/lib.rs:796-892`) reads `MAX(version)` for the namespace, sorts by version, skips versions at or below the watermark, and inserts the version record inside the same transaction as `execute_batch`.
-- **Existing evidence:** `migrations_seed_once_across_reopen` (`crates/storage/src/lib.rs:1250`), `later_migration_applies_on_top_of_earlier` (`crates/storage/src/lib.rs:1576`), `independent_namespace_chains_in_one_database` (`crates/storage/src/lib.rs:1605-1636`).
+- **Primary evidence:** `run_migrations` (`crates/storage/src/lib.rs:767-863`) reads `MAX(version)` for the namespace, sorts by version, skips versions at or below the watermark, and inserts the version record inside the same transaction as `execute_batch`.
+- **Existing evidence:** `migrations_seed_once_across_reopen` (`crates/storage/src/lib.rs:1221`), `later_migration_applies_on_top_of_earlier` (`crates/storage/src/lib.rs:1547`), `independent_namespace_chains_in_one_database` (`crates/storage/src/lib.rs:1576-1607`).
 - **Failure scenario:** a crash between the SQL batch and the version record; the record's transaction placement makes the migration re-run cleanly.
 - **Timing window:** the crash window between batch and record is not injected; the tests cover the steady-state clauses.
 - **Instrumentation:** none.

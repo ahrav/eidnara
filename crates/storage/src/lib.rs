@@ -21,69 +21,40 @@ use lease::LeaseError;
 #[cfg(feature = "sqlite")]
 use lease::LeaseKey;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// A conflicting live holder prevented acquisition, or lease I/O failed.
-    Lease(LeaseError),
+    #[error("storage lease: {0}")]
+    Lease(#[source] LeaseError),
     /// The descriptor asked for a backend this build was not compiled with.
+    #[error("storage backend '{0}' is not supported by this build (missing feature)")]
     UnsupportedBackend(String),
     /// A migration or schema-version operation failed.
+    #[error("migration: {0}")]
     Migration(String),
     /// A backend (database driver) operation failed.
+    #[error("storage backend: {0}")]
     Backend(String),
     /// An io failure preparing the store location.
-    Io(std::io::Error),
+    #[error("storage io: {0}")]
+    Io(#[source] std::io::Error),
     /// A fenced (epoch-checked) write was rejected because the database has already
     /// been claimed by a newer writer. `db_epoch` (the epoch stamped in the
     /// database) is greater than `holder_epoch` (this store's lease epoch), so this
     /// writer has been superseded — for example a draining old instance attempting a
     /// late write after a replacement took the lease. The write was not applied.
+    #[error(
+        "fenced write rejected: this writer holds epoch {holder_epoch} but the \
+         database was claimed by a newer writer at epoch {db_epoch}"
+    )]
     Fenced { holder_epoch: u64, db_epoch: u64 },
     /// An out-of-range database epoch prevents proving monotonic fencing. The store
     /// refuses to open until an operator resets `cortexkit_fence.epoch`.
+    #[error(
+        "database fence epoch {db_epoch} is outside the supported range; reset \
+         cortexkit_fence.epoch to at least the highest epoch a writer has used"
+    )]
     FenceCorrupt { db_epoch: i64 },
-}
-
-impl std::fmt::Display for StoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StoreError::Lease(e) => write!(f, "storage lease: {e}"),
-            StoreError::UnsupportedBackend(b) => write!(
-                f,
-                "storage backend '{b}' is not supported by this build (missing feature)"
-            ),
-            StoreError::Migration(m) => write!(f, "migration: {m}"),
-            StoreError::Backend(m) => write!(f, "storage backend: {m}"),
-            StoreError::Io(e) => write!(f, "storage io: {e}"),
-            StoreError::Fenced {
-                holder_epoch,
-                db_epoch,
-            } => write!(
-                f,
-                "fenced write rejected: this writer holds epoch {holder_epoch} but the \
-                 database was claimed by a newer writer at epoch {db_epoch}"
-            ),
-            StoreError::FenceCorrupt { db_epoch } => write!(
-                f,
-                "database fence epoch {db_epoch} is outside the supported range; reset \
-                 cortexkit_fence.epoch to at least the highest epoch a writer has used"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            StoreError::Lease(e) => Some(e),
-            StoreError::Io(e) => Some(e),
-            StoreError::UnsupportedBackend(_)
-            | StoreError::Migration(_)
-            | StoreError::Backend(_)
-            | StoreError::Fenced { .. }
-            | StoreError::FenceCorrupt { .. } => None,
-        }
-    }
 }
 
 /// The lease key includes the module, backend, storage namespace, and the

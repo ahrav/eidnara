@@ -129,6 +129,7 @@ version = "0.3.0"
 dependencies = [
  "libc",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -315,6 +316,7 @@ dependencies = [
  "libc",
  "rusqlite",
  "storage-types",
+ "thiserror",
 ]
 
 [[package]]

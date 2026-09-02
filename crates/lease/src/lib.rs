@@ -194,35 +194,16 @@ impl LeaseKey {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum LeaseError {
     /// A conflicting live holder owns the lease for this key.
-    Held {
-        key: LeaseKey,
-    },
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for LeaseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LeaseError::Held { key } => write!(
-                f,
-                "storage for module '{}' (backend {}, scope '{}') is held by a conflicting live lease",
-                key.module_id, key.backend, key.scope_key
-            ),
-            LeaseError::Io(e) => write!(f, "lease io: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for LeaseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            LeaseError::Held { .. } => None,
-            LeaseError::Io(e) => Some(e),
-        }
-    }
+    #[error(
+        "storage for module '{}' (backend {}, scope '{}') is held by a conflicting live lease",
+        key.module_id, key.backend, key.scope_key
+    )]
+    Held { key: LeaseKey },
+    #[error("lease io: {0}")]
+    Io(#[source] std::io::Error),
 }
 
 pub struct FileLeaseStore {
@@ -368,29 +349,12 @@ fn invalid_epoch(message: impl Into<String>) -> std::io::Error {
 /// Holding the original error and reporting it through
 /// [`std::error::Error::source`] keeps the errno reachable, which lets a caller
 /// separate `ENOSPC` from `EDQUOT` and apply fault-specific handling.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("failed to {operation} lease epoch at {}: {source}", path.display())]
 struct EpochError {
     path: PathBuf,
     operation: &'static str,
     source: std::io::Error,
-}
-
-impl std::fmt::Display for EpochError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "failed to {} lease epoch at {}: {}",
-            self.operation,
-            self.path.display(),
-            self.source
-        )
-    }
-}
-
-impl std::error::Error for EpochError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
-    }
 }
 
 fn epoch_path_error(
