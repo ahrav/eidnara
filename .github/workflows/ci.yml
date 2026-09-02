@@ -37,8 +37,19 @@ jobs:
             bun run eidnara:check waivers "$file"
           done
 
-      - name: Receipts without source checkouts
-        run: bun run eidnara:check receipt migration/waves/U1/receipt.json
+      - name: Source checkouts for receipt verification
+        run: |
+          set -euo pipefail
+          for repo in commons magic-context; do
+            git clone --quiet --no-checkout "https://github.com/ahrav/${repo}.git" "../${repo}"
+          done
+
+      - name: Receipts
+        run: |
+          set -euo pipefail
+          for file in migration/waves/*/receipt.json; do
+            bun run eidnara:check receipt "$file" --checkout commons=../commons --checkout magic-context=../magic-context
+          done
 
       - name: Property catalog indexes
         run: |
