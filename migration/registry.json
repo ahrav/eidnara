@@ -95,7 +95,7 @@
       "kind": "fixture",
       "path": "crates/storage-types/tests/golden/storage_vectors.json",
       "role": "byte-stable",
-      "rationale": "Storage descriptor golden vectors: database names, store paths, and descriptor wire shape for eight sample module ids. Byte-stable under R18; regenerated only by the registered generator as part of a reviewed contract change.",
+      "rationale": "Storage descriptor golden vectors: database names, store paths, and descriptor wire shape for seven sample module ids. Byte-stable under R18; regenerated only by the registered generator as part of a reviewed contract change.",
       "evidence": [
         "migration/waves/U2/receipt.json",
         "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md"

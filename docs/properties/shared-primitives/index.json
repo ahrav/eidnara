@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shared-primitives",
   "source": "catalog.md",
-  "source_sha256": "6a07cbf2bd6a3f3c6ada4689f076a4cbc65db7dd4a63f55938f0891414847d69",
+  "source_sha256": "d696647d428c032ad1d6282495ff2119b3d5a9a1f7feab0e89694da08aa4630b",
   "records": [
     {
       "slug": "at-most-one-exclusive-holder-per-key",
@@ -198,7 +198,7 @@
         "state": "partial",
         "note": "`separator_in_a_key_field_fails_closed_instead_of_aliasing` places `U+001F` in each field and asserts that `LeaseKey::identity` panics naming that field; `distinct_identity_axes_do_not_conflict` covers separator-free keys that differ in one axis; no check covers FNV-1a-64 collisions."
       },
-      "guarantee": "Distinct `LeaseKey` values never map to the same lease file unless a collision is detected and rejected.",
+      "guarantee": "Distinct `LeaseKey` values produce distinct identity strings, and a field that would make the encoding ambiguous is rejected. Distinct identities map to distinct lease files except under an FNV-1a-64 collision, which no check detects; the property is unproven for colliding identities.",
       "check": {
         "semantics": "always",
         "condition": "Inside the crate, `always(k1 == k2 || lease_path(k1) != lease_path(k2))` for generated and adversarial pairs, where a key that carries the separator is rejected before it reaches a path. The file stores no identity, so collision detection by stored-key verification is a design follow-up, not an available check."
@@ -523,7 +523,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/logical-store-has-single-lease-identity.md). High on derivation facts (`crates/storage/src/lib.rs:62-74,565-661`); unknown whether descriptor authority prevents these combinations in deployment."
       },
-      "existing_check": "`distinct_databases_do_not_falsely_contend` (`crates/storage/src/lib.rs:1493-1502`) uses different parent directories; `distinct_databases_in_one_directory_do_not_falsely_contend` (`:1504-1515`) proves sibling files in one directory do not contend; `symlinked_database_paths_are_refused_never_aliased` (`:1005-1061`) proves both a directory-symlink alias and a file-symlink alias are refused, with and without a live holder. No test covers descriptor disagreement or hardlink aliases; status **unaudited**.",
+      "existing_check": "`distinct_databases_do_not_falsely_contend` (`crates/storage/src/lib.rs:1599-1608`) uses different parent directories; `distinct_databases_in_one_directory_do_not_falsely_contend` (`:1610-1621`) proves sibling files in one directory do not contend; `symlinked_database_paths_are_refused_never_aliased` (`:1111-1167`) proves both a directory-symlink alias and a file-symlink alias are refused, with and without a live holder. No test covers descriptor disagreement or hardlink aliases; status **unaudited**.",
       "impact": "One store can have two writers, or independent stores can falsely block each other.",
       "open_questions": [],
       "extra": {}
@@ -590,10 +590,10 @@
         "state": "partial",
         "note": "`open_claims_fence_before_return` verifies that `open_sqlite` does not return before stamping its epoch, and `open_claim_rejects_an_epoch_the_database_already_stores` verifies that the open claim refuses an epoch equal to the stored fence. No retained old connection races the interval between lease acquisition and the internal claim."
       },
-      "guarantee": "On declared fence-protected paths, from the instant a replacement's exclusive acquisition succeeds, no write from a prior epoch commits, even if that write began earlier.",
+      "guarantee": "Once a replacement store has committed its fence claim, no old-epoch writer can commit an effect against the database: every old-epoch fenced attempt or in-flight transaction aborts as `Fenced` and leaves application state unchanged. The interval between the replacement's lease acquisition and its committed claim is not covered by this guarantee and is unverified.",
       "check": {
         "semantics": "always",
-        "condition": "`always(old_epoch_effect_commits => replacement_not_yet_acquired_at_commit)`. After replacement acquisition, every old-epoch attempt or in-flight transaction must abort as fenced and leave application state unchanged."
+        "condition": "`always(old_epoch_effect_commits => replacement_claim_not_yet_committed)`. After the replacement's claim commits, every old-epoch attempt or in-flight transaction must abort as fenced and leave application state unchanged."
       },
       "fault_timing": "`open_sqlite` acquires the file lease before it obtains the SQLite `IMMEDIATE` transaction used to claim the database fence. A retained old transaction can race inside that internal interval, although no replacement store is exposed before the claim commits. The floor is also read before the lease is held, so a fence advance in that interval makes the issued epoch equal to the stored one; `claim_fence_strict` fails the open rather than duplicating an epoch.",
       "required_faults": "Retain an old connection after releasing its lease, pause replacement open after lease acquisition, and race an old transaction against the replacement's `IMMEDIATE` claim.",
@@ -627,7 +627,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/protected-write-set-is-fence-complete.md). High that the SQLite and PostgreSQL ordinary callbacks reject writes, that a callback cannot lift the SQLite guard or lower fence durability, that each unfenced maintenance surface is reachable only by name, that a callback escaping either the checked or the read-only transaction is rejected rather than reported as success, and that a negative epoch fails closed on both backends. Both limits are PostgreSQL-only, because SQLite withdraws the capability and denies the escape before it executes: on PostgreSQL a callback that ends the transaction and opens a replacement is not detected, and an escape that autocommits before the check can only be reported, while a mode switch that keeps the transaction open rolls back. A PostgreSQL equivalent of the SQLite capability withdrawal does not exist, so narrowing what its callback receives remains the structural fix there. The authoritative protected write set and the consumer upgrade to the fenced APIs still need external ownership."
       },
-      "existing_check": "backend tests cover fenced callbacks, fenced DDL, SQLite and PostgreSQL read-only rejection, and both autocommit maintenance paths. `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1699-1719`) leaves later fenced writes authorized; `a_read_callback_cannot_lower_fence_durability` (`:1721-1787`) pins `synchronous=FULL` and a WAL journal; `a_read_callback_cannot_clear_the_read_only_guard` (`:1789-1837`) denies every pragma write; `a_callback_cannot_end_the_fence_checked_transaction` (`:1839-1884`) denies the transaction escape and `a_callback_that_ends_the_transaction_is_rejected` (`primitives@89abb40`) reports it; `a_read_callback_cannot_escape_read_only_mode` (`primitives@89abb40`) covers ending and switching a read transaction; `a_negative_epoch_fails_closed` (`primitives@89abb40`) and `a_regressed_positive_epoch_fails_closed` (`primitives@89abb40`) fail closed on an unreconcilable epoch; `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` (`primitives@89abb40`), `a_suppressed_epoch_increment_is_rejected` (`primitives@89abb40`), and `open_verifies_the_stored_epoch_matches_the_issued_one` (`primitives@89abb40`) protect the lease row and its issuance; `a_callback_cannot_damage_the_fence_row_it_is_checked_against` (`crates/storage/src/lib.rs:1886-1978`) refuses DML, triggers, indexes, views, and renames onto the `fence` and `format_marker` tables; and `a_fenced_callback_cannot_rewrite_the_format_marker` (`:1980-2036`) refuses an update of, or a rename onto, the marker row. The [durable consumer inventory](durable-consumer-inventory.md) records source receipts; no source-level completeness gate exists.",
+      "existing_check": "backend tests cover fenced callbacks, fenced DDL, SQLite and PostgreSQL read-only rejection, and both autocommit maintenance paths. `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1805-1825`) leaves later fenced writes authorized; `a_read_callback_cannot_lower_fence_durability` (`:1827-1893`) pins `synchronous=FULL` and a WAL journal; `a_read_callback_cannot_clear_the_read_only_guard` (`:1895-1943`) denies every pragma write; `a_callback_cannot_end_the_fence_checked_transaction` (`:1945-1990`) denies the transaction escape and `a_callback_that_ends_the_transaction_is_rejected` (`primitives@89abb40`) reports it; `a_read_callback_cannot_escape_read_only_mode` (`primitives@89abb40`) covers ending and switching a read transaction; `a_negative_epoch_fails_closed` (`primitives@89abb40`) and `a_regressed_positive_epoch_fails_closed` (`primitives@89abb40`) fail closed on an unreconcilable epoch; `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` (`primitives@89abb40`), `a_suppressed_epoch_increment_is_rejected` (`primitives@89abb40`), and `open_verifies_the_stored_epoch_matches_the_issued_one` (`primitives@89abb40`) protect the lease row and its issuance; `a_callback_cannot_damage_the_fence_row_it_is_checked_against` (`crates/storage/src/lib.rs:1992-2095`) refuses DML, triggers, indexes, views, and renames onto the `fence` and `format_marker` tables; and `a_fenced_callback_cannot_rewrite_the_format_marker` (`:2097-2153`) refuses an update of, or a rename onto, the marker row. The [durable consumer inventory](durable-consumer-inventory.md) records source receipts; no source-level completeness gate exists.",
       "impact": "Enforcement converts a silent unfenced commit into a loud failure on SQLite, where the capability can be withdrawn. On PostgreSQL the residual risk is unbounded by validation: callback SQL retains the privilege to attach triggers to the infrastructure tables and to release this session's advisory lease, so an effect can always be scheduled after the last check and single-writer itself is reachable, and consumers may also break on upgrade or reroute a mutation through the unfenced surface.",
       "open_questions": [],
       "extra": {}
@@ -781,7 +781,7 @@
       "required_faults": "A frozen set with at least one unit; a defer with the boundary present, one with it absent, and one with `run_started` set over a frozen set that holds both durability classes.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/defer-pass-replays-frozen-bytes-verbatim.md). `step_defer` (`crates/cache-stability/src/lib.rs:191-217`) never reads `rendered_units` and mutates no frozen unit; the run-boundary filter in `CoreState::step` (`crates/cache-stability/src/lib.rs:168-189`) is the only path that removes units on a defer. `defer_does_not_mutate_frozen_bytes_or_render` (`crates/cache-stability/src/lib.rs:327-346`), `defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending` (`crates/cache-stability/src/lib.rs:383-399`), and `run_started_keeps_lineage_resets_episode` (`crates/cache-stability/src/lib.rs:611-633`) pin the three arms, and every golden vector compares `cached_prefix_bytes()` after each pass."
+        "evidence": "[evidence](evidence/defer-pass-replays-frozen-bytes-verbatim.md). `step_defer` (`crates/cache-stability/src/lib.rs:191-217`) never reads `rendered_units` and mutates no frozen unit; the run-boundary filter in `CoreState::step` (`crates/cache-stability/src/lib.rs:168-189`) is the only path that removes units on a defer. `defer_does_not_mutate_frozen_bytes_or_render` (`crates/cache-stability/src/lib.rs:329-348`), `defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending` (`crates/cache-stability/src/lib.rs:385-401`), and `run_started_keeps_lineage_resets_episode` (`crates/cache-stability/src/lib.rs:636-658`) pin the three arms, and every golden vector compares `cached_prefix_bytes()` after each pass."
       },
       "existing_check": "`defer_does_not_mutate_frozen_bytes_or_render`, `defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending`, `run_started_keeps_lineage_resets_episode`, `all_golden_vectors_pass` (`crates/cache-stability/tests/golden_vectors.rs:159-166`); audited at U2 as an independent oracle: the byte and version assertions do not derive from the action under test.",
       "impact": "A defer pass that re-renders breaks provider prefix-cache stability on every turn, which is the cost the whole mechanism exists to avoid.",
@@ -798,18 +798,18 @@
         "state": "yes",
         "note": "a queued drop followed by a `Hard` bust whose rendered baseline omits the drop."
       },
-      "guarantee": "After a `Hard` pass, `pending_changes` is empty, every unit queued before it is in the frozen set unless the bust re-rendered its key (the rendered bytes win), and `boundary_id` equals the minted id when one is supplied. `reconcile_pending` is false when the pass minted a boundary or the prior anchor is still present; a `Hard` that mints nothing while the anchor is absent keeps it true.",
+      "guarantee": "After a `Hard` pass, the frozen set is exactly the rendered units followed by the drained units whose keys the render did not produce (the rendered bytes win, and a key the render no longer produces leaves the set); `pending_changes` is empty; when the pass carries `run_started`, only lineage units are retained across the boundary; and `boundary_id` equals the minted id when one is supplied. `reconcile_pending` is false when the pass mints a boundary, matches the existing boundary, or has no current boundary; a `Hard` that mints nothing while a minted anchor is absent keeps it true.",
       "check": {
         "semantics": "always",
-        "condition": "`always(pending_changes.is_empty() && queued_before ⊆ frozen_units)` after every `Hard` step, `boundary_id == new_boundary_id` when the input supplies one, and `!reconcile_pending` when `new_boundary_id.is_some() || boundary_match`."
+        "condition": "`always(pending_changes.is_empty() && frozen_keys == rendered_keys ++ (queued_lineage_keys \\\\ rendered_keys))` after every `Hard` step, `boundary_id == new_boundary_id` when the input supplies one, and `!reconcile_pending` when `new_boundary_id.is_some() || boundary_match || boundary_id.is_empty()`."
       },
       "fault_timing": "A hard bust from any cause must drain deferred work; a bust that only froze its rendered units would leave queued drops invisible until a later bust.",
       "required_faults": "At least one unit queued through a `SoftPlus` pass before the `Hard` pass, and a rendered baseline that does not itself include the queued unit.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/hard-bust-drains-deferred-work.md). `step_hard` (`crates/cache-stability/src/lib.rs:254-281`) appends `pending_changes` into the rendered set before `apply_units` and clears `reconcile_pending` only when it minted or the anchor is present; `hard_drains_pending_changes_into_the_bust` (`crates/cache-stability/src/lib.rs:430-463`) asserts the drain, the mint, and the cleared flag, and `hard_without_mint_on_absent_boundary_keeps_reconcile_pending` (`crates/cache-stability/src/lib.rs:694-729`) asserts the flag stays set when nothing reanchors."
+        "evidence": "[evidence](evidence/hard-bust-drains-deferred-work.md). `step_hard` (`crates/cache-stability/src/lib.rs:254-283`) appends `pending_changes` into the rendered set before `apply_units` and clears `reconcile_pending` only when it minted or the anchor is present; `hard_drains_pending_changes_into_the_bust` (`crates/cache-stability/src/lib.rs:455-488`) asserts the drain, the mint, and the cleared flag, and `hard_without_mint_on_absent_boundary_keeps_reconcile_pending` (`crates/cache-stability/src/lib.rs:719-754`) asserts the flag stays set when nothing reanchors."
       },
-      "existing_check": "`hard_drains_pending_changes_into_the_bust`, `hard_prefers_rendered_units_over_deferred_copies_of_the_same_key`, `hard_without_mint_on_absent_boundary_keeps_reconcile_pending`, golden vectors with `queued` units; audited at U2.",
+      "existing_check": "`hard_drains_pending_changes_into_the_bust`, `hard_prefers_rendered_units_over_deferred_copies_of_the_same_key`, `hard_drops_frozen_keys_the_render_no_longer_produces`, `hard_without_mint_on_absent_boundary_keeps_reconcile_pending`, golden vectors with `queued` units; audited at U2.",
       "impact": "A dropped compartment reappears in the cached prefix or never leaves it, so the rendered context and the recorded state disagree.",
       "open_questions": [],
       "extra": {}
@@ -833,9 +833,9 @@
       "required_faults": "A state with `boundary_id == \"\"` and a defer whose `boundary_present` is any other token; then a `Hard` that mints a non-empty id and a defer that omits it.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/never-minted-boundary-is-not-reconcile-pending.md). The guard is one expression in `step_defer` (`crates/cache-stability/src/lib.rs:191-217`); `defer_on_never_minted_boundary_is_stable_not_reconcile_pending` (`crates/cache-stability/src/lib.rs:348-381`) covers both the vacuous and the non-vacuous arm."
+        "evidence": "[evidence](evidence/never-minted-boundary-is-not-reconcile-pending.md). The guard is one expression in `step_defer` (`crates/cache-stability/src/lib.rs:191-217`); `defer_on_never_minted_boundary_is_stable_not_reconcile_pending` (`crates/cache-stability/src/lib.rs:350-383`) covers both the vacuous and the non-vacuous arm."
       },
-      "existing_check": "`defer_on_never_minted_boundary_is_stable_not_reconcile_pending`, `defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending` (`crates/cache-stability/src/lib.rs:383-399`); audited at U2.",
+      "existing_check": "`defer_on_never_minted_boundary_is_stable_not_reconcile_pending`, `defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending` (`crates/cache-stability/src/lib.rs:385-401`); audited at U2.",
       "impact": "Every fresh store busts hard on alternate passes, or a real revert is never reconciled.",
       "open_questions": [],
       "extra": {}
@@ -859,7 +859,7 @@
       "required_faults": "A revert that sets `reconcile_pending`, then a `Soft` with `new_boundary_id` set; and, separately, a `Soft` with `new_boundary_id` at a live anchor.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/anchor-holds-while-reconcile-pending.md). The guard in `step_soft` (`crates/cache-stability/src/lib.rs:219-252`) is a let chain over both conditions; `soft_does_not_advance_anchor_while_reconcile_pending` (`crates/cache-stability/src/lib.rs:572-609`) and `coverage_extending_soft_advances_anchor_keeps_m0_frozen` (`crates/cache-stability/src/lib.rs:502-570`) pin both outcomes."
+        "evidence": "[evidence](evidence/anchor-holds-while-reconcile-pending.md). The guard in `step_soft` (`crates/cache-stability/src/lib.rs:219-252`) is a let chain over both conditions; `soft_does_not_advance_anchor_while_reconcile_pending` (`crates/cache-stability/src/lib.rs:597-634`) and `coverage_extending_soft_advances_anchor_keeps_m0_frozen` (`crates/cache-stability/src/lib.rs:527-595`) pin both outcomes."
       },
       "existing_check": "`soft_does_not_advance_anchor_while_reconcile_pending`, `coverage_extending_soft_advances_anchor_keeps_m0_frozen`; audited at U2.",
       "impact": "The stale m0 is never rematerialized, so the cached prefix summarizes content that the live array no longer contains.",
@@ -876,7 +876,7 @@
         "state": "yes",
         "note": "a `Soft` that replaces one existing key and appends one new key."
       },
-      "guarantee": "Applying rendered units replaces a unit with the same key in its existing slot and appends new keys in input order, so the cached-prefix byte order is the frozen-set order.",
+      "guarantee": "On a `Soft` pass, applying rendered units replaces a unit with the same key in its existing slot and appends new keys in input order; on a `Hard` pass the set is rebuilt in input order. Either way the cached-prefix byte order is the frozen-set order.",
       "check": {
         "semantics": "always",
         "condition": "`always(keys_after == keys_before ++ new_keys_in_input_order && replaced_units_keep_index)` after every `apply_units` call."
@@ -885,7 +885,7 @@
       "required_faults": "A frozen set with two units and a rendered set that replaces the second and adds a third.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/frozen-unit-order-is-preserved.md). `apply_units` (`crates/cache-stability/src/lib.rs:283-295`) is a find-or-push loop; `soft_replaces_by_key_keeps_slot_appends_new` (`crates/cache-stability/src/lib.rs:465-500`) asserts the resulting key order and the untouched first unit."
+        "evidence": "[evidence](evidence/frozen-unit-order-is-preserved.md). `apply_units` (`crates/cache-stability/src/lib.rs:285-297`) is a find-or-push loop; `soft_replaces_by_key_keeps_slot_appends_new` (`crates/cache-stability/src/lib.rs:490-525`) asserts the resulting key order and the untouched first unit."
       },
       "existing_check": "`soft_replaces_by_key_keeps_slot_appends_new`; the golden vectors compare `cached_prefix_bytes()`, which is order-sensitive; audited at U2.",
       "impact": "A reordered prefix is a cache bust at the first moved byte on every later pass.",
@@ -911,7 +911,7 @@
       "required_faults": "A frozen set containing at least one `Episode` unit and a `SoftPlus` pass with `run_started` set.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/episode-units-reset-at-run-boundary.md). `step_defer` (`crates/cache-stability/src/lib.rs:191-217`) retains by `durability_class`; `run_started_keeps_lineage_resets_episode` (`crates/cache-stability/src/lib.rs:611-633`) and `cross_episode_lineage_reproduces_byte_identical` (`crates/cache-stability/tests/golden_vectors.rs:274-320`) cover both classes."
+        "evidence": "[evidence](evidence/episode-units-reset-at-run-boundary.md). `CoreState::step` (`crates/cache-stability/src/lib.rs:168-189`) retains by `durability_class` before dispatching any action; `run_started_keeps_lineage_resets_episode` (`crates/cache-stability/src/lib.rs:636-658`) and `cross_episode_lineage_reproduces_byte_identical` (`crates/cache-stability/tests/golden_vectors.rs:274-320`) cover both classes."
       },
       "existing_check": "`run_started_keeps_lineage_resets_episode`, `cross_episode_lineage_reproduces_byte_identical`; audited at U2.",
       "impact": "A run-scoped unit survives into the next episode, or a lineage unit is dropped and the prefix un-compacts.",
@@ -1015,9 +1015,9 @@
       "required_faults": "A pre-existing file with a foreign object, a second baseline text for the same path, and a bypassed `CHECK` on the fence row.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/store-schema-identity-matches-the-baseline.md). `ExpectedIdentity::for_baseline` (`crates/storage/src/lib.rs:780-797`), `classify` (`:799-849`), and `apply` (`:851-865`) implement the contract inside `open_sqlite` (`:573-677`); `fresh_file_matches_the_baseline_inventory` (`:1303-1367`) pins the fixture, and `a_file_with_foreign_objects_is_refused_without_mutation` (`:1428-1454`), `a_consumer_baseline_is_applied_once_and_verified_on_reopen` (`:1369-1409`), `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched` (`:1411-1426`), and `negative_database_fence_fails_closed` (`:2082-2110`) cover the refusals."
+        "evidence": "[evidence](evidence/store-schema-identity-matches-the-baseline.md). `ExpectedIdentity::for_baseline` (`crates/storage/src/lib.rs:796-824`), `classify` (`:826-876`), and `apply` (`:878-910`) implement the contract inside `open_sqlite` (`:589-693`); `fresh_file_matches_the_baseline_inventory` (`:1409-1473`) pins the fixture, and `a_file_with_foreign_objects_is_refused_without_mutation` (`:1534-1560`), `a_consumer_baseline_is_applied_once_and_verified_on_reopen` (`:1475-1515`), `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched` (`:1517-1532`), and `negative_database_fence_fails_closed` (`:2199-2227`) cover the refusals."
       },
-      "existing_check": "`fresh_file_matches_the_baseline_inventory`, `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched`, `negative_database_fence_fails_closed`; audited at U2.",
+      "existing_check": "`fresh_file_matches_the_baseline_inventory`, `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched`, `a_baseline_that_hooks_an_infrastructure_table_is_rejected`, `fenced_callbacks_cannot_change_the_schema_so_the_store_stays_reopenable`, `negative_database_fence_fails_closed`; audited at U2.",
       "impact": "A foreign or half-formed file is written to as if it were this store, or a renamed table makes the fence read return floor zero and reissue a superseded epoch.",
       "open_questions": [],
       "extra": {}
@@ -1041,7 +1041,7 @@
       "required_faults": "A callback that attempts DML, one that attempts `PRAGMA query_only = OFF`, and one that runs `VACUUM`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/read-callbacks-cannot-write.md). `CallbackScope::read_only` (`crates/storage/src/lib.rs:379-387`) sets `query_only` and installs `deny_scope_escapes` (`crates/storage/src/lib.rs:464-492`); `GuardedConn` (`crates/storage/src/lib.rs:219-331`) omits the escapes; `unfenced_connection_rejects_writes` (`crates/storage/src/lib.rs:1663-1686`), `a_read_callback_cannot_clear_the_read_only_guard` (`crates/storage/src/lib.rs:1789-1837`), and `maintenance_runs_through_the_unfenced_path` (`crates/storage/src/lib.rs:2038-2051`) pin the three denials."
+        "evidence": "[evidence](evidence/read-callbacks-cannot-write.md). `CallbackScope::read_only` (`crates/storage/src/lib.rs:379-387`) sets `query_only` and installs `deny_scope_escapes` (`crates/storage/src/lib.rs:464-508`); `GuardedConn` (`crates/storage/src/lib.rs:219-331`) omits the escapes; `unfenced_connection_rejects_writes` (`crates/storage/src/lib.rs:1769-1792`), `a_read_callback_cannot_clear_the_read_only_guard` (`crates/storage/src/lib.rs:1895-1943`), and `maintenance_runs_through_the_unfenced_path` (`crates/storage/src/lib.rs:2155-2168`) pin the three denials."
       },
       "existing_check": "`unfenced_connection_rejects_writes`, `a_read_callback_cannot_clear_the_read_only_guard`, `maintenance_runs_through_the_unfenced_path`; audited at U2.",
       "impact": "A consumer mutation bypasses the fence and commits while a newer writer owns the database.",
@@ -1067,7 +1067,7 @@
       "required_faults": "A callback that panics inside `with_conn`, then a `with_conn_fenced` and a `with_conn_unfenced` on the same store.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/callback-scope-is-restored-after-unwind.md). `CallbackScope::drop` (`crates/storage/src/lib.rs:456-461`) restores when `release` did not run; `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1699-1719`) exercises the unwind."
+        "evidence": "[evidence](evidence/callback-scope-is-restored-after-unwind.md). `CallbackScope::drop` (`crates/storage/src/lib.rs:456-461`) restores when `release` did not run; `a_panicking_read_does_not_strand_the_connection_read_only` (`crates/storage/src/lib.rs:1805-1825`) exercises the unwind."
       },
       "existing_check": "`a_panicking_read_does_not_strand_the_connection_read_only`; audited at U2.",
       "impact": "One panicking read makes the store permanently read-only for the rest of the process lifetime.",
@@ -1093,7 +1093,7 @@
       "required_faults": "A maintenance callback that lowers `synchronous` or changes the journal mode, followed by a fenced write.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/protected-transactions-pin-fence-durability.md). `pin_fence_durability` (`crates/storage/src/lib.rs:556-571`) runs before each protected transaction; `open_pins_full_synchronous` (`crates/storage/src/lib.rs:1688-1697`) and `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:1721-1787`) observe the pinned values. Power loss itself is not injected."
+        "evidence": "[evidence](evidence/protected-transactions-pin-fence-durability.md). `pin_fence_durability` (`crates/storage/src/lib.rs:572-587`) runs before each protected transaction; `open_pins_full_synchronous` (`crates/storage/src/lib.rs:1794-1803`) and `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:1827-1893`) observe the pinned values. Power loss itself is not injected."
       },
       "existing_check": "`open_pins_full_synchronous`, `a_read_callback_cannot_lower_fence_durability`; audited at U2.",
       "impact": "A fence claim that looked committed disappears after power loss and two writers hold equal epochs.",
@@ -1119,7 +1119,7 @@
       "required_faults": "A pre-existing permissive database, WAL, and SHM, then a reopen; a fresh open under a permissive umask.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/store-files-are-owner-only-after-open.md). `open_sqlite` (`crates/storage/src/lib.rs:573-677`) creates the database owner-only and calls `protect_file` on all three paths before WAL setup; `reopening_a_permissive_store_protects_the_database_and_its_wal` (`crates/storage/src/lib.rs:1119-1169`) asserts all three modes on reopen and `fresh_open_creates_owner_only_sidecars_under_a_permissive_umask` (`crates/storage/src/lib.rs:1571-1599`) asserts them on a fresh open."
+        "evidence": "[evidence](evidence/store-files-are-owner-only-after-open.md). `open_sqlite` (`crates/storage/src/lib.rs:589-693`) creates the database owner-only and calls `protect_file` on all three paths before WAL setup; `reopening_a_permissive_store_protects_the_database_and_its_wal` (`crates/storage/src/lib.rs:1225-1275`) asserts all three modes on reopen and `fresh_open_creates_owner_only_sidecars_under_a_permissive_umask` (`crates/storage/src/lib.rs:1677-1705`) asserts them on a fresh open."
       },
       "existing_check": "`reopening_a_permissive_store_protects_the_database_and_its_wal`, `new_database_file_is_owner_only_at_creation`, `fresh_open_creates_owner_only_sidecars_under_a_permissive_umask` (Unix only); audited at U2.",
       "impact": "Another local user can read committed rows from the WAL or forge the fence row.",
@@ -1145,9 +1145,9 @@
       "required_faults": "A holder epoch above the stored fence, a callback that inserts a row and returns `Err`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/fenced-write-is-atomic.md). `with_conn_fenced` (`crates/storage/src/lib.rs:170-216`) claims and runs inside one transaction and commits only on `Ok`; `fenced_write_rolls_back_on_error` (`crates/storage/src/lib.rs:2053-2080`) checks both the row and the fence."
+        "evidence": "[evidence](evidence/fenced-write-is-atomic.md). `with_conn_fenced` (`crates/storage/src/lib.rs:170-216`) claims and runs inside one transaction and commits only on `Ok`; `fenced_write_rolls_back_on_error` (`crates/storage/src/lib.rs:2170-2197`) checks both the row and the fence."
       },
-      "existing_check": "`fenced_write_rolls_back_on_error`, `fenced_write_commits_and_persists` (`crates/storage/src/lib.rs:1646-1661`); audited at U2.",
+      "existing_check": "`fenced_write_rolls_back_on_error`, `fenced_write_commits_and_persists` (`crates/storage/src/lib.rs:1752-1767`); audited at U2.",
       "impact": "A failed write leaves half of a domain mutation committed, or advances the fence without the write it authorized.",
       "open_questions": [],
       "extra": {}
@@ -1171,7 +1171,7 @@
       "required_faults": "A database whose fence row was written without the `CHECK (epoch >= 0)` constraint, and a store constructed with a holder epoch above `i64::MAX`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/fence-epoch-outside-sqlite-range-fails-closed.md). `decode_fence_epoch` (`crates/storage/src/lib.rs:955-958`) and `fence_epoch_sql_value` (`crates/storage/src/lib.rs:916-923`) use checked conversions; `negative_database_fence_fails_closed` (`crates/storage/src/lib.rs:2082-2110`) and `epoch_above_sqlite_integer_range_fails` (`crates/storage/src/lib.rs:2190-2206`) cover both directions."
+        "evidence": "[evidence](evidence/fence-epoch-outside-sqlite-range-fails-closed.md). `decode_fence_epoch` (`crates/storage/src/lib.rs:1000-1003`) and `fence_epoch_sql_value` (`crates/storage/src/lib.rs:961-968`) use checked conversions; `negative_database_fence_fails_closed` (`crates/storage/src/lib.rs:2199-2227`) and `epoch_above_sqlite_integer_range_fails` (`crates/storage/src/lib.rs:2307-2323`) cover both directions."
       },
       "existing_check": "`negative_database_fence_fails_closed`, `epoch_above_sqlite_integer_range_fails`; audited at U2.",
       "impact": "A corrupt fence row authorizes a superseded writer.",

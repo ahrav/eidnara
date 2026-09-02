@@ -267,6 +267,8 @@ impl CoreState {
                 .into_iter()
                 .filter(|queued| !rendered_keys.contains(&queued.key)),
         );
+        // The whole prefix rebuilds, so a key the render no longer produces leaves the set.
+        self.frozen_units.clear();
         self.apply_units(units);
         let minted = input.new_boundary_id.is_some();
         if let Some(new_boundary) = input.new_boundary_id {
@@ -395,6 +397,29 @@ mod tests {
             state.cached_prefix_bytes(),
             before,
             "revert must keep frozen bytes"
+        );
+    }
+
+    /// A `Hard` render is the whole prefix, so a key it no longer produces leaves the
+    /// frozen set instead of replaying stale bytes.
+    #[test]
+    fn hard_drops_frozen_keys_the_render_no_longer_produces() {
+        let mut state = state_with(
+            vec![
+                unit("m0", "<h>KEEP</h>", DurabilityClass::Lineage),
+                unit("m1", "<h>GONE</h>", DurabilityClass::Lineage),
+            ],
+            "b0",
+        );
+        let mut hard = PassInput::new(Action::Hard, "b0");
+        hard.rendered_units = vec![unit("m0", "<h>KEEP2</h>", DurabilityClass::Lineage)];
+        hard.new_boundary_id = Some("b1".into());
+        state.step(hard);
+        let keys: Vec<&str> = state.frozen_units.iter().map(|u| u.key.as_str()).collect();
+        assert_eq!(keys, vec!["m0"], "a key the render omits leaves the set");
+        assert!(
+            !state.cached_prefix_bytes().contains("GONE"),
+            "stale bytes must not replay after a HARD that omits their key"
         );
     }
 

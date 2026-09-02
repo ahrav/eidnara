@@ -99,7 +99,7 @@
       },
       "strategy_decision": "Example table extended with the inputs a lenient parser accepts (`+1`, padding, hex, digit separator); each body is asserted with exact error kind, path in message, and unchanged bytes through every applicable acquisition mode.",
       "audit_verdict": "pass",
-      "evidence_digest": "a7b656df787a04d2bf98f76c47978a8138b030ed266c1e8cf322b958df48bf9b",
+      "evidence_digest": "f100a5ca45cc183c1b2ff5b2708847a69dda92ac79f0d9383db3561adff3cd55",
       "code_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
       "check_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
       "check_pointer": "crates/lease/src/lib.rs#L626",
@@ -109,7 +109,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "a7b656df787a04d2bf98f76c47978a8138b030ed266c1e8cf322b958df48bf9b",
+        "digest": "f100a5ca45cc183c1b2ff5b2708847a69dda92ac79f0d9383db3561adff3cd55",
         "description": "`invalid_epoch_states_fail_closed` extended with `+1`, `-1`, ` 1`, `1 `, `0x1f`, `1_0`; the parse-based mutant fails."
       }
     },
@@ -132,7 +132,7 @@
       "strategy_decision": "Byte-stable golden fixture: receipt-level byte identity to the source blob plus the fixture-driven test as an independent oracle; the near-tautological action assertion is recorded and the byte, boundary, flag, and queue assertions carry the claim.",
       "audit_verdict": "pass",
       "evidence_digest": "74f972396f700368c6772943d96d35f4110dacb1cbe507e01b4b4118cf2369ac",
-      "code_hash": "52918109a9757701c91a1a35a5772480ec4d32ba1eba2e85d1b26c123678c7fb",
+      "code_hash": "b519f2b4d2a10b4b43b30e159fd1e62a90ca006dc47d0f4eb41d247381ad7562",
       "check_hash": "49c095fee21e88a0ee5785d3a82b068bb6e900e7891e1fba976cfd6c1e4775a6",
       "check_pointer": "crates/cache-stability/tests/golden_vectors.rs#L160",
       "target_configurations": [
@@ -956,9 +956,9 @@
       },
       "strategy_decision": "Fixture test plus refusal tests: a fresh file's application id, user version, format-marker digest, and sqlite_schema inventory are compared to a destination-captured fixture that the generator example produces, and non-pristine files with foreign objects, a different consumer baseline, or a bypassed fence constraint are refused with the file bytes unchanged. Chosen over a property test because the identity is one fixed byte contract.",
       "audit_verdict": "pass",
-      "evidence_digest": "0000000000000000000000000000000000000000000000000000000000000000",
-      "code_hash": "0a7a229c78b51da96e1095bff1d4d9aac64569f38786d8b9bc4b3d450185c1a0",
-      "check_hash": "761158888f0a48ae5a808747b5909328ada6cc0c3fdf1a1681780cbfd980b4b2",
+      "evidence_digest": "ad38cb84f12f72b38bb7a221e2030af024c2dc1776657733346a3f7b191b7387",
+      "code_hash": "aa060420eab44ca681609f3e7156d6490f5992d54f260a65cd64e203ad393685",
+      "check_hash": "d6a853cf506a3b186752515d53579235f6659b7cf992ef285e892ead611f2f2a",
       "check_pointer": "crates/storage/src/lib.rs#L1255",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
@@ -966,7 +966,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "digest": "ad38cb84f12f72b38bb7a221e2030af024c2dc1776657733346a3f7b191b7387",
         "description": "`fresh_file_matches_the_baseline_inventory` compares a fresh file to `fixtures/schema/storage-inventory-v1.json`; `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, and `negative_database_fence_fails_closed` prove refusal leaves the bytes unchanged."
       }
     },

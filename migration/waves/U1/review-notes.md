@@ -33,12 +33,13 @@ list. The checker exercises the control-record JSON files with
 
 ## Copied files
 
-`docs/properties/METHOD.md` is a verbatim copy of the method document at
-`host@b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825`.
-The plan pins this revision as the method for every catalog. The U1 review read
-its prose in full and left it unchanged. Editing it would change the pinned
-method and is out of scope for this wave. Any wording change to METHOD requires
-a separate reviewed pin change.
+`docs/properties/METHOD.md` is adapted from the method document at
+`host@b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825`: the four field-format lines
+that used an em dash as the separator between an enumerated field head and its
+note use a spaced hyphen instead, and the formatting rule names that
+convention. No other prose changed; the receipt records the file as `adapted`
+for that reason. Editing the method further would change the pinned method and
+is out of scope for this wave.
 
 ## Generated files
 

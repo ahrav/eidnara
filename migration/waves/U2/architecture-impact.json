@@ -40,7 +40,7 @@
             "storage::sqlite_backend"
           ],
           "specialist_routes": [],
-          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for eight module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `eidnara_` prefix is frozen in the registry until then.",
+          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for seven module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `eidnara_` prefix is frozen in the registry until then.",
           "follow_up": "contract change after U2; no bead exists yet because the source repositories stay authoritative until U8"
         },
         {
@@ -167,7 +167,7 @@
             "storage::sqlite_backend"
           ],
           "specialist_routes": [],
-          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for eight module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `eidnara_` prefix is frozen in the registry until then.",
+          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for seven module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `eidnara_` prefix is frozen in the registry until then.",
           "follow_up": "contract change after U2; no bead exists yet because the source repositories stay authoritative until U8"
         },
         {

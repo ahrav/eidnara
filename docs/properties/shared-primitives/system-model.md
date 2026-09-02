@@ -4,7 +4,7 @@ Provenance: `primitives@89abb40`. Crate names are the workspace names; the
 PostgreSQL backend in the source (`primitives@89abb40`) is described where the
 source described it and is not part of this workspace.
 
-System path: `crates/lease` at revision `9e871ce`, plus the U8 working-tree changes documented here.
+System path: `crates/lease` at revision `9e871ce`, plus the U2 working-tree changes documented here.
 
 ## Architecture and data flow
 

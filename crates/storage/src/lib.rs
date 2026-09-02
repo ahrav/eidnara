@@ -11,8 +11,8 @@
 //! feature-gated, so module code does not branch on the descriptor's backend.
 //!
 //! The single-writer lease ([`lease`]) is keyed by
-//! `(module_id, backend, storage_namespace)`, preventing collisions between stores
-//! that share a lease root. The persisted epoch serves as the fence token for
+//! `(module_id, backend, storage_namespace/database file name)`, so stores that share
+//! a lease root do not collide. The persisted epoch serves as the fence token for
 //! epoch-checked writes.
 
 pub use storage_types::{
@@ -467,6 +467,11 @@ mod sqlite_backend {
     /// capability class avoids that race. A pragma read carries no value and stays
     /// allowed, as do the ordinary statements a callback exists to run. The argumentless
     /// pragmas that still perform work are denied by name.
+    ///
+    /// Main-schema DDL is denied whatever it targets: the file's schema is the baseline
+    /// the next open compares against, so a committed `CREATE`, `ALTER`, or `DROP` would
+    /// make the store fail to reopen. Temporary objects live outside that comparison and
+    /// stay allowed unless they carry an infrastructure name.
     fn deny_scope_escapes(
         context: rusqlite::hooks::AuthContext<'_>,
     ) -> rusqlite::hooks::Authorization {
@@ -484,6 +489,17 @@ mod sqlite_backend {
                 pragma_name,
                 pragma_value: None,
             } if is_side_effecting_pragma(pragma_name) => Authorization::Deny,
+            AuthAction::CreateTable { .. }
+            | AuthAction::DropTable { .. }
+            | AuthAction::AlterTable { .. }
+            | AuthAction::CreateIndex { .. }
+            | AuthAction::DropIndex { .. }
+            | AuthAction::CreateTrigger { .. }
+            | AuthAction::DropTrigger { .. }
+            | AuthAction::CreateView { .. }
+            | AuthAction::DropView { .. }
+            | AuthAction::CreateVtable { .. }
+            | AuthAction::DropVtable { .. } => Authorization::Deny,
             action => match infrastructure_target(&action) {
                 Some(_) => Authorization::Deny,
                 None => Authorization::Allow,
@@ -789,6 +805,17 @@ mod sqlite_backend {
                 .execute_batch(&text)
                 .map_err(|e| StoreError::Baseline(format!("baseline text does not apply: {e}")))?;
             let objects = schema_inventory(&scratch)?;
+            // A trigger or index on `fence` or `format_marker` could rewrite the epoch
+            // or the marker underneath the checks that read them.
+            if let Some(hooked) = objects
+                .iter()
+                .find(|o| o.kind != "table" && is_infrastructure_table(&o.table))
+            {
+                return Err(StoreError::Baseline(format!(
+                    "baseline attaches {} `{}` to infrastructure table `{}`",
+                    hooked.kind, hooked.name, hooked.table
+                )));
+            }
             Ok(Self {
                 text,
                 digest,
@@ -856,11 +883,29 @@ mod sqlite_backend {
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             tx.pragma_update(None, "user_version", USER_VERSION)
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
-            tx.execute(
-                "INSERT INTO format_marker (id, baseline_sha256) VALUES (0, ?1)",
-                rusqlite::params![self.digest],
-            )
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
+            let rows = tx
+                .execute(
+                    "INSERT INTO format_marker (id, baseline_sha256) VALUES (0, ?1)",
+                    rusqlite::params![self.digest],
+                )
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            let stored: Option<String> = tx
+                .query_row(
+                    "SELECT baseline_sha256 FROM format_marker WHERE id = 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            if rows != 1 || stored.as_deref() != Some(self.digest.as_str()) {
+                return Err(StoreError::Backend(format!(
+                    "format marker write affected {rows} rows and reads back as {stored:?}; expected {}",
+                    self.digest
+                )));
+            }
             Ok(())
         }
     }
@@ -1001,6 +1046,67 @@ mod tests {
 
     const INVENTORY_FIXTURE: &str =
         include_str!("../../../fixtures/schema/storage-inventory-v1.json");
+
+    /// A consumer baseline cannot hang a trigger or index on the fence or the marker.
+    #[test]
+    fn a_baseline_that_hooks_an_infrastructure_table_is_rejected() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        for hook in [
+            "CREATE TRIGGER marker_undo BEFORE INSERT ON format_marker BEGIN SELECT RAISE(IGNORE); END;",
+            "CREATE TRIGGER fence_undo AFTER UPDATE ON fence BEGIN UPDATE fence SET epoch = OLD.epoch WHERE id = 0; END;",
+            "CREATE INDEX fence_idx ON fence (epoch);",
+        ] {
+            match open_sqlite(&d, hook).map(|_| ()) {
+                Err(StoreError::Baseline(m)) => {
+                    assert!(
+                        m.contains("infrastructure table"),
+                        "unexpected message: {m}"
+                    )
+                }
+                other => panic!("{hook} must be rejected, got {other:?}"),
+            }
+        }
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "a rejected baseline must not create the file"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A committed schema change would make the next open refuse the file, so the
+    /// fenced path denies main-schema DDL and the store reopens under its baseline.
+    #[test]
+    fn fenced_callbacks_cannot_change_the_schema_so_the_store_stays_reopenable() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        for ddl in [
+            "CREATE TABLE extra (k TEXT)",
+            "ALTER TABLE kv ADD COLUMN extra TEXT",
+            "CREATE INDEX kv_v ON kv (v)",
+            "CREATE VIEW kv_view AS SELECT k FROM kv",
+            "CREATE TRIGGER kv_trigger AFTER INSERT ON kv BEGIN SELECT 1; END",
+            "DROP TABLE kv",
+        ] {
+            let denied = store.with_conn_fenced(|tx| tx.execute(ddl, []).map(|_| ()));
+            assert!(
+                matches!(&denied, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+                "{ddl} must be denied, got {denied:?}"
+            );
+        }
+        // Temporary objects are outside the baseline comparison and stay allowed.
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("CREATE TEMP TABLE scratch (k TEXT)", [])
+                    .map(|_| ())
+            })
+            .expect("temporary objects stay allowed");
+        drop(store);
+        drop(open_sqlite(&d, KV_BASELINE).expect("the file still matches its baseline"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Any symlink in the database path, whether a directory component or the file
     /// itself, is refused, so no alias can reach the bytes or a second lease.
@@ -1755,16 +1861,16 @@ mod tests {
             .expect("lower again");
         store
             .with_conn_fenced(|tx| {
-                tx.execute("CREATE TABLE kv2 (k TEXT PRIMARY KEY)", [])
+                tx.execute("INSERT INTO kv (k, v) VALUES ('again', 'v')", [])
                     .map(|_| ())
             })
-            .expect("fenced schema change");
-        let after_ddl: i64 = store
+            .expect("second fenced write");
+        let after_second: i64 = store
             .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
             .expect("read synchronous");
         assert_eq!(
-            after_ddl, 2,
-            "the fenced schema change re-pinned synchronous=FULL"
+            after_second, 2,
+            "every fenced write re-pins synchronous=FULL"
         );
 
         store
@@ -1944,6 +2050,7 @@ mod tests {
             "the fence row still carries the epoch the callbacks were checked against"
         );
 
+        // Schema changes are denied outright, so a rename can never shadow the fence.
         for target in ["fence", "FENCE", "Fence"] {
             let renamed = store.with_conn_fenced(|tx| {
                 tx.execute("CREATE TEMP TABLE benign (id INTEGER, epoch INTEGER)", [])?;
@@ -1951,10 +2058,20 @@ mod tests {
                     .map(|_| ())
             });
             assert!(
-                matches!(&renamed, Err(StoreError::Backend(m)) if m.contains("changed the infrastructure schema objects")),
+                matches!(&renamed, Err(StoreError::Backend(m)) if m.contains("not authorized")),
                 "a temporary table renamed to `{target}` is rejected, got {renamed:?}"
             );
         }
+        let shadows: i64 = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE lower(name) = 'fence'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("inspect temp schema");
+        assert_eq!(shadows, 0, "no temporary object may shadow the fence");
         let shadow_after: i64 = store
             .with_conn(|c| {
                 c.query_row(
@@ -2013,7 +2130,7 @@ mod tests {
                 .map(|_| ())
         });
         assert!(
-            matches!(&renamed, Err(StoreError::Backend(m)) if m.contains("changed the infrastructure schema objects")),
+            matches!(&renamed, Err(StoreError::Backend(m)) if m.contains("not authorized")),
             "a temporary table renamed onto the marker is rejected, got {renamed:?}"
         );
 
