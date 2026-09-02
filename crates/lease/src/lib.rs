@@ -670,6 +670,13 @@ mod tests {
             ("invalid-utf8", b"\xff".to_vec()),
             ("too-long", b"000000000000000000001".to_vec()),
             ("u64-overflow", b"18446744073709551616".to_vec()),
+            // `str::parse::<u64>` accepts a leading `+`; the format does not.
+            ("plus-sign", b"+1".to_vec()),
+            ("minus-sign", b"-1".to_vec()),
+            ("leading-space", b" 1".to_vec()),
+            ("trailing-space", b"1 ".to_vec()),
+            ("hex", b"0x1f".to_vec()),
+            ("digit-separator", b"1_0".to_vec()),
         ];
 
         for (name, state) in cases {
@@ -1191,5 +1198,118 @@ mod tests {
         let g2 = store2.acquire(&k).expect("re-acquire");
         assert_eq!(g2.epoch(), 2);
         drop(g2);
+    }
+
+    /// Externally computed FNV-1a-64 vectors detect an encoding or suffix
+    /// change that would orphan existing lease files.
+    #[test]
+    fn lease_path_vectors_are_version_stable() {
+        let (store, dir) = tmp_store();
+        let long = "x".repeat(300);
+        let vectors = [
+            (
+                LeaseKey::new("test-module", "sqlite", "main"),
+                "51a7eaa424b9fd8f",
+            ),
+            (
+                LeaseKey::new("magic-context-kernel", "sqlite", "core"),
+                "1a0ede79732fcf81",
+            ),
+            (
+                LeaseKey::new("magic-context", "sqlite", "mc_cache"),
+                "3af1f17c55068a4d",
+            ),
+            (LeaseKey::new("", "", ""), "0879e907b5281763"),
+            (
+                LeaseKey::new("módulo", "sqlite", "ключ"),
+                "266f8eae208be1ca",
+            ),
+            // The separator inside a field gives these two keys one identity.
+            (LeaseKey::new("a\u{1f}b", "sqlite", "c"), "604e08b680b90474"),
+            (LeaseKey::new("a", "b\u{1f}sqlite", "c"), "604e08b680b90474"),
+            (
+                LeaseKey::new(long.as_str(), "sqlite", "y"),
+                "8ab902ac85c82726",
+            ),
+        ];
+        for (k, digest) in vectors {
+            assert_eq!(
+                k.identity(),
+                format!("{}\u{1f}{}\u{1f}{}", k.module_id, k.backend, k.scope_key)
+            );
+            assert_eq!(fnv1a_hex(&k.identity()), digest, "hash drift for {k:?}");
+            assert_eq!(
+                store.lease_path(&k),
+                dir.path().join(format!("{digest}.lease")),
+                "lease path drift for {k:?}"
+            );
+        }
+
+        // The path the store computes is the file acquisition creates.
+        let k = LeaseKey::new("magic-context-kernel", "sqlite", "core");
+        let guard = store.acquire(&k).expect("acquire production key");
+        drop(guard);
+        let created: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("lease dir")
+            .map(|entry| entry.expect("dir entry").file_name())
+            .collect();
+        assert_eq!(
+            created,
+            vec![std::ffi::OsString::from("1a0ede79732fcf81.lease")]
+        );
+    }
+
+    /// Acquisition reads at most 21 bytes of a lease file however large the file is.
+    #[test]
+    fn epoch_read_is_bounded_regardless_of_file_size() {
+        struct CountingReader {
+            inner: std::io::Cursor<Vec<u8>>,
+            read: usize,
+        }
+
+        impl Read for CountingReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.inner.read(buf)?;
+                self.read += n;
+                Ok(n)
+            }
+        }
+
+        impl Seek for CountingReader {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                self.inner.seek(position)
+            }
+        }
+
+        const SIZE: usize = 1 << 20;
+        let mut reader = CountingReader {
+            inner: std::io::Cursor::new(vec![b'1'; SIZE]),
+            read: 0,
+        };
+        let error = read_epoch(&mut reader).expect_err("oversized epoch must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            reader.read <= EPOCH_WIDTH + 1,
+            "read {} bytes of a {SIZE}-byte epoch",
+            reader.read
+        );
+
+        let (store, _dir) = tmp_store();
+        let k = key("huge");
+        let state = vec![b'1'; SIZE];
+        let path = seed_epoch(&store, &k, &state);
+        for (mode, result) in [
+            ("exclusive", store.acquire(&k)),
+            ("shared", store.acquire_shared(&k)),
+            ("floor", store.acquire_above(&k, 1)),
+        ] {
+            match result {
+                Err(LeaseError::Io(error)) => {
+                    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{mode}")
+                }
+                other => panic!("{mode} accepted an oversized epoch: {other:?}"),
+            }
+        }
+        assert_eq!(std::fs::read(&path).expect("read epoch"), state);
     }
 }

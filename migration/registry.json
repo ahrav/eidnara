@@ -389,6 +389,38 @@
     },
     {
       "kind": "identity",
+      "value": "\"magic-context-kernel\"",
+      "class": "frozen-durable",
+      "rationale": "`module_id` field of the kernel store's lease key `(\"magic-context-kernel\", \"sqlite\", \"core\")`. The lease file name is `fnv1a_hex(identity)` = `1a0ede79732fcf81.lease` under `<data-root>/leases/`; changing the literal orphans that file and restarts the epoch sequence.",
+      "evidence": [
+        "magic-context/crates/mc-kernel/src/open.rs",
+        "crates/lease/src/lib.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "\"magic-context\"",
+      "class": "frozen-durable",
+      "rationale": "`module_id` of the production module-store descriptor (`DEFAULT_MODULE_ID`); with backend `sqlite` and namespace `mc_cache` it forms the lease key whose file is `3af1f17c55068a4d.lease` next to `mc-store.db`. Only the quoted literal is frozen; the bare token stays a legacy identity.",
+      "evidence": [
+        "magic-context/crates/mc-module/src/lib.rs",
+        "magic-context/crates/mc-module/src/bin/ck_mc_host/serve.rs",
+        "crates/lease/src/lib.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "\"mc_cache\"",
+      "class": "frozen-durable",
+      "rationale": "`storage_namespace` of the production module-store descriptor (`STORAGE_NAMESPACE`). It is the third field of the module-store lease key and the namespace column of its `cortexkit_schema_version` rows.",
+      "evidence": [
+        "magic-context/crates/mc-module/src/lib.rs",
+        "crates/lease/src/lib.rs",
+        "crates/storage/src/lib.rs"
+      ]
+    },
+    {
+      "kind": "identity",
       "value": "mc-host/0.1.0",
       "class": "external-protocol",
       "rationale": "Authenticated `daemon_ver` transcript field bound by the proof MAC; changing it breaks client compatibility decisions.",
