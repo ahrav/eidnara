@@ -461,6 +461,19 @@ mod sqlite_backend {
         }
     }
 
+    /// A baseline addresses the main schema only. An attached database is outside the
+    /// file and outside the identity comparison, and a file-backed attachment reaches a
+    /// database the store holds no lease on.
+    fn deny_attachments(
+        context: rusqlite::hooks::AuthContext<'_>,
+    ) -> rusqlite::hooks::Authorization {
+        use rusqlite::hooks::{AuthAction, Authorization};
+        match context.action {
+            AuthAction::Attach { .. } | AuthAction::Detach { .. } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }
+    }
+
     /// Enumerating individual pragma names cannot be complete: `ignore_check_constraints`
     /// disables the fence table's constraint, `defer_foreign_keys` and `writable_schema`
     /// reach schema invariants, and pragma names are case-insensitive. Denying the whole
@@ -657,14 +670,14 @@ mod sqlite_backend {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // Identity is settled before any pragma, transaction, or mode change can touch the
+        // file, so a refused file keeps every byte and every permission bit it had.
+        let state = expected.classify(&conn)?;
         // Pre-existing permissive files are narrowed before the fence claim writes any bytes.
         for suffix in ["", "-wal", "-shm"] {
             protect_file(Path::new(&format!("{path}{suffix}")))
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
         }
-        // Identity is settled before any pragma or transaction can touch the file, so
-        // a refused file keeps every byte it had.
-        let state = expected.classify(&conn)?;
         // A VFS that cannot switch to WAL answers the pragma with the unchanged
         // mode; the fence claim must not commit under a journal mode every later
         // fenced write would reject.
@@ -837,24 +850,20 @@ mod sqlite_backend {
             let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
             let scratch =
                 Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
+            // The authorizer runs before each statement, so an `ATTACH` is refused before
+            // it can open a file, and a `DETACH` cannot hide one that ran.
+            scratch
+                .authorizer(Some(deny_attachments))
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
             scratch
                 .execute_batch(&text)
                 .map_err(|e| StoreError::Baseline(format!("baseline text does not apply: {e}")))?;
-            let objects = schema_inventory(&scratch)?;
-            // An attached database is neither part of the file nor of the comparison, and
-            // a file-backed attachment reaches outside the store's lease.
-            let attached: i64 = scratch
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_database_list WHERE name NOT IN ('main', 'temp')",
-                    [],
-                    |row| row.get(0),
+            scratch
+                .authorizer(
+                    None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
                 )
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
-            if attached != 0 {
-                return Err(StoreError::Baseline(format!(
-                    "baseline attaches {attached} database(s); a baseline addresses the main schema only"
-                )));
-            }
+            let objects = schema_inventory(&scratch)?;
             // The consumer text runs after the store's own DDL, so it could drop and
             // recreate `fence` or `format_marker` with different constraints.
             let store_only =
@@ -1207,7 +1216,11 @@ mod tests {
         for (ddl, needle) in [
             (
                 "ATTACH ':memory:' AS aux; CREATE TABLE aux.t (k TEXT);",
-                "attaches",
+                "not authorized",
+            ),
+            (
+                "ATTACH ':memory:' AS aux; CREATE TABLE aux.t (k TEXT); DETACH aux;",
+                "not authorized",
             ),
             (
                 "DROP TABLE fence; CREATE TABLE fence (id INTEGER PRIMARY KEY CHECK (id = 0), epoch INTEGER NOT NULL CHECK (epoch = 1));",
@@ -1226,6 +1239,59 @@ mod tests {
             }
         }
         assert!(!std::path::Path::new(path).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A baseline that attaches a file is refused before the attachment opens it, so the
+    /// external database is never touched even when the text detaches it again.
+    #[test]
+    fn a_baseline_that_attaches_a_file_never_writes_to_it() {
+        let (root, d) = tmp();
+        std::fs::create_dir_all(&root).expect("root");
+        let external = root.join("outside.db");
+        let ddl = format!(
+            "ATTACH '{}' AS aux; CREATE TABLE aux.t (k TEXT); DETACH aux;",
+            external.display()
+        );
+        match open_sqlite(&d, &ddl).map(|_| ()) {
+            Err(StoreError::Baseline(m)) => {
+                assert!(m.contains("not authorized"), "unexpected message: {m}")
+            }
+            other => panic!("attaching a file must be rejected, got {other:?}"),
+        }
+        assert!(!external.exists(), "the attached path must not be created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A refused foreign file keeps its permission bits as well as its bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_foreign_file_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        std::fs::create_dir_all(&root).expect("root");
+        {
+            let foreign = rusqlite::Connection::open(path).expect("foreign database");
+            foreign
+                .execute_batch("CREATE TABLE theirs (k TEXT);")
+                .expect("foreign schema");
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o664)).expect("chmod");
+        let before = std::fs::read(path).expect("bytes before");
+        assert!(matches!(
+            open_sqlite(&d, "").map(|_| ()),
+            Err(StoreError::Baseline(_))
+        ));
+        let mode = std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o664, "a refused file keeps its mode");
+        assert_eq!(std::fs::read(path).expect("bytes after"), before);
         let _ = std::fs::remove_dir_all(&root);
     }
 

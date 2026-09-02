@@ -1059,6 +1059,12 @@ function validateArchitectureImpactShape(root: JsonObject, errors: string[]): vo
             requireString(analyzed, "repo", `${reportPath}.analyzed`, errors);
             requireCommit(analyzed, "commit", `${reportPath}.analyzed`, errors);
             requireDigest(analyzed, "scope_hash", `${reportPath}.analyzed`, errors);
+            // A post-integration report judges the destination code, so it names the module
+            // directories it covers and the digest of their tracked contents.
+            if (phase === "post-integration") {
+                requireStringArray(analyzed, "modules", `${reportPath}.analyzed`, errors, 1);
+                requireDigest(analyzed, "modules_hash", `${reportPath}.analyzed`, errors);
+            }
         }
         requireDigest(report, "report_hash", reportPath, errors);
         requireDigest(report, "skill_sha256", reportPath, errors);
@@ -1425,6 +1431,43 @@ function receiptDestinations(root: string): Set<string> {
 
 /// `destination_commit` must be an ancestor of the checked-out destination, so impact records
 /// cannot describe an unrelated tree. Skipped when the destination is not a git checkout.
+/**
+ * Digest of every tracked file under the named module directories in the checked tree:
+ * one `path\n<sha256 of bytes>\n` line per file, sorted by path. Tracked means listed by
+ * `git ls-files`; a plain directory walk would let build output and editor files change
+ * the digest.
+ */
+export function modulesHash(root: string, modules: string[], path: string, errors: string[]): string | undefined {
+    const directories = [...new Set(modules)].sort();
+    const lines: string[] = [];
+    for (const directory of directories) {
+        const full = join(root, directory);
+        if (!existsSync(full) || !statSync(full).isDirectory()) {
+            errors.push(`${path} names ${directory}, which is not a directory in the destination tree`);
+            return undefined;
+        }
+        const listed = git(root, ["ls-files", "-z", "--", directory]);
+        if (!listed.ok) {
+            errors.push(`${path}: git ls-files failed for ${directory}: ${listed.error}`);
+            return undefined;
+        }
+        for (const file of listed.stdout.split("\0").filter((entry) => entry !== "")) {
+            const fileFull = join(root, file);
+            if (!existsSync(fileFull) || !statSync(fileFull).isFile()) {
+                errors.push(`${path}: tracked file ${file} is not a file in the destination tree`);
+                return undefined;
+            }
+            lines.push(`${file}\n${sha256(readFileSync(fileFull))}\n`);
+        }
+    }
+    if (lines.length === 0) {
+        errors.push(`${path} covers no tracked files`);
+        return undefined;
+    }
+    lines.sort();
+    return sha256(lines.join(""));
+}
+
 function verifyDestinationCommit(commit: string, path: string, ctx: Context, errors: string[]): void {
     if (!existsSync(join(ctx.root, ".git"))) return;
     const result = spawnSync("git", ["merge-base", "--is-ancestor", commit, "HEAD"], { cwd: ctx.root, encoding: "utf8" });
@@ -1649,6 +1692,12 @@ function verifyKind(kind: CheckKind, root: JsonObject, ctx: Context): string[] {
                     if (!isObject(entry) || entry.phase !== "post-integration" || !isObject(entry.analyzed)) return;
                     if (typeof entry.analyzed.commit === "string") {
                         verifyDestinationCommit(entry.analyzed.commit, `$.reports[${index}].analyzed.commit`, ctx, errors);
+                    }
+                    if (Array.isArray(entry.analyzed.modules) && typeof entry.analyzed.modules_hash === "string") {
+                        const actual = modulesHash(ctx.root, entry.analyzed.modules as string[], `$.reports[${index}].analyzed.modules`, errors);
+                        if (actual !== undefined && actual !== entry.analyzed.modules_hash) {
+                            errors.push(`$.reports[${index}].analyzed.modules_hash is stale: the covered modules hash to ${actual}; re-run the review against the checked tree`);
+                        }
                     }
                 });
             }

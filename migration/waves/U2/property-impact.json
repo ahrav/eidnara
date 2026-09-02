@@ -9,7 +9,7 @@
       "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
-  "destination_commit": "d0836a09fc2904aff4674ef1240ab100daec31d2",
+  "destination_commit": "c250400debdf328a7fb3365f1a4739aa81c7dde4",
   "touched_files": [
     "crates/cache-stability/src/lib.rs",
     "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
@@ -956,9 +956,9 @@
       },
       "strategy_decision": "Fixture test plus refusal tests: a fresh file's application id, user version, format-marker digest, and sqlite_schema inventory are compared to a destination-captured fixture that the generator example produces, and non-pristine files with foreign objects, a different consumer baseline, or a bypassed fence constraint are refused with the file bytes unchanged. Chosen over a property test because the identity is one fixed byte contract.",
       "audit_verdict": "pass",
-      "evidence_digest": "aa42c46d70603e3fba928ac2591ce3e5b94dce4f2aeb560a07e81ca95db88638",
-      "code_hash": "f5fcdb7b985185ce7cf4ae4c1451d33badd097bdb52eba352789f29581520e78",
-      "check_hash": "67f38363e9dab59769326af236a87aa74cf291252a5d2a0b03623399a2d3a9e2",
+      "evidence_digest": "3a449828d9f81a2c7d7be960cfe28bbe5912c193403fbb0cf25b9123378ac584",
+      "code_hash": "226d64ccd86a964375f1e28aa86daf259c0a6152909bca54575ab2bb52b0f764",
+      "check_hash": "d4c37492c7803d0a65954dc7028142bb1fbd56053ecac0c84f08aa6f2eace70d",
       "check_pointer": "crates/storage/src/lib.rs#L1255",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",

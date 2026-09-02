@@ -133,7 +133,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "04078f28b731fe3d93e4b15052bfee770bae39912a374895d3bda4c715d474c6",
+      "destination_sha256": "cff81f34c05848f51dba4387f70c84e998cb629c276f1108cc20e9678844ffa2",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -199,7 +199,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "a62211f96dce389c4a663f393e137e4c1c1130fe9a43af68ec3b3dfedf57e59d",
+      "destination_sha256": "f703dab9789e1d4e0c694e53d1c439420fd802b5f651aeb962279fd8f2ded7c4",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -210,7 +210,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "1b98da6ba0f0249372b7809f8d4ca0b804dfea060de4ecaa4254501ea7189b63",
+      "destination_sha256": "26fb4769a0087eb2a7a2c7a3bb605115396ec1227c9378eb4948b03b0f2fe009",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -276,7 +276,7 @@
     {
       "source": null,
       "destination": "docs/runbooks/architecture-review.md",
-      "destination_sha256": "3ed875d91d7eae01aab603c045b79410c142dc154e4b167f9510d48384331355",
+      "destination_sha256": "e688dc7364aba8a973230f79cf4d4aa90d3e80daf670fdee8c1b632e672d2ad8",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

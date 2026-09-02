@@ -10,6 +10,7 @@ import {
     verify,
     type CheckKind,
     type Context,
+    modulesHash,
 } from "./check";
 
 const digest = "a".repeat(64);
@@ -202,7 +203,7 @@ const valid: Record<CheckKind, Json> = {
             {
                 phase: "post-integration",
                 iteration: 1,
-                analyzed: { repo: "eidnara", commit, scope_hash: digest },
+                analyzed: { repo: "eidnara", commit, scope_hash: digest, modules: ["crates/lease"], modules_hash: digest },
                 report_hash: digest,
                 skill_sha256: digest,
                 candidates: [
@@ -705,6 +706,18 @@ describe("shape: architecture impact", () => {
         );
     });
 
+    test("a post-integration report names the modules it covers and their digest", () => {
+        const value = copy("architecture-impact");
+        const analyzed = (value.reports as Json[])[1]!.analyzed as Json;
+        delete analyzed.modules;
+        delete analyzed.modules_hash;
+        const errors = validateShape("architecture-impact", value);
+        expect(errors).toContain("$.reports[1].analyzed.modules must be an array");
+        expect(errors).toContain("$.reports[1].analyzed.modules_hash must be a non-empty string");
+        const preport = (copy("architecture-impact").reports as Json[])[0]!.analyzed as Json;
+        expect(preport.modules).toBeUndefined();
+    });
+
     test("loop-created Strong candidates may be recorded with a bead", () => {
         const value = copy("architecture-impact");
         const item = candidate(value);
@@ -852,17 +865,24 @@ describe("evidence: git-backed receipts", () => {
         gitIn(destination, ["commit", "-q", "-m", "seed"]);
         destinationCommit = gitIn(destination, ["rev-parse", "HEAD"]);
         write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
-        const architecture = copy("architecture-impact");
-        for (const report of architecture.reports as Json[]) {
-            if (report.phase === "post-integration") (report.analyzed as Json).commit = destinationCommit;
-        }
-        write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(architecture));
+        write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(architectureFor()));
         ctx = { root: destination, checkouts: { source } };
     });
 
     afterAll(() => {
         rmSync(work, { recursive: true, force: true });
     });
+
+    function architectureFor(): Json {
+        const architecture = copy("architecture-impact");
+        for (const report of architecture.reports as Json[]) {
+            if (report.phase !== "post-integration") continue;
+            const analyzed = report.analyzed as Json;
+            analyzed.commit = destinationCommit;
+            analyzed.modules_hash = modulesHash(destination, analyzed.modules as string[], "$", []);
+        }
+        return architecture;
+    }
 
     function impactFor(pin: string): Json {
         const impact = copy("property-impact");
@@ -976,6 +996,31 @@ describe("evidence: git-backed receipts", () => {
         } finally {
             gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
         }
+    });
+
+    test("a post-integration report whose covered modules changed after the review is stale", () => {
+        expect(verify("architecture-impact", architectureFor(), ctx)).toEqual([]);
+        const stale = architectureFor();
+        ((stale.reports as Json[])[1]!.analyzed as Json).modules_hash = "1".repeat(64);
+        expect(verify("architecture-impact", stale, ctx).some((error) => error.includes("analyzed.modules_hash is stale"))).toBe(true);
+        write(join(destination, "crates/lease/src/drift.rs"), "pub fn drift() {}\n");
+        gitIn(destination, ["add", "-A"]);
+        try {
+            const current = architectureFor();
+            expect(verify("architecture-impact", current, ctx)).toEqual([]);
+            const before = architectureFor();
+            gitIn(destination, ["rm", "-q", "-f", "crates/lease/src/drift.rs"]);
+            expect(verify("architecture-impact", before, ctx).some((error) => error.includes("analyzed.modules_hash is stale"))).toBe(true);
+        } finally {
+            rmSync(join(destination, "crates/lease/src/drift.rs"), { force: true });
+            gitIn(destination, ["add", "-A"]);
+        }
+    });
+
+    test("a post-integration report that covers a missing module directory is rejected", () => {
+        const value = architectureFor();
+        ((value.reports as Json[])[1]!.analyzed as Json).modules = ["crates/absent"];
+        expect(verify("architecture-impact", value, ctx)).toContain("$.reports[1].analyzed.modules names crates/absent, which is not a directory in the destination tree");
     });
 
     test("an impact record pinned to an unrelated destination commit is rejected", () => {
@@ -1196,7 +1241,9 @@ describe("cli", () => {
     test("every subcommand accepts its complete shape-only fixture where no evidence is needed", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-check-cli-"));
         try {
-            for (const kind of ["waivers", "property-catalog", "architecture-impact"] as CheckKind[]) {
+            // architecture-impact needs a git-tracked tree for its module digest, so it is
+            // covered by the evidence-backed suite instead.
+            for (const kind of ["waivers", "property-catalog"] as CheckKind[]) {
                 const path = join(root, `${kind}.json`);
                 writeFileSync(path, `${JSON.stringify(valid[kind])}\n`);
                 const result = cli([kind, path, "--root", root]);
