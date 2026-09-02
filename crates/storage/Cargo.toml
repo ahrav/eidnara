@@ -15,4 +15,4 @@ sqlite = ["dep:rusqlite"]
 [dependencies]
 storage-types = { workspace = true }
 lease = { workspace = true }
-rusqlite = { version = "0.39", features = ["bundled", "hooks"], optional = true }
+rusqlite = { workspace = true, optional = true }

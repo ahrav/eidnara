@@ -17,3 +17,4 @@ publish = false
 [workspace.dependencies]
 storage-types = { path = "crates/storage-types" }
 lease = { path = "crates/lease" }
+rusqlite = { version = "0.39", features = ["bundled", "hooks"] }
