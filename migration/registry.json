@@ -1026,52 +1026,12 @@
     },
     {
       "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/defer-pass-replays-frozen-bytes-verbatim.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/hard-bust-drains-deferred-work.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/never-minted-boundary-is-not-reconcile-pending.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
       "path": "docs/properties/shared-primitives/evidence/anchor-holds-while-reconcile-pending.md",
       "rationale": "Evidence for a record discovered at U2."
     },
     {
       "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/frozen-unit-order-is-preserved.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/migrations-apply-once-per-namespace.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/read-callbacks-cannot-write.md",
+      "path": "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md",
       "rationale": "Evidence for a record discovered at U2."
     },
     {
@@ -1081,17 +1041,72 @@
     },
     {
       "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/protected-transactions-pin-fence-durability.md",
-      "rationale": "Evidence for a record discovered at U2."
-    },
-    {
-      "kind": "authored",
-      "path": "docs/properties/shared-primitives/evidence/open-derives-lease-root-from-database-path.md",
+      "path": "docs/properties/shared-primitives/evidence/defer-pass-replays-frozen-bytes-verbatim.md",
       "rationale": "Evidence for a record discovered at U2."
     },
     {
       "kind": "authored",
       "path": "docs/properties/shared-primitives/evidence/descriptor-wire-shape-round-trips.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/episode-units-reset-at-run-boundary.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/fence-epoch-outside-sqlite-range-fails-closed.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/fence-tables-keep-their-durable-identity.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/fenced-write-is-atomic.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/frozen-unit-order-is-preserved.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/hard-bust-drains-deferred-work.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/migrations-apply-once-per-namespace.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/never-minted-boundary-is-not-reconcile-pending.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/protected-transactions-pin-fence-durability.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/read-callbacks-cannot-write.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md",
+      "rationale": "Evidence for a record discovered at U2."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shared-primitives/evidence/store-files-are-owner-only-after-open.md",
       "rationale": "Evidence for a record discovered at U2."
     }
   ]

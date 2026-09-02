@@ -23,7 +23,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "5a750de1690cce077ff2aa1cdefa95639c94f553331f656e81fbf870b082d36f",
+      "destination_sha256": "b4a6ccbb4b2afc71148e0058d78d6bf49fdeaf41999e85df5f6dff102ea939e6",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -34,7 +34,7 @@
     {
       "source": null,
       "destination": "package.json",
-      "destination_sha256": "8e1bad7ff7d85a79eebbfa864823a006d7085cec687fe3f9b9822f492c2a6704",
+      "destination_sha256": "d7bf3b974b34713505df1735cdddc96d352eafa615fa3041df1eeeeaf867139a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -122,7 +122,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "c17dd42b349f7688b31c5d97eab70f39b0e6661369321d1738436ba5221fb4ae",
+      "destination_sha256": "f2699269a67be565bb8d2ae603006f5dc1a1b80d3b6d1b0e066c5eb1d442c07d",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -133,7 +133,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "50fbe0a5d7b9aa4e224413aab799f2fcb4674c01999ef233492da04588c7ec3b",
+      "destination_sha256": "ed2d441b76144fea795400ac5e1235e322df03376054dcfb0b09b7cc7a561b0b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -199,7 +199,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "62e67fad55370490a9ea15363f28c9659423ad1c46c0464d0ff1d4f0026bfece",
+      "destination_sha256": "2caf0822e2ff9118858e55d064310eaa3642296c150ab6dd353ac2980695ac3d",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -210,7 +210,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "262e8eeeb7baa05c44857de551960f53b55ea5fa65e459d003022549ee05f4b8",
+      "destination_sha256": "65dd25b1a1f58040b492c58daa9a808a57969722a04d159f389f218a199738a8",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

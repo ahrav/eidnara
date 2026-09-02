@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "wave": "U2",
+  "source": {
+    "repo": "commons",
+    "commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
+  },
+  "description": "Disposition of the five commons crates that magic-context does not depend on, and of the source repository's fuzz, probe, catalog, CI, and publication artifacts. Registry state is measured with `GET https://crates.io/api/v1/crates/<name>`; each entry records the response digest. The source README's publication table was stale (it listed cortexkit-provider-usage at 0.4.1; the registry serves 0.7.0).",
+  "registry_probe": {
+    "method": "GET https://crates.io/api/v1/crates/<name>",
+    "migrated_crates_unpublished": {
+      "cortexkit-cache-core": {
+        "status": 404,
+        "versions": null,
+        "yanked": null,
+        "response_sha256": "5a565aba0d318502f860a97b463b39eef11f4f4282f0ba6790943285f4beff53",
+        "captured_at": "2026-09-02T17:11:46.914Z"
+      },
+      "cortexkit-lease": {
+        "status": 404,
+        "versions": null,
+        "yanked": null,
+        "response_sha256": "40305b8635d18d58629fb6a72e3c9d310a1051ee61b61f0f7a5b8f4f9b4599f6",
+        "captured_at": "2026-09-02T17:11:46.347Z"
+      },
+      "cortexkit-store-types": {
+        "status": 404,
+        "versions": null,
+        "yanked": null,
+        "response_sha256": "b346e86009f59e84ddc4c280635698fdea8e33fd5f6a2cf641b89180f519999b",
+        "captured_at": "2026-09-02T17:11:46.680Z"
+      },
+      "cortexkit-store": {
+        "status": 404,
+        "versions": null,
+        "yanked": null,
+        "response_sha256": "222880042e8f0f1ae20a8ec810711dbc4c0bd145019ded6a89f4a6752d0c6eec",
+        "captured_at": "2026-09-02T17:11:46.441Z"
+      }
+    }
+  },
+  "crates": [
+    {
+      "name": "cortexkit-paths",
+      "disposition": "frozen-published",
+      "registry": {
+        "status": 200,
+        "versions": [
+          "0.1.1",
+          "0.1.0"
+        ],
+        "yanked": [],
+        "response_sha256": "e5d49cc86ecbd5eeadfd4914a2031dc8110bd7c2ef687eb62b63bb089bdebaf3",
+        "captured_at": "2026-09-02T17:11:45.428Z"
+      },
+      "rationale": "Published; unknown registry consumers may resolve it (claustrum compiles a registry copy). Stays available and unyanked per R21. No Eidnara consumer needs it: the four migrated crates do not depend on it and magic-context does not import it.",
+      "destination": "none"
+    },
+    {
+      "name": "cortexkit-provider-usage",
+      "disposition": "frozen-published",
+      "registry": {
+        "status": 200,
+        "versions": [
+          "0.7.0",
+          "0.6.0",
+          "0.5.0",
+          "0.4.1",
+          "0.4.0",
+          "0.3.0",
+          "0.2.0",
+          "0.1.0"
+        ],
+        "yanked": [],
+        "response_sha256": "86ff9fa9fb49480ec900d7a7a968f918305da4e266bb7d0dc37ece86ad398109",
+        "captured_at": "2026-09-02T17:11:45.673Z"
+      },
+      "rationale": "Published through 0.7.0, none yanked. Stays available and unyanked per R21. No Eidnara consumer.",
+      "destination": "none"
+    },
+    {
+      "name": "cortexkit-model-catalog",
+      "disposition": "dropped",
+      "registry": {
+        "status": 404,
+        "versions": null,
+        "yanked": null,
+        "response_sha256": "6f2c2eb6f001f945c72fa21c927bbf1f3f68c9813e12e4e1091b9adf54651cee",
+        "captured_at": "2026-09-02T17:11:45.899Z"
+      },
+      "rationale": "Unpublished, no magic-context dependency, no consumer in scope. Source stays readable in the archived repository.",
+      "destination": "none"
+    },
+    {
+      "name": "cortexkit-push-seal",
+      "disposition": "dropped",
+      "registry": {
+        "status": 404,
+        "versions": null,
+        "yanked": null,
+        "response_sha256": "960d6e1f3aaae34c56c33c7f185f426ba8cfb92dd5c3e56a263030a79a6be604",
+        "captured_at": "2026-09-02T17:11:46.012Z"
+      },
+      "rationale": "Unpublished, no magic-context dependency. Its property catalog (`docs/property-catalog/cortexkit-push-seal/catalog.md`) stays in the archived source per R31 and does not enter the active Eidnara catalog.",
+      "destination": "none"
+    },
+    {
+      "name": "cortexkit-store-postgres",
+      "disposition": "dropped",
+      "registry": {
+        "status": 404,
+        "versions": null,
+        "yanked": null,
+        "response_sha256": "7915f91a09cf049b1f74f03d63d2bcbf2017314fe642fa25ef97b4e89079f95d",
+        "captured_at": "2026-09-02T17:11:46.108Z"
+      },
+      "rationale": "Unpublished second storage backend with no consumer in scope (no downstream `PostgresStore` use was found by the source inventory). Its checks are cited in the shared-primitives catalog as archived provenance only. Retiring the matching `StorageBackend::Postgres` variant from storage-types is architecture candidate C1, deferred behind the R18 golden-vector pin.",
+      "destination": "none"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact": "fuzz workspace",
+      "found": false,
+      "disposition": "none-to-migrate",
+      "evidence": "`git grep -il fuzz` at the source commit matches only catalog prose (`docs/property-catalog/cortexkit-push-seal/catalog.md`, the lease check inventory, and the lease system model); no fuzz crate, target, or workflow exists."
+    },
+    {
+      "artifact": "evidence probe",
+      "found": false,
+      "disposition": "none-to-migrate",
+      "evidence": "No probe binary, script, or workflow exists at the source commit; the word appears only in the lease catalog's instrumentation notes."
+    },
+    {
+      "artifact": "dropped-crate property catalogs",
+      "found": true,
+      "disposition": "stay-in-archived-source",
+      "evidence": "`docs/property-catalog/cortexkit-push-seal/catalog.md` belongs to a dropped crate (R31). The lease catalog is the only catalog for a migrated crate and moved to `docs/properties/shared-primitives/`."
+    },
+    {
+      "artifact": "CI: three-OS fmt/clippy/test matrix",
+      "found": true,
+      "disposition": "replaced",
+      "evidence": "`.github/workflows/ci.yml` runs Ubuntu, macOS, and Windows on stable. Eidnara's `ci.yml` runs Rust 1.89 and stable on `ubuntu-latest` only: the genesis release ships `linux-x64-gnu` only, and the Windows-only `cortexkit-paths` canonicalization vectors belong to a frozen crate."
+    },
+    {
+      "artifact": "CI: live PostgreSQL job",
+      "found": true,
+      "disposition": "dropped",
+      "evidence": "The `postgres` job tests `cortexkit-store-postgres` against a service container; the backend is dropped."
+    },
+    {
+      "artifact": "CI: push-seal version gate",
+      "found": true,
+      "disposition": "dropped",
+      "evidence": "The `actual_git_diff_requires_version_bump` gate belongs to `cortexkit-push-seal`, which is dropped."
+    },
+    {
+      "artifact": "CI: release tag resolver tests",
+      "found": true,
+      "disposition": "dropped",
+      "evidence": "`.github/scripts/resolve-release-tag.sh` and its test exist to publish crates from `<crate>-v<version>` tags; every Eidnara crate is `publish = false`."
+    },
+    {
+      "artifact": "publication gate (release.yml)",
+      "found": true,
+      "disposition": "dropped",
+      "evidence": "Tag-triggered `cargo publish` per crate (`docs/releasing.md`). No Eidnara crate publishes (R21); the four migrated crates were never published, so no registry successor question arises. The source workflow is disabled by the mechanical freeze in U8 (KTD18)."
+    },
+    {
+      "artifact": "claustrum review duty",
+      "found": true,
+      "disposition": "released",
+      "evidence": "`migration/owners.json` `released_duties[0]` records the storage and lease review duty as released to the single maintainer, citing the source README ownership section."
+    }
+  ]
+}

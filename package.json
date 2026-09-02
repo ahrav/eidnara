@@ -15,6 +15,6 @@
     "eidnara:check": "bun scripts/eidnara-migration/check.ts",
     "eidnara:registry-audit": "bun scripts/eidnara-migration/registry-audit.ts",
     "eidnara:property-index": "bun scripts/eidnara-migration/generate-property-index.ts",
-    "check:repo": "bun run typecheck && bun run test:eidnara-migration && bun run eidnara:check registry migration/registry.json && bun run eidnara:check waivers migration/waves/U1/waivers.json && bun run eidnara:check receipt migration/waves/U1/receipt.json"
+    "check:repo": "bun run typecheck && bun run test:eidnara-migration && bun run eidnara:check registry migration/registry.json && bun run eidnara:check waivers migration/waves/U1/waivers.json && bun run eidnara:check waivers migration/waves/U2/waivers.json && bun run eidnara:property-index docs/properties/shared-primitives --check && bun run eidnara:check property-catalog docs/properties/shared-primitives/index.json && bun run eidnara:check property-impact migration/waves/U2/property-impact.json && bun run eidnara:check architecture-impact migration/waves/U2/architecture-impact.json && bun run eidnara:check receipt migration/waves/U1/receipt.json && bun run eidnara:check receipt migration/waves/U2/receipt.json"
   }
 }
