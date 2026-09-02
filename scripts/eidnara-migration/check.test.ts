@@ -945,6 +945,23 @@ describe("evidence: git-backed receipts", () => {
         expect(errors.some((error) => error.includes(".code_hash is stale"))).toBe(true);
     });
 
+    test("a core record that lists a missing file is an error rather than an unverified hash", () => {
+        const impact = impactFor(sourceCommit);
+        const core = records(impact).find((record) => record.classification === "core")!;
+        core.code_hash = "1".repeat(64);
+        (core.files as string[]).push("crates/lease/src/absent.rs");
+        const errors = verify("property-impact", impact, ctx);
+        expect(errors.some((error) => error.includes("absent.rs, which is not a file in the destination tree"))).toBe(true);
+    });
+
+    test("a core record whose check pointer names a missing file is an error", () => {
+        const impact = impactFor(sourceCommit);
+        const core = records(impact).find((record) => record.classification === "core")!;
+        core.check_pointer = "crates/lease/src/absent.rs#L1";
+        const errors = verify("property-impact", impact, ctx);
+        expect(errors.some((error) => error.includes("check_pointer names crates/lease/src/absent.rs"))).toBe(true);
+    });
+
     test("a scope tree from an older commit is rejected even though it is reachable", () => {
         write(join(source, "crates/lease/src/added.rs"), "pub fn added() {}\n");
         gitIn(source, ["add", "-A"]);

@@ -635,7 +635,7 @@ mod sqlite_backend {
             .unwrap_or_else(|| PathBuf::from("."));
         std::fs::create_dir_all(&parent).map_err(StoreError::Io)?;
 
-        refuse_hard_links(Path::new(&path))?;
+        refuse_unfit_store_files(Path::new(&path))?;
         let epoch_floor = read_fence_epoch(Path::new(&path))?;
         let db_file_name = Path::new(&path)
             .file_name()
@@ -693,18 +693,24 @@ mod sqlite_backend {
         })
     }
 
-    /// Two names for one database inode derive two leases and two `-wal`/`-shm` pairs,
-    /// so neither writer sees the other's fence claim or WAL frames. The database and its
-    /// sidecars must each have exactly one name.
-    fn refuse_hard_links(path: &Path) -> Result<(), StoreError> {
+    /// The database and its sidecars must each be a regular file with exactly one name.
+    /// A FIFO or device would block or misbehave inside SQLite's open before any timeout
+    /// applies, a symlink is an alias, and two names for one inode derive two leases and
+    /// two `-wal`/`-shm` pairs, so neither writer sees the other's fence claim.
+    fn refuse_unfit_store_files(path: &Path) -> Result<(), StoreError> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             for suffix in ["", "-wal", "-shm"] {
                 let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
                 match std::fs::symlink_metadata(&candidate) {
-                    // Directories always carry several names; `protect_file` refuses them.
-                    Ok(meta) if meta.is_file() && meta.nlink() > 1 => {
+                    Ok(meta) if !meta.is_file() => {
+                        return Err(StoreError::Baseline(format!(
+                            "{} is not a regular file",
+                            candidate.display()
+                        )));
+                    }
+                    Ok(meta) if meta.nlink() > 1 => {
                         return Err(StoreError::Baseline(format!(
                             "{} has {} names; a store file must have exactly one",
                             candidate.display(),
@@ -835,6 +841,35 @@ mod sqlite_backend {
                 .execute_batch(&text)
                 .map_err(|e| StoreError::Baseline(format!("baseline text does not apply: {e}")))?;
             let objects = schema_inventory(&scratch)?;
+            // An attached database is neither part of the file nor of the comparison, and
+            // a file-backed attachment reaches outside the store's lease.
+            let attached: i64 = scratch
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_database_list WHERE name NOT IN ('main', 'temp')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            if attached != 0 {
+                return Err(StoreError::Baseline(format!(
+                    "baseline attaches {attached} database(s); a baseline addresses the main schema only"
+                )));
+            }
+            // The consumer text runs after the store's own DDL, so it could drop and
+            // recreate `fence` or `format_marker` with different constraints.
+            let store_only =
+                Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
+            store_only
+                .execute_batch(STORE_BASELINE)
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            for expected in schema_inventory(&store_only)? {
+                if !objects.contains(&expected) {
+                    return Err(StoreError::Baseline(format!(
+                        "baseline redefines infrastructure object `{}`",
+                        expected.name
+                    )));
+                }
+            }
             // A temporary object exists only on the connection that created it, so a
             // baseline that creates one presents a different schema after every reopen.
             let temporary: i64 = scratch
@@ -1140,6 +1175,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A FIFO at the database path would block SQLite's open before any timeout applies.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_database_path_is_refused_before_sqlite_opens_it() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        std::fs::create_dir_all(&root).expect("root");
+        let c_path = std::ffi::CString::new(path.as_str()).expect("path");
+        // SAFETY: `c_path` is a valid NUL-terminated string for the duration of the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "mkfifo");
+        match open_sqlite(&d, "").map(|_| ()) {
+            Err(StoreError::Baseline(m)) => {
+                assert!(m.contains("not a regular file"), "unexpected message: {m}")
+            }
+            other => panic!("a FIFO must be refused without blocking, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A baseline may address the main schema only: no attachments, and the store's own
+    /// tables keep the definitions `baseline.sql` gives them.
+    #[test]
+    fn a_baseline_that_attaches_or_redefines_infrastructure_is_rejected() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        for (ddl, needle) in [
+            (
+                "ATTACH ':memory:' AS aux; CREATE TABLE aux.t (k TEXT);",
+                "attaches",
+            ),
+            (
+                "DROP TABLE fence; CREATE TABLE fence (id INTEGER PRIMARY KEY CHECK (id = 0), epoch INTEGER NOT NULL CHECK (epoch = 1));",
+                "redefines infrastructure object `fence`",
+            ),
+            (
+                "DROP TABLE format_marker; CREATE TABLE format_marker (id INTEGER PRIMARY KEY, baseline_sha256 TEXT);",
+                "redefines infrastructure object `format_marker`",
+            ),
+        ] {
+            match open_sqlite(&d, ddl).map(|_| ()) {
+                Err(StoreError::Baseline(m)) => {
+                    assert!(m.contains(needle), "unexpected message: {m}")
+                }
+                other => panic!("{ddl} must be rejected, got {other:?}"),
+            }
+        }
+        assert!(!std::path::Path::new(path).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A consumer baseline cannot hang a trigger or index on the fence or the marker.
     #[test]
     fn a_baseline_that_hooks_an_infrastructure_table_is_rejected() {
@@ -1242,7 +1331,7 @@ mod tests {
         assert!(
             matches!(
                 open_sqlite(&via_file, "").map(|_| ()),
-                Err(StoreError::Backend(_))
+                Err(StoreError::Baseline(_))
             ),
             "a file-symlink alias must be refused"
         );
@@ -1254,7 +1343,7 @@ mod tests {
         ));
         assert!(matches!(
             open_sqlite(&via_file, "").map(|_| ()),
-            Err(StoreError::Backend(_))
+            Err(StoreError::Baseline(_))
         ));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1270,11 +1359,11 @@ mod tests {
         let target = root.join("elsewhere.db");
         std::os::unix::fs::symlink(&target, path).expect("dangling symlink");
         match open_sqlite(&d, "").map(|_| ()) {
-            Err(StoreError::Io(e)) => {
-                assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "unexpected error: {e}")
+            Err(StoreError::Baseline(m)) => {
+                assert!(m.contains("not a regular file"), "unexpected message: {m}")
             }
             Ok(()) => panic!("open through a dangling symlink must fail"),
-            Err(other) => panic!("expected an O_NOFOLLOW refusal, got {other:?}"),
+            Err(other) => panic!("expected a non-regular-file refusal, got {other:?}"),
         }
         assert!(!target.exists(), "the link target must not be created");
         let _ = std::fs::remove_dir_all(&root);
@@ -1380,7 +1469,7 @@ mod tests {
         let shm = format!("{path}-shm");
         std::fs::create_dir(&shm).expect("plant a directory at the shm path");
         match open_sqlite(&descriptor, "") {
-            Err(StoreError::Backend(_)) => {}
+            Err(StoreError::Backend(_) | StoreError::Baseline(_)) => {}
             Err(other) => panic!("protection failure must abort the open, got {other}"),
             Ok(_) => panic!("protection failure must abort the open, got a store"),
         }

@@ -1604,12 +1604,17 @@ function verifyKind(kind: CheckKind, root: JsonObject, ctx: Context): string[] {
             // Evidence binds to bytes, not to a commit: a core record's hashes must equal the
             // hashes of the files it covers in the checked tree.
             for (const core of shape.cores) {
+                // A missing covered file is itself an error; code_hash is only compared over the
+                // complete file set.
                 const bytes: Buffer[] = [];
                 let complete = true;
                 for (const file of core.files) {
                     const full = join(ctx.root, file);
                     if (existsSync(full) && statSync(full).isFile()) bytes.push(readFileSync(full));
-                    else complete = false;
+                    else {
+                        complete = false;
+                        errors.push(`${core.path}.files lists ${file}, which is not a file in the destination tree; the code_hash cannot be verified`);
+                    }
                 }
                 if (complete) {
                     const actual = sha256(Buffer.concat(bytes));
@@ -1625,6 +1630,8 @@ function verifyKind(kind: CheckKind, root: JsonObject, ctx: Context): string[] {
                         if (core.check_hash !== undefined && actual !== core.check_hash) {
                             errors.push(`${core.path}.check_hash is stale: ${checkFile} hashes to ${actual}; regenerate the record against the checked tree`);
                         }
+                    } else {
+                        errors.push(`${core.path}.check_pointer names ${checkFile}, which is not a file in the destination tree; the check_hash cannot be verified`);
                     }
                 }
             }
