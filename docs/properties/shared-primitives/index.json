@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shared-primitives",
   "source": "catalog.md",
-  "source_sha256": "61b2613ff33ecfcf850d1a5a4eab205a30dd004960032e98056142a77b84f93c",
+  "source_sha256": "45b4ca545de53f6355b7c1f299b2a0d86ac8e40edf189f120dc035a8e796845b",
   "records": [
     {
       "slug": "at-most-one-exclusive-holder-per-key",
@@ -798,18 +798,18 @@
         "state": "yes",
         "note": "a queued drop followed by a `Hard` bust whose rendered baseline omits the drop."
       },
-      "guarantee": "After a `Hard` pass, `pending_changes` is empty, every unit queued before it is in the frozen set, `boundary_id` equals the minted id when one is supplied, and `reconcile_pending` is false.",
+      "guarantee": "After a `Hard` pass, `pending_changes` is empty, every unit queued before it is in the frozen set, and `boundary_id` equals the minted id when one is supplied. `reconcile_pending` is false when the pass minted a boundary or the prior anchor is still present; a `Hard` that mints nothing while the anchor is absent keeps it true.",
       "check": {
         "semantics": "always",
-        "condition": "`always(pending_changes.is_empty() && queued_before ⊆ frozen_units && !reconcile_pending)` after every `Hard` step, plus `boundary_id == new_boundary_id` when the input supplies one."
+        "condition": "`always(pending_changes.is_empty() && queued_before ⊆ frozen_units)` after every `Hard` step, `boundary_id == new_boundary_id` when the input supplies one, and `!reconcile_pending` when `new_boundary_id.is_some() || boundary_match`."
       },
       "fault_timing": "A hard bust from any cause must drain deferred work; a bust that only froze its rendered units would leave queued drops invisible until a later bust.",
       "required_faults": "At least one unit queued through a `SoftPlus` pass before the `Hard` pass, and a rendered baseline that does not itself include the queued unit.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/hard-bust-drains-deferred-work.md). `step_hard` (`crates/cache-stability/src/lib.rs:253-265`) appends `pending_changes` into the rendered set before `apply_units`; `hard_drains_pending_changes_into_the_bust` (`crates/cache-stability/src/lib.rs:390-423`) asserts the drain, the mint, and the cleared flag."
+        "evidence": "[evidence](evidence/hard-bust-drains-deferred-work.md). `step_hard` (`crates/cache-stability/src/lib.rs:253-265`) appends `pending_changes` into the rendered set before `apply_units` and clears `reconcile_pending` only when it minted or the anchor is present; `hard_drains_pending_changes_into_the_bust` (`crates/cache-stability/src/lib.rs:390-423`) asserts the drain, the mint, and the cleared flag, and `hard_without_mint_on_absent_boundary_keeps_reconcile_pending` (`crates/cache-stability/src/lib.rs:654-689`) asserts the flag stays set when nothing reanchors."
       },
-      "existing_check": "`hard_drains_pending_changes_into_the_bust`, golden vectors with `queued` units; audited at U2.",
+      "existing_check": "`hard_drains_pending_changes_into_the_bust`, `hard_without_mint_on_absent_boundary_keeps_reconcile_pending`, golden vectors with `queued` units; audited at U2.",
       "impact": "A dropped compartment reappears in the cached prefix or never leaves it, so the rendered context and the recorded state disagree.",
       "open_questions": [],
       "extra": {}

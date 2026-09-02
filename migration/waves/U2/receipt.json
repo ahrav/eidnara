@@ -248,7 +248,7 @@
         "blob_sha": "d360c86177f779878d5b645bb31b1b06f0d0584c"
       },
       "destination": "docs/properties/shared-primitives/catalog.md",
-      "destination_sha256": "61b2613ff33ecfcf850d1a5a4eab205a30dd004960032e98056142a77b84f93c",
+      "destination_sha256": "45b4ca545de53f6355b7c1f299b2a0d86ac8e40edf189f120dc035a8e796845b",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -879,7 +879,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/index.json",
-      "destination_sha256": "0976ca6fa648dbdeb58d25c50a697b6947ed2e6361dae3bc65416bd0c54dd86d",
+      "destination_sha256": "8ebb8f50241e421d2ced8ddb492e51da25c0cba552a90352242feb31d2da4bdb",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -999,7 +999,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/hard-bust-drains-deferred-work.md",
-      "destination_sha256": "43522554ca4e3f0fd172e211b1c4cafd502251f940e4a218307716e3018a1b7c",
+      "destination_sha256": "d00cb70b280cc67fceb8d175983b6b57cd9ebcf39ea2df090221343550cb88ca",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

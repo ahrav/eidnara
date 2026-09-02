@@ -554,12 +554,12 @@ Type: safety
 Reachability: default-production - every `Hard` pass takes this branch.
 Status: active
 Exercised: yes - a queued drop followed by a `Hard` bust whose rendered baseline omits the drop.
-Guarantee: After a `Hard` pass, `pending_changes` is empty, every unit queued before it is in the frozen set, `boundary_id` equals the minted id when one is supplied, and `reconcile_pending` is false.
-Check: `always` - `always(pending_changes.is_empty() && queued_before ⊆ frozen_units && !reconcile_pending)` after every `Hard` step, plus `boundary_id == new_boundary_id` when the input supplies one.
+Guarantee: After a `Hard` pass, `pending_changes` is empty, every unit queued before it is in the frozen set, and `boundary_id` equals the minted id when one is supplied. `reconcile_pending` is false when the pass minted a boundary or the prior anchor is still present; a `Hard` that mints nothing while the anchor is absent keeps it true.
+Check: `always` - `always(pending_changes.is_empty() && queued_before ⊆ frozen_units)` after every `Hard` step, `boundary_id == new_boundary_id` when the input supplies one, and `!reconcile_pending` when `new_boundary_id.is_some() || boundary_match`.
 Fault/timing angle: A hard bust from any cause must drain deferred work; a bust that only froze its rendered units would leave queued drops invisible until a later bust.
 Required faults and enabling state: At least one unit queued through a `SoftPlus` pass before the `Hard` pass, and a rendered baseline that does not itself include the queued unit.
-Confidence: high - [evidence](evidence/hard-bust-drains-deferred-work.md). `step_hard` (`crates/cache-stability/src/lib.rs:253-265`) appends `pending_changes` into the rendered set before `apply_units`; `hard_drains_pending_changes_into_the_bust` (`crates/cache-stability/src/lib.rs:390-423`) asserts the drain, the mint, and the cleared flag.
-Existing check: `hard_drains_pending_changes_into_the_bust`, golden vectors with `queued` units; audited at U2.
+Confidence: high - [evidence](evidence/hard-bust-drains-deferred-work.md). `step_hard` (`crates/cache-stability/src/lib.rs:253-265`) appends `pending_changes` into the rendered set before `apply_units` and clears `reconcile_pending` only when it minted or the anchor is present; `hard_drains_pending_changes_into_the_bust` (`crates/cache-stability/src/lib.rs:390-423`) asserts the drain, the mint, and the cleared flag, and `hard_without_mint_on_absent_boundary_keeps_reconcile_pending` (`crates/cache-stability/src/lib.rs:654-689`) asserts the flag stays set when nothing reanchors.
+Existing check: `hard_drains_pending_changes_into_the_bust`, `hard_without_mint_on_absent_boundary_keeps_reconcile_pending`, golden vectors with `queued` units; audited at U2.
 Impact: A dropped compartment reappears in the cached prefix or never leaves it, so the rendered context and the recorded state disagree.
 Open questions: None.
 
