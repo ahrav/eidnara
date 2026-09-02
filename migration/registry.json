@@ -1,0 +1,893 @@
+{
+  "schema_version": 1,
+  "description": "Single classification registry for legacy identities, TypeScript ownership, persistent families, and authored destination files. Validated by `bun run eidnara:check registry migration/registry.json`. Identity classes: renamed (value leaves the tree, rename_to replaces it), frozen-durable (byte-level durable identity stays unchanged), external-protocol (wire, credential, schema, or tool-consumed identity stays unchanged), third-party. Family classes follow requirement R11. Entries seeded at U1 from commons@89abb409b8c71b03146eedb5bf64cd964f2a92c0 and magic-context@696a0fc199f9534de736bd319f8d28cdf720c332; later waves add entries as their file inventories arrive.",
+  "entries": [
+    {
+      "kind": "identity",
+      "value": "cortexkit-cache-core",
+      "class": "renamed",
+      "rename_to": "cache-stability",
+      "rationale": "Crate name is a source identity; no durable bytes depend on it.",
+      "evidence": [
+        "commons/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "cortexkit-lease",
+      "class": "renamed",
+      "rename_to": "lease",
+      "rationale": "Crate name is a source identity. Lease key derivation and `.lease` path suffix are frozen separately.",
+      "evidence": [
+        "commons/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "cortexkit-store-types",
+      "class": "renamed",
+      "rename_to": "storage-types",
+      "rationale": "Crate name is a source identity.",
+      "evidence": [
+        "commons/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "cortexkit-store",
+      "class": "renamed",
+      "rename_to": "storage",
+      "rationale": "Crate name is a source identity.",
+      "evidence": [
+        "commons/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-core",
+      "class": "renamed",
+      "rename_to": "context-core",
+      "rationale": "Crate name is a source identity.",
+      "evidence": [
+        "magic-context/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-secret-scanner",
+      "class": "renamed",
+      "rename_to": "secret-scanner",
+      "rationale": "Crate name is a source identity. Rule files and NOTICE move unchanged.",
+      "evidence": [
+        "magic-context/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-store",
+      "class": "renamed",
+      "rename_to": "memory-store",
+      "rationale": "Crate name is a source identity. The `mc-store.db` file name it opens is frozen separately.",
+      "evidence": [
+        "magic-context/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-module",
+      "class": "renamed",
+      "rename_to": "daemon",
+      "rationale": "Crate name is a source identity.",
+      "evidence": [
+        "magic-context/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-host",
+      "class": "renamed",
+      "rename_to": "host-runtime",
+      "rationale": "Crate name is a source identity. The authenticated daemon version string `mc-host/0.1.0` is frozen separately.",
+      "evidence": [
+        "magic-context/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-shm-transport",
+      "class": "renamed",
+      "rename_to": "shm-transport",
+      "rationale": "Crate name is a source identity.",
+      "evidence": [
+        "magic-context/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-tokenizer",
+      "class": "renamed",
+      "rename_to": "tokenizer",
+      "rationale": "Crate name is a source identity. Byte-determinism pins are frozen by their golden vectors.",
+      "evidence": [
+        "magic-context/Cargo.toml",
+        "migration/waves/U1/crate-name-collision-check.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "@cortexkit/opencode-magic-context",
+      "class": "renamed",
+      "rename_to": "@eidnara/opencode",
+      "rationale": "Published package name; the old name stays installable and is deprecated one exact version at a time after cutover.",
+      "evidence": [
+        "magic-context/scripts/generate-mc-host-release-manifest.ts",
+        "magic-context/release/mc-host-registry-gate.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "@cortexkit/pi-magic-context",
+      "class": "renamed",
+      "rename_to": "@eidnara/pi",
+      "rationale": "Published package name; deprecated after cutover.",
+      "evidence": [
+        "magic-context/scripts/generate-mc-host-release-manifest.ts",
+        "magic-context/release/mc-host-registry-gate.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "@cortexkit/magic-context",
+      "class": "renamed",
+      "rename_to": "@eidnara/cli",
+      "rationale": "Published package name; deprecated after cutover.",
+      "evidence": [
+        "magic-context/scripts/generate-mc-host-release-manifest.ts",
+        "magic-context/release/mc-host-registry-gate.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "@cortexkit/mc-shm-native",
+      "class": "renamed",
+      "rename_to": "@eidnara/shm-native",
+      "rationale": "Never published (registry gate records E404); the successor name is the first publication.",
+      "evidence": [
+        "magic-context/release/mc-host-registry-gate.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "@cortexkit/mc-host-linux-x64-gnu",
+      "class": "renamed",
+      "rename_to": "@eidnara/host-linux-x64-gnu",
+      "rationale": "Never published (registry gate records E404); the successor name is the first publication.",
+      "evidence": [
+        "magic-context/release/mc-host-registry-gate.json",
+        "magic-context/release/mc-host-payload-index.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "ck-mc-host",
+      "class": "renamed",
+      "rename_to": "eidnara-host",
+      "rationale": "Daemon binary name. The predecessor binary keeps its name in the source repositories and is stopped, not renamed, at cutover.",
+      "evidence": [
+        "magic-context/crates/mc-module/Cargo.toml"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "packages/mc-shm-native",
+      "class": "renamed",
+      "rename_to": "packages/shm-native",
+      "rationale": "Source path of the native addon package.",
+      "evidence": [
+        "magic-context/Cargo.toml"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "packages/mc-host-linux-x64-gnu",
+      "class": "renamed",
+      "rename_to": "packages/host-linux-x64-gnu",
+      "rationale": "Source path of the payload package.",
+      "evidence": [
+        "magic-context/release/mc-host-payload-index.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "MC_HOST_RING_PROFILE",
+      "class": "renamed",
+      "rename_to": "EIDNARA_HOST_RING_PROFILE",
+      "rationale": "User-facing runtime configuration variable; renamed with the product.",
+      "evidence": [
+        "magic-context/crates/mc-host/src"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "MC_HOST_RING_DEPTH",
+      "class": "renamed",
+      "rename_to": "EIDNARA_HOST_RING_DEPTH",
+      "rationale": "User-facing runtime configuration variable; renamed with the product.",
+      "evidence": [
+        "magic-context/crates/mc-host/src"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "MC_HOST_CANARY_",
+      "class": "external-protocol",
+      "rationale": "Prefix of the owner-hosted release-gate inputs (`MC_HOST_CANARY_DATA_ROOT`, `_LAUNCHER`, `_OPENCODE`, `_NODE`, `_PI_ENTRYPOINT`, `_BROCA_MODEL`, `_PAYLOAD_DIR`, `_PAYLOAD_MANIFEST_SHA256`). The canary host configuration is external to the repository and stays up through cutover.",
+      "evidence": [
+        "magic-context/docs/mc-host-release-gates.md",
+        "magic-context/release/mc-host-production-inputs.lock.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "0x4d435458",
+      "class": "frozen-durable",
+      "rationale": "`PRAGMA application_id` of every current-format SQLite family (`MCTX` in ASCII). Changing it makes existing databases unreadable.",
+      "evidence": [
+        "magic-context/docs/migration-version-lanes.md",
+        "magic-context/crates/mc-store/src/kernel/sqlite_runtime.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "MCTX",
+      "class": "frozen-durable",
+      "rationale": "ASCII spelling of the application id; appears in doc comments and diagnostics that name the pragma value.",
+      "evidence": [
+        "magic-context/docs/migration-version-lanes.md"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "user_version = 1",
+      "class": "frozen-durable",
+      "rationale": "`PRAGMA user_version` of the direct format epoch.",
+      "evidence": [
+        "magic-context/docs/migration-version-lanes.md"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc_format_marker",
+      "class": "frozen-durable",
+      "rationale": "Immutable marker table name inside every current-format database; part of the exact `sqlite_schema` inventory.",
+      "evidence": [
+        "magic-context/docs/migration-version-lanes.md",
+        "magic-context/crates/mc-store/src/kernel/sqlite_runtime.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc_pass_trace",
+      "class": "frozen-durable",
+      "rationale": "Frozen DDL object name; part of the exact `sqlite_schema` inventory.",
+      "evidence": [
+        "docs/plans/2026-09-01-0633-refactor-eidnara-repository-migration-plan.md R3"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "cortexkit",
+      "class": "frozen-durable",
+      "rationale": "`MANAGED_DIR_NAME`: the data-root directory component under `XDG_DATA_HOME`. Renaming it relocates every family and breaks the lifetime fence with the predecessor.",
+      "evidence": [
+        "magic-context/crates/mc-host/src/instance.rs:156",
+        "magic-context/crates/mc-host/src/lifecycle.rs:166"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "cortexkit/magic-context",
+      "class": "frozen-durable",
+      "rationale": "Data-root path of `context.db` (`$XDG_DATA_HOME/cortexkit/magic-context/context.db`).",
+      "evidence": [
+        "magic-context/packages/plugin/src"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": ".mc-host-coordination",
+      "class": "frozen-durable",
+      "rationale": "`COORDINATION_DIR_NAME`: directory holding `transaction.lock`; shared with the predecessor during handoff.",
+      "evidence": [
+        "magic-context/crates/mc-host/src/lifecycle.rs:33"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "lifetime.lock",
+      "class": "frozen-durable",
+      "rationale": "Exclusive flock that fences daemon incarnations; lives outside the managed directory and is never renamed.",
+      "evidence": [
+        "magic-context/crates/mc-host/src/lifecycle.rs:39"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "transaction.lock",
+      "class": "frozen-durable",
+      "rationale": "Version-neutral cross-process store mutation lock.",
+      "evidence": [
+        "magic-context/crates/mc-host/src/lifecycle.rs:36"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "XDG_DATA_HOME",
+      "class": "external-protocol",
+      "rationale": "Data-root resolution input. Relative values are ignored and `$HOME/.local/share` is the fallback; the successor must resolve the same root as the predecessor.",
+      "evidence": [
+        "magic-context/crates/mc-host/src/instance.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-store.db",
+      "class": "frozen-durable",
+      "rationale": "Module store file name opened in production (`docs/migration-version-lanes.md` still says `store.db`; the code opens `mc-store.db`).",
+      "evidence": [
+        "magic-context/crates/mc-store/src"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": ".lease",
+      "class": "frozen-durable",
+      "rationale": "File suffix of lease records; the path is derived from the FNV-1a hash of the lease key triple `(module_id, backend, scope_key)`.",
+      "evidence": [
+        "commons/docs/property-catalogs/cortexkit-lease/README.md",
+        "commons/crates/cortexkit-lease/src/lib.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-host/0.1.0",
+      "class": "external-protocol",
+      "rationale": "Authenticated `daemon_ver` transcript field bound by the proof MAC; changing it breaks client compatibility decisions.",
+      "evidence": [
+        "magic-context/release/mc-host-release.json",
+        "magic-context/scripts/generate-mc-host-release-manifest.ts"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-host-active-selection-credential-v1",
+      "class": "external-protocol",
+      "rationale": "Credential domain separator.",
+      "evidence": [
+        "magic-context/crates/mc-host/src"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-m1-claim-external-v1",
+      "class": "external-protocol",
+      "rationale": "Claim domain separator.",
+      "evidence": [
+        "magic-context/crates/mc-module/src"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-m1-claim-in-session-v1",
+      "class": "external-protocol",
+      "rationale": "Claim domain separator.",
+      "evidence": [
+        "magic-context/crates/mc-module/src"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "mc-synapse-fingerprint-v2",
+      "class": "external-protocol",
+      "rationale": "Synapse fingerprint domain separator.",
+      "evidence": [
+        "magic-context/crates/mc-host/src"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.daemon/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id consumed by clients and tooling.",
+      "evidence": [
+        "magic-context/release/mc-host-release.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-release/v1",
+      "class": "external-protocol",
+      "rationale": "Release contract schema id; its canonical-JSON digest is embedded in Rust and TypeScript outputs.",
+      "evidence": [
+        "magic-context/release/mc-host-release.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-harness-closure/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of pinned harness closures.",
+      "evidence": [
+        "magic-context/release/mc-host-harness-closures"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-harness-closure/v2",
+      "class": "external-protocol",
+      "rationale": "Schema id of pinned harness closures.",
+      "evidence": [
+        "magic-context/scripts/run-mc-host-closure-qualification.ts"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-payload-manifest/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of the payload manifest.",
+      "evidence": [
+        "magic-context/scripts/build-mc-host-payload.ts"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-payload-index/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of the payload index.",
+      "evidence": [
+        "magic-context/release/mc-host-payload-index.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-production-inputs-lock/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of the production-inputs lock.",
+      "evidence": [
+        "magic-context/release/mc-host-production-inputs.lock.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-production-input-sources/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of the production-input sources record.",
+      "evidence": [
+        "magic-context/release/mc-host-production-input-sources.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-provider-credentials/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of the provider-credentials record.",
+      "evidence": [
+        "magic-context/release/mc-host-provider-credentials.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-registry-gate/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of the predecessor registry gate.",
+      "evidence": [
+        "magic-context/release/mc-host-registry-gate.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-registry-gate/v2",
+      "class": "external-protocol",
+      "rationale": "Schema id of the predecessor registry gate.",
+      "evidence": [
+        "magic-context/scripts/generate-mc-host-release-manifest.ts"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-installed-release-evidence/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of installed-release evidence.",
+      "evidence": [
+        "magic-context/scripts/verify-mc-host-release-evidence.ts"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-release-proof/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of release proof records.",
+      "evidence": [
+        "magic-context/scripts"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-release-qualification/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of release qualification records.",
+      "evidence": [
+        "magic-context/scripts/qualify-mc-host-production-inputs.ts"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-synapse-smoke/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of Synapse smoke records.",
+      "evidence": [
+        "magic-context/scripts"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-test-report/v0",
+      "class": "external-protocol",
+      "rationale": "Schema id of test reports.",
+      "evidence": [
+        "magic-context/scripts"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "magic-context.mc-host-test-report/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of test reports.",
+      "evidence": [
+        "magic-context/scripts"
+      ]
+    },
+    {
+      "kind": "family",
+      "name": "kernel-store",
+      "class": "retained-authoritative-baseline",
+      "rationale": "Semantic kernel store. Identity: application id, user version, marker row, incarnation id, schema-component manifest digest, exact `sqlite_schema` inventory.",
+      "literals": [
+        "core.sqlite"
+      ],
+      "paths": [
+        "<data-root>/core.sqlite"
+      ],
+      "mismatch_behavior": "refuse-without-mutation",
+      "probe": "non-mutating open: PRAGMA application_id == 0x4d435458, PRAGMA user_version == 1, one mc_format_marker row, sqlite_schema inventory equals fixtures/vocabulary/kernel-format-vocabulary-v1.json",
+      "baseline_source": "U4 composes one final baseline from the kernel schema components at the pinned magic-context commit and compares its identities to the predecessor-captured vocabulary fixture",
+      "restore_policy": "current-format backup and restore only; legacy-format import and every backfill path are excluded"
+    },
+    {
+      "kind": "family",
+      "name": "context-store",
+      "class": "retained-authoritative-baseline",
+      "rationale": "Harness-facing context database. Written by transitional TypeScript storage until U5 moves authority to the daemon; keeps the U4 baseline and authoritative disposition through that move.",
+      "literals": [
+        "context.db",
+        "database/context.db",
+        "cortexkit/magic-context/context.db"
+      ],
+      "paths": [
+        "$XDG_DATA_HOME/cortexkit/magic-context/context.db"
+      ],
+      "mismatch_behavior": "refuse-without-mutation",
+      "probe": "non-mutating open: PRAGMA application_id == 0x4d435458, PRAGMA user_version == 1, one mc_format_marker row, sqlite_schema inventory equals fixtures/vocabulary/direct-format-vocabulary-v1.json",
+      "baseline_source": "U4 final baseline; direct-format vocabulary copied verbatim from packages/plugin/src/features/magic-context/fixtures/direct-format-vocabulary-v1.json at the pinned commit",
+      "restore_policy": "current-format backup and restore only; reset is an explicit Doctor operation that quarantines, never a startup branch"
+    },
+    {
+      "kind": "family",
+      "name": "context-store-snapshots",
+      "class": "component-of-family",
+      "rationale": "Backup and snapshot sidecars of `context.db`; they share its identity contract.",
+      "literals": [
+        "context-db-snapshot.sqlite",
+        "context-db-snapshot-pre-probe.sqlite",
+        "{BACKUP_PREFIX}{}-{unique}.sqlite"
+      ],
+      "paths": [
+        "same directory as context.db"
+      ],
+      "mismatch_behavior": "refuse-without-mutation",
+      "family": "context-store"
+    },
+    {
+      "kind": "family",
+      "name": "module-store",
+      "class": "retained-authoritative-baseline",
+      "rationale": "Module store opened by the daemon. Production opens `mc-store.db`; the `store.db` name in docs/migration-version-lanes.md is stale.",
+      "literals": [
+        "mc-store.db"
+      ],
+      "paths": [
+        "<data-root>/mc-store.db"
+      ],
+      "mismatch_behavior": "refuse-without-mutation",
+      "probe": "non-mutating open: PRAGMA application_id == 0x4d435458, PRAGMA user_version == 1, one mc_format_marker row, sqlite_schema inventory equals the captured kernel-format vocabulary",
+      "baseline_source": "U4 final baseline composed at the pinned magic-context commit",
+      "restore_policy": "current-format backup and restore only"
+    },
+    {
+      "kind": "family",
+      "name": "artifact-cas",
+      "class": "retained-authoritative-baseline",
+      "rationale": "Content-addressed artifact store. Identity is the content digest; no schema baseline beyond the on-disk layout.",
+      "literals": [
+        "artifact.bin"
+      ],
+      "paths": [
+        "<data-root>/artifacts/"
+      ],
+      "mismatch_behavior": "refuse-without-mutation",
+      "probe": "digest of each artifact equals its address; layout version marker matches",
+      "baseline_source": "U4 records the CAS layout at the pinned magic-context commit",
+      "restore_policy": "included in current-format backup; referenced artifacts restore with the kernel store"
+    },
+    {
+      "kind": "family",
+      "name": "opencode-db",
+      "class": "foreign",
+      "rationale": "Harness-owned database that Eidnara writes to but does not own (R39). No baseline, no backup or restore claim; the single-writer property applies only to Eidnara-owned families.",
+      "literals": [
+        "opencode.db"
+      ],
+      "paths": [
+        "harness data directory"
+      ],
+      "mismatch_behavior": "skip-and-report",
+      "probe": "schema-compatibility probe before every write; refusal is reported as a non-failing event class"
+    },
+    {
+      "kind": "family",
+      "name": "purge-intent",
+      "class": "retained-coordination-state",
+      "rationale": "Kernel purge coordination log.",
+      "literals": [
+        "purge-intent.jsonl"
+      ],
+      "paths": [
+        "<data-root>/purge-intent.jsonl"
+      ],
+      "mismatch_behavior": "recreate"
+    },
+    {
+      "kind": "family",
+      "name": "window-reports",
+      "class": "retained-derived-projection",
+      "rationale": "Ledger derived from authoritative state.",
+      "literals": [
+        "window-reports.jsonl"
+      ],
+      "paths": [
+        "<data-root>/window-reports.jsonl"
+      ],
+      "mismatch_behavior": "rebuild",
+      "rebuild_contract": "deterministic"
+    },
+    {
+      "kind": "family",
+      "name": "embedding-load-lock",
+      "class": "retained-coordination-state",
+      "rationale": "Embedding provider load coordination.",
+      "literals": [
+        ".load.lock"
+      ],
+      "paths": [
+        "<data-root>/.load.lock"
+      ],
+      "mismatch_behavior": "recreate"
+    },
+    {
+      "kind": "family",
+      "name": "host-locks",
+      "class": "retained-coordination-state",
+      "rationale": "Lifetime fence and transaction lock shared with the predecessor during handoff; identities frozen in the identity entries.",
+      "literals": [
+        "lifetime.lock",
+        "transaction.lock"
+      ],
+      "paths": [
+        "$XDG_DATA_HOME/lifetime.lock",
+        "$XDG_DATA_HOME/cortexkit/.mc-host-coordination/transaction.lock"
+      ],
+      "mismatch_behavior": "recreate"
+    },
+    {
+      "kind": "family",
+      "name": "retina-fenced-state",
+      "class": "retained-coordination-state",
+      "rationale": "Path-fenced Retina coordination state.",
+      "literals": [
+        ".handle",
+        "operator.handle"
+      ],
+      "paths": [
+        "plexus/",
+        "claustrum/",
+        "staging/",
+        "*.handle",
+        "binding-key"
+      ],
+      "mismatch_behavior": "recreate"
+    },
+    {
+      "kind": "family",
+      "name": "search-index",
+      "class": "planned",
+      "rationale": "Lexical search projection that kernel work creates; stays planned until the file exists.",
+      "literals": [
+        "search.sqlite"
+      ],
+      "paths": [],
+      "mismatch_behavior": "none"
+    },
+    {
+      "kind": "family",
+      "name": "vector-projections",
+      "class": "planned",
+      "rationale": "Provider-dependent vector projections; rebuild requires stable provider identity and bounded prerequisites once created.",
+      "literals": [],
+      "paths": [],
+      "mismatch_behavior": "none"
+    },
+    {
+      "kind": "family",
+      "name": "test-fixtures",
+      "class": "test-only",
+      "rationale": "Names that appear only in tests and fixtures.",
+      "literals": [
+        "store.db",
+        "claim-vector.db",
+        "embedding.bin"
+      ],
+      "paths": [],
+      "mismatch_behavior": "none"
+    },
+    {
+      "kind": "authored",
+      "path": "Cargo.toml",
+      "rationale": "Destination workspace manifest."
+    },
+    {
+      "kind": "authored",
+      "path": "package.json",
+      "rationale": "Destination package manifest."
+    },
+    {
+      "kind": "authored",
+      "path": "tsconfig.json",
+      "rationale": "Typecheck configuration for migration tooling."
+    },
+    {
+      "kind": "authored",
+      "path": "rust-toolchain.toml",
+      "rationale": "Pinned toolchain."
+    },
+    {
+      "kind": "authored",
+      "path": "rustfmt.toml",
+      "rationale": "Style edition."
+    },
+    {
+      "kind": "authored",
+      "path": ".gitignore",
+      "rationale": "Ignore rules."
+    },
+    {
+      "kind": "authored",
+      "path": "LICENSE",
+      "rationale": "MIT license text."
+    },
+    {
+      "kind": "authored",
+      "path": "NOTICE",
+      "rationale": "Third-party notice index."
+    },
+    {
+      "kind": "authored",
+      "path": "README.md",
+      "rationale": "Repository overview."
+    },
+    {
+      "kind": "authored",
+      "path": ".github/workflows/ci.yml",
+      "rationale": "Repository CI gates."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/registry.json",
+      "rationale": "Classification registry."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/upstream-readiness.json",
+      "rationale": "Wave readiness beads."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/owners.json",
+      "rationale": "Role owners and go/no-go rule."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U1/receipt.json",
+      "rationale": "U1 receipt."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U1/waivers.json",
+      "rationale": "U1 waivers."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U1/crate-name-collision-check.json",
+      "rationale": "cargo metadata collision evidence."
+    },
+    {
+      "kind": "authored",
+      "path": "scripts/eidnara-migration/check.ts",
+      "rationale": "Control-record validator."
+    },
+    {
+      "kind": "authored",
+      "path": "scripts/eidnara-migration/check.test.ts",
+      "rationale": "Validator tests."
+    },
+    {
+      "kind": "authored",
+      "path": "scripts/eidnara-migration/registry-audit.ts",
+      "rationale": "npm registry audit."
+    },
+    {
+      "kind": "authored",
+      "path": "scripts/eidnara-migration/registry-audit.test.ts",
+      "rationale": "Registry audit tests."
+    },
+    {
+      "kind": "authored",
+      "path": "scripts/eidnara-migration/generate-property-index.ts",
+      "rationale": "Property catalog index generator."
+    },
+    {
+      "kind": "authored",
+      "path": "scripts/eidnara-migration/generate-property-index.test.ts",
+      "rationale": "Index generator tests."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/README.md",
+      "rationale": "Property catalog overview."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/runbooks/architecture-review.md",
+      "rationale": "Architecture review rubric."
+    },
+    {
+      "kind": "authored",
+      "path": "fixtures/vocabulary/README.md",
+      "rationale": "Placeholder describing the predecessor-captured fixtures U4 adds."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U1/review-notes.md",
+      "rationale": "U1 per-file review evidence."
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+# Third-party notices
+
+Eidnara is licensed under the MIT License (see `LICENSE`).
+
+This file indexes third-party notices that ship inside the repository. Each
+migration wave that carries a third-party component adds a row here and keeps
+the component's own `NOTICE` file next to the code it covers.
+
+| Component | Location | Arrives in wave |
+|---|---|---|
+| Secret-scanner rules (gossip-rs derived) | `crates/secret-scanner/NOTICE` | U4 |
+| ONNX Runtime and bundled model | `packages/host-linux-x64-gnu/NOTICE` | U7 |
+
+No third-party component is present yet. The table is the contract for where
+each notice must land. The owning wave's receipt lists the notice file as a
+`verbatim` copy from the source repository.

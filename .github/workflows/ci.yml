@@ -1,0 +1,85 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install TypeScript tooling
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck migration tooling
+        run: bun run typecheck
+
+      - name: Migration tooling tests
+        run: bun run test:eidnara-migration
+
+      - name: Registry
+        run: bun run eidnara:check registry migration/registry.json
+
+      - name: Waivers
+        run: |
+          for file in migration/waves/*/waivers.json; do
+            bun run eidnara:check waivers "$file"
+          done
+
+      - name: Receipts without source checkouts
+        run: bun run eidnara:check receipt migration/waves/U1/receipt.json
+
+      - name: Property catalog indexes
+        run: |
+          shopt -s nullglob
+          parts=(docs/properties/*/catalog.md)
+          if [ "${#parts[@]}" -eq 0 ]; then
+            echo "no property catalogs yet"
+            exit 0
+          fi
+          for catalog in "${parts[@]}"; do
+            part=$(dirname "$catalog")
+            bun scripts/eidnara-migration/generate-property-index.ts "$part" --check
+            bun run eidnara:check property-catalog "$part/index.json"
+          done
+
+      - name: Rust toolchain
+        if: hashFiles('crates/**/Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+          components: clippy, rustfmt
+
+      - name: Rust format
+        if: hashFiles('crates/**/Cargo.toml') != ''
+        run: cargo fmt --all -- --check
+
+      - name: Rust lint
+        if: hashFiles('crates/**/Cargo.toml') != ''
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Rust tests
+        if: hashFiles('crates/**/Cargo.toml') != ''
+        run: cargo test --workspace --all-targets --all-features --locked
+
+      - name: Forbidden references
+        run: |
+          set -euo pipefail
+          # Sibling checkouts, CI stubs, and legacy backfill paths never enter the destination tree.
+          if grep -rnE 'path *= *"\.\./' --include=Cargo.toml . ; then
+            echo "sibling path dependency found"; exit 1
+          fi
+          if grep -rln 'provision-rust-ci-stubs\|storage-v22-backfill' --exclude-dir=.git --exclude-dir=node_modules --exclude=ci.yml . ; then
+            echo "cross-repo stub or backfill path found"; exit 1
+          fi

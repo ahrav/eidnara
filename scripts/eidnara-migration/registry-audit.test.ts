@@ -1,0 +1,105 @@
+import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { audit, checkGate, EIDNARA_PACKAGES, run, SCHEMA, type CommandResult, type Runner } from "./registry-audit";
+
+const now = new Date("2026-09-02T12:00:00Z");
+
+function ok(stdout: string): CommandResult {
+    return { status: 0, stdout, stderr: "" };
+}
+
+function e404(): CommandResult {
+    return { status: 1, stdout: "", stderr: "npm error code E404\nnpm error 404 Not Found" };
+}
+
+function fakeRunner(overrides: Record<string, CommandResult> = {}): Runner {
+    return (args) => {
+        const command = args.join(" ");
+        if (command in overrides) return overrides[command]!;
+        if (command === "--version") return ok("11.16.0\n");
+        if (args[0] === "view") {
+            const name = args[1] ?? "";
+            if (name.startsWith("@eidnara/")) {
+                return ok(JSON.stringify({ versions: ["1.0.0-reserved.1"], "dist-tags": { reserved: "1.0.0-reserved.1" } }));
+            }
+            if (name.endsWith("mc-shm-native") || name.endsWith("mc-host-linux-x64-gnu")) return e404();
+            return ok(JSON.stringify({ versions: ["0.38.0"], "dist-tags": { latest: "0.38.0" } }));
+        }
+        if (args[0] === "trust") return ok("(no trusted publishers)\n");
+        if (args[0] === "token") return ok("(no tokens)\n");
+        if (args[0] === "org") return ok("ahrav - owner\n");
+        return { status: 1, stdout: "", stderr: "npm error code EUNKNOWN" };
+    };
+}
+
+describe("registry audit", () => {
+    test("captures one probe per name plus trust, token, and org probes with digests", () => {
+        const gate = audit(fakeRunner(), now);
+        expect(gate.schema).toBe(SCHEMA);
+        expect(gate.npm_version).toBe("11.16.0");
+        expect(gate.probes).toHaveLength(10 + EIDNARA_PACKAGES.length + 2);
+        for (const probe of gate.probes) {
+            expect(probe.response_sha256).toMatch(/^[0-9a-f]{64}$/);
+            expect(typeof probe.exit_status).toBe("number");
+        }
+        expect(checkGate(gate, now)).toEqual([]);
+        expect(checkGate(gate, now, { requireReservation: true })).toEqual([]);
+    });
+
+    test("rejects a gate older than 24 hours", () => {
+        const gate = audit(fakeRunner(), now);
+        const later = new Date(now.getTime() + 25 * 60 * 60 * 1000);
+        expect(checkGate(gate, later)).toContain(`gate is stale: captured ${gate.captured_at}, older than 24 hours`);
+        expect(checkGate(gate, new Date(now.getTime() + 23 * 60 * 60 * 1000))).toEqual([]);
+    });
+
+    test("rejects missing digests, missing probes, and unsupported npm", () => {
+        const gate = audit(fakeRunner(), now);
+        const probe = gate.probes[0]!;
+        const broken = { ...gate, probes: [{ ...probe, response_sha256: "" }] };
+        const errors = checkGate(broken, now);
+        expect(errors).toContain(`probes[0] (${probe.command}) is missing a response digest`);
+        expect(errors).toContain("missing token probe");
+        expect(errors).toContain("missing org probe");
+        expect(checkGate({ ...gate, npm_version: "10.9.0" }, now)).toContain("npm_version 10.9.0 does not support npm trust; need >= 11");
+    });
+
+    test("rejects a non-prerelease @eidnara version and a published predecessor payload name", () => {
+        const runner = fakeRunner({
+            "view @eidnara/cli versions dist-tags --json": ok(JSON.stringify({ versions: ["1.0.0-reserved.1", "1.0.0"], "dist-tags": { latest: "1.0.0" } })),
+            "view @cortexkit/mc-shm-native versions dist-tags --json": ok(JSON.stringify({ versions: ["0.38.0"], "dist-tags": {} })),
+        });
+        const errors = checkGate(audit(runner, now), now);
+        expect(errors).toContain("@eidnara/cli has non-prerelease versions 1.0.0; genesis has not been published");
+        expect(errors).toContain("@cortexkit/mc-shm-native must stay unpublished (E404); observed state published");
+    });
+
+    test("--require-reservation demands an inert reservation on every @eidnara name", () => {
+        const runner = fakeRunner({ "view @eidnara/pi versions dist-tags --json": e404() });
+        const gate = audit(runner, now);
+        expect(checkGate(gate, now)).toEqual([]);
+        expect(checkGate(gate, now, { requireReservation: true })).toContain(
+            "@eidnara/pi holds no inert reservation version (expected 1.0.0-reserved.N); observed state unpublished",
+        );
+    });
+
+    test("run writes the gate file and --check reads it back", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-registry-audit-"));
+        try {
+            mkdirSync(join(root, "release"));
+            expect(run([], root, fakeRunner(), now)).toBe(0);
+            const written = JSON.parse(readFileSync(join(root, "release", "registry-gate.json"), "utf8")) as { schema: string };
+            expect(written.schema).toBe(SCHEMA);
+            expect(run(["--check"], root, fakeRunner(), now)).toBe(0);
+            expect(run(["--check", "--require-reservation"], root, fakeRunner(), now)).toBe(0);
+            expect(run(["--check"], root, fakeRunner(), new Date(now.getTime() + 48 * 60 * 60 * 1000))).toBe(1);
+            writeFileSync(join(root, "release", "registry-gate.json"), "{not json");
+            expect(run(["--check"], root, fakeRunner(), now)).toBe(1);
+            expect(run(["--bogus"], root, fakeRunner(), now)).toBe(2);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+});

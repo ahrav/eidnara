@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "roles": {
+    "release": { "person": "ahrav", "github": "ahrav" },
+    "abort": { "person": "ahrav", "github": "ahrav" },
+    "storage": { "person": "ahrav", "github": "ahrav" },
+    "archive": { "person": "ahrav", "github": "ahrav" },
+    "architecture": { "person": "ahrav", "github": "ahrav" },
+    "review": { "person": "ahrav", "github": "ahrav" }
+  },
+  "go_no_go_rule": {
+    "applies_to": ["disable-harnesses", "stop-predecessor", "authorize-writes", "publish", "promote-latest", "deprecate", "archive"],
+    "record": "release/cutover-record.json",
+    "minimum_lead_time_minutes": 60,
+    "written_outside_execution_session": true,
+    "entry_shape": "conditional pre-commitment: the GO entry names the preconditions the step observes at execution (for authorize-writes: prepared-mode identity comparison passing); the step refuses if any precondition is unmet",
+    "same_person_writes_and_executes": true
+  },
+  "released_duties": [
+    {
+      "duty": "claustrum review of storage and lease changes",
+      "status": "released to the single maintainer",
+      "citation": "commons/README.md ownership section"
+    }
+  ]
+}
