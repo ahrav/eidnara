@@ -1,5 +1,4 @@
 //! The module defines a private complete-frame channel boundary between the connection engine and a transport.
-//! a transport.
 //!
 //! The contract is directional: a cloneable [`FrameSender`] admits complete
 //! outbound frames in FIFO order against one logical writer, and the
@@ -12,8 +11,8 @@
 use std::io;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
@@ -83,191 +82,6 @@ impl CopyCounter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProducerError {
-    BoundExceedsSpans,
-    /// A write would cross the checked bound.
-    Overflow,
-    /// Committed length is greater than the reservation.
-    CommitOutsideReservation,
-    /// Cursor does not equal the committed exact length.
-    Underfill,
-    /// An earlier error already aborted the reservation.
-    Aborted,
-}
-
-/// `ProducerReservation` writes directly into backend-owned spans and tracks its cursor.
-///
-/// `C` is the backend's descriptor/byte charge guard. It moves into
-/// [`ProducedBody`] on success and drops immediately on constructor failure,
-/// The charge guard drops on overflow, underfill, explicit abort, and ordinary drop.
-/// `C` returns its charge when it drops.
-#[must_use = "producer reservations must be committed or aborted"]
-pub struct ProducerReservation<'storage, C> {
-    spans: &'storage mut [&'storage mut [u8]],
-    bound: usize,
-    cursor: usize,
-    charge: Option<C>,
-    aborted: bool,
-}
-
-impl<'storage, C> ProducerReservation<'storage, C> {
-    pub fn new(
-        spans: &'storage mut [&'storage mut [u8]],
-        bound: usize,
-        charge: C,
-    ) -> Result<Self, ProducerError> {
-        let capacity = spans
-            .iter()
-            .try_fold(0usize, |total, span| total.checked_add(span.len()));
-        if capacity.is_none_or(|capacity| bound > capacity) {
-            return Err(ProducerError::BoundExceedsSpans);
-        }
-        Ok(Self {
-            spans,
-            bound,
-            cursor: 0,
-            charge: Some(charge),
-            aborted: false,
-        })
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.bound
-    }
-
-    pub fn written(&self) -> usize {
-        self.cursor
-    }
-
-    pub fn remaining(&self) -> usize {
-        self.bound.saturating_sub(self.cursor)
-    }
-
-    /// The method writes all bytes or aborts without modifying any span.
-    pub fn write(&mut self, bytes: &[u8]) -> Result<(), ProducerError> {
-        if self.aborted {
-            return Err(ProducerError::Aborted);
-        }
-        let Some(end) = self.cursor.checked_add(bytes.len()) else {
-            self.abort_on_error();
-            return Err(ProducerError::Overflow);
-        };
-        if end > self.bound {
-            self.abort_on_error();
-            return Err(ProducerError::Overflow);
-        }
-
-        let mut source = bytes;
-        let mut absolute = self.cursor;
-        for span in self.spans.iter_mut() {
-            if source.is_empty() {
-                break;
-            }
-            if absolute >= span.len() {
-                absolute -= span.len();
-                continue;
-            }
-            let available = span.len() - absolute;
-            let take = available.min(source.len());
-            span[absolute..absolute + take].copy_from_slice(&source[..take]);
-            source = &source[take..];
-            absolute = 0;
-        }
-        debug_assert!(
-            source.is_empty(),
-            "validated span capacity must cover write"
-        );
-        self.cursor = end;
-        Ok(())
-    }
-
-    /// `commit` drops the charge guard when `body_len > bound` or `cursor != body_len`.
-    /// consuming transition.
-    pub fn commit(mut self, body_len: usize) -> Result<ProducedBody<'storage, C>, ProducerError> {
-        if self.aborted {
-            return Err(ProducerError::Aborted);
-        }
-        if body_len > self.bound {
-            self.abort_on_error();
-            return Err(ProducerError::CommitOutsideReservation);
-        }
-        if self.cursor != body_len {
-            self.abort_on_error();
-            return Err(ProducerError::Underfill);
-        }
-        Ok(ProducedBody {
-            spans: std::mem::take(&mut self.spans),
-            len: body_len,
-            _charge: self.charge.take(),
-        })
-    }
-
-    pub fn abort(mut self) {
-        self.abort_on_error();
-    }
-
-    fn abort_on_error(&mut self) {
-        self.aborted = true;
-        drop(self.charge.take());
-    }
-}
-
-/// Backends publish these segments, then drop the value to return its descriptor and byte charges once.
-#[must_use = "a committed body must be published or discarded"]
-pub struct ProducedBody<'storage, C> {
-    spans: &'storage mut [&'storage mut [u8]],
-    len: usize,
-    /// Held only for its drop: releasing the body returns the charge.
-    _charge: Option<C>,
-}
-
-impl<C> ProducedBody<'_, C> {
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn segment_count(&self) -> usize {
-        let mut remaining = self.len;
-        let mut count = 0;
-        for span in self.spans.iter() {
-            if remaining == 0 {
-                break;
-            }
-            if span.is_empty() {
-                continue;
-            }
-            count += 1;
-            remaining = remaining.saturating_sub(span.len());
-        }
-        count
-    }
-
-    pub fn segment(&self, index: usize) -> Option<&[u8]> {
-        let mut remaining = self.len;
-        for (current, span) in self
-            .spans
-            .iter()
-            .filter(|span| !span.is_empty())
-            .enumerate()
-        {
-            if remaining == 0 {
-                break;
-            }
-            let take = remaining.min(span.len());
-            if current == index {
-                return Some(&span[..take]);
-            }
-            remaining -= take;
-        }
-        None
-    }
-}
-
 /// The `Rc` marker makes this view `!Send`.
 ///
 /// The callback can return only values that do not borrow the leased bytes.
@@ -288,7 +102,6 @@ impl<C> ProducedBody<'_, C> {
 pub struct ReceiveLease<'lease> {
     first: &'lease [u8],
     second: Option<&'lease [u8]>,
-    tracker: Option<LeaseTracker>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -301,17 +114,6 @@ impl<'lease> ReceiveLease<'lease> {
         Self {
             first,
             second,
-            tracker: None,
-            _not_send: PhantomData,
-        }
-    }
-
-    fn tracked(first: &'lease [u8], second: Option<&'lease [u8]>, tracker: LeaseTracker) -> Self {
-        tracker.acquire();
-        Self {
-            first,
-            second,
-            tracker: Some(tracker),
             _not_send: PhantomData,
         }
     }
@@ -354,69 +156,6 @@ impl<'lease> ReceiveLease<'lease> {
         }
         counter.record_copy();
         body
-    }
-}
-
-impl Drop for ReceiveLease<'_> {
-    fn drop(&mut self) {
-        if let Some(tracker) = self.tracker.take() {
-            tracker.release();
-        }
-    }
-}
-
-#[derive(Default)]
-struct LeaseState {
-    active: usize,
-    quarantined: bool,
-}
-
-/// A close gate prevents storage reuse while a receive lease is active.
-#[derive(Clone, Default)]
-pub struct LeaseTracker(Arc<Mutex<LeaseState>>);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeaseClose {
-    Drained,
-    Quarantined,
-}
-
-impl LeaseTracker {
-    pub fn lease<'lease>(
-        &self,
-        first: &'lease [u8],
-        second: Option<&'lease [u8]>,
-    ) -> ReceiveLease<'lease> {
-        ReceiveLease::tracked(first, second, self.clone())
-    }
-
-    /// Close never reports reusable storage while any lexical lease is live.
-    /// bounded-quarantine branch.
-    pub fn close(&self) -> LeaseClose {
-        let mut state = self.0.lock().expect("lease tracker lock");
-        if state.active == 0 && !state.quarantined {
-            LeaseClose::Drained
-        } else {
-            state.quarantined = true;
-            LeaseClose::Quarantined
-        }
-    }
-
-    pub fn active(&self) -> usize {
-        self.0.lock().expect("lease tracker lock").active
-    }
-
-    pub fn is_quarantined(&self) -> bool {
-        self.0.lock().expect("lease tracker lock").quarantined
-    }
-
-    fn acquire(&self) {
-        self.0.lock().expect("lease tracker lock").active += 1;
-    }
-
-    fn release(&self) {
-        let mut state = self.0.lock().expect("lease tracker lock");
-        state.active = state.active.saturating_sub(1);
     }
 }
 
