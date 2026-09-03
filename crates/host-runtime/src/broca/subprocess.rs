@@ -1647,3 +1647,35 @@ pub mod group_registry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::EnvSnapshot;
+
+    /// The vector was produced outside this crate from the documented derivation, so a change to
+    /// the domain separator, the canonicalization id, or the row layout fails here.
+    #[test]
+    fn credential_fingerprint_matches_the_committed_vector() {
+        let key = std::array::from_fn(|index| index as u8);
+        let snapshot = EnvSnapshot::capture_from(vec![(
+            OsString::from("ANTHROPIC_API_KEY"),
+            OsString::from("secret"),
+        )])
+        .expect("vector snapshot");
+        assert_eq!(
+            snapshot
+                .credential_fingerprint(&key, "opencode", "anthropic")
+                .expect("fingerprint"),
+            "ecac831b94bb1d9e972ee993f7798c9ff7c6133b545e489ac1a3f60448127e80"
+        );
+        // A different connection key over the same row must not collide.
+        assert_ne!(
+            snapshot
+                .credential_fingerprint(&[0u8; 32], "opencode", "anthropic")
+                .expect("fingerprint"),
+            "ecac831b94bb1d9e972ee993f7798c9ff7c6133b545e489ac1a3f60448127e80"
+        );
+    }
+}

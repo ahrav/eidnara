@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "wave": "U3",
+  "reports": [
+    {
+      "phase": "pre-port",
+      "iteration": 0,
+      "analyzed": {
+        "repo": "host",
+        "commit": "39e8230371b15966a5767771daf001e44d191aac",
+        "scope_hash": "546689b0bfec8de40744bc6a648394c874d849748edc9add1ca2f260130c3fe6"
+      },
+      "report_hash": "20a66eecdb85ee4cd29c8d62c027f76acc9b425331aa744beaeaedb1cba6b221",
+      "report_path": "/tmp/architecture-review-20260903T085551Z-U3-pre-port.html",
+      "skill_sha256": "5a2532a0c9ac5def4a7f453567aaecd4440b095782dfe9e3bda7f934ccdf2f0e",
+      "summary": "Interface versus implementation before porting: host-runtime 535/19402, shm-transport 152/1963, tokenizer 2/38, shm-native 29/1860 (pub items / non-blank non-comment implementation lines outside cfg(test)). host-runtime and shm-native are deep; shm-transport is deep; tokenizer is a two-function facade over the vocabulary table by design. The host runtime has no dependency on the product daemon (zero references), and shm-transport is its only transport adapter. No Strong candidate.",
+      "candidates": [
+        {
+          "title": "Remove the unused producer half of frame_channel",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime"
+          ],
+          "interface": "`#[doc(hidden)] pub mod frame_channel`: 47 public items, of which connection, dispatch, ring_transport, routing, and runtime use `FrameSender`, `frame_sender`, `InboundFrame`, `OwnedInboundFrame`, `InboundEvent`, `OutboundFrame`, `DirectFrame`, `DirectSerializer`, `QueuedOutboundFrame`, `SenderQueue`, `ReadClose`, `RejectedFrame`, `CopyCounter`",
+          "implementation": "the producer half of `frame_channel.rs`: `ProducerError`, `ProducerReservation`, `ProducedBody`, `LeaseTracker`, `LeaseClose`, `ReceiveLease::segmented`, and the matching `frame_channel/contract_tests.rs` cases (about 300 of the module's 616 implementation lines) have no caller outside the module's own contract tests",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the producer half makes the complexity vanish rather than move: no production or test caller outside `frame_channel` constructs a `ProducerReservation` or a `LeaseTracker`, and the mandatory-ring refactor that removed the TCP channel left them behind."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "ring_transport"
+          ],
+          "specialist_routes": [],
+          "rationale": "Not Strong: a deletion of dead surface, not a deepening, so the interface metric does not apply. Recorded rather than done in U3 because the wave's rule is no behavior change beyond renames, and the property catalog carries records (`ring-a-segmented-inbound-body-has-no-production-producer` and siblings) that describe this exact dead surface and must be re-dispositioned when it goes.",
+          "follow_up": "remove after U3 lands, together with the catalog records that describe the dead surface"
+        },
+        {
+          "title": "Inline the setup-proof wrappers onto the shared transcript",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime",
+            "packages/shm-native"
+          ],
+          "interface": "`host_runtime::auth::compute_proof` and the addon's `setup.rs` proof call, both forwarding every argument to `shm_transport::setup_auth::compute_proof`",
+          "implementation": "two nine-line forwarding wrappers plus the test-local `raw_client::proof` oracle, which must stay independent",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Re-exporting the shared function removes the wrappers without moving anything; the oracle in `tests/support/raw_client.rs` is deliberately a separate implementation and is not part of the candidate."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": false
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "shm_transport::setup_auth"
+          ],
+          "specialist_routes": [],
+          "rationale": "Not Strong: pure forwarding removal, no deepening. Recorded; landing it changes public paths the U3 catalogs cite.",
+          "follow_up": "re-export `shm_transport::setup_auth::compute_proof` from `host_runtime::auth` after U3"
+        },
+        {
+          "title": "Share the filesystem-policy helpers between harness_closure and instance",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime"
+          ],
+          "interface": "`instance::{is_safe_ancestor, owner_uid, mode_bits, hex}` (pub(crate)) and `harness_closure::{verify_safe_ancestor, owner_uid, mode_bits, hex, S_ISVTX}` (private)",
+          "implementation": "two copies of the sticky-bit, owner, and mode checks that decide whether a directory ancestor is trusted; the two had already drifted in how they read the mode",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the private copies and calling `instance`'s concentrates the policy in one module; `harness_closure` already depends on `crate::instance`."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": true,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "instance"
+          ],
+          "specialist_routes": [
+            "/code-quality:duplication-check"
+          ],
+          "rationale": "Not Strong on the metric: the shared helpers are a handful of lines, so the interface is not materially smaller than the implementation. Recorded; the two copies must be compared line by line before one is deleted because the drift may be intentional for closure roots.",
+          "follow_up": "compare the two ancestor policies, then delete the private copy or document why closure roots differ"
+        }
+      ]
+    },
+    {
+      "phase": "post-integration",
+      "iteration": 1,
+      "analyzed": {
+        "repo": "eidnara",
+        "commit": "89137deed6ec03c519a3f85da4648191aab65a87",
+        "scope_hash": "34eb5871a64266ee177e4820f869a5a87d05070745096310ddde3b5db03f0d55",
+        "modules": [
+          "crates/host-runtime",
+          "crates/shm-transport",
+          "crates/tokenizer",
+          "packages/shm-native"
+        ],
+        "modules_hash": "undefined"
+      },
+      "report_hash": "df1be2f02c920dfa44178c9f9f3e0b5210945516bded8d6d9df6e16d374d7a0e",
+      "report_path": "/tmp/architecture-review-20260903T085551Z-U3-post-integration.html",
+      "skill_sha256": "5a2532a0c9ac5def4a7f453567aaecd4440b095782dfe9e3bda7f934ccdf2f0e",
+      "summary": "Interface versus implementation after integration: host-runtime 535/19459, shm-transport 152/1963, tokenizer 2/38, shm-native 29/1866 (pub items / non-blank non-comment implementation lines outside cfg(test)). host-runtime and shm-native are deep; shm-transport is deep; tokenizer is a two-function facade over the vocabulary table by design. The host runtime has no dependency on the product daemon (zero references), and shm-transport is its only transport adapter. No Strong candidate. The three recorded candidates are unchanged by the port; no structural change accepted; no loop-created candidate.",
+      "candidates": [
+        {
+          "title": "Remove the unused producer half of frame_channel",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime"
+          ],
+          "interface": "`#[doc(hidden)] pub mod frame_channel`: 47 public items, of which connection, dispatch, ring_transport, routing, and runtime use `FrameSender`, `frame_sender`, `InboundFrame`, `OwnedInboundFrame`, `InboundEvent`, `OutboundFrame`, `DirectFrame`, `DirectSerializer`, `QueuedOutboundFrame`, `SenderQueue`, `ReadClose`, `RejectedFrame`, `CopyCounter`",
+          "implementation": "the producer half of `frame_channel.rs`: `ProducerError`, `ProducerReservation`, `ProducedBody`, `LeaseTracker`, `LeaseClose`, `ReceiveLease::segmented`, and the matching `frame_channel/contract_tests.rs` cases (about 300 of the module's 616 implementation lines) have no caller outside the module's own contract tests",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the producer half makes the complexity vanish rather than move: no production or test caller outside `frame_channel` constructs a `ProducerReservation` or a `LeaseTracker`, and the mandatory-ring refactor that removed the TCP channel left them behind."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "ring_transport"
+          ],
+          "specialist_routes": [],
+          "rationale": "Not Strong: a deletion of dead surface, not a deepening, so the interface metric does not apply. Recorded rather than done in U3 because the wave's rule is no behavior change beyond renames, and the property catalog carries records (`ring-a-segmented-inbound-body-has-no-production-producer` and siblings) that describe this exact dead surface and must be re-dispositioned when it goes.",
+          "follow_up": "remove after U3 lands, together with the catalog records that describe the dead surface"
+        },
+        {
+          "title": "Inline the setup-proof wrappers onto the shared transcript",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime",
+            "packages/shm-native"
+          ],
+          "interface": "`host_runtime::auth::compute_proof` and the addon's `setup.rs` proof call, both forwarding every argument to `shm_transport::setup_auth::compute_proof`",
+          "implementation": "two nine-line forwarding wrappers plus the test-local `raw_client::proof` oracle, which must stay independent",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Re-exporting the shared function removes the wrappers without moving anything; the oracle in `tests/support/raw_client.rs` is deliberately a separate implementation and is not part of the candidate."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": false
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "shm_transport::setup_auth"
+          ],
+          "specialist_routes": [],
+          "rationale": "Not Strong: pure forwarding removal, no deepening. Recorded; landing it changes public paths the U3 catalogs cite.",
+          "follow_up": "re-export `shm_transport::setup_auth::compute_proof` from `host_runtime::auth` after U3"
+        },
+        {
+          "title": "Share the filesystem-policy helpers between harness_closure and instance",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime"
+          ],
+          "interface": "`instance::{is_safe_ancestor, owner_uid, mode_bits, hex}` (pub(crate)) and `harness_closure::{verify_safe_ancestor, owner_uid, mode_bits, hex, S_ISVTX}` (private)",
+          "implementation": "two copies of the sticky-bit, owner, and mode checks that decide whether a directory ancestor is trusted; the two had already drifted in how they read the mode",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the private copies and calling `instance`'s concentrates the policy in one module; `harness_closure` already depends on `crate::instance`."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": true,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "instance"
+          ],
+          "specialist_routes": [
+            "/code-quality:duplication-check"
+          ],
+          "rationale": "Not Strong on the metric: the shared helpers are a handful of lines, so the interface is not materially smaller than the implementation. Recorded; the two copies must be compared line by line before one is deleted because the drift may be intentional for closure roots.",
+          "follow_up": "compare the two ancestor policies, then delete the private copy or document why closure roots differ"
+        }
+      ]
+    }
+  ]
+}
