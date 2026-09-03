@@ -11,6 +11,6 @@
 ## U2 audit
 
 - **Classification:** `core`. The 20-byte decimal format and the 21-byte read bound are the fencing bytes the record names.
-- **New evidence:** `epoch_read_is_bounded_regardless_of_file_size` (`crates/lease/src/lib.rs:2048-2100`) wraps a 1 MiB cursor in a `CountingReader`, calls `read_epoch`, and asserts `InvalidData` with at most 21 bytes read through that wrapper; it then seeds a real 1 MiB lease file and drives exclusive, shared, and floor-based acquisition through it, asserting the error kind and unchanged bytes. The file-backed half asserts the outcome only; it does not count the bytes the `File` reads.
+- **New evidence:** `epoch_read_is_bounded_regardless_of_file_size` (`crates/lease/src/lib.rs:2054-2106`) wraps a 1 MiB cursor in a `CountingReader`, calls `read_epoch`, and asserts `InvalidData` with at most 21 bytes read through that wrapper; it then seeds a real 1 MiB lease file and drives exclusive, shared, and floor-based acquisition through it, asserting the error kind and unchanged bytes. The file-backed half asserts the outcome only; it does not count the bytes the `File` reads.
 - **Discrimination:** replacing `take(EPOCH_WIDTH + 1)` with an unbounded read fails the byte-count assertion.
 - **Verdict:** pass; the check `always(bytes_read_for_epoch <= 21)` is asserted directly on the counting wrapper rather than inferred from the rejection.

@@ -9,7 +9,7 @@
       "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
-  "destination_commit": "6e4f1936fbbeffc5fea79b819e4ab4b2ab7da282",
+  "destination_commit": "99454c8759093412d0c45d535c133f51cf622b81",
   "touched_files": [
     "crates/cache-stability/src/lib.rs",
     "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
@@ -41,9 +41,9 @@
       },
       "strategy_decision": "Golden-vector test: six externally computed identity, digest, and filename vectors plus an acquisition that must create the pinned file. Chosen over a property test because the contract is a fixed byte derivation; an independent implementation is the oracle.",
       "audit_verdict": "pass",
-      "evidence_digest": "3c6633e9f0eceb0bb02254039424827d0a6fbcef0ca927925e9bda932f8d672a",
-      "code_hash": "9440792b266f2bf69d6f063386f22906ddefff4c2a6aa51dbfdfcf2f742d3939",
-      "check_hash": "a87512849bad14add55b10485a947e8cbe9413673fc2d4a419f516be96db3a75",
+      "evidence_digest": "2d857664561b972b98b6383333bf8b334b69d9c28f748df0283b85d61420ba56",
+      "code_hash": "ac0a8f366da0f325236b1a2168527f9074ad6e4a824dffc43e08a2be8ba06d09",
+      "check_hash": "8e0f6646960c1853dacdefc89182698ef38d7e53cd9b010c9c40e41cf06ba2e8",
       "check_pointer": "crates/lease/src/lib.rs#lease_path_vectors_are_version_stable",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/lease-path-format-is-version-stable.md",
       "target_configurations": [
@@ -52,7 +52,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "3c6633e9f0eceb0bb02254039424827d0a6fbcef0ca927925e9bda932f8d672a",
+        "digest": "2d857664561b972b98b6383333bf8b334b69d9c28f748df0283b85d61420ba56",
         "description": "`lease_path_vectors_are_version_stable`: six externally computed vectors including both production keys and the created filename; mutants for suffix and separator fail."
       }
     },
@@ -72,9 +72,9 @@
       },
       "strategy_decision": "Example test with an instrumented reader: the check `bytes_read <= 21` is asserted directly on a 1 MiB input, then the same input is driven through every acquisition path against a real file.",
       "audit_verdict": "pass",
-      "evidence_digest": "44450f70bb313413c1458e07e69ed73495260a1c03cfee3525a12c8675fae8d7",
-      "code_hash": "9440792b266f2bf69d6f063386f22906ddefff4c2a6aa51dbfdfcf2f742d3939",
-      "check_hash": "a87512849bad14add55b10485a947e8cbe9413673fc2d4a419f516be96db3a75",
+      "evidence_digest": "df59c3f7c05a4e749f6f245027b7ae01db38dfbc7240e154d7842e4773deb4e3",
+      "code_hash": "ac0a8f366da0f325236b1a2168527f9074ad6e4a824dffc43e08a2be8ba06d09",
+      "check_hash": "8e0f6646960c1853dacdefc89182698ef38d7e53cd9b010c9c40e41cf06ba2e8",
       "check_pointer": "crates/lease/src/lib.rs#epoch_read_is_bounded_regardless_of_file_size",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/epoch-input-size-is-bounded.md",
       "target_configurations": [
@@ -83,7 +83,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "44450f70bb313413c1458e07e69ed73495260a1c03cfee3525a12c8675fae8d7",
+        "digest": "df59c3f7c05a4e749f6f245027b7ae01db38dfbc7240e154d7842e4773deb4e3",
         "description": "`epoch_read_is_bounded_regardless_of_file_size`: counting reader observes <= 21 bytes on a 1 MiB epoch; all three acquisition paths reject the same file unchanged; the unbounded-read mutant fails."
       }
     },
@@ -104,8 +104,8 @@
       "strategy_decision": "Example table extended with the inputs a lenient parser accepts (`+1`, padding, hex, digit separator); each body is asserted with exact error kind, path in message, and unchanged bytes through every applicable acquisition mode.",
       "audit_verdict": "pass",
       "evidence_digest": "0ecdc2715a653a1bfa459e1e4216935886c5b11cdfb45115c2d2e2341112392b",
-      "code_hash": "9440792b266f2bf69d6f063386f22906ddefff4c2a6aa51dbfdfcf2f742d3939",
-      "check_hash": "a87512849bad14add55b10485a947e8cbe9413673fc2d4a419f516be96db3a75",
+      "code_hash": "ac0a8f366da0f325236b1a2168527f9074ad6e4a824dffc43e08a2be8ba06d09",
+      "check_hash": "8e0f6646960c1853dacdefc89182698ef38d7e53cd9b010c9c40e41cf06ba2e8",
       "check_pointer": "crates/lease/src/lib.rs#invalid_epoch_states_fail_closed",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/invalid-epoch-fails-closed.md",
       "target_configurations": [

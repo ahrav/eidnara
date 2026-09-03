@@ -172,7 +172,7 @@ Check: `always` - Inside the crate, `always(k1 == k2 || lease_path(k1) != lease_
 Fault/timing angle: No timing fault is needed. A field containing `U+001F` would make the tuple encoding ambiguous; `LeaseKey::identity` refuses such a field with a panic. FNV-1a-64 has no collision handling.
 Required faults and enabling state: Construct keys containing the separator in different fields. A targeted FNV collision is a separate enabling state whose practical cost remains open.
 Confidence: high - [evidence](evidence/distinct-lease-keys-do-not-alias.md). High that the separator is rejected in every field (`LeaseKey::identity` (`crates/lease/src/lib.rs:617-643`)); high that collision handling is absent; low on practical targeted-FNV cost.
-Existing check: `distinct_identity_axes_do_not_conflict` covers distinct scope, module, and backend axes; `separator_in_a_key_field_fails_closed_instead_of_aliasing` (`crates/lease/src/lib.rs:2162-2185`) covers the separator in each field; status **unaudited**.
+Existing check: `distinct_identity_axes_do_not_conflict` covers distinct scope, module, and backend axes; `separator_in_a_key_field_fails_closed_instead_of_aliasing` (`crates/lease/src/lib.rs:2168-2191`) covers the separator in each field; status **unaudited**.
 Impact: Unrelated stores falsely contend and share one epoch sequence.
 Open questions:
 

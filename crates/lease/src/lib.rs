@@ -1453,11 +1453,17 @@ mod tests {
                 .env(CHILD_MARKER, "1")
                 .output()
                 .expect("run the probe in a child process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
                 output.status.success(),
-                "probe child failed:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
+                "probe child failed:\n{stdout}\n{}",
                 String::from_utf8_lossy(&output.stderr)
+            );
+            // A filter that matches no test exits successfully with nothing run, so the
+            // child must report exactly one passed test for the probe to count.
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "the probe child did not run exactly one test:\n{stdout}"
             );
             return;
         }

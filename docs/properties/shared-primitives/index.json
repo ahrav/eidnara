@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shared-primitives",
   "source": "catalog.md",
-  "source_sha256": "ac9f832415c5581c2ad76dcd1916b8effb810d6983678ad43bb6109a718e58e7",
+  "source_sha256": "7537123be4c04bf396b253821425711a320d0cda6451ecd29b1248175c0fee3c",
   "records": [
     {
       "slug": "at-most-one-exclusive-holder-per-key",
@@ -209,7 +209,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/distinct-lease-keys-do-not-alias.md). High that the separator is rejected in every field (`LeaseKey::identity` (`crates/lease/src/lib.rs:617-643`)); high that collision handling is absent; low on practical targeted-FNV cost."
       },
-      "existing_check": "`distinct_identity_axes_do_not_conflict` covers distinct scope, module, and backend axes; `separator_in_a_key_field_fails_closed_instead_of_aliasing` (`crates/lease/src/lib.rs:2162-2185`) covers the separator in each field; status **unaudited**.",
+      "existing_check": "`distinct_identity_axes_do_not_conflict` covers distinct scope, module, and backend axes; `separator_in_a_key_field_fails_closed_instead_of_aliasing` (`crates/lease/src/lib.rs:2168-2191`) covers the separator in each field; status **unaudited**.",
       "impact": "Unrelated stores falsely contend and share one epoch sequence.",
       "open_questions": [],
       "extra": {}
