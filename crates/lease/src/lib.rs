@@ -68,7 +68,20 @@ fn protect_open_file(file: &File, path: &std::path::Path) -> std::io::Result<()>
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // A second name for this inode would receive the mode change and the epoch
+        // overwrite, and two lease paths joined to one inode would share one lock and one
+        // epoch despite their distinct keys.
+        if metadata.nlink() > 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "lease file {} has {} names; a lease file must have exactly one",
+                    path.display(),
+                    metadata.nlink()
+                ),
+            ));
+        }
         if metadata.permissions().mode() & 0o777 != 0o600 {
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
@@ -850,6 +863,53 @@ mod tests {
             );
             assert_eq!(writer.inner.into_inner(), case.expected_bytes);
         }
+    }
+
+    /// A lease path that is a second name for another file is refused before the mode change
+    /// and before any epoch byte is written, so the other name keeps its bytes and mode.
+    #[cfg(unix)]
+    #[test]
+    fn acquisition_refuses_a_hard_linked_lease_file_and_leaves_the_other_name_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (store, dir) = tmp_store();
+        let k = key("hardlink-acquire");
+        let other = dir.path().join("other");
+        let other_bytes = b"00000000000000000041";
+        std::fs::write(&other, other_bytes).expect("write other name");
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o644))
+            .expect("set other mode");
+        std::fs::hard_link(&other, store.lease_path(&k)).expect("hard link lease path");
+
+        for result in [
+            store.acquire(&k).map(|_| ()),
+            store.acquire_shared(&k).map(|_| ()),
+        ] {
+            match result {
+                Err(LeaseError::Io(e)) => {
+                    assert_eq!(
+                        e.kind(),
+                        std::io::ErrorKind::InvalidInput,
+                        "unexpected: {e}"
+                    );
+                    assert!(
+                        e.to_string().contains("has 2 names"),
+                        "unexpected message: {e}"
+                    );
+                }
+                other => panic!("a hard-linked lease file must be refused, got {other:?}"),
+            }
+        }
+
+        assert_eq!(std::fs::read(&other).expect("read other name"), other_bytes);
+        assert_eq!(
+            std::fs::metadata(&other)
+                .expect("stat other name")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
     }
 
     #[cfg(unix)]

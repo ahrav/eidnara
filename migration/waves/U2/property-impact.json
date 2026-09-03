@@ -9,7 +9,7 @@
       "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
-  "destination_commit": "b0ca711e85fe38ad3dc89af03c13af61f3d084a7",
+  "destination_commit": "a244f36ca473ce20b8c9f41797035954defd8306",
   "touched_files": [
     "crates/cache-stability/src/lib.rs",
     "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
@@ -19,6 +19,8 @@
     "crates/storage-types/src/lib.rs",
     "crates/storage-types/tests/golden/storage_vectors.json",
     "crates/storage-types/tests/golden_vectors.rs",
+    "crates/storage/baseline.sql",
+    "crates/storage/examples/schema-inventory.rs",
     "crates/storage/src/lib.rs"
   ],
   "scope_decisions": [],
@@ -39,9 +41,9 @@
       },
       "strategy_decision": "Golden-vector test: six externally computed identity, digest, and filename vectors plus an acquisition that must create the pinned file. Chosen over a property test because the contract is a fixed byte derivation; an independent implementation is the oracle.",
       "audit_verdict": "pass",
-      "evidence_digest": "1672fe4891dc67e131173de5fba01db4ca888f5809cb90b07274243be3e554fe",
-      "code_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
-      "check_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
+      "evidence_digest": "9c27fabb1e7685a3df39228653609995625b962a1f7c20592e518a9612e6a212",
+      "code_hash": "23b99e303a7a18701ca8eb5138af8b0f7b6994d2bdc6f63c3f862baeed4baf8a",
+      "check_hash": "556030f7a7a56192b04788efb7ed6001ffebcf73a2f0ac98483c4fa9e484ba75",
       "check_pointer": "crates/lease/src/lib.rs#lease_path_vectors_are_version_stable",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/lease-path-format-is-version-stable.md",
       "target_configurations": [
@@ -50,7 +52,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "1672fe4891dc67e131173de5fba01db4ca888f5809cb90b07274243be3e554fe",
+        "digest": "9c27fabb1e7685a3df39228653609995625b962a1f7c20592e518a9612e6a212",
         "description": "`lease_path_vectors_are_version_stable`: six externally computed vectors including both production keys and the created filename; mutants for suffix and separator fail."
       }
     },
@@ -70,9 +72,9 @@
       },
       "strategy_decision": "Example test with an instrumented reader: the check `bytes_read <= 21` is asserted directly on a 1 MiB input, then the same input is driven through every acquisition path against a real file.",
       "audit_verdict": "pass",
-      "evidence_digest": "6a2e6208055e3ed66311d065637daa987df49240ed1dbcd82be134c42e652b8a",
-      "code_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
-      "check_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
+      "evidence_digest": "0a917ed82b946bf9badcd4721d34ed4d5608b30d2e027d69743e5f3657751a5a",
+      "code_hash": "23b99e303a7a18701ca8eb5138af8b0f7b6994d2bdc6f63c3f862baeed4baf8a",
+      "check_hash": "556030f7a7a56192b04788efb7ed6001ffebcf73a2f0ac98483c4fa9e484ba75",
       "check_pointer": "crates/lease/src/lib.rs#epoch_read_is_bounded_regardless_of_file_size",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/epoch-input-size-is-bounded.md",
       "target_configurations": [
@@ -81,7 +83,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "6a2e6208055e3ed66311d065637daa987df49240ed1dbcd82be134c42e652b8a",
+        "digest": "0a917ed82b946bf9badcd4721d34ed4d5608b30d2e027d69743e5f3657751a5a",
         "description": "`epoch_read_is_bounded_regardless_of_file_size`: counting reader observes <= 21 bytes on a 1 MiB epoch; all three acquisition paths reject the same file unchanged; the unbounded-read mutant fails."
       }
     },
@@ -101,9 +103,9 @@
       },
       "strategy_decision": "Example table extended with the inputs a lenient parser accepts (`+1`, padding, hex, digit separator); each body is asserted with exact error kind, path in message, and unchanged bytes through every applicable acquisition mode.",
       "audit_verdict": "pass",
-      "evidence_digest": "f100a5ca45cc183c1b2ff5b2708847a69dda92ac79f0d9383db3561adff3cd55",
-      "code_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
-      "check_hash": "c1be1e81d858c4874eb7d087075135daec4e566f501fa9104bcad6c0c9eaaac3",
+      "evidence_digest": "9b75217a1d3a401be702e6d2b409d5f459492d54ca82483948d8eb171710e4a1",
+      "code_hash": "23b99e303a7a18701ca8eb5138af8b0f7b6994d2bdc6f63c3f862baeed4baf8a",
+      "check_hash": "556030f7a7a56192b04788efb7ed6001ffebcf73a2f0ac98483c4fa9e484ba75",
       "check_pointer": "crates/lease/src/lib.rs#invalid_epoch_states_fail_closed",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/invalid-epoch-fails-closed.md",
       "target_configurations": [
@@ -112,7 +114,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "f100a5ca45cc183c1b2ff5b2708847a69dda92ac79f0d9383db3561adff3cd55",
+        "digest": "9b75217a1d3a401be702e6d2b409d5f459492d54ca82483948d8eb171710e4a1",
         "description": "`invalid_epoch_states_fail_closed` extended with `+1`, `-1`, ` 1`, `1 `, `0x1f`, `1_0`; the parse-based mutant fails."
       }
     },
@@ -135,7 +137,7 @@
       "strategy_decision": "Byte-stable golden fixture: receipt-level byte identity to the source blob plus the fixture-driven test as an independent oracle; the near-tautological action assertion is recorded and the byte, boundary, flag, and queue assertions carry the claim.",
       "audit_verdict": "pass",
       "evidence_digest": "b23b39071961d128c9009e8b66af7b2201564cd478f6082a238901070bcd17df",
-      "code_hash": "31c98e072f8bbc80500f84d0ea3f63db32cf7e9ffc57c6acf2b7d509706bb27b",
+      "code_hash": "d10c43823faa9dc00220dbce321f4c260afa7cf4ad58ff09c9eb9a63692470a6",
       "check_hash": "99e14b67056563ad68e9941936172f44f7618ecdfe9b074c7316fa5857fb73ea",
       "check_pointer": "crates/cache-stability/tests/golden_vectors.rs#all_golden_vectors_pass",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md",
@@ -165,7 +167,7 @@
       "strategy_decision": "Byte-stable golden fixture: receipt-level byte identity to the source blob plus per-vector derivation checks read from the fixture, independent of the helpers under test.",
       "audit_verdict": "pass",
       "evidence_digest": "c975b75ac2d5f02add4caae7f65ef653b3de70e646bff29b72de711ea9cf126f",
-      "code_hash": "21c99d2e69e68fbcdcf32a46c323cca4dda436db11afbf518982ab74e41e6881",
+      "code_hash": "d744654691a28b4fae345aa94a540c65757a62f2f4819fe7b528baf6826178ed",
       "check_hash": "818565074cce03ed25c9d57557b5e826d2199c4fa7a910351b56727a31a0fa9b",
       "check_pointer": "crates/storage-types/tests/golden_vectors.rs#helpers_reproduce_the_golden_vectors",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md",
@@ -951,7 +953,8 @@
       "files": [
         "crates/storage/src/lib.rs",
         "crates/storage/baseline.sql",
-        "fixtures/schema/storage-inventory-v1.json"
+        "fixtures/schema/storage-inventory-v1.json",
+        "crates/storage/examples/schema-inventory.rs"
       ],
       "source_status": {
         "exercised": "yes",
@@ -961,9 +964,9 @@
       },
       "strategy_decision": "Fixture test plus refusal tests: a fresh file's application id, user version, format-marker digest, and sqlite_schema inventory are compared to a destination-captured fixture that the generator example produces, and non-pristine files with foreign objects, a different consumer baseline, or a bypassed fence constraint are refused with the file bytes unchanged. Chosen over a property test because the identity is one fixed byte contract.",
       "audit_verdict": "pass",
-      "evidence_digest": "dcbff59a81be81d3ab2c5246eb806416573985a992b1f24a1235d37d5cb4bb48",
-      "code_hash": "fc3c0b9cc973db9f3e22b7142aabf1961fc6dc0d800a9528da014f272e9787e6",
-      "check_hash": "e784372d13a8a0d7babe84235daf11d757d8d0a2f43a4d37ae07416ecff31275",
+      "evidence_digest": "2f67573be7323519550bfec108a5bc3879bc66bb715002198c5c8d4c6a81c272",
+      "code_hash": "5f811b1e94c704af9fec6995ae5afac754eb2c04642813ba66cdbe3258e8d269",
+      "check_hash": "19b56b9114f36b4d1b5760c73f0fafe15274465fe30dd9cb6e69f5175fe381a2",
       "check_pointer": "crates/storage/src/lib.rs#fresh_file_matches_the_baseline_inventory",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/store-schema-identity-matches-the-baseline.md",
       "target_configurations": [
@@ -972,7 +975,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "dcbff59a81be81d3ab2c5246eb806416573985a992b1f24a1235d37d5cb4bb48",
+        "digest": "2f67573be7323519550bfec108a5bc3879bc66bb715002198c5c8d4c6a81c272",
         "description": "`fresh_file_matches_the_baseline_inventory` compares a fresh file to `fixtures/schema/storage-inventory-v1.json`; `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, and `negative_database_fence_fails_closed` prove refusal leaves the bytes unchanged."
       }
     },

@@ -668,7 +668,7 @@ mod sqlite_backend {
         // change it. A read-write open would let SQLite recover or checkpoint a foreign
         // WAL and rewrite the file on close, and a fence row in a foreign file would
         // otherwise raise the lease floor before the file was ever classified.
-        let epoch_floor = expected.inspect_existing(Path::new(&path))?;
+        let (epoch_floor, inspected) = expected.inspect_existing(Path::new(&path))?;
         let db_file_name = Path::new(&path)
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -689,6 +689,19 @@ mod sqlite_backend {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // SQLite has opened the file but read nothing: WAL recovery happens on the first
+        // read and the close-time checkpoint only after the WAL was opened. A file swapped
+        // in since the inspection is refused here, before either can happen. The window
+        // between SQLite's own `open(2)` and this `stat(2)` remains; the store directory is
+        // created by this crate and the lease serializes cooperating writers.
+        if let Some(pinned) = inspected {
+            let now = FileIdentity::of(Path::new(&path)).map_err(StoreError::Io)?;
+            if now != pinned {
+                return Err(StoreError::Baseline(format!(
+                    "{path} was replaced between inspection and open"
+                )));
+            }
+        }
         // The read-write connection re-establishes identity so the connection handed out
         // is classified on its own view of the file, not on the inspection that preceded
         // the lease.
@@ -724,6 +737,36 @@ mod sqlite_backend {
             epoch,
             _lease: Some(lease),
         })
+    }
+
+    /// The device and inode of a store file, read without following a final symlink. Two
+    /// readings are equal only while the path still names the same file.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct FileIdentity {
+        #[cfg(unix)]
+        device: u64,
+        #[cfg(unix)]
+        inode: u64,
+        #[cfg(not(unix))]
+        length: u64,
+    }
+
+    impl FileIdentity {
+        pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
+            let meta = std::fs::symlink_metadata(path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                Ok(Self {
+                    device: meta.dev(),
+                    inode: meta.ino(),
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                Ok(Self { length: meta.len() })
+            }
+        }
     }
 
     /// The database and its sidecars must each be a regular file with exactly one name.
@@ -907,14 +950,17 @@ mod sqlite_backend {
         }
 
         /// Classifies an existing file on a read-only connection and returns the fence
-        /// epoch it stores, or zero for a missing or pristine file. A read-only connection
-        /// neither recovers nor checkpoints a WAL, so a refused file keeps its database,
-        /// `-wal`, and `-shm` bytes; the epoch is read only after the file is known to be
-        /// this store's, so a foreign `fence` row cannot raise the lease floor.
-        fn inspect_existing(&self, path: &Path) -> Result<u64, StoreError> {
+        /// epoch it stores, or zero for a missing or pristine file, together with the
+        /// identity of the inspected file so the read-write open can be checked against it.
+        /// A read-only connection neither recovers nor checkpoints a WAL, so a refused file
+        /// keeps its database, `-wal`, and `-shm` bytes; the epoch is read only after the
+        /// file is known to be this store's, so a foreign `fence` row cannot raise the lease
+        /// floor.
+        fn inspect_existing(&self, path: &Path) -> Result<(u64, Option<FileIdentity>), StoreError> {
             if !path.try_exists().map_err(StoreError::Io)? {
-                return Ok(0);
+                return Ok((0, None));
             }
+            let identity = FileIdentity::of(path).map_err(StoreError::Io)?;
             let conn = Connection::open_with_flags(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -922,10 +968,11 @@ mod sqlite_backend {
             .map_err(|e| StoreError::Backend(e.to_string()))?;
             conn.busy_timeout(Duration::from_secs(5))
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
-            match self.classify(&conn)? {
-                FileState::Pristine => Ok(0),
-                FileState::Baseline => read_fence_epoch_in(&conn),
-            }
+            let floor = match self.classify(&conn)? {
+                FileState::Pristine => 0,
+                FileState::Baseline => read_fence_epoch_in(&conn)?,
+            };
+            Ok((floor, Some(identity)))
         }
 
         /// Reads only: a file that is refused keeps every byte it had.
@@ -1116,8 +1163,11 @@ pub use sqlite_backend::{
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
-    use super::sqlite_backend::{claim_fence, claim_fence_strict, create_database_file_owner_only};
+    use super::sqlite_backend::{
+        FileIdentity, claim_fence, claim_fence_strict, create_database_file_owner_only,
+    };
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn a_read_scope_restores_the_query_only_value_it_found() {
@@ -1357,6 +1407,27 @@ mod tests {
             1,
             "the lease was never raised by the foreign row"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The identity the read-write open is checked against changes when the path is
+    /// re-pointed at a different file, and is stable across a rewrite in place.
+    #[cfg(unix)]
+    #[test]
+    fn file_identity_follows_the_inode_not_the_bytes() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(path, b"one").expect("write");
+        let first = FileIdentity::of(Path::new(path)).expect("identity");
+        std::fs::write(path, b"one rewritten in place").expect("rewrite");
+        assert_eq!(FileIdentity::of(Path::new(path)).expect("identity"), first);
+        let replacement = root.join("replacement.db");
+        std::fs::write(&replacement, b"one").expect("write replacement");
+        std::fs::rename(&replacement, path).expect("swap the file in");
+        assert_ne!(FileIdentity::of(Path::new(path)).expect("identity"), first);
         let _ = std::fs::remove_dir_all(&root);
     }
 

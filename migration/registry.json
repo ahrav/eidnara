@@ -342,6 +342,7 @@
         "alias.db",
         "outside.db",
         "origin.db",
+        "replacement.db",
         "embedding.bin",
         "/home/u/.local/share/eidnara/module-a/store.db",
         "/data/eidnara/m/store.db",

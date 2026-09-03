@@ -1326,6 +1326,15 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             const impactErrors = verifyKind("property-impact", impact, ctx);
             impactErrors.forEach((error) => errors.push(`$.property_impact: ${error}`));
             if (impact.wave !== wave) errors.push(`$.property_impact names wave ${String(impact.wave)}, receipt is ${wave}`);
+            // The impact's own touched list is written by the same hand as its records, so
+            // the receipt's destinations decide which implementation files it must cover.
+            const declared = new Set(Array.isArray(impact.touched_files) ? impact.touched_files.filter((entry): entry is string => typeof entry === "string") : []);
+            for (const file of shape.files) {
+                if (!/^crates\/.*\.(?:rs|sql)$/.test(file.destination)) continue;
+                if (!declared.has(file.destination)) {
+                    errors.push(`$.property_impact.touched_files omits ${file.destination}, which this receipt changes`);
+                }
+            }
         }
     }
     if (shape.architectureImpact !== undefined && shape.architectureImpact !== NOT_APPLICABLE) {
@@ -1430,6 +1439,9 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
         if (file.source !== null) dispose(file.source.repo, file.source.blob_sha);
     }
     for (const entry of shape.excluded) dispose(entry.repo, entry.blob_sha);
+    // Required multiplicities are summed over every scoped tree before the comparison: one
+    // disposition of a blob that sits in two trees accounts for one path, not two.
+    const required = new Map<string, { paths: number; scopes: string[] }>();
     const snapshotCache = new Map<string, Set<string> | undefined>();
     shape.scope.forEach((entry, index) => {
         const checkout = checkoutFor(ctx, entry.repo);
@@ -1459,14 +1471,22 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
         }
         if (blobs.size === 0) errors.push(`$.scope[${index}].tree ${entry.tree} lists no blobs`);
         for (const [blob, paths] of blobs) {
-            const accounted = disposed.get(`${entry.repo}\u0000${blob}`) ?? 0;
-            if (accounted === 0) {
-                errors.push(`$.scope[${index}] ${entry.repo} tree ${entry.tree} has blob ${blob} missing from the receipt`);
-            } else if (accounted < paths) {
-                errors.push(`$.scope[${index}] ${entry.repo} tree ${entry.tree} has blob ${blob} at ${paths} paths but the receipt disposes of it ${accounted} time(s)`);
-            }
+            const key = `${entry.repo}\u0000${blob}`;
+            const seen = required.get(key) ?? { paths: 0, scopes: [] };
+            seen.paths += paths;
+            seen.scopes.push(`$.scope[${index}]`);
+            required.set(key, seen);
         }
     });
+    for (const [key, { paths, scopes }] of required) {
+        const [repo, blob] = key.split("\u0000") as [string, string];
+        const accounted = disposed.get(key) ?? 0;
+        if (accounted === 0) {
+            errors.push(`${scopes.join(",")} ${repo} has blob ${blob} missing from the receipt`);
+        } else if (accounted < paths) {
+            errors.push(`${scopes.join(",")} ${repo} has blob ${blob} at ${paths} paths but the receipt disposes of it ${accounted} time(s)`);
+        }
+    }
 }
 
 /// Destinations named by every wave receipt under the destination root.
@@ -1490,14 +1510,24 @@ function receiptDestinations(root: string): Set<string> {
 }
 
 /**
- * Digest of every tracked file under the named module directories in the checked tree:
- * one `path\n<sha256 of bytes>\n` line per file, sorted by path. Tracked means listed by
- * `git ls-files`; a plain directory walk would let build output and editor files change
- * the digest.
+ * Digest of a set of files: one `path\n<sha256 of bytes>\n` line per file, sorted by path.
+ * Each file is hashed on its own, so bytes moving across a file boundary change the digest;
+ * a plain concatenation would not see them move.
+ */
+export function fileSetDigest(entries: Iterable<[string, Buffer]>): string {
+    const lines = [...entries].map(([path, bytes]) => `${path}\n${sha256(bytes)}\n`);
+    lines.sort();
+    return sha256(lines.join(""));
+}
+
+/**
+ * Digest of every tracked file under the named module directories in the checked tree, in
+ * the `fileSetDigest` form. Tracked means listed by `git ls-files`; a plain directory walk
+ * would let build output and editor files change the digest.
  */
 export function modulesHash(root: string, modules: string[], path: string, errors: string[]): string | undefined {
     const directories = [...new Set(modules)].sort();
-    const lines: string[] = [];
+    const entries: [string, Buffer][] = [];
     for (const directory of directories) {
         const full = join(root, directory);
         if (!existsSync(full) || !statSync(full).isDirectory()) {
@@ -1515,15 +1545,14 @@ export function modulesHash(root: string, modules: string[], path: string, error
                 errors.push(`${path}: tracked file ${file} is not a file in the destination tree`);
                 return undefined;
             }
-            lines.push(`${file}\n${sha256(readFileSync(fileFull))}\n`);
+            entries.push([file, readFileSync(fileFull)]);
         }
     }
-    if (lines.length === 0) {
+    if (entries.length === 0) {
         errors.push(`${path} covers no tracked files`);
         return undefined;
     }
-    lines.sort();
-    return sha256(lines.join(""));
+    return fileSetDigest(entries);
 }
 
 /// `destination_commit` must be an ancestor of the checked-out destination, so impact records
@@ -1710,18 +1739,18 @@ function verifyKind(kind: CheckKind, root: JsonObject, ctx: Context): string[] {
             for (const core of shape.cores) {
                 // A missing covered file is itself an error; code_hash is only compared over the
                 // complete file set.
-                const bytes: Buffer[] = [];
+                const entries: [string, Buffer][] = [];
                 let complete = true;
                 for (const file of core.files) {
                     const full = join(ctx.root, file);
-                    if (existsSync(full) && statSync(full).isFile()) bytes.push(readFileSync(full));
+                    if (existsSync(full) && statSync(full).isFile()) entries.push([file, readFileSync(full)]);
                     else {
                         complete = false;
                         errors.push(`${core.path}.files lists ${file}, which is not a file in the destination tree; the code_hash cannot be verified`);
                     }
                 }
                 if (complete) {
-                    const actual = sha256(Buffer.concat(bytes));
+                    const actual = fileSetDigest(entries);
                     if (core.code_hash !== undefined && actual !== core.code_hash) {
                         errors.push(`${core.path}.code_hash is stale: the covered files hash to ${actual}; regenerate the record against the checked tree`);
                     }

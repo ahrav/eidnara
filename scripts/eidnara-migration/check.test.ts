@@ -10,6 +10,7 @@ import {
     verify,
     type CheckKind,
     type Context,
+    fileSetDigest,
     modulesHash,
 } from "./check";
 
@@ -897,8 +898,7 @@ describe("evidence: git-backed receipts", () => {
         impact.destination_commit = destinationCommit;
         for (const record of records(impact)) {
             if (record.classification !== "core") continue;
-            const bytes = Buffer.concat((record.files as string[]).map((file) => readFileSync(join(destination, file))));
-            record.code_hash = sha256(bytes);
+            record.code_hash = fileSetDigest((record.files as string[]).map((file): [string, Buffer] => [file, readFileSync(join(destination, file))]));
             const checkFile = typeof record.check_pointer === "string" ? record.check_pointer.split("#")[0]! : undefined;
             if (checkFile !== undefined) record.check_hash = sha256(readFileSync(join(destination, checkFile)));
             if (typeof record.evidence_pointer === "string") record.evidence_digest = sha256(readFileSync(join(destination, record.evidence_pointer)));
@@ -956,7 +956,7 @@ describe("evidence: git-backed receipts", () => {
     test("a scoped tree with a blob missing from the receipt fails and names the blob (AE26)", () => {
         const value = receipt();
         files(value).splice(1, 1);
-        expect(verify("receipt", value, ctx)).toContain(`$.scope[0] source tree ${leaseTree} has blob ${keyBlob} missing from the receipt`);
+        expect(verify("receipt", value, ctx)).toContain(`$.scope[0] source has blob ${keyBlob} missing from the receipt`);
     });
 
     test("a commit or tree id in place of a blob id is rejected", () => {
@@ -1155,6 +1155,44 @@ describe("evidence: git-backed receipts", () => {
         expect(verify("property-impact", split, ctx).some((error) => error.includes("new_evidence.digest") && error.includes("does not equal evidence_digest"))).toBe(true);
     });
 
+    test("a blob shared by two scoped trees needs one disposition per tree", () => {
+        write(join(source, "crates/other/src/lib.rs"), LEASE_SOURCE);
+        gitIn(source, ["add", "-A"]);
+        gitIn(source, ["commit", "-q", "-m", "same bytes in a second crate"]);
+        const newer = gitIn(source, ["rev-parse", "HEAD"]);
+        try {
+            const value = receipt();
+            (value.sources as Json[])[0] = { repo: "source", commit: newer };
+            (value.catalogs as Json[])[0] = { repo: "source", commit: newer };
+            (value.scope as Json[]).push({ repo: "source", tree: gitIn(source, ["rev-parse", "HEAD:crates/other"]) });
+            const errors = verify("receipt", value, ctx);
+            expect(errors).toContain(`$.scope[0],$.scope[1] source has blob ${leaseBlob} at 2 paths but the receipt disposes of it 1 time(s)`);
+        } finally {
+            gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
+    });
+
+    test("the impact's touched files must include every implementation file the receipt changes", () => {
+        const impact = impactFor(sourceCommit);
+        impact.touched_files = ["crates/lease/src/lib.rs"];
+        const carried = records(impact).find((record) => record.classification === "carried-forward")!;
+        carried.files = ["crates/lease/src/lib.rs"];
+        write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impact));
+        try {
+            expect(verify("receipt", receipt(), ctx)).toContain("$.property_impact.touched_files omits crates/lease/src/key.rs, which this receipt changes");
+        } finally {
+            write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
+        }
+    });
+
+    test("moving bytes across a file boundary changes the core code hash", () => {
+        const a = Buffer.from("alpha\nbeta\n");
+        const b = Buffer.from("gamma\n");
+        const moved = fileSetDigest([["x.rs", Buffer.from("alpha\n")], ["y.rs", Buffer.from("beta\ngamma\n")]]);
+        expect(fileSetDigest([["x.rs", a], ["y.rs", b]])).not.toBe(moved);
+        expect(fileSetDigest([["y.rs", b], ["x.rs", a]])).toBe(fileSetDigest([["x.rs", a], ["y.rs", b]]));
+    });
+
     test("a source blob at two paths must be disposed of twice", () => {
         write(join(source, "crates/lease/src/copy.rs"), LEASE_SOURCE);
         gitIn(source, ["add", "-A"]);
@@ -1166,7 +1204,7 @@ describe("evidence: git-backed receipts", () => {
             (value.catalogs as Json[])[0] = { repo: "source", commit: newer };
             (value.scope as Json[])[0] = { repo: "source", tree: gitIn(source, ["rev-parse", "HEAD:crates/lease"]) };
             const errors = verify("receipt", value, ctx);
-            expect(errors).toContain(`$.scope[0] source tree ${gitIn(source, ["rev-parse", "HEAD:crates/lease"])} has blob ${leaseBlob} at 2 paths but the receipt disposes of it 1 time(s)`);
+            expect(errors).toContain(`$.scope[0] source has blob ${leaseBlob} at 2 paths but the receipt disposes of it 1 time(s)`);
         } finally {
             gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
         }
