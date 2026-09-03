@@ -11,6 +11,7 @@ use crate::connection_file::{ConnectionInfo, DAEMON_ID_LEN, MIN_KEY_LEN};
 
 pub use shm_transport::setup_auth::{
     CLIENT_AUTH_DOMAIN, DEFAULT_CLIENT_ROLE, NONCE_LEN, PROOF_LEN, SERVER_PROOF_DOMAIN,
+    compute_proof,
 };
 
 pub const MAX_AUTH_MESSAGE_LEN: u32 = shm_transport::setup_auth::MAX_AUTH_MESSAGE_LEN as u32;
@@ -114,24 +115,6 @@ pub enum AuthError {
     /// `DaemonVerMismatch` reports a `daemon_ver` that differs from the connection-file snapshot.
     DaemonVerMismatch,
     InvalidClientAuth,
-}
-
-pub fn compute_proof(
-    key: &[u8],
-    domain: &str,
-    client_nonce: &[u8; NONCE_LEN],
-    server_nonce: &[u8; NONCE_LEN],
-    daemon_ver: &str,
-    daemon_id: &[u8],
-) -> [u8; PROOF_LEN] {
-    shm_transport::setup_auth::compute_proof(
-        key,
-        domain,
-        client_nonce,
-        server_nonce,
-        daemon_ver,
-        daemon_id,
-    )
 }
 
 /// Each read and write uses the time remaining until `at`, so all stages share one deadline.

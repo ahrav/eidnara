@@ -11,8 +11,9 @@ use shm_transport::descriptor::SETUP_DESCRIPTOR_COUNT;
 use subtle::ConstantTimeEq;
 
 use shm_transport::setup_auth::{
-    self, CLIENT_AUTH_DOMAIN, DAEMON_ID_LEN, DEFAULT_CLIENT_ROLE, MAX_AUTH_MESSAGE_LEN,
+    CLIENT_AUTH_DOMAIN, DAEMON_ID_LEN, DEFAULT_CLIENT_ROLE, MAX_AUTH_MESSAGE_LEN,
     MAX_SETUP_MESSAGE_LEN, NONCE_LEN, PROOF_LEN, PROTOCOL_VERSION, SERVER_PROOF_DOMAIN,
+    compute_proof,
 };
 
 #[derive(Serialize)]
@@ -214,7 +215,7 @@ fn authenticate(
         MAX_AUTH_MESSAGE_LEN,
     )?;
     let server: ServerProof = read_message(stream, deadline, MAX_AUTH_MESSAGE_LEN)?;
-    let expected = proof(
+    let expected = compute_proof(
         key,
         SERVER_PROOF_DOMAIN,
         &client_nonce,
@@ -231,7 +232,7 @@ fn authenticate(
     write_message(
         stream,
         &ClientAuth {
-            client_auth: proof(
+            client_auth: compute_proof(
                 key,
                 CLIENT_AUTH_DOMAIN,
                 &client_nonce,
@@ -242,24 +243,6 @@ fn authenticate(
         },
         deadline,
         MAX_AUTH_MESSAGE_LEN,
-    )
-}
-
-fn proof(
-    key: &[u8],
-    domain: &str,
-    client_nonce: &[u8; NONCE_LEN],
-    server_nonce: &[u8; NONCE_LEN],
-    daemon_ver: &str,
-    daemon_id: &[u8],
-) -> [u8; PROOF_LEN] {
-    setup_auth::compute_proof(
-        key,
-        domain,
-        client_nonce,
-        server_nonce,
-        daemon_ver,
-        daemon_id,
     )
 }
 
@@ -426,7 +409,7 @@ fn timed_out() -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIENT_AUTH_DOMAIN, GrantMessage, SERVER_PROOF_DOMAIN, proof};
+    use super::{CLIENT_AUTH_DOMAIN, GrantMessage, SERVER_PROOF_DOMAIN, compute_proof};
     use shm_transport::setup_auth::vectors;
 
     #[test]
@@ -452,7 +435,7 @@ mod tests {
     fn auth_proofs_match_committed_wire_vectors() {
         let (key, client_nonce, server_nonce, daemon_id) = vectors::inputs();
         assert_eq!(
-            proof(
+            compute_proof(
                 &key,
                 SERVER_PROOF_DOMAIN,
                 &client_nonce,
@@ -463,7 +446,7 @@ mod tests {
             vectors::SERVER_PROOF,
         );
         assert_eq!(
-            proof(
+            compute_proof(
                 &key,
                 CLIENT_AUTH_DOMAIN,
                 &client_nonce,
