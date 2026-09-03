@@ -23,7 +23,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "17edbcfe8d9885e675a9a05babc254119cca1428add3357b748122022ca9068c",
+      "destination_sha256": "2064d4670c71f94c959ca0977774f04fb1facd54317ad10081716424d7b7d573",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -34,7 +34,7 @@
     {
       "source": null,
       "destination": "package.json",
-      "destination_sha256": "d7bf3b974b34713505df1735cdddc96d352eafa615fa3041df1eeeeaf867139a",
+      "destination_sha256": "90dc2d0ffd184970cd5bf3bc4fe6ad314b47faf6045fae3f80bd3b5eb52fe6b4",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -45,7 +45,7 @@
     {
       "source": null,
       "destination": "tsconfig.json",
-      "destination_sha256": "d50b385e0f68e05ba32e17ad6f37d41e500f38f36331673006336b535e7c7f20",
+      "destination_sha256": "65ef51fda5eeb65fece80734b08c98a9b0bdee93fe26b84f4b7f9bf259fe3b42",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -78,7 +78,7 @@
     {
       "source": null,
       "destination": ".gitignore",
-      "destination_sha256": "93337f9cb022d881608d97016ae5debc16173aca323a5fd8f7fc6d9b80d51e43",
+      "destination_sha256": "eb24f14f7d9c4d06ae4bbed29c58bcfcbc6bfee46e4647644a0b2992a05dcf3c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -133,7 +133,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "2144fe1abd1bbdb4dbe49bfab855c6dcc937f04fb7bbf1d5bd5ed059f76c6a21",
+      "destination_sha256": "7bdd948f1304f73e6dcd6328d322bb0a67721f70923a50f85186a17b2f39fd96",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -300,7 +300,7 @@
     {
       "source": null,
       "destination": "bun.lock",
-      "destination_sha256": "45583d9e02c9b346333f1c7f159948af707e2fba38fc91de525b28595390fa74",
+      "destination_sha256": "191485dff9d74e73153bc01df5ed669bffac6e56381f109f30a25ce719aceab6",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {

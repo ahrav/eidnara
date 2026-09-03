@@ -735,7 +735,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "17edbcfe8d9885e675a9a05babc254119cca1428add3357b748122022ca9068c",
+      "destination_sha256": "2064d4670c71f94c959ca0977774f04fb1facd54317ad10081716424d7b7d573",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -746,7 +746,7 @@
     {
       "source": null,
       "destination": "Cargo.lock",
-      "destination_sha256": "b8bcbba3492209356a5f182e655febf899d495c298168aad60b5f0efd21e3cc7",
+      "destination_sha256": "1952b5fc536914410d5266da58d9b4f85e35fdac7dec9355307425931232b74b",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -767,7 +767,7 @@
     {
       "source": null,
       "destination": "package.json",
-      "destination_sha256": "d7bf3b974b34713505df1735cdddc96d352eafa615fa3041df1eeeeaf867139a",
+      "destination_sha256": "90dc2d0ffd184970cd5bf3bc4fe6ad314b47faf6045fae3f80bd3b5eb52fe6b4",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -778,7 +778,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "2144fe1abd1bbdb4dbe49bfab855c6dcc937f04fb7bbf1d5bd5ed059f76c6a21",
+      "destination_sha256": "7bdd948f1304f73e6dcd6328d322bb0a67721f70923a50f85186a17b2f39fd96",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

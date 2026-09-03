@@ -1,0 +1,8 @@
+//! libFuzzer requires nightly Rust.
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+
+fuzz_target!(|data: &[u8]| {
+    let _ = shm_transport::harness::provider_sample(data);
+});
