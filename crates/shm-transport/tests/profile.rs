@@ -1,0 +1,157 @@
+use std::sync::Arc;
+
+use shm_transport::descriptor::{
+    DESCRIPTOR_SCHEMA_VERSION, HardwareProfileId, TransportDescriptor,
+};
+use shm_transport::profile::{
+    AdmissionController, AdmissionError, HostLimits, ProfileConfig, ResourceCharges, TargetProfile,
+    WorkerTopology, host_test_ring_profile, ring_profile,
+};
+#[test]
+fn fixed_ring_identity_survives_profile_validation() {
+    let profile = ring_profile(HardwareProfileId::new("fixed-ring-contract").unwrap()).unwrap();
+
+    assert_eq!(
+        profile.descriptor().schema_version(),
+        DESCRIPTOR_SCHEMA_VERSION
+    );
+    assert!(profile.descriptor().hardware_matches("fixed-ring-contract"));
+}
+
+#[test]
+fn host_admission_retains_quarantined_commitments() {
+    let profile = ring_profile(HardwareProfileId::new("contract-host").unwrap()).unwrap();
+    let charges = profile.charges();
+    let controller = Arc::new(AdmissionController::new(HostLimits {
+        descriptors: charges.descriptors,
+        arena_bytes: charges.arena_bytes,
+        leases: charges.leases,
+        mappings: charges.mappings,
+        file_descriptors: charges.file_descriptors,
+        workers: charges.workers,
+        client_instances: charges.client_instances,
+        pinned_workers: 0,
+    }));
+    let admission = controller.admit(&profile, None).unwrap();
+    assert_eq!(controller.snapshot().unwrap().active, charges);
+    let _quarantine = admission.quarantine().unwrap();
+    assert_eq!(
+        controller.snapshot().unwrap().quarantined,
+        ResourceCharges {
+            pinned_workers: 0,
+            ..charges
+        }
+    );
+    assert!(matches!(
+        controller.admit(&profile, None),
+        Err(AdmissionError::DescriptorLimit)
+            | Err(AdmissionError::ArenaByteLimit)
+            | Err(AdmissionError::LeaseLimit)
+            | Err(AdmissionError::MappingLimit)
+            | Err(AdmissionError::FileDescriptorLimit)
+            | Err(AdmissionError::ClientInstanceLimit)
+    ));
+}
+
+#[test]
+fn exact_aggregate_capacity_admits_n_and_rejects_n_plus_one_without_charging() {
+    let profile = ring_profile(HardwareProfileId::new("contract-capacity").unwrap()).unwrap();
+    let one = profile.charges();
+    let count = 3;
+    let controller = Arc::new(AdmissionController::new(HostLimits {
+        descriptors: one.descriptors * count,
+        arena_bytes: one.arena_bytes * count,
+        leases: one.leases * count,
+        mappings: one.mappings * count,
+        file_descriptors: one.file_descriptors * count,
+        workers: one.workers * count,
+        client_instances: one.client_instances * count,
+        pinned_workers: one.pinned_workers * count,
+    }));
+    let admissions: Vec<_> = (0..count)
+        .map(|_| {
+            controller
+                .admit(&profile, None)
+                .expect("capacity admission")
+        })
+        .collect();
+    let full = controller.snapshot().unwrap();
+    assert_eq!(full.active.client_instances, count);
+    assert!(matches!(
+        controller.admit(&profile, None),
+        Err(AdmissionError::DescriptorLimit)
+            | Err(AdmissionError::ArenaByteLimit)
+            | Err(AdmissionError::LeaseLimit)
+            | Err(AdmissionError::MappingLimit)
+            | Err(AdmissionError::FileDescriptorLimit)
+            | Err(AdmissionError::WorkerLimit)
+            | Err(AdmissionError::ClientInstanceLimit)
+    ));
+    assert_eq!(controller.snapshot().unwrap(), full);
+    drop(admissions);
+    let reclaimed = controller.snapshot().unwrap();
+    assert_eq!(reclaimed.active, ResourceCharges::ZERO);
+    assert_eq!(reclaimed.quarantined, ResourceCharges::ZERO);
+}
+
+fn span_profile(max_spans: usize) -> TargetProfile {
+    TargetProfile::new(ProfileConfig {
+        descriptor: TransportDescriptor::new(HardwareProfileId::new("contract-spans").unwrap()),
+        descriptor_depth: 8,
+        arena_bytes: shm_transport::MIN_ARENA_BYTES,
+        max_spans,
+        max_leases: 8,
+        mappings: 2,
+        pinned_workers: 0,
+        worker_topology: WorkerTopology::CallerThread,
+    })
+    .unwrap()
+}
+
+#[test]
+fn released_admissions_recompute_active_span_charge() {
+    let wide = span_profile(2);
+    let narrow = span_profile(1);
+    let controller = Arc::new(AdmissionController::new(HostLimits {
+        descriptors: 1024,
+        arena_bytes: 1 << 30,
+        leases: 1024,
+        mappings: 1024,
+        file_descriptors: 1024,
+        workers: 1024,
+        client_instances: 1024,
+        pinned_workers: 0,
+    }));
+
+    // The active span charge equals the maximum among live admissions.
+    let wide_admission = controller.admit(&wide, None).unwrap();
+    let narrow_admission = controller.admit(&narrow, None).unwrap();
+    assert_eq!(controller.snapshot().unwrap().active.spans_per_frame, 2);
+    wide_admission.release();
+    assert_eq!(controller.snapshot().unwrap().active.spans_per_frame, 1);
+    drop(narrow_admission);
+    assert_eq!(controller.snapshot().unwrap().active.spans_per_frame, 0);
+
+    // Quarantine removes the span charge from the active maximum.
+    let wide_admission = controller.admit(&wide, None).unwrap();
+    let _quarantine = wide_admission.quarantine().unwrap();
+    let snapshot = controller.snapshot().unwrap();
+    assert_eq!(snapshot.active.spans_per_frame, 0);
+    assert_eq!(snapshot.quarantined.spans_per_frame, 2);
+}
+
+/// The profile id is a wire literal both peers compare byte for byte, so the test spells it
+/// and the depth rather than reading the constants it is checking.
+#[test]
+fn host_test_ring_profile_names_one_geometry() {
+    let profile = host_test_ring_profile().unwrap();
+    assert!(profile.descriptor().hardware_matches("host-test-ring-v1"));
+    assert_eq!(profile.descriptor_depth(), 8);
+    assert_eq!(profile.max_leases(), 8);
+    // One arena per logical direction is what one connection charges.
+    assert_eq!(
+        profile.charges().arena_bytes,
+        2 * shm_transport::MIN_ARENA_BYTES as u64
+    );
+    assert_eq!(profile.charges().descriptors, 16);
+}

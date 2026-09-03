@@ -637,6 +637,42 @@
       "kind": "authored",
       "path": "crates/storage/examples/schema-inventory.rs",
       "rationale": "Generator for the storage schema inventory fixture."
+    },
+    {
+      "kind": "identity",
+      "value": "host-test-ring-v1",
+      "class": "external-protocol",
+      "rationale": "Hardware profile id of the fixed shared-memory ring both peers attach; a grant naming any other profile is rejected before mapping.",
+      "evidence": [
+        "crates/shm-transport/src/profile.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "eidnara-server-v1",
+      "class": "external-protocol",
+      "rationale": "HMAC domain separator of the host's setup-handshake proof; the peer computes the same transcript and rejects a proof under any other domain.",
+      "evidence": [
+        "crates/shm-transport/src/setup_auth.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "eidnara-client-v1",
+      "class": "external-protocol",
+      "rationale": "HMAC domain separator of the peer's setup-handshake proof.",
+      "evidence": [
+        "crates/shm-transport/src/setup_auth.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "eidnara-host/",
+      "class": "external-protocol",
+      "rationale": "Prefix of the `daemon_ver` string bound into every handshake proof; a peer authenticates against the exact version string the host publishes.",
+      "evidence": [
+        "crates/shm-transport/src/setup_auth.rs"
+      ]
     }
   ]
 }

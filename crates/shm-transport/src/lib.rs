@@ -17,6 +17,10 @@ pub mod backend;
 pub mod descriptor;
 /// Close-state machine shared by the native addon and the host.
 pub mod lifecycle;
+/// Hardware profiles: the ring geometry a profile id names, and host-wide admission of them.
+pub mod profile;
+/// Setup-handshake proof transcript shared by both peers.
+pub mod setup_auth;
 
 pub use arena::{MAX_FRAME_BYTES, MIN_ARENA_BYTES};
 pub use descriptor::{Incarnation, ReleaseIdentity, WIRE_V2_HEADER_BYTES};
