@@ -1785,12 +1785,85 @@ export function normalizedTokens(text: string): Set<string> {
     return out;
 }
 
+/**
+ * `text` with every item under a `#[cfg(test)]` (or `cfg(all(test, ...))`) attribute
+ * replaced by blank lines, so line numbers in later messages still match the file. The item
+ * is the next `{ ... }` block or `;`-terminated declaration after the attribute. String
+ * literals (including raw strings), character literals, and comments are skipped while
+ * matching braces, so a brace inside a test string does not end the item early.
+ */
+export function withoutCfgTestItems(text: string): string {
+    const attribute = /#\[cfg\((?:test|all\(\s*test\b[^)]*\))\)\]/g;
+    let out = "";
+    let cursor = 0;
+    for (const match of text.matchAll(attribute)) {
+        if (match.index < cursor) continue;
+        const start = match.index;
+        const end = rustItemEnd(text, start + match[0].length);
+        out += text.slice(cursor, start) + text.slice(start, end).replace(/[^\n]/g, "");
+        cursor = end;
+    }
+    return out + text.slice(cursor);
+}
+
+/** Index just past the Rust item that starts at `from`: its closing brace or terminating `;`. */
+function rustItemEnd(text: string, from: number): number {
+    let depth = 0;
+    let index = from;
+    while (index < text.length) {
+        const char = text[index];
+        const next = text[index + 1];
+        if (char === "/" && next === "/") {
+            const eol = text.indexOf("\n", index);
+            index = eol === -1 ? text.length : eol;
+            continue;
+        }
+        if (char === "/" && next === "*") {
+            const close = text.indexOf("*/", index + 2);
+            index = close === -1 ? text.length : close + 2;
+            continue;
+        }
+        const raw = /^b?r(#*)"/.exec(text.slice(index, index + 8));
+        if (raw !== null && !/[A-Za-z0-9_]/.test(text[index - 1] ?? "")) {
+            const terminator = `"${raw[1]}`;
+            const close = text.indexOf(terminator, index + raw[0].length);
+            index = close === -1 ? text.length : close + terminator.length;
+            continue;
+        }
+        if (char === '"' || (char === "b" && next === '"' && !/[A-Za-z0-9_]/.test(text[index - 1] ?? ""))) {
+            index += char === "b" ? 2 : 1;
+            while (index < text.length && text[index] !== '"') index += text[index] === "\\" ? 2 : 1;
+            index += 1;
+            continue;
+        }
+        if (char === "'" && /^'(?:\\.|[^\\'])'/.test(text.slice(index, index + 4))) {
+            index = text.indexOf("'", index + 2) + 1;
+            continue;
+        }
+        if (char === "{") depth += 1;
+        else if (char === "}") {
+            depth -= 1;
+            if (depth === 0) return index + 1;
+        } else if (char === ";" && depth === 0) return index + 1;
+        index += 1;
+    }
+    return text.length;
+}
+
 function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): void {
     if (shape.retired.length > 0) {
         const retired = new Set(shape.retired.map((entry) => entry.digest));
         for (const rel of retiredIdentityScanFiles(ctx.root)) {
             const full = join(ctx.root, rel);
             if (!existsSync(full) || !statSync(full).isFile()) continue;
+            // The pathname is scanned along with the contents: a retired name can survive as
+            // a directory or file name with nothing inside naming it.
+            for (const token of normalizedTokens(rel)) {
+                if (retired.has(sha256(token))) {
+                    errors.push(`${rel}: its path names a retired source identity (digest ${sha256(token).slice(0, 12)}); the destination tree carries no source-implementation name`);
+                    break;
+                }
+            }
             const bytes = readFileSync(full);
             if (bytes.includes(0)) continue;
             const text = bytes.toString("utf8");
@@ -1821,10 +1894,11 @@ function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): v
         for (const rel of listFiles(treeRoot, skipVendored)) {
             const parts = rel.split("/");
             if (parts[1] !== "src") continue;
-            if (/(^|[./_-])tests?([./_-]|$)/.test(rel)) continue;
             const language = rel.endsWith(".rs") ? ".rs" : rel.endsWith(".ts") ? ".ts" : undefined;
             if (language === undefined) continue;
-            const text = readFileSync(join(treeRoot, rel), "utf8");
+            // A test-like file name carries no compile-time meaning, so every file under
+            // `src` is scanned; only the bodies Rust compiles for tests alone are skipped.
+            const text = language === ".rs" ? withoutCfgTestItems(readFileSync(join(treeRoot, rel), "utf8")) : readFileSync(join(treeRoot, rel), "utf8");
             for (const match of text.matchAll(PERSISTENT_LITERAL_RE[language])) {
                 const literal = match[1] ?? match[2] ?? match[3];
                 if (literal === undefined || literalOwners.has(literal)) continue;

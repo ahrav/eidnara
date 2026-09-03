@@ -847,8 +847,9 @@ mod sqlite_backend {
         out
     }
 
-    /// A private copy of a database and its sidecars, removed on drop. Reading the copy
-    /// through an ordinary connection replays its WAL without touching the original files.
+    /// A private copy of a database and its sidecars, removed on drop. Opening the copy
+    /// read-write replays its WAL or rolls its hot journal back without touching the
+    /// original files.
     struct InspectionCopy {
         directory: PathBuf,
         database: PathBuf,
@@ -876,7 +877,7 @@ mod sqlite_backend {
                 database: directory.join(file_name),
                 directory,
             };
-            for suffix in ["", "-wal", "-shm"] {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
                 let source = PathBuf::from(format!("{}{suffix}", path.display()));
                 if source.try_exists().map_err(StoreError::Io)? {
                     let target = PathBuf::from(format!("{}{suffix}", copy.database.display()));
@@ -1160,18 +1161,26 @@ mod sqlite_backend {
             let identity = FileIdentity::of(path).map_err(StoreError::Io)?;
             // Any ordinary SQLite connection to a WAL-mode file creates the `-wal` and
             // `-shm` sidecars if they are missing, so the inspection never opens the file
-            // itself in that mode. Without a `-wal` the main file is the whole database
-            // and an `immutable` open reads it while creating nothing. With a `-wal`, the
-            // main file may lag or be torn mid-checkpoint, so the database and its sidecars
-            // are copied into a private directory and the copy is read; the originals are
-            // never opened. The copy costs one pass over the file and runs only when a
-            // writer did not checkpoint on close.
-            let wal = PathBuf::from(format!("{}-wal", path.display()));
-            let floor = if wal.try_exists().map_err(StoreError::Io)? {
+            // itself in that mode. Without a `-wal` or a `-journal` the main file is the
+            // whole database and an `immutable` open reads it while creating nothing. With
+            // either sidecar present the main file may lag, be torn mid-checkpoint, or hold
+            // pages an interrupted rollback-journal transaction spilled, so the database
+            // and its sidecars are copied into a private directory and the copy is opened
+            // read-write so SQLite replays the WAL or rolls the hot journal back there; the
+            // originals are never opened. The copy costs one pass over the file and runs
+            // only when a writer did not finish cleanly.
+            let has_sidecar = ["-wal", "-journal"]
+                .iter()
+                .map(|suffix| PathBuf::from(format!("{}{suffix}", path.display())))
+                .map(|sidecar| sidecar.try_exists().map_err(StoreError::Io))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|exists| exists);
+            let floor = if has_sidecar {
                 let scratch = InspectionCopy::of(path)?;
                 let conn = Connection::open_with_flags(
                     &scratch.database,
-                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
                 )
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
                 self.floor_of(&conn)?
@@ -1898,6 +1907,72 @@ mod tests {
             2,
             "the lease sidecar still holds epoch 1, so the repaired store issues 2"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A store whose maintenance switched it to a rollback journal and whose writer died
+    /// mid-transaction leaves spilled pages in the main file and their originals in a hot
+    /// `-journal`. Here the spilled page holds an uncommitted fence at `i64::MAX`, which a
+    /// bare read of the main file would take as the floor and refuse as exhausted; the
+    /// inspection rolls the copy back first, so the store reopens above the committed epoch.
+    #[test]
+    fn a_store_with_a_hot_rollback_journal_is_classified_after_rollback() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        {
+            let store = open_sqlite(&d, KV_BASELINE).expect("first open");
+            store
+                .with_conn_unfenced(|conn| {
+                    conn.query_row("PRAGMA journal_mode = DELETE", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map(|_| ())
+                })
+                .expect("switch to a rollback journal");
+        }
+        // A tiny page cache forces the dirtied fence page out to the main file while the
+        // transaction is still open; the journal holds the committed page.
+        let writer = rusqlite::Connection::open(path).expect("writer");
+        writer
+            .execute_batch(&format!(
+                "PRAGMA cache_size = 1; BEGIN; UPDATE fence SET epoch = {} WHERE id = 0; \
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4000) \
+                 INSERT INTO kv SELECT hex(randomblob(16)), hex(randomblob(128)) FROM n;",
+                i64::MAX
+            ))
+            .expect("open transaction with spilled pages");
+        let journal = format!("{path}-journal");
+        assert!(
+            std::fs::metadata(&journal).map(|m| m.len()).unwrap_or(0) > 0,
+            "the transaction must leave a journal on disk"
+        );
+        // Copy the crashed state aside while the writer still holds it open, then let the
+        // copy stand in for a store whose process died before commit or rollback.
+        let crashed_root = root.join("crashed");
+        std::fs::create_dir_all(&crashed_root).expect("crashed root");
+        let crashed_path = crashed_root.join("store.db");
+        std::fs::copy(path, &crashed_path).expect("copy database");
+        std::fs::copy(&journal, format!("{}-journal", crashed_path.display()))
+            .expect("copy journal");
+        drop(writer);
+        let crashed = StorageDescriptor {
+            backend: StorageBackend::Sqlite {
+                path: crashed_path.to_string_lossy().into_owned(),
+            },
+            ..d.clone()
+        };
+        let reopened = open_sqlite(&crashed, KV_BASELINE).expect("reopen after rollback");
+        assert_eq!(
+            reopened.epoch(),
+            2,
+            "the floor is the committed epoch 1 from the rolled-back copy, not the spilled value"
+        );
+        let rows: i64 = reopened
+            .with_conn(|conn| conn.query_row("SELECT count(*) FROM kv", [], |row| row.get(0)))
+            .expect("row count");
+        assert_eq!(rows, 0, "the uncommitted rows were rolled back");
         let _ = std::fs::remove_dir_all(&root);
     }
 

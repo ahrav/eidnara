@@ -126,9 +126,33 @@ fn non_regular_file(path: &std::path::Path) -> std::io::Error {
 fn require_private_directory(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         // SAFETY: `geteuid` reads the effective user id and has no preconditions.
         let euid = unsafe { libc::geteuid() };
+        require_private_directory_for(dir, euid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// `require_private_directory` for an explicit running user, so the ownership rules can be
+/// exercised without a second account.
+#[cfg(unix)]
+fn require_private_directory_for(dir: &std::path::Path, euid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    {
+        // A symlink anywhere on the unresolved path is an entry its owner can replace, even
+        // inside a sticky directory, so each one must belong to the running user or root.
+        // Canonicalizing first would drop those entries from the ancestry examined below.
+        let dir = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(dir)
+        };
+        let dir = dir.as_path();
+        require_symlink_components_owned(dir, euid, 0)?;
         let metadata = std::fs::symlink_metadata(dir)?;
         if !metadata.is_dir() {
             return Err(std::io::Error::new(
@@ -189,8 +213,57 @@ fn require_private_directory(dir: &std::path::Path) -> std::io::Result<()> {
             }
         }
     }
-    #[cfg(not(unix))]
-    let _ = dir;
+    Ok(())
+}
+
+/// Every symlink among the components of `path`, and of each symlink's target in turn, must
+/// be owned by `euid` or root; the walk stops after 40 hops as the kernel does.
+#[cfg(unix)]
+fn require_symlink_components_owned(
+    path: &std::path::Path,
+    euid: u32,
+    hops: u32,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if hops > 40 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "lease directory {} resolves through more than 40 symlinks",
+                path.display()
+            ),
+        ));
+    }
+    let mut prefix = std::path::PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        let meta = match std::fs::symlink_metadata(&prefix) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.uid() != euid && meta.uid() != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "lease directory component {} is a symlink owned by uid {}; its owner could \
+                     point it at another directory",
+                    prefix.display(),
+                    meta.uid()
+                ),
+            ));
+        }
+        let target = std::fs::read_link(&prefix)?;
+        let target = if target.is_absolute() {
+            target
+        } else {
+            prefix.parent().map(|p| p.join(&target)).unwrap_or(target)
+        };
+        require_symlink_components_owned(&target, euid, hops + 1)?;
+    }
     Ok(())
 }
 
@@ -1074,6 +1147,43 @@ mod tests {
                 .epoch(),
             2
         );
+    }
+
+    /// A symlink on the way to the lease directory is an entry its owner can retarget, so a
+    /// symlink owned by another user is refused even when the directory it reaches is
+    /// private; the same symlink owned by the running user is accepted.
+    #[cfg(unix)]
+    #[test]
+    fn a_lease_path_through_a_foreign_owned_symlink_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+
+        let outer = tempfile::tempdir().expect("outer");
+        let real = outer.path().join("real");
+        std::fs::create_dir(&real).expect("real");
+        let link = outer.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let base = link.join("leases");
+        std::fs::create_dir(&base).expect("base through the link");
+        let me = std::fs::symlink_metadata(&link).expect("link meta").uid();
+        require_private_directory_for(&base, me)
+            .expect("a symlink the running user owns is accepted");
+        let error = require_private_directory_for(&base, me + 1)
+            .expect_err("a symlink another user owns must be refused");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("is a symlink owned by uid"),
+            "{error}"
+        );
+        // The chain is followed: a second hop owned by another user is refused as well.
+        let hop = outer.path().join("hop");
+        std::os::unix::fs::symlink(&link, &hop).expect("second hop");
+        require_private_directory_for(&hop.join("leases"), me)
+            .expect("two owned hops are accepted");
+        assert!(require_private_directory_for(&hop.join("leases"), me + 1).is_err());
     }
 
     /// A path re-pointed at another inode after the open is detected once the lock is held,

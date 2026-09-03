@@ -1217,12 +1217,13 @@ describe("evidence: git-backed receipts", () => {
             ["scripts/run.sh", "oldname-host --flag\n"],
             ["scripts/compound.sh", "old-name-host --flag\n"],
             ["scripts/prefixed.sh", "run_old_name --flag\n"],
+            ["docs/old-name/note.md", "Nothing inside names it.\n"],
         ] as const) {
             write(join(destination, file), text);
             gitIn(destination, ["add", "-A"]);
             try {
                 const errors = verify("registry", registry, ctx);
-                expect(errors.some((error) => error.startsWith(`${file}: names a retired source identity`))).toBe(true);
+                expect(errors.some((error) => error.startsWith(`${file}: `) && error.includes("retired source identity"))).toBe(true);
             } finally {
                 gitIn(destination, ["rm", "-q", "-f", file]);
             }
@@ -1319,14 +1320,31 @@ describe("evidence: git-backed receipts", () => {
         }
     });
 
+    test("registry scans cover test-named modules under src and skip cfg(test) items", () => {
+        write(
+            join(destination, "crates/lease/src/test_support.rs"),
+            'pub const DB: &str = "support.db";\n#[cfg(test)]\nmod tests {\n    const T: &str = "only-in-tests.db";\n    fn f() { let s = "}"; }\n}\n#[cfg(all(test, feature = "x"))]\nconst U: &str = "also-only.db";\n',
+        );
+        try {
+            const errors = verify("registry", copy("registry"), ctx);
+            expect(errors).toContain('crates/lease/src/test_support.rs: persistent literal "support.db" has no family entry in the registry');
+            expect(errors.some((error) => error.includes("only-in-tests.db") || error.includes("also-only.db"))).toBe(false);
+        } finally {
+            rmSync(join(destination, "crates/lease/src/test_support.rs"));
+        }
+    });
+
     test("registry scans catch migration machinery in non-test code (AE11)", () => {
         write(join(destination, "crates/lease/src/ledger.rs"), "pub struct Migration { pub version: u32 }\npub fn migrate() {}\n");
-        write(join(destination, "crates/lease/src/tests/ledger.rs"), "fn run_migrations() {}\n");
+        // A `tests` directory under `src` is compiled like any other module; only a
+        // `#[cfg(test)]` item is test-only.
+        write(join(destination, "crates/lease/src/tests/ledger.rs"), "fn run_migrations() {}\n#[cfg(test)]\nmod t { fn run_migrations() {} }\n");
         try {
             const errors = verify("registry", copy("registry"), ctx);
             expect(errors).toContain('crates/lease/src/ledger.rs:1: migration machinery "Migration {"; a family has one baseline and no version ledger');
             expect(errors).toContain('crates/lease/src/ledger.rs:2: migration machinery "fn migrate"; a family has one baseline and no version ledger');
-            expect(errors.some((error) => error.startsWith("crates/lease/src/tests/"))).toBe(false);
+            expect(errors).toContain('crates/lease/src/tests/ledger.rs:1: migration machinery "run_migrations"; a family has one baseline and no version ledger');
+            expect(errors.some((error) => error.startsWith("crates/lease/src/tests/ledger.rs:3"))).toBe(false);
         } finally {
             rmSync(join(destination, "crates/lease/src/ledger.rs"));
             rmSync(join(destination, "crates/lease/src/tests"), { recursive: true });
