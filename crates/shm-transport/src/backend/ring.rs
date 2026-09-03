@@ -195,6 +195,17 @@ struct ConsumerCursors {
     active_leases: u64,
 }
 
+/// Every shared cursor, read together for a health check.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CursorSnapshot {
+    published: u64,
+    arena_write: u64,
+    consumed: u64,
+    active_leases: u64,
+    completed: u64,
+    arena_reclaimed: u64,
+}
+
 #[derive(Clone, Copy)]
 struct Layout {
     producer: usize,
@@ -933,8 +944,10 @@ impl Ring {
             _not_send_or_sync: PhantomData,
         };
         // The baseline becomes this handle's record, so a mapping the peer already broke is
-        // refused here rather than adopted as truth.
-        ring.conservation_inner()?;
+        // refused here rather than adopted as truth. Nothing this handle owns is in flight, so
+        // the cursors must agree with the slots exactly once the peer's own transition, if
+        // any, has settled.
+        ring.conservation_inner(true)?;
         Ok(ring)
     }
 
@@ -1223,7 +1236,7 @@ impl Ring {
             // polls again.
             return Ok(None);
         }
-        let published = self.verified_published()?;
+        let published = self.verified_published(consumed)?;
         if consumed == published {
             return Ok(None);
         }
@@ -1333,7 +1346,7 @@ impl Ring {
             .verified_consumer_cursors()
             .map_err(|error| self.quarantine_with(error))?;
         let published = self
-            .verified_published()
+            .verified_published(consumed)
             .map_err(|error| self.quarantine_with(error))?;
         Ok(published != consumed && active < self.grant.max_leases)
     }
@@ -1447,11 +1460,63 @@ impl Ring {
                 },
             ));
         }
-        self.conservation_inner()
+        self.conservation_inner(false)
             .map_err(|error| self.quarantine_with(error))
     }
 
-    fn conservation_inner(&self) -> Result<(DescriptorCounts, ArenaCounts), RingError> {
+    /// Walks the slots until one walk completes with every cursor unchanged around it. The
+    /// cursors only advance, so an unchanged set means no transition finished during the walk,
+    /// and the counts then differ from the cursors by at most the one transition whose slot
+    /// store landed before its cursor store. With `exact`, that one transition is also waited
+    /// out, since it completes within a few instructions on an honest peer while a forged
+    /// cursor never converges. A peer that keeps moving cursors as fast as the walk runs makes
+    /// the check give up as `InvalidSharedState`; healthy traffic settles.
+    fn conservation_inner(
+        &self,
+        exact: bool,
+    ) -> Result<(DescriptorCounts, ArenaCounts), RingError> {
+        const STABLE_SNAPSHOT_ATTEMPTS: usize = 64;
+        for attempt in 1..=STABLE_SNAPSHOT_ATTEMPTS {
+            let before = self.cursor_snapshot()?;
+            let (descriptors, bytes) = self.walk_slots()?;
+            if self.cursor_snapshot()? != before {
+                continue;
+            }
+            match self.check_cursor_invariants(&descriptors, before, exact) {
+                Ok(()) => return Ok((descriptors, bytes)),
+                Err(RingError::InvalidSharedState)
+                    if exact
+                        && attempt < STABLE_SNAPSHOT_ATTEMPTS
+                        && self
+                            .check_cursor_invariants(&descriptors, before, false)
+                            .is_ok() =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(RingError::InvalidSharedState)
+    }
+
+    fn cursor_snapshot(&self) -> Result<CursorSnapshot, RingError> {
+        let producer = self.producer_ptr()?;
+        let consumer = self.consumer_ptr()?;
+        let reclaim = self.reclaim_ptr()?;
+        // SAFETY: the pages were bounds-checked and hold initialized atomics.
+        Ok(unsafe {
+            CursorSnapshot {
+                published: (*producer).published.load(Ordering::Acquire),
+                arena_write: (*producer).arena_write.load(Ordering::Acquire),
+                consumed: (*consumer).consumed.load(Ordering::Acquire),
+                active_leases: (*consumer).active_leases.load(Ordering::Acquire),
+                completed: (*reclaim).completed.load(Ordering::Acquire),
+                arena_reclaimed: (*reclaim).arena_reclaimed.load(Ordering::Acquire),
+            }
+        })
+    }
+
+    fn walk_slots(&self) -> Result<(DescriptorCounts, ArenaCounts), RingError> {
         let mut descriptors = DescriptorCounts::default();
         let mut bytes = ArenaCounts::default();
         let mut charged = 0u64;
@@ -1521,58 +1586,48 @@ impl Ring {
             .arena_bytes
             .checked_sub(charged)
             .ok_or(RingError::InvalidSharedState)?;
-        self.check_cursor_invariants(&descriptors)?;
         Ok((descriptors, bytes))
     }
 
-    /// Cursor invariants that hold in every intermediate state of an honest peer's transitions,
-    /// so a probe racing normal traffic cannot report corruption. Every cursor only advances,
-    /// and each check reads its lower bound before its upper bound: the lower value is then at
-    /// most what it was when the upper value was read.
-    ///
-    /// Cursor-versus-slot comparisons allow one transition in flight. A receive stores the slot
-    /// before `consumed` and `active_leases`; a release stores the slot before `active_leases`;
-    /// a commit stores the slot before `published`. One endpoint performs one transition at a
-    /// time, so each count differs from its cursor by at most one between the two stores.
-    /// Exact agreement is enforced by the owning handle against its private record on every
-    /// operation, which is where a forged cursor would otherwise take effect.
-    fn check_cursor_invariants(&self, descriptors: &DescriptorCounts) -> Result<(), RingError> {
-        let producer = self.producer_ptr()?;
-        let consumer = self.consumer_ptr()?;
-        let reclaim = self.reclaim_ptr()?;
-        // SAFETY: the pages were bounds-checked and hold initialized atomics.
-        let published = || unsafe { (*producer).published.load(Ordering::Acquire) };
-        // SAFETY: same as above.
-        let arena_write = || unsafe { (*producer).arena_write.load(Ordering::Acquire) };
-        // SAFETY: same as above.
-        let consumed = || unsafe { (*consumer).consumed.load(Ordering::Acquire) };
-        // SAFETY: same as above.
-        let active_leases = || unsafe { (*consumer).active_leases.load(Ordering::Acquire) };
-        // SAFETY: same as above.
-        let completed = || unsafe { (*reclaim).completed.load(Ordering::Acquire) };
-        // SAFETY: same as above.
-        let arena_reclaimed = || unsafe { (*reclaim).arena_reclaimed.load(Ordering::Acquire) };
-
-        // `lower <= upper` with the lower cursor read first.
-        let ordered = |lower: &dyn Fn() -> u64, upper: &dyn Fn() -> u64| {
-            let lower = lower();
-            lower <= upper()
-        };
-        // `upper - lower <= bound` with the upper cursor read first; a lower cursor that has
-        // since passed it means nothing is in flight.
-        let gap = |upper: &dyn Fn() -> u64, lower: &dyn Fn() -> u64| {
-            let upper = upper();
-            upper.saturating_sub(lower())
-        };
-        let within_one = |cursor: u64, count: u64| cursor.abs_diff(count) <= 1;
-        if active_leases() > self.grant.max_leases
-            || !within_one(active_leases(), descriptors.receiver_leased)
-            || !ordered(&consumed, &published)
-            || !within_one(gap(&published, &consumed), descriptors.published)
-            || !ordered(&completed, &consumed)
-            || gap(&published, &completed) > self.grant.descriptor_depth
-            || !ordered(&arena_reclaimed, &arena_write)
-            || gap(&arena_write, &arena_reclaimed) > self.grant.arena_bytes
+    /// Checks a cursor snapshot that was stable across a slot walk. Cursor-versus-slot
+    /// comparisons allow one transition in flight: a receive stores the slot before `consumed`
+    /// and `active_leases`, a release stores the slot before `active_leases`, and a commit
+    /// stores the slot before `published`. One endpoint performs one transition at a time, so
+    /// each compared count differs from its cursor by at most one. `exact` requires zero
+    /// difference. `completed` is not compared with the slots: reclaim frees a whole run of
+    /// slots before it stores the cursor, and the producer handle checks that cursor against
+    /// its own record on every operation. A handle that has acted in a role also requires that
+    /// role's cursors to match its own record, which only that handle writes.
+    fn check_cursor_invariants(
+        &self,
+        descriptors: &DescriptorCounts,
+        cursors: CursorSnapshot,
+        exact: bool,
+    ) -> Result<(), RingError> {
+        let CursorSnapshot {
+            published,
+            arena_write,
+            consumed,
+            active_leases,
+            completed,
+            arena_reclaimed,
+        } = cursors;
+        let tolerance = if exact { 0 } else { 1 };
+        let matches = |cursor: u64, count: u64| cursor.abs_diff(count) <= tolerance;
+        let in_flight = published
+            .checked_sub(consumed)
+            .ok_or(RingError::InvalidSharedState)?;
+        let held = consumed
+            .checked_sub(completed)
+            .ok_or(RingError::InvalidSharedState)?;
+        let live_bytes = arena_write
+            .checked_sub(arena_reclaimed)
+            .ok_or(RingError::InvalidSharedState)?;
+        if active_leases > self.grant.max_leases
+            || !matches(active_leases, descriptors.receiver_leased)
+            || !matches(in_flight, descriptors.published)
+            || in_flight + held > self.grant.descriptor_depth
+            || live_bytes > self.grant.arena_bytes
         {
             return Err(RingError::InvalidSharedState);
         }
@@ -1689,12 +1744,16 @@ impl Ring {
         Ok(shared)
     }
 
-    /// Loads `published` and rejects a value below the greatest one this handle has seen.
-    fn verified_published(&self) -> Result<u64, RingError> {
+    /// Loads `published` and rejects a value below the greatest one this handle has seen or
+    /// more than `descriptor_depth` ahead of `consumed`, which no producer can reach.
+    fn verified_published(&self, consumed: u64) -> Result<u64, RingError> {
         let producer = self.producer_ptr()?;
         // SAFETY: producer page holds initialized shared atomics; acquire pairs with publication.
         let published = unsafe { (*producer).published.load(Ordering::Acquire) };
-        if published < self.published_seen.get() {
+        let queued = published
+            .checked_sub(consumed)
+            .ok_or(RingError::InvalidSharedState)?;
+        if published < self.published_seen.get() || queued > self.grant.descriptor_depth {
             return Err(RingError::InvalidSharedState);
         }
         self.published_seen.set(published);
@@ -3218,6 +3277,45 @@ mod tests {
         assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
         assert!(ring.is_quarantined());
         drop((first, second, third));
+    }
+
+    #[test]
+    fn attach_refuses_a_phantom_lease_count_that_a_probe_would_tolerate() {
+        let ring = ring();
+        let consumer = ring.consumer_ptr().unwrap();
+        // One transition's worth of skew is legal mid-operation but not on an idle mapping.
+        // SAFETY: test-owned ring keeps the consumer page mapped.
+        unsafe { (*consumer).active_leases.store(1, Ordering::Release) };
+        assert!(matches!(
+            ring.attachment().unwrap().attach(),
+            Err(RingError::InvalidSharedState)
+        ));
+    }
+
+    #[test]
+    fn published_running_ahead_of_depth_quarantines_before_any_delivery() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        let producer = ring.producer_ptr().unwrap();
+        let depth = ring.grant().descriptor_depth;
+        // SAFETY: test-owned ring keeps the producer page mapped.
+        unsafe { (*producer).published.store(depth + 1, Ordering::Release) };
+        assert!(matches!(
+            ring.try_receive(),
+            Err(RingError::InvalidSharedState)
+        ));
+        assert!(ring.is_quarantined());
+
+        let ring = self::ring();
+        publish(&ring, &[1]);
+        let producer = ring.producer_ptr().unwrap();
+        // SAFETY: same as above for the fresh ring.
+        unsafe { (*producer).published.store(depth + 1, Ordering::Release) };
+        assert!(matches!(
+            ring.wait_for_data(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            Err(RingError::InvalidSharedState)
+        ));
+        assert!(ring.is_quarantined());
     }
 
     #[test]
