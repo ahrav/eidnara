@@ -114,6 +114,28 @@ export interface CheckOptions {
     requireReservation: boolean;
 }
 
+// The shapes `summarizeView` records for a view probe. A recorded gate is checked against
+// them so an empty object, an array, or a probe whose versions are not strings cannot pass
+// as evidence that a name is unpublished.
+type ViewSummary =
+    | { state: "published"; versions: string[] }
+    | { state: "unpublished"; code: unknown }
+    | { state: "error"; code: unknown };
+
+const VIEW_STATES = new Set(["published", "unpublished", "error"]);
+
+function viewSummaryProblem(summary: unknown): string | null {
+    if (summary === null || typeof summary !== "object" || Array.isArray(summary)) return "is missing its summary";
+    const record = summary as Record<string, unknown>;
+    if (typeof record.state !== "string" || !VIEW_STATES.has(record.state)) {
+        return `has summary state ${JSON.stringify(record.state ?? null)}; expected published, unpublished, or error`;
+    }
+    if (record.state === "published" && !(Array.isArray(record.versions) && record.versions.every((value) => typeof value === "string"))) {
+        return "is published without a string array of versions";
+    }
+    return null;
+}
+
 export function checkGate(value: unknown, now: Date, options: CheckOptions = { requireReservation: false }): string[] {
     const errors: string[] = [];
     if (value === null || typeof value !== "object" || Array.isArray(value)) return ["gate file must be a JSON object"];
@@ -135,7 +157,7 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
     const probes = Array.isArray(gate.probes) ? (gate.probes as unknown[]) : undefined;
     if (probes === undefined) return [...errors, "probes must be an array"];
 
-    const viewed = new Map<string, Record<string, unknown>>();
+    const viewed = new Map<string, ViewSummary>();
     const commands = new Set<string>();
     probes.forEach((entry, index) => {
         if (entry === null || typeof entry !== "object") {
@@ -158,10 +180,13 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
             const expected = /^npm view (\S+) versions dist-tags --json$/.exec(command)?.[1];
             if (typeof item.name !== "string" || item.name !== expected) {
                 errors.push(`probes[${index}] (${command}) must name the package it viewed`);
-            } else if (item.summary === null || typeof item.summary !== "object") {
-                errors.push(`probes[${index}] (${command}) is missing its summary`);
             } else {
-                viewed.set(item.name, item.summary as Record<string, unknown>);
+                const problem = viewSummaryProblem(item.summary);
+                if (problem !== null) {
+                    errors.push(`probes[${index}] (${command}) ${problem}`);
+                } else {
+                    viewed.set(item.name, item.summary as ViewSummary);
+                }
             }
         }
     });
@@ -181,7 +206,7 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
             errors.push(`${name} has no usable view summary`);
             continue;
         }
-        const versions = Array.isArray(summary.versions) ? (summary.versions as string[]) : [];
+        const versions = summary.state === "published" ? summary.versions : [];
         const ga = versions.filter((version) => !PRERELEASE_RE.test(version));
         if (ga.length > 0) errors.push(`${name} has non-prerelease versions ${ga.join(", ")}; genesis has not been published`);
         if (summary.state === "error") errors.push(`${name} view probe errored (${String(summary.code)})`);

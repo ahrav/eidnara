@@ -153,7 +153,9 @@ fn require_private_directory_for(dir: &std::path::Path, euid: u32) -> std::io::R
         };
         let dir = dir.as_path();
         require_symlink_components_owned(dir, euid, 0)?;
-        let metadata = std::fs::symlink_metadata(dir)?;
+        // The component check has accepted any final symlink, so the directory it names is
+        // what must be owned by the running user and closed to group and other writers.
+        let metadata = std::fs::metadata(dir)?;
         if !metadata.is_dir() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1325,6 +1327,35 @@ mod tests {
         );
     }
 
+    /// A lease directory named through the running user's own final symlink is accepted:
+    /// the component check owns the link and the directory checks apply to its target.
+    #[cfg(unix)]
+    #[test]
+    fn a_lease_directory_behind_the_running_users_final_symlink_is_accepted() {
+        use std::os::unix::fs::MetadataExt;
+
+        let outer = tempfile::tempdir().expect("outer");
+        let real = outer.path().join("real");
+        std::fs::create_dir(&real).expect("real");
+        let link = outer.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("final symlink");
+        let me = std::fs::metadata(&real).expect("real meta").uid();
+
+        require_private_directory_for(&link, me)
+            .expect("the running user's final symlink is accepted");
+        let store = FileLeaseStore::new(&link).expect("store through the link");
+        let exclusive = store
+            .acquire(&key("a"))
+            .expect("exclusive through the link");
+        drop(exclusive);
+        let shared = store
+            .acquire_shared(&key("a"))
+            .expect("shared through the link");
+        let files = std::fs::read_dir(&real).expect("real dir").count();
+        assert_eq!(files, 1, "the lease file is created in the link's target");
+        drop(shared);
+    }
+
     /// A symlink on the way to the lease directory is an entry its owner can retarget. In a
     /// sticky system directory only the symlink's owner can replace it, so a symlink owned by
     /// another user is refused there while the running user's own symlink is accepted; in a
@@ -1344,7 +1375,9 @@ mod tests {
         let system_tmp = std::env::temp_dir();
         let tmp_meta = std::fs::metadata(&system_tmp).expect("temp dir");
         let sticky_root_owned = tmp_meta.uid() == 0 && tmp_meta.permissions().mode() & 0o1000 != 0;
-        if sticky_root_owned {
+        // A root-owned symlink is accepted for every user, so the foreign-owner case can only
+        // be simulated when the running user is not root.
+        if sticky_root_owned && me != 0 {
             let link = system_tmp.join(format!("lease-link-{}-{}", std::process::id(), me));
             std::os::unix::fs::symlink(&real, &link).expect("symlink in the sticky directory");
             let base = link.join("leases");

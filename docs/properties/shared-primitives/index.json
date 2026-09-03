@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shared-primitives",
   "source": "catalog.md",
-  "source_sha256": "cff379c962a6adf078465a478087daee4c1e5a80ddc2fe6887bc5ca71a9655ba",
+  "source_sha256": "f8bf51f86b4891a002b9d4322e88c5bf9ea348741cf54883e9a283b443d790fc",
   "records": [
     {
       "slug": "at-most-one-exclusive-holder-per-key",
@@ -207,9 +207,9 @@
       "required_faults": "Construct keys containing the separator in different fields. A targeted FNV collision is a separate enabling state whose practical cost remains open.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/distinct-lease-keys-do-not-alias.md). High that the separator is rejected in every field (`LeaseKey::identity` (`crates/lease/src/lib.rs:525-551`)); high that collision handling is absent; low on practical targeted-FNV cost."
+        "evidence": "[evidence](evidence/distinct-lease-keys-do-not-alias.md). High that the separator is rejected in every field (`LeaseKey::identity` (`crates/lease/src/lib.rs:527-553`)); high that collision handling is absent; low on practical targeted-FNV cost."
       },
-      "existing_check": "`distinct_identity_axes_do_not_conflict` covers distinct scope, module, and backend axes; `separator_in_a_key_field_fails_closed_instead_of_aliasing` (`crates/lease/src/lib.rs:1973-1996`) covers the separator in each field; status **unaudited**.",
+      "existing_check": "`distinct_identity_axes_do_not_conflict` covers distinct scope, module, and backend axes; `separator_in_a_key_field_fails_closed_instead_of_aliasing` (`crates/lease/src/lib.rs:2006-2029`) covers the separator in each field; status **unaudited**.",
       "impact": "Unrelated stores falsely contend and share one epoch sequence.",
       "open_questions": [],
       "extra": {}

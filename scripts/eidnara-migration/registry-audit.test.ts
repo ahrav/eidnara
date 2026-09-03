@@ -79,6 +79,26 @@ describe("registry audit", () => {
         expect(checkGate(summaryless, now)).toContain("probes[" + view + "] (npm view @eidnara/cli versions dist-tags --json) is missing its summary");
     });
 
+    test("a malformed view summary is an error rather than an unpublished name", () => {
+        const gate = audit(fakeRunner({}), now);
+        const probes = gate.probes as unknown as Record<string, unknown>[];
+        const view = probes.findIndex((probe) => probe.command === "npm view @eidnara/cli versions dist-tags --json");
+        const command = "npm view @eidnara/cli versions dist-tags --json";
+        const withSummary = (summary: unknown) => ({ ...gate, probes: probes.map((probe, index) => (index === view ? { ...probe, summary } : probe)) });
+        expect(checkGate(withSummary({}), now)).toContain(`probes[${view}] (${command}) has summary state null; expected published, unpublished, or error`);
+        expect(checkGate(withSummary({}), now)).toContain("@eidnara/cli has no usable view summary");
+        expect(checkGate(withSummary([]), now)).toContain(`probes[${view}] (${command}) is missing its summary`);
+        expect(checkGate(withSummary({ state: "reserved" }), now)).toContain(
+            `probes[${view}] (${command}) has summary state "reserved"; expected published, unpublished, or error`,
+        );
+        expect(checkGate(withSummary({ state: "published" }), now)).toContain(`probes[${view}] (${command}) is published without a string array of versions`);
+        expect(checkGate(withSummary({ state: "published", versions: ["1.0.0-reserved.1", 7] }), now)).toContain(
+            `probes[${view}] (${command}) is published without a string array of versions`,
+        );
+        expect(checkGate(withSummary({ state: "published", versions: ["1.0.0-reserved.1"], dist_tags: {} }), now)).toEqual([]);
+        expect(checkGate(withSummary({ state: "unpublished", code: "E404" }), now)).toEqual([]);
+    });
+
     test("rejects a non-prerelease @eidnara version", () => {
         const runner = fakeRunner({
             "view @eidnara/cli versions dist-tags --json": ok(JSON.stringify({ versions: ["1.0.0-reserved.1", "1.0.0"], "dist-tags": { latest: "1.0.0" } })),

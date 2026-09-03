@@ -122,7 +122,7 @@
         "blob_sha": "2699b575864d0d1823d7531aa9a0e53bcfa98c1f"
       },
       "destination": "crates/lease/src/lib.rs",
-      "destination_sha256": "a790509b2a76f39b3d36d5e7a08a51c340a1bd32c38ec07977d4cfdce13f4d49",
+      "destination_sha256": "b0fc909b7103d492d07a6557c83b633bcb3aac6ffd1648d09aefcb482a36c50a",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -270,7 +270,7 @@
         "blob_sha": "d360c86177f779878d5b645bb31b1b06f0d0584c"
       },
       "destination": "docs/properties/shared-primitives/catalog.md",
-      "destination_sha256": "cff379c962a6adf078465a478087daee4c1e5a80ddc2fe6887bc5ca71a9655ba",
+      "destination_sha256": "f8bf51f86b4891a002b9d4322e88c5bf9ea348741cf54883e9a283b443d790fc",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -283,7 +283,7 @@
         "blob_sha": "e1e9761f2a147ae3619dec612bf033fd7c8be1f2"
       },
       "destination": "docs/properties/shared-primitives/existing-checks.md",
-      "destination_sha256": "b226e7cb86a6571becf2e05d0d8f43926364a87a46295923c8a4b95e743b00dc",
+      "destination_sha256": "aa0736fe26773a5eeacfe6293bdc5ebe590bfbce681df53876dbf6bad632cb4b",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -374,7 +374,7 @@
         "blob_sha": "c228f5611c9d04f21a2336a673deac658bf46211"
       },
       "destination": "docs/properties/shared-primitives/evidence/distinct-lease-keys-do-not-alias.md",
-      "destination_sha256": "ee04012191c8f017ea39494f1458d896f7d09a23622745c6f47fd9fb734a9a3c",
+      "destination_sha256": "2d856ed0cf847ff4521ed72be9a6804aacdbf58c13fc57e3726d09fa1c1e2b52",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -387,7 +387,7 @@
         "blob_sha": "9313ae64c111a794261660b09da2f5dfcefc0e64"
       },
       "destination": "docs/properties/shared-primitives/evidence/epoch-input-size-is-bounded.md",
-      "destination_sha256": "8eb8324a7ac5331e8f62dbd22f21571b887868405c4a0196c4996545a0124b4c",
+      "destination_sha256": "58671809f4e2c58f2a5c372e5af1e48a096ea945506231d0013c5676cf099db1",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -413,7 +413,7 @@
         "blob_sha": "1e68a07d4f01a910a5a0bc43969b6c0aa3c72ddc"
       },
       "destination": "docs/properties/shared-primitives/evidence/failed-acquire-preserves-prior-epoch.md",
-      "destination_sha256": "26223252cf2a2958dbc45e586b7f8d31d20a3f079a9d434aaba850948ee34446",
+      "destination_sha256": "f740782abc85fc1c7337395a7a8a575179acc92fa8cede0db75653d586ad1102",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -465,7 +465,7 @@
         "blob_sha": "49aaf7b2004052cbe7fc73b989863b3da130db30"
       },
       "destination": "docs/properties/shared-primitives/evidence/invalid-epoch-fails-closed.md",
-      "destination_sha256": "f1b79ca321232018f52a612358670d2c596c02f3c1c74aa3e19a2c5edae8b8ff",
+      "destination_sha256": "e766bd1e9ee2606554c95d01fc42bf7c30cb65e6a9b4c7c3938d0f1d1022666c",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -478,7 +478,7 @@
         "blob_sha": "9e6d87629fa62230896f28e844b5248c64fea706"
       },
       "destination": "docs/properties/shared-primitives/evidence/lease-file-creation-is-never-permissive.md",
-      "destination_sha256": "5cd65d780bbc33c867ed9a5b6269505904f27f4025106eeab0934e6e213e631e",
+      "destination_sha256": "6b48dc4795d5cfec570e1daf7ddc0d1ec5d194b2a6ceef1682f2809c89dd8ed9",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -517,7 +517,7 @@
         "blob_sha": "7930fa5e9794d85ac7d66b07b7e1040324606299"
       },
       "destination": "docs/properties/shared-primitives/evidence/lease-path-format-is-version-stable.md",
-      "destination_sha256": "16c020fc2642f72862554e0ec2e2f0a740c71a69ca1af492e88076b93905e5b8",
+      "destination_sha256": "8728d1436cc5108caa957df1b5948c875c30ca8243cb6cc90deca4165e4f1e15",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -595,7 +595,7 @@
         "blob_sha": "87ed0880cb2095abfcb2bd084fd92af08444ac3c"
       },
       "destination": "docs/properties/shared-primitives/evidence/returned-epoch-is-crash-durable.md",
-      "destination_sha256": "7efac1977c6945070e455b99b813264b15f383c08b846fc3bad78c2b4d662de4",
+      "destination_sha256": "168d9a2af0e4f556010a277387b93710db528c8b7400e26510ae980f0bf64af5",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -686,7 +686,7 @@
         "blob_sha": "a8bec0e2687e27fbb7611b11c6e22c91da98305f"
       },
       "destination": "docs/properties/shared-primitives/fault-map.md",
-      "destination_sha256": "fb0d58544c8e9b5b7487b15d755ff4a7d26e8615d10a84c273d7cf50b2cdef27",
+      "destination_sha256": "e8a85f51518c60dbc7daa6334a40353c7e7b54dc9898a37c9a3717745a597d43",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -725,7 +725,7 @@
         "blob_sha": "c840cdf8ed0f6c0743d29d88f22b140ecca6ab1f"
       },
       "destination": "docs/properties/shared-primitives/system-model.md",
-      "destination_sha256": "125bf0c82e254adc72099670c62b8a60db3a7422a52bbb0c748ee503752c867c",
+      "destination_sha256": "010712e13cfea636911515c6d6d8e6658ed86d16c0c2d6a963c173eacb3e55e4",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -811,7 +811,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/property-impact.json",
-      "destination_sha256": "d8fac3e11635ea9298f7695d6d31a8f2c180253446ea6c1f04cb805981179e41",
+      "destination_sha256": "97815b6220c349ef7def0fcc8a9db6c6d543ab5004aedc9b82eea1b96b3a851a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -822,7 +822,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/architecture-impact.json",
-      "destination_sha256": "c11b5b93d35081fc97c0221d7ea473ec6f2f7d82a64144f64d065210851d4465",
+      "destination_sha256": "13948a7f706ef9d41c772899894ae9ec77827a054e6da20339605e93f9ca4433",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -855,7 +855,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/index.json",
-      "destination_sha256": "393358180987cf86a1ce44442e9a0a4818ac50541f52f71502996f96d0e40be6",
+      "destination_sha256": "4807b8d4aaf0b0b303fd357c1902f94ba15ca0761743b27f8871915be9140b9b",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -942,7 +942,7 @@
     {
       "source": null,
       "destination": "docs/properties/shared-primitives/evidence/store-schema-identity-matches-the-baseline.md",
-      "destination_sha256": "c5d91d7fa3c0dc7b73e7d9b881a4a868b5610c362360c7bae78a870bc7670faa",
+      "destination_sha256": "dfacf11cbb83ff56320e9b68b44231910343f657483d176bd93b333be2c4feb4",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
