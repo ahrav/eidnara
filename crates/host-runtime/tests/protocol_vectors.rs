@@ -1,0 +1,765 @@
+//! These tests compare protocol literals against independent wire vectors.
+//! These tests use vectors from `docs/host-wire-protocol.md` and verify live-connection framing.
+//! The host must apply the specified framing dispositions to each live connection.
+//!
+//! The test oracle in `support::raw_client` decodes committed expected literals.
+//! These tests do not ask the host to generate expected bytes (protocol §14.1).
+
+mod support;
+
+use std::time::Duration;
+
+use support::raw_client::{
+    self, CLIENT_DOMAIN, FLAGS_INTERACTIVE, FLAGS_PURE_HEADER, HEADER_LEN, RawClient,
+    SERVER_DOMAIN, TY_ERROR, TY_GOODBYE, TY_HELLO, TY_HELLO_ACK, TY_PING, TY_PUSH, TY_REQUEST,
+    TY_RESPONSE, TY_STREAM_DATA, TY_STREAM_END,
+};
+use support::{LINKED_MODULE_ID, TestHost};
+
+const BUDGET: Duration = Duration::from_secs(5);
+const VECTOR_DAEMON_VER: &str = "eidnara-host/0.1.0";
+
+/// `vector_inputs` uses the protocol's canonical proof inputs.
+fn vector_inputs() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    (
+        (0x00u8..=0x1f).collect(),
+        (0x20u8..=0x3f).collect(),
+        (0x40u8..=0x5f).collect(),
+        (0x60u8..=0x6f).collect(),
+    )
+}
+
+#[test]
+fn committed_auth_proof_vectors_pin_the_construction() {
+    let (key, client_nonce, server_nonce, daemon_id) = vector_inputs();
+
+    let expected_server_proof: [u8; 32] = [
+        64, 154, 84, 68, 23, 100, 116, 189, 2, 121, 137, 79, 177, 172, 107, 52, 108, 174, 152, 208,
+        218, 25, 249, 160, 154, 212, 42, 68, 91, 108, 85, 131,
+    ];
+    let expected_client_auth: [u8; 32] = [
+        184, 138, 243, 55, 0, 189, 88, 52, 54, 27, 4, 112, 129, 214, 202, 57, 252, 146, 75, 221,
+        119, 177, 247, 0, 193, 206, 206, 26, 90, 147, 247, 187,
+    ];
+
+    assert_eq!(
+        raw_client::proof(
+            &key,
+            SERVER_DOMAIN,
+            &client_nonce,
+            &server_nonce,
+            VECTOR_DAEMON_VER,
+            &daemon_id
+        ),
+        expected_server_proof.to_vec(),
+        "server proof construction drifted from the committed vector"
+    );
+    assert_eq!(
+        raw_client::proof(
+            &key,
+            CLIENT_DOMAIN,
+            &client_nonce,
+            &server_nonce,
+            VECTOR_DAEMON_VER,
+            &daemon_id
+        ),
+        expected_client_auth.to_vec(),
+        "client proof construction drifted from the committed vector"
+    );
+
+    // Server and client domains must produce distinct proofs.
+    assert_ne!(expected_server_proof, expected_client_auth);
+}
+
+#[test]
+fn proof_folds_every_input() {
+    let (key, client_nonce, server_nonce, daemon_id) = vector_inputs();
+    let baseline = raw_client::proof(
+        &key,
+        SERVER_DOMAIN,
+        &client_nonce,
+        &server_nonce,
+        VECTOR_DAEMON_VER,
+        &daemon_id,
+    );
+
+    let mut other_key = key.clone();
+    other_key[0] ^= 0xff;
+    let mut other_client = client_nonce.clone();
+    other_client[0] ^= 0xff;
+    let mut other_server = server_nonce.clone();
+    other_server[0] ^= 0xff;
+    let mut other_daemon = daemon_id.clone();
+    other_daemon[0] ^= 0xff;
+
+    for (label, proof) in [
+        (
+            "key",
+            raw_client::proof(
+                &other_key,
+                SERVER_DOMAIN,
+                &client_nonce,
+                &server_nonce,
+                VECTOR_DAEMON_VER,
+                &daemon_id,
+            ),
+        ),
+        (
+            "client nonce",
+            raw_client::proof(
+                &key,
+                SERVER_DOMAIN,
+                &other_client,
+                &server_nonce,
+                VECTOR_DAEMON_VER,
+                &daemon_id,
+            ),
+        ),
+        (
+            "server nonce",
+            raw_client::proof(
+                &key,
+                SERVER_DOMAIN,
+                &client_nonce,
+                &other_server,
+                VECTOR_DAEMON_VER,
+                &daemon_id,
+            ),
+        ),
+        (
+            "daemon id",
+            raw_client::proof(
+                &key,
+                SERVER_DOMAIN,
+                &client_nonce,
+                &server_nonce,
+                VECTOR_DAEMON_VER,
+                &other_daemon,
+            ),
+        ),
+        (
+            "daemon version",
+            raw_client::proof(
+                &key,
+                SERVER_DOMAIN,
+                &client_nonce,
+                &server_nonce,
+                "eidnara-host/0.1.1",
+                &daemon_id,
+            ),
+        ),
+    ] {
+        assert_ne!(
+            proof, baseline,
+            "changing the {label} must change the proof"
+        );
+    }
+}
+
+#[test]
+fn committed_header_vectors_decode_to_their_documented_fields() {
+    // `route.open` uses control header values: length 173, Interactive/Normal, channel 0, and epoch 0.
+    // correlation 1.
+    let control = hex_to_bytes("ad0000000200020000000000000100000000000000");
+    assert_eq!(control.len(), HEADER_LEN);
+    let decoded = raw_client::decode_header(&control);
+    assert_eq!(decoded.len, 173);
+    assert_eq!(decoded.ver, 2);
+    assert_eq!(decoded.ty, TY_REQUEST);
+    assert_eq!(decoded.flags, FLAGS_INTERACTIVE);
+    assert_eq!(decoded.channel, 0);
+    assert_eq!(decoded.epoch, 0);
+    assert_eq!(decoded.corr, 1);
+    assert_eq!(
+        raw_client::header(173, TY_REQUEST, FLAGS_INTERACTIVE, 0, 0, 1),
+        control,
+        "encoding must reproduce the committed control header"
+    );
+
+    // The routed request uses header values: length 44, Background/Normal, channel 7, and epoch 77.
+    // correlation 2.
+    let routed = hex_to_bytes("2c00000002000407004d0000000200000000000000");
+    let decoded = raw_client::decode_header(&routed);
+    assert_eq!(decoded.len, 44);
+    assert_eq!(decoded.ty, TY_REQUEST);
+    assert_eq!(decoded.flags, 0b0000_0100);
+    assert_eq!(decoded.channel, 7);
+    assert_eq!(decoded.epoch, 77);
+    assert_eq!(decoded.corr, 2);
+    assert_eq!(
+        raw_client::header(44, TY_REQUEST, 0b0000_0100, 7, 77, 2),
+        routed
+    );
+}
+
+#[test]
+fn canonical_route_open_body_is_173_bytes() {
+    let canonical = concat!(
+        r#"{"op":"route.open","target":{"kind":"tool_provider","module_id":"context"},"#,
+        r#""identity":{"project_root":"/workspace/project","harness":"opencode","session":"session-1"}}"#
+    );
+    assert_eq!(
+        canonical.len(),
+        173,
+        "the documented control header declares 173 body bytes"
+    );
+    // The fixture literal must remain valid input to the host.
+    let parsed: serde_json::Value = serde_json::from_str(canonical).expect("canonical JSON");
+    assert_eq!(parsed["op"], "route.open");
+    assert_eq!(parsed["target"]["module_id"], LINKED_MODULE_ID);
+}
+
+fn hex_to_bytes(hex: &str) -> Vec<u8> {
+    assert!(hex.len().is_multiple_of(2), "hex must be byte-aligned");
+    (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex digit"))
+        .collect()
+}
+
+#[tokio::test]
+async fn host_authenticates_against_the_independent_oracle() {
+    let host = TestHost::start().await;
+    let client = host.client().await;
+    assert_eq!(client.daemon_ver, "eidnara-host/test");
+    drop(client);
+    host.shutdown_gracefully().await;
+}
+
+#[tokio::test]
+async fn every_valid_role_claim_gets_identical_admission() {
+    let host = TestHost::start().await;
+    for role in ["client", "watchdog", "provider", ""] {
+        let mut client = RawClient::connect_with_role(&host.info, role)
+            .await
+            .unwrap_or_else(|err| panic!("role {role:?} must authenticate identically: {err}"));
+        // Reporting metadata cannot grant access beyond the operations available without it.
+        let corr = client
+            .control(&serde_json::json!({"op": "catalog.list"}))
+            .await
+            .expect("catalog");
+        let frame = client.frame_within(BUDGET).await.expect("catalog reply");
+        assert_eq!(frame.corr, corr);
+        assert_eq!(frame.ty, TY_RESPONSE);
+        let unsupported = client
+            .control(&serde_json::json!({"op": "supervisor.restart", "module_id": "x"}))
+            .await
+            .expect("unsupported op");
+        let frame = client.frame_within(BUDGET).await.expect("reply");
+        assert_eq!(frame.corr, unsupported);
+        assert_eq!(frame.error_code(), "unsupported_operation");
+    }
+    host.shutdown_gracefully().await;
+}
+
+#[tokio::test]
+async fn auth_message_at_the_cap_is_valid_and_over_it_closes() {
+    let host = TestHost::start().await;
+
+    // JSON whitespace padding produces a valid 4,096-byte body.
+    let mut stream = raw_client::connect_unauthenticated(&host.info)
+        .await
+        .expect("connect");
+    let nonce: Vec<u8> = (0u8..32).collect();
+    let base = serde_json::json!({"client_nonce": nonce, "role": "client"});
+    let mut body = serde_json::to_vec(&base).expect("hello");
+    let pad = 4096 - body.len();
+    // Padding `role` makes the message exactly the size cap.
+    let padded_role = format!("client{}", " ".repeat(pad));
+    body = serde_json::to_vec(&serde_json::json!({
+        "client_nonce": nonce,
+        "role": padded_role
+    }))
+    .expect("padded hello");
+    assert_eq!(body.len(), 4096, "fixture must sit exactly on the cap");
+    write_len_prefixed(&mut stream, &body).await;
+    // The expected response proves that the request was accepted.
+    let reply = read_len_prefixed(&mut stream).await.expect("server proof");
+    assert!(reply["server_proof"].is_array());
+    drop(stream);
+
+    // 4,096-byte limit.
+    let mut stream = raw_client::connect_unauthenticated(&host.info)
+        .await
+        .expect("connect");
+    let nonce: Vec<u8> = (0u8..32).collect();
+    let base = serde_json::to_vec(&serde_json::json!({
+        "client_nonce": nonce,
+        "role": "client"
+    }))
+    .expect("hello");
+    let padded_role = format!("client{}", " ".repeat(4097 - base.len()));
+    let oversize = serde_json::to_vec(&serde_json::json!({
+        "client_nonce": (0u8..32).collect::<Vec<_>>(),
+        "role": padded_role
+    }))
+    .expect("oversize hello");
+    assert_eq!(oversize.len(), 4097);
+    write_len_prefixed(&mut stream, &oversize).await;
+    assert!(
+        read_len_prefixed(&mut stream).await.is_none(),
+        "an over-cap auth message must not receive a reply"
+    );
+
+    host.shutdown_gracefully().await;
+}
+
+#[tokio::test]
+async fn malformed_and_wrong_proof_handshakes_close_without_envelope_traffic() {
+    let host = TestHost::start().await;
+
+    // Malformed JSON.
+    let mut stream = raw_client::connect_unauthenticated(&host.info)
+        .await
+        .expect("connect");
+    write_len_prefixed(&mut stream, b"{not json").await;
+    assert!(read_len_prefixed(&mut stream).await.is_none());
+
+    let mut stream = raw_client::connect_unauthenticated(&host.info)
+        .await
+        .expect("connect");
+    let short: Vec<u8> = (0u8..16).collect();
+    write_len_prefixed(
+        &mut stream,
+        &serde_json::to_vec(&serde_json::json!({"client_nonce": short, "role": "client"}))
+            .expect("hello"),
+    )
+    .await;
+    assert!(read_len_prefixed(&mut stream).await.is_none());
+
+    // After a valid `Hello` with an invalid client proof, the host must close without reading or writing an envelope frame.
+    let mut stream = raw_client::connect_unauthenticated(&host.info)
+        .await
+        .expect("connect");
+    let nonce: Vec<u8> = (0u8..32).collect();
+    write_len_prefixed(
+        &mut stream,
+        &serde_json::to_vec(&serde_json::json!({"client_nonce": nonce, "role": "client"}))
+            .expect("hello"),
+    )
+    .await;
+    let _server = read_len_prefixed(&mut stream).await.expect("server proof");
+    write_len_prefixed(
+        &mut stream,
+        &serde_json::to_vec(&serde_json::json!({"client_auth": vec![0u8; 32]})).expect("bad auth"),
+    )
+    .await;
+    let mut buf = [0u8; 1];
+    use tokio::io::AsyncReadExt;
+    let read = tokio::time::timeout(BUDGET, stream.read(&mut buf))
+        .await
+        .expect("host must close promptly");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "a failed proof must yield EOF, never frame bytes"
+    );
+
+    host.shutdown_gracefully().await;
+}
+
+/// Each structurally illegal frame retires its generation without an `Error` frame or resynchronization (protocol §6.3, AE2, V13-V15, V17, V42).
+#[tokio::test]
+async fn structural_corruption_is_rejected_before_dispatch() {
+    struct Case {
+        name: &'static str,
+        bytes: Vec<u8>,
+    }
+
+    let cases = vec![
+        Case {
+            name: "unsupported version",
+            bytes: {
+                let mut header = raw_client::header(0, TY_GOODBYE, FLAGS_PURE_HEADER, 0, 0, 0);
+                header[4] = 3;
+                header
+            },
+        },
+        Case {
+            name: "unknown frame type",
+            bytes: raw_client::header(0, 99, FLAGS_PURE_HEADER, 0, 0, 0),
+        },
+        Case {
+            name: "reserved flag bit",
+            bytes: raw_client::header(0, TY_GOODBYE, 0b1000_0000, 0, 0, 0),
+        },
+        Case {
+            name: "reserved priority value",
+            bytes: raw_client::header(0, TY_GOODBYE, 0b0000_0110, 0, 0, 0),
+        },
+        Case {
+            name: "reserved admission value",
+            bytes: raw_client::header(0, TY_GOODBYE, 0b0011_0000, 0, 0, 0),
+        },
+        Case {
+            name: "sheddable on a delivered frame type",
+            bytes: raw_client::header(0, TY_REQUEST, 0b0010_0010, 0, 0, 1),
+        },
+        Case {
+            name: "nonzero epoch on the control channel",
+            bytes: raw_client::header(0, TY_REQUEST, FLAGS_INTERACTIVE, 0, 4, 1),
+        },
+        Case {
+            name: "binary pure-header frame",
+            bytes: raw_client::header(0, TY_GOODBYE, 0b0000_0001, 0, 0, 0),
+        },
+        Case {
+            name: "last pure-header frame",
+            bytes: raw_client::header(0, TY_GOODBYE, 0b0000_1000, 0, 0, 0),
+        },
+        Case {
+            name: "Expedite pure-header frame",
+            bytes: raw_client::header(0, TY_GOODBYE, 0b0001_0000, 0, 0, 0),
+        },
+        Case {
+            name: "pure-header frame declaring a body",
+            bytes: {
+                let mut wire = raw_client::header(4, TY_CANCEL_LOCAL, FLAGS_PURE_HEADER, 1, 1, 1);
+                wire.extend_from_slice(b"body");
+                wire
+            },
+        },
+        Case {
+            name: "body declaration over 64 MiB",
+            bytes: raw_client::header(
+                MAX_BODY_LEN_LOCAL + 1,
+                TY_REQUEST,
+                FLAGS_INTERACTIVE,
+                7,
+                1,
+                1,
+            ),
+        },
+        Case {
+            name: "consumer-originated Response",
+            bytes: raw_client::header(0, TY_RESPONSE, FLAGS_INTERACTIVE, 7, 1, 1),
+        },
+        Case {
+            name: "consumer-originated StreamData",
+            bytes: raw_client::header(0, TY_STREAM_DATA, FLAGS_INTERACTIVE, 7, 1, 1),
+        },
+        Case {
+            name: "consumer-originated StreamEnd",
+            bytes: raw_client::header(0, TY_STREAM_END, FLAGS_INTERACTIVE, 7, 1, 1),
+        },
+        Case {
+            name: "consumer-originated Error",
+            bytes: raw_client::header(0, TY_ERROR, FLAGS_INTERACTIVE, 7, 1, 1),
+        },
+        Case {
+            name: "consumer-originated Push",
+            bytes: raw_client::header(0, TY_PUSH, FLAGS_INTERACTIVE, 7, 1, 0),
+        },
+        Case {
+            name: "role-invalid Hello",
+            bytes: raw_client::header(0, TY_HELLO, FLAGS_INTERACTIVE, 0, 0, 1),
+        },
+        Case {
+            name: "role-invalid HelloAck",
+            bytes: raw_client::header(0, TY_HELLO_ACK, FLAGS_INTERACTIVE, 0, 0, 1),
+        },
+        Case {
+            name: "consumer-originated Ping",
+            bytes: raw_client::header(0, TY_PING, FLAGS_PURE_HEADER, 0, 0, 1),
+        },
+        Case {
+            name: "routed request with zero epoch",
+            bytes: raw_client::header(0, TY_REQUEST, FLAGS_INTERACTIVE, 7, 0, 1),
+        },
+        Case {
+            name: "zero correlation on a control request",
+            bytes: raw_client::header(0, TY_REQUEST, FLAGS_INTERACTIVE, 0, 0, 0),
+        },
+    ];
+
+    let host = TestHost::start().await;
+    for case in cases {
+        let mut client = host.client().await;
+        if let Err(error) = client.send_raw(&case.bytes).await {
+            // The ring producer validates header/body agreement before
+            // publication. Shapes it can reject there never reach the host.
+            assert_eq!(error.kind(), std::io::ErrorKind::Other, "{}", case.name);
+            let message = error.to_string();
+            assert!(
+                message.contains("wire header disagrees with committed body")
+                    || message == "incomplete frame body",
+                "{}: unexpected producer rejection: {error}",
+                case.name
+            );
+            continue;
+        }
+
+        let frames = client.drain_until_close(Duration::from_secs(2)).await;
+        assert!(
+            frames.is_empty(),
+            "{}: corruption must not produce a frame, got {frames:?}",
+            case.name
+        );
+        assert!(
+            client.closed_within(Duration::from_secs(2)).await,
+            "{}: the generation must be retired",
+            case.name
+        );
+    }
+    assert_eq!(
+        host.handler.dispatch_count(),
+        0,
+        "structural corruption must never reach the handler"
+    );
+    host.shutdown_gracefully().await;
+}
+
+const TY_CANCEL_LOCAL: u8 = 6;
+const MAX_BODY_LEN_LOCAL: u32 = 64 * 1024 * 1024;
+
+#[tokio::test]
+async fn pure_header_frames_accept_any_valid_priority() {
+    let host = TestHost::start().await;
+    let mut client = host.client().await;
+    let (channel, epoch) = client
+        .route_open(
+            LINKED_MODULE_ID,
+            "/workspace/project",
+            "opencode",
+            "priority",
+        )
+        .await
+        .expect("route");
+
+    client
+        .send_frame(
+            TY_CANCEL_LOCAL,
+            FLAGS_INTERACTIVE,
+            channel,
+            epoch,
+            999_999,
+            &[],
+        )
+        .await
+        .expect("Interactive Cancel");
+    let corr = client
+        .control(&serde_json::json!({"op": "catalog.list"}))
+        .await
+        .expect("catalog after Cancel");
+    let frame = client.frame_within(BUDGET).await.expect("catalog response");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.ty, TY_RESPONSE);
+
+    client
+        .send_frame(TY_GOODBYE, 0b0000_0100, channel, epoch, 0, &[])
+        .await
+        .expect("Background route Goodbye");
+    let corr = client
+        .control(&serde_json::json!({"op": "catalog.list"}))
+        .await
+        .expect("catalog after Background Goodbye");
+    let frame = client.frame_within(BUDGET).await.expect("catalog response");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.ty, TY_RESPONSE);
+
+    client
+        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, 0, 0, 0, &[])
+        .await
+        .expect("connection Goodbye");
+    assert!(client.closed_within(BUDGET).await);
+    host.shutdown_gracefully().await;
+}
+
+#[tokio::test]
+async fn clean_eof_before_a_header_is_orderly() {
+    let host = TestHost::start().await;
+    let client = host.client().await;
+    drop(client);
+    // An orderly close must leave the host serving other connections.
+    let mut next = host.client().await;
+    let corr = next
+        .control(&serde_json::json!({"op": "catalog.list"}))
+        .await
+        .expect("catalog");
+    let frame = next.frame_within(BUDGET).await.expect("reply");
+    assert_eq!(frame.corr, corr);
+    host.shutdown_gracefully().await;
+}
+
+#[tokio::test]
+async fn control_body_at_the_profile_cap_is_read_and_over_it_is_rejected() {
+    let host = TestHost::start().await;
+    let mut client = host.client().await;
+
+    // JSON whitespace padding produces a valid, admitted 65,536-byte body.
+    // The reply to the whitespace-padded valid JSON proves the host read the full 65,536-byte body.
+    let mut body =
+        serde_json::to_vec(&serde_json::json!({"op": "catalog.list"})).expect("catalog body");
+    let pad = 65_536 - body.len();
+    body.pop();
+    body.extend(std::iter::repeat_n(b' ', pad));
+    body.push(b'}');
+    assert_eq!(body.len(), 65_536);
+    let corr = client.next_corr();
+    client
+        .send_frame(TY_REQUEST, FLAGS_INTERACTIVE, 0, 0, corr, &body)
+        .await
+        .expect("send at cap");
+    let frame = client.frame_within(BUDGET).await.expect("reply at cap");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.ty, TY_RESPONSE);
+
+    let prefix = br#"{"op":"catalog.list","padding":""#;
+    let suffix = br#""}"#;
+    let mut oversize = Vec::with_capacity(65_537);
+    oversize.extend_from_slice(prefix);
+    oversize.extend(std::iter::repeat_n(
+        b'p',
+        65_537 - prefix.len() - suffix.len(),
+    ));
+    oversize.extend_from_slice(suffix);
+    assert_eq!(oversize.len(), 65_537);
+    serde_json::from_slice::<serde_json::Value>(&oversize).expect("valid over-cap JSON");
+    let corr = client.next_corr();
+    client
+        .send_frame(TY_REQUEST, FLAGS_INTERACTIVE, 0, 0, corr, &oversize)
+        .await
+        .expect("send oversize control");
+    let frame = client
+        .frame_within(BUDGET)
+        .await
+        .expect("oversize terminal");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.error_code(), "invalid_control_request");
+
+    // The next frame is served normally after the rejected reservation.
+    let corr = client
+        .control(&serde_json::json!({"op": "catalog.list"}))
+        .await
+        .expect("post-drain catalog");
+    let frame = client.frame_within(BUDGET).await.expect("post-drain reply");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.ty, TY_RESPONSE);
+
+    host.shutdown_gracefully().await;
+}
+
+#[tokio::test]
+async fn a_maximum_size_frame_stays_interoperable() {
+    let host = TestHost::start_with(|config| {
+        config.limits.max_resident_bytes = host_runtime::config::MIN_RESIDENT_BYTES + 64 * 1024;
+    })
+    .await;
+    let mut client = host.client().await;
+    let (channel, epoch) = client
+        .route_open(LINKED_MODULE_ID, "/workspace/project", "opencode", "big")
+        .await
+        .expect("route");
+
+    // Exactly 64 MiB of valid JSON: the profile must accept one such frame.
+    let prefix = br#"{"mode":"len","pad":""#;
+    let suffix = br#""}"#;
+    let pad = MAX_BODY_LEN_LOCAL as usize - prefix.len() - suffix.len();
+    let mut body = Vec::with_capacity(MAX_BODY_LEN_LOCAL as usize);
+    body.extend_from_slice(prefix);
+    body.extend(std::iter::repeat_n(b'a', pad));
+    body.extend_from_slice(suffix);
+    assert_eq!(body.len(), MAX_BODY_LEN_LOCAL as usize);
+
+    let corr = client.next_corr();
+    client
+        .send_frame(TY_REQUEST, FLAGS_INTERACTIVE, channel, epoch, corr, &body)
+        .await
+        .expect("send maximum-size frame");
+
+    let frame = client
+        .frame_within(Duration::from_secs(60))
+        .await
+        .expect("maximum-size frame must be answered");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.ty, TY_RESPONSE);
+    assert_eq!(
+        frame.json()["received_bytes"].as_u64(),
+        Some(u64::from(MAX_BODY_LEN_LOCAL)),
+        "the handler must observe every declared byte"
+    );
+
+    host.shutdown_gracefully().await;
+}
+
+async fn write_len_prefixed(stream: &mut tokio::net::UnixStream, body: &[u8]) {
+    use tokio::io::AsyncWriteExt;
+    stream
+        .write_all(&(body.len() as u32).to_le_bytes())
+        .await
+        .expect("write length");
+    stream.write_all(body).await.expect("write body");
+}
+
+async fn read_len_prefixed(stream: &mut tokio::net::UnixStream) -> Option<serde_json::Value> {
+    use tokio::io::AsyncReadExt;
+    let mut len_bytes = [0u8; 4];
+    match tokio::time::timeout(BUDGET, stream.read_exact(&mut len_bytes)).await {
+        Ok(Ok(_)) => {}
+        _ => return None,
+    }
+    let len = u32::from_le_bytes(len_bytes);
+    if len > 4096 {
+        return None;
+    }
+    let mut body = vec![0u8; len as usize];
+    match tokio::time::timeout(BUDGET, stream.read_exact(&mut body)).await {
+        Ok(Ok(_)) => serde_json::from_slice(&body).ok(),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn host_shutdown_response_bytes_are_pinned() {
+    let host = TestHost::start().await;
+    let mut client = host.client().await;
+    let corr = client
+        .control(&serde_json::json!({"op": "host.shutdown"}))
+        .await
+        .expect("send shutdown");
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    let frame = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let frame = client.frame_within(remaining).await.expect("frame");
+        if frame.corr == corr && frame.ty != raw_client::TY_PING {
+            break frame;
+        }
+    };
+    assert_eq!(frame.ty, TY_RESPONSE);
+    // `FLAGS_INTERACTIVE | FLAGS_LAST` encodes interactive priority in bits 1–2 and the last-frame flag in bit 3.
+    assert_eq!(frame.flags, FLAGS_INTERACTIVE | 0b0000_1000);
+    assert_eq!(frame.channel, 0);
+    assert_eq!(frame.epoch, 0);
+    assert_eq!(frame.body, br#"{"op":"host.shutdown"}"#.to_vec());
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn three_component_catalog_order_is_pinned() {
+    let (context, synapse, broca) = support::stub_trio();
+    let composite = host_runtime::StaticComposite::new(context, synapse, broca)
+        .expect("distinct component ids");
+    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
+    let mut client = host.client().await;
+
+    let corr = client
+        .control(&serde_json::json!({"op": "catalog.list"}))
+        .await
+        .expect("send catalog.list");
+    let frame = client.frame_within(BUDGET).await.expect("catalog");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.ty, TY_RESPONSE);
+    let body = frame.json();
+    let ids: Vec<&str> = body["modules"]
+        .as_array()
+        .expect("modules array")
+        .iter()
+        .map(|module| module["module_id"].as_str().expect("module_id"))
+        .collect();
+    assert_eq!(ids, ["context", "synapse", "broca"]);
+    assert_eq!(
+        body["host_ops"],
+        serde_json::json!(["route.open", "catalog.list", "host.shutdown", "host.status",])
+    );
+
+    host.shutdown().await.expect("graceful shutdown");
+}
