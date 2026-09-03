@@ -834,9 +834,22 @@ describe("check anchors and cfg(test) stripping", () => {
                     "#[cfg(all(test, not(any())))]",
                     "#[tokio::test]",
                     "async fn runs() {}",
+                    "#[cfg(any())] #[test]",
+                    "fn compiled_out_on_one_line() {}",
+                    "#[test] #[ignore]",
+                    "fn skipped_on_one_line() {}",
+                    "#[cfg(unix)] #[test]",
+                    "fn unix_only_on_one_line() {}",
                     "",
                 ].join("\n"),
             );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#compiled_out_on_one_line")).toBe(
+                "names compiled_out_on_one_line, which crates/x/src/lib.rs declares as a test that is compiled out by #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#skipped_on_one_line")).toBe(
+                "names skipped_on_one_line, which crates/x/src/lib.rs declares as a test that is marked #[ignore]",
+            );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#unix_only_on_one_line")).toBeUndefined();
             expect(pointerProblem(root, "crates/x/src/lib.rs#compiled_out")).toBe(
                 "names compiled_out, which crates/x/src/lib.rs declares as a test that is compiled out by #[cfg(any())]",
             );

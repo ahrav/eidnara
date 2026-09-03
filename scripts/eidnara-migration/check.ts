@@ -1268,10 +1268,12 @@ export function pointerProblem(root: string, pointer: string): string | undefine
             for (let back = index - 1; back >= 0; back -= 1) {
                 const line = (lines[back] ?? "").trim();
                 if (!(line.startsWith("#[") || line.startsWith("///") || line.startsWith("//") || line === "")) break;
-                if (/^#\[(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b/.test(line)) isTest = true;
-                if (/^#\[ignore\b/.test(line)) why = "is marked #[ignore]";
-                const cfg = /^#\[cfg\((.*)\)\]/.exec(line);
-                if (cfg !== null && cfgPredicate(cfg[1] ?? "") === false) why = `is compiled out by #[cfg(${cfg[1]})]`;
+                for (const attribute of rustAttributesOn(line)) {
+                    if (/^(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b/.test(attribute)) isTest = true;
+                    if (/^ignore\b/.test(attribute)) why = "is marked #[ignore]";
+                    const cfg = /^cfg\((.*)\)$/s.exec(attribute);
+                    if (cfg !== null && cfgPredicate(cfg[1] ?? "") === false) why = `is compiled out by #[cfg(${cfg[1]})]`;
+                }
             }
             if (isTest && why === undefined) return undefined;
             if (isTest) disabled = why;
@@ -1283,6 +1285,34 @@ export function pointerProblem(root: string, pointer: string): string | undefine
     }
     const declared = filePart.endsWith(".ts") || filePart.endsWith(".tsx") ? typescriptDeclaredChecks(text).has(anchor) : false;
     return declared ? undefined : `names ${anchor}, which ${filePart} does not declare`;
+}
+
+/**
+ * The inner text of every `#[...]` attribute on `line`, in order, so several attributes on
+ * one line (`#[cfg(any())] #[test]`) are each seen. Brackets and parentheses inside an
+ * attribute are balanced before it ends.
+ */
+export function rustAttributesOn(line: string): string[] {
+    const out: string[] = [];
+    let index = 0;
+    while (index < line.length) {
+        const start = line.indexOf("#[", index);
+        if (start === -1) break;
+        let depth = 0;
+        let cursor = start + 1;
+        for (; cursor < line.length; cursor += 1) {
+            const char = line[cursor];
+            if (char === "[" || char === "(") depth += 1;
+            else if (char === "]" || char === ")") {
+                depth -= 1;
+                if (depth === 0) break;
+            }
+        }
+        if (cursor >= line.length) break;
+        out.push(line.slice(start + 2, cursor).trim());
+        index = cursor + 1;
+    }
+    return out;
 }
 
 /**

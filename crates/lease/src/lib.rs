@@ -507,9 +507,19 @@ fn open_lease_file(path: &std::path::Path) -> std::io::Result<File> {
         persist_epoch(temp.as_file_mut(), 0)?;
         match temp.persist_noclobber(path) {
             // The handle `persist` returns was opened by `tempfile` under its own sharing
-            // and flags, so the lease handle is taken by the next attempt's open through
-            // `lease_open_options` instead.
-            Ok(_created) => {}
+            // and flags, so the published file is reopened through `lease_open_options`
+            // at once; a file removed in between is retried like a lost race.
+            Ok(created) => {
+                drop(created);
+                match lease_open_options().open(path) {
+                    Ok(file) => {
+                        protect_open_file(&file, path)?;
+                        return Ok(file);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.error),
         }
@@ -1348,6 +1358,21 @@ mod tests {
                 .epoch(),
             2
         );
+    }
+
+    /// Publishing a fresh lease file and opening it happen in one attempt: the handle
+    /// returned names the published file, so a publication on the last attempt cannot fall
+    /// through to the exhausted-attempts error.
+    #[test]
+    fn a_fresh_lease_file_is_published_and_opened_in_one_attempt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fresh.lease");
+        let file = open_lease_file(&path).expect("publish and open");
+        let held = FileIdentity::of_file(&file).expect("handle identity");
+        let named = FileIdentity::of_path(&path).expect("path identity");
+        assert_eq!(held, named, "the returned handle is the published file");
+        let mut reread = file;
+        assert_eq!(read_epoch(&mut reread).expect("epoch"), 0);
     }
 
     /// A lease root that does not yet exist is created owner-only whatever the umask, so the
