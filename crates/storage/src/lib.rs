@@ -407,7 +407,11 @@ mod sqlite_backend {
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             conn.pragma_update(None, "query_only", "ON")
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
-            Self::install(conn, Some(prior))
+            // A failure between the pragma and the finished scope would leave the shared
+            // connection read-only with no guard to restore it.
+            Self::install(conn, Some(prior)).inspect_err(|_| {
+                let _ = Self::restore(conn, Some(prior));
+            })
         }
 
         /// Denies the escapes only, for a callback inside a fence-checked transaction.
@@ -882,33 +886,61 @@ mod sqlite_backend {
             .unwrap_or(0)
     }
 
-    /// The device and inode of a store file, read without following a final symlink. Two
-    /// readings are equal only while the path still names the same file.
+    /// The identity of a store file, read without following a final symlink: device and
+    /// inode on Unix, volume serial number and file index on Windows. Two readings are equal
+    /// only while the path still names the same file.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) struct FileIdentity {
-        #[cfg(unix)]
-        device: u64,
-        #[cfg(unix)]
-        inode: u64,
-        #[cfg(not(unix))]
-        length: u64,
+        volume: u64,
+        file: u64,
     }
 
     impl FileIdentity {
+        #[cfg(unix)]
         pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
+            use std::os::unix::fs::MetadataExt;
             let meta = std::fs::symlink_metadata(path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                Ok(Self {
-                    device: meta.dev(),
-                    inode: meta.ino(),
-                })
+            Ok(Self {
+                volume: meta.dev(),
+                file: meta.ino(),
+            })
+        }
+
+        #[cfg(windows)]
+        pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
+            use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+            use windows_sys::Win32::Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, FILE_FLAG_OPEN_REPARSE_POINT,
+                GetFileInformationByHandle,
+            };
+            // The handle is opened for reading only and closed on return; a reparse point
+            // is inspected as itself, matching the Unix `symlink_metadata` reading.
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)?;
+            let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+            // SAFETY: `file` holds an open handle for the duration of the call, and `info`
+            // points at writable storage of the exact type the call fills in on success.
+            let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
             }
-            #[cfg(not(unix))]
-            {
-                Ok(Self { length: meta.len() })
-            }
+            // SAFETY: a non-zero return means the call initialized every field.
+            let info = unsafe { info.assume_init() };
+            Ok(Self {
+                volume: u64::from(info.dwVolumeSerialNumber),
+                file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            })
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
+            let _ = path;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "file identity is available on Unix and Windows only",
+            ))
         }
     }
 

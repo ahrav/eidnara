@@ -9,7 +9,7 @@
       "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
     }
   ],
-  "destination_commit": "665cf2c1dc2b1c279d8e05d7c03c9451cdeedcfc",
+  "destination_commit": "245fb6aa8626134a26e176f5ca2be9b5a1ec9824",
   "touched_files": [
     "crates/cache-stability/src/lib.rs",
     "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
@@ -964,9 +964,9 @@
       },
       "strategy_decision": "Fixture test plus refusal tests: a fresh file's application id, user version, format-marker digest, and sqlite_schema inventory are compared to a destination-captured fixture that the generator example produces, and non-pristine files with foreign objects, a different consumer baseline, or a bypassed fence constraint are refused with the file bytes unchanged. Chosen over a property test because the identity is one fixed byte contract.",
       "audit_verdict": "pass",
-      "evidence_digest": "83486be39f35fda44f32d7dc0f19112bf5b4f39d5c940ed3af08536ec5792cb7",
-      "code_hash": "03678c09e4d4f2d62ac6d0046b0a421a4d47624d65ea2b18e624351beaf39735",
-      "check_hash": "34694b39f4f31e01b33078800445c9f3d9a7dcf4349363ac896be8ab7e8dd815",
+      "evidence_digest": "a154b20bf4de740df92fb606bc966a1260cd272fae41db898606f3825dc70381",
+      "code_hash": "ed5d3a4061d2b21ea01f05dab12cd504e2ff6f50f4c57fa79964a2592d2556a7",
+      "check_hash": "691e92afdb12139ec866953a97ec1f35baf5b914d003000f6cc78d05d41ac18a",
       "check_pointer": "crates/storage/src/lib.rs#fresh_file_matches_the_baseline_inventory",
       "evidence_pointer": "docs/properties/shared-primitives/evidence/store-schema-identity-matches-the-baseline.md",
       "target_configurations": [
@@ -975,7 +975,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "83486be39f35fda44f32d7dc0f19112bf5b4f39d5c940ed3af08536ec5792cb7",
+        "digest": "a154b20bf4de740df92fb606bc966a1260cd272fae41db898606f3825dc70381",
         "description": "`fresh_file_matches_the_baseline_inventory` compares a fresh file to `fixtures/schema/storage-inventory-v1.json`; `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, and `negative_database_fence_fails_closed` prove refusal leaves the bytes unchanged."
       }
     },
