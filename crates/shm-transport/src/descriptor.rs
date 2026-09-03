@@ -6,9 +6,15 @@ use crate::arena::{ArenaSpan, MAX_FRAME_BYTES};
 
 /// Shared descriptor schema version.
 pub const DESCRIPTOR_SCHEMA_VERSION: u16 = 3;
-/// File descriptors a grant transfers over the setup socket: the arena mapping and two
-/// doorbells per direction. `setup_auth` re-exports this as `RING_DESCRIPTOR_COUNT`.
-pub const SETUP_DESCRIPTOR_COUNT: usize = 6;
+/// Arena mappings a grant transfers, one per direction.
+pub const SETUP_MAPPING_COUNT: usize = 2;
+/// Doorbell descriptors a grant transfers, two per direction. `profile` charges this many
+/// file descriptors on top of the mappings, so the admission budget and the setup transfer
+/// count cannot drift apart.
+pub const SETUP_DOORBELL_COUNT: usize = 4;
+/// File descriptors a grant transfers over the setup socket: the arena mappings and the
+/// doorbells. `setup_auth` re-exports this as `RING_DESCRIPTOR_COUNT`.
+pub const SETUP_DESCRIPTOR_COUNT: usize = SETUP_MAPPING_COUNT + SETUP_DOORBELL_COUNT;
 /// Frozen wire-v2 header length.
 pub const WIRE_V2_HEADER_BYTES: usize = 21;
 /// Version byte at `wire_header[4]`.
