@@ -19,16 +19,11 @@
 compile_error!("shm-transport ring backend supports Linux only");
 
 use std::cell::{Cell, UnsafeCell};
-use std::ffi::CString;
 use std::fmt;
-use std::fs::File;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::os::fd::RawFd;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -180,6 +175,24 @@ struct LifecyclePage {
     incarnation: [u8; 16],
     lane: u32,
     quarantined: AtomicU8,
+}
+
+/// The producer's own cursors as this handle last wrote them. Shared memory is peer-writable,
+/// so before a producer operation trusts a cursor it checks the shared value against this
+/// copy; a rewind or advance the handle did not perform is invalid shared state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ProducerCursors {
+    published: u64,
+    arena_write: u64,
+    completed: u64,
+    arena_reclaimed: u64,
+}
+
+/// The consumer's own cursors as this handle last wrote them; same role as `ProducerCursors`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ConsumerCursors {
+    consumed: u64,
+    active_leases: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -605,97 +618,6 @@ fn socket_option(fd: &OwnedFd, option: libc::c_int) -> Result<libc::c_int, RingE
     Ok(value)
 }
 
-/// Owner-only directory the ring objects live under. Validation goes through the held
-/// descriptor and the path together, so a swapped or symlinked directory is caught.
-pub struct RuntimeDir {
-    path: PathBuf,
-    fd: File,
-}
-
-impl RuntimeDir {
-    /// Creates a fresh `shm-<random>` directory with mode 0700 under `root`, then checks
-    /// that the path and the opened descriptor name the same inode owned by this user.
-    pub fn create_in(root: &Path) -> Result<Self, RingError> {
-        let mut random = [0u8; 16];
-        getrandom::getrandom(&mut random).map_err(|_| RingError::ObjectSetupFailed)?;
-        let suffix = random
-            .iter()
-            .fold(String::with_capacity(32), |mut text, byte| {
-                use std::fmt::Write;
-                let _ = write!(text, "{byte:02x}");
-                text
-            });
-        let path = root.join(format!("shm-{suffix}"));
-        let c_path =
-            CString::new(path.as_os_str().as_bytes()).map_err(|_| RingError::ObjectSetupFailed)?;
-        // SAFETY: path is valid NUL-terminated string and mode is owner-only at creation.
-        if unsafe { libc::mkdir(c_path.as_ptr(), 0o700) } != 0 {
-            return Err(RingError::ObjectSetupFailed);
-        }
-        let opened = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)
-            .map_err(|_| RingError::ObjectSetupFailed);
-        let fd = match opened {
-            Ok(fd) => fd,
-            Err(error) => {
-                let _ = std::fs::remove_dir(&path);
-                return Err(error);
-            }
-        };
-        let by_path = std::fs::symlink_metadata(&path).map_err(|_| RingError::ObjectSetupFailed)?;
-        let by_fd = fd.metadata().map_err(|_| RingError::ObjectSetupFailed)?;
-        // SAFETY: geteuid has no preconditions.
-        let current_uid = unsafe { libc::geteuid() };
-        if !by_path.is_dir()
-            || !by_fd.is_dir()
-            || by_path.ino() != by_fd.ino()
-            || by_fd.uid() != current_uid
-            || by_fd.permissions().mode() & 0o777 != 0o700
-        {
-            let _ = std::fs::remove_dir(&path);
-            return Err(RingError::ObjectValidationFailed);
-        }
-        Ok(Self { path, fd })
-    }
-
-    /// Re-checks owner, inode, type, and mode. Called before every `Ring::create_in` so a
-    /// directory tampered with after creation is refused rather than written into.
-    pub fn validate(&self) -> Result<(), RingError> {
-        let by_path =
-            std::fs::symlink_metadata(&self.path).map_err(|_| RingError::ObjectValidationFailed)?;
-        let by_fd = self
-            .fd
-            .metadata()
-            .map_err(|_| RingError::ObjectValidationFailed)?;
-        // SAFETY: geteuid has no preconditions.
-        let current_uid = unsafe { libc::geteuid() };
-        if by_path.is_dir()
-            && by_fd.is_dir()
-            && by_path.ino() == by_fd.ino()
-            && by_fd.uid() == current_uid
-            && by_fd.permissions().mode() & 0o777 == 0o700
-        {
-            Ok(())
-        } else {
-            Err(RingError::ObjectValidationFailed)
-        }
-    }
-}
-
-impl fmt::Debug for RuntimeDir {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RuntimeDir(<redacted>)")
-    }
-}
-
-impl Drop for RuntimeDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir(&self.path);
-    }
-}
-
 /// Everything a peer needs to attach: layout version, incarnation, lane, and geometry. Sent
 /// over the authenticated setup channel alongside the file descriptors; `decode` refuses
 /// any grant whose geometry does not map to a valid ring.
@@ -859,7 +781,6 @@ pub struct Ring {
     grant: RingGrant,
     data_ready: Doorbell,
     capacity_ready: Doorbell,
-    owned_runtime_dir: Option<RuntimeDir>,
     /// The peer can overwrite the shared flag; this latch keeps quarantine terminal for this
     /// handle.
     quarantined: Cell<bool>,
@@ -875,28 +796,16 @@ pub struct Ring {
     /// checks the peer-writable descriptor against it, so a lengthened descriptor cannot
     /// reclaim into a later live frame.
     published_allocations: Vec<Cell<Option<(u64, u64)>>>,
+    producer_cursors: Cell<ProducerCursors>,
+    consumer_cursors: Cell<ConsumerCursors>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 impl Ring {
-    /// Creates a ring under a fresh `RuntimeDir` in the system temp directory and owns that
-    /// directory for the ring's lifetime.
+    /// Creates a sealed sparse ring. `TargetProfile::new` already checked the profile; only
+    /// `max_spans` is re-checked here, because this backend wraps frames into two spans and
+    /// cannot honor a one-span profile.
     pub fn create(profile: &TargetProfile, lane: u32) -> Result<Self, RingError> {
-        let runtime = RuntimeDir::create_in(&std::env::temp_dir())?;
-        let mut ring = Self::create_in(profile, lane, &runtime)?;
-        ring.owned_runtime_dir = Some(runtime);
-        Ok(ring)
-    }
-
-    /// Creates a sealed sparse ring under `runtime`. `TargetProfile::new` already checked the
-    /// profile; only `max_spans` is re-checked here, because this backend wraps frames into
-    /// two spans and cannot honor a one-span profile.
-    pub fn create_in(
-        profile: &TargetProfile,
-        lane: u32,
-        runtime: &RuntimeDir,
-    ) -> Result<Self, RingError> {
-        runtime.validate()?;
         debug_assert_eq!(
             profile.descriptor().schema_version(),
             DESCRIPTOR_SCHEMA_VERSION
@@ -927,12 +836,21 @@ impl Ring {
             grant,
             data_ready: Doorbell::create()?,
             capacity_ready: Doorbell::create()?,
-            owned_runtime_dir: None,
             quarantined: Cell::new(false),
             reserved_end: Cell::new(None),
             punched: Cell::new(0),
             producer: Cell::new(false),
             published_allocations: allocation_shadow(profile.descriptor_depth()),
+            producer_cursors: Cell::new(ProducerCursors {
+                published: 0,
+                arena_write: 0,
+                completed: 0,
+                arena_reclaimed: 0,
+            }),
+            consumer_cursors: Cell::new(ConsumerCursors {
+                consumed: 0,
+                active_leases: 0,
+            }),
             _not_send_or_sync: PhantomData,
         })
     }
@@ -946,18 +864,39 @@ impl Ring {
         let total = usize::try_from(grant.total_bytes).map_err(|_| RingError::InvalidGrant)?;
         let mapping = Mapping::attach(mapping_fd, total)?;
         validate_lifecycle(&mapping, layout, grant)?;
+        // Nothing this handle will own has been written yet, so the cursors as attached are
+        // the baseline its own writes advance from.
+        let producer = mapping.ptr_at::<ProducerPage>(layout.producer)?;
+        let consumer = mapping.ptr_at::<ConsumerPage>(layout.consumer)?;
+        let reclaim = mapping.ptr_at::<ReclaimPage>(layout.reclaim)?;
+        // SAFETY: the pages were bounds-checked and hold initialized atomics.
+        let (producer_cursors, consumer_cursors) = unsafe {
+            (
+                ProducerCursors {
+                    published: (*producer).published.load(Ordering::Acquire),
+                    arena_write: (*producer).arena_write.load(Ordering::Acquire),
+                    completed: (*reclaim).completed.load(Ordering::Acquire),
+                    arena_reclaimed: (*reclaim).arena_reclaimed.load(Ordering::Acquire),
+                },
+                ConsumerCursors {
+                    consumed: (*consumer).consumed.load(Ordering::Acquire),
+                    active_leases: (*consumer).active_leases.load(Ordering::Acquire),
+                },
+            )
+        };
         Ok(Self {
             mapping,
             layout,
             grant,
             data_ready: Doorbell::from_fd(data_ready)?,
             capacity_ready: Doorbell::from_fd(capacity_ready)?,
-            owned_runtime_dir: None,
             quarantined: Cell::new(false),
             reserved_end: Cell::new(None),
             punched: Cell::new(0),
             producer: Cell::new(false),
             published_allocations: allocation_shadow(depth),
+            producer_cursors: Cell::new(producer_cursors),
+            consumer_cursors: Cell::new(consumer_cursors),
             _not_send_or_sync: PhantomData,
         })
     }
@@ -1060,12 +999,14 @@ impl Ring {
             return Err(ProducerError::ReservationOutstanding);
         }
         self.reclaim_completed().map_err(ProducerError::Ring)?;
-        let producer = self.producer_ptr().map_err(ProducerError::Ring)?;
-        let reclaim = self.reclaim_ptr().map_err(ProducerError::Ring)?;
-        // SAFETY: producer and reclaim pages were initialized before activation.
-        let published = unsafe { (*producer).published.load(Ordering::Relaxed) };
-        // SAFETY: same as above.
-        let completed = unsafe { (*reclaim).completed.load(Ordering::Acquire) };
+        let ProducerCursors {
+            published,
+            arena_write: write,
+            completed,
+            arena_reclaimed: reclaimed,
+        } = self
+            .verified_producer_cursors()
+            .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
         let outstanding = published.checked_sub(completed).ok_or_else(|| {
             ProducerError::Ring(self.quarantine_with(RingError::InvalidSharedState))
         })?;
@@ -1092,10 +1033,6 @@ impl Ring {
                     ProducerError::Ring(self.quarantine_with(RingError::InvalidSharedState))
                 })?;
         }
-        // SAFETY: pages remain mapped for self lifetime.
-        let write = unsafe { (*producer).arena_write.load(Ordering::Relaxed) };
-        // SAFETY: pages remain mapped for self lifetime.
-        let reclaimed = unsafe { (*reclaim).arena_reclaimed.load(Ordering::Acquire) };
         let plan = match SpanPlan::reserve(self.arena_bytes(), write, reclaimed, bound) {
             Ok(plan) => plan,
             Err(ArenaError::Exhausted) => {
@@ -1219,19 +1156,16 @@ impl Ring {
     fn try_receive_inner(&self) -> Result<Option<ReceiveLease<'_>>, RingError> {
         let producer = self.producer_ptr()?;
         let consumer = self.consumer_ptr()?;
-        // SAFETY: consumer page remains mapped.
-        let active = unsafe { (*consumer).active_leases.load(Ordering::Relaxed) };
-        if active > self.grant.max_leases {
-            return Err(RingError::InvalidSharedState);
-        }
-        if active == self.grant.max_leases {
+        let ConsumerCursors {
+            consumed,
+            active_leases: active,
+        } = self.verified_consumer_cursors()?;
+        if active >= self.grant.max_leases {
             // A full lease set is backpressure, not a fault: published
             // frames stay queued until a lease is released and the caller
             // polls again.
             return Ok(None);
         }
-        // SAFETY: consumer owns consumed cursor.
-        let consumed = unsafe { (*consumer).consumed.load(Ordering::Relaxed) };
         // SAFETY: acquire pairs with producer publication.
         let published = unsafe { (*producer).published.load(Ordering::Acquire) };
         if consumed == published {
@@ -1277,6 +1211,10 @@ impl Ring {
             (*consumer).consumed.store(sequence, Ordering::Release);
             (*consumer).active_leases.fetch_add(1, Ordering::Relaxed);
         }
+        self.consumer_cursors.set(ConsumerCursors {
+            consumed: sequence,
+            active_leases: active + 1,
+        });
         let body_len =
             usize::try_from(validated.body_len()).map_err(|_| RingError::InvalidLayout)?;
         // SAFETY: lease borrows self, spans stay mapped, callback context cannot outlive self.
@@ -1324,15 +1262,14 @@ impl Ring {
 
     fn data_available(&self) -> Result<bool, RingError> {
         let producer = self.producer_ptr()?;
-        let consumer = self.consumer_ptr()?;
-        // SAFETY: cursor and lease fields are initialized shared atomics.
-        let (published, consumed, active) = unsafe {
-            (
-                (*producer).published.load(Ordering::Acquire),
-                (*consumer).consumed.load(Ordering::Acquire),
-                (*consumer).active_leases.load(Ordering::Acquire),
-            )
-        };
+        let ConsumerCursors {
+            consumed,
+            active_leases: active,
+        } = self
+            .verified_consumer_cursors()
+            .map_err(|error| self.quarantine_with(error))?;
+        // SAFETY: producer page holds initialized shared atomics.
+        let published = unsafe { (*producer).published.load(Ordering::Acquire) };
         Ok(published != consumed && active < self.grant.max_leases)
     }
 
@@ -1366,16 +1303,18 @@ impl Ring {
         let consumer = self
             .consumer_ptr()
             .map_err(|_| LeaseError::InvalidSequence)?;
-        // SAFETY: consumer page remains mapped.
-        let consumed = unsafe { (*consumer).consumed.load(Ordering::Acquire) };
+        // A peer-rewritten count would wrap or undercount on decrement and turn every later
+        // receive into permanent backpressure.
+        let ConsumerCursors {
+            consumed,
+            active_leases: active,
+        } = self
+            .verified_consumer_cursors()
+            .map_err(|_| LeaseError::Quarantined)?;
         if sequence > consumed {
             return Err(LeaseError::InvalidSequence);
         }
-        // The count is peer-writable; a decrement from outside `1..=max_leases` would wrap
-        // or undercount and turn every later receive into permanent backpressure.
-        // SAFETY: consumer page remains mapped.
-        let active = unsafe { (*consumer).active_leases.load(Ordering::Acquire) };
-        if active == 0 || active > self.grant.max_leases {
+        if active == 0 {
             return Err(LeaseError::Quarantined);
         }
         let slot = self
@@ -1417,6 +1356,10 @@ impl Ring {
                 .store(sequence, Ordering::Release);
             (*consumer).active_leases.fetch_sub(1, Ordering::Relaxed);
         }
+        self.consumer_cursors.set(ConsumerCursors {
+            consumed,
+            active_leases: active - 1,
+        });
         self.signal_wake(self.capacity_wake_ptr(), &self.capacity_ready)
             .and_then(|()| self.signal_wake(self.data_wake_ptr(), &self.data_ready))
             .map_err(|_| LeaseError::Quarantined)
@@ -1588,6 +1531,41 @@ impl Ring {
         error
     }
 
+    /// Loads the producer-owned cursors and checks them against this handle's own record.
+    fn verified_producer_cursors(&self) -> Result<ProducerCursors, RingError> {
+        let producer = self.producer_ptr()?;
+        let reclaim = self.reclaim_ptr()?;
+        // SAFETY: both pages were bounds-checked and hold initialized atomics.
+        let shared = unsafe {
+            ProducerCursors {
+                published: (*producer).published.load(Ordering::Acquire),
+                arena_write: (*producer).arena_write.load(Ordering::Acquire),
+                completed: (*reclaim).completed.load(Ordering::Acquire),
+                arena_reclaimed: (*reclaim).arena_reclaimed.load(Ordering::Acquire),
+            }
+        };
+        if shared != self.producer_cursors.get() {
+            return Err(RingError::InvalidSharedState);
+        }
+        Ok(shared)
+    }
+
+    /// Loads the consumer-owned cursors and checks them against this handle's own record.
+    fn verified_consumer_cursors(&self) -> Result<ConsumerCursors, RingError> {
+        let consumer = self.consumer_ptr()?;
+        // SAFETY: the page was bounds-checked and holds initialized atomics.
+        let shared = unsafe {
+            ConsumerCursors {
+                consumed: (*consumer).consumed.load(Ordering::Acquire),
+                active_leases: (*consumer).active_leases.load(Ordering::Acquire),
+            }
+        };
+        if shared != self.consumer_cursors.get() {
+            return Err(RingError::InvalidSharedState);
+        }
+        Ok(shared)
+    }
+
     fn arena_bytes(&self) -> usize {
         self.grant.arena_bytes as usize
     }
@@ -1681,11 +1659,14 @@ impl Ring {
     }
 
     fn reclaim_completed_inner(&self) -> Result<(), RingError> {
-        let producer = self.producer_ptr()?;
         let reclaim = self.reclaim_ptr()?;
-        // SAFETY: producer-owned reclaim page remains mapped.
-        let completed = unsafe { (*reclaim).completed.load(Ordering::Relaxed) };
-        let reclaimed = unsafe { (*reclaim).arena_reclaimed.load(Ordering::Relaxed) };
+        let cursors = self.verified_producer_cursors()?;
+        let ProducerCursors {
+            completed,
+            arena_reclaimed: reclaimed,
+            arena_write,
+            ..
+        } = cursors;
         let mut last = completed;
         let mut run_len = 0u64;
         loop {
@@ -1729,8 +1710,6 @@ impl Ring {
         let new_reclaimed = reclaimed
             .checked_add(run_len)
             .ok_or(RingError::ArithmeticOverflow)?;
-        // SAFETY: pages remain mapped for self lifetime.
-        let arena_write = unsafe { (*producer).arena_write.load(Ordering::Relaxed) };
         if new_reclaimed > self.live_end(arena_write) {
             return Err(RingError::InvalidSharedState);
         }
@@ -1757,6 +1736,11 @@ impl Ring {
                 .store(new_reclaimed, Ordering::Release);
             (*reclaim).completed.store(last, Ordering::Release);
         }
+        self.producer_cursors.set(ProducerCursors {
+            completed: last,
+            arena_reclaimed: new_reclaimed,
+            ..cursors
+        });
         Ok(())
     }
 
@@ -1862,12 +1846,17 @@ impl Ring {
         if !self.producer.get() {
             return Err(RingError::RoleMismatch);
         }
-        let producer = self.producer_ptr()?;
-        let reclaim = self.reclaim_ptr()?;
-        // SAFETY: pages remain mapped for self lifetime.
-        let arena_write = unsafe { (*producer).arena_write.load(Ordering::Relaxed) };
-        let reclaimed = unsafe { (*reclaim).arena_reclaimed.load(Ordering::Relaxed) };
-        self.punch_dead_pages(reclaimed, arena_write, true)
+        // Releases only become reclaimed capacity through this pass, which otherwise runs
+        // inside `try_reserve`; an idle ring would keep newly dead pages resident without it.
+        self.reclaim_completed()?;
+        let ProducerCursors {
+            arena_write,
+            arena_reclaimed,
+            ..
+        } = self
+            .verified_producer_cursors()
+            .map_err(|error| self.quarantine_with(error))?;
+        self.punch_dead_pages(arena_reclaimed, arena_write, true)
             .map_err(|error| self.quarantine_with(error))
     }
 
@@ -1944,6 +1933,11 @@ impl Ring {
                 .published
                 .store(identity.sequence(), Ordering::Release);
         }
+        self.producer_cursors.set(ProducerCursors {
+            published: identity.sequence(),
+            arena_write: next_write,
+            ..self.producer_cursors.get()
+        });
         self.reserved_end.set(None);
         if let Err(error) = self.signal_wake(self.data_wake_ptr(), &self.data_ready) {
             self.enter_quarantine();
@@ -2165,25 +2159,20 @@ impl Drop for ProducerReservation<'_> {
     }
 }
 
-/// Two rings under one `RuntimeDir`: lane 0 and lane 1.
+/// Two rings: lane 0 and lane 1.
 pub struct DuplexRing {
     /// Caller-to-peer direction.
     pub first: Ring,
     /// Peer-to-caller direction.
     pub second: Ring,
-    _runtime: RuntimeDir,
 }
 
 impl DuplexRing {
     /// Creates both rings from the same profile.
     pub fn create(profile: &TargetProfile) -> Result<Self, RingError> {
-        let runtime = RuntimeDir::create_in(&std::env::temp_dir())?;
-        let first = Ring::create_in(profile, 0, &runtime)?;
-        let second = Ring::create_in(profile, 1, &runtime)?;
         Ok(Self {
-            first,
-            second,
-            _runtime: runtime,
+            first: Ring::create(profile, 0)?,
+            second: Ring::create(profile, 1)?,
         })
     }
 }
@@ -2268,10 +2257,10 @@ pub enum RingError {
     /// The profile's `max_spans` is 1; this backend needs 2.
     #[error("target profile does not match ring backend")]
     ProfileMismatch,
-    /// `mkdir`, `memfd_create`, `ftruncate`, `mmap`, or `fcntl` failed.
+    /// `memfd_create`, `ftruncate`, `mmap`, or `fcntl` failed.
     #[error("shared object setup failed")]
     ObjectSetupFailed,
-    /// The runtime directory or memfd failed an owner, inode, size, type, mode, or seal check.
+    /// The memfd failed an owner, size, type, mode, or seal check.
     #[error("shared object validation failed")]
     ObjectValidationFailed,
     /// The grant failed `decode`, or disagrees with the mapping it was presented with.
@@ -2715,6 +2704,90 @@ mod tests {
                 "the count must not wrap"
             );
         }
+    }
+
+    #[test]
+    fn rewound_arena_write_quarantines_instead_of_overlapping_a_live_frame() {
+        let ring = ring();
+        publish(&ring, &[1; 4096]);
+        let live = ring.try_receive().unwrap().unwrap();
+        let producer = ring.producer_ptr().unwrap();
+        // In range for `SpanPlan::reserve` (`write >= reclaimed`, used bytes fit), so only the
+        // handle's own record can tell it apart from a legitimate cursor.
+        // SAFETY: test-owned ring keeps the producer page mapped.
+        unsafe { (*producer).arena_write.store(0, Ordering::Release) };
+        assert!(matches!(
+            ring.try_reserve(4096, wire_v2_header(4096).unwrap()),
+            Err(ProducerError::Ring(RingError::InvalidSharedState))
+        ));
+        assert!(ring.is_quarantined());
+        assert_eq!(live.segment(0).unwrap().read_byte(0), Some(1));
+    }
+
+    #[test]
+    fn rewound_published_cursor_quarantines_even_with_a_freed_slot() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        publish(&ring, &[2]);
+        let producer = ring.producer_ptr().unwrap();
+        let slot = ring.slot_ptr(2).unwrap();
+        // SAFETY: test-owned ring keeps both pages mapped.
+        unsafe {
+            (*producer).published.store(1, Ordering::Release);
+            (*slot).state.store(super::SLOT_FREE, Ordering::Release);
+        }
+        assert!(matches!(
+            ring.try_reserve(1, wire_v2_header(1).unwrap()),
+            Err(ProducerError::Ring(RingError::InvalidSharedState))
+        ));
+        assert!(ring.is_quarantined());
+    }
+
+    #[test]
+    fn forged_consumer_cursors_fail_waits_instead_of_parking() {
+        let ring = ring();
+        let consumer = ring.consumer_ptr().unwrap();
+        // SAFETY: test-owned ring keeps the consumer page mapped.
+        unsafe {
+            (*consumer)
+                .active_leases
+                .store(ring.grant().max_leases + 1, Ordering::Release)
+        };
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            ring.wait_for_data(started + std::time::Duration::from_secs(5)),
+            Err(RingError::InvalidSharedState)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(ring.is_quarantined());
+
+        let fresh = self::ring();
+        let consumer = fresh.consumer_ptr().unwrap();
+        // SAFETY: same as above for the fresh ring.
+        unsafe { (*consumer).consumed.store(7, Ordering::Release) };
+        assert!(matches!(
+            fresh.arm_data_wait(),
+            Err(RingError::InvalidSharedState)
+        ));
+        assert!(fresh.is_quarantined());
+    }
+
+    #[test]
+    fn trim_reclaims_pending_releases_before_punching() {
+        let ring = ring();
+        let page = super::system_page_size();
+        publish(&ring, &vec![1; page * 2]);
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+        assert_eq!(ring.resident_arena_pages().unwrap(), 2);
+        ring.trim().unwrap();
+        assert_eq!(
+            ring.resident_arena_pages().unwrap(),
+            0,
+            "an idle trim must reclaim the released frame before punching"
+        );
+        let (descriptors, bytes) = ring.conservation().unwrap();
+        assert_eq!(descriptors.free, ring.grant().descriptor_depth);
+        assert_eq!(bytes.free, ring.grant().arena_bytes);
     }
 
     #[test]
