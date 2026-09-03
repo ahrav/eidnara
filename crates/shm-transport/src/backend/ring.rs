@@ -943,6 +943,9 @@ impl Ring {
             published_seen: Cell::new(producer_cursors.published),
             _not_send_or_sync: PhantomData,
         };
+        if ring.is_quarantined() {
+            return Err(RingError::Quarantined);
+        }
         // The baseline becomes this handle's record, so a mapping the peer already broke is
         // refused here rather than adopted as truth. Nothing this handle owns is in flight, so
         // the cursors must agree with the slots exactly once the peer's own transition, if
@@ -1277,8 +1280,8 @@ impl Ring {
         // SAFETY: consumer owns state and cursor; descriptor stays immutable until release.
         unsafe {
             (*slot).state.store(SLOT_RECEIVER_LEASED, Ordering::Release);
-            (*consumer).consumed.store(sequence, Ordering::Release);
-            (*consumer).active_leases.fetch_add(1, Ordering::Relaxed);
+            Self::advance_cursor(&(*consumer).consumed, consumed, sequence)?;
+            Self::advance_cursor(&(*consumer).active_leases, active, active + 1)?;
         }
         self.consumer_cursors.set(ConsumerCursors {
             consumed: sequence,
@@ -1432,7 +1435,8 @@ impl Ring {
             (*slot)
                 .completion_sequence
                 .store(sequence, Ordering::Release);
-            (*consumer).active_leases.fetch_sub(1, Ordering::Relaxed);
+            Self::advance_cursor(&(*consumer).active_leases, active, active - 1)
+                .map_err(|_| LeaseError::Quarantined)?;
         }
         self.consumer_cursors.set(ConsumerCursors {
             consumed,
@@ -1632,13 +1636,16 @@ impl Ring {
         let receiver_owned_ok = if exact {
             receiver_owned == held
         } else {
-            receiver_owned <= held + 1
+            receiver_owned.saturating_sub(1) <= held
         };
+        let outstanding = in_flight
+            .checked_add(held)
+            .ok_or(RingError::InvalidSharedState)?;
         if active_leases > self.grant.max_leases
             || !matches(active_leases, descriptors.receiver_leased)
             || !matches(in_flight, descriptors.published)
             || !receiver_owned_ok
-            || in_flight + held > self.grant.descriptor_depth
+            || outstanding > self.grant.descriptor_depth
             || live_bytes > self.grant.arena_bytes
         {
             return Err(RingError::InvalidSharedState);
@@ -1736,6 +1743,16 @@ impl Ring {
     fn quarantine_with(&self, error: RingError) -> RingError {
         self.enter_quarantine();
         error
+    }
+
+    /// Moves an owned cursor from the value this handle's record holds to `to`. The compare
+    /// makes the verify-then-store pair atomic: a peer rewrite between them fails the exchange
+    /// instead of being overwritten or, for a counter, wrapped.
+    fn advance_cursor(cursor: &AtomicU64, from: u64, to: u64) -> Result<(), RingError> {
+        cursor
+            .compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| RingError::InvalidSharedState)
     }
 
     /// Loads the producer-owned cursors and checks them against this handle's own record.
@@ -1954,10 +1971,8 @@ impl Ring {
         }
         // SAFETY: capacity becomes visible only after every removal succeeds.
         unsafe {
-            (*reclaim)
-                .arena_reclaimed
-                .store(new_reclaimed, Ordering::Release);
-            (*reclaim).completed.store(last, Ordering::Release);
+            Self::advance_cursor(&(*reclaim).arena_reclaimed, reclaimed, new_reclaimed)?;
+            Self::advance_cursor(&(*reclaim).completed, completed, last)?;
         }
         self.producer_cursors.set(ProducerCursors {
             completed: last,
@@ -2083,8 +2098,16 @@ impl Ring {
             .map_err(|error| self.quarantine_with(error))
     }
 
+    /// Returns the slot and arena range without publishing. Pages the reservation dirtied lie
+    /// above `arena_write`, where no reclaim pass will ever reach them, so they are removed
+    /// here; a removal failure quarantines because `Drop` cannot report it.
     fn abort_reservation(&self, sequence: u64) {
-        self.reserved_end.set(None);
+        if let Some(reserved_end) = self.reserved_end.take() {
+            let arena_write = self.producer_cursors.get().arena_write;
+            if let Err(error) = self.punch_range(arena_write, reserved_end) {
+                self.quarantine_with(error);
+            }
+        }
         if let Ok(slot) = self.slot_ptr(sequence) {
             // SAFETY: reservation owner calls only before publication.
             unsafe {
@@ -2092,6 +2115,28 @@ impl Ring {
                 (*slot).state.store(SLOT_FREE, Ordering::Release);
             }
         }
+    }
+
+    /// Removes every page that lies wholly inside the logical range `[start, end)`.
+    fn punch_range(&self, start: u64, end: u64) -> Result<(), RingError> {
+        let len = end
+            .checked_sub(start)
+            .ok_or(RingError::InvalidSharedState)?;
+        for (offset, len) in removal_ranges(
+            self.layout.arena,
+            self.arena_bytes(),
+            start,
+            len,
+            system_page_size(),
+        )?
+        .into_iter()
+        .filter(|(_, len)| *len != 0)
+        {
+            if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
+                return Err(RingError::PageRemovalFailed);
+            }
+        }
+        Ok(())
     }
 
     /// Everything `commit` checks before it writes shared state. Any error here leaves the
@@ -2147,24 +2192,34 @@ impl Ring {
             descriptor.allocation_start,
             descriptor.allocation_len,
         )));
+        let cursors = self.producer_cursors.get();
         // SAFETY: producer exclusively owns reserved slot and arena range.
         unsafe {
             std::ptr::write_volatile((*slot).descriptor.get(), descriptor);
             (*slot).state.store(SLOT_PUBLISHED, Ordering::Relaxed);
-            (*producer).arena_write.store(next_write, Ordering::Relaxed);
-            (*producer)
-                .published
-                .store(identity.sequence(), Ordering::Release);
+            Self::advance_cursor(&(*producer).arena_write, cursors.arena_write, next_write)
+                .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
+            Self::advance_cursor(
+                &(*producer).published,
+                cursors.published,
+                identity.sequence(),
+            )
+            .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
         }
         self.producer_cursors.set(ProducerCursors {
             published: identity.sequence(),
             arena_write: next_write,
-            ..self.producer_cursors.get()
+            ..cursors
         });
         self.reserved_end.set(None);
         if let Err(error) = self.signal_wake(self.data_wake_ptr(), &self.data_ready) {
             self.enter_quarantine();
             return Err(ProducerError::Ring(error));
+        }
+        // A peer quarantine that landed between `commit`'s check and the stores above leaves
+        // the frame published on a terminal ring; the caller must not take it as delivered.
+        if self.is_quarantined() {
+            return Err(ProducerError::Quarantined);
         }
         Ok(identity)
     }
@@ -2704,7 +2759,7 @@ fn seal_object(fd: &OwnedFd) -> Result<(), RingError> {
 #[cfg(test)]
 mod tests {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::arena::{ArenaError, MIN_ARENA_BYTES};
     use crate::descriptor::{
@@ -3368,6 +3423,82 @@ mod tests {
         assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
         assert!(ring.is_quarantined());
         drop((first, second));
+    }
+
+    #[test]
+    fn owned_cursor_advance_fails_closed_when_the_shared_value_moved() {
+        let cursor = AtomicU64::new(5);
+        Ring::advance_cursor(&cursor, 5, 4).unwrap();
+        assert!(matches!(
+            Ring::advance_cursor(&cursor, 5, 3),
+            Err(RingError::InvalidSharedState)
+        ));
+        assert_eq!(
+            cursor.load(Ordering::Acquire),
+            4,
+            "a failed exchange writes nothing"
+        );
+    }
+
+    #[test]
+    fn publication_that_raced_a_quarantine_is_not_reported_as_delivered() {
+        let ring = ring();
+        let mut reservation = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
+        reservation.write(&[1]).unwrap();
+        let prepared = ring
+            .prepare_commit(1, reservation.plan, 1, reservation.wire_header)
+            .unwrap();
+        let lifecycle = ring.lifecycle_ptr().unwrap();
+        // The peer quarantines after `commit`'s check would have passed.
+        // SAFETY: test-owned ring keeps the lifecycle page mapped.
+        unsafe { (*lifecycle).quarantined.store(1, Ordering::Release) };
+        assert_eq!(
+            ring.publish_commit(prepared),
+            Err(ProducerError::Quarantined)
+        );
+        reservation.finished = true;
+        assert!(ring.is_quarantined());
+    }
+
+    #[test]
+    fn health_check_bounds_do_not_overflow_on_forged_cursors() {
+        let ring = ring();
+        let producer = ring.producer_ptr().unwrap();
+        let consumer = ring.consumer_ptr().unwrap();
+        // SAFETY: test-owned ring keeps both pages mapped.
+        unsafe {
+            (*producer).published.store(u64::MAX, Ordering::Release);
+            (*consumer).consumed.store(u64::MAX, Ordering::Release);
+        }
+        assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
+    }
+
+    #[test]
+    fn aborted_reservation_leaves_no_resident_pages() {
+        let ring = ring();
+        let page = super::system_page_size();
+        let mut reservation = ring
+            .try_reserve(page * 2, wire_v2_header(page * 2).unwrap())
+            .unwrap();
+        reservation.write(&vec![7; page * 2]).unwrap();
+        assert_eq!(ring.resident_arena_pages().unwrap(), 2);
+        reservation.abort();
+        assert_eq!(
+            ring.resident_arena_pages().unwrap(),
+            0,
+            "an aborted reservation's pages sit above every reclaim cursor and must be punched on abort"
+        );
+        let (descriptors, bytes) = ring.conservation().unwrap();
+        assert_eq!(descriptors.free, ring.grant().descriptor_depth);
+        assert_eq!(bytes.free, ring.grant().arena_bytes);
+    }
+
+    #[test]
+    fn attach_refuses_a_quarantined_ring() {
+        let ring = ring();
+        let attachment = ring.attachment().unwrap();
+        ring.enter_quarantine();
+        assert!(matches!(attachment.attach(), Err(RingError::Quarantined)));
     }
 
     #[test]
