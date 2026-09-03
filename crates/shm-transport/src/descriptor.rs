@@ -374,8 +374,8 @@ impl ValidatedFrame {
         self.span_count
     }
 
-    /// The span at `index`, or `None` past `span_count`. Slice lookup keeps any `index`
-    /// panic-free; `from_untrusted` rejects a `span_count` above `MAX_SPANS`.
+    /// The span at `index`, or `None` if `index >= span_count`. `validate` rejects
+    /// `span_count > MAX_SPANS`, so the slice bound is in range.
     pub fn span(self, index: usize) -> Option<ArenaSpan> {
         self.spans[..usize::from(self.span_count)]
             .get(index)
@@ -455,7 +455,8 @@ pub enum DescriptorError {
     /// `body_len` exceeds `MAX_FRAME_BYTES`.
     #[error("frame exceeds protocol maximum")]
     FrameTooLarge,
-    /// The allocation is empty, exceeds the arena, or is shorter than the body.
+    /// The arena is empty, or the allocation exceeds the arena or is shorter than the body.
+    /// A zero-length allocation is legal for a zero-length body.
     #[error("arena allocation is invalid")]
     InvalidAllocation,
     /// The span count is not 1 or 2.

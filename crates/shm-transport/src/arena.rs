@@ -15,6 +15,9 @@ pub enum ArenaError {
     /// Requested frame exceeds the wire limit.
     #[error("frame exceeds the protocol maximum")]
     FrameTooLarge,
+    /// Committed length exceeds the bytes the plan reserved.
+    #[error("committed length exceeds the reservation")]
+    ExceedsAllocation,
     /// Absolute cursors are malformed or wrapped.
     #[error("arena cursor is invalid")]
     InvalidCursor,
@@ -128,7 +131,7 @@ impl SpanPlan {
     pub fn prefix(self, exact_len: usize) -> Result<Self, ArenaError> {
         let exact_len = u64::try_from(exact_len).map_err(|_| ArenaError::ArithmeticOverflow)?;
         if exact_len > self.allocation_len {
-            return Err(ArenaError::FrameTooLarge);
+            return Err(ArenaError::ExceedsAllocation);
         }
         let first_len = exact_len.min(self.spans[0].len);
         let second_len = exact_len - first_len;
@@ -158,8 +161,8 @@ impl SpanPlan {
         self.span_count
     }
 
-    /// The span at `index`, or `None` past `span_count`. Slice lookup keeps any `index`
-    /// panic-free; `span_count` never exceeds the array length by construction.
+    /// The span at `index`, or `None` if `index >= span_count`.
+    /// `reserve` and `prefix` set `span_count` to 1 or 2, so the slice bound is in range.
     pub fn span(self, index: usize) -> Option<ArenaSpan> {
         self.spans[..usize::from(self.span_count)]
             .get(index)

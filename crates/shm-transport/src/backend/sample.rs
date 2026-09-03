@@ -92,6 +92,13 @@ impl SamplePrefix {
         if self.body_len > MAX_FRAME_BYTES as u64 {
             return Err(DescriptorError::FrameTooLarge);
         }
+        let body_len = usize::try_from(self.body_len).map_err(|_| DescriptorError::Overflow)?;
+        let body_end = SAMPLE_PREFIX_BYTES
+            .checked_add(body_len)
+            .ok_or(DescriptorError::Overflow)?;
+        if body_end > allocation_len {
+            return Err(DescriptorError::InvalidAllocation);
+        }
         let declared = u32::from_le_bytes([
             self.wire_header[0],
             self.wire_header[1],
@@ -100,13 +107,6 @@ impl SamplePrefix {
         ]);
         if u64::from(declared) != self.body_len || self.wire_header[4] != 2 {
             return Err(DescriptorError::WireHeaderMismatch);
-        }
-        let body_len = usize::try_from(self.body_len).map_err(|_| DescriptorError::Overflow)?;
-        let body_end = SAMPLE_PREFIX_BYTES
-            .checked_add(body_len)
-            .ok_or(DescriptorError::Overflow)?;
-        if body_end > allocation_len {
-            return Err(DescriptorError::InvalidAllocation);
         }
         Ok(ValidatedSample {
             identity: self.identity,

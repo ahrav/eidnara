@@ -1,4 +1,6 @@
-use shm_transport::arena::{ArenaCounts, ArenaSpan, MAX_FRAME_BYTES, SpanPlan};
+use shm_transport::arena::{
+    ArenaCounts, ArenaError, ArenaSpan, MAX_FRAME_BYTES, MIN_ARENA_BYTES, SpanPlan,
+};
 use shm_transport::backend::sample::{SAMPLE_PREFIX_BYTES, SamplePrefix};
 use shm_transport::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor,
@@ -253,6 +255,60 @@ fn arena_plans_wrap_and_conserves_all_states() {
         }
         .conserves(7)
     );
+}
+
+#[test]
+fn arena_reserve_and_prefix_report_every_failure_mode() {
+    let capacity = MIN_ARENA_BYTES;
+    let full = capacity as u64;
+
+    assert_eq!(
+        SpanPlan::reserve(capacity - 1, 0, 0, 1),
+        Err(ArenaError::BelowMinimumCapacity)
+    );
+    assert_eq!(
+        SpanPlan::reserve(0, 0, 0, 1),
+        Err(ArenaError::BelowMinimumCapacity)
+    );
+    assert_eq!(
+        SpanPlan::reserve(capacity, 0, 0, MAX_FRAME_BYTES + 1),
+        Err(ArenaError::FrameTooLarge)
+    );
+    // `reclaimed` ahead of `write` and a hold larger than the arena are both malformed cursors.
+    assert_eq!(
+        SpanPlan::reserve(capacity, 4, 8, 1),
+        Err(ArenaError::InvalidCursor)
+    );
+    assert_eq!(
+        SpanPlan::reserve(capacity, full + 1, 0, 1),
+        Err(ArenaError::InvalidCursor)
+    );
+    // Holding all but one byte leaves no room for a two-byte frame.
+    assert_eq!(
+        SpanPlan::reserve(capacity, full - 1, 0, 2),
+        Err(ArenaError::Exhausted)
+    );
+    // Holding exactly the full arena still admits nothing but an empty frame.
+    assert_eq!(
+        SpanPlan::reserve(capacity, full, 0, 1),
+        Err(ArenaError::Exhausted)
+    );
+    assert!(SpanPlan::reserve(capacity, full, 0, 0).is_ok());
+    // A write cursor at `u64::MAX` cannot advance without overflowing.
+    assert_eq!(
+        SpanPlan::reserve(capacity, u64::MAX, u64::MAX, 1),
+        Err(ArenaError::ArithmeticOverflow)
+    );
+
+    let plan = SpanPlan::reserve(capacity, 0, 0, 8).unwrap();
+    assert_eq!(plan.prefix(9), Err(ArenaError::ExceedsAllocation));
+    let shortened = plan.prefix(8).unwrap();
+    assert_eq!(shortened.allocation_len(), 8);
+    assert_eq!(shortened.span(0).unwrap().len(), 8);
+    let empty = plan.prefix(0).unwrap();
+    assert_eq!(empty.allocation_len(), 8);
+    assert_eq!(empty.span_count(), 1);
+    assert!(empty.span(0).unwrap().is_empty());
 }
 
 #[test]
@@ -541,6 +597,18 @@ fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
             Err(error)
         );
     }
+
+    // Allocation bounds are checked before the wire header, matching
+    // `FrameDescriptor::validate`: a body that overruns the allocation reports
+    // `InvalidAllocation` even when the wire header also disagrees.
+    let overrun_and_mismatch =
+        sample_payload(DESCRIPTOR_SCHEMA_VERSION, header(5), expected, 1024, &body);
+    assert_eq!(
+        SamplePrefix::snapshot(&overrun_and_mismatch)
+            .unwrap()
+            .validate(overrun_and_mismatch.len(), expected),
+        Err(DescriptorError::InvalidAllocation)
+    );
 
     // A body declared longer than the allocation holds is rejected.
     let excessive = sample_payload(
