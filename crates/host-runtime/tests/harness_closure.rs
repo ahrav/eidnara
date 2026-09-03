@@ -1,0 +1,699 @@
+// This crate root must declare `file_mode` because `harness_closure.rs` uses `crate::file_mode`.
+#[path = "../src/file_mode.rs"]
+mod file_mode;
+#[path = "../src/harness_closure.rs"]
+mod harness_closure;
+
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+use harness_closure::{
+    ClosureCandidate, ClosureDependency, ClosureManifest, ClosureNode, DependencyKind,
+    HarnessClosureStore, NodeKind, manifest_digest, validate_manifest,
+};
+use sha2::{Digest, Sha256};
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn node(
+    path: &str,
+    source_path: &str,
+    kind: NodeKind,
+    bytes: &[u8],
+    dependencies: Vec<ClosureDependency>,
+) -> ClosureNode {
+    ClosureNode {
+        path: path.to_owned(),
+        source_root: "install".to_owned(),
+        source_path: source_path.to_owned(),
+        kind,
+        mode: if matches!(kind, NodeKind::Executable | NodeKind::Interpreter) {
+            0o700
+        } else {
+            0o600
+        },
+        size_bytes: bytes.len() as u64,
+        sha256: sha256(bytes),
+        dependencies,
+    }
+}
+
+fn dependency(path: &str, kind: DependencyKind) -> ClosureDependency {
+    ClosureDependency {
+        path: path.to_owned(),
+        kind,
+    }
+}
+
+fn fixture(source: &Path) -> ClosureCandidate {
+    let files = [
+        ("bin/node", b"node-runtime".as_slice()),
+        (
+            "node_modules/pi/dist/cli.js",
+            b"import './helper.js'; import './addon.node'".as_slice(),
+        ),
+        (
+            "node_modules/pi/dist/helper.js",
+            b"export const answer = 42".as_slice(),
+        ),
+        (
+            "node_modules/pi/dist/addon.node",
+            b"native-addon".as_slice(),
+        ),
+        (
+            "node_modules/provider/a.js",
+            b"export const provider = 'a'".as_slice(),
+        ),
+        (
+            "node_modules/provider/b.js",
+            b"export const provider = 'b'".as_slice(),
+        ),
+    ];
+    for (path, bytes) in files {
+        let destination = source.join(path);
+        std::fs::create_dir_all(destination.parent().expect("parent")).expect("create parent");
+        std::fs::write(&destination, bytes).expect("write source");
+    }
+    let nodes = vec![
+        node(
+            "bin/node",
+            "bin/node",
+            NodeKind::Interpreter,
+            b"node-runtime",
+            vec![],
+        ),
+        node(
+            "node_modules/pi/dist/addon.node",
+            "node_modules/pi/dist/addon.node",
+            NodeKind::NativeAddon,
+            b"native-addon",
+            vec![],
+        ),
+        node(
+            "node_modules/pi/dist/cli.js",
+            "node_modules/pi/dist/cli.js",
+            NodeKind::Module,
+            b"import './helper.js'; import './addon.node'",
+            vec![
+                dependency("node_modules/pi/dist/addon.node", DependencyKind::Native),
+                dependency("node_modules/pi/dist/helper.js", DependencyKind::Static),
+            ],
+        ),
+        node(
+            "node_modules/pi/dist/helper.js",
+            "node_modules/pi/dist/helper.js",
+            NodeKind::Module,
+            b"export const answer = 42",
+            vec![],
+        ),
+        node(
+            "node_modules/provider/a.js",
+            "node_modules/provider/a.js",
+            NodeKind::Extension,
+            b"export const provider = 'a'",
+            vec![],
+        ),
+        node(
+            "node_modules/provider/b.js",
+            "node_modules/provider/b.js",
+            NodeKind::Extension,
+            b"export const provider = 'b'",
+            vec![],
+        ),
+    ];
+    ClosureCandidate {
+        manifest: ClosureManifest {
+            schema: "eidnara.host-harness-closure/v1".to_owned(),
+            harness: "pi".to_owned(),
+            package: "@earendil-works/pi-coding-agent".to_owned(),
+            version: "0.80.2".to_owned(),
+            argument_variant: "run_prompt".to_owned(),
+            source_roots: vec!["install".to_owned()],
+            executable: None,
+            interpreter: Some("bin/node".to_owned()),
+            entrypoint: Some("node_modules/pi/dist/cli.js".to_owned()),
+            extensions: vec![
+                "node_modules/provider/a.js".to_owned(),
+                "node_modules/provider/b.js".to_owned(),
+            ],
+            nodes,
+        },
+        source_roots: BTreeMap::from([("install".to_owned(), source.to_path_buf())]),
+    }
+}
+
+fn setup() -> (tempfile::TempDir, PathBuf, ClosureCandidate) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).expect("source");
+    let candidate = fixture(&source);
+    (temp, source, candidate)
+}
+
+#[test]
+fn resolved_descriptor_is_rewound_after_verification() {
+    let (temp, _source, candidate) = setup();
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    let closure = store.materialize(&candidate).expect("materialize");
+
+    let node = closure
+        .resolve_node_descriptor("node_modules/pi/dist/helper.js")
+        .expect("resolve node");
+
+    // A macOS child opening `/dev/fd/N` receives a duplicate descriptor with the original offset, so the handed-out descriptor must start at offset 0.
+    // A macOS child opening `/dev/fd/N` receives a duplicate descriptor with the original offset, so the handed-out descriptor must start at offset 0.
+    // SAFETY: `node` owns this descriptor for the duration of the borrow.
+    let inherited = unsafe { std::os::fd::BorrowedFd::borrow_raw(node.inherited_fd()) };
+    let offset = rustix::fs::seek(inherited, rustix::fs::SeekFrom::Current(0))
+        .expect("query descriptor offset");
+    assert_eq!(
+        offset, 0,
+        "a handed-out node descriptor must be positioned at the start of the file"
+    );
+    let mut bytes = Vec::new();
+    std::fs::File::from(rustix::io::dup(inherited).expect("duplicate inherited descriptor"))
+        .read_to_end(&mut bytes)
+        .expect("read inherited descriptor");
+    assert_eq!(bytes, b"export const answer = 42");
+}
+
+#[test]
+fn materialization_preserves_layout_and_security() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let closure = store.materialize(&candidate).expect("materialize");
+
+    let entrypoint = closure
+        .resolve_node_descriptor("node_modules/pi/dist/cli.js")
+        .expect("entrypoint");
+    assert_eq!(
+        std::fs::read(entrypoint.closure_path()).expect("read copied entrypoint"),
+        b"import './helper.js'; import './addon.node'"
+    );
+    assert_eq!(closure.manifest().extensions, candidate.manifest.extensions);
+    for node in &candidate.manifest.nodes {
+        let path = closure.path().join("files").join(&node.path);
+        let metadata = std::fs::symlink_metadata(path).expect("copied node metadata");
+        assert_eq!(metadata.permissions().mode() & 0o777, node.mode);
+        assert_eq!(metadata.nlink(), 1);
+    }
+}
+
+#[test]
+fn retained_closure_survives_source_deletion_and_deduplicates_by_digest() {
+    let (temp, source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let first = store.materialize(&candidate).expect("first materialize");
+    let digest = first.digest().to_owned();
+    std::fs::remove_dir_all(source).expect("delete source");
+
+    let second = store
+        .materialize(&candidate)
+        .expect("dedupe does not reopen deleted source");
+    assert_eq!(second.digest(), digest);
+    assert_eq!(
+        std::fs::read(
+            second
+                .resolve_node_descriptor("node_modules/pi/dist/helper.js")
+                .expect("resolve retained node")
+                .closure_path()
+        )
+        .expect("read retained node"),
+        b"export const answer = 42"
+    );
+    let digest_directories = std::fs::read_dir(&store_root)
+        .expect("read store")
+        .filter_map(Result::ok)
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with(".tmp-"))
+        .count();
+    assert_eq!(digest_directories, 1);
+
+    let descriptor_path = second
+        .resolve_node_descriptor("node_modules/pi/dist/helper.js")
+        .expect("descriptor-rooted retained node");
+    let retained = store_root.join(&digest);
+    let moved = store_root.join("moved-retained");
+    std::fs::rename(&retained, &moved).expect("rename retained closure");
+    let replacement = retained.join("files/node_modules/pi/dist");
+    std::fs::create_dir_all(&replacement).expect("replacement tree");
+    std::fs::write(
+        replacement.join("helper.js"),
+        b"export const answer = 'malicious'",
+    )
+    .expect("replacement bytes");
+    assert_eq!(
+        std::fs::read(descriptor_path.path()).expect("read descriptor-rooted node"),
+        b"export const answer = 42",
+        "path replacement must not change the retained closure object"
+    );
+}
+
+#[test]
+fn retained_executable_loads_dependency_and_extension_after_source_deletion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(source.join("bin")).expect("bin");
+    std::fs::create_dir_all(source.join("node_modules/pkg")).expect("package");
+    let script = b"#!/bin/sh\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd)\nprintf '%s' \"$(cat \"$root/node_modules/pkg/dep\")$(cat \"$root/node_modules/pkg/ext\")\"\n";
+    std::fs::write(source.join("bin/run"), script).expect("script");
+    std::fs::write(source.join("node_modules/pkg/dep"), b"dependency").expect("dependency");
+    std::fs::write(source.join("node_modules/pkg/ext"), b"extension").expect("extension");
+    let manifest = ClosureManifest {
+        schema: "eidnara.host-harness-closure/v1".to_owned(),
+        harness: "execution-test".to_owned(),
+        package: "execution-test".to_owned(),
+        version: "1.0.0".to_owned(),
+        argument_variant: "run_prompt".to_owned(),
+        source_roots: vec!["install".to_owned()],
+        executable: Some("bin/run".to_owned()),
+        interpreter: None,
+        entrypoint: None,
+        extensions: vec!["node_modules/pkg/ext".to_owned()],
+        nodes: vec![
+            node(
+                "bin/run",
+                "bin/run",
+                NodeKind::Executable,
+                script,
+                vec![dependency("node_modules/pkg/dep", DependencyKind::Static)],
+            ),
+            node(
+                "node_modules/pkg/dep",
+                "node_modules/pkg/dep",
+                NodeKind::Data,
+                b"dependency",
+                vec![],
+            ),
+            node(
+                "node_modules/pkg/ext",
+                "node_modules/pkg/ext",
+                NodeKind::Extension,
+                b"extension",
+                vec![],
+            ),
+        ],
+    };
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    let closure = store
+        .materialize(&ClosureCandidate {
+            manifest,
+            source_roots: BTreeMap::from([("install".to_owned(), source.clone())]),
+        })
+        .expect("materialize");
+    std::fs::remove_dir_all(source).expect("delete source");
+
+    let output = std::process::Command::new(
+        closure
+            .resolve_node_descriptor("bin/run")
+            .expect("retained executable")
+            .closure_path(),
+    )
+    .env_clear()
+    .output()
+    .expect("execute retained closure");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"dependencyextension");
+}
+
+#[test]
+fn source_and_retained_hash_mismatches_fail_closed() {
+    let (temp, _source, candidate) = setup();
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    let bad_source = candidate.clone();
+    std::fs::write(
+        bad_source.source_roots["install"].join("node_modules/pi/dist/helper.js"),
+        b"export const answer = 41",
+    )
+    .expect("mutate source");
+    assert_eq!(
+        store
+            .materialize(&bad_source)
+            .expect_err("source hash mismatch")
+            .detail(),
+        "source node bytes diverge from manifest"
+    );
+
+    std::fs::write(
+        bad_source.source_roots["install"].join("node_modules/pi/dist/helper.js"),
+        b"export const answer = 42",
+    )
+    .expect("restore source");
+    let closure = store.materialize(&candidate).expect("materialize");
+    let retained = closure.path().join("files/node_modules/pi/dist/helper.js");
+    std::fs::write(&retained, b"export const answer = 41").expect("mutate retained");
+    assert_eq!(
+        store
+            .validate(closure.digest())
+            .expect_err("retained hash mismatch")
+            .detail(),
+        "closure node hash diverges from manifest"
+    );
+}
+
+#[test]
+fn traversal_and_symlink_sources_are_rejected() {
+    let (temp, source, candidate) = setup();
+    let mut traversal = candidate.clone();
+    traversal.manifest.nodes[0].source_path = "../node".to_owned();
+    assert_eq!(
+        validate_manifest(&traversal.manifest)
+            .expect_err("traversal")
+            .detail(),
+        "manifest path has an invalid component"
+    );
+
+    let real = source.join("real-node");
+    std::fs::write(&real, b"node-runtime").expect("real source");
+    std::fs::remove_file(source.join("bin/node")).expect("remove original");
+    std::os::unix::fs::symlink(&real, source.join("bin/node")).expect("symlink source");
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    assert_eq!(
+        store
+            .materialize(&candidate)
+            .expect_err("symlink refused")
+            .detail(),
+        "source node is missing or insecure"
+    );
+}
+
+#[test]
+fn missing_dependency_and_unreachable_nodes_are_rejected() {
+    let (_temp, _source, candidate) = setup();
+    let mut missing = candidate.manifest.clone();
+    missing.nodes[2].dependencies[1].path = "node_modules/pi/dist/missing.js".to_owned();
+    assert_eq!(
+        validate_manifest(&missing)
+            .expect_err("missing dependency")
+            .detail(),
+        "manifest references a missing node"
+    );
+
+    let mut unreachable = candidate.manifest.clone();
+    unreachable.nodes[2].dependencies.pop();
+    assert_eq!(
+        validate_manifest(&unreachable)
+            .expect_err("unreachable helper")
+            .detail(),
+        "manifest contains an unreachable node"
+    );
+}
+
+#[test]
+fn ordered_extensions_are_part_of_manifest_identity() {
+    let (_temp, _source, candidate) = setup();
+    let first = manifest_digest(&candidate.manifest).expect("first digest");
+    let mut reordered = candidate.manifest.clone();
+    reordered.extensions.reverse();
+    let second = manifest_digest(&reordered).expect("second digest");
+    assert_ne!(first, second);
+}
+
+#[test]
+fn strict_manifest_decode_rejects_unknown_fields() {
+    let (_temp, _source, candidate) = setup();
+    let mut value = serde_json::to_value(&candidate.manifest).expect("value");
+    value
+        .as_object_mut()
+        .expect("object")
+        .insert("ambient_path".to_owned(), serde_json::Value::Bool(true));
+    assert!(serde_json::from_value::<ClosureManifest>(value).is_err());
+}
+
+#[test]
+fn rust_and_typescript_share_the_canonical_manifest_digest() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
+    let manifest: ClosureManifest =
+        serde_json::from_slice(&std::fs::read(fixture).expect("read closure fixture"))
+            .expect("decode closure fixture");
+    assert_eq!(
+        manifest_digest(&manifest).expect("digest"),
+        "5386c2004cc31abbdd98e766be193f78e1a74937254681e6db47bd700961f911"
+    );
+}
+
+#[test]
+#[ignore = "requires U9 external closure roots; run explicitly in release qualification"]
+fn production_closures_from_environment_materialize() {
+    let opencode_root =
+        std::env::var_os("EIDNARA_OPENCODE_CLOSURE_RUNTIME_ROOT").expect("OpenCode closure root");
+    let pi_install = PathBuf::from(
+        std::env::var_os("EIDNARA_PI_CLOSURE_INSTALL_ROOT")
+            .expect("EIDNARA_PI_CLOSURE_INSTALL_ROOT accompanies OpenCode root"),
+    );
+    let pi_runtime = PathBuf::from(
+        std::env::var_os("EIDNARA_PI_CLOSURE_RUNTIME_ROOT")
+            .expect("EIDNARA_PI_CLOSURE_RUNTIME_ROOT accompanies OpenCode root"),
+    );
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read_manifest = |name: &str| -> ClosureManifest {
+        serde_json::from_slice(
+            &std::fs::read(repo.join("release/harness-closures").join(name))
+                .expect("read production closure manifest"),
+        )
+        .expect("decode production closure manifest")
+    };
+    let store_root = tempfile::tempdir().expect("closure store");
+    let store =
+        HarnessClosureStore::open(&store_root.path().join("closures")).expect("open closure store");
+
+    let opencode = store
+        .materialize(&ClosureCandidate {
+            manifest: read_manifest("opencode-linux-x64-1.18.22.json"),
+            source_roots: BTreeMap::from([("runtime".to_owned(), PathBuf::from(opencode_root))]),
+        })
+        .expect("materialize OpenCode closure");
+    assert!(
+        opencode
+            .resolve_node_descriptor("bin/opencode")
+            .expect("OpenCode executable")
+            .closure_path()
+            .is_file()
+    );
+
+    let pi = store
+        .materialize(&ClosureCandidate {
+            manifest: read_manifest("pi-linux-x64-node-24.18.0.json"),
+            source_roots: BTreeMap::from([
+                ("pi-install".to_owned(), pi_install),
+                ("runtime".to_owned(), pi_runtime),
+            ]),
+        })
+        .expect("materialize Pi closure");
+    assert!(
+        pi.resolve_node_descriptor("node_modules/@earendil-works/pi-coding-agent/dist/cli.js")
+            .expect("Pi entrypoint")
+            .closure_path()
+            .is_file()
+    );
+    assert_eq!(pi.manifest().nodes.len(), 3_081);
+}
+
+#[test]
+fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
+    let (extra_temp, _source, extra_candidate) = setup();
+    let extra_store =
+        HarnessClosureStore::open(&extra_temp.path().join("closures")).expect("store");
+    let extra = extra_store
+        .materialize(&extra_candidate)
+        .expect("materialize");
+    std::fs::write(extra.path().join("files/unlisted"), b"extra").expect("extra file");
+    assert_eq!(
+        extra_store
+            .validate(extra.digest())
+            .expect_err("unlisted file must fail")
+            .detail(),
+        "closure contains an unlisted file"
+    );
+
+    let (missing_temp, _source, missing_candidate) = setup();
+    let missing_store =
+        HarnessClosureStore::open(&missing_temp.path().join("closures")).expect("store");
+    let missing = missing_store
+        .materialize(&missing_candidate)
+        .expect("materialize");
+    std::fs::remove_file(missing.path().join("files/node_modules/pi/dist/helper.js"))
+        .expect("remove retained node");
+    assert_eq!(
+        missing_store
+            .validate(missing.digest())
+            .expect_err("missing node must fail")
+            .detail(),
+        "closure is missing a manifest-listed node"
+    );
+
+    let (mode_temp, _source, mode_candidate) = setup();
+    let mode_store = HarnessClosureStore::open(&mode_temp.path().join("closures")).expect("store");
+    let mode = mode_store
+        .materialize(&mode_candidate)
+        .expect("materialize");
+    let helper = mode.path().join("files/node_modules/pi/dist/helper.js");
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
+        .expect("change retained mode");
+    assert_eq!(
+        mode_store
+            .validate(mode.digest())
+            .expect_err("wrong mode must fail")
+            .detail(),
+        "closure file is not owner-only single-link"
+    );
+}
+
+#[test]
+fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let closure = store.materialize(&candidate).expect("materialize");
+    let digest = closure.digest().to_owned();
+
+    std::fs::create_dir(store_root.join(".tmp-deadbeefdeadbeef")).expect("stale temp");
+    std::fs::set_permissions(
+        store_root.join(".tmp-deadbeefdeadbeef"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .expect("temp mode");
+    std::fs::create_dir(store_root.join("foreign-entry")).expect("foreign entry");
+
+    let protected = std::collections::BTreeSet::from([digest.clone()]);
+    store.prune(&protected).expect("prune with protection");
+    assert!(
+        store_root.join(&digest).is_dir(),
+        "protected digest survives"
+    );
+    assert!(
+        !store_root.join(".tmp-deadbeefdeadbeef").exists(),
+        "stale staging directory is reclaimed"
+    );
+    assert!(
+        store_root.join("foreign-entry").is_dir(),
+        "entries the store did not create are left untouched"
+    );
+    store
+        .validate(&digest)
+        .expect("protected closure still validates");
+
+    store
+        .prune(&std::collections::BTreeSet::new())
+        .expect("prune without protection");
+    assert!(
+        !store_root.join(&digest).is_dir(),
+        "unprotected digest is reclaimed"
+    );
+}
+
+#[test]
+fn native_edges_and_native_addons_must_correspond_exactly() {
+    let (_temp, _source, candidate) = setup();
+
+    // Validation rejects a non-`Native` dependency edge to a `NativeAddon`.
+    // qualification-side biconditional.
+    let mut static_edge = candidate.clone();
+    static_edge.manifest.nodes[2].dependencies = vec![
+        dependency("node_modules/pi/dist/addon.node", DependencyKind::Static),
+        dependency("node_modules/pi/dist/helper.js", DependencyKind::Static),
+    ];
+    assert_eq!(
+        validate_manifest(&static_edge.manifest)
+            .expect_err("static edge onto native addon")
+            .detail(),
+        "native dependency kind must correspond exactly to a native addon target"
+    );
+
+    // Validation rejects a `NativeAddon` with no inbound `Native` dependency even if graph traversal reaches it.
+    let mut unclaimed = candidate.clone();
+    unclaimed.manifest.nodes[2].dependencies = vec![
+        dependency(
+            "node_modules/pi/dist/addon.node",
+            DependencyKind::FiniteDynamic,
+        ),
+        dependency("node_modules/pi/dist/helper.js", DependencyKind::Static),
+    ];
+    assert_eq!(
+        validate_manifest(&unclaimed.manifest)
+            .expect_err("finite_dynamic edge onto native addon")
+            .detail(),
+        "native dependency kind must correspond exactly to a native addon target"
+    );
+}
+
+/// Lexicographic path order can place `bin/node.dat` between `bin/node` and `bin/node/main.js`.
+/// Lexicographic path order can place `bin/node.dat` between `bin/node` and `bin/node/main.js`.
+/// Validation must reject a regular file that prefixes another manifest path.
+/// Validation must compare every path with its ancestor paths, not only the immediately preceding sorted entry.
+/// Validation rejects a regular file that prefixes another manifest path.
+/// Validation rejects a regular file that prefixes another manifest path.
+#[test]
+fn a_parent_file_collision_is_caught_across_an_intervening_sibling() {
+    let (_temp, _source, candidate) = setup();
+
+    let mut adjacent = candidate.manifest.clone();
+    adjacent.nodes.push(node(
+        "bin/node/main.js",
+        "bin/node/main.js",
+        NodeKind::Module,
+        b"nested under a file",
+        vec![],
+    ));
+    adjacent.nodes.sort_by(|a, b| a.path.cmp(&b.path));
+    assert_eq!(
+        validate_manifest(&adjacent)
+            .expect_err("a child of a regular file is not materializable")
+            .detail(),
+        "manifest node path collides with a parent file"
+    );
+
+    let mut separated = adjacent.clone();
+    separated.nodes.push(node(
+        "bin/node.dat",
+        "bin/node.dat",
+        NodeKind::Data,
+        b"sorts between the parent and its child",
+        vec![],
+    ));
+    separated.nodes.sort_by(|a, b| a.path.cmp(&b.path));
+    let paths: Vec<&str> = separated
+        .nodes
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(
+        &paths[..3],
+        &["bin/node", "bin/node.dat", "bin/node/main.js"],
+        "the sibling must sort between the parent file and its child for this case to bite"
+    );
+    assert_eq!(
+        validate_manifest(&separated)
+            .expect_err("an intervening sibling must not hide the collision")
+            .detail(),
+        "manifest node path collides with a parent file"
+    );
+}
+
+/// Validation rejects multiple dependencies that name the same target, regardless of `DependencyKind`.
+/// Dependencies with the same path but different kinds require explicit duplicate-path validation.
+/// Dependencies with the same path but different kinds require explicit duplicate-path validation.
+/// Duplicate dependency validation rejects dependencies with equal paths even when their `DependencyKind` values differ.
+/// Duplicate dependency validation rejects dependencies with equal paths even when their `DependencyKind` values differ.
+#[test]
+fn duplicate_dependency_targets_are_rejected_across_kinds() {
+    let (_temp, _source, candidate) = setup();
+    let mut duplicated = candidate.manifest.clone();
+    duplicated.nodes[2].dependencies = vec![
+        dependency("node_modules/pi/dist/addon.node", DependencyKind::Native),
+        dependency("node_modules/pi/dist/helper.js", DependencyKind::Static),
+        dependency("node_modules/pi/dist/helper.js", DependencyKind::Native),
+    ];
+    assert_eq!(
+        validate_manifest(&duplicated)
+            .expect_err("one target named twice")
+            .detail(),
+        "node dependencies are not uniquely sorted by target path"
+    );
+}

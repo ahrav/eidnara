@@ -1,0 +1,1088 @@
+use std::{error::Error, fmt, future::Future, io, time::Duration};
+
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use subtle::ConstantTimeEq;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    time,
+};
+
+use crate::connection_file::{ConnectionInfo, DAEMON_ID_LEN, MIN_KEY_LEN};
+
+pub use shm_transport::setup_auth::{
+    CLIENT_AUTH_DOMAIN, DEFAULT_CLIENT_ROLE, NONCE_LEN, PROOF_LEN, SERVER_PROOF_DOMAIN,
+};
+
+pub const MAX_AUTH_MESSAGE_LEN: u32 = shm_transport::setup_auth::MAX_AUTH_MESSAGE_LEN as u32;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientHello {
+    pub client_nonce: [u8; NONCE_LEN],
+    pub role: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerProof {
+    pub daemon_id: [u8; DAEMON_ID_LEN],
+    pub server_nonce: [u8; NONCE_LEN],
+    pub daemon_ver: String,
+    pub server_proof: [u8; PROOF_LEN],
+}
+
+// A derived `Debug` exposes the HMAC in error and panic output.
+// while debugging.
+impl fmt::Debug for ServerProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerProof")
+            .field("daemon_id", &self.daemon_id)
+            .field("server_nonce", &self.server_nonce)
+            .field("daemon_ver", &self.daemon_ver)
+            .field("server_proof", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientAuth {
+    pub client_auth: [u8; PROOF_LEN],
+}
+
+/// `Debug` redacts the proof to keep it out of error and panic output.
+impl fmt::Debug for ClientAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientAuth")
+            .field("client_auth", &"[redacted]")
+            .finish()
+    }
+}
+
+///
+///
+/// `ClientHello.role` is client-asserted and unverified.
+/// `ClientHello.role` is discarded because any peer holding the key can claim any role.
+/// `ClientHello.role` must not decide admission, capacity, or privilege.
+/// `Authenticated` attests only connection-key possession.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Authenticated;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthStage {
+    ClientHello,
+    ServerProof,
+    ClientAuth,
+}
+
+#[derive(Debug)]
+pub enum AuthError {
+    Io {
+        stage: AuthStage,
+        source: io::Error,
+    },
+    Timeout {
+        stage: AuthStage,
+        deadline: Duration,
+    },
+    UnexpectedEof {
+        stage: AuthStage,
+        expected: usize,
+        actual: usize,
+    },
+    MessageTooLarge {
+        stage: AuthStage,
+        len: u32,
+        max: u32,
+    },
+    JsonEncode {
+        stage: AuthStage,
+        source: serde_json::Error,
+    },
+    JsonDecode {
+        stage: AuthStage,
+        source: serde_json::Error,
+    },
+    /// `InvalidDeadline` reports a total that cannot form an absolute deadline.
+    InvalidDeadline {
+        total: Duration,
+    },
+    Random(getrandom::Error),
+    KeyTooShort {
+        len: usize,
+        min: usize,
+    },
+    InvalidServerProof,
+    DaemonIdMismatch,
+    /// `DaemonVerMismatch` reports a `daemon_ver` that differs from the connection-file snapshot.
+    DaemonVerMismatch,
+    InvalidClientAuth,
+}
+
+pub fn compute_proof(
+    key: &[u8],
+    domain: &str,
+    client_nonce: &[u8; NONCE_LEN],
+    server_nonce: &[u8; NONCE_LEN],
+    daemon_ver: &str,
+    daemon_id: &[u8],
+) -> [u8; PROOF_LEN] {
+    shm_transport::setup_auth::compute_proof(
+        key,
+        domain,
+        client_nonce,
+        server_nonce,
+        daemon_ver,
+        daemon_id,
+    )
+}
+
+/// Each read and write uses the time remaining until `at`, so all stages share one deadline.
+/// All reads, writes, and teardown share the absolute deadline `at`.
+/// Per-step durations would let a slow peer consume the full budget for each length and body read.
+#[derive(Clone, Copy)]
+struct Deadline {
+    at: time::Instant,
+    total: Duration,
+}
+
+impl Deadline {
+    /// `Instant::checked_add` returns `InvalidDeadline` for an unrepresentable deadline instead of panicking.
+    fn starting_now(total: Duration) -> Result<Self, AuthError> {
+        let at = time::Instant::now()
+            .checked_add(total)
+            .ok_or(AuthError::InvalidDeadline { total })?;
+        Ok(Self { at, total })
+    }
+
+    /// `Deadline::remaining` returns the time until the deadline or `Timeout` after it elapses.
+    fn remaining(&self, stage: AuthStage) -> Result<Duration, AuthError> {
+        let remaining = self.at.saturating_duration_since(time::Instant::now());
+        if remaining.is_zero() {
+            Err(AuthError::Timeout {
+                stage,
+                deadline: self.total,
+            })
+        } else {
+            Ok(remaining)
+        }
+    }
+
+    /// An elapsed deadline yields zero time for teardown so teardown cannot outlive the handshake budget.
+    fn remaining_or_zero(&self) -> Duration {
+        self.at.saturating_duration_since(time::Instant::now())
+    }
+}
+
+///
+/// Teardown shares the handshake deadline, so it cannot extend the handshake budget.
+///
+async fn teardown_failed_handshake<S>(stream: &mut S, deadline: Deadline)
+where
+    S: AsyncWrite + Unpin,
+{
+    let _ = time::timeout(deadline.remaining_or_zero(), stream.shutdown()).await;
+}
+
+pub async fn authenticate_server<S>(
+    stream: &mut S,
+    key: &[u8],
+    daemon_id: &[u8; DAEMON_ID_LEN],
+    daemon_ver: &str,
+    deadline: Duration,
+) -> Result<Authenticated, AuthError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let deadline = Deadline::starting_now(deadline)?;
+    let result = authenticate_server_inner(stream, key, daemon_id, daemon_ver, deadline).await;
+    if result.is_err() {
+        teardown_failed_handshake(stream, deadline).await;
+    }
+    result
+}
+
+async fn authenticate_server_inner<S>(
+    stream: &mut S,
+    key: &[u8],
+    daemon_id: &[u8; DAEMON_ID_LEN],
+    daemon_ver: &str,
+    deadline: Deadline,
+) -> Result<Authenticated, AuthError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    validate_key(key)?;
+
+    let hello: ClientHello = read_message(stream, AuthStage::ClientHello, deadline).await?;
+    let server_nonce = random_nonce()?;
+    let server_proof = compute_proof(
+        key,
+        SERVER_PROOF_DOMAIN,
+        &hello.client_nonce,
+        &server_nonce,
+        daemon_ver,
+        daemon_id,
+    );
+
+    write_message(
+        stream,
+        AuthStage::ServerProof,
+        &ServerProof {
+            daemon_id: *daemon_id,
+            server_nonce,
+            daemon_ver: daemon_ver.to_owned(),
+            server_proof,
+        },
+        deadline,
+    )
+    .await?;
+
+    let client_auth: ClientAuth = read_message(stream, AuthStage::ClientAuth, deadline).await?;
+    let expected_client_auth = compute_proof(
+        key,
+        CLIENT_AUTH_DOMAIN,
+        &hello.client_nonce,
+        &server_nonce,
+        daemon_ver,
+        daemon_id,
+    );
+    if !constant_time_eq(&expected_client_auth, &client_auth.client_auth) {
+        return Err(AuthError::InvalidClientAuth);
+    }
+
+    Ok(Authenticated)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientAuthenticated {
+    pub daemon_ver: String,
+}
+
+pub async fn authenticate_client<S>(
+    stream: &mut S,
+    conn: &ConnectionInfo,
+    deadline: Duration,
+) -> Result<ClientAuthenticated, AuthError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let deadline = Deadline::starting_now(deadline)?;
+    let result = authenticate_client_inner(stream, conn, deadline).await;
+    if result.is_err() {
+        teardown_failed_handshake(stream, deadline).await;
+    }
+    result
+}
+
+async fn authenticate_client_inner<S>(
+    stream: &mut S,
+    conn: &ConnectionInfo,
+    deadline: Deadline,
+) -> Result<ClientAuthenticated, AuthError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    validate_key(&conn.key)?;
+
+    let client_nonce = random_nonce()?;
+    write_message(
+        stream,
+        AuthStage::ClientHello,
+        &ClientHello {
+            client_nonce,
+            role: DEFAULT_CLIENT_ROLE.to_owned(),
+        },
+        deadline,
+    )
+    .await?;
+
+    let server_proof: ServerProof = read_message(stream, AuthStage::ServerProof, deadline).await?;
+    let expected_server_proof = compute_proof(
+        &conn.key,
+        SERVER_PROOF_DOMAIN,
+        &client_nonce,
+        &server_proof.server_nonce,
+        &server_proof.daemon_ver,
+        &server_proof.daemon_id,
+    );
+    if !constant_time_eq(&expected_server_proof, &server_proof.server_proof) {
+        return Err(AuthError::InvalidServerProof);
+    }
+    if server_proof.daemon_id != conn.daemon_id {
+        return Err(AuthError::DaemonIdMismatch);
+    }
+    // `ServerProof.daemon_ver` must match the connection-file snapshot.
+    // The client emits `ClientAuth` only after validating the server proof, `daemon_id`, and `daemon_ver`.
+    // Comparing `server_proof.daemon_ver` with `conn.daemon_ver` binds the authenticated version to the connection metadata used to dial.
+    if server_proof.daemon_ver != conn.daemon_ver {
+        return Err(AuthError::DaemonVerMismatch);
+    }
+
+    let client_auth = compute_proof(
+        &conn.key,
+        CLIENT_AUTH_DOMAIN,
+        &client_nonce,
+        &server_proof.server_nonce,
+        &server_proof.daemon_ver,
+        &server_proof.daemon_id,
+    );
+    write_message(
+        stream,
+        AuthStage::ClientAuth,
+        &ClientAuth { client_auth },
+        deadline,
+    )
+    .await?;
+    Ok(ClientAuthenticated {
+        daemon_ver: server_proof.daemon_ver,
+    })
+}
+
+fn validate_key(key: &[u8]) -> Result<(), AuthError> {
+    if key.len() < MIN_KEY_LEN {
+        return Err(AuthError::KeyTooShort {
+            len: key.len(),
+            min: MIN_KEY_LEN,
+        });
+    }
+    Ok(())
+}
+
+fn random_nonce() -> Result<[u8; NONCE_LEN], AuthError> {
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom::getrandom(&mut nonce).map_err(AuthError::Random)?;
+    Ok(nonce)
+}
+
+/// Compares two proofs in constant time so the comparison's duration does not reveal how
+/// many leading bytes matched.
+fn constant_time_eq(expected: &[u8; PROOF_LEN], actual: &[u8; PROOF_LEN]) -> bool {
+    expected.as_slice().ct_eq(actual.as_slice()).into()
+}
+
+async fn read_message<S, T>(
+    stream: &mut S,
+    stage: AuthStage,
+    deadline: Deadline,
+) -> Result<T, AuthError>
+where
+    S: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    // Both reads use the same absolute deadline, so their combined duration cannot exceed the budget.
+    let mut len_bytes = [0u8; 4];
+    read_exact_deadline(stream, &mut len_bytes, stage, deadline).await?;
+    let len = u32::from_le_bytes(len_bytes);
+    if len > MAX_AUTH_MESSAGE_LEN {
+        return Err(AuthError::MessageTooLarge {
+            stage,
+            len,
+            max: MAX_AUTH_MESSAGE_LEN,
+        });
+    }
+
+    let mut json = vec![0u8; len as usize];
+    if !json.is_empty() {
+        read_exact_deadline(stream, &mut json, stage, deadline).await?;
+    }
+    serde_json::from_slice(&json).map_err(|source| AuthError::JsonDecode { stage, source })
+}
+
+async fn write_message<S, T>(
+    stream: &mut S,
+    stage: AuthStage,
+    value: &T,
+    deadline: Deadline,
+) -> Result<(), AuthError>
+where
+    S: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let json =
+        serde_json::to_vec(value).map_err(|source| AuthError::JsonEncode { stage, source })?;
+    let len = u32::try_from(json.len()).map_err(|_| AuthError::MessageTooLarge {
+        stage,
+        len: u32::MAX,
+        max: MAX_AUTH_MESSAGE_LEN,
+    })?;
+    if len > MAX_AUTH_MESSAGE_LEN {
+        return Err(AuthError::MessageTooLarge {
+            stage,
+            len,
+            max: MAX_AUTH_MESSAGE_LEN,
+        });
+    }
+
+    write_all_deadline(stream, &len.to_le_bytes(), stage, deadline).await?;
+    write_all_deadline(stream, &json, stage, deadline).await
+}
+
+async fn read_exact_deadline<S>(
+    stream: &mut S,
+    buf: &mut [u8],
+    stage: AuthStage,
+    deadline: Deadline,
+) -> Result<(), AuthError>
+where
+    S: AsyncRead + Unpin,
+{
+    let remaining = deadline.remaining(stage)?;
+    let expected = buf.len();
+    with_timeout(stage, remaining, async {
+        let mut actual = 0;
+        while actual < expected {
+            let read = stream.read(&mut buf[actual..]).await?;
+            if read == 0 {
+                return Err(ReadExactError::UnexpectedEof { actual });
+            }
+            actual += read;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| match err {
+        DeadlineIoError::Io(source) => AuthError::Io { stage, source },
+        DeadlineIoError::Timeout => AuthError::Timeout {
+            stage,
+            deadline: deadline.total,
+        },
+        DeadlineIoError::UnexpectedEof { actual } => AuthError::UnexpectedEof {
+            stage,
+            expected,
+            actual,
+        },
+    })
+}
+
+async fn write_all_deadline<S>(
+    stream: &mut S,
+    buf: &[u8],
+    stage: AuthStage,
+    deadline: Deadline,
+) -> Result<(), AuthError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let remaining = deadline.remaining(stage)?;
+    timeout_io(stage, remaining, deadline.total, stream.write_all(buf)).await
+}
+
+async fn timeout_io<T, F>(
+    stage: AuthStage,
+    remaining: Duration,
+    total: Duration,
+    future: F,
+) -> Result<T, AuthError>
+where
+    F: Future<Output = io::Result<T>>,
+{
+    match time::timeout(remaining, future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(source)) => Err(AuthError::Io { stage, source }),
+        Err(_) => Err(AuthError::Timeout {
+            stage,
+            deadline: total,
+        }),
+    }
+}
+
+async fn with_timeout<F>(
+    _stage: AuthStage,
+    deadline: Duration,
+    future: F,
+) -> Result<(), DeadlineIoError>
+where
+    F: Future<Output = Result<(), ReadExactError>>,
+{
+    match time::timeout(deadline, future).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(ReadExactError::Io(source))) => Err(DeadlineIoError::Io(source)),
+        Ok(Err(ReadExactError::UnexpectedEof { actual })) => {
+            Err(DeadlineIoError::UnexpectedEof { actual })
+        }
+        Err(_) => Err(DeadlineIoError::Timeout),
+    }
+}
+
+#[derive(Debug)]
+enum ReadExactError {
+    Io(io::Error),
+    UnexpectedEof { actual: usize },
+}
+
+impl From<io::Error> for ReadExactError {
+    fn from(source: io::Error) -> Self {
+        Self::Io(source)
+    }
+}
+
+#[derive(Debug)]
+enum DeadlineIoError {
+    Io(io::Error),
+    Timeout,
+    UnexpectedEof { actual: usize },
+}
+
+impl fmt::Display for AuthError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { stage, source } => write!(f, "auth {stage:?} I/O error: {source}"),
+            Self::Timeout { stage, deadline } => {
+                write!(f, "auth {stage:?} timed out after {deadline:?}")
+            }
+            Self::UnexpectedEof {
+                stage,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "auth {stage:?} ended early: expected {expected} bytes, got {actual}"
+            ),
+            Self::MessageTooLarge { stage, len, max } => write!(
+                f,
+                "auth {stage:?} message length {len} exceeds hard cap {max}"
+            ),
+            Self::JsonEncode { stage, source } => {
+                write!(f, "auth {stage:?} JSON encode error: {source}")
+            }
+            Self::JsonDecode { stage, source } => {
+                write!(f, "auth {stage:?} JSON decode error: {source}")
+            }
+            Self::Random(source) => write!(f, "auth random generation failed: {source}"),
+            Self::InvalidDeadline { total } => {
+                write!(f, "auth deadline {total:?} is not a representable instant")
+            }
+            Self::KeyTooShort { len, min } => {
+                write!(f, "auth key is too short: {len} bytes, need at least {min}")
+            }
+            Self::InvalidServerProof => write!(f, "invalid server auth proof"),
+            Self::DaemonIdMismatch => write!(f, "server daemon_id did not match connection file"),
+            Self::DaemonVerMismatch => {
+                write!(f, "server daemon_ver did not match connection file")
+            }
+            Self::InvalidClientAuth => write!(f, "invalid client auth proof"),
+        }
+    }
+}
+
+impl Error for AuthError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::JsonEncode { source, .. } | Self::JsonDecode { source, .. } => Some(source),
+            Self::Random(_) => None,
+            Self::Timeout { .. }
+            | Self::UnexpectedEof { .. }
+            | Self::MessageTooLarge { .. }
+            | Self::KeyTooShort { .. }
+            | Self::InvalidServerProof
+            | Self::DaemonIdMismatch
+            | Self::DaemonVerMismatch
+            | Self::InvalidDeadline { .. }
+            | Self::InvalidClientAuth => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proof_debug_output_never_carries_the_proof_bytes() {
+        let sentinel = 0xAB;
+        let server = ServerProof {
+            daemon_id: [1; DAEMON_ID_LEN],
+            server_nonce: [2; NONCE_LEN],
+            daemon_ver: "1.2.3".to_owned(),
+            server_proof: [sentinel; PROOF_LEN],
+        };
+        let rendered = format!("{server:?}");
+        let byte = format!("{sentinel}");
+        assert!(
+            !rendered.contains(&byte),
+            "server_proof bytes leaked into Debug: {rendered}"
+        );
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(rendered.contains("1.2.3"), "{rendered}");
+        assert!(rendered.contains("server_nonce"), "{rendered}");
+
+        let client = ClientAuth {
+            client_auth: [sentinel; PROOF_LEN],
+        };
+        let rendered = format!("{client:?}");
+        assert!(
+            !rendered.contains(&byte),
+            "client_auth bytes leaked into Debug: {rendered}"
+        );
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+    }
+
+    #[test]
+    fn an_unrepresentable_auth_deadline_is_rejected_not_panicked() {
+        // `Deadline::starting_now` returns `InvalidDeadline` when the configured duration is unrepresentable instead of panicking.
+        let error = Deadline::starting_now(Duration::MAX)
+            .err()
+            .expect("an unrepresentable total has no absolute deadline");
+        assert!(
+            matches!(error, AuthError::InvalidDeadline { .. }),
+            "{error:?}"
+        );
+        assert!(Deadline::starting_now(Duration::from_secs(2)).is_ok());
+    }
+    use tokio::{
+        io::{DuplexStream, duplex},
+        task::yield_now,
+        time::advance,
+    };
+
+    const TEST_DAEMON_VER: &str = "host-auth-test-1";
+    const TEST_ROLE: &str = "client";
+
+    #[test]
+    fn committed_wire_vectors_pin_the_proof_construction() {
+        let key: Vec<u8> = (0x00..0x20).collect();
+        let client_nonce = std::array::from_fn(|index| 0x20 + index as u8);
+        let server_nonce = std::array::from_fn(|index| 0x40 + index as u8);
+        let daemon_id: Vec<u8> = (0x60..0x70).collect();
+
+        for (domain, expected) in [
+            (
+                SERVER_PROOF_DOMAIN,
+                "59295f650f2b6c3384e4ce75e5f337ee23367407a85c524af2d2724062264038",
+            ),
+            (
+                CLIENT_AUTH_DOMAIN,
+                "8ca1451b12e6ec3606c7314c9afa51544ea0b66cfd92d637199389a8de29d79f",
+            ),
+        ] {
+            let proof = compute_proof(
+                &key,
+                domain,
+                &client_nonce,
+                &server_nonce,
+                "eidnara-host/0.1.0",
+                &daemon_id,
+            );
+            let actual: String = proof.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(
+                actual, expected,
+                "proof construction changed for domain {domain}: the committed \
+                 cross-language wire vectors no longer describe this implementation"
+            );
+        }
+    }
+
+    async fn write_auth_json<T>(stream: &mut DuplexStream, value: &T)
+    where
+        T: Serialize,
+    {
+        let body = serde_json::to_vec(value).expect("encode auth json");
+        assert!(
+            body.len() <= MAX_AUTH_MESSAGE_LEN as usize,
+            "test helper auth message over cap"
+        );
+        stream
+            .write_all(&(body.len() as u32).to_le_bytes())
+            .await
+            .expect("write auth length");
+        stream.write_all(&body).await.expect("write auth body");
+    }
+
+    async fn read_auth_json<T>(stream: &mut DuplexStream) -> T
+    where
+        T: DeserializeOwned,
+    {
+        let mut len_bytes = [0u8; 4];
+        stream
+            .read_exact(&mut len_bytes)
+            .await
+            .expect("read auth length");
+        let len = u32::from_le_bytes(len_bytes);
+        assert!(
+            len <= MAX_AUTH_MESSAGE_LEN,
+            "test helper received auth message over cap"
+        );
+        let mut body = vec![0u8; len as usize];
+        stream.read_exact(&mut body).await.expect("read auth body");
+        serde_json::from_slice(&body).expect("decode auth json")
+    }
+
+    /// The test peer writes only the 4-byte length prefix and withholds the body to stall the peer within the stage deadline.
+    async fn write_auth_len_only<T>(stream: &mut DuplexStream, value: &T)
+    where
+        T: Serialize,
+    {
+        let body = serde_json::to_vec(value).expect("encode auth json");
+        stream
+            .write_all(&(body.len() as u32).to_le_bytes())
+            .await
+            .expect("write auth length");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authenticate_server_deadline_is_absolute_across_handshake() {
+        let key = vec![0x5a; MIN_KEY_LEN];
+        let daemon_id = [0x6b; DAEMON_ID_LEN];
+        let deadline = Duration::from_millis(100);
+        let stage_delay = Duration::from_millis(60);
+        let (mut client, mut server) = duplex(4096);
+
+        let server_task = tokio::spawn(async move {
+            authenticate_server(&mut server, &key, &daemon_id, TEST_DAEMON_VER, deadline).await
+        });
+
+        yield_now().await;
+        assert!(!server_task.is_finished());
+
+        advance(stage_delay).await;
+        write_auth_json(
+            &mut client,
+            &ClientHello {
+                client_nonce: [0x11; NONCE_LEN],
+                role: TEST_ROLE.to_owned(),
+            },
+        )
+        .await;
+        yield_now().await;
+
+        let server_proof: ServerProof = read_auth_json(&mut client).await;
+        assert_eq!(server_proof.daemon_id, daemon_id);
+        assert_eq!(server_proof.daemon_ver, TEST_DAEMON_VER);
+        assert!(!server_task.is_finished());
+
+        advance(stage_delay).await;
+        yield_now().await;
+        assert!(server_task.is_finished());
+
+        let err = server_task
+            .await
+            .expect("server task should join")
+            .expect_err("server handshake should time out once the total deadline elapses");
+        assert!(matches!(
+            err,
+            AuthError::Timeout {
+                stage: AuthStage::ClientAuth,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn server_deadline_spans_length_and_body_within_one_stage() {
+        let key = vec![0x5a; MIN_KEY_LEN];
+        let daemon_id = [0x6b; DAEMON_ID_LEN];
+        let deadline = Duration::from_millis(100);
+        let (mut client, mut server) = duplex(4096);
+
+        let server_task = tokio::spawn(async move {
+            authenticate_server(&mut server, &key, &daemon_id, TEST_DAEMON_VER, deadline).await
+        });
+
+        yield_now().await;
+        advance(Duration::from_millis(60)).await;
+        write_auth_len_only(
+            &mut client,
+            &ClientHello {
+                client_nonce: [0x11; NONCE_LEN],
+                role: TEST_ROLE.to_owned(),
+            },
+        )
+        .await;
+        yield_now().await;
+        assert!(!server_task.is_finished());
+
+        // The test peer exceeds the 100-unit absolute deadline by waiting 60 + 50 units before sending the body.
+        advance(Duration::from_millis(50)).await;
+        yield_now().await;
+        assert!(
+            server_task.is_finished(),
+            "body read must share the handshake deadline, not get a fresh window"
+        );
+        let err = server_task
+            .await
+            .expect("join")
+            .expect_err("must time out at ClientHello body");
+        assert!(matches!(
+            err,
+            AuthError::Timeout {
+                stage: AuthStage::ClientHello,
+                ..
+            }
+        ));
+    }
+
+    async fn complete_handshake(key: &[u8], daemon_id: [u8; DAEMON_ID_LEN]) -> ServerProof {
+        let (mut client, mut server) = duplex(4096);
+        let key_owned = key.to_vec();
+        let server_task = tokio::spawn(async move {
+            authenticate_server(
+                &mut server,
+                &key_owned,
+                &daemon_id,
+                TEST_DAEMON_VER,
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        let client_nonce = [0x11u8; NONCE_LEN];
+        write_auth_json(
+            &mut client,
+            &ClientHello {
+                client_nonce,
+                role: TEST_ROLE.to_owned(),
+            },
+        )
+        .await;
+        let server_proof: ServerProof = read_auth_json(&mut client).await;
+        let client_auth = compute_proof(
+            key,
+            CLIENT_AUTH_DOMAIN,
+            &client_nonce,
+            &server_proof.server_nonce,
+            &server_proof.daemon_ver,
+            &server_proof.daemon_id,
+        );
+        write_auth_json(&mut client, &ClientAuth { client_auth }).await;
+        server_task
+            .await
+            .expect("join")
+            .expect("handshake completes");
+        server_proof
+    }
+
+    #[tokio::test]
+    async fn repeated_handshakes_receive_fresh_server_nonces() {
+        let key = vec![0x5a; MIN_KEY_LEN];
+        let daemon_id = [0x6b; DAEMON_ID_LEN];
+        let first = complete_handshake(&key, daemon_id).await;
+        let second = complete_handshake(&key, daemon_id).await;
+        assert_ne!(
+            first.server_nonce, second.server_nonce,
+            "server nonces must be fresh per handshake, never replayed"
+        );
+        assert_ne!(
+            first.server_proof, second.server_proof,
+            "a fresh nonce must produce a fresh proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_client_proof_is_rejected_and_error_carries_no_secrets() {
+        let key = vec![0x5a; MIN_KEY_LEN];
+        let daemon_id = [0x6b; DAEMON_ID_LEN];
+        let (mut client, mut server) = duplex(4096);
+        let key_task = key.clone();
+        let server_task = tokio::spawn(async move {
+            authenticate_server(
+                &mut server,
+                &key_task,
+                &daemon_id,
+                TEST_DAEMON_VER,
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        write_auth_json(
+            &mut client,
+            &ClientHello {
+                client_nonce: [0x11; NONCE_LEN],
+                role: TEST_ROLE.to_owned(),
+            },
+        )
+        .await;
+        let _proof: ServerProof = read_auth_json(&mut client).await;
+        write_auth_json(
+            &mut client,
+            &ClientAuth {
+                client_auth: [0u8; PROOF_LEN],
+            },
+        )
+        .await;
+
+        let err = server_task
+            .await
+            .expect("join")
+            .expect_err("wrong proof must be rejected");
+        assert!(matches!(err, AuthError::InvalidClientAuth));
+        let key_decimals = format!("{:?}", key);
+        for rendered in [format!("{err}"), format!("{err:?}")] {
+            assert!(
+                !rendered.contains(&key_decimals),
+                "auth errors must not leak key bytes: {rendered}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn client_auth_is_bound_to_the_server_reported_daemon_version() {
+        let key = vec![0x5a; MIN_KEY_LEN];
+        let daemon_id = [0x6b; DAEMON_ID_LEN];
+        let (mut client, mut server) = duplex(4096);
+        let key_task = key.clone();
+        let server_task = tokio::spawn(async move {
+            authenticate_server(
+                &mut server,
+                &key_task,
+                &daemon_id,
+                TEST_DAEMON_VER,
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        let client_nonce = [0x11; NONCE_LEN];
+        write_auth_json(
+            &mut client,
+            &ClientHello {
+                client_nonce,
+                role: TEST_ROLE.to_owned(),
+            },
+        )
+        .await;
+        let server_proof: ServerProof = read_auth_json(&mut client).await;
+        let client_auth = compute_proof(
+            &key,
+            CLIENT_AUTH_DOMAIN,
+            &client_nonce,
+            &server_proof.server_nonce,
+            "host-auth-test-mutated",
+            &server_proof.daemon_id,
+        );
+        write_auth_json(&mut client, &ClientAuth { client_auth }).await;
+
+        assert!(matches!(
+            server_task
+                .await
+                .expect("join")
+                .expect_err("a version-substituted client proof must fail"),
+            AuthError::InvalidClientAuth
+        ));
+    }
+
+    #[tokio::test]
+    async fn over_cap_auth_message_is_rejected_before_allocation() {
+        let key = vec![0x5a; MIN_KEY_LEN];
+        let daemon_id = [0x6b; DAEMON_ID_LEN];
+        let (mut client, mut server) = duplex(4096);
+        let server_task = tokio::spawn(async move {
+            authenticate_server(
+                &mut server,
+                &key,
+                &daemon_id,
+                TEST_DAEMON_VER,
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        client
+            .write_all(&(MAX_AUTH_MESSAGE_LEN + 1).to_le_bytes())
+            .await
+            .expect("write oversize length");
+        let err = server_task
+            .await
+            .expect("join")
+            .expect_err("over-cap message must be rejected");
+        assert!(matches!(
+            err,
+            AuthError::MessageTooLarge {
+                stage: AuthStage::ClientHello,
+                len,
+                max: MAX_AUTH_MESSAGE_LEN,
+            } if len == MAX_AUTH_MESSAGE_LEN + 1
+        ));
+    }
+
+    async fn rejected_server_sends_no_client_auth(
+        server_daemon_id: [u8; DAEMON_ID_LEN],
+        valid_proof: bool,
+        expected: fn(&AuthError) -> bool,
+    ) {
+        let key = vec![0x5a; MIN_KEY_LEN];
+        let expected_daemon_id = [0x6b; DAEMON_ID_LEN];
+        let conn = ConnectionInfo {
+            schema: crate::connection_file::SCHEMA_VERSION,
+            wire_version: crate::wire::PROTOCOL_VERSION,
+            setup_socket: "/tmp/eidnara-host.sock".to_owned(),
+            key: key.clone(),
+            daemon_id: expected_daemon_id,
+            pid: 1,
+            daemon_ver: TEST_DAEMON_VER.to_owned(),
+        };
+        let (mut server, mut client) = duplex(4096);
+        let task = tokio::spawn(async move {
+            authenticate_client(&mut client, &conn, Duration::from_secs(5)).await
+        });
+        let hello: ClientHello = read_auth_json(&mut server).await;
+        let server_nonce = [0x22; NONCE_LEN];
+        let server_proof = if valid_proof {
+            compute_proof(
+                &key,
+                SERVER_PROOF_DOMAIN,
+                &hello.client_nonce,
+                &server_nonce,
+                TEST_DAEMON_VER,
+                &server_daemon_id,
+            )
+        } else {
+            [0; PROOF_LEN]
+        };
+        write_auth_json(
+            &mut server,
+            &ServerProof {
+                daemon_id: server_daemon_id,
+                server_nonce,
+                daemon_ver: TEST_DAEMON_VER.to_owned(),
+                server_proof,
+            },
+        )
+        .await;
+        let err = task.await.expect("join").expect_err("server rejected");
+        assert!(expected(&err), "unexpected error: {err}");
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            server.read(&mut byte).await.expect("read after rejection"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_server_proof_sends_no_client_auth() {
+        rejected_server_sends_no_client_auth([0x6b; DAEMON_ID_LEN], false, |err| {
+            matches!(err, AuthError::InvalidServerProof)
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn daemon_id_mismatch_sends_no_client_auth() {
+        rejected_server_sends_no_client_auth([0x7c; DAEMON_ID_LEN], true, |err| {
+            matches!(err, AuthError::DaemonIdMismatch)
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn short_key_is_rejected_before_any_read() {
+        let key = vec![0x5a; MIN_KEY_LEN - 1];
+        let daemon_id = [0x6b; DAEMON_ID_LEN];
+        let (_client, mut server) = duplex(64);
+        let err = authenticate_server(
+            &mut server,
+            &key,
+            &daemon_id,
+            TEST_DAEMON_VER,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("short key must be rejected");
+        assert!(matches!(
+            err,
+            AuthError::KeyTooShort {
+                len,
+                min: MIN_KEY_LEN
+            } if len == MIN_KEY_LEN - 1
+        ));
+    }
+}
