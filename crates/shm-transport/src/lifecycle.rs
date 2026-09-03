@@ -34,6 +34,7 @@ pub enum CloseState {
 /// Close-state machine for one ring attachment. `mark_prepared` records that the peer has
 /// been told the ring exists; from then on a failure must be reported to the peer, because
 /// the peer would otherwise wait on a ring that will never open.
+#[derive(Debug)]
 pub struct Lifecycle {
     state: CloseState,
     prepared: bool,
@@ -113,16 +114,6 @@ impl Lifecycle {
 impl Default for Lifecycle {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl fmt::Debug for Lifecycle {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Lifecycle")
-            .field("state", &self.state)
-            .field("prepared", &self.prepared)
-            .finish()
     }
 }
 

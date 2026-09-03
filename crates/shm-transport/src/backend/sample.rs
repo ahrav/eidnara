@@ -11,6 +11,7 @@ use std::ops::Range;
 use crate::arena::MAX_FRAME_BYTES;
 use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorError, Incarnation, ReleaseIdentity, WIRE_V2_HEADER_BYTES,
+    check_wire_header,
 };
 
 /// Bytes ahead of every sample body: schema (2), wire header (21), incarnation (16),
@@ -67,8 +68,9 @@ impl SamplePrefix {
     }
 
     /// Checks the prefix against the identity the receiver expects. `allocation_len` is the
-    /// full allocation, body plus slack; the declared body must end within it. Checks run in
-    /// the same order as `FrameDescriptor::validate` and return the first failure.
+    /// full allocation, body plus slack; the declared body must end within it. Identity and
+    /// length checks run in the same order as `FrameDescriptor::validate`; there are no span
+    /// checks because a sample is one contiguous allocation. The first failure is returned.
     pub fn validate(
         &self,
         allocation_len: usize,
@@ -77,29 +79,9 @@ impl SamplePrefix {
         if self.schema != DESCRIPTOR_SCHEMA_VERSION {
             return Err(DescriptorError::UnsupportedSchema);
         }
-        if self.identity.sequence() == 0 {
-            return Err(DescriptorError::InvalidSequence);
-        }
-        if self.identity.incarnation() != expected.incarnation() {
-            return Err(DescriptorError::WrongIncarnation);
-        }
-        if self.identity.lane() != expected.lane() {
-            return Err(DescriptorError::WrongLane);
-        }
-        if self.identity.sequence() != expected.sequence() {
-            return Err(DescriptorError::InvalidSequence);
-        }
+        self.identity.check(expected)?;
         if self.body_len > MAX_FRAME_BYTES as u64 {
             return Err(DescriptorError::FrameTooLarge);
-        }
-        let declared = u32::from_le_bytes([
-            self.wire_header[0],
-            self.wire_header[1],
-            self.wire_header[2],
-            self.wire_header[3],
-        ]);
-        if u64::from(declared) != self.body_len || self.wire_header[4] != 2 {
-            return Err(DescriptorError::WireHeaderMismatch);
         }
         let body_len = usize::try_from(self.body_len).map_err(|_| DescriptorError::Overflow)?;
         let body_end = SAMPLE_PREFIX_BYTES
@@ -108,6 +90,7 @@ impl SamplePrefix {
         if body_end > allocation_len {
             return Err(DescriptorError::InvalidAllocation);
         }
+        check_wire_header(&self.wire_header, self.body_len)?;
         Ok(ValidatedSample {
             identity: self.identity,
             body_len,
@@ -115,11 +98,7 @@ impl SamplePrefix {
     }
 }
 
-impl std::fmt::Debug for SamplePrefix {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SamplePrefix(<redacted>)")
-    }
-}
+crate::redacted_debug!(SamplePrefix);
 
 /// A sample prefix that passed `validate`. `body_range` is the only range a decoder may read.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -145,8 +124,4 @@ impl ValidatedSample {
     }
 }
 
-impl std::fmt::Debug for ValidatedSample {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("ValidatedSample(<redacted>)")
-    }
-}
+crate::redacted_debug!(ValidatedSample);
