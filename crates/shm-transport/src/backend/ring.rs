@@ -400,9 +400,12 @@ impl Mapping {
     }
 
     fn attach(fd: OwnedFd, len: usize) -> Result<Self, RingError> {
-        validate_object(&fd, len)?;
+        // Seals first: once `F_SEAL_SHRINK | F_SEAL_GROW` are observed the size read below
+        // cannot change, so a peer cannot shrink the object between the size check and the
+        // mapping and leave a page whose first touch is `SIGBUS`.
         validate_seals(&fd)?;
-        // SAFETY: authenticated fd was size-validated before mapping.
+        validate_object(&fd, len)?;
+        // SAFETY: sealed fd was size-validated before mapping.
         let mapped = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -935,28 +938,47 @@ impl Ring {
                 .parked
                 .store(generation.wrapping_add(1), Ordering::SeqCst)
         };
-        if self.data_available()?
-            || unsafe { (*wake).generation.load(Ordering::SeqCst) } != generation
-        {
-            unsafe { (*wake).parked.store(0, Ordering::Release) };
+        if !self.armed_wait_holds(wake, generation)? {
             return Ok(false);
         }
-        self.data_ready.drain()?;
-        if self.data_available()?
-            || unsafe { (*wake).generation.load(Ordering::SeqCst) } != generation
-        {
+        if let Err(error) = self.data_ready.drain() {
+            // SAFETY: wake page remains mapped and atomics were initialized before activation.
             unsafe { (*wake).parked.store(0, Ordering::Release) };
+            return Err(self.quarantine_with(error));
+        }
+        self.armed_wait_holds(wake, generation)
+    }
+
+    /// Re-checks, after `parked` is set, that blocking is still correct: no quarantine, no
+    /// data, and no wake generation change. `enter_quarantine` rings the doorbell only for a
+    /// handle it sees parked, so a quarantine that lands between the first check and the
+    /// `parked` store sends no token; this re-check covers that window. Clears `parked` on
+    /// every path that does not return `Ok(true)`.
+    fn armed_wait_holds(&self, wake: *mut WakeEpoch, generation: u64) -> Result<bool, RingError> {
+        // SAFETY: wake page remains mapped and atomics were initialized before activation.
+        let unpark = || unsafe { (*wake).parked.store(0, Ordering::Release) };
+        if self.is_quarantined() {
+            unpark();
+            return Err(RingError::Quarantined);
+        }
+        let available = self.data_available().inspect_err(|_| unpark())?;
+        // SAFETY: same page as above.
+        if available || unsafe { (*wake).generation.load(Ordering::SeqCst) } != generation {
+            unpark();
             return Ok(false);
         }
         Ok(true)
     }
 
-    /// Clears the parked marker set by `arm_data_wait` and drains the doorbell token.
+    /// Clears the parked marker set by `arm_data_wait` and drains the doorbell token. A
+    /// doorbell failure means the peer closed its end, which quarantines the ring.
     pub fn complete_data_wait(&self) -> Result<(), RingError> {
         let wake = self.data_wake_ptr()?;
         // SAFETY: wake page remains mapped and atomics were initialized before activation.
         unsafe { (*wake).parked.store(0, Ordering::Release) };
-        self.data_ready.drain()
+        self.data_ready
+            .drain()
+            .map_err(|error| self.quarantine_with(error))
     }
 
     /// Duplicates the mapping and moves the peer's two doorbell ends out, all with `CLOEXEC`
@@ -1110,7 +1132,7 @@ impl Ring {
             }
             if let Err(error) = self.capacity_ready.drain() {
                 unsafe { (*wake).parked.store(0, Ordering::Release) };
-                return Err(ProducerError::Ring(error));
+                return Err(ProducerError::Ring(self.quarantine_with(error)));
             }
             match self.try_reserve(bound, wire_header) {
                 Err(ProducerError::Exhausted) if Instant::now() < deadline => {}
@@ -1131,14 +1153,16 @@ impl Ring {
                 Ok(ready) => ready,
                 Err(error) => {
                     unsafe { (*wake).parked.store(0, Ordering::Release) };
-                    return Err(ProducerError::Ring(error));
+                    return Err(ProducerError::Ring(self.quarantine_with(error)));
                 }
             };
             unsafe { (*wake).parked.store(0, Ordering::Release) };
             if !ready && Instant::now() >= deadline {
                 return Err(ProducerError::Deadline);
             }
-            self.capacity_ready.drain().map_err(ProducerError::Ring)?;
+            self.capacity_ready
+                .drain()
+                .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
         }
     }
 
@@ -1249,9 +1273,17 @@ impl Ring {
             if !self.arm_data_wait()? {
                 continue;
             }
-            let ready = self.data_ready.wait_until(deadline)?;
+            let wake = self.data_wake_ptr()?;
+            let ready = match self.data_ready.wait_until(deadline) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    // SAFETY: wake page remains mapped and atomics were initialized before
+                    // activation.
+                    unsafe { (*wake).parked.store(0, Ordering::Release) };
+                    return Err(self.quarantine_with(error));
+                }
+            };
             if !ready && Instant::now() >= deadline {
-                let wake = self.data_wake_ptr()?;
                 // SAFETY: wake page remains mapped and atomics were initialized before activation.
                 unsafe { (*wake).parked.store(0, Ordering::Release) };
                 return Ok(false);
@@ -2788,6 +2820,90 @@ mod tests {
         let (descriptors, bytes) = ring.conservation().unwrap();
         assert_eq!(descriptors.free, ring.grant().descriptor_depth);
         assert_eq!(bytes.free, ring.grant().arena_bytes);
+    }
+
+    #[test]
+    fn armed_wait_recheck_sees_a_quarantine_that_sent_no_token() {
+        let ring = ring();
+        assert!(ring.arm_data_wait().unwrap());
+        let wake = ring.data_wake_ptr().unwrap();
+        let lifecycle = ring.lifecycle_ptr().unwrap();
+        // SAFETY: test-owned ring keeps both pages mapped.
+        let generation = unsafe {
+            // A peer that quarantined before observing `parked` writes only the flag.
+            (*lifecycle).quarantined.store(1, Ordering::Release);
+            (*wake).generation.load(Ordering::SeqCst)
+        };
+        assert!(matches!(
+            ring.armed_wait_holds(wake, generation),
+            Err(RingError::Quarantined)
+        ));
+        // SAFETY: same page.
+        assert_eq!(unsafe { (*wake).parked.load(Ordering::Acquire) }, 0);
+    }
+
+    #[test]
+    fn peer_closing_its_doorbell_quarantines_the_waiting_side() {
+        let ring = ring();
+        let attached = ring.attachment().unwrap().attach().unwrap();
+        drop(attached);
+        assert!(matches!(
+            ring.wait_for_data(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            Err(RingError::DoorbellFailed)
+        ));
+        assert!(ring.is_quarantined());
+        let wake = ring.data_wake_ptr().unwrap();
+        // SAFETY: test-owned ring keeps the wake page mapped.
+        assert_eq!(unsafe { (*wake).parked.load(Ordering::Acquire) }, 0);
+
+        let ring = self::ring();
+        let attached = ring.attachment().unwrap().attach().unwrap();
+        let arena_len = ring.arena_bytes();
+        publish(&ring, &vec![1; arena_len]);
+        drop(attached);
+        assert!(matches!(
+            ring.reserve_until(
+                1,
+                wire_v2_header(1).unwrap(),
+                std::time::Instant::now() + std::time::Duration::from_secs(5)
+            ),
+            Err(ProducerError::Ring(RingError::DoorbellFailed))
+        ));
+        assert!(ring.is_quarantined());
+    }
+
+    #[test]
+    fn sealed_object_of_the_wrong_size_is_refused_before_mapping() {
+        let ring = ring();
+        let (descriptors, grant) = ring.attachment().unwrap().into_parts();
+        let [_, data_ready, capacity_ready] = descriptors;
+        // SAFETY: static name and flags are valid for memfd_create.
+        let raw = unsafe {
+            libc::syscall(
+                libc::SYS_memfd_create,
+                c"shm-short-test".as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            ) as libc::c_int
+        };
+        assert!(raw >= 0);
+        // SAFETY: successful memfd_create returned a new owned descriptor.
+        let short = unsafe { OwnedFd::from_raw_fd(raw) };
+        // SAFETY: fd is valid; the length is one page short of the grant.
+        unsafe {
+            assert_eq!(
+                libc::ftruncate(
+                    short.as_raw_fd(),
+                    (ring.object_size() - super::system_page_size()) as libc::off_t
+                ),
+                0
+            );
+            assert_eq!(libc::fchmod(short.as_raw_fd(), 0o600), 0);
+        }
+        super::seal_object(&short).unwrap();
+        assert!(matches!(
+            Ring::attach([short, data_ready, capacity_ready], grant),
+            Err(RingError::ObjectValidationFailed)
+        ));
     }
 
     #[test]
