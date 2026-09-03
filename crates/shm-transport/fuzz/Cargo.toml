@@ -1,0 +1,40 @@
+[package]
+name = "shm-transport-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.shm-transport]
+path = ".."
+default-features = false
+
+[[bin]]
+name = "frame_descriptor"
+path = "fuzz_targets/frame_descriptor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "provider_grant"
+path = "fuzz_targets/provider_grant.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "provider_sample"
+path = "fuzz_targets/provider_sample.rs"
+test = false
+doc = false
+bench = false
+
+# standalone workspace.
+[workspace]
+members = ["."]
