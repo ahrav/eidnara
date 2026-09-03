@@ -44,6 +44,10 @@ const CACHELINE: usize = 128;
 const PAGE_SIZE: usize = 4096;
 const GRANT_BYTES: usize = 58;
 const PUNCH_BATCH_DIVISOR: u64 = 4;
+/// Upper bound on `descriptor_depth`. Each slot costs 256 bytes of mapping plus a heap entry in
+/// the producer's allocation record, and the record is allocated before a grant's mapping is
+/// validated, so an unbounded depth in a hostile grant would be an allocation attack.
+pub const MAX_DESCRIPTOR_DEPTH: usize = 4096;
 
 const SLOT_FREE: u8 = 0;
 const SLOT_PRODUCER_RESERVED: u8 = 1;
@@ -225,6 +229,9 @@ impl Layout {
         // Page removal works in whole pages, so the arena must tile them exactly or the ring
         // would create, publish, and receive normally and then fail at its first reclaim.
         if arena_bytes == 0 || !arena_bytes.is_multiple_of(page_size) {
+            return Err(RingError::InvalidLayout);
+        }
+        if depth == 0 || depth > MAX_DESCRIPTOR_DEPTH {
             return Err(RingError::InvalidLayout);
         }
         let producer = 0usize;
@@ -1629,6 +1636,9 @@ impl Ring {
         cursors: CursorSnapshot,
         exact: bool,
     ) -> Result<(), RingError> {
+        if exact {
+            self.validate_idle_window(cursors)?;
+        }
         let CursorSnapshot {
             published,
             arena_write,
@@ -1674,6 +1684,75 @@ impl Ring {
         }
         if self.consumer.get() {
             self.verified_consumer_cursors()?;
+        }
+        Ok(())
+    }
+
+    /// Structural check of an idle mapping: every sequence in `(completed, published]` holds a
+    /// live descriptor that validates against its own identity, the allocations chain from
+    /// `arena_reclaimed` to `arena_write` without gaps, each allocation matches the slot's
+    /// `reservation_len`, and every other slot is free except for one open reservation at
+    /// `published + 1`. A running probe cannot require this, since the peer's transitions
+    /// change several of these fields one store at a time; an attaching handle can, because
+    /// the stable-snapshot loop waits those transitions out.
+    fn validate_idle_window(&self, cursors: CursorSnapshot) -> Result<(), RingError> {
+        let CursorSnapshot {
+            published,
+            arena_write,
+            completed,
+            arena_reclaimed,
+            ..
+        } = cursors;
+        let depth = self.grant.descriptor_depth;
+        let mut expected_start = arena_reclaimed;
+        let mut sequence = completed;
+        while sequence < published {
+            sequence += 1;
+            let slot = self.slot_ptr(sequence)?;
+            // SAFETY: slot atomics and descriptor remain mapped.
+            let (state, reservation_len, descriptor) = unsafe {
+                (
+                    (*slot).state.load(Ordering::Acquire),
+                    (*slot).reservation_len.load(Ordering::Acquire),
+                    std::ptr::read_volatile((*slot).descriptor.get()),
+                )
+            };
+            if !matches!(
+                state,
+                SLOT_PUBLISHED | SLOT_RECEIVER_LEASED | SLOT_RELEASE_PENDING
+            ) {
+                return Err(RingError::InvalidSharedState);
+            }
+            let expected = ReleaseIdentity::new(self.grant.incarnation, self.grant.lane, sequence);
+            let validated = descriptor
+                .snapshot()
+                .validate(expected, self.arena_bytes())
+                .map_err(RingError::Descriptor)?;
+            if validated.allocation_start() != expected_start
+                || validated.allocation_len() != reservation_len
+            {
+                return Err(RingError::InvalidSharedState);
+            }
+            expected_start = expected_start
+                .checked_add(reservation_len)
+                .ok_or(RingError::ArithmeticOverflow)?;
+        }
+        if expected_start != arena_write {
+            return Err(RingError::InvalidSharedState);
+        }
+        // Slots outside the live window: free, or the one open reservation right after it.
+        let outside = depth.saturating_sub(published.saturating_sub(completed));
+        for offset in 1..=outside {
+            let sequence = published
+                .checked_add(offset)
+                .ok_or(RingError::SequenceExhausted)?;
+            let slot = self.slot_ptr(sequence)?;
+            // SAFETY: slot atomics remain mapped.
+            let state = unsafe { (*slot).state.load(Ordering::Acquire) };
+            let allowed = state == SLOT_FREE || (offset == 1 && state == SLOT_PRODUCER_RESERVED);
+            if !allowed {
+                return Err(RingError::InvalidSharedState);
+            }
         }
         Ok(())
     }
@@ -3584,6 +3663,74 @@ mod tests {
         );
         consumer.complete_data_wait().unwrap();
         consumer.try_receive().unwrap().unwrap().release().unwrap();
+    }
+
+    #[test]
+    fn attach_refuses_a_write_cursor_beyond_the_committed_frames() {
+        let ring = ring();
+        let producer = ring.producer_ptr().unwrap();
+        // Every slot free, yet the arena reads as full: nothing could ever be released.
+        // SAFETY: test-owned ring keeps the producer page mapped.
+        unsafe {
+            (*producer)
+                .arena_write
+                .store(ring.grant().arena_bytes, Ordering::Release)
+        };
+        assert!(matches!(
+            ring.attachment().unwrap().attach(),
+            Err(RingError::InvalidSharedState)
+        ));
+    }
+
+    #[test]
+    fn attach_refuses_a_live_slot_whose_descriptor_does_not_validate() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        let slot = ring.slot_ptr(1).unwrap();
+        // SAFETY: test-owned ring keeps the slot mapped.
+        unsafe {
+            std::ptr::write_volatile((*slot).descriptor.get(), super::SharedDescriptor::ZERO)
+        };
+        assert!(matches!(
+            ring.attachment().unwrap().attach(),
+            Err(RingError::Descriptor(_))
+        ));
+
+        let ring = self::ring();
+        publish(&ring, &[1; 100]);
+        let slot = ring.slot_ptr(1).unwrap();
+        // SAFETY: same as above for the fresh ring.
+        unsafe { (*slot).reservation_len.store(99, Ordering::Release) };
+        assert!(matches!(
+            ring.attachment().unwrap().attach(),
+            Err(RingError::InvalidSharedState)
+        ));
+    }
+
+    #[test]
+    fn descriptor_depth_above_the_cap_is_rejected_before_any_allocation() {
+        let mut bytes = ring().grant().encode();
+        bytes[22..30].copy_from_slice(&((super::MAX_DESCRIPTOR_DEPTH as u64) + 1).to_le_bytes());
+        assert!(matches!(
+            RingGrant::decode(bytes),
+            Err(RingError::InvalidGrant)
+        ));
+
+        let profile = TargetProfile::new(ProfileConfig {
+            descriptor: TransportDescriptor::new(HardwareProfileId::new("ring-deep").unwrap()),
+            descriptor_depth: super::MAX_DESCRIPTOR_DEPTH + 1,
+            arena_bytes: MIN_ARENA_BYTES,
+            max_spans: 2,
+            max_leases: 1,
+            mappings: SETUP_MAPPING_COUNT,
+            pinned_workers: 0,
+            worker_topology: WorkerTopology::CallerThread,
+        })
+        .unwrap();
+        assert!(matches!(
+            Ring::create(&profile, 0),
+            Err(RingError::InvalidLayout)
+        ));
     }
 
     #[test]
