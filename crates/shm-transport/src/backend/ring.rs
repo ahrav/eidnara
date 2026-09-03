@@ -1446,7 +1446,8 @@ impl Ring {
     /// Counts descriptors and arena bytes by ownership state. A quarantined ring reports
     /// everything as quarantined; a live one must partition depth and capacity exactly and
     /// its cursors must satisfy the protocol's ordering bounds, or `InvalidSharedState` is
-    /// returned and the ring is quarantined.
+    /// returned and the ring is quarantined. `Busy` means the peer kept the cursors moving for
+    /// the whole check; nothing was judged and the ring stays live.
     pub fn conservation(&self) -> Result<(DescriptorCounts, ArenaCounts), RingError> {
         if self.is_quarantined() {
             return Ok((
@@ -1460,8 +1461,10 @@ impl Ring {
                 },
             ));
         }
-        self.conservation_inner(false)
-            .map_err(|error| self.quarantine_with(error))
+        self.conservation_inner(false).map_err(|error| match error {
+            RingError::Busy => error,
+            error => self.quarantine_with(error),
+        })
     }
 
     /// Walks the slots until one walk completes with every cursor unchanged around it. The
@@ -1469,8 +1472,8 @@ impl Ring {
     /// and the counts then differ from the cursors by at most the one transition whose slot
     /// store landed before its cursor store. With `exact`, that one transition is also waited
     /// out, since it completes within a few instructions on an honest peer while a forged
-    /// cursor never converges. A peer that keeps moving cursors as fast as the walk runs makes
-    /// the check give up as `InvalidSharedState`; healthy traffic settles.
+    /// cursor never converges. Sustained traffic can keep a cursor moving through every walk;
+    /// that is `Busy`, not a fault, and the caller retries later.
     fn conservation_inner(
         &self,
         exact: bool,
@@ -1496,7 +1499,7 @@ impl Ring {
                 Err(error) => return Err(error),
             }
         }
-        Err(RingError::InvalidSharedState)
+        Err(RingError::Busy)
     }
 
     fn cursor_snapshot(&self) -> Result<CursorSnapshot, RingError> {
@@ -1594,10 +1597,11 @@ impl Ring {
     /// and `active_leases`, a release stores the slot before `active_leases`, and a commit
     /// stores the slot before `published`. One endpoint performs one transition at a time, so
     /// each compared count differs from its cursor by at most one. `exact` requires zero
-    /// difference. `completed` is not compared with the slots: reclaim frees a whole run of
-    /// slots before it stores the cursor, and the producer handle checks that cursor against
-    /// its own record on every operation. A handle that has acted in a role also requires that
-    /// role's cursors to match its own record, which only that handle writes.
+    /// difference. Receiver-owned slots (held, leased, release-pending) may exceed
+    /// `consumed - completed` by one for the receive in flight but never by more; they may fall
+    /// short by a whole run, because reclaim frees the run before it stores `completed`. A
+    /// handle that has acted in a role also requires that role's cursors to match its own
+    /// record, which only that handle writes.
     fn check_cursor_invariants(
         &self,
         descriptors: &DescriptorCounts,
@@ -1623,9 +1627,17 @@ impl Ring {
         let live_bytes = arena_write
             .checked_sub(arena_reclaimed)
             .ok_or(RingError::InvalidSharedState)?;
+        let receiver_owned =
+            descriptors.receiver_held + descriptors.receiver_leased + descriptors.release_pending;
+        let receiver_owned_ok = if exact {
+            receiver_owned == held
+        } else {
+            receiver_owned <= held + 1
+        };
         if active_leases > self.grant.max_leases
             || !matches(active_leases, descriptors.receiver_leased)
             || !matches(in_flight, descriptors.published)
+            || !receiver_owned_ok
             || in_flight + held > self.grant.descriptor_depth
             || live_bytes > self.grant.arena_bytes
         {
@@ -1641,7 +1653,8 @@ impl Ring {
     }
 
     /// `conservation` without the counts: `Ok` if shared state is consistent and not
-    /// quarantined. An inconsistency quarantines the ring, as any other operation would.
+    /// quarantined. An inconsistency quarantines the ring, as any other operation would;
+    /// `Busy` does not.
     ///
     /// The peer's cursors are checked against the bounds that hold while one of its
     /// transitions is in flight, not for exact agreement with the slot states; the peer's own
@@ -2499,6 +2512,10 @@ pub enum RingError {
     /// live reservation range page removal must avoid.
     #[error("operation belongs to the producer handle")]
     RoleMismatch,
+    /// A health check could not observe a stable snapshot because the peer kept the cursors
+    /// moving. Nothing was judged; retry when traffic is lighter.
+    #[error("shared state was busy for the whole health check")]
+    Busy,
     /// A published descriptor failed `FrameDescriptor::validate`.
     #[error("shared descriptor validation failed")]
     Descriptor(#[source] DescriptorError),
@@ -3316,6 +3333,41 @@ mod tests {
             Err(RingError::InvalidSharedState)
         ));
         assert!(ring.is_quarantined());
+    }
+
+    #[test]
+    fn attach_refuses_an_orphaned_receiver_slot() {
+        let ring = ring();
+        let slot = ring.slot_ptr(1).unwrap();
+        // Cursors all zero, one slot receiver-owned: no honest history produces this.
+        // SAFETY: test-owned ring keeps the slot mapped.
+        unsafe {
+            (*slot)
+                .state
+                .store(super::SLOT_RELEASE_PENDING, Ordering::Release)
+        };
+        assert!(matches!(
+            ring.attachment().unwrap().attach(),
+            Err(RingError::InvalidSharedState)
+        ));
+    }
+
+    #[test]
+    fn probe_treats_receiver_slots_beyond_the_cursor_gap_as_a_fault() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        publish(&ring, &[2]);
+        let first = ring.try_receive().unwrap().unwrap();
+        let second = ring.try_receive().unwrap().unwrap();
+        ring.probe().unwrap();
+        // Two receiver-owned slots with `consumed` rewound to zero is two transitions of skew.
+        ring.consumer.set(false);
+        let consumer = ring.consumer_ptr().unwrap();
+        // SAFETY: test-owned ring keeps the consumer page mapped.
+        unsafe { (*consumer).consumed.store(0, Ordering::Release) };
+        assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
+        assert!(ring.is_quarantined());
+        drop((first, second));
     }
 
     #[test]
