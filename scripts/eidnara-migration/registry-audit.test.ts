@@ -91,12 +91,23 @@ describe("registry audit", () => {
         expect(checkGate(withSummary({ state: "reserved" }), now)).toContain(
             `probes[${view}] (${command}) has summary state "reserved"; expected published, unpublished, or error`,
         );
-        expect(checkGate(withSummary({ state: "published" }), now)).toContain(`probes[${view}] (${command}) is published without a string array of versions`);
+        expect(checkGate(withSummary({ state: "published" }), now)).toContain(`probes[${view}] (${command}) is published without a non-empty string array of versions`);
+        expect(checkGate(withSummary({ state: "published", versions: [] }), now)).toContain(
+            `probes[${view}] (${command}) is published without a non-empty string array of versions`,
+        );
         expect(checkGate(withSummary({ state: "published", versions: ["1.0.0-reserved.1", 7] }), now)).toContain(
-            `probes[${view}] (${command}) is published without a string array of versions`,
+            `probes[${view}] (${command}) is published without a non-empty string array of versions`,
         );
         expect(checkGate(withSummary({ state: "published", versions: ["1.0.0-reserved.1"], dist_tags: {} }), now)).toEqual([]);
         expect(checkGate(withSummary({ state: "unpublished", code: "E404" }), now)).toEqual([]);
+    });
+
+    test("a successful view without versions is recorded as an error, not as published", () => {
+        const runner = fakeRunner({ "view @eidnara/cli versions dist-tags --json": ok(JSON.stringify({ "dist-tags": {} })) });
+        const gate = audit(runner, now);
+        const probe = (gate.probes as unknown as Record<string, unknown>[]).find((entry) => entry.command === "npm view @eidnara/cli versions dist-tags --json")!;
+        expect(probe.summary).toEqual({ state: "error", code: "no-versions" });
+        expect(checkGate(gate, now)).toContain("@eidnara/cli view probe errored (no-versions)");
     });
 
     test("rejects a non-prerelease @eidnara version", () => {

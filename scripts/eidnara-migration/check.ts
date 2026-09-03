@@ -1266,14 +1266,18 @@ export function pointerProblem(root: string, pointer: string): string | undefine
             // must not sit under a `cfg` predicate that is false in every build.
             let isTest = false;
             let why: string | undefined;
-            for (let back = index - 1; back >= 0; back -= 1) {
-                const line = (lines[back] ?? "").trim();
-                if (!(line.startsWith("#[") || line === "")) break;
-                for (const attribute of rustAttributesOn(line)) {
-                    if (/^(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b/.test(attribute)) isTest = true;
-                    if (/^ignore\b/.test(attribute)) why = "is marked #[ignore]";
-                    const cfg = /^cfg\((.*)\)$/s.exec(attribute);
-                    if (cfg !== null && cfgPredicate(cfg[1] ?? "") === false) why = `is compiled out by #[cfg(${cfg[1]})]`;
+            for (const attribute of rustOuterAttributes(lines, index)) {
+                if (/^(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b/.test(attribute)) isTest = true;
+                if (/^ignore\b/.test(attribute)) why = "is marked #[ignore]";
+                const cfg = /^cfg\((.*)\)$/s.exec(attribute);
+                if (cfg !== null && cfgPredicate(cfg[1] ?? "") === false) why = `is compiled out by #[cfg(${cfg[1]})]`;
+            }
+            // An enclosing module or block that is compiled out takes the test with it, so
+            // the `cfg` attributes of every enclosing item, and the inner `#![cfg]` attributes
+            // of the file and of each enclosing block, are evaluated as well.
+            if (why === undefined) {
+                for (const cfg of rustEnclosingCfgs(lines, index)) {
+                    if (cfgPredicate(cfg) === false) why = `is compiled out by an enclosing #[cfg(${cfg})]`;
                 }
             }
             if (isTest && why === undefined) return undefined;
@@ -1286,6 +1290,66 @@ export function pointerProblem(root: string, pointer: string): string | undefine
     }
     const declared = filePart.endsWith(".ts") || filePart.endsWith(".tsx") ? typescriptDeclaredChecks(text).has(anchor) : false;
     return declared ? undefined : `names ${anchor}, which ${filePart} does not declare`;
+}
+
+/**
+ * The outer attributes of the item declared on `lines[index]`: the inner text of every
+ * `#[...]` on the attribute lines directly above it, blank lines allowed between. The lines
+ * are expected to have comments and strings blanked already.
+ */
+function rustOuterAttributes(lines: string[], index: number): string[] {
+    const out: string[] = [];
+    for (let back = index - 1; back >= 0; back -= 1) {
+        const line = (lines[back] ?? "").trim();
+        if (!(line.startsWith("#[") || line === "")) break;
+        out.push(...rustAttributesOn(line));
+    }
+    return out;
+}
+
+/**
+ * The `cfg` predicates that govern the item declared on `lines[index]` through its
+ * enclosing items: for each unclosed `{` above the declaration, the outer `#[cfg(...)]`
+ * attributes on the lines above the line holding that brace and the inner `#![cfg(...)]`
+ * attributes on the lines just inside it, plus the inner attributes at the top of the file.
+ * The lines are expected to have comments and strings blanked already.
+ */
+function rustEnclosingCfgs(lines: string[], index: number): string[] {
+    const out: string[] = [];
+    const cfgOf = (attribute: string): string | undefined => /^cfg\((.*)\)$/s.exec(attribute)?.[1];
+    const innerCfgsFrom = (start: number): void => {
+        for (let at = start; at < lines.length; at += 1) {
+            const line = (lines[at] ?? "").trim();
+            if (line === "") continue;
+            if (!line.startsWith("#![")) break;
+            const inner = /^#!\[(.*)\]$/s.exec(line)?.[1];
+            const cfg = inner === undefined ? undefined : cfgOf(inner.trim());
+            if (cfg !== undefined) out.push(cfg);
+        }
+    };
+    innerCfgsFrom(0);
+    // Walk backward from the declaration, matching braces; each `{` still open when the
+    // walk reaches it belongs to an enclosing item.
+    let depth = 0;
+    for (let at = index - 1; at >= 0; at -= 1) {
+        const line = lines[at] ?? "";
+        for (let column = line.length - 1; column >= 0; column -= 1) {
+            const char = line[column];
+            if (char === "}") depth += 1;
+            else if (char === "{") {
+                if (depth > 0) {
+                    depth -= 1;
+                    continue;
+                }
+                for (const attribute of rustOuterAttributes(lines, at)) {
+                    const cfg = cfgOf(attribute);
+                    if (cfg !== undefined) out.push(cfg);
+                }
+                innerCfgsFrom(at + 1);
+            }
+        }
+    }
+    return out;
 }
 
 /**
@@ -1438,6 +1502,19 @@ function typescriptCallEnd(text: string, open: number): number {
 }
 
 /**
+ * Whether a `/` at `index` starts a regex literal rather than a division: it does when the
+ * previous significant token cannot end an operand, that is, when the text before it ends
+ * in an operator, an opening bracket, a separator, or a keyword such as `return`, or when
+ * nothing precedes it.
+ */
+function typescriptRegexCanStart(text: string, index: number): boolean {
+    const before = text.slice(0, index).trimEnd();
+    if (before === "") return true;
+    if (/[(,=:[!&|?{};+\-*%<>~^]$/.test(before)) return true;
+    return /(?:^|[^A-Za-z0-9_$.])(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/.test(before);
+}
+
+/**
  * Index just past the comment, string, or template literal that starts at `index`, or
  * `null` when none does. A template literal ends at its closing backtick; a `${ ... }`
  * substitution is skipped by brace depth, with strings inside it skipped in turn.
@@ -1452,6 +1529,28 @@ function typescriptLexemeEnd(text: string, index: number): number | null {
     if (char === "/" && next === "*") {
         const close = text.indexOf("*/", index + 2);
         return close === -1 ? text.length : close + 2;
+    }
+    if (char === "/" && typescriptRegexCanStart(text, index)) {
+        // A regex literal runs to its unescaped closing slash outside a character class,
+        // then its flags; a line break ends it, since a regex literal cannot span lines.
+        let cursor = index + 1;
+        let inClass = false;
+        while (cursor < text.length && text[cursor] !== "\n") {
+            const current = text[cursor];
+            if (current === "\\") cursor += 2;
+            else if (current === "[") {
+                inClass = true;
+                cursor += 1;
+            } else if (current === "]") {
+                inClass = false;
+                cursor += 1;
+            } else if (current === "/" && !inClass) {
+                cursor += 1;
+                while (cursor < text.length && /[a-z]/i.test(text[cursor] ?? "")) cursor += 1;
+                return cursor;
+            } else cursor += 1;
+        }
+        return cursor;
     }
     if (char === '"' || char === "'") {
         let cursor = index + 1;
@@ -2123,12 +2222,16 @@ function rustLexemeEnd(text: string, index: number): number | null {
  * A `}` met before any `{` closes the enclosing type, so the member ends in front of it
  * rather than swallowing the rest of the file. Commas inside parentheses, brackets, and
  * generic angle brackets belong to the member; an angle bracket counts as generic when it
- * directly follows an identifier, since an operator `<` in an item header is spaced.
+ * directly follows an identifier or a closing `>` and appears before any top-level `=`,
+ * since after `=` the item is an initializer or alias target in which `<` may compare.
  */
 function rustItemEnd(text: string, from: number): number {
     let braces = 0;
     let groups = 0;
     let angles = 0;
+    // A top-level `=` starts an initializer or alias target, where `<` and `>` may be
+    // comparison operators, so angle tracking stops there and the `;` ends the item.
+    let initializer = false;
     let index = from;
     while (index < text.length) {
         const skipped = rustLexemeEnd(text, index);
@@ -2138,6 +2241,7 @@ function rustItemEnd(text: string, from: number): number {
         }
         const char = text[index];
         const previous = text[index - 1] ?? "";
+        const next = text[index + 1] ?? "";
         if (char === "{") braces += 1;
         else if (char === "}") {
             if (braces === 0) return index;
@@ -2146,8 +2250,9 @@ function rustItemEnd(text: string, from: number): number {
         } else if (braces === 0) {
             if (char === "(" || char === "[") groups += 1;
             else if (char === ")" || char === "]") groups = Math.max(0, groups - 1);
-            else if (char === "<" && /[A-Za-z0-9_>]/.test(previous)) angles += 1;
-            else if (char === ">" && previous !== "-" && angles > 0) angles -= 1;
+            else if (char === "=" && groups === 0 && angles === 0 && next !== "=" && next !== ">" && !/[=!<>]/.test(previous)) initializer = true;
+            else if (!initializer && char === "<" && /[A-Za-z_>]/.test(previous)) angles += 1;
+            else if (!initializer && char === ">" && previous !== "-" && angles > 0) angles -= 1;
             else if ((char === ";" || char === ",") && groups === 0 && angles === 0) return index + 1;
         }
         index += 1;
@@ -2159,8 +2264,9 @@ function rustItemEnd(text: string, from: number): number {
  * The source files a crate ships: every `.rs`, `.ts`, and `.tsx` under the crate except the
  * auto-discovered `tests/`, `benches/`, and `examples/` targets and any `[[test]]`,
  * `[[bench]]`, or `[[example]]` target the manifest names by path. A `[lib]`, `[[bin]]`, or
- * build script the manifest names is scanned wherever it lives, even under one of those
- * directory names, as is a TypeScript file kept in a crate.
+ * build script the manifest names is scanned as Rust wherever it lives and whatever its
+ * extension, even under one of those directory names, as is a TypeScript file kept in a
+ * crate.
  */
 export function productionCrateFiles(crateDir: string): string[] {
     const testOnly = new Set<string>();
@@ -2183,9 +2289,10 @@ export function productionCrateFiles(crateDir: string): string[] {
         if (typeof build === "string") production.add(build.split(sep).join("/"));
     }
     return listFiles(crateDir, skipVendored).filter((rel) => {
-        if (!rel.endsWith(".rs") && !rel.endsWith(".ts") && !rel.endsWith(".tsx")) return false;
         const normalized = rel.split(sep).join("/");
+        // A target the manifest names is Rust whatever its extension.
         if (production.has(normalized)) return true;
+        if (!rel.endsWith(".rs") && !rel.endsWith(".ts") && !rel.endsWith(".tsx")) return false;
         const top = normalized.split("/")[0];
         if (top === "tests" || top === "benches" || top === "examples") return false;
         return !testOnly.has(normalized);
@@ -2251,16 +2358,16 @@ function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): v
         for (const entry of readdirSync(cratesRoot, { withFileTypes: true })) {
             if (!entry.isDirectory()) continue;
             for (const rel of productionCrateFiles(join(cratesRoot, entry.name))) {
-                scanProduction(`crates/${entry.name}/${rel.split(sep).join("/")}`, rel.endsWith(".rs") ? ".rs" : ".ts");
+                scanProduction(`crates/${entry.name}/${rel.split(sep).join("/")}`, rel.endsWith(".ts") || rel.endsWith(".tsx") ? ".ts" : ".rs");
             }
         }
     }
+    // Every TypeScript file under `packages` is classified by the registry below, and a
+    // package may ship an entrypoint outside `src`, so the same set is scanned here.
     const packagesTree = join(ctx.root, "packages");
     if (existsSync(packagesTree)) {
         for (const rel of listFiles(packagesTree, skipVendored)) {
-            const parts = rel.split(sep);
-            if (parts[1] !== "src") continue;
-            if (rel.endsWith(".ts") || rel.endsWith(".tsx")) scanProduction(`packages/${parts.join("/")}`, ".ts");
+            if (rel.endsWith(".ts") || rel.endsWith(".tsx")) scanProduction(`packages/${rel.split(sep).join("/")}`, ".ts");
         }
     }
 

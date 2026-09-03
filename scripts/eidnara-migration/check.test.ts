@@ -852,6 +852,45 @@ describe("check anchors and cfg(test) stripping", () => {
             );
             expect(pointerProblem(root, "crates/x/src/lib.rs#commented_out")).toBe("names commented_out, which crates/x/src/lib.rs does not declare");
             expect(pointerProblem(root, "crates/x/src/lib.rs#in_string")).toBe("names in_string, which crates/x/src/lib.rs does not declare");
+            writeFileSync(
+                join(root, "crates/x/src/nested.rs"),
+                [
+                    "#[cfg(any())]",
+                    "mod disabled {",
+                    "    #[test]",
+                    "    fn proof() {}",
+                    "    mod deeper {",
+                    "        #[test]",
+                    "        fn deeper_proof() {}",
+                    "    }",
+                    "}",
+                    "#[cfg(test)]",
+                    "mod tests {",
+                    "    #[test]",
+                    "    fn runs_under_test() {}",
+                    "}",
+                    "mod inner_attribute {",
+                    "    #![cfg(any())]",
+                    "    #[test]",
+                    "    fn inner_disabled() {}",
+                    "}",
+                    "",
+                ].join("\n"),
+            );
+            expect(pointerProblem(root, "crates/x/src/nested.rs#proof")).toBe(
+                "names proof, which crates/x/src/nested.rs declares as a test that is compiled out by an enclosing #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/nested.rs#deeper_proof")).toBe(
+                "names deeper_proof, which crates/x/src/nested.rs declares as a test that is compiled out by an enclosing #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/nested.rs#inner_disabled")).toBe(
+                "names inner_disabled, which crates/x/src/nested.rs declares as a test that is compiled out by an enclosing #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/nested.rs#runs_under_test")).toBeUndefined();
+            writeFileSync(join(root, "crates/x/src/file_off.rs"), ["#![cfg(any())]", "#[test]", "fn file_disabled() {}", ""].join("\n"));
+            expect(pointerProblem(root, "crates/x/src/file_off.rs#file_disabled")).toBe(
+                "names file_disabled, which crates/x/src/file_off.rs declares as a test that is compiled out by an enclosing #[cfg(any())]",
+            );
             expect(pointerProblem(root, "crates/x/src/lib.rs#compiled_out_on_one_line")).toBe(
                 "names compiled_out_on_one_line, which crates/x/src/lib.rs declares as a test that is compiled out by #[cfg(any())]",
             );
@@ -892,9 +931,13 @@ describe("check anchors and cfg(test) stripping", () => {
             '    () => { it("nested-in-spaced-skip", () => {}); },',
             ");",
             'test("after-spaced-skips", () => {});',
+            'const pattern = /test("in-regex", () => {})/g;',
+            "const ratio = total / count; test('after-division', () => {});",
+            'if (/it("in-if-regex")/.test(s)) {}',
+            'return /describe("in-return-regex")/;',
         ].join("\n");
         const declared = typescriptDeclaredChecks(text);
-        expect([...declared].sort()).toEqual(["after-spaced-skips", "backtick", "live-suite", "nested-live", "real", "single"]);
+        expect([...declared].sort()).toEqual(["after-division", "after-spaced-skips", "backtick", "live-suite", "nested-live", "real", "single"]);
         const root = mkdtempSync(join(tmpdir(), "eidnara-anchor-"));
         try {
             mkdirSync(join(root, "packages/p/src"), { recursive: true });
@@ -930,6 +973,21 @@ describe("check anchors and cfg(test) stripping", () => {
         ].join("\n");
         const stripped = withoutCfgTestItems(text);
         expect(stripped).toContain('"after.db"');
+        const compared = [
+            "#[cfg(test)] const LESS: bool = 1<2;",
+            "#[cfg(test)] type Names = Vec<String>;",
+            "#[cfg(test)] const CMP: bool = a<b;",
+            'fn migrate() { let db = "after-compare.db"; }',
+            "#[cfg(test)] fn generic<T: Into<u8>>(x: T) -> bool { true }",
+            'const LAST: &str = "after-generic.db";',
+            "",
+        ].join("\n");
+        const strippedCompared = withoutCfgTestItems(compared);
+        expect(strippedCompared).toContain('"after-compare.db"');
+        expect(strippedCompared).toContain('"after-generic.db"');
+        expect(strippedCompared).not.toContain("1<2");
+        expect(strippedCompared).not.toContain("Vec<String>");
+        expect(strippedCompared).not.toContain("Into<u8>");
         expect(stripped).toContain("pub struct Cfg {");
         expect(stripped).toContain("    Prod,");
         expect(stripped).not.toContain("Test,");
@@ -1552,6 +1610,10 @@ describe("evidence: git-backed receipts", () => {
             '[package]\nname = "edge"\nversion = "0.1.0"\nedition = "2024"\nbuild = "examples/build.rs"\n\n[lib]\npath = "tests/lib.rs"\n\n[[bin]]\nname = "edge"\npath = "app/main.rs"\n\n[[test]]\nname = "named"\npath = "checks/named.rs"\n',
         );
         write(join(crate, "tests/lib.rs"), 'pub const A: &str = "root-lib.db";\n');
+        write(join(crate, "Cargo.toml"), readFileSync(join(crate, "Cargo.toml"), "utf8").replace('path = "tests/lib.rs"', 'path = "code"'));
+        write(join(crate, "code"), 'pub const A: &str = "root-lib.db";\n');
+        rmSync(join(crate, "tests/lib.rs"));
+        write(join(destination, "packages/edge/index.ts"), 'export const entry = "entrypoint.db";\n');
         write(join(crate, "examples/build.rs"), 'const G: &str = "build.db";\nfn main() {}\n');
         write(join(crate, "app/main.rs"), 'const B: &str = "bin.db";\nfn main() {}\n');
         write(join(crate, "checks/named.rs"), 'const C: &str = "named-test.db";\n');
@@ -1560,7 +1622,8 @@ describe("evidence: git-backed receipts", () => {
         write(join(crate, "benches/speed.rs"), 'const F: &str = "bench.db";\n');
         try {
             const errors = verify("registry", copy("registry"), ctx);
-            expect(errors).toContain('crates/edge/tests/lib.rs: persistent literal "root-lib.db" has no family entry in the registry');
+            expect(errors).toContain('crates/edge/code: persistent literal "root-lib.db" has no family entry in the registry');
+            expect(errors).toContain('packages/edge/index.ts: persistent literal "entrypoint.db" has no family entry in the registry');
             expect(errors).toContain('crates/edge/examples/build.rs: persistent literal "build.db" has no family entry in the registry');
             expect(errors).toContain('crates/edge/app/main.rs: persistent literal "bin.db" has no family entry in the registry');
             for (const literal of ["named-test.db", "auto-test.db", "example.db", "bench.db"]) {
@@ -1568,6 +1631,7 @@ describe("evidence: git-backed receipts", () => {
             }
         } finally {
             rmSync(crate, { recursive: true });
+            rmSync(join(destination, "packages"), { recursive: true, force: true });
         }
     });
 

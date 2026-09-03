@@ -61,10 +61,14 @@ function summarizeView(result: CommandResult): Record<string, unknown> {
     }
     try {
         const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
-        const versions = Array.isArray(parsed.versions) ? (parsed.versions as unknown[]) : [];
+        // A successful view of a published name always carries its versions; a response
+        // without them proves nothing about the name and is recorded as an error, since a
+        // published summary with no versions would otherwise pass as prerelease-only.
+        const versions = Array.isArray(parsed.versions) ? parsed.versions.filter((value): value is string => typeof value === "string") : [];
+        if (versions.length === 0) return { state: "error", code: "no-versions" };
         return {
             state: "published",
-            versions: versions.filter((value): value is string => typeof value === "string"),
+            versions,
             dist_tags: parsed["dist-tags"] ?? {},
         };
     } catch {
@@ -115,8 +119,8 @@ export interface CheckOptions {
 }
 
 // The shapes `summarizeView` records for a view probe. A recorded gate is checked against
-// them so an empty object, an array, or a probe whose versions are not strings cannot pass
-// as evidence that a name is unpublished.
+// them so an empty object, an array, a published summary with no versions, or a probe whose
+// versions are not strings cannot pass as evidence that a name is unpublished.
 type ViewSummary =
     | { state: "published"; versions: string[] }
     | { state: "unpublished"; code: unknown }
@@ -130,8 +134,8 @@ function viewSummaryProblem(summary: unknown): string | null {
     if (typeof record.state !== "string" || !VIEW_STATES.has(record.state)) {
         return `has summary state ${JSON.stringify(record.state ?? null)}; expected published, unpublished, or error`;
     }
-    if (record.state === "published" && !(Array.isArray(record.versions) && record.versions.every((value) => typeof value === "string"))) {
-        return "is published without a string array of versions";
+    if (record.state === "published" && !(Array.isArray(record.versions) && record.versions.length > 0 && record.versions.every((value) => typeof value === "string"))) {
+        return "is published without a non-empty string array of versions";
     }
     return null;
 }

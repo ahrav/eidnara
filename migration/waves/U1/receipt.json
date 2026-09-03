@@ -199,7 +199,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "c9ccd9202d804604115423d7ac2250610ac731bcbfd5cab7fd57d6a1ebc240c9",
+      "destination_sha256": "901e9094fc2cd5c1dc969e300e19e95c4ef7dfdb86c8448c2bd92593d250dbe6",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -210,7 +210,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "d90b245126e326ecef902a6c1a07b84737f09da7c52d7fb3c1d0a76d11107367",
+      "destination_sha256": "3c0f11acb2f2ca7fc18c4824cd6157c3024bc1418069d401be4b403e0cea5d50",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -221,7 +221,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/registry-audit.ts",
-      "destination_sha256": "f44992ea70520c7c2adb13732a60ab9ea3c0545571f321894dafb4570a5ff460",
+      "destination_sha256": "02c6fe5edabb7de0762fc895593eb87fff008bd98e58727c5a1bc82c4c23ed73",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -232,7 +232,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/registry-audit.test.ts",
-      "destination_sha256": "90f100f64fb3b86a8ef08fd8e7c31d54639b9e51bc4fc29f787d0de91e4edcff",
+      "destination_sha256": "7b347f0800eae513e2975366f30d68e7b6283d01be1c31fd1728cf10d634e487",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

@@ -134,7 +134,7 @@
       "iteration": 1,
       "analyzed": {
         "repo": "eidnara",
-        "commit": "d89e47127ccaf910628be2541e4289fe6db381c0",
+        "commit": "69289bf457341b13950f1003f305987ff329fbab",
         "scope_hash": "5ccab89a030986e9ec49211ef672c9ea0d0e3cfd9fe9b78746d255e3d253dbd7",
         "modules": [
           "crates/cache-stability",
