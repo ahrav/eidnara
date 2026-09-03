@@ -1,0 +1,16 @@
+[package]
+name = "cache-stability"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Prompt-cache-stability core: the frozen-set per-pass state machine (boundary-presence anchor, render-on-bust, replay-verbatim-on-defer) shared by every harness that pins a render config across turns."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

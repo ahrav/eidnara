@@ -1,0 +1,19 @@
+{
+  "application_id": 1162429518,
+  "baseline_sha256": "3bc0db25dbd2b3034df370674770e8a12c488dea255ae56edc51f8ff9986ebfd",
+  "objects": [
+    {
+      "name": "fence",
+      "sql": "CREATE TABLE fence (\n    id INTEGER PRIMARY KEY CHECK (id = 0),\n    epoch INTEGER NOT NULL CHECK (epoch >= 0)\n)",
+      "tbl_name": "fence",
+      "type": "table"
+    },
+    {
+      "name": "format_marker",
+      "sql": "CREATE TABLE format_marker (\n    id INTEGER PRIMARY KEY CHECK (id = 0),\n    baseline_sha256 TEXT NOT NULL CHECK (length(baseline_sha256) = 64)\n)",
+      "tbl_name": "format_marker",
+      "type": "table"
+    }
+  ],
+  "user_version": 1
+}

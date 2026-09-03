@@ -1,16 +1,22 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
-    LEGACY_IDENTITY_RE,
     NOT_APPLICABLE,
+    cfgPredicate,
+    pointerProblem,
     sha256,
+    typescriptDeclaredChecks,
     validateShape,
     verify,
+    withoutCfgTestItems,
     type CheckKind,
     type Context,
+    fileSetDigest,
+    modulesHash,
+    retiredIdentityDigest,
 } from "./check";
 
 const digest = "a".repeat(64);
@@ -31,17 +37,17 @@ const valid: Record<CheckKind, Json> = {
     receipt: {
         schema_version: 1,
         wave: "U2",
-        sources: [{ repo: "commons", commit }],
-        catalogs: [{ repo: "commons", commit }],
+        sources: [{ repo: "source", commit }],
+        catalogs: [{ repo: "source", commit }],
         readiness: "migration/upstream-readiness.json",
         registry: "migration/registry.json",
         waivers: "migration/waves/U2/waivers.json",
-        scope: [{ repo: "commons", path: "crates/cortexkit-lease" }],
+        scope: [{ repo: "source", tree: "d".repeat(40) }],
         property_impact: "migration/waves/U2/property-impact.json",
         architecture_impact: "migration/waves/U2/architecture-impact.json",
         files: [
             {
-                source: { repo: "commons", path: "crates/cortexkit-lease/src/lib.rs", blob_sha: blob },
+                source: { repo: "source", blob_sha: blob },
                 destination: "crates/lease/src/lib.rs",
                 destination_sha256: digest,
                 transformation: "adapted",
@@ -55,7 +61,7 @@ const valid: Record<CheckKind, Json> = {
                 gate: "source-release",
                 kind: "release",
                 status: "not_run",
-                source_repo: "commons",
+                source_repo: "source",
                 justification: "Owner-hosted source release gate unavailable",
             },
         ],
@@ -65,18 +71,17 @@ const valid: Record<CheckKind, Json> = {
         entries: [
             {
                 kind: "identity",
-                value: ".mc-host-coordination",
+                value: ".coordination",
                 class: "frozen-durable",
-                rationale: "Existing writer exclusion path",
-                evidence: ["release/mc-host-release.json"],
+                rationale: "Writer exclusion path",
+                evidence: ["release/host-release.json"],
             },
             {
                 kind: "identity",
-                value: "cortexkit-lease",
-                class: "renamed",
-                rename_to: "lease",
-                rationale: "Crate name",
-                evidence: ["Cargo.toml"],
+                value: "eidnara.store/v1",
+                class: "external-protocol",
+                rationale: "Store wire schema id",
+                evidence: ["crates/storage-types/src/lib.rs"],
             },
             {
                 kind: "typescript",
@@ -123,7 +128,7 @@ const valid: Record<CheckKind, Json> = {
                 kind: "release",
                 owner: "ahrav",
                 approver: "ahrav",
-                bead_id: "magic-context-abc",
+                bead_id: "upstream-abc",
                 created_at: "2026-09-02",
                 expires_by_wave: "U3",
                 closure_condition: "owner-hosted chain repointed",
@@ -157,7 +162,7 @@ const valid: Record<CheckKind, Json> = {
     "property-impact": {
         schema_version: 1,
         wave: "U2",
-        provenance: [{ repo: "commons", source_commit: commit, catalog_commit: commit }],
+        provenance: [{ repo: "source", source_commit: commit, catalog_commit: commit }],
         destination_commit: commit,
         touched_files: ["crates/lease/src/lib.rs", "crates/lease/src/key.rs"],
         records: [
@@ -172,6 +177,8 @@ const valid: Record<CheckKind, Json> = {
                 audit_verdict: "pass",
                 evidence_digest: digest,
                 code_hash: digest,
+                check_pointer: "crates/lease/src/lib.rs#lease_is_single_writer",
+                evidence_pointer: "docs/properties/shared-primitives/evidence/lease-single-writer.md",
                 check_hash: digest,
                 target_configurations: ["linux-x64"],
                 evidence_attempts: 1,
@@ -181,10 +188,10 @@ const valid: Record<CheckKind, Json> = {
                 classification: "carried-forward",
                 relationship: "mapped",
                 files: ["crates/lease/src/key.rs"],
-                provenance: `commons@${commit}`,
+                provenance: `source@${commit}`,
                 source_status: { exercised: "partial", check_status: "unaudited", portfolio_verdict: "not-evaluated", known_violation: false },
                 destination_status: { exercised: "partial", check_status: "unaudited", portfolio_verdict: "not-evaluated", known_violation: false },
-                check_pointer: "crates/lease/src/key.rs#L10",
+                check_pointer: "crates/lease/src/key.rs#key_derivation_is_stable",
                 evidence_pointer: "docs/properties/shared-primitives/evidence/lease-key-derivation.md",
             },
         ],
@@ -196,7 +203,7 @@ const valid: Record<CheckKind, Json> = {
             {
                 phase: "pre-port",
                 iteration: 0,
-                analyzed: { repo: "commons", commit, scope_hash: digest },
+                analyzed: { repo: "source", commit, scope_hash: digest },
                 report_hash: digest,
                 skill_sha256: digest,
                 candidates: [],
@@ -204,7 +211,7 @@ const valid: Record<CheckKind, Json> = {
             {
                 phase: "post-integration",
                 iteration: 1,
-                analyzed: { repo: "eidnara", commit, scope_hash: digest },
+                analyzed: { repo: "eidnara", commit, scope_hash: digest, modules: ["crates/lease"], modules_hash: digest },
                 report_hash: digest,
                 skill_sha256: digest,
                 candidates: [
@@ -355,7 +362,7 @@ describe("shape: receipt", () => {
         const unknownClass = copy("receipt");
         files(unknownClass)[0]!.class = "mystery";
         expect(validateShape("receipt", unknownClass)).toContain(
-            "$.files[0].class must be one of: human-authored, generated, contract-generated, predecessor-captured, new-authored",
+            "$.files[0].class must be one of: human-authored, generated, contract-generated, captured, new-authored",
         );
 
         const noneString = copy("receipt");
@@ -413,27 +420,30 @@ describe("shape: receipt", () => {
         expect(validateShape("receipt", humanNull)).toContain("$.files[0].source may be null only for new-authored or generated files");
     });
 
-    test("predecessor-captured files must be verbatim with capture evidence", () => {
+    test("captured files must be verbatim with capture evidence", () => {
         const value = copy("receipt");
         const file = files(value)[0]!;
-        file.class = "predecessor-captured";
+        file.class = "captured";
         file.transformation = "adapted";
         file.review_evidence = { captured_at_commit: commit };
         expect(validateShape("receipt", value)).toEqual(
             expect.arrayContaining([
-                "$.files[0].transformation must be verbatim for predecessor-captured files",
+                "$.files[0].transformation must be verbatim for captured files",
                 "$.files[0].review_evidence.capture_command must be a non-empty string",
             ]),
         );
     });
 
-    test("scope entries and file sources must name a pinned repository", () => {
+    test("file sources and scope trees must name a pinned repository", () => {
         const value = copy("receipt");
-        (value.scope as Json[]).push({ repo: "magic-context", path: "crates/mc-host" });
-        expect(validateShape("receipt", value)).toContain("$.scope[1].repo magic-context has no pinned source commit");
+        (files(value)[0]!.source as Json).repo = "elsewhere";
+        (value.scope as Json[]).push({ repo: "elsewhere", tree: "e".repeat(40) });
+        const errors = validateShape("receipt", value);
+        expect(errors).toContain("$.files[0].source.repo elsewhere has no pinned source commit");
+        expect(errors).toContain("$.scope[1].repo elsewhere has no pinned source commit");
         const empty = copy("receipt");
         empty.scope = [];
-        expect(validateShape("receipt", empty)).toContain("$.scope must declare at least one source directory");
+        expect(validateShape("receipt", empty)).toContain("$.scope must declare at least one source tree");
     });
 });
 
@@ -445,17 +455,6 @@ describe("shape: registry", () => {
         expect(validateShape("registry", value)).toContain("$.entries[6].value is duplicated");
     });
 
-    test("renamed identities need a legacy-free rename target", () => {
-        const value = copy("registry");
-        const renamed = (value.entries as Json[])[1]!;
-        delete renamed.rename_to;
-        expect(validateShape("registry", value)).toContain("$.entries[1].rename_to is required for renamed identities");
-        renamed.rename_to = "mc-lease";
-        expect(validateShape("registry", value)).toContain("$.entries[1].rename_to retains a legacy identity");
-        const frozen = (value.entries as Json[])[0]!;
-        frozen.rename_to = "x";
-        expect(validateShape("registry", value)).toContain("$.entries[0].rename_to is only valid for renamed identities");
-    });
 
     test("identity and family evidence cannot be empty", () => {
         const value = copy("registry");
@@ -539,14 +538,6 @@ describe("shape: registry", () => {
         );
     });
 
-    test("legacy identity regex matches whole tokens only", () => {
-        expect(LEGACY_IDENTITY_RE.test("check.ts")).toBe(false);
-        expect(LEGACY_IDENTITY_RE.test("mcu-board")).toBe(false);
-        expect(LEGACY_IDENTITY_RE.test("ck-mc-host")).toBe(true);
-        expect(LEGACY_IDENTITY_RE.test("MC_HOST_RING_PROFILE")).toBe(true);
-        expect(LEGACY_IDENTITY_RE.test("cortexkit/magic-context")).toBe(true);
-        expect(LEGACY_IDENTITY_RE.test("eidnara-host")).toBe(false);
-    });
 });
 
 describe("shape: waivers", () => {
@@ -676,7 +667,7 @@ describe("shape: property impact", () => {
         expect(validateShape("property-impact", value)).toContain(
             "$.records[1] carried-forward record changed status; destination_status must equal source_status",
         );
-        record.provenance = "commons";
+        record.provenance = "source";
         expect(validateShape("property-impact", value)).toContain("$.records[1].provenance must have the form <repo>@<sha>");
     });
 
@@ -692,7 +683,7 @@ describe("shape: property impact", () => {
         record.disposition = "blocked";
         record.evidence_attempts = 2;
         expect(validateShape("property-impact", value)).toContain("$.records[0] needs a scope decision after 2 failed evidence attempts");
-        value.scope_decisions = [{ slug: "lease-single-writer", decision: "mechanism-left-scope", evidence: "lease fencing stays in commons this wave" }];
+        value.scope_decisions = [{ slug: "lease-single-writer", decision: "mechanism-left-scope", evidence: "lease fencing stays in the source repository this wave" }];
         expect(validateShape("property-impact", value)).toEqual(["$.records[0] blocks the wave"]);
     });
 
@@ -721,6 +712,18 @@ describe("shape: architecture impact", () => {
         expect(validateShape("architecture-impact", value)).toContain(
             "$.reports[1].candidates[0] is an original-scope Strong candidate that is neither accepted nor rejected",
         );
+    });
+
+    test("a post-integration report names the modules it covers and their digest", () => {
+        const value = copy("architecture-impact");
+        const analyzed = (value.reports as Json[])[1]!.analyzed as Json;
+        delete analyzed.modules;
+        delete analyzed.modules_hash;
+        const errors = validateShape("architecture-impact", value);
+        expect(errors).toContain("$.reports[1].analyzed.modules must be an array");
+        expect(errors).toContain("$.reports[1].analyzed.modules_hash must be a non-empty string");
+        const preport = (copy("architecture-impact").reports as Json[])[0]!.analyzed as Json;
+        expect(preport.modules).toBeUndefined();
     });
 
     test("loop-created Strong candidates may be recorded with a bead", () => {
@@ -795,13 +798,214 @@ describe("shape: architecture impact", () => {
     });
 });
 
+// The lease source carried verbatim into the destination; it declares the check the core
+// record names.
+const LEASE_SOURCE = "pub fn lease() {}\n#[test]\nfn lease_is_single_writer() {}\n";
+
+describe("check anchors and cfg(test) stripping", () => {
+    test("cfg predicates evaluate to a build-independent value or stay open", () => {
+        expect(cfgPredicate("any()")).toBe(false);
+        expect(cfgPredicate("all()")).toBe(true);
+        expect(cfgPredicate("test")).toBe(true);
+        expect(cfgPredicate("not(any())")).toBe(true);
+        expect(cfgPredicate("all(test, any())")).toBe(false);
+        expect(cfgPredicate("any(unix, any())")).toBeUndefined();
+        expect(cfgPredicate("unix")).toBeUndefined();
+        expect(cfgPredicate('all(unix, feature = "sqlite")')).toBeUndefined();
+        expect(cfgPredicate('not(feature = "x")')).toBeUndefined();
+    });
+
+    test("a Rust anchor must be a test that a build can run", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-anchor-"));
+        try {
+            mkdirSync(join(root, "crates/x/src"), { recursive: true });
+            writeFileSync(
+                join(root, "crates/x/src/lib.rs"),
+                [
+                    "#[cfg(any())]",
+                    "#[test]",
+                    "fn compiled_out() {}",
+                    "#[test]",
+                    "#[ignore]",
+                    "fn skipped() {}",
+                    "#[cfg(unix)]",
+                    "#[test]",
+                    "fn unix_only() {}",
+                    "#[cfg(all(test, not(any())))]",
+                    "#[tokio::test]",
+                    "async fn runs() {}",
+                    "#[cfg(any())] #[test]",
+                    "fn compiled_out_on_one_line() {}",
+                    "#[test] #[ignore]",
+                    "fn skipped_on_one_line() {}",
+                    "#[cfg(unix)] #[test]",
+                    "fn unix_only_on_one_line() {}",
+                    "/*",
+                    "#[test]",
+                    "fn commented_out() {}",
+                    "*/",
+                    'const S: &str = "',
+                    "#[test]",
+                    'fn in_string() {}";',
+                    "",
+                ].join("\n"),
+            );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#commented_out")).toBe("names commented_out, which crates/x/src/lib.rs does not declare");
+            expect(pointerProblem(root, "crates/x/src/lib.rs#in_string")).toBe("names in_string, which crates/x/src/lib.rs does not declare");
+            writeFileSync(
+                join(root, "crates/x/src/nested.rs"),
+                [
+                    "#[cfg(any())]",
+                    "mod disabled {",
+                    "    #[test]",
+                    "    fn proof() {}",
+                    "    mod deeper {",
+                    "        #[test]",
+                    "        fn deeper_proof() {}",
+                    "    }",
+                    "}",
+                    "#[cfg(test)]",
+                    "mod tests {",
+                    "    #[test]",
+                    "    fn runs_under_test() {}",
+                    "}",
+                    "mod inner_attribute {",
+                    "    #![cfg(any())]",
+                    "    #[test]",
+                    "    fn inner_disabled() {}",
+                    "}",
+                    "",
+                ].join("\n"),
+            );
+            expect(pointerProblem(root, "crates/x/src/nested.rs#proof")).toBe(
+                "names proof, which crates/x/src/nested.rs declares as a test that is compiled out by an enclosing #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/nested.rs#deeper_proof")).toBe(
+                "names deeper_proof, which crates/x/src/nested.rs declares as a test that is compiled out by an enclosing #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/nested.rs#inner_disabled")).toBe(
+                "names inner_disabled, which crates/x/src/nested.rs declares as a test that is compiled out by an enclosing #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/nested.rs#runs_under_test")).toBeUndefined();
+            writeFileSync(join(root, "crates/x/src/file_off.rs"), ["#![cfg(any())]", "#[test]", "fn file_disabled() {}", ""].join("\n"));
+            expect(pointerProblem(root, "crates/x/src/file_off.rs#file_disabled")).toBe(
+                "names file_disabled, which crates/x/src/file_off.rs declares as a test that is compiled out by an enclosing #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#compiled_out_on_one_line")).toBe(
+                "names compiled_out_on_one_line, which crates/x/src/lib.rs declares as a test that is compiled out by #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#skipped_on_one_line")).toBe(
+                "names skipped_on_one_line, which crates/x/src/lib.rs declares as a test that is marked #[ignore]",
+            );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#unix_only_on_one_line")).toBeUndefined();
+            expect(pointerProblem(root, "crates/x/src/lib.rs#compiled_out")).toBe(
+                "names compiled_out, which crates/x/src/lib.rs declares as a test that is compiled out by #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#skipped")).toBe("names skipped, which crates/x/src/lib.rs declares as a test that is marked #[ignore]");
+            expect(pointerProblem(root, "crates/x/src/lib.rs#unix_only")).toBeUndefined();
+            expect(pointerProblem(root, "crates/x/src/lib.rs#runs")).toBeUndefined();
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a TypeScript anchor is a call outside comments and strings", () => {
+        const text = [
+            '// test("in-comment", () => {})',
+            '/* it("in-block", () => {}) */',
+            'const s = \'describe("in-string", () => {})\';',
+            "const t = `test(\"in-template\", () => {}) ${describe(\"in-substitution\")}`;",
+            'test("real", () => {});',
+            "it('single', () => {});",
+            "describe.only(`backtick`, () => {});",
+            'test.skip("skipped", () => { test("inside-skip", () => {}); });',
+            'test.todo("todo");',
+            'describe.skip("skipped-suite", () => {',
+            '    test("nested-in-skipped-suite", () => {});',
+            '    it("also-nested", () => {});',
+            '});',
+            'describe("live-suite", () => { it("nested-live", () => {}); });',
+            'test.todo( "spaced-todo" );',
+            "describe.skip(",
+            '    "spaced-skipped-suite",',
+            '    () => { it("nested-in-spaced-skip", () => {}); },',
+            ");",
+            'test("after-spaced-skips", () => {});',
+            'const pattern = /test("in-regex", () => {})/g;',
+            "const ratio = total / count; test('after-division', () => {});",
+            'if (/it("in-if-regex")/.test(s)) {}',
+            'return /describe("in-return-regex")/;',
+        ].join("\n");
+        const declared = typescriptDeclaredChecks(text);
+        expect([...declared].sort()).toEqual(["after-division", "after-spaced-skips", "backtick", "live-suite", "nested-live", "real", "single"]);
+        const root = mkdtempSync(join(tmpdir(), "eidnara-anchor-"));
+        try {
+            mkdirSync(join(root, "packages/p/src"), { recursive: true });
+            writeFileSync(join(root, "packages/p/src/a.test.ts"), text);
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#in-comment")).toBe("names in-comment, which packages/p/src/a.test.ts does not declare");
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#in-string")).toBe("names in-string, which packages/p/src/a.test.ts does not declare");
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#skipped")).toBe("names skipped, which packages/p/src/a.test.ts does not declare");
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#nested-in-skipped-suite")).toBe(
+                "names nested-in-skipped-suite, which packages/p/src/a.test.ts does not declare",
+            );
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#real")).toBeUndefined();
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("cfg(test) on a variant or field blanks that member only", () => {
+        const text = [
+            "pub enum Mode {",
+            "    Prod,",
+            "    #[cfg(test)]",
+            "    Test,",
+            "}",
+            "pub struct Cfg {",
+            "    pub a: HashMap<String, Vec<u8>>,",
+            "    #[cfg(test)]",
+            "    pub probe: Option<(u8, u8)>",
+            "}",
+            'pub const AFTER: &str = "after.db";',
+            "#[cfg(test)]",
+            "mod tests { const T: &str = \"only.db\"; }",
+            "",
+        ].join("\n");
+        const stripped = withoutCfgTestItems(text);
+        expect(stripped).toContain('"after.db"');
+        const compared = [
+            "#[cfg(test)] const LESS: bool = 1<2;",
+            "#[cfg(test)] type Names = Vec<String>;",
+            "#[cfg(test)] const CMP: bool = a<b;",
+            'fn migrate() { let db = "after-compare.db"; }',
+            "#[cfg(test)] fn generic<T: Into<u8>>(x: T) -> bool { true }",
+            'const LAST: &str = "after-generic.db";',
+            "",
+        ].join("\n");
+        const strippedCompared = withoutCfgTestItems(compared);
+        expect(strippedCompared).toContain('"after-compare.db"');
+        expect(strippedCompared).toContain('"after-generic.db"');
+        expect(strippedCompared).not.toContain("1<2");
+        expect(strippedCompared).not.toContain("Vec<String>");
+        expect(strippedCompared).not.toContain("Into<u8>");
+        expect(stripped).toContain("pub struct Cfg {");
+        expect(stripped).toContain("    Prod,");
+        expect(stripped).not.toContain("Test,");
+        expect(stripped).not.toContain("probe");
+        expect(stripped).not.toContain("only.db");
+        expect(stripped.split("\n").length).toBe(text.split("\n").length);
+    });
+});
+
 describe("evidence: git-backed receipts", () => {
     let work: string;
     let source: string;
     let destination: string;
     let sourceCommit: string;
+    let leaseTree: string;
     let leaseBlob: string;
     let keyBlob: string;
+    let destinationCommit: string;
     let ctx: Context;
 
     function gitIn(cwd: string, args: string[]): string {
@@ -817,27 +1021,29 @@ describe("evidence: git-backed receipts", () => {
 
     beforeAll(() => {
         work = mkdtempSync(join(tmpdir(), "eidnara-check-"));
-        source = join(work, "commons");
+        source = join(work, "source");
         destination = join(work, "eidnara");
         mkdirSync(source);
         gitIn(source, ["init", "-q", "-b", "main"]);
         gitIn(source, ["config", "user.email", "t@example.com"]);
         gitIn(source, ["config", "user.name", "t"]);
-        write(join(source, "crates/cortexkit-lease/src/lib.rs"), "pub fn lease() {}\n");
-        write(join(source, "crates/cortexkit-lease/src/key.rs"), "pub struct LeaseKey;\n");
-        write(join(source, "crates/cortexkit-lease/Cargo.toml"), "[package]\nname = \"cortexkit-lease\"\n");
+        write(join(source, "crates/lease/src/lib.rs"), LEASE_SOURCE);
+        write(join(source, "crates/lease/src/key.rs"), "pub struct LeaseKey;\n");
+        write(join(source, "crates/lease/Cargo.toml"), "[package]\nname = \"lease\"\n");
         write(
             join(source, ".beads/issues.jsonl"),
-            `${JSON.stringify({ id: "commons-abc", status: "closed" })}\n${JSON.stringify({ id: "commons-open", status: "open" })}\n`,
+            `${JSON.stringify({ id: "source-abc", status: "closed" })}\n${JSON.stringify({ id: "source-open", status: "open" })}\n`,
         );
         gitIn(source, ["add", "-A"]);
         gitIn(source, ["commit", "-q", "-m", "seed"]);
         sourceCommit = gitIn(source, ["rev-parse", "HEAD"]);
-        leaseBlob = gitIn(source, ["rev-parse", `HEAD:crates/cortexkit-lease/src/lib.rs`]);
-        keyBlob = gitIn(source, ["rev-parse", `HEAD:crates/cortexkit-lease/src/key.rs`]);
+        leaseTree = gitIn(source, ["rev-parse", "HEAD:crates/lease"]);
+        leaseBlob = gitIn(source, ["rev-parse", `HEAD:crates/lease/src/lib.rs`]);
+        keyBlob = gitIn(source, ["rev-parse", `HEAD:crates/lease/src/key.rs`]);
 
-        write(join(destination, "crates/lease/src/lib.rs"), "pub fn lease() {}\n");
-        write(join(destination, "crates/lease/src/key.rs"), "pub struct LeaseKey; // adapted\n");
+        write(join(destination, "crates/lease/src/lib.rs"), LEASE_SOURCE);
+        write(join(destination, "crates/lease/src/key.rs"), "pub struct LeaseKey; // adapted\n#[test]\nfn key_derivation_is_stable() {}\n");
+        write(join(destination, "docs/properties/shared-primitives/evidence/lease-single-writer.md"), "# evidence\n");
         write(join(destination, "crates/lease/Cargo.toml"), "[package]\nname = \"lease\"\n");
         write(join(destination, "docs/properties/shared-primitives/evidence/lease-key-derivation.md"), "# evidence\n");
         write(
@@ -848,8 +1054,8 @@ describe("evidence: git-backed receipts", () => {
                     ["U1", "U2", "U3", "U4", "U5", "U7", "U8"].map((wave) => [
                         wave,
                         {
-                            repo: "commons",
-                            bead_ids: wave === "U2" ? ["commons-abc"] : [],
+                            repo: "source",
+                            bead_ids: wave === "U2" ? ["source-abc"] : [],
                             required_status: "closed",
                             acceptance_check: "test",
                         },
@@ -860,17 +1066,47 @@ describe("evidence: git-backed receipts", () => {
         write(join(destination, "migration/registry.json"), JSON.stringify(valid.registry));
         write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify({ schema_version: 1, wave: "U2", waivers: [] }));
         write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
-        write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(valid["architecture-impact"]));
-        ctx = { root: destination, checkouts: { commons: source } };
+        gitIn(destination, ["init", "-q", "-b", "main"]);
+        gitIn(destination, ["config", "user.email", "t@example.com"]);
+        gitIn(destination, ["config", "user.name", "t"]);
+        gitIn(destination, ["add", "-A"]);
+        gitIn(destination, ["commit", "-q", "-m", "seed"]);
+        destinationCommit = gitIn(destination, ["rev-parse", "HEAD"]);
+        write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
+        write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(architectureFor()));
+        ctx = { root: destination, checkouts: { source } };
     });
 
     afterAll(() => {
         rmSync(work, { recursive: true, force: true });
     });
 
+    function architectureFor(): Json {
+        const architecture = copy("architecture-impact");
+        for (const report of architecture.reports as Json[]) {
+            const analyzed = report.analyzed as Json;
+            if (report.phase === "pre-port") {
+                analyzed.commit = sourceCommit;
+                continue;
+            }
+            analyzed.commit = destinationCommit;
+            analyzed.modules_hash = modulesHash(destination, analyzed.modules as string[], "$", []);
+        }
+        return architecture;
+    }
+
     function impactFor(pin: string): Json {
         const impact = copy("property-impact");
-        (impact.provenance as Json[])[0] = { repo: "commons", source_commit: pin, catalog_commit: pin };
+        (impact.provenance as Json[])[0] = { repo: "source", source_commit: pin, catalog_commit: pin };
+        impact.destination_commit = destinationCommit;
+        for (const record of records(impact)) {
+            if (typeof record.provenance === "string") record.provenance = `source@${pin}`;
+            if (record.classification !== "core") continue;
+            record.code_hash = fileSetDigest((record.files as string[]).map((file): [string, Buffer] => [file, readFileSync(join(destination, file))]));
+            const checkFile = typeof record.check_pointer === "string" ? record.check_pointer.split("#")[0]! : undefined;
+            if (checkFile !== undefined) record.check_hash = sha256(readFileSync(join(destination, checkFile)));
+            if (typeof record.evidence_pointer === "string") record.evidence_digest = sha256(readFileSync(join(destination, record.evidence_pointer)));
+        }
         return impact;
     }
 
@@ -878,28 +1114,28 @@ describe("evidence: git-backed receipts", () => {
         return {
             schema_version: 1,
             wave: "U2",
-            sources: [{ repo: "commons", commit: sourceCommit }],
-            catalogs: [{ repo: "commons", commit: sourceCommit }],
+            sources: [{ repo: "source", commit: sourceCommit }],
+            catalogs: [{ repo: "source", commit: sourceCommit }],
             readiness: "migration/upstream-readiness.json",
             registry: "migration/registry.json",
             waivers: "migration/waves/U2/waivers.json",
-            scope: [{ repo: "commons", path: "crates/cortexkit-lease" }],
-            excluded: [{ repo: "commons", path: "crates/cortexkit-lease/Cargo.toml", reason: "regenerated as crates/lease/Cargo.toml" }],
+            scope: [{ repo: "source", tree: leaseTree }],
+            excluded: [{ repo: "source", blob_sha: gitIn(source, ["rev-parse", "HEAD:crates/lease/Cargo.toml"]), reason: "regenerated as crates/lease/Cargo.toml" }],
             property_impact: "migration/waves/U2/property-impact.json",
             architecture_impact: "migration/waves/U2/architecture-impact.json",
             files: [
                 {
-                    source: { repo: "commons", path: "crates/cortexkit-lease/src/lib.rs", blob_sha: leaseBlob },
+                    source: { repo: "source", blob_sha: leaseBlob },
                     destination: "crates/lease/src/lib.rs",
-                    destination_sha256: sha256("pub fn lease() {}\n"),
+                    destination_sha256: sha256(LEASE_SOURCE),
                     transformation: "verbatim",
                     class: "human-authored",
                     review_evidence: { doc_rigor: "review/U2/lib.json" },
                 },
                 {
-                    source: { repo: "commons", path: "crates/cortexkit-lease/src/key.rs", blob_sha: keyBlob },
+                    source: { repo: "source", blob_sha: keyBlob },
                     destination: "crates/lease/src/key.rs",
-                    destination_sha256: sha256("pub struct LeaseKey; // adapted\n"),
+                    destination_sha256: sha256("pub struct LeaseKey; // adapted\n#[test]\nfn key_derivation_is_stable() {}\n"),
                     transformation: "adapted",
                     class: "human-authored",
                     review_evidence: { doc_rigor: "review/U2/key.json" },
@@ -921,11 +1157,103 @@ describe("evidence: git-backed receipts", () => {
         expect(verify("receipt", receipt(), ctx)).toEqual([]);
     });
 
-    test("stale source blob hash marks the receipt stale (AE6)", () => {
+    test("a scoped tree with a blob missing from the receipt fails and names the blob (AE26)", () => {
+        const value = receipt();
+        files(value).splice(1, 1);
+        expect(verify("receipt", value, ctx)).toContain(`$.scope[0] source has blob ${keyBlob} missing from the receipt`);
+    });
+
+    test("a commit or tree id in place of a blob id is rejected", () => {
+        const value = receipt();
+        (files(value)[0]!.source as Json).blob_sha = sourceCommit;
+        expect(verify("receipt", value, ctx)).toContain(`$.files[0].source.blob_sha ${sourceCommit} is a commit, not a blob`);
+    });
+
+    test("a core record whose hashes do not match the checked tree is stale", () => {
+        const impact = impactFor(sourceCommit);
+        const core = records(impact).find((record) => record.classification === "core")!;
+        core.code_hash = "1".repeat(64);
+        const errors = verify("property-impact", impact, ctx);
+        expect(errors.some((error) => error.includes(".code_hash is stale"))).toBe(true);
+    });
+
+    test("a core record that lists a missing file is an error rather than an unverified hash", () => {
+        const impact = impactFor(sourceCommit);
+        const core = records(impact).find((record) => record.classification === "core")!;
+        core.code_hash = "1".repeat(64);
+        (core.files as string[]).push("crates/lease/src/absent.rs");
+        const errors = verify("property-impact", impact, ctx);
+        expect(errors.some((error) => error.includes("absent.rs, which is not a file in the destination tree"))).toBe(true);
+    });
+
+    test("a core record without a check pointer is rejected rather than carrying an uncompared hash", () => {
+        const impact = impactFor(sourceCommit);
+        const core = records(impact).find((record) => record.classification === "core")!;
+        delete core.check_pointer;
+        expect(verify("property-impact", impact, ctx).some((error) => error.endsWith(".check_pointer must be a non-empty string"))).toBe(true);
+    });
+
+    test("a core record whose check pointer names a missing file is an error", () => {
+        const impact = impactFor(sourceCommit);
+        const core = records(impact).find((record) => record.classification === "core")!;
+        core.check_pointer = "crates/lease/src/absent.rs#lease_is_single_writer";
+        const errors = verify("property-impact", impact, ctx);
+        expect(errors.some((error) => error.includes("check_pointer names crates/lease/src/absent.rs"))).toBe(true);
+    });
+
+    test("a scope tree from an older commit is rejected even though it is reachable", () => {
+        write(join(source, "crates/lease/src/added.rs"), "pub fn added() {}\n");
+        gitIn(source, ["add", "-A"]);
+        gitIn(source, ["commit", "-q", "-m", "add a file"]);
+        const newer = gitIn(source, ["rev-parse", "HEAD"]);
+        try {
+            const value = receipt();
+            (value.sources as Json[])[0] = { repo: "source", commit: newer };
+            (value.catalogs as Json[])[0] = { repo: "source", commit: newer };
+            const errors = verify("receipt", value, ctx);
+            expect(errors).toContain(`$.scope[0].tree ${leaseTree} is not a tree of source@${newer}`);
+        } finally {
+            gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
+    });
+
+    test("a post-integration report whose covered modules changed after the review is stale", () => {
+        expect(verify("architecture-impact", architectureFor(), ctx)).toEqual([]);
+        const stale = architectureFor();
+        ((stale.reports as Json[])[1]!.analyzed as Json).modules_hash = "1".repeat(64);
+        expect(verify("architecture-impact", stale, ctx).some((error) => error.includes("analyzed.modules_hash is stale"))).toBe(true);
+        write(join(destination, "crates/lease/src/drift.rs"), "pub fn drift() {}\n");
+        gitIn(destination, ["add", "-A"]);
+        try {
+            const current = architectureFor();
+            expect(verify("architecture-impact", current, ctx)).toEqual([]);
+            const before = architectureFor();
+            gitIn(destination, ["rm", "-q", "-f", "crates/lease/src/drift.rs"]);
+            expect(verify("architecture-impact", before, ctx).some((error) => error.includes("analyzed.modules_hash is stale"))).toBe(true);
+        } finally {
+            rmSync(join(destination, "crates/lease/src/drift.rs"), { force: true });
+            gitIn(destination, ["add", "-A"]);
+        }
+    });
+
+    test("a post-integration report that covers a missing module directory is rejected", () => {
+        const value = architectureFor();
+        ((value.reports as Json[])[1]!.analyzed as Json).modules = ["crates/absent"];
+        expect(verify("architecture-impact", value, ctx)).toContain("$.reports[1].analyzed.modules names crates/absent, which is not a directory in the destination tree");
+    });
+
+    test("an impact record pinned to an unrelated destination commit is rejected", () => {
+        const impact = impactFor(sourceCommit);
+        impact.destination_commit = "f".repeat(40);
+        expect(verify("property-impact", impact, ctx)).toContain(`$.destination_commit ${"f".repeat(40)} is not an ancestor of the destination HEAD`);
+        expect(verify("property-impact", impactFor(sourceCommit), ctx)).toEqual([]);
+    });
+
+    test("a source blob outside the pinned snapshot marks the receipt stale (AE6)", () => {
         const value = receipt();
         (files(value)[0]!.source as Json).blob_sha = "e".repeat(40);
         const errors = verify("receipt", value, ctx);
-        expect(errors.some((error) => error.startsWith("$.files[0].source.blob_sha is stale"))).toBe(true);
+        expect(errors).toContain(`$.files[0].source.blob_sha ${"e".repeat(40)} is not reachable from source@${sourceCommit}`);
     });
 
     test("stale destination hash and missing destination fail", () => {
@@ -945,30 +1273,18 @@ describe("evidence: git-backed receipts", () => {
         expect(verify("receipt", value, ctx).some((error) => error.includes("is verbatim but destination bytes differ"))).toBe(true);
     });
 
-    test("scope file missing from the receipt fails and names the path (AE26)", () => {
-        const value = receipt();
-        files(value).splice(1, 1);
-        expect(verify("receipt", value, ctx)).toContain(
-            "$.scope commons:crates/cortexkit-lease has file missing from receipt: crates/cortexkit-lease/src/key.rs",
-        );
-    });
 
-    test("unpinned source path is rejected", () => {
-        const value = receipt();
-        (files(value)[0]!.source as Json).path = "crates/cortexkit-lease/src/nope.rs";
-        expect(verify("receipt", value, ctx).some((error) => error.includes("is not a blob at commons@"))).toBe(true);
-    });
 
     test("open readiness bead refuses the SHA pin (AE32)", () => {
         const value = receipt();
         const readinessPath = join(destination, "migration/upstream-readiness.json");
         const original = JSON.parse(require("node:fs").readFileSync(readinessPath, "utf8")) as Json;
         const modified = structuredClone(original);
-        ((modified.waves as Json).U2 as Json).bead_ids = ["commons-abc", "commons-open", "commons-missing"];
+        ((modified.waves as Json).U2 as Json).bead_ids = ["source-abc", "source-open", "source-missing"];
         writeFileSync(readinessPath, JSON.stringify(modified));
         try {
             const errors = verify("receipt", value, ctx);
-            expect(errors.some((error) => error.includes("beads not closed: commons-open=open, commons-missing=missing"))).toBe(true);
+            expect(errors.some((error) => error.includes("beads not closed: source-open=open, source-missing=missing"))).toBe(true);
         } finally {
             writeFileSync(readinessPath, JSON.stringify(original));
         }
@@ -992,7 +1308,7 @@ describe("evidence: git-backed receipts", () => {
         files(value).push({
             source: null,
             destination: "crates/lease/src/lib.rs",
-            destination_sha256: sha256("pub fn lease() {}\n"),
+            destination_sha256: sha256(LEASE_SOURCE),
             transformation: "authored",
             class: "new-authored",
             review_evidence: { design_review: "x", negative_tests: "y" },
@@ -1005,40 +1321,448 @@ describe("evidence: git-backed receipts", () => {
 
     test("carried-forward pointers must resolve in the destination tree (AE25)", () => {
         const impact = impactFor(sourceCommit);
-        records(impact)[1]!.check_pointer = "crates/lease/src/gone.rs#L1";
+        records(impact)[1]!.check_pointer = "crates/lease/src/gone.rs#key_derivation_is_stable";
         const errors = verify("property-impact", impact, ctx);
         expect(errors).toContain(
-            "$.records[1].check_pointer crates/lease/src/gone.rs#L1 does not resolve in the destination tree; reclassify the record as core or excluded",
+            "$.records[1].check_pointer crates/lease/src/gone.rs#key_derivation_is_stable does not resolve in the destination tree; reclassify the record as core or excluded",
         );
         expect(verify("property-impact", impactFor(sourceCommit), ctx)).toEqual([]);
     });
 
-    test("registry scans catch unfrozen legacy identities and unowned persistent literals (AE7)", () => {
-        write(join(destination, "crates/lease/src/paths.rs"), 'const ROOT: &str = "cortexkit";\nconst DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\n');
-        write(join(destination, "crates/lease/src/old.rs"), 'use cortexkit_lease::Lease;\n');
+    test("a pointer into a sibling directory that extends the root's name is rejected", () => {
+        const twin = `${destination}-twin`;
+        write(join(twin, "crates/lease/src/lib.rs"), LEASE_SOURCE);
         try {
-            const registry = copy("registry");
-            let errors = verify("registry", registry, ctx);
-            expect(errors).toEqual(
-                expect.arrayContaining([
-                    "crates/lease/src/paths.rs:1: legacy identity not frozen by the registry",
-                    'crates/lease/src/paths.rs: persistent literal "mystery.db" has no family entry in the registry',
-                ]),
+            const impact = impactFor(sourceCommit);
+            records(impact)[1]!.check_pointer = `../${basename(twin)}/crates/lease/src/lib.rs#lease_is_single_writer`;
+            expect(verify("property-impact", impact, ctx)).toContain(
+                `$.records[1].check_pointer ../${basename(twin)}/crates/lease/src/lib.rs#lease_is_single_writer escapes the destination root; reclassify the record as core or excluded`,
             );
-            expect(errors.some((error) => error.startsWith("crates/lease/src/old.rs:1"))).toBe(true);
-            (registry.entries as Json[]).push({
-                kind: "identity",
-                value: "cortexkit",
-                class: "frozen-durable",
-                rationale: "managed dir",
-                evidence: ["x"],
-            });
-            errors = verify("registry", registry, ctx);
-            expect(errors).not.toContain("crates/lease/src/paths.rs:1: legacy identity not frozen by the registry");
+        } finally {
+            rmSync(twin, { recursive: true, force: true });
+        }
+    });
+
+    test("a check pointer names a declared check, never a line", () => {
+        const byLine = impactFor(sourceCommit);
+        records(byLine)[1]!.check_pointer = "crates/lease/src/key.rs#L10";
+        expect(verify("property-impact", byLine, ctx)).toContain(
+            "$.records[1].check_pointer crates/lease/src/key.rs#L10 uses a line anchor; name the check instead; reclassify the record as core or excluded",
+        );
+        const renamed = impactFor(sourceCommit);
+        records(renamed)[1]!.check_pointer = "crates/lease/src/key.rs#key_derivation_was_renamed";
+        expect(verify("property-impact", renamed, ctx)).toContain(
+            "$.records[1].check_pointer crates/lease/src/key.rs#key_derivation_was_renamed names key_derivation_was_renamed, which crates/lease/src/key.rs does not declare; reclassify the record as core or excluded",
+        );
+        const bare = impactFor(sourceCommit);
+        const core = records(bare).find((record) => record.classification === "core")!;
+        core.check_pointer = "crates/lease/src/lib.rs";
+        expect(verify("property-impact", bare, ctx)).toContain("$.records[0].check_pointer must name the check as path#check");
+        // `lease` is a plain function in the fixture source; a name without a test attribute
+        // is not an executable check.
+        const helper = impactFor(sourceCommit);
+        records(helper)[1]!.check_pointer = "crates/lease/src/lib.rs#lease";
+        expect(verify("property-impact", helper, ctx)).toContain(
+            "$.records[1].check_pointer crates/lease/src/lib.rs#lease names lease, which crates/lease/src/lib.rs declares without a test attribute; reclassify the record as core or excluded",
+        );
+    });
+
+    test("a core record's evidence digest is compared against its evidence file", () => {
+        const stale = impactFor(sourceCommit);
+        const core = records(stale).find((record) => record.classification === "core")!;
+        core.evidence_digest = "2".repeat(64);
+        (core.new_evidence as Json | undefined) && ((core.new_evidence as Json).digest = "2".repeat(64));
+        expect(verify("property-impact", stale, ctx).some((error) => error.includes(".evidence_digest is stale"))).toBe(true);
+        const split = impactFor(sourceCommit);
+        const splitCore = records(split).find((record) => record.classification === "core")!;
+        splitCore.new_evidence = { digest: "3".repeat(64), description: "fresh" };
+        splitCore.source_status = { exercised: "partial", check_status: "unaudited", portfolio_verdict: "not-evaluated", known_violation: false };
+        expect(verify("property-impact", split, ctx).some((error) => error.includes("new_evidence.digest") && error.includes("does not equal evidence_digest"))).toBe(true);
+    });
+
+    test("a blob shared by two scoped trees needs one disposition per tree", () => {
+        write(join(source, "crates/other/src/lib.rs"), LEASE_SOURCE);
+        gitIn(source, ["add", "-A"]);
+        gitIn(source, ["commit", "-q", "-m", "same bytes in a second crate"]);
+        const newer = gitIn(source, ["rev-parse", "HEAD"]);
+        try {
+            const value = receipt();
+            (value.sources as Json[])[0] = { repo: "source", commit: newer };
+            (value.catalogs as Json[])[0] = { repo: "source", commit: newer };
+            (value.scope as Json[]).push({ repo: "source", tree: gitIn(source, ["rev-parse", "HEAD:crates/other"]) });
+            const errors = verify("receipt", value, ctx);
+            expect(errors).toContain(`$.scope[0],$.scope[1] source has blob ${leaseBlob} at 2 paths but the receipt disposes of it 1 time(s)`);
+        } finally {
+            gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
+    });
+
+    test("property-impact provenance must name the receipt's pinned source at its pinned commit", () => {
+        const value = receipt();
+        const impact = impactFor(sourceCommit);
+        const impactPath = join(destination, "migration/waves/U2/property-impact-drift.json");
+        write(impactPath, JSON.stringify(impact));
+        try {
+            value.property_impact = "migration/waves/U2/property-impact-drift.json";
+            expect(verify("receipt", value, ctx)).toEqual([]);
+            const stale = "d".repeat(40);
+            (impact.provenance as Json[])[0] = { repo: "source", source_commit: stale, catalog_commit: stale };
+            writeFileSync(impactPath, JSON.stringify(impact));
+            expect(verify("receipt", value, ctx)).toContain(`$.property_impact.provenance[0].source_commit ${stale} is not the pinned source commit ${sourceCommit}`);
+            (impact.provenance as Json[])[0] = { repo: "elsewhere", source_commit: sourceCommit, catalog_commit: sourceCommit };
+            writeFileSync(impactPath, JSON.stringify(impact));
+            expect(verify("receipt", value, ctx)).toContain("$.property_impact.provenance[0].repo elsewhere is not a pinned source of this receipt");
+            (impact.provenance as Json[])[0] = { repo: "source", source_commit: sourceCommit, catalog_commit: sourceCommit };
+            records(impact)[1]!.provenance = `source@${stale}`;
+            writeFileSync(impactPath, JSON.stringify(impact));
+            expect(verify("receipt", value, ctx)).toContain(`$.property_impact.records[1].provenance source@${stale} is not a pinned source of this receipt at its pinned commit`);
+        } finally {
+            rmSync(impactPath, { force: true });
+        }
+    });
+
+    test("a pre-port architecture report must name a pinned source at its pinned commit", () => {
+        const stale = architectureFor();
+        ((stale.reports as Json[])[0]!.analyzed as Json).commit = "f".repeat(40);
+        write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(stale));
+        try {
+            expect(verify("receipt", receipt(), ctx)).toContain(
+                `$.architecture_impact.reports[0].analyzed.commit ${"f".repeat(40)} is not the pinned source commit ${sourceCommit}`,
+            );
+            const foreign = architectureFor();
+            ((foreign.reports as Json[])[0]!.analyzed as Json).repo = "elsewhere";
+            write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(foreign));
+            expect(verify("receipt", receipt(), ctx)).toContain("$.architecture_impact.reports[0].analyzed.repo elsewhere is not a pinned source of this receipt");
+        } finally {
+            write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(architectureFor()));
+        }
+        expect(verify("receipt", receipt(), ctx)).toEqual([]);
+    });
+
+    test("a retired source identity is found through its digest in any spelling or compound", () => {
+        const registry = copy("registry");
+        (registry.entries as Json[]).push({ kind: "retired-identity", digest: retiredIdentityDigest("old-name"), rationale: "retired" });
+        for (const [file, text] of [
+            ["docs/note.md", "The Old-Name service.\n"],
+            ["crates/lease/src/paths.rs", 'const DIR: &str = "old_name";\n'],
+            ["scripts/run.sh", "oldname-host --flag\n"],
+            ["scripts/compound.sh", "old-name-host --flag\n"],
+            ["scripts/prefixed.sh", "run_old_name --flag\n"],
+            ["docs/old-name/note.md", "Nothing inside names it.\n"],
+        ] as const) {
+            write(join(destination, file), text);
+            gitIn(destination, ["add", "-A"]);
+            try {
+                const errors = verify("registry", registry, ctx);
+                expect(errors.some((error) => error.startsWith(`${file}: `) && error.includes("retired source identity"))).toBe(true);
+            } finally {
+                gitIn(destination, ["rm", "-q", "-f", file]);
+            }
+        }
+        write(join(destination, "docs/note.md"), "An unrelated older name.\n");
+        gitIn(destination, ["add", "-A"]);
+        try {
+            expect(verify("registry", registry, ctx).some((error) => error.includes("retired source identity"))).toBe(false);
+        } finally {
+            gitIn(destination, ["rm", "-q", "-f", "docs/note.md"]);
+        }
+    });
+
+    test("a waiver expires when the wave it names has landed, in any receipt (AE30)", () => {
+        const u1 = {
+            schema_version: 1,
+            wave: "U1",
+            waivers: [
+                {
+                    id: "W-U1-example",
+                    gate: "example-gate",
+                    kind: "release",
+                    owner: "o",
+                    approver: "a",
+                    bead_id: "b",
+                    created_at: "2026-09-01",
+                    expires_by_wave: "U2",
+                    closure_condition: "close it",
+                    evidence: ["e"],
+                },
+            ],
+        };
+        write(join(destination, "migration/waves/U1/waivers.json"), JSON.stringify(u1));
+        try {
+            expect(verify("receipt", receipt(), ctx)).toContain(
+                "migration/waves/U1/waivers.json W-U1-example expired: expires_by_wave U2 is not after wave U2; close the gate before recording this wave",
+            );
+            u1.waivers[0]!.expires_by_wave = "U3";
+            write(join(destination, "migration/waves/U1/waivers.json"), JSON.stringify(u1));
+            expect(verify("receipt", receipt(), ctx)).toEqual([]);
+            // The U2 receipt exists in the tree, so a U2 waiver naming U2 as its expiry is
+            // already due when its own receipt is checked.
+            const own = receipt();
+            const waivers = { schema_version: 1, wave: "U2", waivers: [{ ...u1.waivers[0]!, id: "W-U2-example", expires_by_wave: "U3" }] };
+            write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify(waivers));
+            (own.gates as Json)["example-gate"] = "not_run";
+            expect(verify("receipt", own, ctx)).toEqual([]);
+            waivers.waivers[0]!.expires_by_wave = "U2";
+            write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify(waivers));
+            const errors = verify("receipt", own, ctx);
+            expect(errors).toContain("$.waivers W-U2-example expired: expires_by_wave U2 and wave U2 has landed; close the gate or record a new waiver");
+            expect(errors).toContain("$.gates.example-gate blocks the wave with status not_run");
+        } finally {
+            rmSync(join(destination, "migration/waves/U1/waivers.json"), { force: true });
+            write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify({ schema_version: 1, wave: "U2", waivers: [] }));
+        }
+    });
+
+    test("the impact's touched files must include every implementation file the receipt changes", () => {
+        const impact = impactFor(sourceCommit);
+        impact.touched_files = ["crates/lease/src/lib.rs"];
+        const carried = records(impact).find((record) => record.classification === "carried-forward")!;
+        carried.files = ["crates/lease/src/lib.rs"];
+        write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impact));
+        try {
+            expect(verify("receipt", receipt(), ctx)).toContain("$.property_impact.touched_files omits crates/lease/src/key.rs, which this receipt changes");
+        } finally {
+            write(join(destination, "migration/waves/U2/property-impact.json"), JSON.stringify(impactFor(sourceCommit)));
+        }
+    });
+
+    test("moving bytes across a file boundary changes the core code hash", () => {
+        const a = Buffer.from("alpha\nbeta\n");
+        const b = Buffer.from("gamma\n");
+        const moved = fileSetDigest([["x.rs", Buffer.from("alpha\n")], ["y.rs", Buffer.from("beta\ngamma\n")]]);
+        expect(fileSetDigest([["x.rs", a], ["y.rs", b]])).not.toBe(moved);
+        expect(fileSetDigest([["y.rs", b], ["x.rs", a]])).toBe(fileSetDigest([["x.rs", a], ["y.rs", b]]));
+    });
+
+    test("a source blob from an earlier revision of a file is not part of the pinned snapshot", () => {
+        write(join(source, "crates/lease/src/lib.rs"), `${LEASE_SOURCE}// revised\n`);
+        gitIn(source, ["add", "-A"]);
+        gitIn(source, ["commit", "-q", "-m", "revise the lease source"]);
+        const newer = gitIn(source, ["rev-parse", "HEAD"]);
+        try {
+            const value = receipt();
+            (value.sources as Json[])[0] = { repo: "source", commit: newer };
+            (value.catalogs as Json[])[0] = { repo: "source", commit: newer };
+            (value.scope as Json[])[0] = { repo: "source", tree: gitIn(source, ["rev-parse", "HEAD:crates/lease"]) };
+            // The receipt still cites the superseded blob, which the commit's history holds
+            // but its tree does not.
+            expect(verify("receipt", value, ctx)).toContain(`$.files[0].source.blob_sha ${leaseBlob} is not reachable from source@${newer}`);
+        } finally {
+            gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
+    });
+
+    test("a source blob at two paths must be disposed of twice", () => {
+        write(join(source, "crates/lease/src/copy.rs"), LEASE_SOURCE);
+        gitIn(source, ["add", "-A"]);
+        gitIn(source, ["commit", "-q", "-m", "duplicate bytes at a second path"]);
+        const newer = gitIn(source, ["rev-parse", "HEAD"]);
+        try {
+            const value = receipt();
+            (value.sources as Json[])[0] = { repo: "source", commit: newer };
+            (value.catalogs as Json[])[0] = { repo: "source", commit: newer };
+            (value.scope as Json[])[0] = { repo: "source", tree: gitIn(source, ["rev-parse", "HEAD:crates/lease"]) };
+            const errors = verify("receipt", value, ctx);
+            expect(errors).toContain(`$.scope[0] source has blob ${leaseBlob} at 2 paths but the receipt disposes of it 1 time(s)`);
+        } finally {
+            gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
+    });
+
+    test("registry scans cover test-named modules under src and skip cfg(test) items", () => {
+        write(
+            join(destination, "crates/lease/src/test_support.rs"),
+            'pub const DB: &str = "support.db";\n#[cfg(test)]\nmod tests {\n    /* outer /* inner */ still a comment { */\n    const T: &str = "only-in-tests.db";\n    fn f() { let s = "}"; let long = r##########"}" { "##########; }\n}\n#[cfg(all(test, feature = "x"))]\nconst U: &str = "also-only.db";\npub const AFTER: &str = "after.db";\n',
+        );
+        try {
+            const errors = verify("registry", copy("registry"), ctx);
+            expect(errors).toContain('crates/lease/src/test_support.rs: persistent literal "support.db" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/test_support.rs: persistent literal "after.db" has no family entry in the registry');
+            expect(errors.some((error) => error.includes("only-in-tests.db") || error.includes("also-only.db"))).toBe(false);
+        } finally {
+            rmSync(join(destination, "crates/lease/src/test_support.rs"));
+        }
+    });
+
+    test("registry scans ignore cfg(test) spelled inside comments and strings", () => {
+        write(
+            join(destination, "crates/lease/src/spelled.rs"),
+            '// example: #[cfg(test)]\npub const A: &str = "after-comment.db";\n/* #[cfg(test)] */ pub const B: &str = "after-block.db";\nconst S: &str = "#[cfg(test)]";\npub const C: &str = "after-string.db";\nconst R: &str = r#"#[cfg(test)]"#;\npub const D: &str = "after-raw.db";\n#[cfg(test)]\nmod t { const T: &str = "test-only.db"; }\n',
+        );
+        try {
+            const errors = verify("registry", copy("registry"), ctx);
+            for (const literal of ["after-comment.db", "after-block.db", "after-string.db", "after-raw.db"]) {
+                expect(errors).toContain(`crates/lease/src/spelled.rs: persistent literal "${literal}" has no family entry in the registry`);
+            }
+            expect(errors.some((error) => error.includes("test-only.db"))).toBe(false);
+        } finally {
+            rmSync(join(destination, "crates/lease/src/spelled.rs"));
+        }
+    });
+
+    test("registry scans follow Cargo targets rather than the src directory", () => {
+        // A crate whose library, build script, and binary live outside `src` (two of them
+        // under test directory names), with a test target the manifest names by path and
+        // the auto-discovered test, example, and bench directories.
+        const crate = join(destination, "crates/edge");
+        write(
+            join(crate, "Cargo.toml"),
+            '[package]\nname = "edge"\nversion = "0.1.0"\nedition = "2024"\nbuild = "examples/build.rs"\n\n[lib]\npath = "tests/lib.rs"\n\n[[bin]]\nname = "edge"\npath = "app/main.rs"\n\n[[test]]\nname = "named"\npath = "checks/named.rs"\n',
+        );
+        write(join(crate, "tests/lib.rs"), 'pub const A: &str = "root-lib.db";\n');
+        write(join(crate, "Cargo.toml"), readFileSync(join(crate, "Cargo.toml"), "utf8").replace('path = "tests/lib.rs"', 'path = "code"'));
+        write(join(crate, "code"), 'pub const A: &str = "root-lib.db";\n');
+        rmSync(join(crate, "tests/lib.rs"));
+        write(join(destination, "packages/edge/index.ts"), 'export const entry = "entrypoint.db";\n');
+        write(join(crate, "examples/build.rs"), 'const G: &str = "build.db";\nfn main() {}\n');
+        write(join(crate, "app/main.rs"), 'const B: &str = "bin.db";\nfn main() {}\n');
+        write(join(crate, "checks/named.rs"), 'const C: &str = "named-test.db";\n');
+        write(join(crate, "tests/it.rs"), 'const D: &str = "auto-test.db";\n');
+        write(join(crate, "examples/demo.rs"), 'const E: &str = "example.db";\n');
+        write(join(crate, "benches/speed.rs"), 'const F: &str = "bench.db";\n');
+        try {
+            const errors = verify("registry", copy("registry"), ctx);
+            expect(errors).toContain('crates/edge/code: persistent literal "root-lib.db" has no family entry in the registry');
+            expect(errors).toContain('packages/edge/index.ts: persistent literal "entrypoint.db" has no family entry in the registry');
+            expect(errors).toContain('crates/edge/examples/build.rs: persistent literal "build.db" has no family entry in the registry');
+            expect(errors).toContain('crates/edge/app/main.rs: persistent literal "bin.db" has no family entry in the registry');
+            for (const literal of ["named-test.db", "auto-test.db", "example.db", "bench.db"]) {
+                expect(errors.some((error) => error.includes(literal))).toBe(false);
+            }
+        } finally {
+            rmSync(crate, { recursive: true });
+            rmSync(join(destination, "packages"), { recursive: true, force: true });
+        }
+    });
+
+    test("registry scans catch migration machinery in non-test code (AE11)", () => {
+        write(join(destination, "crates/lease/src/ledger.rs"), "pub struct Migration { pub version: u32 }\npub fn migrate() {}\n");
+        // A `tests` directory under `src` is compiled like any other module; only a
+        // `#[cfg(test)]` item is test-only.
+        write(join(destination, "crates/lease/src/tests/ledger.rs"), "fn run_migrations() {}\n#[cfg(test)]\nmod t { fn run_migrations() {} }\n");
+        try {
+            const errors = verify("registry", copy("registry"), ctx);
+            expect(errors).toContain('crates/lease/src/ledger.rs:1: migration machinery "Migration {"; a family has one baseline and no version ledger');
+            expect(errors).toContain('crates/lease/src/ledger.rs:2: migration machinery "fn migrate"; a family has one baseline and no version ledger');
+            expect(errors).toContain('crates/lease/src/tests/ledger.rs:1: migration machinery "run_migrations"; a family has one baseline and no version ledger');
+            expect(errors.some((error) => error.startsWith("crates/lease/src/tests/ledger.rs:3"))).toBe(false);
+        } finally {
+            rmSync(join(destination, "crates/lease/src/ledger.rs"));
+            rmSync(join(destination, "crates/lease/src/tests"), { recursive: true });
+        }
+    });
+
+    test("registry scans catch unowned persistent literals (AE7)", () => {
+        write(
+            join(destination, "crates/lease/src/paths.rs"),
+            'const DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\nconst RAW: &str = r#"raw.db"#;\nconst BYTES: &[u8] = b"bytes.lock";\nconst BOTH: &[u8] = br#"both.jsonl"#;\n',
+        );
+        write(join(destination, "crates/lease/src/paths.ts"), "const a = 'single.db';\nconst b = `template.jsonl`;\n");
+        write(join(destination, "crates/lease/src/view.tsx"), 'export const p = "component.db";\n');
+        try {
+            const errors = verify("registry", copy("registry"), ctx);
+            expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "mystery.db" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "raw.db" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "bytes.lock" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "both.jsonl" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.ts: persistent literal "single.db" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.ts: persistent literal "template.jsonl" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/view.tsx: persistent literal "component.db" has no family entry in the registry');
+            expect(errors.some((error) => error.includes('"core.sqlite"'))).toBe(false);
         } finally {
             rmSync(join(destination, "crates/lease/src/paths.rs"));
-            rmSync(join(destination, "crates/lease/src/old.rs"));
+            rmSync(join(destination, "crates/lease/src/paths.ts"));
+            rmSync(join(destination, "crates/lease/src/view.tsx"));
         }
+    });
+
+
+    test("registered fixtures must exist and byte-stable fixtures must be verbatim or authored", () => {
+        const fixturePath = "crates/lease/tests/golden/vectors.json";
+        const fixtureBytes = '{"vectors": []}\n';
+        write(join(destination, fixturePath), fixtureBytes);
+        try {
+            const registry = copy("registry");
+            (registry.entries as Json[]).push({
+                kind: "fixture",
+                path: fixturePath,
+                role: "byte-stable",
+                rationale: "golden vectors",
+                evidence: ["migration/waves/U2/receipt.json"],
+            });
+            let errors = verify("registry", registry, ctx);
+            expect(errors).toContain(`fixture ${fixturePath} is byte-stable but no receipt pins its bytes`);
+            const pinning = receipt();
+            files(pinning).push({
+                source: null,
+                destination: fixturePath,
+                destination_sha256: sha256(fixtureBytes),
+                transformation: "authored",
+                class: "new-authored",
+                review_evidence: { design_review: "x", negative_tests: "y" },
+            });
+            writeFileSync(join(destination, "migration/waves/U2/receipt.json"), JSON.stringify(pinning));
+            errors = verify("registry", registry, ctx);
+            expect(errors.some((error) => error.startsWith(`fixture ${fixturePath}`))).toBe(false);
+
+            (registry.entries as Json[]).push({
+                kind: "fixture",
+                path: "crates/lease/tests/golden/missing.json",
+                role: "generator",
+                rationale: "generator",
+                evidence: ["x"],
+            });
+            expect(validateShape("registry", registry)).toContain("$.entries[7].fixture must be a non-empty string");
+            ((registry.entries as Json[])[7] as Json).fixture = fixturePath;
+            errors = verify("registry", registry, ctx);
+            expect(errors).toContain("fixture crates/lease/tests/golden/missing.json is registered but does not exist in the destination");
+
+            (registry.entries as Json[]).pop();
+            writeFileSync(join(destination, "migration/registry.json"), JSON.stringify(registry));
+            const value = receipt();
+            files(value).push({
+                source: { repo: "source", blob_sha: blob },
+                destination: fixturePath,
+                destination_sha256: sha256(fixtureBytes),
+                transformation: "adapted",
+                class: "human-authored",
+                review_evidence: { doc_rigor: "x" },
+            });
+            expect(verify("receipt", value, ctx)).toContain(
+                `$.files[${files(value).length - 1}] is a byte-stable fixture but its transformation is adapted, not verbatim or authored`,
+            );
+        } finally {
+            rmSync(join(destination, fixturePath));
+            rmSync(join(destination, "migration/waves/U2/receipt.json"), { force: true });
+            writeFileSync(join(destination, "migration/registry.json"), JSON.stringify(valid.registry));
+        }
+    });
+
+    test("a generator fixture must target a registered byte-stable fixture", () => {
+        const registry = copy("registry");
+        (registry.entries as Json[]).push({
+            kind: "fixture",
+            path: "scripts/gen.ts",
+            role: "generator",
+            fixture: "crates/lease/tests/golden/unregistered.json",
+            rationale: "generator",
+            evidence: ["x"],
+        });
+        expect(validateShape("registry", registry)).toContain(
+            "$.entries[6].fixture crates/lease/tests/golden/unregistered.json is not a registered byte-stable fixture",
+        );
+        // A registered fixture whose role is not byte-stable is rejected too.
+        (registry.entries as Json[]).push({
+            kind: "fixture",
+            path: "release/registry-gate.json",
+            role: "external-record",
+            rationale: "external record",
+            evidence: ["x"],
+        });
+        ((registry.entries as Json[])[6] as Json).fixture = "release/registry-gate.json";
+        expect(validateShape("registry", registry)).toContain(
+            "$.entries[6].fixture release/registry-gate.json is not a registered byte-stable fixture",
+        );
     });
 
     test("shipped TypeScript needs a permanent or transitional registry entry", () => {
@@ -1058,7 +1782,9 @@ describe("cli", () => {
     test("every subcommand accepts its complete shape-only fixture where no evidence is needed", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-check-cli-"));
         try {
-            for (const kind of ["waivers", "property-catalog", "architecture-impact"] as CheckKind[]) {
+            // architecture-impact needs a git-tracked tree for its module digest, so it is
+            // covered by the evidence-backed suite instead.
+            for (const kind of ["waivers", "property-catalog"] as CheckKind[]) {
                 const path = join(root, `${kind}.json`);
                 writeFileSync(path, `${JSON.stringify(valid[kind])}\n`);
                 const result = cli([kind, path, "--root", root]);

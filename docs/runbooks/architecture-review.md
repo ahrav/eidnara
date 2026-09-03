@@ -20,6 +20,12 @@ validators, not product source.
   interfaces, implementations, seams, and adapters the wave touches. It also
   records the `git log --since` window used to measure recent change pressure.
   Its SHA-256 is `analyzed.scope_hash`.
+- Module digest (post-integration reports only): `analyzed.modules` lists the
+  module directories the report judged, and `analyzed.modules_hash` is the
+  SHA-256 over one `path\n<sha256 of bytes>\n` line per `git ls-files` entry
+  under those directories, sorted by path. `eidnara:check` recomputes it from
+  the checked tree, so any change to a covered module after the review makes
+  the report stale until the review is re-run and the digest re-recorded.
 
 ```json
 {
@@ -95,7 +101,7 @@ post-integration report.
     {
       "phase": "pre-port",
       "iteration": 0,
-      "analyzed": { "repo": "commons", "commit": "<sha>", "scope_hash": "<sha256>" },
+      "analyzed": { "repo": "primitives", "commit": "<sha>", "scope_hash": "<sha256>" },
       "report_hash": "<sha256>",
       "skill_sha256": "<sha256>",
       "candidates": []
@@ -103,7 +109,13 @@ post-integration report.
     {
       "phase": "post-integration",
       "iteration": 1,
-      "analyzed": { "repo": "eidnara", "commit": "<sha>", "scope_hash": "<sha256>" },
+      "analyzed": {
+        "repo": "eidnara",
+        "commit": "<sha>",
+        "scope_hash": "<sha256>",
+        "modules": ["crates/lease", "crates/storage"],
+        "modules_hash": "<sha256>"
+      },
       "report_hash": "<sha256>",
       "skill_sha256": "<sha256>",
       "candidates": [

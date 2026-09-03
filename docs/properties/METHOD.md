@@ -27,7 +27,8 @@ Method: `/testing:property-discovery-and-catalog`.
 6. **No fixes.** This is evidence and analysis, not remediation. Do not edit
    source, tests, or CI.
 7. **Prose style.** Plain, direct, present tense. Full sentences. No hype, no
-   emoji, no em dashes as connectors. Wrap at about 80 columns.
+   emoji, no em dashes as connectors. A spaced hyphen separates an enumerated
+   field head from its note (`yes - <note>`). Wrap at about 80 columns.
 
 ## Record schema
 
@@ -39,12 +40,12 @@ Every catalog record uses exactly these fields, in this order:
 Type: safety | liveness | reachability
 Reachability: default-production | explicit-config-only | test-only
 Status: active | invalidated
-Exercised: not yet — <what is missing> | partial — <what is covered> | yes — <what constructed it>
+Exercised: not yet - <what is missing> | partial - <what is covered> | yes - <what constructed it>
 Guarantee: <one sentence>
-Check: `<semantics>` — <the exact condition to assert, plus why these semantics>
+Check: `<semantics>` - <the exact condition to assert, plus why these semantics>
 Fault/timing angle: <the window, the interleaving, or "none">
 Required faults and enabling state: <concretely what must occur>
-Confidence: high | medium | low — [evidence](evidence/<slug>.md). <what you verified and how>
+Confidence: high | medium | low - [evidence](evidence/<slug>.md). <what you verified and how>
 Existing check: <location + what it covers, or "none">
 Impact: <consequence if it fails>
 Open questions:

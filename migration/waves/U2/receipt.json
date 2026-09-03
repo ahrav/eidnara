@@ -1,0 +1,1092 @@
+{
+  "schema_version": 1,
+  "wave": "U2",
+  "sources": [
+    {
+      "repo": "primitives",
+      "commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
+    }
+  ],
+  "catalogs": [
+    {
+      "repo": "primitives",
+      "commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
+    }
+  ],
+  "readiness": "migration/upstream-readiness.json",
+  "registry": "migration/registry.json",
+  "waivers": "migration/waves/U2/waivers.json",
+  "scope": [
+    {
+      "repo": "primitives",
+      "tree": "93c77aac984ec5ee433ae9957c18382dcec1dbaa"
+    },
+    {
+      "repo": "primitives",
+      "tree": "2d82e97cd6008b91a4db1819dd80551032878030"
+    },
+    {
+      "repo": "primitives",
+      "tree": "5cef7e34fe4cac574a44d72c2e737e102012b5c3"
+    },
+    {
+      "repo": "primitives",
+      "tree": "231e8d989aa881f21b096b7854a314e54d8de0e1"
+    },
+    {
+      "repo": "primitives",
+      "tree": "c1f46d75a5065e27289a60c076fe3983cf439936"
+    }
+  ],
+  "excluded": [
+    {
+      "repo": "primitives",
+      "blob_sha": "67b5ec9fabce080bf1d37b35df41fe20d9dd5565",
+      "reason": "cache-stability golden vectors are authored in the destination (crates/cache-stability/tests/golden/cache-stability-golden-vectors.json)"
+    },
+    {
+      "repo": "primitives",
+      "blob_sha": "6aa91fa1ca848ccb1d3641a428887072501ed964",
+      "reason": "storage descriptor golden vectors are authored in the destination by the registered generator (crates/storage-types/tests/golden/storage_vectors.json)"
+    }
+  ],
+  "property_impact": "migration/waves/U2/property-impact.json",
+  "architecture_impact": "migration/waves/U2/architecture-impact.json",
+  "files": [
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "835d282a3fa172c12816735ecafc8f021a35019e"
+      },
+      "destination": "crates/cache-stability/Cargo.toml",
+      "destination_sha256": "314cd0b9221b09c5a6865883389bccc5d9e7c94058f4e0dfe785acfba9bce7d6",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#authored-control-records"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "668de98e86598eca1ba50a051328db583460a274"
+      },
+      "destination": "crates/cache-stability/src/lib.rs",
+      "destination_sha256": "61168d1cfe261fca56475fc064781fe89c34b60a0c420ac631314e308c52e72a",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-rust-sources"
+      }
+    },
+    {
+      "source": null,
+      "destination": "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
+      "destination_sha256": "7018f937836d4776e29ad779ff41f88d89cac0c27427d9fee0faef44d07a3fec",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#byte-stable-fixtures",
+        "negative_tests": "crates/cache-stability/tests/golden_vectors.rs and crates/storage-types/tests/golden_vectors.rs; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "cfa66afee8e2e5e7cf67ba49be02f452bdd83bb9"
+      },
+      "destination": "crates/cache-stability/tests/golden_vectors.rs",
+      "destination_sha256": "99e14b67056563ad68e9941936172f44f7618ecdfe9b074c7316fa5857fb73ea",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-rust-sources"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "0d572fbc4f158559017ddb129729f4da97985d1c"
+      },
+      "destination": "crates/lease/Cargo.toml",
+      "destination_sha256": "8f626c6d8d167d4fee33f3496fd384d4d53b768890c2381fa9fe3203f1b62f80",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#authored-control-records"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "2699b575864d0d1823d7531aa9a0e53bcfa98c1f"
+      },
+      "destination": "crates/lease/src/lib.rs",
+      "destination_sha256": "8e0f6646960c1853dacdefc89182698ef38d7e53cd9b010c9c40e41cf06ba2e8",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-rust-sources"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "a2c18e5a2730669c3088e00757ecd73d8b14fc3a"
+      },
+      "destination": "crates/storage-types/Cargo.toml",
+      "destination_sha256": "8e460374453b3471f578e40888941de8d983fb47c8fe0b52f10f08636e0ff7e4",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#authored-control-records"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "8def626a0de42b432ffd4804c8f60ab5ac2849a0"
+      },
+      "destination": "crates/storage-types/examples/golden-vectors.rs",
+      "destination_sha256": "1d4a59249157b77a87c07c8dd77ebed370787656c9a923dafe478bfb21446b7c",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-rust-sources"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "b32580688f10cf68de7e767031f4ac732fdda245"
+      },
+      "destination": "crates/storage-types/src/lib.rs",
+      "destination_sha256": "752179013a35eff989dc9a7ea164fdc39d07f012e1f165ba9960d2be975f5cc5",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-rust-sources"
+      }
+    },
+    {
+      "source": null,
+      "destination": "crates/storage-types/tests/golden/storage_vectors.json",
+      "destination_sha256": "180856114b2f3a1d638e66fe9f9c1bdc90b8a55d0a6562945f93d7e6aa06e53c",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#byte-stable-fixtures",
+        "negative_tests": "crates/cache-stability/tests/golden_vectors.rs and crates/storage-types/tests/golden_vectors.rs; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "706c05544a65ef8b79cc4a1cf3ceaba489d23024"
+      },
+      "destination": "crates/storage-types/tests/golden_vectors.rs",
+      "destination_sha256": "818565074cce03ed25c9d57557b5e826d2199c4fa7a910351b56727a31a0fa9b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-rust-sources"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "35a35fb60da85e09e9ad7887a846739073e57af6"
+      },
+      "destination": "crates/storage/Cargo.toml",
+      "destination_sha256": "d60161c259c820c31fc816254bf5919b0584d144a0ca9bc8f13134de28f1d37b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#authored-control-records"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "95dc9c575f3ef72f6739719225bb78ea19f99dbb"
+      },
+      "destination": "crates/storage/src/lib.rs",
+      "destination_sha256": "483b2be94ea2c14ad90c333aa9b8b907b1006c484b4eb0b117a334e56108571e",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-rust-sources"
+      }
+    },
+    {
+      "source": null,
+      "destination": "crates/storage/baseline.sql",
+      "destination_sha256": "1db021f34a2f031cdcd7b6c1aa395cb4d283066b243e8e77fe92c0170b7aaf82",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#baseline-open",
+        "negative_tests": "crates/storage/src/lib.rs; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "crates/storage/examples/schema-inventory.rs",
+      "destination_sha256": "16bf8fc432fc70487739239f6bc9c7a5fd87e547594e08ac6b81bf1de5bd04fa",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#baseline-open",
+        "negative_tests": "crates/storage/src/lib.rs; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "fixtures/schema/storage-inventory-v1.json",
+      "destination_sha256": "4a9c3a0484725423bcd9abf41143f3ab7b29d576957f0aa4ec41594dcb6e10eb",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#baseline-open",
+        "negative_tests": "crates/storage/src/lib.rs; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "ef1e855d950cbf947eb9702fd048b60672034244"
+      },
+      "destination": "docs/properties/shared-primitives/lease-store-density.md",
+      "destination_sha256": "8ff54390d23637d615f26eaef46699497065b7b48506c9db005bfe27ae5d8510",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "d360c86177f779878d5b645bb31b1b06f0d0584c"
+      },
+      "destination": "docs/properties/shared-primitives/catalog.md",
+      "destination_sha256": "7537123be4c04bf396b253821425711a320d0cda6451ecd29b1248175c0fee3c",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "e1e9761f2a147ae3619dec612bf033fd7c8be1f2"
+      },
+      "destination": "docs/properties/shared-primitives/existing-checks.md",
+      "destination_sha256": "dde3eab8b51970b5f96075c289b9be7b0434bc0d33502019a2f4f4e6a9b3ef78",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "6446f25ed59d345a4cd303db65907ddd8c4f02b5"
+      },
+      "destination": "docs/properties/shared-primitives/durable-consumer-inventory.md",
+      "destination_sha256": "e3610d869ee7682da1aacee7b5f4606a5148580723581da5949470e2d003dd96",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "16cae3cc425e5a49285f520b96defab43a2f2e96"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/acquisition-does-not-follow-symlink.md",
+      "destination_sha256": "1eb9adc33c619b23705f7401fc98f339080cf161429996314a63d5d1b2ae8713",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "b2064e5eb5fda817eb039c7e8c0379264f0cb9e8"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/at-most-one-exclusive-holder-per-key.md",
+      "destination_sha256": "7d2a0d588ffa49afcebf909279b7bba44429a9886b8837fded89d228b19f859f",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "a818c1d126726c5de0cab0ec798c1286b069e071"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/contention-is-classified-as-held.md",
+      "destination_sha256": "7b19247debee0ff96179e9a5164e6e9127a41893748beec27b4d1a201c2245b5",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "04a9cc331a493e9faea856358b68ca7ae24d83b3"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/cross-process-exclusive-race-is-reached.md",
+      "destination_sha256": "f636e41ee568a88ae3c3dc89ba6f2d1dd2163ae027d6f7dcd01e9a734401faa3",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "699b2118f8d521929037199941f65e097e13054e"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/dead-holder-lease-is-reclaimable.md",
+      "destination_sha256": "5440cfedb6c65f93b54cb2256331cb76f9957bddbb1588613edc04906ea59146",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "c228f5611c9d04f21a2336a673deac658bf46211"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/distinct-lease-keys-do-not-alias.md",
+      "destination_sha256": "e1dd187be9ef18d4e84ef1c03bfb3228506b480cb76ed0d90ecb3f0d63bdcc83",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "9313ae64c111a794261660b09da2f5dfcefc0e64"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/epoch-input-size-is-bounded.md",
+      "destination_sha256": "df59c3f7c05a4e749f6f245027b7ae01db38dfbc7240e154d7842e4773deb4e3",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "789988184a0d75dac0c198d118b558dce46f476a"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/epoch-update-interruption-window-is-reached.md",
+      "destination_sha256": "0e2527414b49fee9237ce618008c88685c9a6ae8d66b125d6ba3588e67a4c5db",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "1e68a07d4f01a910a5a0bc43969b6c0aa3c72ddc"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/failed-acquire-preserves-prior-epoch.md",
+      "destination_sha256": "7ecf1731d493b9e7faa8bd75e36d22d659ccec99e2f4be54aa3d10496d3c8f84",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "9f2ed272fb5217af5b44f84f55dcaacd6e42d50d"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/failed-acquisition-does-not-mutate-lease-state.md",
+      "destination_sha256": "15c99544db36695bad8b898a7a0cdb714d3b2ea6ec6a26d28c9333bae623ab52",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "071210f91103c9dcc870e3d59192be8a094423ba"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/filesystem-lock-scope-matches-deployment.md",
+      "destination_sha256": "0f654e43e9024b36c7329b504eb84ba62414cb6ef229cbdc45a11df5051608a9",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "b2acebc09c76b3a7b67d6cf93b440205b7e4a5cd"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/handle-drop-releases-lease.md",
+      "destination_sha256": "06f290b96c34a961e01f2a9001e79940e70c40b6d74d1e5b670de6da220f966c",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "49aaf7b2004052cbe7fc73b989863b3da130db30"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/invalid-epoch-fails-closed.md",
+      "destination_sha256": "0ecdc2715a653a1bfa459e1e4216935886c5b11cdfb45115c2d2e2341112392b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "9e6d87629fa62230896f28e844b5248c64fea706"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/lease-file-creation-is-never-permissive.md",
+      "destination_sha256": "34ecbe91ccb97e652998a627632a58e00ff1876fbafc4c1ca9c8f2707e275116",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "a2b6a576ba3b2c67f2c3dcd37e6cd943054c1895"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/lease-file-growth-trigger-is-observed.md",
+      "destination_sha256": "8783ce2888c86d69205aa9de508f0704d4aa44a995be37d7bd247e0573335736",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "242f27c583dea77e41dbbb6f33da8ea4001df429"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/lease-inode-remains-stable-while-held.md",
+      "destination_sha256": "2c427c6bb28a4d4fed8dee1693e220559b87e8d80c11f813a1c656ae6f17cb95",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "7930fa5e9794d85ac7d66b07b7e1040324606299"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/lease-path-format-is-version-stable.md",
+      "destination_sha256": "2d857664561b972b98b6383333bf8b334b69d9c28f748df0283b85d61420ba56",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "db48fb08448a52cc564a5b7eaf621cc72e37fe1d"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/live-lease-file-replacement-is-reached.md",
+      "destination_sha256": "bb29578e61bc88dabc64dff98c9a5087ba8673e95b4dc629d5bf6581179c19df",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "b1e22cc64e6e7c435516c967df340232dc3c3b98"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/logical-store-has-single-lease-identity.md",
+      "destination_sha256": "1485e7fdf000cde89c7361efadd8d57c7ab01a4f5f6569facc2ca541f84a0d85",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "014d7675776b9a2c54d87fe530d256c82dfe0cfe"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/permission-hardening-never-follows-replacement.md",
+      "destination_sha256": "cf155ea1e1fe73cdb21d2b79a820b4f1c3155e9e2e2790a94aae64e7521f368e",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "ac571ceba652df7ffc54c7f3424e305e5d274e36"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/protected-write-set-is-fence-complete.md",
+      "destination_sha256": "44e765883ccd285b8baf8dcdb8ba7cf8812247df8f1298f3b1c1ca53e6879ce4",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "e2f4943057aea1ee96d8b671513dc67e02740ef3"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/replacement-fence-is-claimed-before-old-writer-writes.md",
+      "destination_sha256": "b6ded67b0eeb16cb1ef8e61cebe5b00cd5030a60c6ddd36881b51e506a6c11da",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "87ed0880cb2095abfcb2bd084fd92af08444ac3c"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/returned-epoch-is-crash-durable.md",
+      "destination_sha256": "c88ab65fd4c340117ea2343ba4e508e47cf74116d8171c26a07faeddcca3a298",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "3dfe44ad9e957c5b8b7f8982b9c0fb6fc8b273d5"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/shared-acquisition-is-epoch-neutral.md",
+      "destination_sha256": "fbd2c927c9230a7694e5f2eddc3b1aca022852eab8f3a1b3efb82339aae40aa1",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "3e1182c7616f58b2ae7d264e4a03fe9d11e23457"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/shared-epoch-never-authorizes-write.md",
+      "destination_sha256": "e274ef703e6fb73fd2978bdf8f6c9b414dd3a3d62cd7aee642655a1645e2877d",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "2dc014c3ba8820c1f1c0ec86972ff480fdd32be8"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/shared-exclusive-exclusion-matrix.md",
+      "destination_sha256": "791c53e1bc996fbdfa2cb2e3586bb55cffe8c0a7c5965cbca8dd96d16a2c0958",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "c42f7f9b97aa605f8d371046915575149d9e2372"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/stale-writer-write-is-rejected.md",
+      "destination_sha256": "fca03138a239f6830ce2fb4c8e94cc3e499f2659cb1a2ce30b76af46b9dfbaa9",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "de430703b0d2826eab03358a003914072d234f1e"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/unix-lease-file-is-owner-only.md",
+      "destination_sha256": "d47cf54e5ca1526d3384cea4b3b2701f5ec81f4f78df48ebc4bda8321bcdbe18",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "de56d55fd4b31e305f658baea91902980b3ab78c"
+      },
+      "destination": "docs/properties/shared-primitives/evidence/writer-epoch-strictly-increases.md",
+      "destination_sha256": "52b142b8662dad624d895fc8142d0622b897b822a330f947ad36f510b6dd1b76",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "a8bec0e2687e27fbb7611b11c6e22c91da98305f"
+      },
+      "destination": "docs/properties/shared-primitives/fault-map.md",
+      "destination_sha256": "961f65008b771214571842b343e4fc434f1ce5bb9b0fbb6e374e3b02f4ca59a3",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "a03f53d02800be76450858f79f9c74f9c1718eac"
+      },
+      "destination": "docs/properties/shared-primitives/portfolio-evaluation.md",
+      "destination_sha256": "1f7dee3acea6569160cc7a633bfd7ad511e6d1fe43c5676551740f6f9f182b5c",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "a27c6bf42e29fd186ab5aa7cc580c158f14f3044"
+      },
+      "destination": "docs/properties/shared-primitives/relationships.md",
+      "destination_sha256": "44ff0f4533cead811926a626af0335ce2d4a01e5a3a98132672a8a4564dbb01d",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": {
+        "repo": "primitives",
+        "blob_sha": "c840cdf8ed0f6c0743d29d88f22b140ecca6ab1f"
+      },
+      "destination": "docs/properties/shared-primitives/system-model.md",
+      "destination_sha256": "df691872bfb577fe8bb339e16be4d917c7085549eda859b4d4fd11088325cddd",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog"
+      }
+    },
+    {
+      "source": null,
+      "destination": "Cargo.toml",
+      "destination_sha256": "17edbcfe8d9885e675a9a05babc254119cca1428add3357b748122022ca9068c",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "Cargo.lock",
+      "destination_sha256": "b8bcbba3492209356a5f182e655febf899d495c298168aad60b5f0efd21e3cc7",
+      "transformation": "generated",
+      "class": "generated",
+      "review_evidence": {
+        "regeneration": "cargo +1.98 generate-lockfile; every `--locked` build verifies it"
+      }
+    },
+    {
+      "source": null,
+      "destination": ".github/workflows/ci.yml",
+      "destination_sha256": "9a20deeea2598a4a85b7a717499505291c073b319ef385fab7c9ace69d477ce1",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "package.json",
+      "destination_sha256": "d7bf3b974b34713505df1735cdddc96d352eafa615fa3041df1eeeeaf867139a",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/registry.json",
+      "destination_sha256": "2144fe1abd1bbdb4dbe49bfab855c6dcc937f04fb7bbf1d5bd5ed059f76c6a21",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "scripts/eidnara-migration/check.ts",
+      "destination_sha256": "901e9094fc2cd5c1dc969e300e19e95c4ef7dfdb86c8448c2bd92593d250dbe6",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "scripts/eidnara-migration/check.test.ts",
+      "destination_sha256": "3c0f11acb2f2ca7fc18c4824cd6157c3024bc1418069d401be4b403e0cea5d50",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/waves/U2/property-impact.json",
+      "destination_sha256": "b1c1f814e54cf74eda4b4766cab6adfeee4b43f53fe950283598f377c5710573",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/waves/U2/architecture-impact.json",
+      "destination_sha256": "e561354d80d3a1ed97439dbbc965fdd5ec4a947db19c6093b8b999e2f4e11804",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/waves/U2/waivers.json",
+      "destination_sha256": "a9303de1cadb58df2ed77ef7a9b319de1664160c771f2a1b2c99c207a5c0d781",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "migration/waves/U2/review-notes.md",
+      "destination_sha256": "e60e5851f6bc47e62764726c78ab009f05e32f192b09a53ab5ffb714b6dafada",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#authored-control-records",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/index.json",
+      "destination_sha256": "07d9c201e5192deb51d95b4b6d14af2c673adcdbf58fab37c62b978a10a8d01f",
+      "transformation": "generated",
+      "class": "generated",
+      "review_evidence": {
+        "regeneration": "bun scripts/eidnara-migration/generate-property-index.ts docs/properties/shared-primitives --check"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/anchor-holds-while-reconcile-pending.md",
+      "destination_sha256": "7a51ef216e0e5b93119e8a92bbd8f7358a3e0df61ce65de7449d58252f1d5e68",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md",
+      "destination_sha256": "b23b39071961d128c9009e8b66af7b2201564cd478f6082a238901070bcd17df",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/callback-scope-is-restored-after-unwind.md",
+      "destination_sha256": "034e39d5c0e3bc91642d9db83e2578ca49f5fc5518e20cbfa4049164fbaf4232",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/defer-pass-replays-frozen-bytes-verbatim.md",
+      "destination_sha256": "03c846cb213c51ddd408ee7bd80093582597549bff5ac2b35e850906fc8ca12a",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/descriptor-wire-shape-round-trips.md",
+      "destination_sha256": "58fa8b86a203d7940c3e3e7c3d419f8afa4f3741f80276d228e3a0a4cea51396",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/episode-units-reset-at-run-boundary.md",
+      "destination_sha256": "522849071a1823d53e2020392c69a4c27fde996b0717a6764ddd667aa883d927",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/fence-epoch-outside-sqlite-range-fails-closed.md",
+      "destination_sha256": "ff0a0a753f5a879e3aaf54d9fbaf8471e1d2f5078c3a35d1130396a7aab50ff9",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/store-schema-identity-matches-the-baseline.md",
+      "destination_sha256": "8e55c988054924d1ce7dcf300d2021deb42bde39bec7c646a3fa16cbed2b2dee",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/fenced-write-is-atomic.md",
+      "destination_sha256": "2632535e5985bd475a55d2759d145bb1336889ac0ac806dc95c5343322df21b2",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/frozen-unit-order-is-preserved.md",
+      "destination_sha256": "996a96b5bc70fbb28d55dc26f4d2405f28c4e1f34cc09bb6b33c4ede2c98b783",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/hard-bust-drains-deferred-work.md",
+      "destination_sha256": "18c8040195455bb65e35377f929b2a26f51e83941e56585bf5f2b6e56b40d2d0",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/never-minted-boundary-is-not-reconcile-pending.md",
+      "destination_sha256": "3cf8e2b855dd00d16ea0be263bc49f3b6dc180da3ca80d3758a5c4760b338de2",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/protected-transactions-pin-fence-durability.md",
+      "destination_sha256": "5a325137f45c17806d3277ebde30997ae840dfd8871c7fc351067c52e96bf887",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/read-callbacks-cannot-write.md",
+      "destination_sha256": "752fb954a3ce76242e4d0a60d1cf4ec5a787e7e9e68580c87f498e7e25185634",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md",
+      "destination_sha256": "c975b75ac2d5f02add4caae7f65ef653b3de70e646bff29b72de711ea9cf126f",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shared-primitives/evidence/store-files-are-owner-only-after-open.md",
+      "destination_sha256": "f32cbfe071b644718d9b429394824231b183f66e710200f6276bfca36f2fb446",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U2/review-notes.md#doc-rigor-property-catalog",
+        "negative_tests": "scripts/eidnara-migration/check.test.ts; cargo test --workspace --all-targets --all-features --locked on Rust 1.98 and stable"
+      }
+    }
+  ],
+  "gates": {
+    "rust-format": "pass",
+    "rust-lint-1.98": "pass",
+    "rust-lint-stable": "pass",
+    "rust-tests-1.98": "pass",
+    "rust-tests-stable": "pass",
+    "rust-doctests-and-docs": "pass",
+    "feature-configurations": "pass",
+    "pinned-toolchain-unlocked-latest": "pass",
+    "workspace-graph": "pass",
+    "golden-vectors-byte-identical": "pass",
+    "typecheck": "pass",
+    "migration-tooling-tests": "pass",
+    "registry": "pass",
+    "waivers": "pass",
+    "property-catalog": "pass",
+    "property-impact": "pass",
+    "architecture-impact": "pass",
+    "forbidden-references": "pass"
+  },
+  "known_red": [
+    {
+      "gate": "source-three-os-matrix",
+      "kind": "repo",
+      "status": "not_run",
+      "source_repo": "primitives",
+      "justification": "The source CI runs macOS and Windows; the genesis release ships linux-x64-gnu only, and the Windows-only vectors belong to a source crate that is not carried."
+    },
+    {
+      "gate": "source-postgres-live",
+      "kind": "repo",
+      "status": "not_run",
+      "source_repo": "primitives",
+      "justification": "Tests the dropped PostgreSQL storage backend against a service container."
+    },
+    {
+      "gate": "source-push-seal-version-gate",
+      "kind": "repo",
+      "status": "not_run",
+      "source_repo": "primitives",
+      "justification": "Belongs to a dropped source crate."
+    },
+    {
+      "gate": "source-release-tag-resolver",
+      "kind": "release",
+      "status": "not_run",
+      "source_repo": "primitives",
+      "justification": "Publishes crates from tags; every Eidnara crate is publish = false (R21)."
+    }
+  ]
+}

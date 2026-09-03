@@ -1,0 +1,117 @@
+{
+  "data_home": "/data",
+  "vectors": [
+    {
+      "module_id": "module-a",
+      "postgres_database_name": "eidnara_module_a_1235d130a94babc3",
+      "sqlite_descriptor": {
+        "backend": {
+          "backend": "sqlite",
+          "path": "/data/eidnara/module-a/store.db"
+        },
+        "isolation": {
+          "kind": "module"
+        },
+        "module_id": "module-a",
+        "storage_namespace": "default"
+      },
+      "sqlite_store_path": "/data/eidnara/module-a/store.db"
+    },
+    {
+      "module_id": "module-b",
+      "postgres_database_name": "eidnara_module_b_1235d230a94bad76",
+      "sqlite_descriptor": {
+        "backend": {
+          "backend": "sqlite",
+          "path": "/data/eidnara/module-b/store.db"
+        },
+        "isolation": {
+          "kind": "module"
+        },
+        "module_id": "module-b",
+        "storage_namespace": "default"
+      },
+      "sqlite_store_path": "/data/eidnara/module-b/store.db"
+    },
+    {
+      "module_id": "module-c",
+      "postgres_database_name": "eidnara_module_c_1235d330a94baf29",
+      "sqlite_descriptor": {
+        "backend": {
+          "backend": "sqlite",
+          "path": "/data/eidnara/module-c/store.db"
+        },
+        "isolation": {
+          "kind": "module"
+        },
+        "module_id": "module-c",
+        "storage_namespace": "default"
+      },
+      "sqlite_store_path": "/data/eidnara/module-c/store.db"
+    },
+    {
+      "module_id": "module-d",
+      "postgres_database_name": "eidnara_module_d_1235d430a94bb0dc",
+      "sqlite_descriptor": {
+        "backend": {
+          "backend": "sqlite",
+          "path": "/data/eidnara/module-d/store.db"
+        },
+        "isolation": {
+          "kind": "module"
+        },
+        "module_id": "module-d",
+        "storage_namespace": "default"
+      },
+      "sqlite_store_path": "/data/eidnara/module-d/store.db"
+    },
+    {
+      "module_id": "a-b",
+      "postgres_database_name": "eidnara_a_b_e61ab31904644883",
+      "sqlite_descriptor": {
+        "backend": {
+          "backend": "sqlite",
+          "path": "/data/eidnara/a-b/store.db"
+        },
+        "isolation": {
+          "kind": "module"
+        },
+        "module_id": "a-b",
+        "storage_namespace": "default"
+      },
+      "sqlite_store_path": "/data/eidnara/a-b/store.db"
+    },
+    {
+      "module_id": "a_b",
+      "postgres_database_name": "eidnara_a_b_e6c4a31904f4ad51",
+      "sqlite_descriptor": {
+        "backend": {
+          "backend": "sqlite",
+          "path": "/data/eidnara/a_b/store.db"
+        },
+        "isolation": {
+          "kind": "module"
+        },
+        "module_id": "a_b",
+        "storage_namespace": "default"
+      },
+      "sqlite_store_path": "/data/eidnara/a_b/store.db"
+    },
+    {
+      "module_id": "a-very-long-module-id-that-exceeds-the-postgres-identifier-byte-limit-by-a-lot",
+      "postgres_database_name": "eidnara_a_very_long_module_id_that_exceeds_t_67087abf88b553c2",
+      "sqlite_descriptor": {
+        "backend": {
+          "backend": "sqlite",
+          "path": "/data/eidnara/a-very-long-module-id-that-exceeds-the-postgres-identifier-byte-limit-by-a-lot/store.db"
+        },
+        "isolation": {
+          "kind": "module"
+        },
+        "module_id": "a-very-long-module-id-that-exceeds-the-postgres-identifier-byte-limit-by-a-lot",
+        "storage_namespace": "default"
+      },
+      "sqlite_store_path": "/data/eidnara/a-very-long-module-id-that-exceeds-the-postgres-identifier-byte-limit-by-a-lot/store.db"
+    }
+  ]
+}

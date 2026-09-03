@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type CheckKind =
@@ -32,7 +32,7 @@ export const FILE_CLASSES = [
     "human-authored",
     "generated",
     "contract-generated",
-    "predecessor-captured",
+    "captured",
     "new-authored",
 ] as const;
 
@@ -40,7 +40,7 @@ export const TRANSFORMATIONS = ["verbatim", "renamed", "adapted", "generated", "
 
 export const GATE_STATES = ["pass", "fail", "cannot_run", "not_run"] as const;
 
-export const IDENTITY_CLASSES = ["renamed", "frozen-durable", "external-protocol", "third-party"] as const;
+export const IDENTITY_CLASSES = ["frozen-durable", "external-protocol", "third-party"] as const;
 
 export const TYPESCRIPT_CLASSES = ["permanent", "transitional", "excluded"] as const;
 
@@ -85,12 +85,21 @@ const BLOB_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 const PROVENANCE_RE = /^[a-z0-9][a-z0-9-]*@[0-9a-f]{7,64}$/;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?Z)?$/;
 
-// Whole-token match: `ck` inside `check` and `mc` inside `mcu` do not count,
-// while `MC_HOST_X` and `ck-mc-host` do.
-export const LEGACY_IDENTITY_RE =
-    /(?:cortexkit|magic-context|magic_context|MCTX|subc|(?<![A-Za-z0-9])(?:mc|ck|MC|CK)(?![A-Za-z0-9]))/;
+// A persistent filename in every string form of the scanned language. Rust strings are
+// `"…"`, `b"…"`, `r"…"`, `r#"…"#`, and `br#"…"#`; a backtick in Rust is a doc-comment code
+// span, not a string. TypeScript strings are `"…"`, `'…'`, and the template form `` `…` ``.
+const PERSISTENT_NAME = String.raw`\.(?:db|sqlite|bin|lock|jsonl|handle)`;
+export const PERSISTENT_LITERAL_RE: Record<".rs" | ".ts", RegExp> = {
+    ".rs": new RegExp(String.raw`(?:\b(?:br|b|r)#*)?"([^"\n]*${PERSISTENT_NAME})"#*`, "g"),
+    ".ts": new RegExp(String.raw`"([^"\n]*${PERSISTENT_NAME})"|'([^'\n]*${PERSISTENT_NAME})'|` + "`([^`\\n]*" + PERSISTENT_NAME + ")`", "g"),
+};
 
-export const PERSISTENT_LITERAL_RE = /"([^"\n]*\.(?:db|sqlite|bin|lock|jsonl|handle))"/g;
+// Every Eidnara-owned SQL family has exactly one baseline; a version ledger or a
+// runner that upgrades one schema into another has no place in destination code.
+export const MIGRATION_MACHINERY_RE =
+    /schema_migrations|\bMIGRATIONS\b|LATEST_MIGRATION_VERSION|BOOTSTRAP_MIGRATION_VERSION|ensureColumn|\bMigration \{|\bfn migrate\b|run_migrations/g;
+
+export const FIXTURE_ROLES = ["byte-stable", "generator", "external-record"] as const;
 
 function isObject(value: unknown): value is JsonObject {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -251,7 +260,7 @@ function validateRepoCommits(value: unknown, path: string, errors: string[], all
 
 interface ReceiptFile {
     path: string;
-    source: { repo: string; path: string; blob_sha: string } | null;
+    source: { repo: string; blob_sha: string } | null;
     destination: string;
     destination_sha256: string | undefined;
     transformation: string | undefined;
@@ -261,8 +270,9 @@ interface ReceiptFile {
 interface ReceiptShape {
     wave: Wave | undefined;
     sources: RepoCommit[];
-    scope: { repo: string; path: string }[];
-    excluded: { repo: string; path: string }[];
+    /// Source trees whose every blob must be listed in `files` or `excluded`.
+    scope: { repo: string; tree: string }[];
+    excluded: { repo: string; blob_sha: string }[];
     files: ReceiptFile[];
     readiness: string | undefined;
     registry: string | undefined;
@@ -295,13 +305,12 @@ function validateReceiptFile(entry: unknown, path: string, errors: string[]): Re
         const sourceObject = requireObject(file.source, `${path}.source`, errors);
         if (sourceObject !== undefined) {
             const repo = requireString(sourceObject, "repo", `${path}.source`, errors);
-            const sourcePath = requireString(sourceObject, "path", `${path}.source`, errors);
             const blob = requireString(sourceObject, "blob_sha", `${path}.source`, errors);
             if (blob !== undefined && !BLOB_RE.test(blob)) {
                 errors.push(`${path}.source.blob_sha must be a git blob id`);
             }
-            if (repo !== undefined && sourcePath !== undefined && blob !== undefined) {
-                source = { repo, path: sourcePath, blob_sha: blob };
+            if (repo !== undefined && blob !== undefined) {
+                source = { repo, blob_sha: blob };
             }
         }
         if (classification === "new-authored") {
@@ -325,11 +334,11 @@ function validateReceiptFile(entry: unknown, path: string, errors: string[]): Re
                 requireString(review, "generator", reviewPath, errors);
                 requireString(review, "semantic_review", reviewPath, errors);
                 break;
-            case "predecessor-captured":
+            case "captured":
                 requireCommit(review, "captured_at_commit", reviewPath, errors);
                 requireString(review, "capture_command", reviewPath, errors);
                 if (transformation !== "verbatim") {
-                    errors.push(`${path}.transformation must be verbatim for predecessor-captured files`);
+                    errors.push(`${path}.transformation must be verbatim for captured files`);
                 }
                 break;
             case "new-authored":
@@ -428,14 +437,15 @@ function validateReceiptShape(root: JsonObject, errors: string[]): ReceiptShape 
         const item = requireObject(entry, path, errors);
         if (item === undefined) return;
         const repo = requireString(item, "repo", path, errors);
-        const scopePath = requireString(item, "path", path, errors);
+        const tree = requireString(item, "tree", path, errors);
+        if (tree !== undefined && !BLOB_RE.test(tree)) errors.push(`${path}.tree must be a git tree id`);
         if (repo !== undefined && !sourceRepos.has(repo)) {
             errors.push(`${path}.repo ${repo} has no pinned source commit`);
         }
-        if (repo !== undefined && scopePath !== undefined) scope.push({ repo, path: scopePath });
+        if (repo !== undefined && tree !== undefined) scope.push({ repo, tree });
     });
     if (!controlOnly && scope.length === 0) {
-        errors.push("$.scope must declare at least one source directory");
+        errors.push("$.scope must declare at least one source tree");
     }
 
     const excluded: ReceiptShape["excluded"] = [];
@@ -445,9 +455,10 @@ function validateReceiptShape(root: JsonObject, errors: string[]): ReceiptShape 
             const item = requireObject(entry, path, errors);
             if (item === undefined) return;
             const repo = requireString(item, "repo", path, errors);
-            const excludedPath = requireString(item, "path", path, errors);
+            const blob = requireString(item, "blob_sha", path, errors);
             requireString(item, "reason", path, errors);
-            if (repo !== undefined && excludedPath !== undefined) excluded.push({ repo, path: excludedPath });
+            if (blob !== undefined && !BLOB_RE.test(blob)) errors.push(`${path}.blob_sha must be a git blob id`);
+            if (repo !== undefined && blob !== undefined) excluded.push({ repo, blob_sha: blob });
         });
     }
 
@@ -486,9 +497,11 @@ function validateReceiptShape(root: JsonObject, errors: string[]): ReceiptShape 
 
 interface RegistryShape {
     identities: { value: string; class: string }[];
+    retired: { digest: string }[];
     typescript: { path: string; class: string }[];
     families: { name: string; class: string; literals: string[] }[];
     authored: string[];
+    fixtures: { path: string; role: string }[];
 }
 
 function validateIdentityEntry(entry: JsonObject, path: string, errors: string[]): { value: string; class: string } | undefined {
@@ -496,16 +509,6 @@ function validateIdentityEntry(entry: JsonObject, path: string, errors: string[]
     const classification = requireEnum(entry, "class", IDENTITY_CLASSES, path, errors);
     requireString(entry, "rationale", path, errors);
     requireStringArray(entry, "evidence", path, errors, 1);
-    const renameTo = optionalString(entry, "rename_to", path, errors);
-    if (classification === "renamed") {
-        if (renameTo === undefined) {
-            errors.push(`${path}.rename_to is required for renamed identities`);
-        } else if (LEGACY_IDENTITY_RE.test(renameTo)) {
-            errors.push(`${path}.rename_to retains a legacy identity`);
-        }
-    } else if (renameTo !== undefined) {
-        errors.push(`${path}.rename_to is only valid for renamed identities`);
-    }
     if (value === undefined || classification === undefined) return undefined;
     return { value, class: classification };
 }
@@ -593,12 +596,15 @@ function validateFamilyEntry(
 
 function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShape {
     validateSchemaVersion(root, errors);
-    const shape: RegistryShape = { identities: [], typescript: [], families: [], authored: [] };
+    const shape: RegistryShape = { identities: [], retired: [], typescript: [], families: [], authored: [], fixtures: [] };
+    const retiredDigests = new Set<string>();
     const identityValues = new Set<string>();
     const typescriptPaths = new Set<string>();
     const familyNames = new Set<string>();
     const literals = new Map<string, string>();
     const authoredPaths = new Set<string>();
+    const fixturePaths = new Set<string>();
+    const generatorTargets: { target: string; path: string }[] = [];
 
     const entries = requireArray(root, "entries", "$", errors);
     if (entries.length === 0) errors.push("$.entries must contain at least one entry");
@@ -606,8 +612,19 @@ function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShap
         const path = `$.entries[${index}]`;
         const entry = requireObject(raw, path, errors);
         if (entry === undefined) return;
-        const kind = requireEnum(entry, "kind", ["identity", "typescript", "family", "authored"], path, errors);
+        const kind = requireEnum(entry, "kind", ["identity", "retired-identity", "typescript", "family", "authored", "fixture"], path, errors);
         switch (kind) {
+            case "retired-identity": {
+                // The source implementation's names are recorded as digests of their normalized
+                // form, so the registry enforces their absence without spelling them.
+                const digest = requireDigest(entry, "digest", path, errors);
+                requireString(entry, "rationale", path, errors);
+                if (digest === undefined) return;
+                if (retiredDigests.has(digest)) errors.push(`${path}.digest is duplicated`);
+                retiredDigests.add(digest);
+                shape.retired.push({ digest });
+                break;
+            }
             case "identity": {
                 const identity = validateIdentityEntry(entry, path, errors);
                 if (identity === undefined) return;
@@ -648,10 +665,34 @@ function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShap
                 shape.authored.push(authoredPath);
                 break;
             }
+            case "fixture": {
+                const fixturePath = requireString(entry, "path", path, errors);
+                const role = requireEnum(entry, "role", FIXTURE_ROLES, path, errors);
+                requireString(entry, "rationale", path, errors);
+                requireStringArray(entry, "evidence", path, errors, 1);
+                if (role === "generator") {
+                    const target = requireString(entry, "fixture", path, errors);
+                    if (target !== undefined) generatorTargets.push({ target, path });
+                }
+                if (fixturePath === undefined || role === undefined) return;
+                if (fixturePaths.has(fixturePath)) errors.push(`${path}.path is duplicated`);
+                fixturePaths.add(fixturePath);
+                shape.fixtures.push({ path: fixturePath, role });
+                break;
+            }
             default:
                 break;
         }
     });
+    // Each generator target must name a registered byte-stable fixture.
+    const byteStable = new Set(
+        shape.fixtures.filter((fixture) => fixture.role === "byte-stable").map((fixture) => fixture.path),
+    );
+    for (const { target, path } of generatorTargets) {
+        if (!byteStable.has(target)) {
+            errors.push(`${path}.fixture ${target} is not a registered byte-stable fixture`);
+        }
+    }
     return shape;
 }
 
@@ -756,6 +797,17 @@ function validatePropertyCatalogShape(root: JsonObject, errors: string[]): void 
 
 interface PropertyImpactShape {
     pointers: { path: string; pointer: string }[];
+    /// Core records whose hashes must match the destination bytes they claim to cover.
+    cores: {
+        path: string;
+        files: string[];
+        check_pointer: string | undefined;
+        evidence_pointer: string | undefined;
+        code_hash: string | undefined;
+        check_hash: string | undefined;
+        evidence_digest: string | undefined;
+        new_evidence_digest: string | undefined;
+    }[];
 }
 
 const SOURCE_EXERCISED = ["yes", "partial", "not-yet"] as const;
@@ -834,6 +886,7 @@ function validatePropertyImpactShape(root: JsonObject, errors: string[]): Proper
 
     const covered = new Set<string>();
     const seen = new Set<string>();
+    const cores: PropertyImpactShape["cores"] = [];
     const records = requireArray(root, "records", "$", errors);
     if (records.length === 0) errors.push("$.records must contain at least one disposition");
     records.forEach((entry, index) => {
@@ -856,9 +909,30 @@ function validatePropertyImpactShape(root: JsonObject, errors: string[]): Proper
                 const source = validateSourceStatus(record, "source_status", path, errors);
                 requireString(record, "strategy_decision", path, errors);
                 const auditVerdict = requireEnum(record, "audit_verdict", ["pass", "fail", "vacuous", "pending"], path, errors);
-                requireDigest(record, "evidence_digest", path, errors);
-                requireDigest(record, "code_hash", path, errors);
-                requireDigest(record, "check_hash", path, errors);
+                // Every digest names the file it is compared against: `evidence_digest` is
+                // the evidence record, `check_hash` the file the check pointer names, and
+                // `code_hash` the covered files. A digest without a file is never compared.
+                const evidenceDigest = requireDigest(record, "evidence_digest", path, errors);
+                const evidencePointer = requireString(record, "evidence_pointer", path, errors);
+                const codeHash = requireDigest(record, "code_hash", path, errors);
+                const checkPointer = requireString(record, "check_pointer", path, errors);
+                if (checkPointer !== undefined && !checkPointer.includes("#")) {
+                    errors.push(`${path}.check_pointer must name the check as path#check`);
+                }
+                const checkHash = requireDigest(record, "check_hash", path, errors);
+                if (checkPointer !== undefined) pointers.push({ path: `${path}.check_pointer`, pointer: checkPointer });
+                if (evidencePointer !== undefined) pointers.push({ path: `${path}.evidence_pointer`, pointer: evidencePointer });
+                const newEvidence = isObject(record.new_evidence) ? record.new_evidence : undefined;
+                cores.push({
+                    path,
+                    files,
+                    check_pointer: checkPointer,
+                    evidence_pointer: evidencePointer,
+                    code_hash: codeHash,
+                    check_hash: checkHash,
+                    evidence_digest: evidenceDigest,
+                    new_evidence_digest: typeof newEvidence?.digest === "string" ? newEvidence.digest : undefined,
+                });
                 const targets = requireStringArray(record, "target_configurations", path, errors);
                 const attempts = requireInteger(record, "evidence_attempts", path, errors);
                 if (targets.length === 0) {
@@ -921,7 +995,7 @@ function validatePropertyImpactShape(root: JsonObject, errors: string[]): Proper
             errors.push(`$.touched_files has uncovered file: ${file}; run property discovery for it before approval`);
         }
     }
-    return { pointers };
+    return { pointers, cores };
 }
 
 function describeSourceStatus(status: SourceStatus): string {
@@ -1028,6 +1102,12 @@ function validateArchitectureImpactShape(root: JsonObject, errors: string[]): vo
             requireString(analyzed, "repo", `${reportPath}.analyzed`, errors);
             requireCommit(analyzed, "commit", `${reportPath}.analyzed`, errors);
             requireDigest(analyzed, "scope_hash", `${reportPath}.analyzed`, errors);
+            // A post-integration report judges the destination code, so it names the module
+            // directories it covers and the digest of their tracked contents.
+            if (phase === "post-integration") {
+                requireStringArray(analyzed, "modules", `${reportPath}.analyzed`, errors, 1);
+                requireDigest(analyzed, "modules_hash", `${reportPath}.analyzed`, errors);
+            }
         }
         requireDigest(report, "report_hash", reportPath, errors);
         requireDigest(report, "skill_sha256", reportPath, errors);
@@ -1089,14 +1169,13 @@ export interface Context {
 }
 
 export function defaultContext(root: string): Context {
-    const parent = dirname(root);
-    return {
-        root,
-        checkouts: {
-            commons: join(parent, "commons"),
-            "magic-context": join(parent, "magic-context"),
-        },
-    };
+    return { root, checkouts: {} };
+}
+
+/// A source repository alias resolves to `--checkout <alias>=<dir>` when given, otherwise to a
+/// sibling directory of the destination checkout named after the alias.
+function checkoutFor(ctx: Context, repo: string): string {
+    return ctx.checkouts[repo] ?? join(dirname(ctx.root), repo);
 }
 
 function git(cwd: string, args: string[]): { ok: true; stdout: string } | { ok: false; error: string } {
@@ -1149,32 +1228,398 @@ function skipVendored(rel: string): boolean {
     return rel.split("/").some((segment) => SKIP_DIRS.has(segment));
 }
 
-// A pointer is `path` or `path#Lnn`; the file must exist under the root.
-function pointerResolves(root: string, pointer: string): boolean {
-    const [filePart] = pointer.split("#");
-    if (filePart === undefined || filePart === "") return false;
+/**
+ * A pointer is `path` or `path#check`, where `check` names a declared test in the file: a
+ * `fn check` in Rust or a `test("check"`, `it("check"`, or `describe("check"` in TypeScript.
+ * A line number would keep resolving after the cited check moved, so it is not an anchor.
+ * Returns the reason a pointer does not resolve, or undefined when it does.
+ */
+export function pointerProblem(root: string, pointer: string): string | undefined {
+    const hash = pointer.indexOf("#");
+    const filePart = hash === -1 ? pointer : pointer.slice(0, hash);
+    const anchor = hash === -1 ? undefined : pointer.slice(hash + 1);
+    if (filePart === "") return "names no file";
     const full = resolve(root, filePart);
-    if (!full.startsWith(resolve(root))) return false;
-    return existsSync(full) && statSync(full).isFile();
+    // A prefix comparison would admit a sibling directory whose name extends the root's;
+    // the relative path decides containment.
+    const inside = relative(resolve(root), full);
+    if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) return "escapes the destination root";
+    if (!existsSync(full) || !statSync(full).isFile()) return "does not resolve in the destination tree";
+    if (anchor === undefined) return undefined;
+    if (/^L\d+$/.test(anchor)) return "uses a line anchor; name the check instead";
+    if (!/^[A-Za-z_][A-Za-z0-9_ -]*$/.test(anchor)) return `has an anchor "${anchor}" that is not a check name`;
+    const text = readFileSync(full, "utf8");
+    if (filePart.endsWith(".rs")) {
+        // The anchor must be a test: a `fn` whose attribute block carries `#[test]` or a
+        // `#[...test]` attribute such as `#[tokio::test]`. A production helper with the same
+        // name is a function, not an executable check. Comments and string literals are
+        // blanked first, so a declaration or attribute spelled inside one is text.
+        const declaration = new RegExp(`^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${anchor}\\b`, "m");
+        const lines = rustWithoutCommentsAndStrings(text).split("\n");
+        let found = false;
+        let disabled: string | undefined;
+        for (let index = 0; index < lines.length; index += 1) {
+            if (!declaration.test(lines[index] ?? "")) continue;
+            found = true;
+            // The attribute block above the declaration decides whether the function is an
+            // executable check: it must carry a test attribute, must not be `#[ignore]`, and
+            // must not sit under a `cfg` predicate that is false in every build.
+            let isTest = false;
+            let why: string | undefined;
+            for (const attribute of rustOuterAttributes(lines, index)) {
+                if (/^(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b/.test(attribute)) isTest = true;
+                if (/^ignore\b/.test(attribute)) why = "is marked #[ignore]";
+                const cfg = /^cfg\((.*)\)$/s.exec(attribute);
+                if (cfg !== null && cfgPredicate(cfg[1] ?? "") === false) why = `is compiled out by #[cfg(${cfg[1]})]`;
+            }
+            // An enclosing module or block that is compiled out takes the test with it, so
+            // the `cfg` attributes of every enclosing item, and the inner `#![cfg]` attributes
+            // of the file and of each enclosing block, are evaluated as well.
+            if (why === undefined) {
+                for (const cfg of rustEnclosingCfgs(lines, index)) {
+                    if (cfgPredicate(cfg) === false) why = `is compiled out by an enclosing #[cfg(${cfg})]`;
+                }
+            }
+            if (isTest && why === undefined) return undefined;
+            if (isTest) disabled = why;
+        }
+        if (!found) return `names ${anchor}, which ${filePart} does not declare`;
+        return disabled === undefined
+            ? `names ${anchor}, which ${filePart} declares without a test attribute`
+            : `names ${anchor}, which ${filePart} declares as a test that ${disabled}`;
+    }
+    const declared = filePart.endsWith(".ts") || filePart.endsWith(".tsx") ? typescriptDeclaredChecks(text).has(anchor) : false;
+    return declared ? undefined : `names ${anchor}, which ${filePart} does not declare`;
 }
 
-interface LsTreeEntry {
-    blob: string;
-    path: string;
+/**
+ * The outer attributes of the item declared on `lines[index]`: the inner text of every
+ * `#[...]` on the attribute lines directly above it, blank lines allowed between. The lines
+ * are expected to have comments and strings blanked already.
+ */
+function rustOuterAttributes(lines: string[], index: number): string[] {
+    const out: string[] = [];
+    for (let back = index - 1; back >= 0; back -= 1) {
+        const line = (lines[back] ?? "").trim();
+        if (!(line.startsWith("#[") || line === "")) break;
+        out.push(...rustAttributesOn(line));
+    }
+    return out;
 }
 
-function lsTree(checkout: string, commit: string, scopePath: string): LsTreeEntry[] | string {
-    const result = git(checkout, ["ls-tree", "-r", commit, "--", scopePath]);
-    if (!result.ok) return result.error;
-    const entries: LsTreeEntry[] = [];
-    for (const line of result.stdout.split("\n")) {
-        if (line === "") continue;
-        const match = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line);
-        if (match && match[1] !== undefined && match[2] !== undefined) {
-            entries.push({ blob: match[1], path: match[2] });
+/**
+ * The `cfg` predicates that govern the item declared on `lines[index]` through its
+ * enclosing items: for each unclosed `{` above the declaration, the outer `#[cfg(...)]`
+ * attributes on the lines above the line holding that brace and the inner `#![cfg(...)]`
+ * attributes on the lines just inside it, plus the inner attributes at the top of the file.
+ * The lines are expected to have comments and strings blanked already.
+ */
+function rustEnclosingCfgs(lines: string[], index: number): string[] {
+    const out: string[] = [];
+    const cfgOf = (attribute: string): string | undefined => /^cfg\((.*)\)$/s.exec(attribute)?.[1];
+    const innerCfgsFrom = (start: number): void => {
+        for (let at = start; at < lines.length; at += 1) {
+            const line = (lines[at] ?? "").trim();
+            if (line === "") continue;
+            if (!line.startsWith("#![")) break;
+            const inner = /^#!\[(.*)\]$/s.exec(line)?.[1];
+            const cfg = inner === undefined ? undefined : cfgOf(inner.trim());
+            if (cfg !== undefined) out.push(cfg);
+        }
+    };
+    innerCfgsFrom(0);
+    // Walk backward from the declaration, matching braces; each `{` still open when the
+    // walk reaches it belongs to an enclosing item.
+    let depth = 0;
+    for (let at = index - 1; at >= 0; at -= 1) {
+        const line = lines[at] ?? "";
+        for (let column = line.length - 1; column >= 0; column -= 1) {
+            const char = line[column];
+            if (char === "}") depth += 1;
+            else if (char === "{") {
+                if (depth > 0) {
+                    depth -= 1;
+                    continue;
+                }
+                for (const attribute of rustOuterAttributes(lines, at)) {
+                    const cfg = cfgOf(attribute);
+                    if (cfg !== undefined) out.push(cfg);
+                }
+                innerCfgsFrom(at + 1);
+            }
         }
     }
-    return entries;
+    return out;
+}
+
+/**
+ * `text` with every comment and string literal replaced by spaces of the same length, so
+ * line numbers and the positions of the remaining tokens are unchanged while nothing inside
+ * a comment or literal can be read as a declaration or an attribute.
+ */
+export function rustWithoutCommentsAndStrings(text: string): string {
+    let out = "";
+    let index = 0;
+    while (index < text.length) {
+        const end = rustLexemeEnd(text, index);
+        if (end === null) {
+            out += text[index];
+            index += 1;
+            continue;
+        }
+        out += text.slice(index, end).replace(/[^\n]/g, " ");
+        index = end;
+    }
+    return out;
+}
+
+/**
+ * The inner text of every `#[...]` attribute on `line`, in order, so several attributes on
+ * one line (`#[cfg(any())] #[test]`) are each seen. Brackets and parentheses inside an
+ * attribute are balanced before it ends.
+ */
+export function rustAttributesOn(line: string): string[] {
+    const out: string[] = [];
+    let index = 0;
+    while (index < line.length) {
+        const start = line.indexOf("#[", index);
+        if (start === -1) break;
+        let depth = 0;
+        let cursor = start + 1;
+        for (; cursor < line.length; cursor += 1) {
+            const char = line[cursor];
+            if (char === "[" || char === "(") depth += 1;
+            else if (char === "]" || char === ")") {
+                depth -= 1;
+                if (depth === 0) break;
+            }
+        }
+        if (cursor >= line.length) break;
+        out.push(line.slice(start + 2, cursor).trim());
+        index = cursor + 1;
+    }
+    return out;
+}
+
+/**
+ * Three-valued evaluation of a `cfg` predicate: `true` or `false` when the predicate has
+ * that value in every build, `undefined` when it depends on the target or features.
+ * `test` is true because the anchor is judged as a test build sees it; `any()` is false
+ * and `all()` is true by definition.
+ */
+export function cfgPredicate(predicate: string): boolean | undefined {
+    const text = predicate.trim();
+    const call = /^(any|all|not)\((.*)\)$/s.exec(text);
+    if (call === null) return text === "test" ? true : undefined;
+    const args = splitCfgArguments(call[2] ?? "").map(cfgPredicate);
+    if (call[1] === "not") return args.length === 1 && args[0] !== undefined ? !args[0] : undefined;
+    if (call[1] === "any") return args.some((value) => value === true) ? true : args.every((value) => value === false) ? false : undefined;
+    return args.some((value) => value === false) ? false : args.every((value) => value === true) ? true : undefined;
+}
+
+/** Top-level comma-separated arguments of a `cfg` call, honoring nested parentheses. */
+function splitCfgArguments(text: string): string[] {
+    const out: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (char === "(") depth += 1;
+        else if (char === ")") depth -= 1;
+        else if (char === "," && depth === 0) {
+            out.push(text.slice(start, index));
+            start = index + 1;
+        }
+    }
+    const last = text.slice(start);
+    if (last.trim() !== "" || out.length > 0) out.push(last);
+    return out.map((arg) => arg.trim()).filter((arg) => arg !== "");
+}
+
+/**
+ * Names of the `test`, `it`, and `describe` calls in a TypeScript file whose first argument
+ * is a plain string, found by walking the text token by token so a call spelled inside a
+ * comment, a string, or a template literal is text rather than a declared check.
+ */
+export function typescriptDeclaredChecks(text: string): Set<string> {
+    const out = new Set<string>();
+    const call = /^(?:test|it|describe)(?:\.(?<modifier>only|skip|todo|concurrent|sequential))?\s*\(\s*/;
+    let index = 0;
+    while (index < text.length) {
+        const skipped = typescriptLexemeEnd(text, index);
+        if (skipped !== null) {
+            index = skipped;
+            continue;
+        }
+        const char = text[index] ?? "";
+        if (/[A-Za-z_$]/.test(char) && !/[A-Za-z0-9_$.]/.test(text[index - 1] ?? "")) {
+            const match = call.exec(text.slice(index, index + 64));
+            if (match !== null) {
+                const modifier = match.groups?.modifier;
+                if (modifier === "skip" || modifier === "todo") {
+                    // The runner never executes a skipped or todo check, nor anything nested
+                    // in a skipped `describe`, so the whole call is passed over.
+                    index = typescriptCallEnd(text, index + match[0].indexOf("("));
+                    continue;
+                }
+                const at = index + match[0].length;
+                const quote = text[at];
+                if (quote === '"' || quote === "'" || quote === "`") {
+                    const end = typescriptLexemeEnd(text, at);
+                    const literal = end === null ? "" : text.slice(at + 1, end - 1);
+                    if (!literal.includes("${") && !literal.includes("\\")) out.add(literal);
+                }
+            }
+            let cursor = index;
+            while (cursor < text.length && /[A-Za-z0-9_$]/.test(text[cursor] ?? "")) cursor += 1;
+            index = Math.max(cursor, index + 1);
+            continue;
+        }
+        index += 1;
+    }
+    return out;
+}
+
+/** Index just past the `)` that closes the call whose `(` is at `open`, skipping lexemes. */
+function typescriptCallEnd(text: string, open: number): number {
+    let depth = 0;
+    let index = open;
+    while (index < text.length) {
+        const skipped = typescriptLexemeEnd(text, index);
+        if (skipped !== null) {
+            index = skipped;
+            continue;
+        }
+        const char = text[index];
+        if (char === "(") depth += 1;
+        else if (char === ")") {
+            depth -= 1;
+            if (depth === 0) return index + 1;
+        }
+        index += 1;
+    }
+    return text.length;
+}
+
+/**
+ * Whether a `/` at `index` starts a regex literal rather than a division: it does when the
+ * previous significant token cannot end an operand, that is, when the text before it ends
+ * in an operator, an opening bracket, a separator, or a keyword such as `return`, or when
+ * nothing precedes it.
+ */
+function typescriptRegexCanStart(text: string, index: number): boolean {
+    const before = text.slice(0, index).trimEnd();
+    if (before === "") return true;
+    if (/[(,=:[!&|?{};+\-*%<>~^]$/.test(before)) return true;
+    return /(?:^|[^A-Za-z0-9_$.])(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/.test(before);
+}
+
+/**
+ * Index just past the comment, string, or template literal that starts at `index`, or
+ * `null` when none does. A template literal ends at its closing backtick; a `${ ... }`
+ * substitution is skipped by brace depth, with strings inside it skipped in turn.
+ */
+function typescriptLexemeEnd(text: string, index: number): number | null {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === "/" && next === "/") {
+        const eol = text.indexOf("\n", index);
+        return eol === -1 ? text.length : eol;
+    }
+    if (char === "/" && next === "*") {
+        const close = text.indexOf("*/", index + 2);
+        return close === -1 ? text.length : close + 2;
+    }
+    if (char === "/" && typescriptRegexCanStart(text, index)) {
+        // A regex literal runs to its unescaped closing slash outside a character class,
+        // then its flags; a line break ends it, since a regex literal cannot span lines.
+        let cursor = index + 1;
+        let inClass = false;
+        while (cursor < text.length && text[cursor] !== "\n") {
+            const current = text[cursor];
+            if (current === "\\") cursor += 2;
+            else if (current === "[") {
+                inClass = true;
+                cursor += 1;
+            } else if (current === "]") {
+                inClass = false;
+                cursor += 1;
+            } else if (current === "/" && !inClass) {
+                cursor += 1;
+                while (cursor < text.length && /[a-z]/i.test(text[cursor] ?? "")) cursor += 1;
+                return cursor;
+            } else cursor += 1;
+        }
+        return cursor;
+    }
+    if (char === '"' || char === "'") {
+        let cursor = index + 1;
+        while (cursor < text.length && text[cursor] !== char && text[cursor] !== "\n") cursor += text[cursor] === "\\" ? 2 : 1;
+        return cursor + 1;
+    }
+    if (char === "`") {
+        let cursor = index + 1;
+        while (cursor < text.length && text[cursor] !== "`") {
+            if (text[cursor] === "\\") {
+                cursor += 2;
+            } else if (text[cursor] === "$" && text[cursor + 1] === "{") {
+                let depth = 1;
+                cursor += 2;
+                while (cursor < text.length && depth > 0) {
+                    const inner = typescriptLexemeEnd(text, cursor);
+                    if (inner !== null) {
+                        cursor = inner;
+                        continue;
+                    }
+                    if (text[cursor] === "{") depth += 1;
+                    else if (text[cursor] === "}") depth -= 1;
+                    cursor += 1;
+                }
+            } else cursor += 1;
+        }
+        return cursor + 1;
+    }
+    return null;
+}
+
+
+/// Object types for `ids` in one `git cat-file --batch-check` call; missing ids are absent.
+function objectTypes(checkout: string, ids: Iterable<string>): Map<string, string> | string {
+    const input = [...ids].join("\n");
+    if (input === "") return new Map();
+    const result = spawnSync("git", ["cat-file", "--batch-check"], { cwd: checkout, input: `${input}\n`, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+    if (result.error) return String(result.error);
+    if (result.status !== 0) return result.stderr.trim() || `git exited ${result.status}`;
+    const types = new Map<string, string>();
+    for (const line of result.stdout.split("\n")) {
+        const [id, type] = line.trim().split(/\s+/);
+        if (id !== undefined && type !== undefined && type !== "missing") types.set(id, type);
+    }
+    return types;
+}
+
+/// Tree ids that are part of the pinned commit's own snapshot, including its root tree.
+function snapshotTrees(checkout: string, commit: string): Set<string> | string {
+    const root = git(checkout, ["rev-parse", `${commit}^{tree}`]);
+    if (!root.ok) return root.error;
+    const listed = git(checkout, ["ls-tree", "-r", "-d", "--object-only", commit]);
+    if (!listed.ok) return listed.error;
+    const trees = new Set(listed.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== ""));
+    trees.add(root.stdout.trim());
+    return trees;
+}
+
+/// Blob ids under a tree with the number of paths each occupies. Two paths with identical
+/// bytes share one blob id, so a set would let one receipt entry account for both files.
+function treeBlobs(checkout: string, tree: string): Map<string, number> | string {
+    const result = git(checkout, ["ls-tree", "-r", "--object-only", tree]);
+    if (!result.ok) return result.error;
+    const counts = new Map<string, number>();
+    for (const line of result.stdout.split("\n")) {
+        const blob = line.trim();
+        if (blob !== "") counts.set(blob, (counts.get(blob) ?? 0) + 1);
+    }
+    return counts;
 }
 
 function blobBytes(checkout: string, blob: string): Buffer | string {
@@ -1198,6 +1643,9 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
         }
     }
     let waiverGates = new Set<string>();
+    // A waiver expires when the wave it names has landed, whichever receipt is being
+    // checked: the waiver's own wave is where it was written, not where it stops applying.
+    const landed = landedWave(ctx.root, wave);
     if (shape.waivers !== undefined) {
         const waivers = readJson(join(ctx.root, shape.waivers), errors, "$.waivers");
         if (waivers !== undefined) {
@@ -1207,7 +1655,16 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             if (waiverShape.wave !== undefined && waiverShape.wave !== wave) {
                 errors.push(`$.waivers names wave ${waiverShape.wave}, receipt is ${wave}`);
             }
+            for (const expired of expiredWaivers(waivers, landed)) {
+                errors.push(`$.waivers ${expired.id} expired: expires_by_wave ${expired.expires} and wave ${landed} has landed; close the gate or record a new waiver`);
+                waiverShape.gates.delete(expired.gate);
+            }
             waiverGates = waiverShape.gates;
+        }
+    }
+    for (const earlier of earlierWaiverFiles(ctx.root, wave)) {
+        for (const expired of expiredWaivers(earlier.waivers, wave)) {
+            errors.push(`${earlier.path} ${expired.id} expired: expires_by_wave ${expired.expires} is not after wave ${wave}; close the gate before recording this wave`);
         }
     }
     for (const [name, status] of Object.entries(shape.gates)) {
@@ -1222,6 +1679,38 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             const impactErrors = verifyKind("property-impact", impact, ctx);
             impactErrors.forEach((error) => errors.push(`$.property_impact: ${error}`));
             if (impact.wave !== wave) errors.push(`$.property_impact names wave ${String(impact.wave)}, receipt is ${wave}`);
+            // The records judge the source tree, so every provenance entry and every
+            // carried-forward record must name a pinned source at its pinned commit; a
+            // decision about another revision decides nothing about this wave.
+            const pinnedCommit = (repo: string | undefined): string | undefined => shape.sources.find((candidate) => candidate.repo === repo)?.commit;
+            (Array.isArray(impact.provenance) ? impact.provenance : []).forEach((entry, index) => {
+                if (!isObject(entry)) return;
+                const repo = typeof entry.repo === "string" ? entry.repo : undefined;
+                const pinned = pinnedCommit(repo);
+                if (pinned === undefined) {
+                    errors.push(`$.property_impact.provenance[${index}].repo ${String(repo)} is not a pinned source of this receipt`);
+                } else if (entry.source_commit !== pinned) {
+                    errors.push(`$.property_impact.provenance[${index}].source_commit ${String(entry.source_commit)} is not the pinned ${repo} commit ${pinned}`);
+                }
+            });
+            (Array.isArray(impact.records) ? impact.records : []).forEach((record, index) => {
+                if (!isObject(record) || typeof record.provenance !== "string") return;
+                const at = record.provenance.indexOf("@");
+                const repo = at === -1 ? record.provenance : record.provenance.slice(0, at);
+                const pinned = pinnedCommit(repo);
+                if (pinned === undefined || record.provenance !== `${repo}@${pinned}`) {
+                    errors.push(`$.property_impact.records[${index}].provenance ${record.provenance} is not a pinned source of this receipt at its pinned commit`);
+                }
+            });
+            // The impact's own touched list is written by the same hand as its records, so
+            // the receipt's destinations decide which implementation files it must cover.
+            const declared = new Set(Array.isArray(impact.touched_files) ? impact.touched_files.filter((entry): entry is string => typeof entry === "string") : []);
+            for (const file of shape.files) {
+                if (!/^crates\/.*\.(?:rs|sql)$/.test(file.destination)) continue;
+                if (!declared.has(file.destination)) {
+                    errors.push(`$.property_impact.touched_files omits ${file.destination}, which this receipt changes`);
+                }
+            }
         }
     }
     if (shape.architectureImpact !== undefined && shape.architectureImpact !== NOT_APPLICABLE) {
@@ -1230,6 +1719,19 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             const impactErrors = verifyKind("architecture-impact", impact, ctx);
             impactErrors.forEach((error) => errors.push(`$.architecture_impact: ${error}`));
             if (impact.wave !== wave) errors.push(`$.architecture_impact names wave ${String(impact.wave)}, receipt is ${wave}`);
+            // A pre-port report judges the source tree, so it must name a pinned source at
+            // the pinned commit; a report of another revision decides nothing about this wave.
+            (Array.isArray(impact.reports) ? impact.reports : []).forEach((entry, index) => {
+                if (!isObject(entry) || entry.phase !== "pre-port" || !isObject(entry.analyzed)) return;
+                const repo = typeof entry.analyzed.repo === "string" ? entry.analyzed.repo : undefined;
+                const commit = typeof entry.analyzed.commit === "string" ? entry.analyzed.commit : undefined;
+                const source = shape.sources.find((candidate) => candidate.repo === repo);
+                if (source === undefined) {
+                    errors.push(`$.architecture_impact.reports[${index}].analyzed.repo ${String(repo)} is not a pinned source of this receipt`);
+                } else if (commit !== source.commit) {
+                    errors.push(`$.architecture_impact.reports[${index}].analyzed.commit ${String(commit)} is not the pinned ${repo} commit ${source.commit}`);
+                }
+            });
         }
     }
 
@@ -1250,73 +1752,260 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
         if (file.class === "new-authored" && registryShape !== undefined && !registryShape.authored.includes(file.destination)) {
             errors.push(`${file.path} is new-authored but the registry has no authored entry for ${file.destination}`);
         }
+        const fixtureRole = registryShape?.fixtures.find((fixture) => fixture.path === file.destination)?.role;
+        if (fixtureRole === "byte-stable" && file.transformation !== "verbatim" && file.transformation !== "authored") {
+            errors.push(`${file.path} is a byte-stable fixture but its transformation is ${file.transformation ?? "missing"}, not verbatim or authored`);
+        }
     }
 
     const commitByRepo = new Map(shape.sources.map((source) => [source.repo, source.commit]));
-    const treeCache = new Map<string, Map<string, string>>();
-    const treeFor = (repo: string, scopePath: string): Map<string, string> | undefined => {
-        const key = `${repo}\u0000${scopePath}`;
-        const cached = treeCache.get(key);
-        if (cached !== undefined) return cached;
-        const checkout = ctx.checkouts[repo];
+    const reachableCache = new Map<string, Set<string> | undefined>();
+    // Every object reachable from the pinned commit, so a blob is verified as part of that commit
+    // without naming where it lived in the source tree.
+    const reachableFor = (repo: string): Set<string> | undefined => {
+        if (reachableCache.has(repo)) return reachableCache.get(repo);
         const commit = commitByRepo.get(repo);
-        if (checkout === undefined) {
-            errors.push(`no checkout is configured for source repository ${repo}`);
-            return undefined;
+        let result: Set<string> | undefined;
+        if (commit !== undefined) {
+            const checkout = checkoutFor(ctx, repo);
+            if (!existsSync(checkout)) {
+                errors.push(`no checkout is available for source repository ${repo} at ${checkout}`);
+            } else {
+                // The traversal starts at the commit's tree, not the commit: a commit walk
+                // would also return blobs from earlier revisions of a file, and a receipt
+                // could then cite a superseded blob as the migrated source.
+                const listed = git(checkout, ["rev-list", "--objects", "--no-object-names", `${commit}^{tree}`]);
+                if (!listed.ok) {
+                    errors.push(`git rev-list failed for ${repo}@${commit}: ${listed.error}`);
+                } else {
+                    result = new Set(listed.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== ""));
+                }
+            }
         }
-        if (commit === undefined) return undefined;
-        const listed = lsTree(checkout, commit, scopePath);
-        if (typeof listed === "string") {
-            errors.push(`git ls-tree failed for ${repo}@${commit} ${scopePath}: ${listed}`);
-            return undefined;
-        }
-        const map = new Map(listed.map((entry) => [entry.path, entry.blob]));
-        treeCache.set(key, map);
-        return map;
+        reachableCache.set(repo, result);
+        return result;
     };
+
+    // A commit or tree id is reachable too, so the type is checked as well as the reach.
+    const typesByRepo = new Map<string, Map<string, string>>();
+    for (const repo of commitByRepo.keys()) {
+        const checkout = checkoutFor(ctx, repo);
+        if (!existsSync(checkout)) continue;
+        const ids = shape.files.flatMap((file) => (file.source?.repo === repo ? [file.source.blob_sha] : []));
+        const types = objectTypes(checkout, ids);
+        if (typeof types === "string") errors.push(`git cat-file --batch-check failed for ${repo}: ${types}`);
+        else typesByRepo.set(repo, types);
+    }
 
     for (const file of shape.files) {
         if (file.source === null) continue;
-        const tree = treeFor(file.source.repo, file.source.path);
-        if (tree === undefined) continue;
-        const actualBlob = tree.get(file.source.path);
-        if (actualBlob === undefined) {
-            errors.push(`${file.path}.source.path ${file.source.path} is not a blob at ${file.source.repo}@${commitByRepo.get(file.source.repo)}`);
+        const reachable = reachableFor(file.source.repo);
+        if (reachable === undefined) continue;
+        // The object type is named first: a commit or tree id sits outside the snapshot's
+        // blob set as well, and the type is the more useful reason.
+        const type = typesByRepo.get(file.source.repo)?.get(file.source.blob_sha);
+        if (type !== undefined && type !== "blob") {
+            errors.push(`${file.path}.source.blob_sha ${file.source.blob_sha} is a ${type}, not a blob`);
             continue;
         }
-        if (actualBlob !== file.source.blob_sha) {
-            errors.push(`${file.path}.source.blob_sha is stale: ${file.source.repo}@${commitByRepo.get(file.source.repo)} has ${actualBlob}`);
+        if (!reachable.has(file.source.blob_sha)) {
+            errors.push(`${file.path}.source.blob_sha ${file.source.blob_sha} is not reachable from ${file.source.repo}@${commitByRepo.get(file.source.repo)}`);
             continue;
         }
         if (file.transformation === "verbatim" && file.destination_sha256 !== undefined) {
-            const checkout = ctx.checkouts[file.source.repo];
-            if (checkout === undefined) continue;
-            const bytes = blobBytes(checkout, actualBlob);
+            const bytes = blobBytes(checkoutFor(ctx, file.source.repo), file.source.blob_sha);
             if (typeof bytes === "string") {
-                errors.push(`git cat-file failed for ${file.source.repo} blob ${actualBlob}: ${bytes}`);
+                errors.push(`git cat-file failed for ${file.source.repo} blob ${file.source.blob_sha}: ${bytes}`);
             } else if (sha256(bytes) !== file.destination_sha256) {
-                errors.push(`${file.path} is verbatim but destination bytes differ from source blob ${actualBlob}`);
+                errors.push(`${file.path} is verbatim but destination bytes differ from source blob ${file.source.blob_sha}`);
             }
         }
     }
 
-    const listedSources = new Set<string>();
+    // Every blob under a scoped source tree is either carried or explicitly excluded, so a
+    // file dropped from a source crate cannot pass unnoticed.
+    const disposed = new Map<string, number>();
+    const dispose = (repo: string, blob: string) => {
+        const key = `${repo}\u0000${blob}`;
+        disposed.set(key, (disposed.get(key) ?? 0) + 1);
+    };
     for (const file of shape.files) {
-        if (file.source !== null) listedSources.add(`${file.source.repo}\u0000${file.source.path}`);
+        if (file.source !== null) dispose(file.source.repo, file.source.blob_sha);
     }
-    const excluded = new Set(shape.excluded.map((entry) => `${entry.repo}\u0000${entry.path}`));
-    for (const scope of shape.scope) {
-        const tree = treeFor(scope.repo, scope.path);
-        if (tree === undefined) continue;
-        if (tree.size === 0) {
-            errors.push(`$.scope ${scope.repo}:${scope.path} lists no files at the pinned commit`);
-        }
-        for (const path of tree.keys()) {
-            const key = `${scope.repo}\u0000${path}`;
-            if (!listedSources.has(key) && !excluded.has(key)) {
-                errors.push(`$.scope ${scope.repo}:${scope.path} has file missing from receipt: ${path}`);
+    for (const entry of shape.excluded) dispose(entry.repo, entry.blob_sha);
+    // Required multiplicities are summed over every scoped tree before the comparison: one
+    // disposition of a blob that sits in two trees accounts for one path, not two.
+    const required = new Map<string, { paths: number; scopes: string[] }>();
+    const snapshotCache = new Map<string, Set<string> | undefined>();
+    shape.scope.forEach((entry, index) => {
+        const checkout = checkoutFor(ctx, entry.repo);
+        if (!existsSync(checkout)) return;
+        const commit = commitByRepo.get(entry.repo);
+        if (commit === undefined) return;
+        // A tree from an older commit is reachable too, so the tree must sit in the pinned
+        // commit's own snapshot or a stale crate version could pass as complete.
+        if (!snapshotCache.has(entry.repo)) {
+            const trees = snapshotTrees(checkout, commit);
+            if (typeof trees === "string") {
+                errors.push(`git ls-tree failed for ${entry.repo}@${commit}: ${trees}`);
+                snapshotCache.set(entry.repo, undefined);
+            } else {
+                snapshotCache.set(entry.repo, trees);
             }
         }
+        const snapshot = snapshotCache.get(entry.repo);
+        if (snapshot !== undefined && !snapshot.has(entry.tree)) {
+            errors.push(`$.scope[${index}].tree ${entry.tree} is not a tree of ${entry.repo}@${commit}`);
+            return;
+        }
+        const blobs = treeBlobs(checkout, entry.tree);
+        if (typeof blobs === "string") {
+            errors.push(`git ls-tree failed for ${entry.repo} tree ${entry.tree}: ${blobs}`);
+            return;
+        }
+        if (blobs.size === 0) errors.push(`$.scope[${index}].tree ${entry.tree} lists no blobs`);
+        for (const [blob, paths] of blobs) {
+            const key = `${entry.repo}\u0000${blob}`;
+            const seen = required.get(key) ?? { paths: 0, scopes: [] };
+            seen.paths += paths;
+            seen.scopes.push(`$.scope[${index}]`);
+            required.set(key, seen);
+        }
+    });
+    for (const [key, { paths, scopes }] of required) {
+        const [repo, blob] = key.split("\u0000") as [string, string];
+        const accounted = disposed.get(key) ?? 0;
+        if (accounted === 0) {
+            errors.push(`${scopes.join(",")} ${repo} has blob ${blob} missing from the receipt`);
+        } else if (accounted < paths) {
+            errors.push(`${scopes.join(",")} ${repo} has blob ${blob} at ${paths} paths but the receipt disposes of it ${accounted} time(s)`);
+        }
+    }
+}
+
+/// The highest wave with a receipt under the destination root, or `current` when none is
+/// higher; a receipt being written counts as landed for its own waivers.
+function landedWave(root: string, current: string): string {
+    let highest = current;
+    const waves = join(root, "migration", "waves");
+    if (!existsSync(waves)) return highest;
+    for (const wave of readdirSync(waves)) {
+        if (waveIndex(wave) === -1 || !existsSync(join(waves, wave, "receipt.json"))) continue;
+        if (waveIndex(wave) > waveIndex(highest)) highest = wave;
+    }
+    return highest;
+}
+
+/// Waiver files of waves earlier than `current`, read as they are on disk.
+function earlierWaiverFiles(root: string, current: string): { path: string; waivers: JsonObject }[] {
+    const out: { path: string; waivers: JsonObject }[] = [];
+    const waves = join(root, "migration", "waves");
+    if (!existsSync(waves)) return out;
+    for (const wave of readdirSync(waves).sort()) {
+        if (waveIndex(wave) === -1 || waveIndex(wave) >= waveIndex(current)) continue;
+        const path = join("migration", "waves", wave, "waivers.json");
+        if (!existsSync(join(root, path))) continue;
+        try {
+            const waivers = JSON.parse(readFileSync(join(root, path), "utf8")) as JsonObject;
+            if (isObject(waivers)) out.push({ path, waivers });
+        } catch {
+            // A malformed waiver file fails its own wave's check.
+        }
+    }
+    return out;
+}
+
+/// Waivers in `waivers` whose `expires_by_wave` is not after `wave`.
+function expiredWaivers(waivers: JsonObject, wave: string): { id: string; gate: string; expires: string }[] {
+    const out: { id: string; gate: string; expires: string }[] = [];
+    for (const entry of Array.isArray(waivers.waivers) ? waivers.waivers : []) {
+        if (!isObject(entry) || typeof entry.expires_by_wave !== "string" || waveIndex(entry.expires_by_wave) === -1) continue;
+        if (waveIndex(entry.expires_by_wave) <= waveIndex(wave)) {
+            out.push({
+                id: typeof entry.id === "string" ? entry.id : "<unnamed>",
+                gate: typeof entry.gate === "string" ? entry.gate : "",
+                expires: entry.expires_by_wave,
+            });
+        }
+    }
+    return out;
+}
+
+/// Destinations named by every wave receipt under the destination root.
+function receiptDestinations(root: string): Set<string> {
+    const out = new Set<string>();
+    const waves = join(root, "migration", "waves");
+    if (!existsSync(waves)) return out;
+    for (const wave of readdirSync(waves)) {
+        const path = join(waves, wave, "receipt.json");
+        if (!existsSync(path)) continue;
+        try {
+            const receipt = JSON.parse(readFileSync(path, "utf8")) as JsonObject;
+            for (const entry of Array.isArray(receipt.files) ? receipt.files : []) {
+                if (isObject(entry) && typeof entry.destination === "string") out.add(entry.destination);
+            }
+        } catch {
+            // A malformed receipt fails its own check; the registry check does not double-report it.
+        }
+    }
+    return out;
+}
+
+/**
+ * Digest of a set of files: one `path\n<sha256 of bytes>\n` line per file, sorted by path.
+ * Each file is hashed on its own, so bytes moving across a file boundary change the digest;
+ * a plain concatenation would not see them move.
+ */
+export function fileSetDigest(entries: Iterable<[string, Buffer]>): string {
+    const lines = [...entries].map(([path, bytes]) => `${path}\n${sha256(bytes)}\n`);
+    lines.sort();
+    return sha256(lines.join(""));
+}
+
+/**
+ * Digest of every tracked file under the named module directories in the checked tree, in
+ * the `fileSetDigest` form. Tracked means listed by `git ls-files`; a plain directory walk
+ * would let build output and editor files change the digest.
+ */
+export function modulesHash(root: string, modules: string[], path: string, errors: string[]): string | undefined {
+    const directories = [...new Set(modules)].sort();
+    const entries: [string, Buffer][] = [];
+    for (const directory of directories) {
+        const full = join(root, directory);
+        if (!existsSync(full) || !statSync(full).isDirectory()) {
+            errors.push(`${path} names ${directory}, which is not a directory in the destination tree`);
+            return undefined;
+        }
+        const listed = git(root, ["ls-files", "-z", "--", directory]);
+        if (!listed.ok) {
+            errors.push(`${path}: git ls-files failed for ${directory}: ${listed.error}`);
+            return undefined;
+        }
+        for (const file of listed.stdout.split("\0").filter((entry) => entry !== "")) {
+            const fileFull = join(root, file);
+            if (!existsSync(fileFull) || !statSync(fileFull).isFile()) {
+                errors.push(`${path}: tracked file ${file} is not a file in the destination tree`);
+                return undefined;
+            }
+            entries.push([file, readFileSync(fileFull)]);
+        }
+    }
+    if (entries.length === 0) {
+        errors.push(`${path} covers no tracked files`);
+        return undefined;
+    }
+    return fileSetDigest(entries);
+}
+
+/// `destination_commit` must be an ancestor of the checked-out destination, so impact records
+/// cannot describe an unrelated tree. Skipped when the destination is not a git checkout.
+function verifyDestinationCommit(commit: string, path: string, ctx: Context, errors: string[]): void {
+    if (!existsSync(join(ctx.root, ".git"))) return;
+    const result = spawnSync("git", ["merge-base", "--is-ancestor", commit, "HEAD"], { cwd: ctx.root, encoding: "utf8" });
+    if (result.error) {
+        errors.push(`${path}: git merge-base failed: ${String(result.error)}`);
+    } else if (result.status !== 0) {
+        errors.push(`${path} ${commit} is not an ancestor of the destination HEAD`);
     }
 }
 
@@ -1343,9 +2032,9 @@ function verifyReadiness(shape: ReceiptShape, ctx: Context, errors: string[]): v
         errors.push(`$.readiness wave ${shape.wave} needs a pinned ${repo} commit to read bead state`);
         return;
     }
-    const checkout = ctx.checkouts[repo];
-    if (checkout === undefined) {
-        errors.push(`no checkout is configured for readiness repository ${repo}`);
+    const checkout = checkoutFor(ctx, repo);
+    if (!existsSync(checkout)) {
+        errors.push(`no checkout is available for readiness repository ${repo} at ${checkout}`);
         return;
     }
     const exportPath = (entry.beads_export as string | undefined) ?? ".beads/issues.jsonl";
@@ -1409,50 +2098,276 @@ export function validateReadinessShape(root: JsonObject, errors: string[]): void
     }
 }
 
-const IDENTITY_SCAN_ROOTS = ["crates", "packages", "release", ".github", "Cargo.toml", "package.json"];
-const TEXT_EXTENSIONS = new Set([".rs", ".ts", ".tsx", ".js", ".json", ".toml", ".yml", ".yaml", ".md", ".txt", ".sh", ".sql"]);
 
-function isTextFile(path: string): boolean {
-    const dot = path.lastIndexOf(".");
-    return dot >= 0 && TEXT_EXTENSIONS.has(path.slice(dot));
+
+
+
+/**
+ * Normalized form of a name for the retired-identity digest: lower-case with `-` and `_`
+ * removed, so `Some-Name`, `some_name`, and `somename` share one digest.
+ */
+export function retiredIdentityDigest(name: string): string {
+    return sha256(name.toLowerCase().replace(/[-_]/g, ""));
+}
+
+/** Text files a retired identity is searched in: every tracked file except lock files. */
+function retiredIdentityScanFiles(root: string): string[] {
+    const listed = git(root, ["ls-files", "-z"]);
+    const files = listed.ok ? listed.stdout.split("\0").filter((f) => f !== "") : listFiles(root, skipVendored);
+    return files.filter((f) => !/(^|\/)(bun\.lock|Cargo\.lock|package-lock\.json)$/.test(f));
+}
+
+/**
+ * Every word-like token in `text` and every contiguous run of its `-`/`_`-separated parts,
+ * joined and lower-cased. `old-name-host` yields `old`, `name`, `host`, `oldname`,
+ * `namehost`, and `oldnamehost`, so a retired name that keeps its delimiter inside a
+ * compound is found through the run that spells it.
+ */
+export function normalizedTokens(text: string): Set<string> {
+    const out = new Set<string>();
+    for (const match of text.matchAll(/[A-Za-z][A-Za-z0-9_-]*/g)) {
+        const parts = match[0].toLowerCase().split(/[-_]+/).filter((part) => part !== "");
+        for (let start = 0; start < parts.length; start += 1) {
+            let run = "";
+            for (let end = start; end < parts.length; end += 1) {
+                run += parts[end];
+                out.add(run);
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * `text` with every item under a `#[cfg(test)]` (or `cfg(all(test, ...))`) attribute
+ * replaced by blank lines, so line numbers in later messages still match the file. The item
+ * is the next `{ ... }` block or `;`-terminated declaration after the attribute. The text is
+ * walked token by token: an attribute spelled inside a comment, a string literal, or a raw
+ * string is text, not an attribute, so it neither starts a blanked item nor ends one early.
+ */
+export function withoutCfgTestItems(text: string): string {
+    const attribute = /^#\[cfg\((?:test|all\(\s*test\b[^)]*\))\)\]/;
+    let out = "";
+    let cursor = 0;
+    let index = 0;
+    while (index < text.length) {
+        const skipped = rustLexemeEnd(text, index);
+        if (skipped !== null) {
+            index = skipped;
+            continue;
+        }
+        if (text[index] === "#") {
+            const match = attribute.exec(text.slice(index, index + 200));
+            if (match !== null) {
+                const end = rustItemEnd(text, index + match[0].length);
+                out += text.slice(cursor, index) + text.slice(index, end).replace(/[^\n]/g, "");
+                cursor = end;
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    return out + text.slice(cursor);
+}
+
+/**
+ * Index just past the comment, string, byte string, raw string, or character literal that
+ * starts at `index`, or `null` when none does. Rust block comments nest, so a block comment
+ * ends at the terminator that returns to depth 0; a raw string may carry up to 255 `#` in
+ * its delimiter, so its opener is matched on the remaining text rather than a fixed window.
+ */
+function rustLexemeEnd(text: string, index: number): number | null {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === "/" && next === "/") {
+        const eol = text.indexOf("\n", index);
+        return eol === -1 ? text.length : eol;
+    }
+    if (char === "/" && next === "*") {
+        let comments = 1;
+        let cursor = index + 2;
+        while (cursor < text.length && comments > 0) {
+            if (text[cursor] === "/" && text[cursor + 1] === "*") {
+                comments += 1;
+                cursor += 2;
+            } else if (text[cursor] === "*" && text[cursor + 1] === "/") {
+                comments -= 1;
+                cursor += 2;
+            } else cursor += 1;
+        }
+        return cursor;
+    }
+    const identifierBefore = /[A-Za-z0-9_]/.test(text[index - 1] ?? "");
+    const raw = (char === "r" || (char === "b" && next === "r")) && !identifierBefore ? /^b?r(#{0,255})"/.exec(text.slice(index, index + 260)) : null;
+    if (raw !== null) {
+        const terminator = `"${raw[1]}`;
+        const close = text.indexOf(terminator, index + raw[0].length);
+        return close === -1 ? text.length : close + terminator.length;
+    }
+    if (char === '"' || (char === "b" && next === '"' && !identifierBefore)) {
+        let cursor = index + (char === "b" ? 2 : 1);
+        while (cursor < text.length && text[cursor] !== '"') cursor += text[cursor] === "\\" ? 2 : 1;
+        return cursor + 1;
+    }
+    if (char === "'" && /^'(?:\\.|[^\\'])'/.test(text.slice(index, index + 4))) {
+        return text.indexOf("'", index + 2) + 1;
+    }
+    return null;
+}
+
+/**
+ * Index just past the Rust item or member that starts at `from`: its closing brace, its
+ * terminating `;`, or, for an enum variant or struct field, the `,` that ends the member.
+ * A `}` met before any `{` closes the enclosing type, so the member ends in front of it
+ * rather than swallowing the rest of the file. Commas inside parentheses, brackets, and
+ * generic angle brackets belong to the member; an angle bracket counts as generic when it
+ * directly follows an identifier or a closing `>` and appears before any top-level `=`,
+ * since after `=` the item is an initializer or alias target in which `<` may compare.
+ */
+function rustItemEnd(text: string, from: number): number {
+    let braces = 0;
+    let groups = 0;
+    let angles = 0;
+    // A top-level `=` starts an initializer or alias target, where `<` and `>` may be
+    // comparison operators, so angle tracking stops there and the `;` ends the item.
+    let initializer = false;
+    let index = from;
+    while (index < text.length) {
+        const skipped = rustLexemeEnd(text, index);
+        if (skipped !== null) {
+            index = skipped;
+            continue;
+        }
+        const char = text[index];
+        const previous = text[index - 1] ?? "";
+        const next = text[index + 1] ?? "";
+        if (char === "{") braces += 1;
+        else if (char === "}") {
+            if (braces === 0) return index;
+            braces -= 1;
+            if (braces === 0) return index + 1;
+        } else if (braces === 0) {
+            if (char === "(" || char === "[") groups += 1;
+            else if (char === ")" || char === "]") groups = Math.max(0, groups - 1);
+            else if (char === "=" && groups === 0 && angles === 0 && next !== "=" && next !== ">" && !/[=!<>]/.test(previous)) initializer = true;
+            else if (!initializer && char === "<" && /[A-Za-z_>]/.test(previous)) angles += 1;
+            else if (!initializer && char === ">" && previous !== "-" && angles > 0) angles -= 1;
+            else if ((char === ";" || char === ",") && groups === 0 && angles === 0) return index + 1;
+        }
+        index += 1;
+    }
+    return text.length;
+}
+
+/**
+ * The source files a crate ships: every `.rs`, `.ts`, and `.tsx` under the crate except the
+ * auto-discovered `tests/`, `benches/`, and `examples/` targets and any `[[test]]`,
+ * `[[bench]]`, or `[[example]]` target the manifest names by path. A `[lib]`, `[[bin]]`, or
+ * build script the manifest names is scanned as Rust wherever it lives and whatever its
+ * extension, even under one of those directory names, as is a TypeScript file kept in a
+ * crate.
+ */
+export function productionCrateFiles(crateDir: string): string[] {
+    const testOnly = new Set<string>();
+    const production = new Set<string>();
+    const manifestPath = join(crateDir, "Cargo.toml");
+    if (existsSync(manifestPath)) {
+        const manifest = Bun.TOML.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+        const pathsOf = (value: unknown): string[] => {
+            const targets = Array.isArray(value) ? value : value === undefined ? [] : [value];
+            return targets.flatMap((target) => {
+                const path = (target as Record<string, unknown>).path;
+                return typeof path === "string" ? [path.split(sep).join("/")] : [];
+            });
+        };
+        for (const kind of ["test", "bench", "example"]) for (const path of pathsOf(manifest[kind])) testOnly.add(path);
+        // A library, binary, or build script the manifest places under a test directory
+        // name is still compiled into the crate, so it is scanned wherever it lives.
+        for (const kind of ["lib", "bin"]) for (const path of pathsOf(manifest[kind])) production.add(path);
+        const build = (manifest.package as Record<string, unknown> | undefined)?.build;
+        if (typeof build === "string") production.add(build.split(sep).join("/"));
+    }
+    return listFiles(crateDir, skipVendored).filter((rel) => {
+        const normalized = rel.split(sep).join("/");
+        // A target the manifest names is Rust whatever its extension.
+        if (production.has(normalized)) return true;
+        if (!rel.endsWith(".rs") && !rel.endsWith(".ts") && !rel.endsWith(".tsx")) return false;
+        const top = normalized.split("/")[0];
+        if (top === "tests" || top === "benches" || top === "examples") return false;
+        return !testOnly.has(normalized);
+    });
 }
 
 function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): void {
-    const retained = shape.identities.filter((identity) => identity.class !== "renamed").map((identity) => identity.value);
-    const renamed = shape.identities.filter((identity) => identity.class === "renamed").map((identity) => identity.value);
-
-    for (const scanRoot of IDENTITY_SCAN_ROOTS) {
-        const full = join(ctx.root, scanRoot);
-        if (!existsSync(full)) continue;
-        const files = statSync(full).isDirectory() ? listFiles(full, skipVendored).map((rel) => join(scanRoot, rel)) : [scanRoot];
-        for (const file of files) {
-            if (!isTextFile(file)) continue;
-            const lines = readFileSync(join(ctx.root, file), "utf8").split("\n");
-            lines.forEach((line, index) => {
-                if (!LEGACY_IDENTITY_RE.test(line)) return;
-                if (retained.some((value) => line.includes(value))) return;
-                const hit = renamed.find((value) => line.includes(value));
-                const detail = hit !== undefined ? `renamed identity ${hit} still present` : "legacy identity not frozen by the registry";
-                errors.push(`${file}:${index + 1}: ${detail}`);
-            });
+    if (shape.retired.length > 0) {
+        const retired = new Set(shape.retired.map((entry) => entry.digest));
+        for (const rel of retiredIdentityScanFiles(ctx.root)) {
+            const full = join(ctx.root, rel);
+            if (!existsSync(full) || !statSync(full).isFile()) continue;
+            // The pathname is scanned along with the contents: a retired name can survive as
+            // a directory or file name with nothing inside naming it.
+            for (const token of normalizedTokens(rel)) {
+                if (retired.has(sha256(token))) {
+                    errors.push(`${rel}: its path names a retired source identity (digest ${sha256(token).slice(0, 12)}); the destination tree carries no source-implementation name`);
+                    break;
+                }
+            }
+            const bytes = readFileSync(full);
+            if (bytes.includes(0)) continue;
+            const text = bytes.toString("utf8");
+            for (const token of normalizedTokens(text)) {
+                if (retired.has(sha256(token))) {
+                    errors.push(`${rel}: names a retired source identity (digest ${sha256(token).slice(0, 12)}); the destination tree carries no source-implementation name`);
+                    break;
+                }
+            }
+        }
+    }
+    const pinned = receiptDestinations(ctx.root);
+    for (const fixture of shape.fixtures) {
+        const full = join(ctx.root, fixture.path);
+        if (!existsSync(full) || !statSync(full).isFile()) {
+            errors.push(`fixture ${fixture.path} is registered but does not exist in the destination`);
+        }
+        // Only a receipt entry pins bytes, so a byte-stable fixture outside every receipt is unpinned.
+        if (fixture.role === "byte-stable" && !pinned.has(fixture.path)) {
+            errors.push(`fixture ${fixture.path} is byte-stable but no receipt pins its bytes`);
         }
     }
 
     const literalOwners = new Set(shape.families.flatMap((family) => family.literals));
-    for (const tree of ["crates", "packages"]) {
-        const treeRoot = join(ctx.root, tree);
-        if (!existsSync(treeRoot)) continue;
-        for (const rel of listFiles(treeRoot, skipVendored)) {
-            const parts = rel.split("/");
-            if (parts[1] !== "src") continue;
-            if (/(^|[./_-])tests?([./_-]|$)/.test(rel)) continue;
-            if (!rel.endsWith(".rs") && !rel.endsWith(".ts")) continue;
-            const text = readFileSync(join(treeRoot, rel), "utf8");
-            for (const match of text.matchAll(PERSISTENT_LITERAL_RE)) {
-                const literal = match[1];
-                if (literal === undefined || literalOwners.has(literal)) continue;
-                errors.push(`${tree}/${rel}: persistent literal "${literal}" has no family entry in the registry`);
+    const scanProduction = (path: string, language: ".rs" | ".ts"): void => {
+        // A test-like file name carries no compile-time meaning, so every production file is
+        // scanned; only the bodies Rust compiles for tests alone are skipped.
+        const source = readFileSync(join(ctx.root, path), "utf8");
+        const text = language === ".rs" ? withoutCfgTestItems(source) : source;
+        for (const match of text.matchAll(PERSISTENT_LITERAL_RE[language])) {
+            const literal = match[1] ?? match[2] ?? match[3];
+            if (literal === undefined || literalOwners.has(literal)) continue;
+            errors.push(`${path}: persistent literal "${literal}" has no family entry in the registry`);
+        }
+        text.split("\n").forEach((line, index) => {
+            for (const match of line.matchAll(MIGRATION_MACHINERY_RE)) {
+                errors.push(`${path}:${index + 1}: migration machinery "${match[0]}"; a family has one baseline and no version ledger`);
             }
+        });
+    };
+    const cratesRoot = join(ctx.root, "crates");
+    if (existsSync(cratesRoot)) {
+        for (const entry of readdirSync(cratesRoot, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            for (const rel of productionCrateFiles(join(cratesRoot, entry.name))) {
+                scanProduction(`crates/${entry.name}/${rel.split(sep).join("/")}`, rel.endsWith(".ts") || rel.endsWith(".tsx") ? ".ts" : ".rs");
+            }
+        }
+    }
+    // Every TypeScript file under `packages` is classified by the registry below, and a
+    // package may ship an entrypoint outside `src`, so the same set is scanned here.
+    const packagesTree = join(ctx.root, "packages");
+    if (existsSync(packagesTree)) {
+        for (const rel of listFiles(packagesTree, skipVendored)) {
+            if (rel.endsWith(".ts") || rel.endsWith(".tsx")) scanProduction(`packages/${rel.split(sep).join("/")}`, ".ts");
         }
     }
 
@@ -1490,15 +2405,81 @@ function verifyKind(kind: CheckKind, root: JsonObject, ctx: Context): string[] {
             break;
         case "property-impact": {
             const shape = validatePropertyImpactShape(root, errors);
+            if (errors.length === 0 && typeof root.destination_commit === "string") {
+                verifyDestinationCommit(root.destination_commit, "$.destination_commit", ctx, errors);
+            }
+            // Evidence binds to bytes, not to a commit: a core record's hashes must equal the
+            // hashes of the files it covers in the checked tree.
+            for (const core of shape.cores) {
+                // A missing covered file is itself an error; code_hash is only compared over the
+                // complete file set.
+                const entries: [string, Buffer][] = [];
+                let complete = true;
+                for (const file of core.files) {
+                    const full = join(ctx.root, file);
+                    if (existsSync(full) && statSync(full).isFile()) entries.push([file, readFileSync(full)]);
+                    else {
+                        complete = false;
+                        errors.push(`${core.path}.files lists ${file}, which is not a file in the destination tree; the code_hash cannot be verified`);
+                    }
+                }
+                if (complete) {
+                    const actual = fileSetDigest(entries);
+                    if (core.code_hash !== undefined && actual !== core.code_hash) {
+                        errors.push(`${core.path}.code_hash is stale: the covered files hash to ${actual}; regenerate the record against the checked tree`);
+                    }
+                }
+                const checkFile = core.check_pointer?.split("#")[0];
+                if (checkFile !== undefined) {
+                    const full = join(ctx.root, checkFile);
+                    if (existsSync(full) && statSync(full).isFile()) {
+                        const actual = sha256(readFileSync(full));
+                        if (core.check_hash !== undefined && actual !== core.check_hash) {
+                            errors.push(`${core.path}.check_hash is stale: ${checkFile} hashes to ${actual}; regenerate the record against the checked tree`);
+                        }
+                    } else {
+                        errors.push(`${core.path}.check_pointer names ${checkFile}, which is not a file in the destination tree; the check_hash cannot be verified`);
+                    }
+                }
+                if (core.evidence_pointer !== undefined) {
+                    const full = join(ctx.root, core.evidence_pointer);
+                    if (existsSync(full) && statSync(full).isFile()) {
+                        const actual = sha256(readFileSync(full));
+                        if (core.evidence_digest !== undefined && actual !== core.evidence_digest) {
+                            errors.push(`${core.path}.evidence_digest is stale: ${core.evidence_pointer} hashes to ${actual}; regenerate the record against the checked tree`);
+                        }
+                    } else {
+                        errors.push(`${core.path}.evidence_pointer names ${core.evidence_pointer}, which is not a file in the destination tree; the evidence_digest cannot be verified`);
+                    }
+                }
+                if (core.new_evidence_digest !== undefined && core.evidence_digest !== undefined && core.new_evidence_digest !== core.evidence_digest) {
+                    errors.push(`${core.path}.new_evidence.digest ${core.new_evidence_digest} does not equal evidence_digest; both name the same evidence record`);
+                }
+            }
             for (const pointer of shape.pointers) {
-                if (!pointerResolves(ctx.root, pointer.pointer)) {
-                    errors.push(`${pointer.path} ${pointer.pointer} does not resolve in the destination tree; reclassify the record as core or excluded`);
+                const problem = pointerProblem(ctx.root, pointer.pointer);
+                if (problem !== undefined) {
+                    errors.push(`${pointer.path} ${pointer.pointer} ${problem}; reclassify the record as core or excluded`);
                 }
             }
             break;
         }
         case "architecture-impact":
             validateArchitectureImpactShape(root, errors);
+            if (errors.length === 0) {
+                (Array.isArray(root.reports) ? root.reports : []).forEach((entry, index) => {
+                    if (!isObject(entry) || entry.phase !== "post-integration" || !isObject(entry.analyzed)) return;
+                    if (typeof entry.analyzed.commit === "string") {
+                        verifyDestinationCommit(entry.analyzed.commit, `$.reports[${index}].analyzed.commit`, ctx, errors);
+                    }
+                    if (Array.isArray(entry.analyzed.modules) && typeof entry.analyzed.modules_hash === "string") {
+                        const actual = modulesHash(ctx.root, entry.analyzed.modules as string[], `$.reports[${index}].analyzed.modules`, errors);
+                        if (actual !== undefined && actual !== entry.analyzed.modules_hash) {
+                            errors.push(`$.reports[${index}].analyzed.modules_hash is stale: the covered modules hash to ${actual}; re-run the review against the checked tree`);
+                        }
+                    }
+                });
+            }
             break;
     }
     return errors;

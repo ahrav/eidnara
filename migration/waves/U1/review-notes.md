@@ -6,9 +6,9 @@ verbatim from a pinned source commit.
 
 ## Authored files
 
-Each authored file implements a numbered U1 step from
-`docs/plans/2026-09-01-0633-refactor-eidnara-repository-migration-plan.md` in
-the commons repository. The mapping is:
+Each authored file implements a numbered U1 step from the repository plan
+`2026-09-01-0633-refactor-eidnara-repository-migration-plan` in the `primitives`
+source. The mapping is:
 
 | File | Plan step |
 | --- | --- |
@@ -22,7 +22,7 @@ the commons repository. The mapping is:
 | `scripts/eidnara-migration/registry-audit.ts`, `registry-audit.test.ts` | step 11 |
 | `scripts/eidnara-migration/generate-property-index.ts`, `generate-property-index.test.ts` | step 12 (KTD14) |
 | `docs/runbooks/architecture-review.md` | step 9 |
-| `docs/properties/README.md`, `fixtures/vocabulary/README.md` | U1 files list |
+| `docs/properties/README.md` | U1 files list |
 
 The negative tests in `scripts/eidnara-migration/check.test.ts` (56 tests),
 `registry-audit.test.ts` (6 tests), and `generate-property-index.test.ts` (4
@@ -33,12 +33,13 @@ list. The checker exercises the control-record JSON files with
 
 ## Copied files
 
-`docs/properties/METHOD.md` is a verbatim copy of
-`magic-context@b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825:docs/properties/METHOD.md`.
-The plan pins this revision as the method for every catalog. The U1 review read
-its prose in full and left it unchanged. Editing it would change the pinned
-method and is out of scope for this wave. Any wording change to METHOD requires
-a separate reviewed pin change.
+`docs/properties/METHOD.md` is adapted from the method document at
+`host@b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825`: the four field-format lines
+that used an em dash as the separator between an enumerated field head and its
+note use a spaced hyphen instead, and the formatting rule names that
+convention. No other prose changed; the receipt records the file as `adapted`
+for that reason. Editing the method further would change the pinned method and
+is out of scope for this wave.
 
 ## Generated files
 

@@ -16,17 +16,6 @@ export const EIDNARA_PACKAGES = [
     "@eidnara/pi",
 ] as const;
 
-export const CORTEXKIT_PACKAGES = [
-    "@cortexkit/mc-shm-native",
-    "@cortexkit/mc-host-linux-x64-gnu",
-    "@cortexkit/magic-context",
-    "@cortexkit/opencode-magic-context",
-    "@cortexkit/pi-magic-context",
-] as const;
-
-// Predecessor payload and addon names that must stay unpublished (registry gate confirms E404).
-export const MUST_BE_UNPUBLISHED: readonly string[] = ["@cortexkit/mc-shm-native", "@cortexkit/mc-host-linux-x64-gnu"];
-
 export const NPM_SCOPE = "eidnara";
 
 const PRERELEASE_RE = /^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$/;
@@ -72,10 +61,14 @@ function summarizeView(result: CommandResult): Record<string, unknown> {
     }
     try {
         const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
-        const versions = Array.isArray(parsed.versions) ? (parsed.versions as unknown[]) : [];
+        // A successful view of a published name always carries its versions; a response
+        // without them proves nothing about the name and is recorded as an error, since a
+        // published summary with no versions would otherwise pass as prerelease-only.
+        const versions = Array.isArray(parsed.versions) ? parsed.versions.filter((value): value is string => typeof value === "string") : [];
+        if (versions.length === 0) return { state: "error", code: "no-versions" };
         return {
             state: "published",
-            versions: versions.filter((value): value is string => typeof value === "string"),
+            versions,
             dist_tags: parsed["dist-tags"] ?? {},
         };
     } catch {
@@ -105,7 +98,7 @@ function summarizeExit(result: CommandResult): Record<string, unknown> {
 export function audit(run: Runner, now: Date): GateFile {
     const versionResult = run(["--version"]);
     const probes: Probe[] = [];
-    for (const name of [...EIDNARA_PACKAGES, ...CORTEXKIT_PACKAGES]) {
+    for (const name of EIDNARA_PACKAGES) {
         probes.push(probe(run, name, ["view", name, "versions", "dist-tags", "--json"], summarizeView));
     }
     for (const name of EIDNARA_PACKAGES) {
@@ -123,6 +116,28 @@ export function audit(run: Runner, now: Date): GateFile {
 
 export interface CheckOptions {
     requireReservation: boolean;
+}
+
+// The shapes `summarizeView` records for a view probe. A recorded gate is checked against
+// them so an empty object, an array, a published summary with no versions, or a probe whose
+// versions are not strings cannot pass as evidence that a name is unpublished.
+type ViewSummary =
+    | { state: "published"; versions: string[] }
+    | { state: "unpublished"; code: unknown }
+    | { state: "error"; code: unknown };
+
+const VIEW_STATES = new Set(["published", "unpublished", "error"]);
+
+function viewSummaryProblem(summary: unknown): string | null {
+    if (summary === null || typeof summary !== "object" || Array.isArray(summary)) return "is missing its summary";
+    const record = summary as Record<string, unknown>;
+    if (typeof record.state !== "string" || !VIEW_STATES.has(record.state)) {
+        return `has summary state ${JSON.stringify(record.state ?? null)}; expected published, unpublished, or error`;
+    }
+    if (record.state === "published" && !(Array.isArray(record.versions) && record.versions.length > 0 && record.versions.every((value) => typeof value === "string"))) {
+        return "is published without a non-empty string array of versions";
+    }
+    return null;
 }
 
 export function checkGate(value: unknown, now: Date, options: CheckOptions = { requireReservation: false }): string[] {
@@ -146,7 +161,7 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
     const probes = Array.isArray(gate.probes) ? (gate.probes as unknown[]) : undefined;
     if (probes === undefined) return [...errors, "probes must be an array"];
 
-    const viewed = new Map<string, Record<string, unknown>>();
+    const viewed = new Map<string, ViewSummary>();
     const commands = new Set<string>();
     probes.forEach((entry, index) => {
         if (entry === null || typeof entry !== "object") {
@@ -163,12 +178,24 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
         if (!(typeof item.exit_status === "number" || item.exit_status === null)) {
             errors.push(`probes[${index}] (${command}) is missing exit_status`);
         }
-        if (command.startsWith("npm view ") && typeof item.name === "string" && item.summary !== null && typeof item.summary === "object") {
-            viewed.set(item.name, item.summary as Record<string, unknown>);
+        if (command.startsWith("npm view ")) {
+            // A view probe without its package name or summary would satisfy the command
+            // check while contributing no evidence, so it is an error rather than skipped.
+            const expected = /^npm view (\S+) versions dist-tags --json$/.exec(command)?.[1];
+            if (typeof item.name !== "string" || item.name !== expected) {
+                errors.push(`probes[${index}] (${command}) must name the package it viewed`);
+            } else {
+                const problem = viewSummaryProblem(item.summary);
+                if (problem !== null) {
+                    errors.push(`probes[${index}] (${command}) ${problem}`);
+                } else {
+                    viewed.set(item.name, item.summary as ViewSummary);
+                }
+            }
         }
     });
 
-    for (const name of [...EIDNARA_PACKAGES, ...CORTEXKIT_PACKAGES]) {
+    for (const name of EIDNARA_PACKAGES) {
         if (!commands.has(`npm view ${name} versions dist-tags --json`)) errors.push(`missing view probe for ${name}`);
     }
     for (const name of EIDNARA_PACKAGES) {
@@ -179,19 +206,16 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
 
     for (const name of EIDNARA_PACKAGES) {
         const summary = viewed.get(name);
-        if (summary === undefined) continue;
-        const versions = Array.isArray(summary.versions) ? (summary.versions as string[]) : [];
+        if (summary === undefined) {
+            errors.push(`${name} has no usable view summary`);
+            continue;
+        }
+        const versions = summary.state === "published" ? summary.versions : [];
         const ga = versions.filter((version) => !PRERELEASE_RE.test(version));
         if (ga.length > 0) errors.push(`${name} has non-prerelease versions ${ga.join(", ")}; genesis has not been published`);
         if (summary.state === "error") errors.push(`${name} view probe errored (${String(summary.code)})`);
         if (options.requireReservation && !versions.some((version) => /-reserved\.\d+$/.test(version))) {
             errors.push(`${name} holds no inert reservation version (expected 1.0.0-reserved.N); observed state ${String(summary.state)}`);
-        }
-    }
-    for (const name of MUST_BE_UNPUBLISHED) {
-        const summary = viewed.get(name);
-        if (summary !== undefined && summary.state !== "unpublished") {
-            errors.push(`${name} must stay unpublished (E404); observed state ${String(summary.state)}`);
         }
     }
     return errors;

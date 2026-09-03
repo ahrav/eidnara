@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "wave": "U2",
+  "reports": [
+    {
+      "phase": "pre-port",
+      "iteration": 0,
+      "analyzed": {
+        "repo": "primitives",
+        "commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+        "scope_hash": "060ee421f6ef3ba6b62b4ce2ef6d8b1b83e87dd694dc03f4d7cf8a32e2e39a0d"
+      },
+      "report_hash": "d4060e65604fcac26ea5a2249ba4e27e4f8b1ed32335401d4da076282a72f470",
+      "report_path": "/tmp/architecture-review-20260902T170000Z-U2-pre-port.html",
+      "skill_sha256": "5a2532a0c9ac5def4a7f453567aaecd4440b095782dfe9e3bda7f934ccdf2f0e",
+      "summary": "Interface versus implementation: cache-stability 10/136, lease 15/351, storage-types 7/62, storage 22/536 (pub items / non-blank non-comment implementation lines). lease and storage are deep; storage-types is shallow by design. No Strong candidate.",
+      "candidates": [
+        {
+          "title": "Retire the PostgreSQL backend variation",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/storage-types",
+            "crates/storage"
+          ],
+          "interface": "`StorageBackend::Postgres { dsn, database }`, `postgres_database_name`, `StoreError::UnsupportedBackend`, Cargo feature `sqlite`",
+          "implementation": "`label()` arm, `open_sqlite` unsupported-backend arm, `postgres_database_name` and its private `fnv1a_hex`, five `#[cfg(feature = \"sqlite\")]` sites",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the variation makes the complexity vanish rather than move: no call site in the host source constructs `StorageBackend::Postgres` (0 hits), and no adapter exists in this workspace once the PostgreSQL backend is dropped."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "storage::sqlite_backend"
+          ],
+          "specialist_routes": [],
+          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for seven module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `eidnara_` prefix is frozen in the registry until then.",
+          "follow_up": "contract change after U2; no bead exists yet because the source repositories stay authoritative until U8"
+        },
+        {
+          "title": "Single FNV-1a implementation",
+          "strength": "Speculative",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/storage-types",
+            "crates/lease"
+          ],
+          "interface": "`lease::fnv1a_hex` (public); `storage_types::fnv1a_hex` (private)",
+          "implementation": "identical six-line FNV-1a-64",
+          "deletion_test": {
+            "concentrates_complexity": false,
+            "rationale": "Deleting either copy moves it: storage-types must stay free of a filesystem-lock dependency and lease must not depend on descriptor types, so the shared home would be a new crate for six lines."
+          },
+          "benefits": {
+            "locality": false,
+            "leverage": false,
+            "testability": false
+          },
+          "claims_flexibility": false,
+          "adapters": [],
+          "specialist_routes": [],
+          "rationale": "The storage-types copy exists only for `postgres_database_name`; C1 removes it."
+        },
+        {
+          "title": "Merge GuardedConn and MaintenanceConn forwarding",
+          "strength": "Speculative",
+          "origin": "original-scope",
+          "decision": "rejected",
+          "modules": [
+            "crates/storage"
+          ],
+          "interface": "`GuardedConn::{query_row,execute,prepare,last_insert_rowid,changes}`; `MaintenanceConn::{query_row,execute,execute_batch,prepare,pragma_update}`",
+          "implementation": "two forwarding structs over `&Connection` (`crates/storage/src/lib.rs:243-350`)",
+          "deletion_test": {
+            "concentrates_complexity": false,
+            "rationale": "A shared inner handle would hand the guarded callback `execute_batch` and `pragma_update`, or take `changes` from it. The duplication is the capability boundary that `a_read_callback_cannot_clear_the_read_only_guard` (`crates/storage/src/lib.rs:1299`) and `a_callback_cannot_end_the_fence_checked_transaction` (`:1355`) depend on."
+          },
+          "benefits": {
+            "locality": false,
+            "leverage": false,
+            "testability": false
+          },
+          "claims_flexibility": false,
+          "adapters": [],
+          "specialist_routes": [],
+          "rationale": "Call sites that show the complexity moves rather than concentrates: every consumer callback in the host source's store passes through `with_conn` or `with_conn_fenced` and must not gain batch or pragma capability; merging the handles reshuffles the same forwarding while widening the guarded surface."
+        },
+        {
+          "title": "Remove the migration runner",
+          "strength": "Strong",
+          "origin": "original-scope",
+          "decision": "accepted",
+          "modules": [
+            "crates/storage-types",
+            "crates/storage"
+          ],
+          "interface": "`storage::open_sqlite(descriptor, baseline)`: one DDL text per store",
+          "implementation": "pristine detection, baseline application, identity verification, and refusal without mutation",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the runner removes the version ledger, the per-namespace watermark, ordering rules, and three authorizer targets; what remains is one identity check the open already needed."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": true,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [],
+          "specialist_routes": [
+            "/software-design:persistence-boundary-and-transaction-design"
+          ],
+          "rationale": "Accepted: a store has exactly one schema, so the runner, the `Migration` type, and the version ledger are surface without a second implementation. The open applies the baseline to a pristine file and refuses any other identity, which is smaller than the runner it replaces and closes the forged-ledger class of escapes.",
+          "affected_properties": [
+            "store-schema-identity-matches-the-baseline",
+            "protected-write-set-is-fence-complete",
+            "read-callbacks-cannot-write"
+          ],
+          "property_impact": "`store-schema-identity-matches-the-baseline` replaces the fence-table identity record and the per-namespace migration record: a fresh file equals the inventory fixture and a mismatched file is refused without mutation. `protected-write-set-is-fence-complete` and `read-callbacks-cannot-write` lose their migration arms and gain the format_marker target.",
+          "implementation_evidence": "`crates/storage/src/lib.rs`: `open_sqlite(descriptor, baseline)`, `ExpectedIdentity::{for_baseline, classify, apply}`, `crates/storage/baseline.sql`; tests `fresh_file_matches_the_baseline_inventory`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, `a_file_with_foreign_objects_is_refused_without_mutation`, `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched`; `scripts/eidnara-migration/check.ts` rejects migration machinery tokens in non-test code.",
+          "final_verdict": "Implemented: `storage` has no `Migration` type, runner, or version ledger; a fresh file's identity equals `fixtures/schema/storage-inventory-v1.json` and a mismatched file is refused without mutation."
+        }
+      ]
+    },
+    {
+      "phase": "post-integration",
+      "iteration": 1,
+      "analyzed": {
+        "repo": "eidnara",
+        "commit": "69289bf457341b13950f1003f305987ff329fbab",
+        "scope_hash": "5ccab89a030986e9ec49211ef672c9ea0d0e3cfd9fe9b78746d255e3d253dbd7",
+        "modules": [
+          "crates/cache-stability",
+          "crates/lease",
+          "crates/storage",
+          "crates/storage-types"
+        ],
+        "modules_hash": "a14f8644b45889dab8a8cf9e1c94ed84cdad500024c88a4ea80f8dfda64c5766"
+      },
+      "report_hash": "d765ddd76795c00501776218dc75d8ffaa665f34065a46bbd76a615053bc71c5",
+      "report_path": "/tmp/architecture-review-20260902T190000Z-U2-post-integration.html",
+      "skill_sha256": "5a2532a0c9ac5def4a7f453567aaecd4440b095782dfe9e3bda7f934ccdf2f0e",
+      "summary": "Interface versus implementation after integration: cache-stability 10/137, lease 15/351, storage-types 7/62, storage 22/536. The two storage re-exports name types already present in public signatures. No structural change accepted; no loop-created candidate.",
+      "candidates": [
+        {
+          "title": "Retire the PostgreSQL backend variation",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/storage-types",
+            "crates/storage"
+          ],
+          "interface": "`StorageBackend::Postgres { dsn, database }`, `postgres_database_name`, `StoreError::UnsupportedBackend`, Cargo feature `sqlite`",
+          "implementation": "`label()` arm, `open_sqlite` unsupported-backend arm, `postgres_database_name` and its private `fnv1a_hex`, five `#[cfg(feature = \"sqlite\")]` sites",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the variation makes the complexity vanish rather than move: no call site in the host source constructs `StorageBackend::Postgres` (0 hits), and no adapter exists in this workspace once the PostgreSQL backend is dropped."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "storage::sqlite_backend"
+          ],
+          "specialist_routes": [],
+          "rationale": "Not Strong: the candidate removes surface rather than deepening a module, so the interface-versus-implementation metric does not apply. Blocked in U2 by R18: `crates/storage-types/tests/golden/storage_vectors.json` pins `postgres_database_name` for seven module ids and the U2 test scenario requires the fixture byte-identical. Retirement is a separately reviewed contract change that replaces the fixture; the `eidnara_` prefix is frozen in the registry until then.",
+          "follow_up": "contract change after U2; no bead exists yet because the source repositories stay authoritative until U8"
+        },
+        {
+          "title": "Single FNV-1a implementation",
+          "strength": "Speculative",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/storage-types",
+            "crates/lease"
+          ],
+          "interface": "`lease::fnv1a_hex` (public); `storage_types::fnv1a_hex` (private)",
+          "implementation": "identical six-line FNV-1a-64",
+          "deletion_test": {
+            "concentrates_complexity": false,
+            "rationale": "Deleting either copy moves it: storage-types must stay free of a filesystem-lock dependency and lease must not depend on descriptor types, so the shared home would be a new crate for six lines."
+          },
+          "benefits": {
+            "locality": false,
+            "leverage": false,
+            "testability": false
+          },
+          "claims_flexibility": false,
+          "adapters": [],
+          "specialist_routes": [],
+          "rationale": "The storage-types copy exists only for `postgres_database_name`; C1 removes it."
+        },
+        {
+          "title": "Merge GuardedConn and MaintenanceConn forwarding",
+          "strength": "Speculative",
+          "origin": "original-scope",
+          "decision": "rejected",
+          "modules": [
+            "crates/storage"
+          ],
+          "interface": "`GuardedConn::{query_row,execute,prepare,last_insert_rowid,changes}`; `MaintenanceConn::{query_row,execute,execute_batch,prepare,pragma_update}`",
+          "implementation": "two forwarding structs over `&Connection` (`crates/storage/src/lib.rs:243-350`)",
+          "deletion_test": {
+            "concentrates_complexity": false,
+            "rationale": "A shared inner handle would hand the guarded callback `execute_batch` and `pragma_update`, or take `changes` from it. The duplication is the capability boundary that `a_read_callback_cannot_clear_the_read_only_guard` (`crates/storage/src/lib.rs:1299`) and `a_callback_cannot_end_the_fence_checked_transaction` (`:1355`) depend on."
+          },
+          "benefits": {
+            "locality": false,
+            "leverage": false,
+            "testability": false
+          },
+          "claims_flexibility": false,
+          "adapters": [],
+          "specialist_routes": [],
+          "rationale": "Call sites that show the complexity moves rather than concentrates: every consumer callback in the host source's store passes through `with_conn` or `with_conn_fenced` and must not gain batch or pragma capability; merging the handles reshuffles the same forwarding while widening the guarded surface."
+        },
+        {
+          "title": "Remove the migration runner",
+          "strength": "Strong",
+          "origin": "original-scope",
+          "decision": "accepted",
+          "modules": [
+            "crates/storage-types",
+            "crates/storage"
+          ],
+          "interface": "`storage::open_sqlite(descriptor, baseline)`: one DDL text per store",
+          "implementation": "pristine detection, baseline application, identity verification, and refusal without mutation",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the runner removes the version ledger, the per-namespace watermark, ordering rules, and three authorizer targets; what remains is one identity check the open already needed."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": true,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [],
+          "specialist_routes": [
+            "/software-design:persistence-boundary-and-transaction-design"
+          ],
+          "rationale": "Accepted: a store has exactly one schema, so the runner, the `Migration` type, and the version ledger are surface without a second implementation. The open applies the baseline to a pristine file and refuses any other identity, which is smaller than the runner it replaces and closes the forged-ledger class of escapes.",
+          "affected_properties": [
+            "store-schema-identity-matches-the-baseline",
+            "protected-write-set-is-fence-complete",
+            "read-callbacks-cannot-write"
+          ],
+          "property_impact": "`store-schema-identity-matches-the-baseline` replaces the fence-table identity record and the per-namespace migration record: a fresh file equals the inventory fixture and a mismatched file is refused without mutation. `protected-write-set-is-fence-complete` and `read-callbacks-cannot-write` lose their migration arms and gain the format_marker target.",
+          "implementation_evidence": "`crates/storage/src/lib.rs`: `open_sqlite(descriptor, baseline)`, `ExpectedIdentity::{for_baseline, classify, apply}`, `crates/storage/baseline.sql`; tests `fresh_file_matches_the_baseline_inventory`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, `a_file_with_foreign_objects_is_refused_without_mutation`, `a_baseline_that_does_not_apply_is_rejected_before_the_file_is_touched`; `scripts/eidnara-migration/check.ts` rejects migration machinery tokens in non-test code.",
+          "final_verdict": "Implemented: `storage` has no `Migration` type, runner, or version ledger; a fresh file's identity equals `fixtures/schema/storage-inventory-v1.json` and a mismatched file is refused without mutation."
+        }
+      ]
+    }
+  ]
+}

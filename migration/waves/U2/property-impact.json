@@ -1,0 +1,1121 @@
+{
+  "schema_version": 1,
+  "wave": "U2",
+  "description": "Property impact closure for the four shared primitive crates. `core` records are those whose evidence the crate rename and tree re-layout could invalidate: byte-level lease path derivation, the epoch byte grammar, and the two byte-stable golden fixtures. Every other touched record is `carried-forward` with its source or discovery status verbatim. No record is `excluded`: no source record is PostgreSQL-only; the dropped backend's checks are archived provenance in the catalog.",
+  "provenance": [
+    {
+      "repo": "primitives",
+      "source_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "catalog_commit": "89abb409b8c71b03146eedb5bf64cd964f2a92c0"
+    }
+  ],
+  "destination_commit": "69289bf457341b13950f1003f305987ff329fbab",
+  "touched_files": [
+    "crates/cache-stability/src/lib.rs",
+    "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
+    "crates/cache-stability/tests/golden_vectors.rs",
+    "crates/lease/src/lib.rs",
+    "crates/storage-types/examples/golden-vectors.rs",
+    "crates/storage-types/src/lib.rs",
+    "crates/storage-types/tests/golden/storage_vectors.json",
+    "crates/storage-types/tests/golden_vectors.rs",
+    "crates/storage/baseline.sql",
+    "crates/storage/examples/schema-inventory.rs",
+    "crates/storage/src/lib.rs"
+  ],
+  "scope_decisions": [],
+  "records": [
+    {
+      "slug": "lease-path-format-is-version-stable",
+      "classification": "core",
+      "disposition": "pass",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "strategy_decision": "Golden-vector test: six externally computed identity, digest, and filename vectors plus an acquisition that must create the pinned file. Chosen over a property test because the contract is a fixed byte derivation; an independent implementation is the oracle.",
+      "audit_verdict": "pass",
+      "evidence_digest": "2d857664561b972b98b6383333bf8b334b69d9c28f748df0283b85d61420ba56",
+      "code_hash": "ac0a8f366da0f325236b1a2168527f9074ad6e4a824dffc43e08a2be8ba06d09",
+      "check_hash": "8e0f6646960c1853dacdefc89182698ef38d7e53cd9b010c9c40e41cf06ba2e8",
+      "check_pointer": "crates/lease/src/lib.rs#lease_path_vectors_are_version_stable",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/lease-path-format-is-version-stable.md",
+      "target_configurations": [
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
+      ],
+      "evidence_attempts": 1,
+      "new_evidence": {
+        "digest": "2d857664561b972b98b6383333bf8b334b69d9c28f748df0283b85d61420ba56",
+        "description": "`lease_path_vectors_are_version_stable`: six externally computed vectors including both production keys and the created filename; mutants for suffix and separator fail."
+      }
+    },
+    {
+      "slug": "epoch-input-size-is-bounded",
+      "classification": "core",
+      "disposition": "pass",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "strategy_decision": "Example test with an instrumented reader: the check `bytes_read <= 21` is asserted directly on a 1 MiB input, then the same input is driven through every acquisition path against a real file.",
+      "audit_verdict": "pass",
+      "evidence_digest": "df59c3f7c05a4e749f6f245027b7ae01db38dfbc7240e154d7842e4773deb4e3",
+      "code_hash": "ac0a8f366da0f325236b1a2168527f9074ad6e4a824dffc43e08a2be8ba06d09",
+      "check_hash": "8e0f6646960c1853dacdefc89182698ef38d7e53cd9b010c9c40e41cf06ba2e8",
+      "check_pointer": "crates/lease/src/lib.rs#epoch_read_is_bounded_regardless_of_file_size",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/epoch-input-size-is-bounded.md",
+      "target_configurations": [
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
+      ],
+      "evidence_attempts": 1,
+      "new_evidence": {
+        "digest": "df59c3f7c05a4e749f6f245027b7ae01db38dfbc7240e154d7842e4773deb4e3",
+        "description": "`epoch_read_is_bounded_regardless_of_file_size`: counting reader observes <= 21 bytes on a 1 MiB epoch; all three acquisition paths reject the same file unchanged; the unbounded-read mutant fails."
+      }
+    },
+    {
+      "slug": "invalid-epoch-fails-closed",
+      "classification": "core",
+      "disposition": "pass",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "strategy_decision": "Example table extended with the inputs a lenient parser accepts (`+1`, padding, hex, digit separator); each body is asserted with exact error kind, path in message, and unchanged bytes through every applicable acquisition mode.",
+      "audit_verdict": "pass",
+      "evidence_digest": "0ecdc2715a653a1bfa459e1e4216935886c5b11cdfb45115c2d2e2341112392b",
+      "code_hash": "ac0a8f366da0f325236b1a2168527f9074ad6e4a824dffc43e08a2be8ba06d09",
+      "check_hash": "8e0f6646960c1853dacdefc89182698ef38d7e53cd9b010c9c40e41cf06ba2e8",
+      "check_pointer": "crates/lease/src/lib.rs#invalid_epoch_states_fail_closed",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/invalid-epoch-fails-closed.md",
+      "target_configurations": [
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
+      ],
+      "evidence_attempts": 1,
+      "new_evidence": {
+        "digest": "0ecdc2715a653a1bfa459e1e4216935886c5b11cdfb45115c2d2e2341112392b",
+        "description": "`invalid_epoch_states_fail_closed` extended with `+1`, `-1`, ` 1`, `1 `, `0x1f`, `1_0`; the parse-based mutant fails."
+      }
+    },
+    {
+      "slug": "cache-stability-golden-vectors-are-byte-stable",
+      "classification": "core",
+      "disposition": "pass",
+      "relationship": "mapped",
+      "files": [
+        "crates/cache-stability/src/lib.rs",
+        "crates/cache-stability/tests/golden_vectors.rs",
+        "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json"
+      ],
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "strategy_decision": "Byte-stable golden fixture: receipt-level byte identity to the source blob plus the fixture-driven test as an independent oracle; the near-tautological action assertion is recorded and the byte, boundary, flag, and queue assertions carry the claim.",
+      "audit_verdict": "pass",
+      "evidence_digest": "b23b39071961d128c9009e8b66af7b2201564cd478f6082a238901070bcd17df",
+      "code_hash": "27b2854f8137ad61e61e463f97213fd35e5c786e14156bda893dad6d94fe9532",
+      "check_hash": "99e14b67056563ad68e9941936172f44f7618ecdfe9b074c7316fa5857fb73ea",
+      "check_pointer": "crates/cache-stability/tests/golden_vectors.rs#all_golden_vectors_pass",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/cache-stability-golden-vectors-are-byte-stable.md",
+      "target_configurations": [
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
+      ],
+      "evidence_attempts": 1
+    },
+    {
+      "slug": "storage-descriptor-golden-vectors-are-byte-stable",
+      "classification": "core",
+      "disposition": "pass",
+      "relationship": "mapped",
+      "files": [
+        "crates/storage-types/src/lib.rs",
+        "crates/storage-types/tests/golden_vectors.rs",
+        "crates/storage-types/tests/golden/storage_vectors.json",
+        "crates/storage-types/examples/golden-vectors.rs"
+      ],
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "strategy_decision": "Byte-stable golden fixture: receipt-level byte identity to the source blob plus per-vector derivation checks read from the fixture, independent of the helpers under test.",
+      "audit_verdict": "pass",
+      "evidence_digest": "c975b75ac2d5f02add4caae7f65ef653b3de70e646bff29b72de711ea9cf126f",
+      "code_hash": "d744654691a28b4fae345aa94a540c65757a62f2f4819fe7b528baf6826178ed",
+      "check_hash": "818565074cce03ed25c9d57557b5e826d2199c4fa7a910351b56727a31a0fa9b",
+      "check_pointer": "crates/storage-types/tests/golden_vectors.rs#helpers_reproduce_the_golden_vectors",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/storage-descriptor-golden-vectors-are-byte-stable.md",
+      "target_configurations": [
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
+      ],
+      "evidence_attempts": 1
+    },
+    {
+      "slug": "at-most-one-exclusive-holder-per-key",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "check_pointer": "crates/lease/src/lib.rs#acquire_then_second_holder_is_rejected",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/at-most-one-exclusive-holder-per-key.md"
+    },
+    {
+      "slug": "shared-exclusive-exclusion-matrix",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#shared_holders_coexist_but_block_exclusive",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/shared-exclusive-exclusion-matrix.md"
+    },
+    {
+      "slug": "dead-holder-lease-is-reclaimable",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#shared_lease_across_processes_blocks_exclusive",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/dead-holder-lease-is-reclaimable.md"
+    },
+    {
+      "slug": "writer-epoch-strictly-increases",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs",
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#exclusive_epoch_exceeds_resource_floor",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/writer-epoch-strictly-increases.md"
+    },
+    {
+      "slug": "returned-epoch-is-crash-durable",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#epoch_persists_across_store_instances",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/returned-epoch-is-crash-durable.md"
+    },
+    {
+      "slug": "failed-acquire-preserves-prior-epoch",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#interrupted_persist_never_leaves_a_lower_parseable_epoch",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/failed-acquire-preserves-prior-epoch.md"
+    },
+    {
+      "slug": "distinct-lease-keys-do-not-alias",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "check_pointer": "crates/lease/src/lib.rs#distinct_identity_axes_do_not_conflict",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/distinct-lease-keys-do-not-alias.md"
+    },
+    {
+      "slug": "lease-inode-remains-stable-while-held",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "check_pointer": "docs/properties/shared-primitives/evidence/lease-inode-remains-stable-while-held.md",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/lease-inode-remains-stable-while-held.md"
+    },
+    {
+      "slug": "shared-acquisition-is-epoch-neutral",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#shared_first_initializes_canonical_zero",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/shared-acquisition-is-epoch-neutral.md"
+    },
+    {
+      "slug": "shared-epoch-never-authorizes-write",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#shared_acquisition_does_not_bump_the_write_epoch",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/shared-epoch-never-authorizes-write.md"
+    },
+    {
+      "slug": "unix-lease-file-is-owner-only",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#an_acquired_lease_file_is_owner_only",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/unix-lease-file-is-owner-only.md"
+    },
+    {
+      "slug": "permission-hardening-never-follows-replacement",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#acquisition_refuses_symlink_and_leaves_target_untouched",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/permission-hardening-never-follows-replacement.md"
+    },
+    {
+      "slug": "contention-is-classified-as-held",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#acquire_then_second_holder_is_rejected",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/contention-is-classified-as-held.md"
+    },
+    {
+      "slug": "filesystem-lock-scope-matches-deployment",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#shared_lease_across_processes_blocks_exclusive",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/filesystem-lock-scope-matches-deployment.md"
+    },
+    {
+      "slug": "lease-file-growth-trigger-is-observed",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "docs/properties/shared-primitives/evidence/lease-file-growth-trigger-is-observed.md",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/lease-file-growth-trigger-is-observed.md"
+    },
+    {
+      "slug": "stale-writer-write-is-rejected",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs",
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/storage/src/lib.rs#superseded_writer_is_fenced_out_after_handover",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/stale-writer-write-is-rejected.md"
+    },
+    {
+      "slug": "logical-store-has-single-lease-identity",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs",
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "check_pointer": "crates/storage/src/lib.rs#distinct_databases_do_not_falsely_contend",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/logical-store-has-single-lease-identity.md"
+    },
+    {
+      "slug": "failed-acquisition-does-not-mutate-lease-state",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "check_pointer": "docs/properties/shared-primitives/evidence/failed-acquisition-does-not-mutate-lease-state.md",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/failed-acquisition-does-not-mutate-lease-state.md"
+    },
+    {
+      "slug": "handle-drop-releases-lease",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#acquire_then_second_holder_is_rejected",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/handle-drop-releases-lease.md"
+    },
+    {
+      "slug": "replacement-fence-is-claimed-before-old-writer-writes",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs",
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": true
+      },
+      "check_pointer": "crates/storage/src/lib.rs#open_claims_fence_before_return",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/replacement-fence-is-claimed-before-old-writer-writes.md"
+    },
+    {
+      "slug": "protected-write-set-is-fence-complete",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs",
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/storage/src/lib.rs#a_panicking_read_does_not_strand_the_connection_read_only",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/protected-write-set-is-fence-complete.md"
+    },
+    {
+      "slug": "lease-file-creation-is-never-permissive",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#an_acquired_lease_file_is_owner_only",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/lease-file-creation-is-never-permissive.md"
+    },
+    {
+      "slug": "acquisition-does-not-follow-symlink",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#acquisition_refuses_symlink_and_leaves_target_untouched",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/acquisition-does-not-follow-symlink.md"
+    },
+    {
+      "slug": "cross-process-exclusive-race-is-reached",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "docs/properties/shared-primitives/evidence/cross-process-exclusive-race-is-reached.md",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/cross-process-exclusive-race-is-reached.md"
+    },
+    {
+      "slug": "epoch-update-interruption-window-is-reached",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/lease/src/lib.rs#interrupted_persist_never_leaves_a_lower_parseable_epoch",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/epoch-update-interruption-window-is-reached.md"
+    },
+    {
+      "slug": "live-lease-file-replacement-is-reached",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/lease/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "docs/properties/shared-primitives/evidence/live-lease-file-replacement-is-reached.md",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/live-lease-file-replacement-is-reached.md"
+    },
+    {
+      "slug": "defer-pass-replays-frozen-bytes-verbatim",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/cache-stability/src/lib.rs",
+        "crates/cache-stability/tests/golden_vectors.rs",
+        "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/cache-stability/src/lib.rs#defer_does_not_mutate_frozen_bytes_or_render",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/defer-pass-replays-frozen-bytes-verbatim.md"
+    },
+    {
+      "slug": "hard-bust-drains-deferred-work",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/cache-stability/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/cache-stability/src/lib.rs#hard_drains_pending_changes_into_the_bust",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/hard-bust-drains-deferred-work.md"
+    },
+    {
+      "slug": "never-minted-boundary-is-not-reconcile-pending",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/cache-stability/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/cache-stability/src/lib.rs#defer_on_never_minted_boundary_is_stable_not_reconcile_pending",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/never-minted-boundary-is-not-reconcile-pending.md"
+    },
+    {
+      "slug": "anchor-holds-while-reconcile-pending",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/cache-stability/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/cache-stability/src/lib.rs#soft_does_not_advance_anchor_while_reconcile_pending",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/anchor-holds-while-reconcile-pending.md"
+    },
+    {
+      "slug": "frozen-unit-order-is-preserved",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/cache-stability/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/cache-stability/src/lib.rs#soft_replaces_by_key_keeps_slot_appends_new",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/frozen-unit-order-is-preserved.md"
+    },
+    {
+      "slug": "episode-units-reset-at-run-boundary",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/cache-stability/src/lib.rs",
+        "crates/cache-stability/tests/golden_vectors.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/cache-stability/src/lib.rs#run_started_keeps_lineage_resets_episode",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/episode-units-reset-at-run-boundary.md"
+    },
+    {
+      "slug": "descriptor-wire-shape-round-trips",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/storage-types/src/lib.rs",
+        "crates/storage-types/tests/golden_vectors.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/storage-types/src/lib.rs#sqlite_descriptor_golden_json",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/descriptor-wire-shape-round-trips.md"
+    },
+    {
+      "slug": "store-schema-identity-matches-the-baseline",
+      "classification": "core",
+      "disposition": "pass",
+      "relationship": "mapped",
+      "files": [
+        "crates/storage/src/lib.rs",
+        "crates/storage/baseline.sql",
+        "fixtures/schema/storage-inventory-v1.json",
+        "crates/storage/examples/schema-inventory.rs"
+      ],
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "strategy_decision": "Fixture test plus refusal tests: a fresh file's application id, user version, format-marker digest, and sqlite_schema inventory are compared to a destination-captured fixture that the generator example produces, and non-pristine files with foreign objects, a different consumer baseline, or a bypassed fence constraint are refused with the file bytes unchanged. Chosen over a property test because the identity is one fixed byte contract.",
+      "audit_verdict": "pass",
+      "evidence_digest": "8e55c988054924d1ce7dcf300d2021deb42bde39bec7c646a3fa16cbed2b2dee",
+      "code_hash": "8e5d9701680ba26c62139009dc411736c0b23988a183a2c2c1daf45826affb33",
+      "check_hash": "483b2be94ea2c14ad90c333aa9b8b907b1006c484b4eb0b117a334e56108571e",
+      "check_pointer": "crates/storage/src/lib.rs#fresh_file_matches_the_baseline_inventory",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/store-schema-identity-matches-the-baseline.md",
+      "target_configurations": [
+        "x86_64-unknown-linux-gnu, Rust 1.98 (pinned), --locked",
+        "x86_64-unknown-linux-gnu, Rust stable, --locked"
+      ],
+      "evidence_attempts": 1,
+      "new_evidence": {
+        "digest": "8e55c988054924d1ce7dcf300d2021deb42bde39bec7c646a3fa16cbed2b2dee",
+        "description": "`fresh_file_matches_the_baseline_inventory` compares a fresh file to `fixtures/schema/storage-inventory-v1.json`; `a_file_with_foreign_objects_is_refused_without_mutation`, `a_consumer_baseline_is_applied_once_and_verified_on_reopen`, and `negative_database_fence_fails_closed` prove refusal leaves the bytes unchanged."
+      }
+    },
+    {
+      "slug": "read-callbacks-cannot-write",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/storage/src/lib.rs#unfenced_connection_rejects_writes",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/read-callbacks-cannot-write.md"
+    },
+    {
+      "slug": "callback-scope-is-restored-after-unwind",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/storage/src/lib.rs#a_panicking_read_does_not_strand_the_connection_read_only",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/callback-scope-is-restored-after-unwind.md"
+    },
+    {
+      "slug": "protected-transactions-pin-fence-durability",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/storage/src/lib.rs#open_pins_full_synchronous",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/protected-transactions-pin-fence-durability.md"
+    },
+    {
+      "slug": "store-files-are-owner-only-after-open",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/storage/src/lib.rs#reopening_a_permissive_store_protects_the_database_and_its_wal",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/store-files-are-owner-only-after-open.md"
+    },
+    {
+      "slug": "fenced-write-is-atomic",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/storage/src/lib.rs#fenced_write_rolls_back_on_error",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/fenced-write-is-atomic.md"
+    },
+    {
+      "slug": "fence-epoch-outside-sqlite-range-fails-closed",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/storage/src/lib.rs"
+      ],
+      "provenance": "primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "audited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/storage/src/lib.rs#negative_database_fence_fails_closed",
+      "evidence_pointer": "docs/properties/shared-primitives/evidence/fence-epoch-outside-sqlite-range-fails-closed.md"
+    }
+  ]
+}
