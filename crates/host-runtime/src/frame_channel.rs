@@ -3,10 +3,9 @@
 //! The contract is directional: a cloneable [`FrameSender`] admits complete
 //! outbound frames in FIFO order against one logical writer, and the
 //! single-owner receive side yields complete, structurally validated
-//! inbound frames. Direct producers fill bounded transport spans through a
-//! cursor and commit one exact length. Receive bytes are visible only through
-//! a lexical [`ReceiveLease`]; contiguous consumers use the explicit
-//! copying adapter before entering asynchronous work.
+//! inbound frames. Receive bytes are visible only through a lexical
+//! [`ReceiveLease`]; contiguous consumers use the explicit copying adapter
+//! ([`ReceiveLease::to_owned`]) before entering asynchronous work.
 
 use std::io;
 use std::marker::PhantomData;
