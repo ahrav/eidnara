@@ -22,8 +22,8 @@ pub struct OperationCounters {
 impl OperationCounters {
     /// One reason per nonzero counter. Body copies, allocations, and queue hops always
     /// disqualify. Syscalls, park/wakes, and scheduler hand-offs are allowed only when
-    /// `eventfd_wake_qualified` is set, since an eventfd doorbell is the one wake path the
-    /// design permits.
+    /// `eventfd_wake_qualified` is set and a park was recorded, since an eventfd doorbell is
+    /// the one wake path the design permits and nothing else on the timed path may block.
     pub fn disqualifications(self, eventfd_wake_qualified: bool) -> Vec<&'static str> {
         let mut reasons = Vec::new();
         if self.body_copies != 0 {
@@ -35,7 +35,7 @@ impl OperationCounters {
         if self.generic_queue_hops != 0 {
             reasons.push("generic_queue_hop");
         }
-        let wake_allowed = eventfd_wake_qualified;
+        let wake_allowed = eventfd_wake_qualified && self.park_wakes != 0;
         if self.syscalls != 0 && !wake_allowed {
             reasons.push("timed_path_syscall");
         }

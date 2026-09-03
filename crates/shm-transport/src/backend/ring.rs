@@ -470,6 +470,33 @@ impl Drop for Mapping {
     }
 }
 
+/// Doorbell operations this process has issued on a ring.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DoorbellCounters {
+    /// `send`, `recv`, and `poll` calls on either doorbell.
+    pub syscalls: u64,
+    /// `poll` calls that blocked on a doorbell; each is one park/wake transition.
+    pub parks: u64,
+}
+
+impl DoorbellCounters {
+    /// Field-wise sum.
+    pub const fn add(self, other: Self) -> Self {
+        Self {
+            syscalls: self.syscalls.wrapping_add(other.syscalls),
+            parks: self.parks.wrapping_add(other.parks),
+        }
+    }
+
+    /// Field-wise difference, saturating at zero.
+    pub const fn since(self, earlier: Self) -> Self {
+        Self {
+            syscalls: self.syscalls.saturating_sub(earlier.syscalls),
+            parks: self.parks.saturating_sub(earlier.parks),
+        }
+    }
+}
+
 /// One wake channel between the peers, built on a `socketpair`. Each socketpair endpoint has a
 /// separate open file description, so peer-set status flags such as `O_NONBLOCK` cannot
 /// affect `local`. `MSG_DONTWAIT` prevents blocking regardless of status flags, and
@@ -479,6 +506,7 @@ struct Doorbell {
     /// The peer's end. `attachment` moves it out, so after the handoff only the peer holds
     /// that end and its exit is visible here as EOF or `EPIPE`.
     remote: Cell<Option<OwnedFd>>,
+    counters: Cell<DoorbellCounters>,
 }
 
 /// Each `drain` call consumes at most this many bytes; remaining bytes only cause a spurious
@@ -506,6 +534,7 @@ impl Doorbell {
         Ok(Self {
             local,
             remote: Cell::new(Some(remote)),
+            counters: Cell::new(DoorbellCounters::default()),
         })
     }
 
@@ -526,7 +555,21 @@ impl Doorbell {
         Ok(Self {
             local: fd,
             remote: Cell::new(None),
+            counters: Cell::new(DoorbellCounters::default()),
         })
+    }
+
+    fn counters(&self) -> DoorbellCounters {
+        self.counters.get()
+    }
+
+    fn record(&self, parked: bool) {
+        let mut counters = self.counters.get();
+        counters.syscalls = counters.syscalls.wrapping_add(1);
+        if parked {
+            counters.parks = counters.parks.wrapping_add(1);
+        }
+        self.counters.set(counters);
     }
 
     fn duplicate(&self) -> Result<OwnedFd, RingError> {
@@ -543,6 +586,7 @@ impl Doorbell {
     fn signal(&self) -> Result<(), RingError> {
         let token = [1u8];
         loop {
+            self.record(false);
             // SAFETY: pointer and length describe one initialized byte.
             let result = unsafe {
                 libc::send(
@@ -568,6 +612,7 @@ impl Doorbell {
     fn drain(&self) -> Result<(), RingError> {
         let mut buffer = [0u8; DRAIN_BYTES];
         loop {
+            self.record(false);
             // SAFETY: pointer and length describe writable storage of `DRAIN_BYTES`.
             let result = unsafe {
                 libc::recv(
@@ -606,6 +651,7 @@ impl Doorbell {
             events: libc::POLLIN,
             revents: 0,
         };
+        self.record(true);
         // SAFETY: poll receives one initialized pollfd.
         let result = unsafe { libc::poll(&mut descriptor, 1, timeout) };
         if result > 0 {
@@ -974,6 +1020,14 @@ impl Ring {
     /// Duplicate of the data doorbell, for registering with an event loop that owns its fds.
     pub fn duplicate_data_ready(&self) -> Result<OwnedFd, RingError> {
         self.data_ready.duplicate()
+    }
+
+    /// Both doorbells summed. The counts never reset, so a window is the difference of two
+    /// samples.
+    pub fn doorbell_counters(&self) -> DoorbellCounters {
+        self.data_ready
+            .counters()
+            .add(self.capacity_ready.counters())
     }
 
     /// Prepares to block on the data doorbell. Records the wake generation, re-checks for
@@ -2858,6 +2912,7 @@ fn seal_object(fd: &OwnedFd) -> Result<(), RingError> {
 mod tests {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
 
     use crate::arena::{ArenaError, MIN_ARENA_BYTES};
     use crate::descriptor::{
@@ -2868,8 +2923,8 @@ mod tests {
     use crate::profile::{ProfileConfig, TargetProfile, WorkerTopology, ring_profile};
 
     use super::{
-        Doorbell, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError, RingGrant,
-        removal_ranges, residency_vector_len, wire_v2_header,
+        Doorbell, DoorbellCounters, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError,
+        RingGrant, removal_ranges, residency_vector_len, wire_v2_header,
     };
 
     fn ring() -> Ring {
@@ -2883,6 +2938,36 @@ mod tests {
             .unwrap();
         reservation.write(bytes).unwrap();
         reservation.commit(bytes.len()).unwrap();
+    }
+
+    #[test]
+    fn doorbell_counters_track_only_actual_doorbell_operations() {
+        let ring = ring();
+        let before = ring.doorbell_counters();
+        assert_eq!(before, DoorbellCounters::default());
+
+        // No peer is parked, so publishing rings no doorbell.
+        publish(&ring, b"quiet");
+        assert_eq!(ring.doorbell_counters(), DoorbellCounters::default());
+
+        // A wait on a ring with data returns before touching the doorbell.
+        assert!(ring.wait_for_data(Instant::now()).unwrap());
+        assert_eq!(ring.doorbell_counters(), DoorbellCounters::default());
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+
+        // An empty ring parks once: one drain `recv` while arming, one blocking `poll`.
+        assert!(
+            !ring
+                .wait_for_data(Instant::now() + Duration::from_millis(5))
+                .unwrap()
+        );
+        assert_eq!(
+            ring.doorbell_counters().since(before),
+            DoorbellCounters {
+                syscalls: 2,
+                parks: 1,
+            }
+        );
     }
 
     fn clear_nonblock(fd: &OwnedFd) {

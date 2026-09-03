@@ -58,7 +58,10 @@
     2097151,
     2097152,
     2097153,
-    67108864,
+    67108863,
+    67108864
+  ],
+  "rejected_byte_size_probes": [
     67108865
   ],
   "special_probes": [
@@ -97,9 +100,9 @@
     "incremental_segmented"
   ],
   "seeds": [
-    2779096485,
-    11400714819323198485,
-    15111065706836454659
+    "0xa5a5a5a5",
+    "0x9e3779b97f4a7c15",
+    "0xd1b54a32d192ed03"
   ],
   "statistics": {
     "confidence": 0.99,
