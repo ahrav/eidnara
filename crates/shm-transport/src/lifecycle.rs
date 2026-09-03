@@ -123,11 +123,13 @@ impl fmt::Debug for Lifecycle {
 }
 
 /// Why a lifecycle transition was refused.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LifecycleError {
     /// The requested state is not the successor of the current one.
+    #[error("invalid lifecycle transition")]
     InvalidTransition,
     /// The current state is `Joined` or `Quarantined`.
+    #[error("lifecycle state is terminal")]
     Terminal,
 }
 
@@ -136,14 +138,3 @@ impl fmt::Debug for LifecycleError {
         fmt::Display::fmt(self, formatter)
     }
 }
-
-impl fmt::Display for LifecycleError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidTransition => "invalid lifecycle transition",
-            Self::Terminal => "lifecycle state is terminal",
-        })
-    }
-}
-
-impl std::error::Error for LifecycleError {}
