@@ -70,11 +70,12 @@ impl<'lease> LeaseSpan<'lease> {
 
     /// Wrapping sum of all bytes. Tests compare it before and after a lease to detect mutation.
     pub fn checksum(self) -> u64 {
-        // SAFETY: `LeaseSpan::new` guarantees that the slice range is readable for the lease.
-        let bytes = unsafe { std::slice::from_raw_parts(self.base.as_ptr(), self.len) };
-        bytes
-            .iter()
-            .fold(0u64, |sum, byte| sum.wrapping_add(u64::from(*byte)))
+        // The peer may write these bytes at any time, so no `&[u8]` is ever formed over them.
+        (0..self.len).fold(0u64, |sum, index| {
+            // SAFETY: constructor bound covers len and index is below it.
+            let byte = unsafe { self.base.as_ptr().add(index).read_volatile() };
+            sum.wrapping_add(u64::from(byte))
+        })
     }
 }
 

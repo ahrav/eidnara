@@ -7,13 +7,18 @@
 //! Released slots return to the producer in FIFO order, so a stalled oldest lease holds back
 //! reclamation of everything behind it.
 //!
+//! Reclaimed arena pages go back to the kernel through `MADV_REMOVE`.
+//! Reclamation punches once a quarter of the arena is dead; `trim` punches whatever is left.
+//! Only pages with no live byte are ever punched.
+//!
 //! Both peers can write the mapping. Every value read from it is treated as untrusted:
-//! descriptors are snapshotted then validated, cursors are checked for wrap and overflow,
-//! and any impossible state moves the ring to quarantine, which is terminal.
+//! descriptors are snapshotted then validated, and cursors are checked for wrap and overflow.
+//! Impossible shared-memory state quarantines the ring; the local latch keeps quarantine
+//! terminal if a peer clears the shared flag.
 #[cfg(not(target_os = "linux"))]
 compile_error!("shm-transport ring backend supports Linux only");
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::ffi::CString;
 use std::fmt;
 use std::fs::File;
@@ -33,7 +38,7 @@ use std::time::Instant;
 use crate::arena::{ArenaCounts, ArenaError, ArenaSpan, MAX_FRAME_BYTES, SpanPlan};
 use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor, Incarnation,
-    MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES,
+    MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES, WIRE_V2_VERSION, check_wire_header,
 };
 use crate::lease::{LeaseError, LeaseSpan, ReceiveLease};
 use crate::profile::TargetProfile;
@@ -43,6 +48,7 @@ const LAYOUT_VERSION: u16 = 3;
 const CACHELINE: usize = 128;
 const PAGE_SIZE: usize = 4096;
 const GRANT_BYTES: usize = 58;
+const PUNCH_BATCH_DIVISOR: u64 = 4;
 
 const SLOT_FREE: u8 = 0;
 const SLOT_PRODUCER_RESERVED: u8 = 1;
@@ -135,6 +141,34 @@ struct DescriptorSlot {
     descriptor: UnsafeCell<SharedDescriptor>,
 }
 
+// `DescriptorSlot` tail padding can hide `SharedDescriptor` layout changes from a slot-size
+// assertion; these assertions reject them at compile time.
+const _: () = {
+    use std::mem::offset_of;
+    assert!(size_of::<SharedDescriptor>() == 120);
+    assert!(offset_of!(SharedDescriptor, schema_version) == 0);
+    assert!(offset_of!(SharedDescriptor, wire_header) == 2);
+    assert!(offset_of!(SharedDescriptor, incarnation) == 23);
+    assert!(offset_of!(SharedDescriptor, lane) == 40);
+    assert!(offset_of!(SharedDescriptor, sequence) == 48);
+    assert!(offset_of!(SharedDescriptor, body_len) == 56);
+    assert!(offset_of!(SharedDescriptor, allocation_start) == 64);
+    assert!(offset_of!(SharedDescriptor, allocation_len) == 72);
+    assert!(offset_of!(SharedDescriptor, span_count) == 80);
+    assert!(offset_of!(SharedDescriptor, span_offsets) == 88);
+    assert!(offset_of!(SharedDescriptor, span_lengths) == 104);
+    assert!(size_of::<DescriptorSlot>() == 256);
+    assert!(offset_of!(DescriptorSlot, state) == 0);
+    assert!(offset_of!(DescriptorSlot, completion_sequence) == 8);
+    assert!(offset_of!(DescriptorSlot, reservation_len) == 16);
+    assert!(offset_of!(DescriptorSlot, descriptor) == 24);
+    assert!(size_of::<ProducerPage>() == CACHELINE);
+    assert!(size_of::<ConsumerPage>() == CACHELINE);
+    assert!(size_of::<ReclaimPage>() == CACHELINE);
+    assert!(size_of::<WakeEpoch>() == CACHELINE);
+    assert!(size_of::<LifecyclePage>() == CACHELINE);
+};
+
 #[repr(C, align(128))]
 struct LifecyclePage {
     magic: u64,
@@ -164,6 +198,11 @@ struct Layout {
 impl Layout {
     fn new(depth: usize, arena_bytes: usize) -> Result<Self, RingError> {
         let page_size = system_page_size();
+        // Page removal works in whole pages, so the arena must tile them exactly or the ring
+        // would create, publish, and receive normally and then fail at its first reclaim.
+        if arena_bytes == 0 || !arena_bytes.is_multiple_of(page_size) {
+            return Err(RingError::InvalidLayout);
+        }
         let producer = 0usize;
         let consumer = align_up(size_of::<ProducerPage>(), CACHELINE)?;
         let reclaim = align_up(
@@ -672,7 +711,7 @@ impl RingGrant {
         let depth = usize::try_from(self.descriptor_depth).map_err(|_| RingError::InvalidGrant)?;
         let arena = usize::try_from(self.arena_bytes).map_err(|_| RingError::InvalidGrant)?;
         let total = usize::try_from(self.total_bytes).map_err(|_| RingError::InvalidGrant)?;
-        let layout = Layout::new(depth, arena)?;
+        let layout = Layout::new(depth, arena).map_err(|_| RingError::InvalidGrant)?;
         if layout.total != total {
             return Err(RingError::InvalidGrant);
         }
@@ -739,6 +778,14 @@ pub struct Ring {
     data_ready: Doorbell,
     capacity_ready: Doorbell,
     owned_runtime_dir: Option<RuntimeDir>,
+    /// The peer can overwrite the shared flag; this latch keeps quarantine terminal for this
+    /// handle.
+    quarantined: Cell<bool>,
+    /// End of the sole outstanding `try_reserve` reservation; `arena_write` advances only when
+    /// it commits.
+    reserved_end: Cell<Option<u64>>,
+    /// Logical arena position below which every reclaimed page has been removed.
+    punched: Cell<u64>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -792,6 +839,9 @@ impl Ring {
             data_ready: Doorbell::create()?,
             capacity_ready: Doorbell::create()?,
             owned_runtime_dir: None,
+            quarantined: Cell::new(false),
+            reserved_end: Cell::new(None),
+            punched: Cell::new(0),
             _not_send_or_sync: PhantomData,
         })
     }
@@ -811,6 +861,9 @@ impl Ring {
             data_ready: Doorbell::from_fd(data_ready)?,
             capacity_ready: Doorbell::from_fd(capacity_ready)?,
             owned_runtime_dir: None,
+            quarantined: Cell::new(false),
+            reserved_end: Cell::new(None),
+            punched: Cell::new(0),
             _not_send_or_sync: PhantomData,
         })
     }
@@ -921,7 +974,9 @@ impl Ring {
     }
 
     /// Reserves a slot and up to `bound` arena bytes without blocking. `Exhausted` means no
-    /// slot or not enough contiguous-or-wrapped arena; nothing is charged on any error.
+    /// slot or not enough contiguous-or-wrapped arena; `ReservationOutstanding` means this
+    /// handle has not committed or aborted its previous reservation. Nothing is charged on any
+    /// error.
     pub fn try_reserve(
         &self,
         bound: usize,
@@ -933,6 +988,9 @@ impl Ring {
         if self.is_quarantined() {
             return Err(ProducerError::Quarantined);
         }
+        if self.reserved_end.get().is_some() {
+            return Err(ProducerError::ReservationOutstanding);
+        }
         self.reclaim_completed().map_err(ProducerError::Ring)?;
         let producer = self.producer_ptr().map_err(ProducerError::Ring)?;
         let reclaim = self.reclaim_ptr().map_err(ProducerError::Ring)?;
@@ -940,9 +998,9 @@ impl Ring {
         let published = unsafe { (*producer).published.load(Ordering::Relaxed) };
         // SAFETY: same as above.
         let completed = unsafe { (*reclaim).completed.load(Ordering::Acquire) };
-        let outstanding = published
-            .checked_sub(completed)
-            .ok_or(ProducerError::Ring(RingError::InvalidSharedState))?;
+        let outstanding = published.checked_sub(completed).ok_or_else(|| {
+            ProducerError::Ring(self.quarantine_with(RingError::InvalidSharedState))
+        })?;
         if outstanding >= self.grant.descriptor_depth {
             return Err(ProducerError::Exhausted);
         }
@@ -976,6 +1034,8 @@ impl Ring {
             Err(error) => {
                 // SAFETY: same rollback as exhaustion.
                 unsafe { (*slot).state.store(SLOT_FREE, Ordering::Release) };
+                // Cursors the protocol cannot produce are a fault, not backpressure.
+                self.enter_quarantine();
                 return Err(ProducerError::Arena(error));
             }
         };
@@ -985,6 +1045,9 @@ impl Ring {
                 .reservation_len
                 .store(plan.allocation_len(), Ordering::Relaxed)
         };
+        // `SpanPlan::reserve` checked this sum.
+        self.reserved_end
+            .set(Some(plan.allocation_start() + plan.allocation_len()));
         Ok(ProducerReservation {
             ring: self,
             plan,
@@ -1076,6 +1139,11 @@ impl Ring {
         if self.is_quarantined() {
             return Err(RingError::Quarantined);
         }
+        self.try_receive_inner()
+            .map_err(|error| self.quarantine_with(error))
+    }
+
+    fn try_receive_inner(&self) -> Result<Option<ReceiveLease<'_>>, RingError> {
         let producer = self.producer_ptr()?;
         let consumer = self.consumer_ptr()?;
         // SAFETY: consumer page remains mapped.
@@ -1112,13 +1180,10 @@ impl Ring {
         // SAFETY: acquire publication made descriptor visible; one read snapshots all fields.
         let shared = unsafe { std::ptr::read_volatile((*slot).descriptor.get()) };
         let expected = ReleaseIdentity::new(self.grant.incarnation, self.grant.lane, sequence);
-        let validated = match shared.snapshot().validate(expected, self.arena_bytes()) {
-            Ok(validated) => validated,
-            Err(error) => {
-                self.enter_quarantine();
-                return Err(RingError::Descriptor(error));
-            }
-        };
+        let validated = shared
+            .snapshot()
+            .validate(expected, self.arena_bytes())
+            .map_err(RingError::Descriptor)?;
         // SAFETY: validated span offsets and lengths fit arena and usize on this mapping.
         let first =
             unsafe { self.lease_span(validated.span(0).ok_or(RingError::InvalidSharedState)?)? };
@@ -1395,24 +1460,33 @@ impl Ring {
         self.mapping.len
     }
 
-    /// Marks the ring quarantined in shared state. Every later operation on either side
-    /// fails; the flag never clears.
+    /// The private latch never clears, so rewriting the shared flag cannot revive the ring.
     pub fn enter_quarantine(&self) {
+        self.quarantined.set(true);
         if let Ok(page) = self.lifecycle_ptr() {
             // SAFETY: lifecycle page remains mapped and flag is atomic.
             unsafe { (*page).quarantined.store(1, Ordering::Release) };
         }
     }
 
-    /// Whether the shared quarantine flag is set. An unreadable lifecycle page counts as
-    /// quarantined.
+    /// True if this handle latched quarantine or the shared flag is set.
+    /// An unreadable lifecycle page counts as quarantined.
     pub fn is_quarantined(&self) -> bool {
+        if self.quarantined.get() {
+            return true;
+        }
         self.lifecycle_ptr()
             .map(|page| {
                 // SAFETY: lifecycle page remains mapped and flag is atomic.
                 unsafe { (*page).quarantined.load(Ordering::Acquire) != 0 }
             })
             .unwrap_or(true)
+    }
+
+    /// Quarantines and returns `error`, for impossible shared state observed mid-operation.
+    fn quarantine_with(&self, error: RingError) -> RingError {
+        self.enter_quarantine();
+        error
     }
 
     fn arena_bytes(&self) -> usize {
@@ -1496,6 +1570,11 @@ impl Ring {
     }
 
     fn reclaim_completed(&self) -> Result<(), RingError> {
+        self.reclaim_completed_inner()
+            .map_err(|error| self.quarantine_with(error))
+    }
+
+    fn reclaim_completed_inner(&self) -> Result<(), RingError> {
         let producer = self.producer_ptr()?;
         let reclaim = self.reclaim_ptr()?;
         // SAFETY: producer-owned reclaim page remains mapped.
@@ -1537,41 +1616,13 @@ impl Ring {
         let new_reclaimed = reclaimed
             .checked_add(run_len)
             .ok_or(RingError::ArithmeticOverflow)?;
-        let page_size = system_page_size();
-        let remove = |offset, len| {
-            if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
-                self.enter_quarantine();
-                return Err(RingError::PageRemovalFailed);
-            }
-            Ok(())
-        };
-        for (offset, len) in removal_ranges(
-            self.layout.arena,
-            self.arena_bytes(),
-            reclaimed,
-            run_len,
-            page_size,
-        )?
-        .into_iter()
-        .filter(|(_, len)| *len != 0)
-        {
-            remove(offset, len)?;
-        }
+        // SAFETY: pages remain mapped for self lifetime.
         let arena_write = unsafe { (*producer).arena_write.load(Ordering::Relaxed) };
-        let page_size_u64 = page_size as u64;
-        if arena_write == new_reclaimed
-            && !reclaimed.is_multiple_of(page_size_u64)
-            && new_reclaimed.is_multiple_of(page_size_u64)
-        {
-            let logical_page = reclaimed & !(page_size_u64 - 1);
-            let physical = usize::try_from(logical_page % self.arena_bytes() as u64)
-                .map_err(|_| RingError::ArithmeticOverflow)?;
-            let offset = self
-                .layout
-                .arena
-                .checked_add(physical)
-                .ok_or(RingError::ArithmeticOverflow)?;
-            remove(offset, page_size)?;
+        if new_reclaimed > self.live_end(arena_write) {
+            return Err(RingError::InvalidSharedState);
+        }
+        if new_reclaimed - self.punched.get() >= self.punch_batch_bytes() {
+            self.punch_dead_pages(new_reclaimed, arena_write, false)?;
         }
         for sequence in completed + 1..=last {
             let slot = self.slot_ptr(sequence)?;
@@ -1592,7 +1643,99 @@ impl Ring {
         Ok(())
     }
 
+    /// The arena's logical end bounds bytes that readers or writers may access.
+    fn live_end(&self, arena_write: u64) -> u64 {
+        self.reserved_end.get().unwrap_or(arena_write)
+    }
+
+    /// `PUNCH_BATCH_DIVISOR` amortizes page-punch overhead.
+    fn punch_batch_bytes(&self) -> u64 {
+        (self.grant.arena_bytes / PUNCH_BATCH_DIVISOR).max(system_page_size() as u64)
+    }
+
+    /// Dead pages in `[punched, reclaimed)` do not overlap `[reclaimed, live_end)`.
+    /// `everything` also counts partially covered pages as dead once no live bytes remain.
+    fn punch_dead_pages(
+        &self,
+        reclaimed: u64,
+        arena_write: u64,
+        everything: bool,
+    ) -> Result<(), RingError> {
+        let punched = self.punched.get();
+        if punched >= reclaimed {
+            return Ok(());
+        }
+        let arena_bytes = self.arena_bytes();
+        let arena_bytes_u64 = arena_bytes as u64;
+        let page_size = system_page_size();
+        let page_size_u64 = page_size as u64;
+        let live_end = self.live_end(arena_write);
+        if live_end < reclaimed {
+            return Err(RingError::InvalidSharedState);
+        }
+        let remove = |offset, len| {
+            if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
+                return Err(RingError::PageRemovalFailed);
+            }
+            Ok(())
+        };
+        if everything && live_end == reclaimed {
+            let start = punched & !(page_size_u64 - 1);
+            let end = reclaimed
+                .checked_add(page_size_u64 - 1)
+                .ok_or(RingError::ArithmeticOverflow)?
+                & !(page_size_u64 - 1);
+            if end - start >= arena_bytes_u64 {
+                remove(self.layout.arena, arena_bytes)?;
+            } else {
+                for (offset, len) in removal_ranges(
+                    self.layout.arena,
+                    arena_bytes,
+                    start,
+                    end - start,
+                    page_size,
+                )?
+                .into_iter()
+                .filter(|(_, len)| *len != 0)
+                {
+                    remove(offset, len)?;
+                }
+            }
+        } else {
+            let dead_start = punched.max(live_end.saturating_sub(arena_bytes_u64));
+            for (offset, len) in removal_ranges(
+                self.layout.arena,
+                arena_bytes,
+                dead_start,
+                reclaimed - dead_start,
+                page_size,
+            )?
+            .into_iter()
+            .filter(|(_, len)| *len != 0)
+            {
+                remove(offset, len)?;
+            }
+        }
+        self.punched.set(reclaimed);
+        Ok(())
+    }
+
+    /// Punches every dead arena page, including partial ones.
+    pub fn trim(&self) -> Result<(), RingError> {
+        if self.is_quarantined() {
+            return Err(RingError::Quarantined);
+        }
+        let producer = self.producer_ptr()?;
+        let reclaim = self.reclaim_ptr()?;
+        // SAFETY: pages remain mapped for self lifetime.
+        let arena_write = unsafe { (*producer).arena_write.load(Ordering::Relaxed) };
+        let reclaimed = unsafe { (*reclaim).arena_reclaimed.load(Ordering::Relaxed) };
+        self.punch_dead_pages(reclaimed, arena_write, true)
+            .map_err(|error| self.quarantine_with(error))
+    }
+
     fn abort_reservation(&self, sequence: u64) {
+        self.reserved_end.set(None);
         if let Ok(slot) = self.slot_ptr(sequence) {
             // SAFETY: reservation owner calls only before publication.
             unsafe {
@@ -1610,15 +1753,8 @@ impl Ring {
         wire_header: [u8; WIRE_V2_HEADER_BYTES],
     ) -> Result<ReleaseIdentity, ProducerError> {
         let exact = plan.prefix(exact_len).map_err(ProducerError::Arena)?;
-        let declared_len = u32::from_le_bytes([
-            wire_header[0],
-            wire_header[1],
-            wire_header[2],
-            wire_header[3],
-        ]);
-        if declared_len as usize != exact_len || wire_header[4] != 2 {
-            return Err(ProducerError::WireHeaderMismatch);
-        }
+        check_wire_header(&wire_header, exact_len as u64)
+            .map_err(|_| ProducerError::WireHeaderMismatch)?;
         let identity = ReleaseIdentity::new(self.grant.incarnation, self.grant.lane, sequence);
         let spans = exact.spans();
         let shared = SharedDescriptor {
@@ -1636,10 +1772,8 @@ impl Ring {
         };
         let slot = self.slot_ptr(sequence).map_err(ProducerError::Ring)?;
         let producer = self.producer_ptr().map_err(ProducerError::Ring)?;
-        let next_write = plan
-            .allocation_start()
-            .checked_add(plan.allocation_len())
-            .ok_or(ProducerError::SequenceExhausted)?;
+        // `SpanPlan::reserve` checked this sum.
+        let next_write = plan.allocation_start() + plan.allocation_len();
         // SAFETY: producer exclusively owns reserved slot and arena range.
         unsafe {
             std::ptr::write_volatile((*slot).descriptor.get(), shared);
@@ -1647,6 +1781,7 @@ impl Ring {
             (*producer).arena_write.store(next_write, Ordering::Relaxed);
             (*producer).published.store(sequence, Ordering::Release);
         }
+        self.reserved_end.set(None);
         if let Err(error) = self.signal_wake(self.data_wake_ptr(), &self.data_ready) {
             self.enter_quarantine();
             return Err(ProducerError::Ring(error));
@@ -1888,12 +2023,12 @@ pub fn wire_v2_header(body_len: usize) -> Result<[u8; WIRE_V2_HEADER_BYTES], Pro
     }
     let mut header = [0u8; WIRE_V2_HEADER_BYTES];
     header[0..4].copy_from_slice(&body_len.to_le_bytes());
-    header[4] = 2;
+    header[4] = WIRE_V2_VERSION;
     Ok(header)
 }
 
-/// Why a reservation, write, or commit failed. Every variant except `Exhausted` and
-/// `Deadline` leaves the reservation aborted.
+/// Why a reservation, write, or commit failed. Failures other than `Exhausted`, `Deadline`,
+/// and `ReservationOutstanding` abort the reservation.
 #[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProducerError {
     /// `bound` exceeds `MAX_FRAME_BYTES`.
@@ -1914,6 +2049,10 @@ pub enum ProducerError {
     /// No free slot, or not enough arena. Retry after a release.
     #[error("bounded ring capacity is exhausted")]
     Exhausted,
+    /// This handle already holds an uncommitted reservation. No peer release can clear it;
+    /// commit or abort that reservation first.
+    #[error("producer reservation is already outstanding")]
+    ReservationOutstanding,
     /// `reserve_until` hit its deadline while still `Exhausted`.
     #[error("bounded backpressure deadline elapsed")]
     Deadline,
@@ -2260,7 +2399,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_subpage_releases_eventually_remove_complete_pages() {
+    fn subpage_releases_stay_resident_until_trim() {
         let ring = ring();
         let page = super::system_page_size();
         assert!(page >= 256 && page.is_multiple_of(256));
@@ -2271,9 +2410,19 @@ mod tests {
             ring.try_reserve(0, wire_v2_header(0).unwrap())
                 .unwrap()
                 .abort();
-            let expected = usize::from(index + 1 < page / 256);
-            assert_eq!(ring.resident_arena_pages().unwrap(), expected);
+            assert_eq!(ring.resident_arena_pages().unwrap(), 1);
         }
+        ring.trim().unwrap();
+        assert_eq!(ring.resident_arena_pages().unwrap(), 0);
+
+        publish(&ring, &[0x5a; 256]);
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+        ring.try_reserve(0, wire_v2_header(0).unwrap())
+            .unwrap()
+            .abort();
+        assert_eq!(ring.resident_arena_pages().unwrap(), 1);
+        ring.trim().unwrap();
+        assert_eq!(ring.resident_arena_pages().unwrap(), 0);
     }
 
     #[test]
@@ -2288,16 +2437,70 @@ mod tests {
         ring.try_reserve(0, wire_v2_header(0).unwrap())
             .unwrap()
             .abort();
+        ring.trim().unwrap();
         assert_eq!(second.segment(0).unwrap().read_byte(0), Some(0x22));
         assert_eq!(second.segment(0).unwrap().read_byte(255), Some(0x22));
         second.release().unwrap();
     }
 
     #[test]
+    fn trim_preserves_bytes_of_an_uncommitted_reservation() {
+        let ring = ring();
+        publish(&ring, &[0x11; 100]);
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+        ring.try_reserve(0, wire_v2_header(0).unwrap())
+            .unwrap()
+            .abort();
+        // Drained: `arena_reclaimed == arena_write == 100`, mid-page. The reservation now
+        // starts inside the page that `trim` would otherwise treat as fully dead.
+        let mut held = ring.try_reserve(50, wire_v2_header(50).unwrap()).unwrap();
+        held.write(&[0x33; 50]).unwrap();
+
+        assert_eq!(
+            ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap_err(),
+            ProducerError::ReservationOutstanding
+        );
+        ring.trim().unwrap();
+        let span = held.segment(0).unwrap().unwrap();
+        assert_eq!(span.read_byte(0), Some(0x33));
+        assert_eq!(span.read_byte(49), Some(0x33));
+
+        held.commit(50).unwrap();
+        let lease = ring.try_receive().unwrap().unwrap();
+        assert_eq!(lease.to_vec().unwrap(), vec![0x33; 50]);
+        lease.release().unwrap();
+    }
+
+    #[test]
+    fn outstanding_reservation_is_refused_without_parking() {
+        let ring = ring();
+        let held = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
+        assert_eq!(
+            ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap_err(),
+            ProducerError::ReservationOutstanding
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(
+            ring.reserve_until(
+                1,
+                wire_v2_header(1).unwrap(),
+                started + std::time::Duration::from_secs(5),
+            )
+            .unwrap_err(),
+            ProducerError::ReservationOutstanding
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        held.abort();
+        ring.try_reserve(1, wire_v2_header(1).unwrap())
+            .unwrap()
+            .abort();
+    }
+
+    #[test]
     fn page_removal_failure_quarantines_before_capacity_publication() {
         let ring = ring();
-        let page = super::system_page_size();
-        publish(&ring, &vec![1; page]);
+        let arena_len = ring.arena_bytes();
+        publish(&ring, &vec![1; arena_len]);
         ring.try_receive().unwrap().unwrap().release().unwrap();
         FAIL_NEXT_PAGE_REMOVAL.store(true, Ordering::Release);
 
@@ -2312,6 +2515,62 @@ mod tests {
             assert_eq!((*reclaim).completed.load(Ordering::Acquire), 0);
             assert_eq!((*reclaim).arena_reclaimed.load(Ordering::Acquire), 0);
         }
+    }
+
+    #[test]
+    fn quarantine_survives_peer_clearing_shared_flag() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        ring.enter_quarantine();
+        let lifecycle = ring.lifecycle_ptr().unwrap();
+        // SAFETY: test-owned ring keeps reclaim page mapped.
+        unsafe { (*lifecycle).quarantined.store(0, Ordering::Release) };
+        assert!(ring.is_quarantined());
+        assert!(matches!(ring.try_receive(), Err(RingError::Quarantined)));
+        assert_eq!(
+            ring.try_reserve(0, wire_v2_header(0).unwrap()).unwrap_err(),
+            ProducerError::Quarantined
+        );
+        assert!(matches!(ring.trim(), Err(RingError::Quarantined)));
+    }
+
+    #[test]
+    fn impossible_slot_state_quarantines_the_receiver() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        let slot = ring.slot_ptr(1).unwrap();
+        // SAFETY: test-owned ring keeps reclaim page mapped.
+        unsafe {
+            (*slot)
+                .state
+                .store(super::SLOT_RELEASE_PENDING, Ordering::Release)
+        };
+        assert!(matches!(
+            ring.try_receive(),
+            Err(RingError::InvalidSharedState)
+        ));
+        assert!(ring.is_quarantined());
+    }
+
+    #[test]
+    fn forged_reclaim_length_quarantines_the_producer() {
+        let ring = ring();
+        let arena_len = ring.arena_bytes() as u64;
+        publish(&ring, &[1; 16]);
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+        let slot = ring.slot_ptr(1).unwrap();
+        // SAFETY: test-owned ring keeps reclaim page mapped.
+        unsafe {
+            let mut descriptor = std::ptr::read_volatile((*slot).descriptor.get());
+            descriptor.allocation_len = arena_len;
+            std::ptr::write_volatile((*slot).descriptor.get(), descriptor);
+        }
+        assert!(matches!(
+            ring.try_reserve(0, wire_v2_header(0).unwrap()),
+            Err(ProducerError::Ring(RingError::InvalidSharedState))
+        ));
+        assert!(ring.is_quarantined());
+        assert!(ring.resident_arena_pages().unwrap() > 0);
     }
 
     #[test]
