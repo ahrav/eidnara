@@ -1049,7 +1049,7 @@ describe("evidence: git-backed receipts", () => {
         expect(verify("property-impact", impactFor(sourceCommit), ctx)).toEqual([]);
     });
 
-    test("a source blob the pinned commit does not reach marks the receipt stale (AE6)", () => {
+    test("a source blob outside the pinned snapshot marks the receipt stale (AE6)", () => {
         const value = receipt();
         (files(value)[0]!.source as Json).blob_sha = "e".repeat(40);
         const errors = verify("receipt", value, ctx);
@@ -1303,6 +1303,24 @@ describe("evidence: git-backed receipts", () => {
         expect(fileSetDigest([["y.rs", b], ["x.rs", a]])).toBe(fileSetDigest([["x.rs", a], ["y.rs", b]]));
     });
 
+    test("a source blob from an earlier revision of a file is not part of the pinned snapshot", () => {
+        write(join(source, "crates/lease/src/lib.rs"), `${LEASE_SOURCE}// revised\n`);
+        gitIn(source, ["add", "-A"]);
+        gitIn(source, ["commit", "-q", "-m", "revise the lease source"]);
+        const newer = gitIn(source, ["rev-parse", "HEAD"]);
+        try {
+            const value = receipt();
+            (value.sources as Json[])[0] = { repo: "source", commit: newer };
+            (value.catalogs as Json[])[0] = { repo: "source", commit: newer };
+            (value.scope as Json[])[0] = { repo: "source", tree: gitIn(source, ["rev-parse", "HEAD:crates/lease"]) };
+            // The receipt still cites the superseded blob, which the commit's history holds
+            // but its tree does not.
+            expect(verify("receipt", value, ctx)).toContain(`$.files[0].source.blob_sha ${leaseBlob} is not reachable from source@${newer}`);
+        } finally {
+            gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
+    });
+
     test("a source blob at two paths must be disposed of twice", () => {
         write(join(source, "crates/lease/src/copy.rs"), LEASE_SOURCE);
         gitIn(source, ["add", "-A"]);
@@ -1323,11 +1341,12 @@ describe("evidence: git-backed receipts", () => {
     test("registry scans cover test-named modules under src and skip cfg(test) items", () => {
         write(
             join(destination, "crates/lease/src/test_support.rs"),
-            'pub const DB: &str = "support.db";\n#[cfg(test)]\nmod tests {\n    const T: &str = "only-in-tests.db";\n    fn f() { let s = "}"; }\n}\n#[cfg(all(test, feature = "x"))]\nconst U: &str = "also-only.db";\n',
+            'pub const DB: &str = "support.db";\n#[cfg(test)]\nmod tests {\n    /* outer /* inner */ still a comment { */\n    const T: &str = "only-in-tests.db";\n    fn f() { let s = "}"; }\n}\n#[cfg(all(test, feature = "x"))]\nconst U: &str = "also-only.db";\npub const AFTER: &str = "after.db";\n',
         );
         try {
             const errors = verify("registry", copy("registry"), ctx);
             expect(errors).toContain('crates/lease/src/test_support.rs: persistent literal "support.db" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/test_support.rs: persistent literal "after.db" has no family entry in the registry');
             expect(errors.some((error) => error.includes("only-in-tests.db") || error.includes("also-only.db"))).toBe(false);
         } finally {
             rmSync(join(destination, "crates/lease/src/test_support.rs"));

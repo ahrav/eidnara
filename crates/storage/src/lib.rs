@@ -93,7 +93,7 @@ mod sqlite_backend {
         time::Duration,
     };
 
-    use lease::{FileLeaseStore, HeldFileLease, protect_file};
+    use lease::{FileIdentity, FileLeaseStore, HeldFileLease, protect_file};
     use rusqlite::{Connection, OpenFlags};
     use sha2::{Digest, Sha256};
 
@@ -785,7 +785,7 @@ mod sqlite_backend {
         // between SQLite's own `open(2)` and this `stat(2)` remains; the store directory is
         // created by this crate and the lease serializes cooperating writers.
         if let Some(pinned) = inspected {
-            let now = FileIdentity::of(Path::new(&path)).map_err(StoreError::Io)?;
+            let now = FileIdentity::of_path(Path::new(&path)).map_err(StoreError::Io)?;
             if now != pinned {
                 return Err(StoreError::Baseline(format!(
                     "{path} was replaced between inspection and open"
@@ -879,13 +879,39 @@ mod sqlite_backend {
             };
             for suffix in ["", "-wal", "-shm", "-journal"] {
                 let source = PathBuf::from(format!("{}{suffix}", path.display()));
-                if source.try_exists().map_err(StoreError::Io)? {
-                    let target = PathBuf::from(format!("{}{suffix}", copy.database.display()));
-                    std::fs::copy(&source, &target).map_err(StoreError::Io)?;
-                }
+                let target = PathBuf::from(format!("{}{suffix}", copy.database.display()));
+                copy_regular_file(&source, &target)?;
             }
             Ok(copy)
         }
+    }
+
+    /// Copies `source` to `target` when `source` exists, opening the source without following
+    /// a final symlink and refusing anything that is not a regular file, so a path swapped
+    /// for a symlink or a FIFO after the unfit check is neither followed nor waited on.
+    fn copy_regular_file(source: &Path, target: &Path) -> Result<(), StoreError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let mut from = match options.open(source) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(StoreError::Io(e)),
+        };
+        let meta = from.metadata().map_err(StoreError::Io)?;
+        if !meta.is_file() {
+            return Err(StoreError::Baseline(format!(
+                "{} is not a regular file",
+                source.display()
+            )));
+        }
+        let mut to = std::fs::File::create(target).map_err(StoreError::Io)?;
+        std::io::copy(&mut from, &mut to).map_err(StoreError::Io)?;
+        Ok(())
     }
 
     impl Drop for InspectionCopy {
@@ -902,73 +928,16 @@ mod sqlite_backend {
             .unwrap_or(0)
     }
 
-    /// The identity of a store file, read without following a final symlink: device and
-    /// inode on Unix, volume serial number and file index on Windows. Two readings are equal
-    /// only while the path still names the same file.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) struct FileIdentity {
-        volume: u64,
-        file: u64,
-    }
-
-    impl FileIdentity {
-        #[cfg(unix)]
-        pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
-            use std::os::unix::fs::MetadataExt;
-            let meta = std::fs::symlink_metadata(path)?;
-            Ok(Self {
-                volume: meta.dev(),
-                file: meta.ino(),
-            })
-        }
-
-        #[cfg(windows)]
-        pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
-            use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-            use windows_sys::Win32::Storage::FileSystem::{
-                BY_HANDLE_FILE_INFORMATION, FILE_FLAG_OPEN_REPARSE_POINT,
-                GetFileInformationByHandle,
-            };
-            // The handle is opened for reading only and closed on return; a reparse point
-            // is inspected as itself, matching the Unix `symlink_metadata` reading.
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .open(path)?;
-            let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-            // SAFETY: `file` holds an open handle for the duration of the call, and `info`
-            // points at writable storage of the exact type the call fills in on success.
-            let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) };
-            if ok == 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            // SAFETY: a non-zero return means the call initialized every field.
-            let info = unsafe { info.assume_init() };
-            Ok(Self {
-                volume: u64::from(info.dwVolumeSerialNumber),
-                file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-            })
-        }
-
-        #[cfg(not(any(unix, windows)))]
-        pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
-            let _ = path;
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "file identity is available on Unix and Windows only",
-            ))
-        }
-    }
-
     /// The database and its sidecars must each be a regular file with exactly one name.
-    /// A FIFO or device would block or misbehave inside SQLite's open before any timeout
-    /// applies, a symlink is an alias, and two names for one inode derive two leases and
-    /// two `-wal`/`-shm` pairs, so neither writer sees the other's fence claim.
+    /// A FIFO or device would block or misbehave inside SQLite's open or the inspection
+    /// copy before any timeout applies, a symlink is an alias, and two names for one inode
+    /// derive two leases and two sidecar sets, so neither writer sees the other's fence
+    /// claim.
     fn refuse_unfit_store_files(path: &Path) -> Result<(), StoreError> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            for suffix in ["", "-wal", "-shm"] {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
                 let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
                 match std::fs::symlink_metadata(&candidate) {
                     Ok(meta) if !meta.is_file() => {
@@ -1158,7 +1127,7 @@ mod sqlite_backend {
             if !path.try_exists().map_err(StoreError::Io)? {
                 return Ok((0, None));
             }
-            let identity = FileIdentity::of(path).map_err(StoreError::Io)?;
+            let identity = FileIdentity::of_path(path).map_err(StoreError::Io)?;
             // Any ordinary SQLite connection to a WAL-mode file creates the `-wal` and
             // `-shm` sidecars if they are missing, so the inspection never opens the file
             // itself in that mode. Without a `-wal` or a `-journal` the main file is the
@@ -1418,10 +1387,10 @@ pub use sqlite_backend::{
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::sqlite_backend::{
-        FileIdentity, FileState, claim_fence, claim_fence_strict, create_database_file_owner_only,
-        immutable_uri,
+        FileState, claim_fence, claim_fence_strict, create_database_file_owner_only, immutable_uri,
     };
     use super::*;
+    use lease::FileIdentity;
     use std::path::Path;
 
     #[test]
@@ -1525,6 +1494,29 @@ mod tests {
                 assert!(m.contains("not a regular file"), "unexpected message: {m}")
             }
             other => panic!("a FIFO must be refused without blocking, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A FIFO at the `-journal` path is refused with the other sidecars before the inspection
+    /// would copy it, so the open cannot block on it.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_journal_path_is_refused_before_inspection() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, "").expect("first open"));
+        let journal = format!("{path}-journal");
+        let c_path = std::ffi::CString::new(journal.as_str()).expect("path");
+        // SAFETY: `c_path` is a valid NUL-terminated string for the duration of the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "mkfifo");
+        match open_sqlite(&d, "").map(|_| ()) {
+            Err(StoreError::Baseline(m)) => {
+                assert!(m.contains("not a regular file"), "unexpected message: {m}")
+            }
+            other => panic!("a FIFO journal must be refused without blocking, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1796,13 +1788,19 @@ mod tests {
         };
         std::fs::create_dir_all(&root).expect("root");
         std::fs::write(path, b"one").expect("write");
-        let first = FileIdentity::of(Path::new(path)).expect("identity");
+        let first = FileIdentity::of_path(Path::new(path)).expect("identity");
         std::fs::write(path, b"one rewritten in place").expect("rewrite");
-        assert_eq!(FileIdentity::of(Path::new(path)).expect("identity"), first);
+        assert_eq!(
+            FileIdentity::of_path(Path::new(path)).expect("identity"),
+            first
+        );
         let replacement = root.join("replacement.db");
         std::fs::write(&replacement, b"one").expect("write replacement");
         std::fs::rename(&replacement, path).expect("swap the file in");
-        assert_ne!(FileIdentity::of(Path::new(path)).expect("identity"), first);
+        assert_ne!(
+            FileIdentity::of_path(Path::new(path)).expect("identity"),
+            first
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -1423,7 +1423,10 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             if (!existsSync(checkout)) {
                 errors.push(`no checkout is available for source repository ${repo} at ${checkout}`);
             } else {
-                const listed = git(checkout, ["rev-list", "--objects", "--no-object-names", commit]);
+                // The traversal starts at the commit's tree, not the commit: a commit walk
+                // would also return blobs from earlier revisions of a file, and a receipt
+                // could then cite a superseded blob as the migrated source.
+                const listed = git(checkout, ["rev-list", "--objects", "--no-object-names", `${commit}^{tree}`]);
                 if (!listed.ok) {
                     errors.push(`git rev-list failed for ${repo}@${commit}: ${listed.error}`);
                 } else {
@@ -1450,13 +1453,15 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
         if (file.source === null) continue;
         const reachable = reachableFor(file.source.repo);
         if (reachable === undefined) continue;
-        if (!reachable.has(file.source.blob_sha)) {
-            errors.push(`${file.path}.source.blob_sha ${file.source.blob_sha} is not reachable from ${file.source.repo}@${commitByRepo.get(file.source.repo)}`);
-            continue;
-        }
+        // The object type is named first: a commit or tree id sits outside the snapshot's
+        // blob set as well, and the type is the more useful reason.
         const type = typesByRepo.get(file.source.repo)?.get(file.source.blob_sha);
         if (type !== undefined && type !== "blob") {
             errors.push(`${file.path}.source.blob_sha ${file.source.blob_sha} is a ${type}, not a blob`);
+            continue;
+        }
+        if (!reachable.has(file.source.blob_sha)) {
+            errors.push(`${file.path}.source.blob_sha ${file.source.blob_sha} is not reachable from ${file.source.repo}@${commitByRepo.get(file.source.repo)}`);
             continue;
         }
         if (file.transformation === "verbatim" && file.destination_sha256 !== undefined) {
@@ -1819,8 +1824,18 @@ function rustItemEnd(text: string, from: number): number {
             continue;
         }
         if (char === "/" && next === "*") {
-            const close = text.indexOf("*/", index + 2);
-            index = close === -1 ? text.length : close + 2;
+            // Rust block comments nest, so the terminator is the one that returns to depth 0.
+            let comments = 1;
+            index += 2;
+            while (index < text.length && comments > 0) {
+                if (text[index] === "/" && text[index + 1] === "*") {
+                    comments += 1;
+                    index += 2;
+                } else if (text[index] === "*" && text[index + 1] === "/") {
+                    comments -= 1;
+                    index += 2;
+                } else index += 1;
+            }
             continue;
         }
         const raw = /^b?r(#*)"/.exec(text.slice(index, index + 8));

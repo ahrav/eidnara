@@ -186,32 +186,46 @@ fn require_private_directory_for(dir: &std::path::Path, euid: u32) -> std::io::R
         let resolved = std::fs::canonicalize(dir)?;
         for ancestor in resolved.ancestors().skip(1) {
             let meta = std::fs::metadata(ancestor)?;
-            if meta.uid() != euid && meta.uid() != 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!(
-                        "lease directory ancestor {} is owned by uid {}; another principal \
-                         could rename the lease directory away",
-                        ancestor.display(),
-                        meta.uid()
-                    ),
-                ));
-            }
-            let mode = meta.permissions().mode();
-            let writable_by_others = mode & 0o022 != 0;
-            let sticky = mode & 0o1000 != 0;
-            if writable_by_others && !sticky {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!(
-                        "lease directory ancestor {} has mode {:o} without the sticky bit; \
-                         another principal could rename the lease directory away",
-                        ancestor.display(),
-                        mode & 0o7777
-                    ),
-                ));
-            }
+            require_ancestor_private(ancestor, &meta, euid)?;
         }
+    }
+    Ok(())
+}
+
+/// A directory that holds an entry on the way to the lease directory must be owned by the
+/// running user or root and be either not writable by group or other or sticky, since a
+/// sticky directory lets only an entry's owner rename it.
+#[cfg(unix)]
+fn require_ancestor_private(
+    ancestor: &std::path::Path,
+    meta: &std::fs::Metadata,
+    euid: u32,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if meta.uid() != euid && meta.uid() != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "lease directory ancestor {} is owned by uid {}; another principal could \
+                 rename the lease directory away",
+                ancestor.display(),
+                meta.uid()
+            ),
+        ));
+    }
+    let mode = meta.permissions().mode();
+    let writable_by_others = mode & 0o022 != 0;
+    let sticky = mode & 0o1000 != 0;
+    if writable_by_others && !sticky {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "lease directory ancestor {} has mode {:o} without the sticky bit; another \
+                 principal could rename the lease directory away",
+                ancestor.display(),
+                mode & 0o7777
+            ),
+        ));
     }
     Ok(())
 }
@@ -242,6 +256,16 @@ fn require_symlink_components_owned(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
         };
+        if meta.file_type().is_dir() {
+            // The directory that holds the next entry decides who can replace that entry,
+            // whether it is a symlink or the lease directory itself, so every directory on
+            // the unresolved path is held to the ancestor rule; canonicalization alone would
+            // examine only the directories the final target sits under.
+            if prefix != path {
+                require_ancestor_private(&prefix, &meta, euid)?;
+            }
+            continue;
+        }
         if !meta.file_type().is_symlink() {
             continue;
         }
@@ -267,27 +291,116 @@ fn require_symlink_components_owned(
     Ok(())
 }
 
-/// After the lock is held, the path must still name the locked inode. A rename between
-/// this acquirer's open and its lock would leave it holding a lock on a file the path no
-/// longer names, so the next acquirer would lock a different inode for the same key.
-fn require_path_still_names(file: &File, path: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let held = file.metadata()?;
-        let named = std::fs::symlink_metadata(path)?;
-        if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "lease path {} was replaced while the lease was being acquired",
-                    path.display()
-                ),
-            ));
+/// The identity of a file independent of its name: device and inode on Unix, volume serial
+/// number and file index on Windows. Two readings are equal only while they name the same
+/// file, so comparing the identity of an opened handle with the identity the path now has
+/// shows whether the path was re-pointed after the open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    volume: u64,
+    file: u64,
+}
+
+impl FileIdentity {
+    /// The identity of the file `path` names, without following a final symlink.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O error from reading the path's metadata, or `Unsupported` on a target
+    /// that is neither Unix nor Windows.
+    pub fn of_path(path: &std::path::Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::symlink_metadata(path)?;
+            Ok(Self {
+                volume: meta.dev(),
+                file: meta.ino(),
+            })
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            // The handle is opened for reading only and closed on return; a reparse point
+            // is inspected as itself, matching the Unix reading.
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)?;
+            Self::of_file(&file)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "file identity is available on Unix and Windows only",
+            ))
         }
     }
-    #[cfg(not(unix))]
-    let _ = (file, path);
+
+    /// The identity of an opened file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O error from querying the handle, or `Unsupported` on a target that is
+    /// neither Unix nor Windows.
+    pub fn of_file(file: &File) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = file.metadata()?;
+            Ok(Self {
+                volume: meta.dev(),
+                file: meta.ino(),
+            })
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+            };
+            let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+            // SAFETY: `file` holds an open handle for the duration of the call, and `info`
+            // points at writable storage of the exact type the call fills in on success.
+            let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: a non-zero return means the call initialized every field.
+            let info = unsafe { info.assume_init() };
+            Ok(Self {
+                volume: u64::from(info.dwVolumeSerialNumber),
+                file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = file;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "file identity is available on Unix and Windows only",
+            ))
+        }
+    }
+}
+
+/// After the lock is held, the path must still name the locked file. A rename between this
+/// acquirer's open and its lock would leave it holding a lock on a file the path no longer
+/// names, so the next acquirer would lock a different file for the same key. On Windows the
+/// default share mode permits a rename of an open file, so the comparison applies there too.
+fn require_path_still_names(file: &File, path: &std::path::Path) -> std::io::Result<()> {
+    if FileIdentity::of_file(file)? != FileIdentity::of_path(path)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "lease path {} was replaced while the lease was being acquired",
+                path.display()
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -1149,41 +1262,73 @@ mod tests {
         );
     }
 
-    /// A symlink on the way to the lease directory is an entry its owner can retarget, so a
-    /// symlink owned by another user is refused even when the directory it reaches is
-    /// private; the same symlink owned by the running user is accepted.
+    /// A symlink on the way to the lease directory is an entry its owner can retarget. In a
+    /// sticky system directory only the symlink's owner can replace it, so a symlink owned by
+    /// another user is refused there while the running user's own symlink is accepted; in a
+    /// directory others can write to, even the running user's symlink is replaceable, so
+    /// that directory is refused unless it is sticky.
     #[cfg(unix)]
     #[test]
     fn a_lease_path_through_a_foreign_owned_symlink_is_refused() {
-        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         let outer = tempfile::tempdir().expect("outer");
         let real = outer.path().join("real");
         std::fs::create_dir(&real).expect("real");
-        let link = outer.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).expect("symlink");
-        let base = link.join("leases");
-        std::fs::create_dir(&base).expect("base through the link");
-        let me = std::fs::symlink_metadata(&link).expect("link meta").uid();
-        require_private_directory_for(&base, me)
-            .expect("a symlink the running user owns is accepted");
-        let error = require_private_directory_for(&base, me + 1)
-            .expect_err("a symlink another user owns must be refused");
-        assert_eq!(
-            error.kind(),
-            std::io::ErrorKind::PermissionDenied,
-            "{error}"
-        );
+        let me = std::fs::metadata(&real).expect("real meta").uid();
+
+        // The system temporary directory stands in for a root-owned sticky directory.
+        let system_tmp = std::env::temp_dir();
+        let tmp_meta = std::fs::metadata(&system_tmp).expect("temp dir");
+        let sticky_root_owned = tmp_meta.uid() == 0 && tmp_meta.permissions().mode() & 0o1000 != 0;
+        if sticky_root_owned {
+            let link = system_tmp.join(format!("lease-link-{}-{}", std::process::id(), me));
+            std::os::unix::fs::symlink(&real, &link).expect("symlink in the sticky directory");
+            let base = link.join("leases");
+            std::fs::create_dir(&base).expect("base through the link");
+            require_private_directory_for(&base, me)
+                .expect("the running user's symlink is accepted");
+            let error = require_private_directory_for(&base, me + 1)
+                .expect_err("a symlink another user owns must be refused");
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{error}"
+            );
+            assert!(
+                error.to_string().contains("is a symlink owned by uid"),
+                "{error}"
+            );
+            let _ = std::fs::remove_file(&link);
+        }
+
+        // A user-owned symlink inside a directory others can write to is still replaceable,
+        // so the directory that holds the symlink is checked even though the resolved path
+        // never passes through it.
+        let open_dir = outer.path().join("open");
+        std::fs::create_dir(&open_dir).expect("open dir");
+        std::os::unix::fs::symlink(&real, open_dir.join("link")).expect("symlink in open dir");
+        let through_open = open_dir.join("link").join("leases");
+        std::fs::create_dir_all(&through_open).expect("base through the open dir");
+        std::fs::set_permissions(&open_dir, std::fs::Permissions::from_mode(0o777))
+            .expect("open the directory");
+        let error = require_private_directory_for(&through_open, me)
+            .expect_err("a writable non-sticky directory holding the symlink must be refused");
         assert!(
-            error.to_string().contains("is a symlink owned by uid"),
+            error.to_string().contains("without the sticky bit"),
             "{error}"
         );
-        // The chain is followed: a second hop owned by another user is refused as well.
+        std::fs::set_permissions(&open_dir, std::fs::Permissions::from_mode(0o1777))
+            .expect("sticky directory");
+        require_private_directory_for(&through_open, me)
+            .expect("a sticky directory protects the owner's symlink");
+        std::fs::set_permissions(&open_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("private directory");
+        // The chain is followed: a second hop resolves through the first.
         let hop = outer.path().join("hop");
-        std::os::unix::fs::symlink(&link, &hop).expect("second hop");
+        std::os::unix::fs::symlink(open_dir.join("link"), &hop).expect("second hop");
         require_private_directory_for(&hop.join("leases"), me)
             .expect("two owned hops are accepted");
-        assert!(require_private_directory_for(&hop.join("leases"), me + 1).is_err());
     }
 
     /// A path re-pointed at another inode after the open is detected once the lock is held,

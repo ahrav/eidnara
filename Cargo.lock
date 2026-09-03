@@ -179,6 +179,7 @@ dependencies = [
  "libc",
  "tempfile",
  "thiserror",
+ "windows-sys",
 ]
 
 [[package]]
@@ -379,7 +380,6 @@ dependencies = [
  "sha2",
  "storage-types",
  "thiserror",
- "windows-sys",
 ]
 
 [[package]]
