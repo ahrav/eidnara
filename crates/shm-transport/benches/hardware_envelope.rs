@@ -169,7 +169,15 @@ fn main() {
                     .lines()
                     .rev()
                     .find_map(|line| serde_json::from_str::<Measurement>(line).ok())
-                    .unwrap_or_else(|| failed(arm, payload, iterations, "arm process failed"));
+                    .unwrap_or_else(|| {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let excerpt: String = stderr.trim().chars().take(240).collect();
+                        let reason = format!(
+                            "arm process produced no record: {}; stderr: {excerpt:?}",
+                            output.status
+                        );
+                        failed(arm, payload, iterations, &reason)
+                    });
                 attempts.push(record);
             }
         }
