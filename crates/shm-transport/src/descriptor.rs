@@ -11,8 +11,28 @@ pub const DESCRIPTOR_SCHEMA_VERSION: u16 = 3;
 pub const SETUP_DESCRIPTOR_COUNT: usize = 6;
 /// Frozen wire-v2 header length.
 pub const WIRE_V2_HEADER_BYTES: usize = 21;
+/// Version byte at `wire_header[4]`.
+pub const WIRE_V2_VERSION: u8 = 2;
 /// A complete-frame descriptor contains at most two shared spans.
 pub const MAX_SPANS: usize = 2;
+
+/// Shared by `FrameDescriptor::validate` and `SamplePrefix::validate` so both paths agree on
+/// which wire headers are admissible.
+pub(crate) fn check_wire_header(
+    wire_header: &[u8; WIRE_V2_HEADER_BYTES],
+    body_len: u64,
+) -> Result<(), DescriptorError> {
+    let declared_len = u32::from_le_bytes([
+        wire_header[0],
+        wire_header[1],
+        wire_header[2],
+        wire_header[3],
+    ]);
+    if u64::from(declared_len) != body_len || wire_header[4] != WIRE_V2_VERSION {
+        return Err(DescriptorError::WireHeaderMismatch);
+    }
+    Ok(())
+}
 
 /// Validated opaque hardware-profile identifier.
 ///
@@ -302,15 +322,7 @@ impl FrameDescriptor {
             _ => return Err(DescriptorError::InvalidSpanCount),
         }
 
-        let declared_len = u32::from_le_bytes([
-            wire_header[0],
-            wire_header[1],
-            wire_header[2],
-            wire_header[3],
-        ]);
-        if u64::from(declared_len) != body_len || wire_header[4] != 2 {
-            return Err(DescriptorError::WireHeaderMismatch);
-        }
+        check_wire_header(&wire_header, body_len)?;
 
         Ok(ValidatedFrame {
             wire_header,

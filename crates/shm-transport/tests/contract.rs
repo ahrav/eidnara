@@ -5,13 +5,14 @@ use shm_transport::backend::sample::{SAMPLE_PREFIX_BYTES, SamplePrefix};
 use shm_transport::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor,
     HardwareProfileId, Incarnation, ReleaseIdentity, TransportDescriptor, WIRE_V2_HEADER_BYTES,
+    WIRE_V2_VERSION,
 };
 use shm_transport::lifecycle::{CloseState, Lifecycle, LifecycleError};
 
 fn header(len: usize) -> [u8; WIRE_V2_HEADER_BYTES] {
     let mut header = [0u8; WIRE_V2_HEADER_BYTES];
     header[..4].copy_from_slice(&(len as u32).to_le_bytes());
-    header[4] = 2;
+    header[4] = WIRE_V2_VERSION;
     header
 }
 
@@ -302,6 +303,19 @@ fn arena_reserve_and_prefix_report_every_failure_mode() {
 
     let plan = SpanPlan::reserve(capacity, 0, 0, 8).unwrap();
     assert_eq!(plan.prefix(9), Err(ArenaError::ExceedsAllocation));
+    // A narrowed plan cannot widen again, even within the original allocation: the spans no
+    // longer describe the reserved bytes past the committed prefix, so widening would
+    // fabricate a wrap at offset zero.
+    let narrowed = plan.prefix(2).unwrap();
+    assert_eq!(narrowed.prefix(3), Err(ArenaError::ExceedsAllocation));
+    assert_eq!(narrowed.prefix(2).unwrap().span_count(), 1);
+    assert_eq!(narrowed.prefix(1).unwrap().span(0).unwrap().len(), 1);
+    // Narrowing a wrapped plan below the first span drops the second span.
+    let wrapped = SpanPlan::reserve(capacity, full - 4, full - 4, 8).unwrap();
+    let unwrapped = wrapped.prefix(3).unwrap();
+    assert_eq!(unwrapped.span_count(), 1);
+    assert_eq!(unwrapped.span(0).unwrap().len(), 3);
+    assert_eq!(unwrapped.prefix(4), Err(ArenaError::ExceedsAllocation));
     let shortened = plan.prefix(8).unwrap();
     assert_eq!(shortened.allocation_len(), 8);
     assert_eq!(shortened.span(0).unwrap().len(), 8);
@@ -582,7 +596,7 @@ fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
         (
             {
                 let mut wire = header(4);
-                wire[4] = 1;
+                wire[4] = WIRE_V2_VERSION - 1;
                 base(DESCRIPTOR_SCHEMA_VERSION, wire, expected, 4)
             },
             expected,
@@ -663,6 +677,37 @@ fn frame_descriptor_rejects_span_count_and_allocation_extremes() {
     assert_eq!(
         valid_descriptor().validate(identity, 0),
         Err(DescriptorError::InvalidAllocation)
+    );
+    // An allocation overrun takes precedence over a conflicting wire header.
+    let overrun_and_mismatch = FrameDescriptor::from_untrusted(
+        DESCRIPTOR_SCHEMA_VERSION,
+        header(7),
+        identity,
+        8,
+        0,
+        arena as u64 + 1,
+        1,
+        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+    );
+    assert_eq!(
+        overrun_and_mismatch.validate(identity, arena),
+        Err(DescriptorError::InvalidAllocation)
+    );
+    let mut stale_version = header(8);
+    stale_version[4] = WIRE_V2_VERSION - 1;
+    let wrong_version = FrameDescriptor::from_untrusted(
+        DESCRIPTOR_SCHEMA_VERSION,
+        stale_version,
+        identity,
+        8,
+        0,
+        8,
+        1,
+        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+    );
+    assert_eq!(
+        wrong_version.validate(identity, arena),
+        Err(DescriptorError::WireHeaderMismatch)
     );
 }
 #[test]

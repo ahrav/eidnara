@@ -15,8 +15,8 @@ pub enum ArenaError {
     /// Requested frame exceeds the wire limit.
     #[error("frame exceeds the protocol maximum")]
     FrameTooLarge,
-    /// Committed length exceeds the bytes the plan reserved.
-    #[error("committed length exceeds the reservation")]
+    /// `prefix` was asked for more bytes than its spans cover; a narrowed plan cannot widen.
+    #[error("committed length exceeds the bytes the plan covers")]
     ExceedsAllocation,
     /// Absolute cursors are malformed or wrapped.
     #[error("arena cursor is invalid")]
@@ -128,9 +128,16 @@ impl SpanPlan {
 
     /// Same allocation, spans shortened to `exact_len` committed bytes. The allocation length
     /// is kept so reclamation still frees the full reserved range.
+    ///
+    /// `exact_len` is bounded by the bytes the current spans cover, not by `allocation_len`.
+    /// Growing past the covered spans writes at arena offset zero, outside the reservation.
     pub fn prefix(self, exact_len: usize) -> Result<Self, ArenaError> {
         let exact_len = u64::try_from(exact_len).map_err(|_| ArenaError::ArithmeticOverflow)?;
-        if exact_len > self.allocation_len {
+        let committed = self.spans[0]
+            .len
+            .checked_add(self.spans[1].len)
+            .ok_or(ArenaError::ArithmeticOverflow)?;
+        if exact_len > committed {
             return Err(ArenaError::ExceedsAllocation);
         }
         let first_len = exact_len.min(self.spans[0].len);

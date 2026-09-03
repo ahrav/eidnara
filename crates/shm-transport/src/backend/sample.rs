@@ -11,6 +11,7 @@ use std::ops::Range;
 use crate::arena::MAX_FRAME_BYTES;
 use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorError, Incarnation, ReleaseIdentity, WIRE_V2_HEADER_BYTES,
+    check_wire_header,
 };
 
 /// Bytes ahead of every sample body: schema (2), wire header (21), incarnation (16),
@@ -99,15 +100,7 @@ impl SamplePrefix {
         if body_end > allocation_len {
             return Err(DescriptorError::InvalidAllocation);
         }
-        let declared = u32::from_le_bytes([
-            self.wire_header[0],
-            self.wire_header[1],
-            self.wire_header[2],
-            self.wire_header[3],
-        ]);
-        if u64::from(declared) != self.body_len || self.wire_header[4] != 2 {
-            return Err(DescriptorError::WireHeaderMismatch);
-        }
+        check_wire_header(&self.wire_header, self.body_len)?;
         Ok(ValidatedSample {
             identity: self.identity,
             body_len,
