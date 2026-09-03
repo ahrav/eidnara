@@ -840,9 +840,18 @@ describe("check anchors and cfg(test) stripping", () => {
                     "fn skipped_on_one_line() {}",
                     "#[cfg(unix)] #[test]",
                     "fn unix_only_on_one_line() {}",
+                    "/*",
+                    "#[test]",
+                    "fn commented_out() {}",
+                    "*/",
+                    'const S: &str = "',
+                    "#[test]",
+                    'fn in_string() {}";',
                     "",
                 ].join("\n"),
             );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#commented_out")).toBe("names commented_out, which crates/x/src/lib.rs does not declare");
+            expect(pointerProblem(root, "crates/x/src/lib.rs#in_string")).toBe("names in_string, which crates/x/src/lib.rs does not declare");
             expect(pointerProblem(root, "crates/x/src/lib.rs#compiled_out_on_one_line")).toBe(
                 "names compiled_out_on_one_line, which crates/x/src/lib.rs declares as a test that is compiled out by #[cfg(any())]",
             );
@@ -870,16 +879,26 @@ describe("check anchors and cfg(test) stripping", () => {
             'test("real", () => {});',
             "it('single', () => {});",
             "describe.only(`backtick`, () => {});",
-            'test.skip("skipped", () => {});',
+            'test.skip("skipped", () => { test("inside-skip", () => {}); });',
+            'test.todo("todo");',
+            'describe.skip("skipped-suite", () => {',
+            '    test("nested-in-skipped-suite", () => {});',
+            '    it("also-nested", () => {});',
+            '});',
+            'describe("live-suite", () => { it("nested-live", () => {}); });',
         ].join("\n");
         const declared = typescriptDeclaredChecks(text);
-        expect([...declared].sort()).toEqual(["backtick", "real", "single", "skipped"]);
+        expect([...declared].sort()).toEqual(["backtick", "live-suite", "nested-live", "real", "single"]);
         const root = mkdtempSync(join(tmpdir(), "eidnara-anchor-"));
         try {
             mkdirSync(join(root, "packages/p/src"), { recursive: true });
             writeFileSync(join(root, "packages/p/src/a.test.ts"), text);
             expect(pointerProblem(root, "packages/p/src/a.test.ts#in-comment")).toBe("names in-comment, which packages/p/src/a.test.ts does not declare");
             expect(pointerProblem(root, "packages/p/src/a.test.ts#in-string")).toBe("names in-string, which packages/p/src/a.test.ts does not declare");
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#skipped")).toBe("names skipped, which packages/p/src/a.test.ts does not declare");
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#nested-in-skipped-suite")).toBe(
+                "names nested-in-skipped-suite, which packages/p/src/a.test.ts does not declare",
+            );
             expect(pointerProblem(root, "packages/p/src/a.test.ts#real")).toBeUndefined();
         } finally {
             rmSync(root, { recursive: true, force: true });
@@ -1017,6 +1036,7 @@ describe("evidence: git-backed receipts", () => {
         (impact.provenance as Json[])[0] = { repo: "source", source_commit: pin, catalog_commit: pin };
         impact.destination_commit = destinationCommit;
         for (const record of records(impact)) {
+            if (typeof record.provenance === "string") record.provenance = `source@${pin}`;
             if (record.classification !== "core") continue;
             record.code_hash = fileSetDigest((record.files as string[]).map((file): [string, Buffer] => [file, readFileSync(join(destination, file))]));
             const checkFile = typeof record.check_pointer === "string" ? record.check_pointer.split("#")[0]! : undefined;
@@ -1310,6 +1330,30 @@ describe("evidence: git-backed receipts", () => {
             expect(errors).toContain(`$.scope[0],$.scope[1] source has blob ${leaseBlob} at 2 paths but the receipt disposes of it 1 time(s)`);
         } finally {
             gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
+    });
+
+    test("property-impact provenance must name the receipt's pinned source at its pinned commit", () => {
+        const value = receipt();
+        const impact = impactFor(sourceCommit);
+        const impactPath = join(destination, "migration/waves/U2/property-impact-drift.json");
+        write(impactPath, JSON.stringify(impact));
+        try {
+            value.property_impact = "migration/waves/U2/property-impact-drift.json";
+            expect(verify("receipt", value, ctx)).toEqual([]);
+            const stale = "d".repeat(40);
+            (impact.provenance as Json[])[0] = { repo: "source", source_commit: stale, catalog_commit: stale };
+            writeFileSync(impactPath, JSON.stringify(impact));
+            expect(verify("receipt", value, ctx)).toContain(`$.property_impact.provenance[0].source_commit ${stale} is not the pinned source commit ${sourceCommit}`);
+            (impact.provenance as Json[])[0] = { repo: "elsewhere", source_commit: sourceCommit, catalog_commit: sourceCommit };
+            writeFileSync(impactPath, JSON.stringify(impact));
+            expect(verify("receipt", value, ctx)).toContain("$.property_impact.provenance[0].repo elsewhere is not a pinned source of this receipt");
+            (impact.provenance as Json[])[0] = { repo: "source", source_commit: sourceCommit, catalog_commit: sourceCommit };
+            records(impact)[1]!.provenance = `source@${stale}`;
+            writeFileSync(impactPath, JSON.stringify(impact));
+            expect(verify("receipt", value, ctx)).toContain(`$.property_impact.records[1].provenance source@${stale} is not a pinned source of this receipt at its pinned commit`);
+        } finally {
+            rmSync(impactPath, { force: true });
         }
     });
 

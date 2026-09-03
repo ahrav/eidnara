@@ -121,8 +121,11 @@ fn non_regular_file(path: &std::path::Path) -> std::io::Error {
 /// lease for one key. On Unix the directory must be owned by the running user with no group
 /// or other write bit, and each ancestor must be owned by the running user or root and be
 /// either not writable by group or other or sticky, since a sticky directory lets only an
-/// entry's owner rename it. Windows has no equivalent mode semantics, and the check is a
-/// no-op there.
+/// entry's owner rename it. Windows has no equivalent mode semantics; there every component
+/// of the path must be a plain directory rather than a reparse point, since a symbolic link
+/// or junction on the way is an entry its owner can retarget while a holder's file handle
+/// pins only the final file. Directory ACLs are not evaluated. On other targets the check
+/// is a no-op.
 fn require_private_directory(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -130,11 +133,65 @@ fn require_private_directory(dir: &std::path::Path) -> std::io::Result<()> {
         let euid = unsafe { libc::geteuid() };
         require_private_directory_for(dir, euid)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        require_no_reparse_point_components(dir)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = dir;
         Ok(())
     }
+}
+
+/// Refuses a lease directory whose path passes through a reparse point. Each component of
+/// the absolute path is read without following it; a component that is missing ends the
+/// walk, since the acquisition that follows creates or reports it.
+#[cfg(windows)]
+fn require_no_reparse_point_components(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dir)
+    };
+    let mut prefix = std::path::PathBuf::new();
+    for component in dir.components() {
+        prefix.push(component);
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
+        let meta = match std::fs::symlink_metadata(&prefix) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "lease directory component {} is a reparse point; its owner could point \
+                     it at another directory",
+                    prefix.display()
+                ),
+            ));
+        }
+        if !meta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "lease directory component {} is not a directory",
+                    prefix.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `require_private_directory` for an explicit running user, so the ownership rules can be

@@ -791,11 +791,23 @@ mod sqlite_backend {
         builder.create(&parent).map_err(StoreError::Io)?;
 
         refuse_unfit_store_files(Path::new(&path))?;
+        let db_file_name = Path::new(&path)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        let leases = FileLeaseStore::new(&parent).map_err(StoreError::Io)?;
+        let key = lease_key(descriptor, &db_file_name)?;
         // An existing file is inspected on a read-only connection before anything can
         // change it. A read-write open would let SQLite recover or checkpoint a foreign
         // WAL and rewrite the file on close, and a fence row in a foreign file would
-        // otherwise raise the lease floor before the file was ever classified.
+        // otherwise raise the lease floor before the file was ever classified. The
+        // inspection runs under a shared lease: a live store holds the exclusive lease, so
+        // its owner is reported as `Held` rather than read while it checkpoints, and no
+        // cooperating writer can start while the inspection copy is taken. The shared
+        // lease leaves the persisted epoch alone.
+        let inspection_guard = leases.acquire_shared(&key).map_err(StoreError::Lease)?;
         let (epoch_floor, inspected) = expected.inspect_existing(Path::new(&path))?;
+        drop(inspection_guard);
         // The lease will issue at least `epoch_floor + 1`, and that value must be storable
         // in the fence row; refusing here keeps an unrepresentable successor out of the
         // lease sidecar, which would otherwise stay poisoned after the row was repaired.
@@ -804,13 +816,8 @@ mod sqlite_backend {
                 db_epoch: epoch_floor,
             });
         }
-        let db_file_name = Path::new(&path)
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
-        let lease = FileLeaseStore::new(&parent)
-            .map_err(StoreError::Io)?
-            .acquire_above(&lease_key(descriptor, &db_file_name)?, epoch_floor)
+        let lease = leases
+            .acquire_above(&key, epoch_floor)
             .map_err(StoreError::Lease)?;
         let epoch = lease.epoch();
 
@@ -2073,6 +2080,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A store another process holds is reported as `Lease(Held)` before its file is read:
+    /// the inspection takes a shared lease first, which the live owner's exclusive lease
+    /// refuses, so a file the owner is checkpointing is never copied half-written and
+    /// misreported as foreign or corrupt.
+    #[test]
+    fn a_live_holder_is_reported_before_the_file_is_inspected() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        std::fs::create_dir_all(&root).expect("root");
+        // Bytes that are not a SQLite database stand in for a half-checkpointed copy.
+        std::fs::write(path, b"not a database while the owner writes it").expect("junk");
+        let leases = lease::FileLeaseStore::new(&root).expect("lease store");
+        let key = lease_key(&d, "store.db").expect("key");
+        let owner = leases
+            .acquire(&key)
+            .expect("the live owner's exclusive lease");
+        match open_sqlite(&d, KV_BASELINE).map(|_| ()) {
+            Err(StoreError::Lease(lease::LeaseError::Held { .. })) => {}
+            other => panic!("a held store must be reported as held, got {other:?}"),
+        }
+        drop(owner);
+        match open_sqlite(&d, KV_BASELINE).map(|_| ()) {
+            Err(StoreError::Baseline(_) | StoreError::Backend(_)) => {}
+            other => panic!("without a holder the file itself is judged, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A fence at `i64::MAX` is refused before the lease is touched, so repairing the row is
     /// enough to reopen; the lease sidecar never holds an epoch SQLite cannot store.
     #[test]
@@ -2441,13 +2478,24 @@ mod tests {
             },
             ..real.clone()
         };
+        // While the real path is held, the alias resolves to the held lease and is refused
+        // before its file is read; once released, the alias is refused at the inspection
+        // open, which does not follow a symlinked component.
+        let via_dir_result = open_sqlite(&via_dir, "").map(|_| ());
         assert!(
             matches!(
-                open_sqlite(&via_dir, "").map(|_| ()),
-                Err(StoreError::Backend(_))
+                via_dir_result,
+                Err(StoreError::Lease(lease::LeaseError::Held { .. }))
             ),
-            "a directory-symlink alias must be refused"
+            "a directory-symlink alias of a held store must be refused as held, got {via_dir_result:?}"
         );
+        drop(held);
+        let via_dir_result = open_sqlite(&via_dir, "").map(|_| ());
+        assert!(
+            matches!(via_dir_result, Err(StoreError::Backend(_))),
+            "a directory-symlink alias must be refused, got {via_dir_result:?}"
+        );
+        let held = open_sqlite(&real, "").expect("hold the real path again");
 
         let file_alias_dir = root.join("file-alias");
         std::fs::create_dir_all(&file_alias_dir).expect("alias dir");

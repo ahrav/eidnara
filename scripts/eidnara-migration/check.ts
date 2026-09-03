@@ -1252,9 +1252,10 @@ export function pointerProblem(root: string, pointer: string): string | undefine
     if (filePart.endsWith(".rs")) {
         // The anchor must be a test: a `fn` whose attribute block carries `#[test]` or a
         // `#[...test]` attribute such as `#[tokio::test]`. A production helper with the same
-        // name is a function, not an executable check.
+        // name is a function, not an executable check. Comments and string literals are
+        // blanked first, so a declaration or attribute spelled inside one is text.
         const declaration = new RegExp(`^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${anchor}\\b`, "m");
-        const lines = text.split("\n");
+        const lines = rustWithoutCommentsAndStrings(text).split("\n");
         let found = false;
         let disabled: string | undefined;
         for (let index = 0; index < lines.length; index += 1) {
@@ -1267,7 +1268,7 @@ export function pointerProblem(root: string, pointer: string): string | undefine
             let why: string | undefined;
             for (let back = index - 1; back >= 0; back -= 1) {
                 const line = (lines[back] ?? "").trim();
-                if (!(line.startsWith("#[") || line.startsWith("///") || line.startsWith("//") || line === "")) break;
+                if (!(line.startsWith("#[") || line === "")) break;
                 for (const attribute of rustAttributesOn(line)) {
                     if (/^(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b/.test(attribute)) isTest = true;
                     if (/^ignore\b/.test(attribute)) why = "is marked #[ignore]";
@@ -1285,6 +1286,27 @@ export function pointerProblem(root: string, pointer: string): string | undefine
     }
     const declared = filePart.endsWith(".ts") || filePart.endsWith(".tsx") ? typescriptDeclaredChecks(text).has(anchor) : false;
     return declared ? undefined : `names ${anchor}, which ${filePart} does not declare`;
+}
+
+/**
+ * `text` with every comment and string literal replaced by spaces of the same length, so
+ * line numbers and the positions of the remaining tokens are unchanged while nothing inside
+ * a comment or literal can be read as a declaration or an attribute.
+ */
+export function rustWithoutCommentsAndStrings(text: string): string {
+    let out = "";
+    let index = 0;
+    while (index < text.length) {
+        const end = rustLexemeEnd(text, index);
+        if (end === null) {
+            out += text[index];
+            index += 1;
+            continue;
+        }
+        out += text.slice(index, end).replace(/[^\n]/g, " ");
+        index = end;
+    }
+    return out;
 }
 
 /**
@@ -1357,7 +1379,7 @@ function splitCfgArguments(text: string): string[] {
  */
 export function typescriptDeclaredChecks(text: string): Set<string> {
     const out = new Set<string>();
-    const call = /^(?:test|it|describe)(?:\.(?:only|skip|todo|concurrent|sequential))?\s*\(\s*/;
+    const call = /^(?:test|it|describe)(?:\.(?<modifier>only|skip|todo|concurrent|sequential))?\s*\(\s*/;
     let index = 0;
     while (index < text.length) {
         const skipped = typescriptLexemeEnd(text, index);
@@ -1369,6 +1391,13 @@ export function typescriptDeclaredChecks(text: string): Set<string> {
         if (/[A-Za-z_$]/.test(char) && !/[A-Za-z0-9_$.]/.test(text[index - 1] ?? "")) {
             const match = call.exec(text.slice(index, index + 64));
             if (match !== null) {
+                const modifier = match.groups?.modifier;
+                if (modifier === "skip" || modifier === "todo") {
+                    // The runner never executes a skipped or todo check, nor anything nested
+                    // in a skipped `describe`, so the whole call is passed over.
+                    index = typescriptCallEnd(text, index + match[0].length - 1);
+                    continue;
+                }
                 const at = index + match[0].length;
                 const quote = text[at];
                 if (quote === '"' || quote === "'" || quote === "`") {
@@ -1385,6 +1414,27 @@ export function typescriptDeclaredChecks(text: string): Set<string> {
         index += 1;
     }
     return out;
+}
+
+/** Index just past the `)` that closes the call whose `(` is at `open`, skipping lexemes. */
+function typescriptCallEnd(text: string, open: number): number {
+    let depth = 0;
+    let index = open;
+    while (index < text.length) {
+        const skipped = typescriptLexemeEnd(text, index);
+        if (skipped !== null) {
+            index = skipped;
+            continue;
+        }
+        const char = text[index];
+        if (char === "(") depth += 1;
+        else if (char === ")") {
+            depth -= 1;
+            if (depth === 0) return index + 1;
+        }
+        index += 1;
+    }
+    return text.length;
 }
 
 /**
@@ -1530,6 +1580,29 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             const impactErrors = verifyKind("property-impact", impact, ctx);
             impactErrors.forEach((error) => errors.push(`$.property_impact: ${error}`));
             if (impact.wave !== wave) errors.push(`$.property_impact names wave ${String(impact.wave)}, receipt is ${wave}`);
+            // The records judge the source tree, so every provenance entry and every
+            // carried-forward record must name a pinned source at its pinned commit; a
+            // decision about another revision decides nothing about this wave.
+            const pinnedCommit = (repo: string | undefined): string | undefined => shape.sources.find((candidate) => candidate.repo === repo)?.commit;
+            (Array.isArray(impact.provenance) ? impact.provenance : []).forEach((entry, index) => {
+                if (!isObject(entry)) return;
+                const repo = typeof entry.repo === "string" ? entry.repo : undefined;
+                const pinned = pinnedCommit(repo);
+                if (pinned === undefined) {
+                    errors.push(`$.property_impact.provenance[${index}].repo ${String(repo)} is not a pinned source of this receipt`);
+                } else if (entry.source_commit !== pinned) {
+                    errors.push(`$.property_impact.provenance[${index}].source_commit ${String(entry.source_commit)} is not the pinned ${repo} commit ${pinned}`);
+                }
+            });
+            (Array.isArray(impact.records) ? impact.records : []).forEach((record, index) => {
+                if (!isObject(record) || typeof record.provenance !== "string") return;
+                const at = record.provenance.indexOf("@");
+                const repo = at === -1 ? record.provenance : record.provenance.slice(0, at);
+                const pinned = pinnedCommit(repo);
+                if (pinned === undefined || record.provenance !== `${repo}@${pinned}`) {
+                    errors.push(`$.property_impact.records[${index}].provenance ${record.provenance} is not a pinned source of this receipt at its pinned commit`);
+                }
+            });
             // The impact's own touched list is written by the same hand as its records, so
             // the receipt's destinations decide which implementation files it must cover.
             const declared = new Set(Array.isArray(impact.touched_files) ? impact.touched_files.filter((entry): entry is string => typeof entry === "string") : []);
