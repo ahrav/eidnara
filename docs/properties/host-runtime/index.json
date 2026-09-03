@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "72d6e435364355bfbefec26c163576ff97e67245724a34e4060abd37d5fee0dd",
+  "source_sha256": "bf9df26b37d8ca07ea0aa9057a907b209927a8260bd81c6658facb37684b5411",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -3780,13 +3780,13 @@
         "semantics": "always",
         "condition": "`manifest_digest(fixture) == committed literal`; the digest changes when any field changes and is unchanged under key reordering."
       },
-      "fault_timing": "A digest that depended on serialization order would let two equal manifests disagree; a digest over a different canonical form would break the TypeScript twin that computes it independently.",
+      "fault_timing": "A digest that depended on serialization order would let two equal manifests disagree; a digest over a different canonical form would break the TypeScript twin, which lands with the packages in U7 and reads this fixture.",
       "required_faults": "The committed fixture and an oracle outside the crate.",
       "confidence": {
         "level": "high",
         "evidence": "[evidence](evidence/harness-closure-manifest-digest-is-canonical.md). The fixture's `schema` field is a renamed identity, so the digest was regenerated once; a Python `json.dumps(sort_keys=True, indent=2)` digest reproduced the predecessor value from the predecessor schema string and the new value from the new one."
       },
-      "existing_check": "`rust_and_typescript_share_the_canonical_manifest_digest` (`crates/host-runtime/tests/harness_closure.rs`) and the strict-decode tests in the same file; audited at U3.",
+      "existing_check": "`canonical_manifest_digest_is_pinned` (`crates/host-runtime/tests/harness_closure.rs`) and the strict-decode tests in the same file; audited at U3.",
       "impact": "A closure verified by one side is rejected by the other, or a tampered closure passes.",
       "open_questions": [],
       "extra": {}
@@ -3804,7 +3804,7 @@
       "guarantee": "The credential fingerprint is `HMAC(derive(connection_key, \"eidnara-broca-credential-v1\"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.",
       "check": {
         "semantics": "always",
-        "condition": "`credential_fingerprint(key, harness, provider) == committed literal` for the documented row; individual and aggregate size caps reject before fingerprinting."
+        "condition": "`credential_fingerprint(key, harness, provider) == committed literal` for the documented row; the per-value size cap rejects before fingerprinting."
       },
       "fault_timing": "A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.",
       "required_faults": "The documented inputs and an oracle outside the crate.",
@@ -3814,7 +3814,9 @@
       },
       "existing_check": "`credential_fingerprint_matches_the_committed_vector` (`crates/host-runtime/src/broca/subprocess.rs`, added at U3) and `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`, a `harness = false` binary whose checks are plain functions the binary's own runner names); audited at U3.",
       "impact": "A credential row passes a fingerprint check it should fail, or fails one it should pass.",
-      "open_questions": [],
+      "open_questions": [
+        "`CREDENTIAL_ROW_CAP_BYTES` is defined in `subprocess.rs` but nothing enforces it; only the 16 KiB per-value cap is checked."
+      ],
       "extra": {}
     },
     {
@@ -3825,12 +3827,12 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "the committed tiny fixture's fingerprint is recomputed from its manifest; single-bit artifact changes disable the lane."
+        "note": "the committed tiny fixture's fingerprint is recomputed from its manifest; single-bit artifact changes are caught by each artifact's own digest at load."
       },
       "guarantee": "The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.",
       "check": {
         "semantics": "always",
-        "condition": "`canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; any one-bit change to an artifact disables the lane."
+        "condition": "`canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load."
       },
       "fault_timing": "A fingerprint that omitted an artifact would let a swapped artifact change embedding bytes under an unchanged identity.",
       "required_faults": "The committed fixture and its generator's independent fingerprint function.",
@@ -3957,7 +3959,7 @@
         "state": "yes",
         "note": "each valid operation decodes its exact schema, every enumerated malformed shape is rejected, and the 512 KiB boundary is exact."
       },
-      "guarantee": "The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, oversize bodies, and unsupported harness names are `schema_violation` terminals, and malformed requests create no run state.",
+      "guarantee": "The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.",
       "check": {
         "semantics": "always",
         "condition": "every malformed shape is rejected with `schema_violation`; `always` - a 512 KiB body is admitted and one byte more is rejected; `always` - a rejected request leaves no run."
@@ -4011,7 +4013,7 @@
         "state": "partial",
         "note": "missing, corrupt, extra, wrong-identity, and wrong-pooling artifacts disable the lane while the context module stays routable; a fault during inference itself is covered only by the deterministic engine."
       },
-      "guarantee": "An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and `models.list` reports the exact disabled state.",
+      "guarantee": "An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.",
       "check": {
         "semantics": "always",
         "condition": "`activate` returns `Ok` with the lane disabled for every artifact fault; `reachable` - a context request completes while Synapse is disabled."
@@ -4037,7 +4039,7 @@
         "state": "partial",
         "note": "constraint violations, unknown fields, excessive depth, oversize bodies, and replay reuse are covered with a deterministic engine that counts calls."
       },
-      "guarantee": "A request that violates any constraint, carries an unknown field, exceeds the depth or size bound, or names a foreign job is rejected as a schema violation before the engine runs, and equal replays reuse one job and one inference.",
+      "guarantee": "A request that violates a constraint, carries an unknown field, exceeds the depth or size bound, names a different model, fingerprint, or epoch, or names a foreign job is rejected before the engine runs (as `schema_violation`, `substitution_rejected`, or `module_restarted` by class), and equal replays reuse one job and one inference.",
       "check": {
         "semantics": "always",
         "condition": "`engine.calls` is unchanged by a rejected request; `always` - equal replays produce one inference."
@@ -4060,8 +4062,8 @@
       "reachability_note": "every inference loads ONNX Runtime through the sealed memfd path.",
       "status": "active",
       "exercised": {
-        "state": "not-yet",
-        "note": "no test asserts the memfd is sealed or that a swapped library after certification is refused; the load path is exercised only where ONNX Runtime is present."
+        "state": "partial",
+        "note": "`source_replacement_cannot_change_verified_loader_bytes` asserts the seals, rejected writes, replacement resistance, and the digest on the memfd path; the full load into ONNX Runtime is exercised only where the runtime library is present."
       },
       "guarantee": "The ONNX Runtime library is loaded from a sealed memfd named `host-onnxruntime` whose bytes were certified with the bundle, so a library swapped on disk after certification cannot reach inference.",
       "check": {
@@ -4071,10 +4073,10 @@
       "fault_timing": "A library swapped between certification and load changes every embedding.",
       "required_faults": "A modified library on disk after certification; a memfd without seals.",
       "confidence": {
-        "level": "low",
-        "evidence": "`crates/host-runtime/src/synapse/inference.rs` creates the memfd and seals it; no test in this tree observes the seals."
+        "level": "medium",
+        "evidence": "`source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`) observes the seals and the digest."
       },
-      "existing_check": "None in this tree; the roundtrip tests cover only that a certified fixture serves vectors.",
+      "existing_check": "`source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`); unaudited.",
       "impact": "Embeddings from an uncertified runtime under a certified identity.",
       "open_questions": [],
       "extra": {}

@@ -375,31 +375,28 @@ async fn route_loss_drops_queued_query_without_engine_work_and_releases_slot() {
 }
 
 /// Resident accounting rejects the bound-plus-one request with `queue_full`.
-#[tokio::test(start_paused = true)]
-#[ignore = "opens 33 concurrent ring clients, but MAX_RING_RESIDENT_BYTES (1 GiB of arena) \
-            admits at most 8 rings per process, so the ninth setup socket closes before its \
-            descriptor grant and the test never reaches its assertions"]
-async fn boundary_waiters_with_maximal_texts_are_all_admitted() {
+// `WAITER_BOUNDARY` is the largest feasible value under the startup scratch formula.
+// Formula or pool changes require recomputing it.
+// Each waiter slot reserves 2,097,408 bytes: twice `max_text_bytes` plus 256.
+// Queued text reserves `max_queued_request_bytes` (8,388,608 bytes).
+// Queued metadata reserves 3,940,352 bytes for 64 jobs.
+// Worst-case parsing reserves 100,708,352 bytes.
+// The boundary is 32 because at most 33 waiter charges fit in the reservable pool.
+const WAITER_BOUNDARY: usize = 32;
+
+#[test]
+fn waiter_boundary_is_the_last_feasible_startup_configuration() {
     let engine = DeterministicEngine::new();
-    let gate = engine.block_calls();
-    // `BOUNDARY` is the largest feasible value under the startup scratch formula.
-    // Formula or pool changes require recomputing `BOUNDARY`.
-    // Each waiter slot reserves 2,097,408 bytes: twice `max_text_bytes` plus 256.
-    // Queued text reserves `max_queued_request_bytes` (8,388,608 bytes).
-    // Queued metadata reserves 3,940,352 bytes for 64 jobs.
-    // Worst-case parsing reserves 100,708,352 bytes.
-    // `BOUNDARY` is 32 because at most 33 waiter charges fit in the reservable pool.
-    const BOUNDARY: usize = 32;
     host_runtime::synapse::SynapseComponent::ready_with_engine(
         test_lane(),
         engine.clone(),
-        waiter_limits(BOUNDARY),
+        waiter_limits(WAITER_BOUNDARY),
     )
     .expect("the boundary configuration is feasible");
     let error = match host_runtime::synapse::SynapseComponent::ready_with_engine(
         test_lane(),
-        engine.clone(),
-        waiter_limits(BOUNDARY + 1),
+        engine,
+        waiter_limits(WAITER_BOUNDARY + 1),
     ) {
         Ok(_) => panic!("one waiter past the boundary must fail validation"),
         Err(error) => error,
@@ -409,6 +406,16 @@ async fn boundary_waiters_with_maximal_texts_are_all_admitted() {
             .to_string()
             .contains("query admission capacity requires")
     );
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "opens 33 concurrent ring clients, but MAX_RING_RESIDENT_BYTES (1 GiB of arena) \
+            admits at most 8 rings per process, so the ninth setup socket closes before its \
+            descriptor grant and the test never reaches its assertions"]
+async fn boundary_waiters_with_maximal_texts_are_all_admitted() {
+    const BOUNDARY: usize = WAITER_BOUNDARY;
+    let engine = DeterministicEngine::new();
+    let gate = engine.block_calls();
 
     let host = SynapseHost::start(ready_component(engine.clone(), waiter_limits(BOUNDARY))).await;
     let (clock_running, clock_task) = keep_paused_clock_manual();

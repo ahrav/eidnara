@@ -6,5 +6,5 @@
 - **Failure scenario:** an artifact omitted from the pre-image.
 - **Timing window:** none.
 - **Instrumentation:** none.
-- **Audit verdict (U3):** pass. The one-bit tests show every listed artifact is covered; the generator is an independent implementation of the pre-image.
+- **Audit verdict (U3):** pass. The one-bit tests show each artifact's own digest is checked at load, before the fingerprint comparison; that the pre-image lists every artifact is established by reading `canonical_fingerprint` against its Python mirror, not by a test.
 - **Open-question log:** none.

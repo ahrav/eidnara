@@ -1,6 +1,6 @@
 //! This binary drives the perf-harness host over the mandatory ring.
-//! The benchmark arms are the ones `benches/support/evidence.rs` names; the shared
-//! measurement contract lives in `tests/support/perf_measurement.rs`.
+//! Its arms are the `--serial`, `--pipeline`, and open-loop `--rate` modes selected on the
+//! command line; the shared measurement contract lives in `tests/support/perf_measurement.rs`.
 //!
 //! The sender captures issue time after admission, immediately before frame construction.
 //! Closed-loop arms report issue-to-validated-terminal latency.

@@ -410,7 +410,6 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
         ));
     }
 
-    const UNSEALED_NAME: &str = "shm-unsealed-test";
     let name = c"shm-unsealed-test";
     // SAFETY: static name and flags are valid for memfd_create.
     let raw = unsafe {
@@ -428,14 +427,13 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
         0
     );
     assert_eq!(unsafe { libc::fchmod(unsealed.as_raw_fd(), 0o600) }, 0);
-    assert_eq!(mapped_region_count(UNSEALED_NAME), 0);
     let [_, data_ready, capacity_ready] = ring.attachment().unwrap().into_parts().0;
     assert!(matches!(
         Ring::attach([unsealed, data_ready, capacity_ready], ring.grant()),
         Err(RingError::ObjectValidationFailed)
     ));
     assert_eq!(
-        mapped_region_count(UNSEALED_NAME),
+        mapped_region_count(name.to_str().expect("ascii memfd name")),
         0,
         "unsealed object was mapped"
     );

@@ -64,9 +64,10 @@ impl Lifecycle {
         self.state
     }
 
-    /// Moves to `next` if that is the successor of the current state. A terminal state
-    /// returns `LifecycleError::Terminal`; any other skipped or reversed step returns
-    /// `LifecycleError::InvalidTransition`.
+    /// Moves to `next` if the table below admits it from the current state. Every state
+    /// has one successor except `RevokingJsOnEnv`, which may also enter `Quarantined`; no
+    /// other state can be quarantined. A terminal state returns `LifecycleError::Terminal`;
+    /// any other skipped or reversed step returns `LifecycleError::InvalidTransition`.
     pub fn advance(&mut self, next: CloseState) -> Result<(), LifecycleError> {
         let valid = matches!(
             (self.state, next),
@@ -125,7 +126,8 @@ impl fmt::Debug for Lifecycle {
 /// Why a lifecycle transition was refused.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleError {
-    /// The requested state is not the successor of the current one.
+    /// The requested state is not admitted from the current one, or `mark_prepared` was
+    /// called twice or outside `Open`.
     InvalidTransition,
     /// The current state is `Joined` or `Quarantined`.
     Terminal,

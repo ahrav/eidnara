@@ -33,7 +33,11 @@ async function main(): Promise<void> {
         const bytes = Buffer.from(
             Object.keys(obj)
                 .sort((a, b) => Number(a) - Number(b))
-                .map((k) => obj[k] ?? 0),
+                .map((k) => {
+                    const byte = obj[k];
+                    if (byte === undefined) throw new Error(`missing byte ${k}`);
+                    return byte;
+                }),
         );
         rows.push([bytes.toString("base64"), rank]);
     }
@@ -46,7 +50,7 @@ async function main(): Promise<void> {
     const singleByteCovered = new Set<number>();
     for (const [b64] of rows) {
         const b = Buffer.from(b64, "base64");
-        if (b.length === 1) singleByteCovered.add(b[0] ?? 0);
+        if (b.length === 1) singleByteCovered.add(b.readUInt8(0));
     }
     if (singleByteCovered.size !== 256) {
         throw new Error(`missing base bytes: ${256 - singleByteCovered.size}`);

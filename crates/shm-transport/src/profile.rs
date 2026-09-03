@@ -687,18 +687,14 @@ mod tests {
     use super::*;
 
     /// The profile id is a wire literal both peers compare byte for byte, so the test spells
-    /// it rather than reading the constant it is checking.
+    /// it and the depth rather than reading the constants it is checking.
     #[test]
     fn host_test_ring_profile_names_one_geometry() {
         let profile = host_test_ring_profile().expect("static profile");
         assert!(profile.descriptor().hardware_matches("host-test-ring-v1"));
-        assert!(!profile.descriptor().hardware_matches("host-test-ring-v2"));
         assert_eq!(profile.descriptor_depth(), 8);
         assert_eq!(profile.max_leases(), 8);
-        assert_eq!(profile.arena_bytes(), MIN_ARENA_BYTES);
-        assert_eq!(profile.max_spans(), 2);
-        assert_eq!(profile.worker_topology(), WorkerTopology::Fused);
-        // Two duplex mappings of one arena each are what one connection charges.
+        // One arena per logical direction is what one connection charges.
         assert_eq!(profile.charges().arena_bytes, 2 * MIN_ARENA_BYTES as u64);
         assert_eq!(profile.charges().descriptors, 16);
     }

@@ -125,11 +125,8 @@ pub(crate) fn io_err(op: &'static str, path: &Path, source: rustix::io::Errno) -
     }
 }
 
-///
-/// The resolver ignores relative or empty `XDG_DATA_HOME` and `HOME` values to prevent cwd-dependent data roots.
-/// lifecycle root.
-///
-/// a level.
+/// Resolves the data root: an absolute override, else the default root the environment
+/// implies. A relative override is refused because the setup socket path derives from it.
 pub fn data_dir_path(data_dir_override: Option<&Path>) -> Result<PathBuf, InstanceError> {
     match data_dir_override {
         // The setup socket path uses this directory; `ConnectionInfo::validate` rejects relative `setup_socket` paths.
@@ -138,26 +135,31 @@ pub fn data_dir_path(data_dir_override: Option<&Path>) -> Result<PathBuf, Instan
             path: dir.to_path_buf(),
         }),
         Some(dir) => Ok(dir.to_path_buf()),
-        None => default_data_root(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME")),
+        None => default_data_root(DataRootEnv {
+            xdg_data_home: std::env::var_os("XDG_DATA_HOME"),
+            home: std::env::var_os("HOME"),
+        }),
     }
 }
 
-/// The data root implied by the `XDG_DATA_HOME` and `HOME` values: an absolute
-/// `XDG_DATA_HOME` wins, then `$HOME/.local/share` for an absolute `HOME`. A relative
-/// or empty value is ignored rather than joined to the working directory, so the two
-/// values are taken as arguments and the resolver never reads the process environment
-/// itself.
-fn default_data_root(
+/// The two environment values the default data root is derived from, named so a caller
+/// cannot swap them.
+struct DataRootEnv {
     xdg_data_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
-) -> Result<PathBuf, InstanceError> {
+}
+
+/// The data root implied by the environment: an absolute `XDG_DATA_HOME` wins, then
+/// `$HOME/.local/share` for an absolute `HOME`. A relative or empty value is ignored rather
+/// than joined to the working directory.
+fn default_data_root(env: DataRootEnv) -> Result<PathBuf, InstanceError> {
     fn absolute(value: std::ffi::OsString) -> Option<PathBuf> {
         let path = PathBuf::from(value);
         path.is_absolute().then_some(path)
     }
-    match xdg_data_home.and_then(absolute) {
+    match env.xdg_data_home.and_then(absolute) {
         Some(dir) => Ok(dir),
-        None => match home.and_then(absolute) {
+        None => match env.home.and_then(absolute) {
             Some(home) => Ok(home.join(".local").join("share")),
             None => Err(InstanceError::NoDataDir),
         },
@@ -864,9 +866,13 @@ mod tests {
     #[test]
     fn default_root_follows_xdg_then_home() {
         let os = |value: &str| Some(std::ffi::OsString::from(value));
-        let resolve = |xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>| {
-            default_data_root(xdg, home)
-                .map(|root| root.join(MANAGED_DIR_NAME).join(RUNTIME_DIR_NAME))
+        let resolve = |xdg_data_home: Option<std::ffi::OsString>,
+                       home: Option<std::ffi::OsString>| {
+            default_data_root(DataRootEnv {
+                xdg_data_home,
+                home,
+            })
+            .map(|root| root.join(MANAGED_DIR_NAME).join(RUNTIME_DIR_NAME))
         };
 
         assert_eq!(

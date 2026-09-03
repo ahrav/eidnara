@@ -426,7 +426,7 @@ fn strict_manifest_decode_rejects_unknown_fields() {
 }
 
 #[test]
-fn rust_and_typescript_share_the_canonical_manifest_digest() {
+fn canonical_manifest_digest_is_pinned() {
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
     let manifest: ClosureManifest =

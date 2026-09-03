@@ -9871,10 +9871,10 @@ Status: active
 Exercised: yes - the committed fixture's digest is asserted, and an independent canonical-JSON digest reproduced both the predecessor and the current value.
 Guarantee: The manifest digest is SHA-256 over the manifest serialized as key-sorted, two-space-indented JSON, so any manifest with the same fields hashes the same regardless of field order, and the committed `pi-valid.json` fixture digests to `5386c200...f911`.
 Check: `always` - `manifest_digest(fixture) == committed literal`; the digest changes when any field changes and is unchanged under key reordering.
-Fault/timing angle: A digest that depended on serialization order would let two equal manifests disagree; a digest over a different canonical form would break the TypeScript twin that computes it independently.
+Fault/timing angle: A digest that depended on serialization order would let two equal manifests disagree; a digest over a different canonical form would break the TypeScript twin, which lands with the packages in U7 and reads this fixture.
 Required faults and enabling state: The committed fixture and an oracle outside the crate.
 Confidence: high - [evidence](evidence/harness-closure-manifest-digest-is-canonical.md). The fixture's `schema` field is a renamed identity, so the digest was regenerated once; a Python `json.dumps(sort_keys=True, indent=2)` digest reproduced the predecessor value from the predecessor schema string and the new value from the new one.
-Existing check: `rust_and_typescript_share_the_canonical_manifest_digest` (`crates/host-runtime/tests/harness_closure.rs`) and the strict-decode tests in the same file; audited at U3.
+Existing check: `canonical_manifest_digest_is_pinned` (`crates/host-runtime/tests/harness_closure.rs`) and the strict-decode tests in the same file; audited at U3.
 Impact: A closure verified by one side is rejected by the other, or a tampered closure passes.
 Open questions: None.
 
@@ -9885,22 +9885,22 @@ Reachability: default-production - every provider credential row is fingerprinte
 Status: active
 Exercised: yes - the committed vector is asserted, and an independent HMAC oracle reproduced it.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-broca-credential-v1"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
-Check: `always` - `credential_fingerprint(key, harness, provider) == committed literal` for the documented row; individual and aggregate size caps reject before fingerprinting.
+Check: `always` - `credential_fingerprint(key, harness, provider) == committed literal` for the documented row; the per-value size cap rejects before fingerprinting.
 Fault/timing angle: A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.
 Required faults and enabling state: The documented inputs and an oracle outside the crate.
 Confidence: high - [evidence](evidence/credential-fingerprint-derives-from-the-product-domain.md). The domain separator is a renamed identity; the vector was regenerated once from a Python implementation of the documented derivation, which also reproduced the predecessor value from the predecessor domain.
 Existing check: `credential_fingerprint_matches_the_committed_vector` (`crates/host-runtime/src/broca/subprocess.rs`, added at U3) and `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`, a `harness = false` binary whose checks are plain functions the binary's own runner names); audited at U3.
 Impact: A credential row passes a fingerprint check it should fail, or fails one it should pass.
-Open questions: None.
+Open questions: `CREDENTIAL_ROW_CAP_BYTES` is defined in `subprocess.rs` but nothing enforces it; only the 16 KiB per-value cap is checked.
 
 ### synapse-bundle-fingerprint-covers-every-artifact
 
 Type: safety
 Reachability: default-production - every Synapse bundle load recomputes and compares the fingerprint.
 Status: active
-Exercised: yes - the committed tiny fixture's fingerprint is recomputed from its manifest; single-bit artifact changes disable the lane.
+Exercised: yes - the committed tiny fixture's fingerprint is recomputed from its manifest; single-bit artifact changes are caught by each artifact's own digest at load.
 Guarantee: The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.
-Check: `always` - `canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; any one-bit change to an artifact disables the lane.
+Check: `always` - `canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load.
 Fault/timing angle: A fingerprint that omitted an artifact would let a swapped artifact change embedding bytes under an unchanged identity.
 Required faults and enabling state: The committed fixture and its generator's independent fingerprint function.
 Confidence: high - [evidence](evidence/synapse-bundle-fingerprint-covers-every-artifact.md). The pre-image's first line is a renamed identity; the fixture manifest's fingerprint was regenerated once with the generator's Python `canonical_fingerprint`, which also reproduced the predecessor value from the predecessor line.
@@ -9974,7 +9974,7 @@ Type: safety
 Reachability: default-production - every Broca request is decoded through the closed schema.
 Status: active
 Exercised: yes - each valid operation decodes its exact schema, every enumerated malformed shape is rejected, and the 512 KiB boundary is exact.
-Guarantee: The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, oversize bodies, and unsupported harness names are `schema_violation` terminals, and malformed requests create no run state.
+Guarantee: The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.
 Check: `always` - every malformed shape is rejected with `schema_violation`; `always` - a 512 KiB body is admitted and one byte more is rejected; `always` - a rejected request leaves no run.
 Fault/timing angle: A permissive decoder lets a harness smuggle fields the host does not validate.
 Required faults and enabling state: Malformed and boundary-sized bodies.
@@ -10004,7 +10004,7 @@ Type: liveness
 Reachability: default-production - every artifact fault takes this path.
 Status: active
 Exercised: partial - missing, corrupt, extra, wrong-identity, and wrong-pooling artifacts disable the lane while the context module stays routable; a fault during inference itself is covered only by the deterministic engine.
-Guarantee: An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and `models.list` reports the exact disabled state.
+Guarantee: An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.
 Check: `always` - `activate` returns `Ok` with the lane disabled for every artifact fault; `reachable` - a context request completes while Synapse is disabled.
 Fault/timing angle: A host-fatal Synapse fault would take the product down for an optional lane.
 Required faults and enabling state: Each artifact fault class; an unconfigured component.
@@ -10019,7 +10019,7 @@ Type: safety
 Reachability: default-production - every Synapse request is decoded and bounded before it reaches the engine.
 Status: active
 Exercised: partial - constraint violations, unknown fields, excessive depth, oversize bodies, and replay reuse are covered with a deterministic engine that counts calls.
-Guarantee: A request that violates any constraint, carries an unknown field, exceeds the depth or size bound, or names a foreign job is rejected as a schema violation before the engine runs, and equal replays reuse one job and one inference.
+Guarantee: A request that violates a constraint, carries an unknown field, exceeds the depth or size bound, names a different model, fingerprint, or epoch, or names a foreign job is rejected before the engine runs (as `schema_violation`, `substitution_rejected`, or `module_restarted` by class), and equal replays reuse one job and one inference.
 Check: `always` - `engine.calls` is unchanged by a rejected request; `always` - equal replays produce one inference.
 Fault/timing angle: Validation after inference would spend model time on hostile input.
 Required faults and enabling state: Each violation class; replayed requests.
@@ -10033,12 +10033,12 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every inference loads ONNX Runtime through the sealed memfd path.
 Status: active
-Exercised: not yet - no test asserts the memfd is sealed or that a swapped library after certification is refused; the load path is exercised only where ONNX Runtime is present.
+Exercised: partial - `source_replacement_cannot_change_verified_loader_bytes` asserts the seals, rejected writes, replacement resistance, and the digest on the memfd path; the full load into ONNX Runtime is exercised only where the runtime library is present.
 Guarantee: The ONNX Runtime library is loaded from a sealed memfd named `host-onnxruntime` whose bytes were certified with the bundle, so a library swapped on disk after certification cannot reach inference.
 Check: `always` - the loaded image's digest equals the certified digest; `always` - the memfd carries the write and grow seals.
 Fault/timing angle: A library swapped between certification and load changes every embedding.
 Required faults and enabling state: A modified library on disk after certification; a memfd without seals.
-Confidence: low - `crates/host-runtime/src/synapse/inference.rs` creates the memfd and seals it; no test in this tree observes the seals.
-Existing check: None in this tree; the roundtrip tests cover only that a certified fixture serves vectors.
+Confidence: medium - `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`) observes the seals and the digest.
+Existing check: `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`); unaudited.
 Impact: Embeddings from an uncertified runtime under a certified identity.
 Open questions: None.

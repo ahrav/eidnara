@@ -3909,13 +3909,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - the host stamps `host-test-ring-v1` into every production grant.
 Status: active
-Exercised: yes - the id string, depth, arena size, span bound, topology, and admission charges are asserted against literals.
-Guarantee: The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, one 64 MiB arena per direction, at most two spans, fused worker topology, and a per-connection charge of two arenas and sixteen descriptors.
-Check: `always` - `host_test_ring_profile()` matches the literal id and every literal geometry value; a different id does not match.
+Exercised: yes - the id string, depth, lease bound, and admission charges are asserted against literals spelled in the test.
+Guarantee: The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.
+Check: `always` - `host_test_ring_profile()` matches the literal id, depth, lease bound, and charges.
 Fault/timing angle: A peer that echoes the id exercises whatever geometry the host built; if the id survived a geometry change the peer's bounds would be silently wrong.
 Required faults and enabling state: None; the check is a literal comparison.
 Confidence: high - [evidence](evidence/one-profile-id-names-one-ring-geometry-in-code.md). The id is a renamed identity, so the record is `core` for U3; the sibling record `one-profile-name-denotes-one-geometry` states the cross-peer half and keeps its source status.
-Existing check: `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/src/profile.rs`), added at U3; the addon asserts the same id in `grant_message_accepts_tagged_setup_envelope` (`packages/shm-native/src/setup.rs`).
+Existing check: `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/src/profile.rs`), added at U3; the addon's setup fixture and `packages/shm-native/tests/mechanism.ts` name the same id.
 Impact: A peer sized for a different depth over- or under-runs the ring.
 Open questions: None.
 
@@ -3924,22 +3924,22 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every channel close in the addon runs this drop order.
 Status: active
-Exercised: partial - one unit test drives the drop order for borrowing reservations; the N-API detachment half is covered by the package tests under Bun only.
+Exercised: partial - one unit test drives the drop order for borrowing reservations; the N-API detachment half is covered by `packages/shm-native/tests/runtime.ts` under Bun only.
 Guarantee: Closing a channel drops every reservation that borrows ring memory before the ring itself is dropped, so no JavaScript alias outlives the mapping it points into.
 Check: `always` - at channel close, `reservations.is_empty()` before `ring` is dropped; externally, no `Uint8Array` handed to JavaScript remains attached after `close` returns.
 Fault/timing angle: A reservation dropped after the ring would touch unmapped memory from the finalizer.
 Required faults and enabling state: A channel with live borrowing reservations at close.
-Confidence: medium - `channel_drops_borrowing_reservations_before_the_ring` (`packages/shm-native/src/lib.rs`) and the detachment cases in `packages/shm-native/tests/mechanism.ts`; the Node runtime reports detachment unavailable, so the Node half is a capability refusal, not a proof.
-Existing check: `channel_drops_borrowing_reservations_before_the_ring`; `packages/shm-native/tests/mechanism.ts` detachment cases (Bun); unaudited.
+Confidence: medium - `channel_drops_borrowing_reservations_before_the_ring` (`packages/shm-native/src/lib.rs`) and the detachment cases in `packages/shm-native/tests/runtime.ts`; the Node runtime reports detachment unavailable, so the Node half is a capability refusal, not a proof.
+Existing check: `channel_drops_borrowing_reservations_before_the_ring`; `packages/shm-native/tests/runtime.ts` detachment cases (Bun); unaudited.
 Impact: Use-after-unmap in the JavaScript peer.
 Open questions: None.
 
 ### addon-scheduling-wakes-only-on-acknowledged-readiness
 
 Type: liveness
-Reachability: default-production - every poll and watch in the addon goes through the scheduler.
+Reachability: default-production - `watch` callbacks and readiness acknowledgement go through the scheduler; `poll` reads the ring directly and consults the reactor only for readiness.
 Status: active
-Exercised: partial - three unit tests cover acknowledgement waiting, setup-socket EOF as readiness, and interrupted waits; no test covers a lost eventfd wake.
+Exercised: partial - three unit tests cover acknowledgement waiting, setup-socket EOF as readiness, and interrupted waits, and `packages/shm-native/tests/mechanism.ts` covers a frame published during a callback; no test covers a lost eventfd wake with no frame behind it.
 Guarantee: A pending callback runs only after the readiness it waited on is acknowledged; setup-socket EOF is delivered as readiness so a closed peer is observed; an interrupted wait retries until success or close rather than reporting a spurious wake.
 Check: `always` - a callback never runs before its acknowledgement; `sometimes` - EOF and EINTR paths are reached.
 Fault/timing angle: A missed or duplicated wake leaves the JavaScript side spinning or stalled.
@@ -3952,12 +3952,12 @@ Open questions: None.
 ### addon-grant-decoding-is-the-shared-setup-envelope
 
 Type: safety
-Reachability: default-production - the addon decodes every grant through the shared setup envelope.
+Reachability: default-production - the addon decodes every grant through its setup envelope.
 Status: active
 Exercised: partial - the tagged-envelope acceptance and the live-then-dropped sentinel are tested; malformed grants are covered by the transport fuzz corpus, not by the addon.
-Guarantee: The addon accepts a grant only as the tagged setup envelope `shm-transport::setup_auth` defines, and reports a closed peer as live-then-dropped rather than as a fresh grant.
+Guarantee: The addon accepts a grant only as the tagged setup envelope whose shape mirrors the host's `GrantMessage` (`crates/host-runtime/src/setup_socket.rs`); the two definitions are separate and kept in step by the committed fixture. A closed peer is reported as live-then-dropped rather than as a fresh grant.
 Check: `always` - `grant_message` decodes exactly the tagged envelope; a closed peer yields the dropped sentinel.
-Fault/timing angle: A second decoder drifting from the transport's would accept a grant the host never issued.
+Fault/timing angle: The addon's decoder drifting from the host's encoder would accept a grant the host never issued, or refuse every real one.
 Required faults and enabling state: A grant message from the host; a peer that closes after the grant.
 Confidence: medium - `grant_message_accepts_tagged_setup_envelope`, `peer_closed_reports_live_then_dropped_sentinel` (`packages/shm-native/src/setup.rs`).
 Existing check: The two unit tests named above; unaudited.

@@ -33,8 +33,10 @@ impl<'lease> LeaseSpan<'lease> {
         self.len
     }
 
-    /// Base pointer of the span; the mapping is peer-writable, so reads go through
-    /// `read_byte` or `copy_to` rather than a long-lived slice.
+    /// Base pointer of the span. The mapping is peer-writable, so a caller reads through
+    /// `read_byte` or `copy_to` rather than holding a `&[u8]` over it; `checksum` is the
+    /// one method that still builds a slice, which the property catalog records as a
+    /// known violation.
     pub const fn as_mut_ptr(self) -> *mut u8 {
         self.base.as_ptr()
     }

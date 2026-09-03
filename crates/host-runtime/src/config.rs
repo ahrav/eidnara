@@ -16,8 +16,11 @@ pub const MIN_RESIDENT_BYTES: u64 =
 
 pub(crate) const EGRESS_RESERVED_BYTES: u64 = MAX_BODY_LEN as u64 + HEADER_LEN as u64;
 
-/// Working memory startup reserves beyond one inbound body and one egress frame: decode
-/// scratch, the largest ring arena, retained job metadata, and Synapse waiter headroom.
+/// Working memory startup reserves beyond one inbound body and one egress frame. Sized for
+/// Synapse's worst parse reservation, its full queued-batch budget, one admitted maximum
+/// query, per-item and envelope headroom, the waiter headroom, and the retained job
+/// metadata slice; `validate_serving_limits` checks the same combined bound for configured
+/// limits. Ring arena bytes are budgeted separately by the transport's admission limits.
 pub(crate) const SCRATCH_RESERVED_BYTES: u64 = (MAX_BODY_LEN as u64 * 5 / 2)
     + (6 * 1024 * 1024)
     + 256
