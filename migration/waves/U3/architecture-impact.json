@@ -11,7 +11,7 @@
         "scope_hash": "546689b0bfec8de40744bc6a648394c874d849748edc9add1ca2f260130c3fe6"
       },
       "report_hash": "20a66eecdb85ee4cd29c8d62c027f76acc9b425331aa744beaeaedb1cba6b221",
-      "report_path": "/tmp/architecture-review-20260903T085708Z-U3-pre-port.html",
+      "report_path": "/tmp/architecture-review-20260903T090351Z-U3-pre-port.html",
       "skill_sha256": "5a2532a0c9ac5def4a7f453567aaecd4440b095782dfe9e3bda7f934ccdf2f0e",
       "summary": "Interface versus implementation before porting: host-runtime 535/19402, shm-transport 152/1963, tokenizer 2/38, shm-native 29/1860 (pub items / non-blank non-comment implementation lines outside cfg(test)). host-runtime and shm-native are deep; shm-transport is deep; tokenizer is a two-function facade over the vocabulary table by design. The host runtime has no dependency on the product daemon (zero references), and shm-transport is its only transport adapter. No Strong candidate.",
       "candidates": [
@@ -106,8 +106,8 @@
       "iteration": 1,
       "analyzed": {
         "repo": "eidnara",
-        "commit": "f3d03d2c9a312f7df441018c425bc177721af6d1",
-        "scope_hash": "cecee09a657889cc6efb0ebac7ed7bb4cf334206504804f7289d33fdb545f6af",
+        "commit": "a343d10da820fe64826d04c2ceeeb0d85d28ffc0",
+        "scope_hash": "1c46c9df316ff52f572c2efea6c5a963289f239f81c10e1d428652b2aaa581ca",
         "modules": [
           "crates/host-runtime",
           "crates/shm-transport",
@@ -116,8 +116,8 @@
         ],
         "modules_hash": "c0ac71834e24933850ee5e9c2fcb89e54a65c89b3bb3fab9efc686960c082fff"
       },
-      "report_hash": "8021e11dc803e5a801d0b8e7318b296ce2f0b7592f8f6e183b0874c6fc5e2d17",
-      "report_path": "/tmp/architecture-review-20260903T085708Z-U3-post-integration.html",
+      "report_hash": "17c007c268f9194b4278fcf986876feef91f9f513ee2d850cd0c02bdab992c7f",
+      "report_path": "/tmp/architecture-review-20260903T090351Z-U3-post-integration.html",
       "skill_sha256": "5a2532a0c9ac5def4a7f453567aaecd4440b095782dfe9e3bda7f934ccdf2f0e",
       "summary": "Interface versus implementation after integration: host-runtime 535/19459, shm-transport 152/1963, tokenizer 2/38, shm-native 29/1866 (pub items / non-blank non-comment implementation lines outside cfg(test)). host-runtime and shm-native are deep; shm-transport is deep; tokenizer is a two-function facade over the vocabulary table by design. The host runtime has no dependency on the product daemon (zero references), and shm-transport is its only transport adapter. No Strong candidate. The three recorded candidates are unchanged by the port; no structural change accepted; no loop-created candidate.",
       "candidates": [

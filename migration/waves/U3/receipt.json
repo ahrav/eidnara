@@ -5274,7 +5274,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "ff1476b190b2bf8918d084774e9ce81d0ea7f9e51457353c22b14f1e11bc6e4a",
+      "destination_sha256": "5ac87dab87fb1fd26c57b02fab006f1bf5452ebe022a6478e5469beb5557b312",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5285,7 +5285,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "12e39a0b112a2a9a88f56e0ff5dbde0ec488ff183c55991b2d78066295d7d77b",
+      "destination_sha256": "e2d3464bc694594ada627140be62657326c1fe81999b2c919e6dc9e1650f6be7",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5384,7 +5384,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/receipt.json",
-      "destination_sha256": "e927b92edaba5510a5ad021edc93fd64c20f8e0b4c5d9808687bdaa065d806b1",
+      "destination_sha256": "a01feb360a0dd0ef90f120ea399410837c9efb7dc22ecba9db8637d28c4439f1",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5395,7 +5395,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/receipt.json",
-      "destination_sha256": "f62ce42edc676fb15bfd4786f87c2c9a49bb7ed0d6bed5d91f8e14df2fab0e0e",
+      "destination_sha256": "97a5297de60a782a07ea7ff1fed4e801c757e99455ebb2fca517feaab74a661b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

@@ -9,7 +9,7 @@
       "catalog_commit": "39e8230371b15966a5767771daf001e44d191aac"
     }
   ],
-  "destination_commit": "f3d03d2c9a312f7df441018c425bc177721af6d1",
+  "destination_commit": "a343d10da820fe64826d04c2ceeeb0d85d28ffc0",
   "touched_files": [
     "crates/host-runtime/benches/ipc_budget.rs",
     "crates/host-runtime/benches/support/atomic.rs",
