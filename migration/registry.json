@@ -673,6 +673,16 @@
       "evidence": [
         "crates/shm-transport/src/setup_auth.rs"
       ]
+    },
+    {
+      "kind": "identity",
+      "value": "shm-transport",
+      "class": "frozen-durable",
+      "rationale": "Name of the memfd that backs every ring arena; tests and diagnostics find a ring mapping by this name in `/proc/<pid>/maps`.",
+      "evidence": [
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
+      ]
     }
   ]
 }

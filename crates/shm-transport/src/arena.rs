@@ -171,6 +171,11 @@ impl SpanPlan {
             .get(index)
             .copied()
     }
+
+    /// Both spans as stored, second one zeroed when unused, for the shared descriptor.
+    pub(crate) const fn spans(self) -> [ArenaSpan; 2] {
+        self.spans
+    }
 }
 
 crate::redacted_debug!(SpanPlan);
