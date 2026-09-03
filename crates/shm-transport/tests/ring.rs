@@ -1,14 +1,12 @@
 use std::os::fd::OwnedFd;
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use std::time::Instant;
 
 use shm_transport::MAX_FRAME_BYTES;
 use shm_transport::backend::ring::{ProducerError, Ring, RingError, RingGrant, wire_v2_header};
-use shm_transport::descriptor::{
-    HardwareProfileId, Incarnation, ReleaseIdentity, TransportDescriptor,
-};
+use shm_transport::descriptor::{HardwareProfileId, TransportDescriptor};
 use shm_transport::lease::LeaseError;
 use shm_transport::profile::{ProfileConfig, TargetProfile, WorkerTopology, ring_profile};
 
@@ -30,12 +28,12 @@ fn lease_limited_profile() -> TargetProfile {
     .unwrap()
 }
 
-fn publish(ring: &Ring, body: &[u8]) -> ReleaseIdentity {
+fn publish(ring: &Ring, body: &[u8]) {
     let mut reservation = ring
         .try_reserve(body.len(), wire_v2_header(body.len()).unwrap())
         .unwrap();
     reservation.write(body).unwrap();
-    reservation.commit(body.len()).unwrap()
+    reservation.commit(body.len()).unwrap();
 }
 
 #[test]
@@ -122,7 +120,7 @@ fn boundary_round_trips_include_wrap_and_exact_maximum() {
 }
 
 #[test]
-fn retained_oldest_lease_enforces_fifo_reclamation_and_release_validation() {
+fn retained_oldest_lease_enforces_fifo_reclamation() {
     let ring = Ring::create(&profile(), 11).unwrap();
     let first_len = 40 * 1024 * 1024;
     let second_len = MAX_FRAME_BYTES - first_len;
@@ -134,7 +132,7 @@ fn retained_oldest_lease_enforces_fifo_reclamation_and_release_validation() {
     for _ in 0..40 {
         first.write(&chunk).unwrap();
     }
-    let first_id = first.commit(first_len).unwrap();
+    first.commit(first_len).unwrap();
     let first_lease = ring.try_receive().unwrap().unwrap();
 
     let mut second = ring
@@ -143,34 +141,9 @@ fn retained_oldest_lease_enforces_fifo_reclamation_and_release_validation() {
     for _ in 0..24 {
         second.write(&chunk).unwrap();
     }
-    let second_id = second.commit(second_len).unwrap();
+    second.commit(second_len).unwrap();
     ring.try_receive().unwrap().unwrap().release().unwrap();
 
-    assert_eq!(
-        ring.release(ReleaseIdentity::new(
-            Incarnation::from_bytes([99; 16]),
-            first_id.lane(),
-            first_id.sequence()
-        )),
-        Err(LeaseError::WrongIncarnation)
-    );
-    assert_eq!(
-        ring.release(ReleaseIdentity::new(
-            first_id.incarnation(),
-            first_id.lane() + 1,
-            first_id.sequence()
-        )),
-        Err(LeaseError::WrongLane)
-    );
-    assert_eq!(
-        ring.release(ReleaseIdentity::new(
-            first_id.incarnation(),
-            first_id.lane(),
-            first_id.sequence() + 99
-        )),
-        Err(LeaseError::InvalidSequence)
-    );
-    assert_eq!(ring.release(second_id), Err(LeaseError::DuplicateRelease));
     assert_eq!(
         ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap_err(),
         ProducerError::Exhausted
@@ -200,43 +173,10 @@ fn retained_oldest_lease_enforces_fifo_reclamation_and_release_validation() {
 }
 
 #[test]
-fn stale_lap_release_cannot_complete_recycled_slot() {
-    let ring = Ring::create(&profile(), 13).unwrap();
-    let depth = profile().descriptor_depth();
-
-    let stale = publish(&ring, &[1]);
-    ring.try_receive().unwrap().unwrap().release().unwrap();
-    for value in 2..=depth {
-        publish(&ring, &[value as u8]);
-        ring.try_receive().unwrap().unwrap().release().unwrap();
-    }
-
-    publish(&ring, &[0xa5]);
-    let fresh = ring.try_receive().unwrap().unwrap();
-    assert_eq!(
-        ring.release(stale),
-        Err(LeaseError::InvalidSequence),
-        "stale identity must not complete recycled slot"
-    );
-    assert_eq!(fresh.segment(0).unwrap().read_byte(0), Some(0xa5));
-    let (descriptors, bytes) = ring.conservation().unwrap();
-    assert_eq!(descriptors.receiver_leased, 1);
-    assert_eq!(descriptors.free, depth as u64 - 1);
-    assert_eq!(bytes.receiver_leased, 1);
-    fresh.release().unwrap();
-
-    ring.try_reserve(0, wire_v2_header(0).unwrap())
-        .unwrap()
-        .abort();
-    let (descriptors, bytes) = ring.conservation().unwrap();
-    assert_eq!(descriptors.free, depth as u64);
-    assert_eq!(bytes.free, MAX_FRAME_BYTES as u64);
-}
-
-#[test]
 fn quarantine_rejects_all_operations_and_reports_conservation() {
     let ring = Ring::create(&profile(), 17).unwrap();
-    let identity = publish(&ring, &[1, 2, 3]);
+    publish(&ring, &[1, 2, 3]);
+    let lease = ring.try_receive().unwrap().unwrap();
     ring.enter_quarantine();
 
     assert_eq!(
@@ -244,7 +184,11 @@ fn quarantine_rejects_all_operations_and_reports_conservation() {
         ProducerError::Quarantined
     );
     assert!(matches!(ring.try_receive(), Err(RingError::Quarantined)));
-    assert_eq!(ring.release(identity), Err(LeaseError::Quarantined));
+    assert!(matches!(
+        ring.wait_for_data(Instant::now() + Duration::from_secs(5)),
+        Err(RingError::Quarantined)
+    ));
+    assert_eq!(lease.release(), Err(LeaseError::Quarantined));
     let (descriptors, bytes) = ring.conservation().unwrap();
     assert_eq!(descriptors.quarantined, profile().descriptor_depth() as u64);
     assert_eq!(bytes.quarantined, MAX_FRAME_BYTES as u64);
@@ -493,11 +437,39 @@ fn decode_hex<const N: usize>(text: &str) -> [u8; N] {
     bytes
 }
 
+/// Kills and reaps the child if the test unwinds before `wait_with_output`, so a failed
+/// assertion cannot leave a process holding the ring mapping and doorbells.
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn into_inner(mut self) -> Child {
+        self.0.take().expect("child is taken once")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[test]
+fn ring_memfd_carries_the_registered_name() {
+    let _ring = Ring::create(&profile(), 29).unwrap();
+    assert!(
+        mapped_region_count("shm-transport") >= 1,
+        "ring mapping must appear under the registered memfd name"
+    );
+}
+
 #[test]
 fn two_process_zero_copy_exchange_uses_authenticated_grant() {
     let ring = Ring::create(&profile(), 23).unwrap();
     ring.set_inheritable(true).unwrap();
-    let [mapping, data_ready, capacity_ready] = ring.raw_descriptors();
+    let [mapping, data_ready, capacity_ready] = ring.raw_descriptors().unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "ring_child_exchange", "--nocapture"])
         .env("EIDNARA_SHM_CHILD_FD", mapping.to_string())
@@ -510,6 +482,7 @@ fn two_process_zero_copy_exchange_uses_authenticated_grant() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
+    let child = ChildGuard(Some(child));
     ring.set_inheritable(false).unwrap();
 
     let mut reservation = ring
@@ -531,7 +504,7 @@ fn two_process_zero_copy_exchange_uses_authenticated_grant() {
     .abort();
     assert!(waiting_since.elapsed() >= Duration::from_millis(25));
 
-    let output = child.wait_with_output().unwrap();
+    let output = child.into_inner().wait_with_output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("EIDNARA_SHM_CHILD_EXCHANGE_OK"), "{stdout}");

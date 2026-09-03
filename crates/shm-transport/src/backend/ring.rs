@@ -40,7 +40,7 @@ use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor, Incarnation,
     MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES, WIRE_V2_VERSION, check_wire_header,
 };
-use crate::lease::{LeaseError, LeaseSpan, ReceiveLease};
+use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, volatile_copy};
 use crate::profile::TargetProfile;
 
 const MAPPING_MAGIC: u64 = 0x4d43_5348_4d52_3031;
@@ -432,70 +432,136 @@ impl Drop for Mapping {
     }
 }
 
-struct Doorbell(OwnedFd);
+/// One wake channel between the peers, built on a `socketpair`. Each socketpair endpoint has a
+/// separate open file description, so peer-set status flags such as `O_NONBLOCK` cannot
+/// affect `local`. `MSG_DONTWAIT` prevents blocking regardless of status flags, and
+/// `MSG_NOSIGNAL` keeps a closed peer end from raising `SIGPIPE`.
+struct Doorbell {
+    local: OwnedFd,
+    /// The peer's end, held by the creating side until `attachment` hands it over.
+    remote: Option<OwnedFd>,
+}
+
+/// Each `drain` call consumes at most this many bytes; remaining bytes only cause a spurious
+/// wake, so a flooding peer cannot keep `drain` spinning.
+const DRAIN_BYTES: usize = 256;
 
 impl Doorbell {
     fn create() -> Result<Self, RingError> {
-        // SAFETY: eventfd creates one process-owned nonblocking counter.
-        let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        if raw < 0 {
+        let mut raw = [0 as libc::c_int; 2];
+        // SAFETY: `raw` is writable storage for the two descriptors socketpair returns.
+        let result = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+                raw.as_mut_ptr(),
+            )
+        };
+        if result != 0 {
             return Err(RingError::DoorbellFailed);
         }
-        // SAFETY: successful eventfd returns a new owned descriptor.
-        Ok(Self(unsafe { OwnedFd::from_raw_fd(raw) }))
+        // SAFETY: successful socketpair returns two new owned descriptors.
+        let (local, remote) =
+            unsafe { (OwnedFd::from_raw_fd(raw[0]), OwnedFd::from_raw_fd(raw[1])) };
+        Ok(Self {
+            local,
+            remote: Some(remote),
+        })
     }
 
+    /// Accepts only a connected `AF_UNIX` stream socket.
     fn from_fd(fd: OwnedFd) -> Result<Self, RingError> {
-        // SAFETY: F_GETFL validates descriptor liveness and returns its status flags.
-        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0 || flags & libc::O_NONBLOCK == 0 {
+        if socket_option(&fd, libc::SO_DOMAIN)? != libc::AF_UNIX
+            || socket_option(&fd, libc::SO_TYPE)? != libc::SOCK_STREAM
+        {
             return Err(RingError::DoorbellFailed);
         }
-        let target =
-            std::fs::read_link(Path::new("/proc/self/fd").join(fd.as_raw_fd().to_string()))
-                .map_err(|_| RingError::DoorbellFailed)?;
-        if target.as_os_str().as_bytes() != b"anon_inode:[eventfd]" {
+        // SAFETY: an all-zero sockaddr_un is valid output storage for getpeername.
+        let mut peer: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let mut len = size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        // SAFETY: `peer` and `len` describe writable storage of the declared size.
+        if unsafe { libc::getpeername(fd.as_raw_fd(), (&raw mut peer).cast(), &raw mut len) } != 0 {
             return Err(RingError::DoorbellFailed);
         }
-        Ok(Self(fd))
+        Ok(Self {
+            local: fd,
+            remote: None,
+        })
     }
 
     fn duplicate(&self) -> Result<OwnedFd, RingError> {
-        self.0.try_clone().map_err(|_| RingError::DoorbellFailed)
+        self.local
+            .try_clone()
+            .map_err(|_| RingError::DoorbellFailed)
     }
 
+    fn peer_end(&self) -> Result<OwnedFd, RingError> {
+        self.remote
+            .as_ref()
+            .ok_or(RingError::DoorbellFailed)?
+            .try_clone()
+            .map_err(|_| RingError::DoorbellFailed)
+    }
+
+    fn peer_raw_fd(&self) -> Result<RawFd, RingError> {
+        self.remote
+            .as_ref()
+            .map(AsRawFd::as_raw_fd)
+            .ok_or(RingError::DoorbellFailed)
+    }
+
+    /// `EAGAIN` means the peer already has unread wake bytes, which is the same outcome.
     fn signal(&self) -> Result<(), RingError> {
-        let value = 1u64.to_ne_bytes();
-        // SAFETY: pointer and length describe one eventfd word.
-        let result = unsafe { libc::write(self.0.as_raw_fd(), value.as_ptr().cast(), value.len()) };
-        if result == value.len() as isize {
-            return Ok(());
+        let token = [1u8];
+        loop {
+            // SAFETY: pointer and length describe one initialized byte.
+            let result = unsafe {
+                libc::send(
+                    self.local.as_raw_fd(),
+                    token.as_ptr().cast(),
+                    token.len(),
+                    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+                )
+            };
+            if result == token.len() as isize {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EAGAIN) => return Ok(()),
+                Some(libc::EINTR) => continue,
+                _ => return Err(RingError::DoorbellFailed),
+            }
         }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::EAGAIN) {
-            return Ok(());
-        }
-        Err(RingError::DoorbellFailed)
     }
 
+    /// A zero-length read means the peer closed its end, which ends the channel.
     fn drain(&self) -> Result<(), RingError> {
-        let mut value = 0u64;
-        // SAFETY: pointer and length describe one writable eventfd word.
-        let result = unsafe {
-            libc::read(
-                self.0.as_raw_fd(),
-                std::ptr::addr_of_mut!(value).cast(),
-                size_of::<u64>(),
-            )
-        };
-        if result == size_of::<u64>() as isize {
-            return Ok(());
+        let mut buffer = [0u8; DRAIN_BYTES];
+        loop {
+            // SAFETY: pointer and length describe writable storage of `DRAIN_BYTES`.
+            let result = unsafe {
+                libc::recv(
+                    self.local.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if result > 0 {
+                return Ok(());
+            }
+            if result == 0 {
+                return Err(RingError::DoorbellFailed);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EAGAIN) => return Ok(()),
+                Some(libc::EINTR) => continue,
+                _ => return Err(RingError::DoorbellFailed),
+            }
         }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::EAGAIN) {
-            return Ok(());
-        }
-        Err(RingError::DoorbellFailed)
     }
 
     fn wait_until(&self, deadline: Instant) -> Result<bool, RingError> {
@@ -508,7 +574,7 @@ impl Doorbell {
             .saturating_add(1)
             .min(i32::MAX as u128) as i32;
         let mut descriptor = libc::pollfd {
-            fd: self.0.as_raw_fd(),
+            fd: self.local.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
@@ -524,6 +590,25 @@ impl Doorbell {
             Err(RingError::DoorbellFailed)
         }
     }
+}
+
+fn socket_option(fd: &OwnedFd, option: libc::c_int) -> Result<libc::c_int, RingError> {
+    let mut value: libc::c_int = 0;
+    let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `value` and `len` describe writable storage of the declared size.
+    let result = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            option,
+            (&raw mut value).cast(),
+            &raw mut len,
+        )
+    };
+    if result != 0 || len != size_of::<libc::c_int>() as libc::socklen_t {
+        return Err(RingError::DoorbellFailed);
+    }
+    Ok(value)
 }
 
 /// Owner-only directory the ring objects live under. Validation goes through the held
@@ -620,6 +705,9 @@ impl Drop for RuntimeDir {
 /// Everything a peer needs to attach: layout version, incarnation, lane, and geometry. Sent
 /// over the authenticated setup channel alongside the file descriptors; `decode` refuses
 /// any grant whose geometry does not map to a valid ring.
+///
+/// The hardware profile id is excluded from this encoding. The setup layer validates the
+/// hardware profile id before decoding any grant.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct RingGrant {
     layout_version: u16,
@@ -879,12 +967,14 @@ impl Ring {
     }
 
     /// Mapping, data doorbell, and capacity doorbell descriptors, in the order `attach` takes.
-    pub fn raw_descriptors(&self) -> [RawFd; 3] {
-        [
+    /// The doorbell entries are the peer's socket ends, so only the creating ring can report
+    /// them.
+    pub fn raw_descriptors(&self) -> Result<[RawFd; 3], RingError> {
+        Ok([
             self.mapping.fd.as_raw_fd(),
-            self.data_ready.0.as_raw_fd(),
-            self.capacity_ready.0.as_raw_fd(),
-        ]
+            self.data_ready.peer_raw_fd()?,
+            self.capacity_ready.peer_raw_fd()?,
+        ])
     }
 
     /// Duplicate of the data doorbell, for registering with an event loop that owns its fds.
@@ -897,6 +987,9 @@ impl Ring {
     /// Returns `true` only when blocking is correct; `false` means data or a generation change
     /// is already visible and the caller should poll again instead.
     pub fn arm_data_wait(&self) -> Result<bool, RingError> {
+        if self.is_quarantined() {
+            return Err(RingError::Quarantined);
+        }
         if self.data_available()? {
             return Ok(false);
         }
@@ -932,7 +1025,8 @@ impl Ring {
         self.data_ready.drain()
     }
 
-    /// Duplicates all three descriptors with `CLOEXEC` set, paired with the grant.
+    /// Duplicates the mapping and the peer's two doorbell ends with `CLOEXEC` set, paired with
+    /// the grant. Fails on an attached ring, which holds no peer ends.
     pub fn attachment(&self) -> Result<RingAttachment, RingError> {
         // SAFETY: F_DUPFD_CLOEXEC duplicates owned valid descriptor.
         let raw = unsafe { libc::fcntl(self.raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
@@ -944,8 +1038,8 @@ impl Ring {
         Ok(RingAttachment {
             descriptors: [
                 fd,
-                self.data_ready.duplicate()?,
-                self.capacity_ready.duplicate()?,
+                self.data_ready.peer_end()?,
+                self.capacity_ready.peer_end()?,
             ],
             grant: self.grant,
         })
@@ -954,7 +1048,7 @@ impl Ring {
     /// Sets or clears `FD_CLOEXEC` on all three descriptors, for handing the ring to a child
     /// across `exec`.
     pub fn set_inheritable(&self, inheritable: bool) -> Result<(), RingError> {
-        for descriptor in self.raw_descriptors() {
+        for descriptor in self.raw_descriptors()? {
             // SAFETY: F_GETFD reads flags from owned valid fd.
             let current = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
             if current < 0 {
@@ -1008,6 +1102,8 @@ impl Ring {
             .checked_add(1)
             .ok_or(ProducerError::SequenceExhausted)?;
         let slot = self.slot_ptr(sequence).map_err(ProducerError::Ring)?;
+        // `outstanding < depth` means this slot's previous occupant was reclaimed and stored
+        // `SLOT_FREE`, so any other state is corruption rather than backpressure.
         // SAFETY: slot points to initialized atomics in mapping.
         unsafe {
             (*slot)
@@ -1018,7 +1114,9 @@ impl Ring {
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 )
-                .map_err(|_| ProducerError::Exhausted)?;
+                .map_err(|_| {
+                    ProducerError::Ring(self.quarantine_with(RingError::InvalidSharedState))
+                })?;
         }
         // SAFETY: pages remain mapped for self lifetime.
         let write = unsafe { (*producer).arena_write.load(Ordering::Relaxed) };
@@ -1220,9 +1318,12 @@ impl Ring {
     }
 
     /// Blocks on the data doorbell until `try_receive` would return a frame, or `deadline`.
-    /// Returns whether data is available.
+    /// Returns whether data is available; a quarantined ring returns `Quarantined` at once.
     pub fn wait_for_data(&self, deadline: Instant) -> Result<bool, RingError> {
         loop {
+            if self.is_quarantined() {
+                return Err(RingError::Quarantined);
+            }
             if self.data_available()? {
                 return Ok(true);
             }
@@ -1259,8 +1360,9 @@ impl Ring {
 
     /// Returns a leased frame to the producer. Checks incarnation, lane, and sequence against
     /// the grant and the slot, then moves the slot to release-pending and rings both
-    /// doorbells. `ReceiveLease` calls this on drop; direct callers see the error instead.
-    pub fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError> {
+    /// doorbells. Only `ReceiveLease` reaches this: an identity is `Copy`, so a public entry
+    /// point would let a caller release a frame while still holding the lease that reads it.
+    pub(crate) fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError> {
         if self.is_quarantined() {
             return Err(LeaseError::Quarantined);
         }
@@ -1469,18 +1571,24 @@ impl Ring {
         }
     }
 
-    /// True if this handle latched quarantine or the shared flag is set.
+    /// True if this handle latched quarantine or the shared flag is set. Observing the shared
+    /// flag latches too, so a peer that sets and then clears it cannot revive this handle.
     /// An unreadable lifecycle page counts as quarantined.
     pub fn is_quarantined(&self) -> bool {
         if self.quarantined.get() {
             return true;
         }
-        self.lifecycle_ptr()
+        let observed = self
+            .lifecycle_ptr()
             .map(|page| {
                 // SAFETY: lifecycle page remains mapped and flag is atomic.
                 unsafe { (*page).quarantined.load(Ordering::Acquire) != 0 }
             })
-            .unwrap_or(true)
+            .unwrap_or(true);
+        if observed {
+            self.quarantined.set(true);
+        }
+        observed
     }
 
     /// Quarantines and returns `error`, for impossible shared state observed mid-operation.
@@ -1621,7 +1729,10 @@ impl Ring {
         if new_reclaimed > self.live_end(arena_write) {
             return Err(RingError::InvalidSharedState);
         }
-        if new_reclaimed - self.punched.get() >= self.punch_batch_bytes() {
+        let unpunched = new_reclaimed
+            .checked_sub(self.punched.get())
+            .ok_or(RingError::InvalidSharedState)?;
+        if unpunched >= self.punch_batch_bytes() {
             self.punch_dead_pages(new_reclaimed, arena_write, false)?;
         }
         for sequence in completed + 1..=last {
@@ -1655,6 +1766,10 @@ impl Ring {
 
     /// Dead pages in `[punched, reclaimed)` do not overlap `[reclaimed, live_end)`.
     /// `everything` also counts partially covered pages as dead once no live bytes remain.
+    ///
+    /// `punched` is left page-aligned. Advancing it to an unaligned `reclaimed` would drop the
+    /// dead prefix of the boundary page: the next batch would start past that prefix and
+    /// round the page up, leaving it resident until the ring drained completely.
     fn punch_dead_pages(
         &self,
         reclaimed: u64,
@@ -1662,15 +1777,22 @@ impl Ring {
         everything: bool,
     ) -> Result<(), RingError> {
         let punched = self.punched.get();
-        if punched >= reclaimed {
+        if punched == reclaimed {
             return Ok(());
+        }
+        // Both cursors live in peer-writable memory; a backwards cursor is a fault.
+        if punched > reclaimed {
+            return Err(RingError::InvalidSharedState);
         }
         let arena_bytes = self.arena_bytes();
         let arena_bytes_u64 = arena_bytes as u64;
         let page_size = system_page_size();
         let page_size_u64 = page_size as u64;
         let live_end = self.live_end(arena_write);
-        if live_end < reclaimed {
+        let live_len = live_end
+            .checked_sub(reclaimed)
+            .ok_or(RingError::InvalidSharedState)?;
+        if live_len > arena_bytes_u64 {
             return Err(RingError::InvalidSharedState);
         }
         let remove = |offset, len| {
@@ -1702,12 +1824,16 @@ impl Ring {
                 }
             }
         } else {
+            // `live_len <= arena_bytes` puts `live_end - arena_bytes` at or below `reclaimed`.
             let dead_start = punched.max(live_end.saturating_sub(arena_bytes_u64));
+            let dead_len = reclaimed
+                .checked_sub(dead_start)
+                .ok_or(RingError::InvalidSharedState)?;
             for (offset, len) in removal_ranges(
                 self.layout.arena,
                 arena_bytes,
                 dead_start,
-                reclaimed - dead_start,
+                dead_len,
                 page_size,
             )?
             .into_iter()
@@ -1716,7 +1842,7 @@ impl Ring {
                 remove(offset, len)?;
             }
         }
-        self.punched.set(reclaimed);
+        self.punched.set(reclaimed & !(page_size_u64 - 1));
         Ok(())
     }
 
@@ -1745,19 +1871,21 @@ impl Ring {
         }
     }
 
-    fn commit_reservation(
+    /// Everything `commit` checks before it writes shared state. Any error here leaves the
+    /// reservation abortable.
+    fn prepare_commit(
         &self,
         sequence: u64,
         plan: SpanPlan,
         exact_len: usize,
         wire_header: [u8; WIRE_V2_HEADER_BYTES],
-    ) -> Result<ReleaseIdentity, ProducerError> {
+    ) -> Result<PreparedCommit, ProducerError> {
         let exact = plan.prefix(exact_len).map_err(ProducerError::Arena)?;
         check_wire_header(&wire_header, exact_len as u64)
             .map_err(|_| ProducerError::WireHeaderMismatch)?;
         let identity = ReleaseIdentity::new(self.grant.incarnation, self.grant.lane, sequence);
         let spans = exact.spans();
-        let shared = SharedDescriptor {
+        let descriptor = SharedDescriptor {
             schema_version: DESCRIPTOR_SCHEMA_VERSION,
             wire_header,
             incarnation: identity.incarnation().into_bytes(),
@@ -1772,14 +1900,34 @@ impl Ring {
         };
         let slot = self.slot_ptr(sequence).map_err(ProducerError::Ring)?;
         let producer = self.producer_ptr().map_err(ProducerError::Ring)?;
-        // `SpanPlan::reserve` checked this sum.
-        let next_write = plan.allocation_start() + plan.allocation_len();
+        Ok(PreparedCommit {
+            identity,
+            descriptor,
+            slot,
+            producer,
+            // `SpanPlan::reserve` checked this sum.
+            next_write: plan.allocation_start() + plan.allocation_len(),
+        })
+    }
+
+    /// Publishes a prepared commit. Once the slot and cursors are written the peer may hold
+    /// the frame, so a failed wake quarantines the ring but never rolls the slot back.
+    fn publish_commit(&self, prepared: PreparedCommit) -> Result<ReleaseIdentity, ProducerError> {
+        let PreparedCommit {
+            identity,
+            descriptor,
+            slot,
+            producer,
+            next_write,
+        } = prepared;
         // SAFETY: producer exclusively owns reserved slot and arena range.
         unsafe {
-            std::ptr::write_volatile((*slot).descriptor.get(), shared);
+            std::ptr::write_volatile((*slot).descriptor.get(), descriptor);
             (*slot).state.store(SLOT_PUBLISHED, Ordering::Relaxed);
             (*producer).arena_write.store(next_write, Ordering::Relaxed);
-            (*producer).published.store(sequence, Ordering::Release);
+            (*producer)
+                .published
+                .store(identity.sequence(), Ordering::Release);
         }
         self.reserved_end.set(None);
         if let Err(error) = self.signal_wake(self.data_wake_ptr(), &self.data_ready) {
@@ -1812,7 +1960,7 @@ impl Ring {
             let take = available.min(bytes.len() - copied);
             // SAFETY: active reservation owns range and chunk remains inside arena mapping.
             unsafe {
-                std::ptr::copy_nonoverlapping(
+                volatile_copy(
                     bytes.as_ptr().add(copied),
                     self.mapping.base.as_ptr().add(self.layout.arena + offset),
                     take,
@@ -1828,6 +1976,15 @@ impl fmt::Debug for Ring {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("Ring(<redacted>)")
     }
+}
+
+/// Output of `prepare_commit`, consumed by `publish_commit`.
+struct PreparedCommit {
+    identity: ReleaseIdentity,
+    descriptor: SharedDescriptor,
+    slot: *mut DescriptorSlot,
+    producer: *mut ProducerPage,
+    next_write: u64,
 }
 
 unsafe fn ring_release_callback(
@@ -1931,7 +2088,8 @@ impl ProducerReservation<'_> {
     }
 
     /// Publishes `body_len` bytes. `body_len` must equal `written()`; the header's declared
-    /// length must equal `body_len`. Any failure aborts the reservation.
+    /// length must equal `body_len`. A failure before publication aborts the reservation; a
+    /// failed wake after publication quarantines the ring and leaves the frame published.
     pub fn commit(mut self, body_len: usize) -> Result<ReleaseIdentity, ProducerError> {
         if self.finished {
             return Err(ProducerError::Aborted);
@@ -1946,20 +2104,20 @@ impl ProducerReservation<'_> {
             self.finished = true;
             return Err(ProducerError::Underfill);
         }
-        match self
-            .ring
-            .commit_reservation(self.sequence, self.plan, body_len, self.wire_header)
-        {
-            Ok(identity) => {
-                self.finished = true;
-                Ok(identity)
-            }
-            Err(error) => {
-                self.ring.abort_reservation(self.sequence);
-                self.finished = true;
-                Err(error)
-            }
-        }
+        let prepared =
+            match self
+                .ring
+                .prepare_commit(self.sequence, self.plan, body_len, self.wire_header)
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.ring.abort_reservation(self.sequence);
+                    self.finished = true;
+                    return Err(error);
+                }
+            };
+        self.finished = true;
+        self.ring.publish_commit(prepared)
     }
 
     /// Gives the slot and arena bytes back without publishing. Same as drop, but explicit.
@@ -2089,7 +2247,7 @@ pub enum RingError {
     /// The profile's `max_spans` is 1; this backend needs 2.
     #[error("target profile does not match ring backend")]
     ProfileMismatch,
-    /// `mkdir`, `memfd_create`, `ftruncate`, `mmap`, `fcntl`, or `eventfd` failed.
+    /// `mkdir`, `memfd_create`, `ftruncate`, `mmap`, or `fcntl` failed.
     #[error("shared object setup failed")]
     ObjectSetupFailed,
     /// The runtime directory or memfd failed an owner, inode, size, type, mode, or seal check.
@@ -2104,7 +2262,8 @@ pub enum RingError {
     /// A cursor, slot state, or count is one the protocol cannot produce.
     #[error("shared ring state is invalid")]
     InvalidSharedState,
-    /// An `eventfd` create, `poll`, `read`, or `write` failed.
+    /// A doorbell `socketpair`, `poll`, `recv`, or `send` failed, the peer closed its doorbell
+    /// end, or an attachment descriptor is not a connected `AF_UNIX` stream socket.
     #[error("ring doorbell failed")]
     DoorbellFailed,
     /// `madvise(MADV_REMOVE)` on a reclaimed arena range failed; the ring is quarantined.
@@ -2306,14 +2465,17 @@ mod tests {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::atomic::Ordering;
 
-    use crate::arena::ArenaError;
-    use crate::descriptor::{DescriptorError, HardwareProfileId};
+    use crate::arena::{ArenaError, MIN_ARENA_BYTES};
+    use crate::descriptor::{
+        DescriptorError, HardwareProfileId, Incarnation, ReleaseIdentity, SETUP_MAPPING_COUNT,
+        TransportDescriptor,
+    };
     use crate::lease::LeaseError;
-    use crate::profile::ring_profile;
+    use crate::profile::{ProfileConfig, TargetProfile, WorkerTopology, ring_profile};
 
     use super::{
-        Doorbell, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError, removal_ranges,
-        residency_vector_len, wire_v2_header,
+        Doorbell, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError, RingGrant,
+        removal_ranges, residency_vector_len, wire_v2_header,
     };
 
     fn ring() -> Ring {
@@ -2329,28 +2491,329 @@ mod tests {
         reservation.commit(bytes.len()).unwrap();
     }
 
+    fn clear_nonblock(fd: &OwnedFd) {
+        // SAFETY: F_GETFL and F_SETFL act on a live owned descriptor.
+        unsafe {
+            let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
+            assert!(flags >= 0);
+            assert_eq!(
+                libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK),
+                0
+            );
+        }
+    }
+
     #[test]
-    fn doorbell_attachment_requires_nonblocking_eventfd() {
-        // SAFETY: eventfd returns a fresh owned descriptor on success.
-        let blocking = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
-        assert!(blocking >= 0);
-        // SAFETY: the successful eventfd result transfers ownership here.
-        let blocking = unsafe { OwnedFd::from_raw_fd(blocking) };
+    fn doorbell_attachment_requires_connected_unix_stream_socket() {
+        let not_a_socket: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
         assert!(matches!(
-            Doorbell::from_fd(blocking),
+            Doorbell::from_fd(not_a_socket),
             Err(RingError::DoorbellFailed)
         ));
 
-        let non_eventfd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
-        // SAFETY: F_SETFL updates status flags on this live owned descriptor.
-        assert_eq!(
-            unsafe { libc::fcntl(non_eventfd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK,) },
-            0
-        );
+        // SAFETY: eventfd returns a fresh owned descriptor on success.
+        let eventfd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        assert!(eventfd >= 0);
+        // SAFETY: the successful eventfd result transfers ownership here.
+        let eventfd = unsafe { OwnedFd::from_raw_fd(eventfd) };
         assert!(matches!(
-            Doorbell::from_fd(non_eventfd),
+            Doorbell::from_fd(eventfd),
             Err(RingError::DoorbellFailed)
         ));
+
+        // SAFETY: socket returns a fresh owned descriptor on success.
+        let unconnected = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(unconnected >= 0);
+        // SAFETY: the successful socket result transfers ownership here.
+        let unconnected = unsafe { OwnedFd::from_raw_fd(unconnected) };
+        assert!(matches!(
+            Doorbell::from_fd(unconnected),
+            Err(RingError::DoorbellFailed)
+        ));
+
+        let created = Doorbell::create().unwrap();
+        let peer = created.peer_end().unwrap();
+        let attached = Doorbell::from_fd(peer).unwrap();
+        assert!(attached.remote.is_none());
+        assert!(matches!(
+            attached.peer_end(),
+            Err(RingError::DoorbellFailed)
+        ));
+    }
+
+    #[test]
+    fn doorbell_never_blocks_after_either_end_clears_nonblock() {
+        let created = Doorbell::create().unwrap();
+        let attached = Doorbell::from_fd(created.peer_end().unwrap()).unwrap();
+        clear_nonblock(&created.local);
+        clear_nonblock(&attached.local);
+        clear_nonblock(created.remote.as_ref().unwrap());
+
+        let started = std::time::Instant::now();
+        created.drain().unwrap();
+        attached.drain().unwrap();
+        created.signal().unwrap();
+        assert!(
+            attached
+                .wait_until(started + std::time::Duration::from_secs(5))
+                .unwrap()
+        );
+        attached.drain().unwrap();
+        attached.drain().unwrap();
+        // A peer that fills its own receive queue only makes later signals report EAGAIN.
+        for _ in 0..1_000_000 {
+            attached.signal().unwrap();
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn closed_peer_doorbell_fails_instead_of_blocking() {
+        let created = Doorbell::create().unwrap();
+        let attached = Doorbell::from_fd(created.peer_end().unwrap()).unwrap();
+        drop(created);
+        assert!(matches!(attached.signal(), Err(RingError::DoorbellFailed)));
+        assert!(matches!(attached.drain(), Err(RingError::DoorbellFailed)));
+    }
+
+    #[test]
+    fn attached_ring_cannot_hand_out_doorbells_it_does_not_hold() {
+        let ring = ring();
+        let attached = ring.attachment().unwrap().attach().unwrap();
+        assert!(matches!(
+            attached.attachment(),
+            Err(RingError::DoorbellFailed)
+        ));
+        assert!(matches!(
+            attached.raw_descriptors(),
+            Err(RingError::DoorbellFailed)
+        ));
+    }
+
+    #[test]
+    fn unaligned_arena_is_rejected_before_any_frame_flows() {
+        let profile = TargetProfile::new(ProfileConfig {
+            descriptor: TransportDescriptor::new(
+                HardwareProfileId::new("ring-unaligned-arena").unwrap(),
+            ),
+            descriptor_depth: 4,
+            arena_bytes: MIN_ARENA_BYTES + 1,
+            max_spans: 2,
+            max_leases: 4,
+            mappings: SETUP_MAPPING_COUNT,
+            pinned_workers: 0,
+            worker_topology: WorkerTopology::CallerThread,
+        })
+        .unwrap();
+        assert!(matches!(
+            Ring::create(&profile, 0),
+            Err(RingError::InvalidLayout)
+        ));
+
+        let mut bytes = ring().grant().encode();
+        let arena = u64::from_le_bytes(bytes[30..38].try_into().unwrap()) + 1;
+        bytes[30..38].copy_from_slice(&arena.to_le_bytes());
+        assert!(matches!(
+            RingGrant::decode(bytes),
+            Err(RingError::InvalidGrant)
+        ));
+    }
+
+    #[test]
+    fn release_validates_identity_against_grant_and_slot() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        publish(&ring, &[2]);
+        let first = ring.try_receive().unwrap().unwrap();
+        let first_id = first.identity();
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+
+        assert_eq!(
+            ring.release(ReleaseIdentity::new(
+                Incarnation::from_bytes([99; 16]),
+                first_id.lane(),
+                first_id.sequence()
+            )),
+            Err(LeaseError::WrongIncarnation)
+        );
+        assert_eq!(
+            ring.release(ReleaseIdentity::new(
+                first_id.incarnation(),
+                first_id.lane() + 1,
+                first_id.sequence()
+            )),
+            Err(LeaseError::WrongLane)
+        );
+        assert_eq!(
+            ring.release(ReleaseIdentity::new(
+                first_id.incarnation(),
+                first_id.lane(),
+                first_id.sequence() + 99
+            )),
+            Err(LeaseError::InvalidSequence)
+        );
+        assert_eq!(
+            ring.release(ReleaseIdentity::new(
+                first_id.incarnation(),
+                first_id.lane(),
+                first_id.sequence() + 1
+            )),
+            Err(LeaseError::DuplicateRelease)
+        );
+        first.release().unwrap();
+    }
+
+    #[test]
+    fn stale_lap_release_cannot_complete_recycled_slot() {
+        let ring = ring();
+        let depth = ring.grant().descriptor_depth;
+
+        publish(&ring, &[1]);
+        let stale = ring.try_receive().unwrap().unwrap();
+        let stale_id = stale.identity();
+        stale.release().unwrap();
+        for value in 2..=depth {
+            publish(&ring, &[value as u8]);
+            ring.try_receive().unwrap().unwrap().release().unwrap();
+        }
+
+        publish(&ring, &[0xa5]);
+        let fresh = ring.try_receive().unwrap().unwrap();
+        assert_eq!(
+            ring.release(stale_id),
+            Err(LeaseError::InvalidSequence),
+            "stale identity must not complete recycled slot"
+        );
+        assert_eq!(fresh.segment(0).unwrap().read_byte(0), Some(0xa5));
+        let (descriptors, bytes) = ring.conservation().unwrap();
+        assert_eq!(descriptors.receiver_leased, 1);
+        assert_eq!(descriptors.free, depth - 1);
+        assert_eq!(bytes.receiver_leased, 1);
+        fresh.release().unwrap();
+
+        ring.try_reserve(0, wire_v2_header(0).unwrap())
+            .unwrap()
+            .abort();
+        let (descriptors, bytes) = ring.conservation().unwrap();
+        assert_eq!(descriptors.free, depth);
+        assert_eq!(bytes.free, ring.grant().arena_bytes);
+    }
+
+    #[test]
+    fn shared_quarantine_flag_latches_locally_when_observed() {
+        let ring = ring();
+        let lifecycle = ring.lifecycle_ptr().unwrap();
+        // SAFETY: test-owned ring keeps the lifecycle page mapped.
+        unsafe { (*lifecycle).quarantined.store(1, Ordering::Release) };
+        assert!(ring.is_quarantined());
+        // SAFETY: same mapping.
+        unsafe { (*lifecycle).quarantined.store(0, Ordering::Release) };
+        assert!(
+            ring.is_quarantined(),
+            "a cleared shared flag must not revive the ring"
+        );
+        assert!(matches!(
+            ring.wait_for_data(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            Err(RingError::Quarantined)
+        ));
+        assert!(matches!(ring.arm_data_wait(), Err(RingError::Quarantined)));
+    }
+
+    #[test]
+    fn foreign_slot_state_on_reserve_is_a_fault_not_backpressure() {
+        let ring = ring();
+        let slot = ring.slot_ptr(1).unwrap();
+        // SAFETY: test-owned ring keeps the slot mapped.
+        unsafe {
+            (*slot)
+                .state
+                .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release)
+        };
+        assert!(matches!(
+            ring.try_reserve(1, wire_v2_header(1).unwrap()),
+            Err(ProducerError::Ring(RingError::InvalidSharedState))
+        ));
+        assert!(ring.is_quarantined());
+    }
+
+    #[test]
+    fn failed_publication_wake_leaves_the_slot_published() {
+        let mut ring = ring();
+        // Dropping the peer end makes the next wake signal fail with EPIPE.
+        ring.data_ready.remote = None;
+        let wake = ring.data_wake_ptr().unwrap();
+        // SAFETY: test-owned ring keeps the wake page mapped.
+        unsafe { (*wake).parked.store(1, Ordering::Release) };
+
+        let mut reservation = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
+        reservation.write(&[9]).unwrap();
+        assert!(matches!(
+            reservation.commit(1),
+            Err(ProducerError::Ring(RingError::DoorbellFailed))
+        ));
+        assert!(ring.is_quarantined());
+        let slot = ring.slot_ptr(1).unwrap();
+        let producer = ring.producer_ptr().unwrap();
+        // SAFETY: test-owned ring keeps both pages mapped.
+        unsafe {
+            assert_eq!(
+                (*slot).state.load(Ordering::Acquire),
+                super::SLOT_PUBLISHED,
+                "a published slot must not be rolled back to free"
+            );
+            assert_eq!((*slot).reservation_len.load(Ordering::Acquire), 1);
+            assert_eq!((*producer).published.load(Ordering::Acquire), 1);
+        }
+    }
+
+    #[test]
+    fn forged_arena_write_quarantines_instead_of_underflowing() {
+        let ring = ring();
+        let arena_len = ring.arena_bytes();
+        publish(&ring, &vec![1; arena_len / 2]);
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+        let producer = ring.producer_ptr().unwrap();
+        // SAFETY: test-owned ring keeps the producer page mapped.
+        unsafe {
+            (*producer)
+                .arena_write
+                .store(3 * arena_len as u64, Ordering::Release)
+        };
+        assert!(matches!(
+            ring.try_reserve(0, wire_v2_header(0).unwrap()),
+            Err(ProducerError::Ring(RingError::InvalidSharedState))
+        ));
+        assert!(ring.is_quarantined());
+    }
+
+    #[test]
+    fn unaligned_batch_boundaries_do_not_strand_pages() {
+        let ring = ring();
+        let page = super::system_page_size();
+        let batch = ring.punch_batch_bytes() as usize;
+        assert!(batch > page);
+
+        publish(&ring, &vec![1; batch + 100]);
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+        ring.try_reserve(0, wire_v2_header(0).unwrap())
+            .unwrap()
+            .abort();
+        assert_eq!(
+            ring.resident_arena_pages().unwrap(),
+            1,
+            "only the boundary page keeps its dead prefix resident"
+        );
+
+        publish(&ring, &vec![2; batch]);
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+        ring.try_reserve(0, wire_v2_header(0).unwrap())
+            .unwrap()
+            .abort();
+        assert_eq!(
+            ring.resident_arena_pages().unwrap(),
+            1,
+            "the earlier boundary page must be removed once its tail is dead"
+        );
     }
 
     #[test]

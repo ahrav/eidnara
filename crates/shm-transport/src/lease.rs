@@ -61,10 +61,9 @@ impl<'lease> LeaseSpan<'lease> {
         if destination.len() != self.len {
             return Err(LeaseError::LengthMismatch);
         }
-        // SAFETY: `LeaseSpan::new` guarantees that the source range is readable.
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.base.as_ptr(), destination.as_mut_ptr(), self.len)
-        };
+        // SAFETY: the constructor's contract keeps `len` source bytes readable for `'lease`,
+        // and `destination` is a live exclusive slice of the same length.
+        unsafe { volatile_copy(self.base.as_ptr(), destination.as_mut_ptr(), self.len) };
         Ok(())
     }
 
@@ -82,6 +81,36 @@ impl<'lease> LeaseSpan<'lease> {
 impl fmt::Debug for LeaseSpan<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("LeaseSpan(<redacted>)")
+    }
+}
+
+/// `[u8; WORD]` has alignment 1, so word-sized volatile accesses work at any byte offset.
+///
+/// # Safety
+/// `source..source.add(len)` must be readable and `destination..destination.add(len)` must be
+/// writable for the duration of the call, and the two ranges must not overlap.
+pub(crate) unsafe fn volatile_copy(source: *const u8, destination: *mut u8, len: usize) {
+    const WORD: usize = std::mem::size_of::<usize>();
+    let mut offset = 0usize;
+    while len - offset >= WORD {
+        // SAFETY: caller keeps both ranges valid for `len` bytes and `offset + WORD <= len`.
+        unsafe {
+            let word = source.add(offset).cast::<[u8; WORD]>().read_volatile();
+            destination
+                .add(offset)
+                .cast::<[u8; WORD]>()
+                .write_volatile(word);
+        }
+        offset += WORD;
+    }
+    while offset < len {
+        // SAFETY: caller keeps both ranges valid for `len` bytes and `offset < len`.
+        unsafe {
+            destination
+                .add(offset)
+                .write_volatile(source.add(offset).read_volatile());
+        }
+        offset += 1;
     }
 }
 
@@ -205,10 +234,10 @@ impl<'lease> ReceiveLease<'lease> {
         if self.released {
             return Err(LeaseError::DuplicateRelease);
         }
-        // SAFETY: constructor requires a live callback context for lease lifetime.
-        unsafe { (self.release_fn)(self.release_context, self.identity)? };
+        // `released` is set before `release_fn` so `Drop` cannot retry a failed release.
         self.released = true;
-        Ok(())
+        // SAFETY: constructor requires a live callback context for lease lifetime.
+        unsafe { (self.release_fn)(self.release_context, self.identity) }
     }
 }
 
@@ -255,5 +284,90 @@ pub enum LeaseError {
 impl fmt::Debug for LeaseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, formatter)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::{LeaseError, LeaseSpan, ReceiveLease, volatile_copy};
+    use crate::descriptor::{Incarnation, ReleaseIdentity};
+
+    struct CallLog {
+        calls: Cell<usize>,
+        verdict: Result<(), LeaseError>,
+    }
+
+    unsafe fn logging_release(context: *const (), _: ReleaseIdentity) -> Result<(), LeaseError> {
+        // SAFETY: tests keep the `CallLog` alive for the lease lifetime.
+        let log = unsafe { &*context.cast::<CallLog>() };
+        log.calls.set(log.calls.get() + 1);
+        log.verdict
+    }
+
+    fn lease<'a>(bytes: &'a mut [u8], log: &'a CallLog) -> ReceiveLease<'a> {
+        // SAFETY: `bytes` and `log` outlive the returned lease.
+        let span = unsafe { LeaseSpan::new(bytes.as_mut_ptr(), bytes.len()) }.unwrap();
+        let identity = ReleaseIdentity::new(Incarnation::from_bytes([7; 16]), 0, 1);
+        // SAFETY: span, context, and callback stay valid for the lease lifetime.
+        unsafe {
+            ReceiveLease::new(
+                [Some(span), None],
+                1,
+                bytes.len(),
+                [0; crate::descriptor::WIRE_V2_HEADER_BYTES],
+                identity,
+                (log as *const CallLog).cast(),
+                logging_release,
+            )
+        }
+        .unwrap()
+    }
+
+    #[test]
+    fn failed_explicit_release_is_not_retried_by_drop() {
+        let mut bytes = [1u8; 4];
+        let log = CallLog {
+            calls: Cell::new(0),
+            verdict: Err(LeaseError::Quarantined),
+        };
+        let held = lease(&mut bytes, &log);
+        assert_eq!(held.release(), Err(LeaseError::Quarantined));
+        assert_eq!(
+            log.calls.get(),
+            1,
+            "drop must not call the release callback again"
+        );
+    }
+
+    #[test]
+    fn drop_releases_exactly_once() {
+        let mut bytes = [1u8; 4];
+        let log = CallLog {
+            calls: Cell::new(0),
+            verdict: Ok(()),
+        };
+        drop(lease(&mut bytes, &log));
+        assert_eq!(log.calls.get(), 1);
+    }
+
+    #[test]
+    fn volatile_copy_matches_plain_copy_at_every_offset_and_length() {
+        let source: Vec<u8> = (0..64u8).collect();
+        for start in 0..16 {
+            for len in 0..40 {
+                let mut destination = vec![0xff; len];
+                // SAFETY: both ranges are inside live, non-overlapping allocations.
+                unsafe {
+                    volatile_copy(source.as_ptr().add(start), destination.as_mut_ptr(), len);
+                }
+                assert_eq!(
+                    destination,
+                    source[start..start + len],
+                    "start {start} len {len}"
+                );
+            }
+        }
     }
 }
