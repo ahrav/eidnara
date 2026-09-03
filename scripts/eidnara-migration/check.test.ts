@@ -886,9 +886,15 @@ describe("check anchors and cfg(test) stripping", () => {
             '    it("also-nested", () => {});',
             '});',
             'describe("live-suite", () => { it("nested-live", () => {}); });',
+            'test.todo( "spaced-todo" );',
+            "describe.skip(",
+            '    "spaced-skipped-suite",',
+            '    () => { it("nested-in-spaced-skip", () => {}); },',
+            ");",
+            'test("after-spaced-skips", () => {});',
         ].join("\n");
         const declared = typescriptDeclaredChecks(text);
-        expect([...declared].sort()).toEqual(["backtick", "live-suite", "nested-live", "real", "single"]);
+        expect([...declared].sort()).toEqual(["after-spaced-skips", "backtick", "live-suite", "nested-live", "real", "single"]);
         const root = mkdtempSync(join(tmpdir(), "eidnara-anchor-"));
         try {
             mkdirSync(join(root, "packages/p/src"), { recursive: true });

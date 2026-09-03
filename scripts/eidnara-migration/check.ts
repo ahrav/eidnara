@@ -1395,7 +1395,7 @@ export function typescriptDeclaredChecks(text: string): Set<string> {
                 if (modifier === "skip" || modifier === "todo") {
                     // The runner never executes a skipped or todo check, nor anything nested
                     // in a skipped `describe`, so the whole call is passed over.
-                    index = typescriptCallEnd(text, index + match[0].length - 1);
+                    index = typescriptCallEnd(text, index + match[0].indexOf("("));
                     continue;
                 }
                 const at = index + match[0].length;
