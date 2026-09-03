@@ -8,6 +8,19 @@
 #![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+/// `Debug` that prints only the type name. Values here are sentinels a peer must echo back,
+/// so they stay out of logs.
+macro_rules! redacted_debug {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl ::core::fmt::Debug for $ty {
+            fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                formatter.write_str(concat!(stringify!($ty), "(<redacted>)"))
+            }
+        }
+    )+};
+}
+pub(crate) use redacted_debug;
+
 /// Arena geometry: span arithmetic and the frame size bounds shared by both peers.
 pub mod arena;
 /// Frame decoders that run before any body byte is trusted; `sample` handles the fixed

@@ -68,8 +68,9 @@ impl SamplePrefix {
     }
 
     /// Checks the prefix against the identity the receiver expects. `allocation_len` is the
-    /// full allocation, body plus slack; the declared body must end within it. Checks run in
-    /// the same order as `FrameDescriptor::validate` and return the first failure.
+    /// full allocation, body plus slack; the declared body must end within it. Identity and
+    /// length checks run in the same order as `FrameDescriptor::validate`; there are no span
+    /// checks because a sample is one contiguous allocation. The first failure is returned.
     pub fn validate(
         &self,
         allocation_len: usize,
@@ -78,18 +79,7 @@ impl SamplePrefix {
         if self.schema != DESCRIPTOR_SCHEMA_VERSION {
             return Err(DescriptorError::UnsupportedSchema);
         }
-        if self.identity.sequence() == 0 {
-            return Err(DescriptorError::InvalidSequence);
-        }
-        if self.identity.incarnation() != expected.incarnation() {
-            return Err(DescriptorError::WrongIncarnation);
-        }
-        if self.identity.lane() != expected.lane() {
-            return Err(DescriptorError::WrongLane);
-        }
-        if self.identity.sequence() != expected.sequence() {
-            return Err(DescriptorError::InvalidSequence);
-        }
+        self.identity.check(expected)?;
         if self.body_len > MAX_FRAME_BYTES as u64 {
             return Err(DescriptorError::FrameTooLarge);
         }
@@ -108,11 +98,7 @@ impl SamplePrefix {
     }
 }
 
-impl std::fmt::Debug for SamplePrefix {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SamplePrefix(<redacted>)")
-    }
-}
+crate::redacted_debug!(SamplePrefix);
 
 /// A sample prefix that passed `validate`. `body_range` is the only range a decoder may read.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,8 +124,4 @@ impl ValidatedSample {
     }
 }
 
-impl std::fmt::Debug for ValidatedSample {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("ValidatedSample(<redacted>)")
-    }
-}
+crate::redacted_debug!(ValidatedSample);

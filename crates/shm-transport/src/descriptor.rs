@@ -78,11 +78,7 @@ impl Serialize for HardwareProfileId {
     }
 }
 
-impl fmt::Debug for HardwareProfileId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("HardwareProfileId(<redacted>)")
-    }
-}
+crate::redacted_debug!(HardwareProfileId);
 
 /// Fixed ring profile identity carried by an authenticated grant.
 #[derive(Clone, PartialEq, Eq)]
@@ -111,11 +107,7 @@ impl TransportDescriptor {
     }
 }
 
-impl fmt::Debug for TransportDescriptor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("TransportDescriptor(<redacted>)")
-    }
-}
+crate::redacted_debug!(TransportDescriptor);
 
 /// 128-bit identity drawn once per ring attachment. A frame from an earlier attachment
 /// carries a different incarnation, so its descriptor fails `validate` even if the lane and
@@ -143,11 +135,7 @@ impl Incarnation {
     }
 }
 
-impl fmt::Debug for Incarnation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Incarnation(<redacted>)")
-    }
-}
+crate::redacted_debug!(Incarnation);
 
 /// The triple a completion must echo back exactly: incarnation, lane, and per-lane sequence.
 /// Any mismatch means the release belongs to another frame or another attachment.
@@ -182,13 +170,27 @@ impl ReleaseIdentity {
     pub const fn sequence(self) -> u64 {
         self.sequence
     }
-}
 
-impl fmt::Debug for ReleaseIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ReleaseIdentity(<redacted>)")
+    /// Identity mismatches are reported before any bounds check so a stale frame surfaces as
+    /// stale, not malformed.
+    pub(crate) fn check(self, expected: ReleaseIdentity) -> Result<(), DescriptorError> {
+        if self.sequence == 0 {
+            return Err(DescriptorError::InvalidSequence);
+        }
+        if self.incarnation != expected.incarnation {
+            return Err(DescriptorError::WrongIncarnation);
+        }
+        if self.lane != expected.lane {
+            return Err(DescriptorError::WrongLane);
+        }
+        if self.sequence != expected.sequence {
+            return Err(DescriptorError::InvalidSequence);
+        }
+        Ok(())
     }
 }
+
+crate::redacted_debug!(ReleaseIdentity);
 
 /// Metadata for one frame, copied out of shared memory before any check runs. Copying first
 /// means a peer that rewrites the descriptor mid-validation cannot make one field pass and
@@ -259,18 +261,7 @@ impl FrameDescriptor {
         if schema_version != DESCRIPTOR_SCHEMA_VERSION {
             return Err(DescriptorError::UnsupportedSchema);
         }
-        if identity.sequence == 0 {
-            return Err(DescriptorError::InvalidSequence);
-        }
-        if identity.incarnation != expected.incarnation {
-            return Err(DescriptorError::WrongIncarnation);
-        }
-        if identity.lane != expected.lane {
-            return Err(DescriptorError::WrongLane);
-        }
-        if identity.sequence != expected.sequence {
-            return Err(DescriptorError::InvalidSequence);
-        }
+        identity.check(expected)?;
         if body_len > MAX_FRAME_BYTES as u64 {
             return Err(DescriptorError::FrameTooLarge);
         }
@@ -336,11 +327,7 @@ impl FrameDescriptor {
     }
 }
 
-impl fmt::Debug for FrameDescriptor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("FrameDescriptor(<redacted>)")
-    }
-}
+crate::redacted_debug!(FrameDescriptor);
 
 /// A frame descriptor that passed `FrameDescriptor::validate`; its spans are in bounds and
 /// its lengths agree, so the receiver may build a lease over them.
@@ -395,11 +382,7 @@ impl ValidatedFrame {
     }
 }
 
-impl fmt::Debug for ValidatedFrame {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ValidatedFrame(<redacted>)")
-    }
-}
+crate::redacted_debug!(ValidatedFrame);
 
 /// How many descriptors sit in each ownership state. `conserves` checks that the states
 /// partition the ring depth.

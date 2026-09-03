@@ -64,11 +64,7 @@ impl ArenaSpan {
     }
 }
 
-impl fmt::Debug for ArenaSpan {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ArenaSpan(<redacted>)")
-    }
-}
+crate::redacted_debug!(ArenaSpan);
 
 /// Where one frame body lives in the arena: one span, or two when the body wraps past the
 /// arena end. `reserve` plans the allocation; `prefix` narrows it to the committed length.
@@ -177,11 +173,7 @@ impl SpanPlan {
     }
 }
 
-impl fmt::Debug for SpanPlan {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SpanPlan(<redacted>)")
-    }
-}
+crate::redacted_debug!(SpanPlan);
 
 /// How many arena bytes sit in each ownership state. `conserves` checks that the states
 /// partition the capacity, so no byte is lost or double-counted.
