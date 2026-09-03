@@ -342,6 +342,7 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
     lane[18] ^= 1;
     for bytes in [incarnation, lane] {
         let grant = RingGrant::decode(bytes).unwrap();
+        let ring = Ring::create(&profile(), 21).unwrap();
         assert!(matches!(
             Ring::attach(ring.attachment().unwrap().into_parts().0, grant),
             Err(RingError::InvalidGrant)
@@ -465,11 +466,27 @@ fn ring_memfd_carries_the_registered_name() {
     );
 }
 
+/// Clears `FD_CLOEXEC` so the descriptor survives `exec` into the child.
+fn make_inheritable(fd: &OwnedFd) {
+    // SAFETY: F_GETFD and F_SETFD act on a live owned descriptor.
+    unsafe {
+        let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFD);
+        assert!(flags >= 0);
+        assert_eq!(
+            libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags & !libc::FD_CLOEXEC),
+            0
+        );
+    }
+}
+
 #[test]
 fn two_process_zero_copy_exchange_uses_authenticated_grant() {
     let ring = Ring::create(&profile(), 23).unwrap();
-    ring.set_inheritable(true).unwrap();
-    let [mapping, data_ready, capacity_ready] = ring.raw_descriptors().unwrap();
+    let (descriptors, grant) = ring.attachment().unwrap().into_parts();
+    for descriptor in &descriptors {
+        make_inheritable(descriptor);
+    }
+    let [mapping, data_ready, capacity_ready] = descriptors.each_ref().map(AsRawFd::as_raw_fd);
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "ring_child_exchange", "--nocapture"])
         .env("EIDNARA_SHM_CHILD_FD", mapping.to_string())
@@ -478,12 +495,14 @@ fn two_process_zero_copy_exchange_uses_authenticated_grant() {
             "EIDNARA_SHM_CHILD_CAPACITY_READY_FD",
             capacity_ready.to_string(),
         )
-        .env("EIDNARA_SHM_CHILD_GRANT", hex(&ring.grant().encode()))
+        .env("EIDNARA_SHM_CHILD_GRANT", hex(&grant.encode()))
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     let child = ChildGuard(Some(child));
-    ring.set_inheritable(false).unwrap();
+    // The child owns the peer ends now; closing the parent's copies is what lets the parent
+    // observe the child's exit through the doorbells.
+    drop(descriptors);
 
     let mut reservation = ring
         .try_reserve(MAX_FRAME_BYTES, wire_v2_header(MAX_FRAME_BYTES).unwrap())
