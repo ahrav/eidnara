@@ -1256,24 +1256,151 @@ export function pointerProblem(root: string, pointer: string): string | undefine
         const declaration = new RegExp(`^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${anchor}\\b`, "m");
         const lines = text.split("\n");
         let found = false;
+        let disabled: string | undefined;
         for (let index = 0; index < lines.length; index += 1) {
             if (!declaration.test(lines[index] ?? "")) continue;
             found = true;
+            // The attribute block above the declaration decides whether the function is an
+            // executable check: it must carry a test attribute, must not be `#[ignore]`, and
+            // must not sit under a `cfg` predicate that is false in every build.
+            let isTest = false;
+            let why: string | undefined;
             for (let back = index - 1; back >= 0; back -= 1) {
                 const line = (lines[back] ?? "").trim();
-                if (line.startsWith("#[") || line.startsWith("///") || line.startsWith("//") || line === "") {
-                    if (/^#\[(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b/.test(line)) return undefined;
-                    continue;
-                }
-                break;
+                if (!(line.startsWith("#[") || line.startsWith("///") || line.startsWith("//") || line === "")) break;
+                if (/^#\[(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b/.test(line)) isTest = true;
+                if (/^#\[ignore\b/.test(line)) why = "is marked #[ignore]";
+                const cfg = /^#\[cfg\((.*)\)\]/.exec(line);
+                if (cfg !== null && cfgPredicate(cfg[1] ?? "") === false) why = `is compiled out by #[cfg(${cfg[1]})]`;
             }
+            if (isTest && why === undefined) return undefined;
+            if (isTest) disabled = why;
         }
-        return found ? `names ${anchor}, which ${filePart} declares without a test attribute` : `names ${anchor}, which ${filePart} does not declare`;
+        if (!found) return `names ${anchor}, which ${filePart} does not declare`;
+        return disabled === undefined
+            ? `names ${anchor}, which ${filePart} declares without a test attribute`
+            : `names ${anchor}, which ${filePart} declares as a test that ${disabled}`;
     }
-    const declared = filePart.endsWith(".ts") || filePart.endsWith(".tsx")
-        ? new RegExp(`\\b(?:test|it|describe)\\(\\s*"${anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`).test(text)
-        : false;
+    const declared = filePart.endsWith(".ts") || filePart.endsWith(".tsx") ? typescriptDeclaredChecks(text).has(anchor) : false;
     return declared ? undefined : `names ${anchor}, which ${filePart} does not declare`;
+}
+
+/**
+ * Three-valued evaluation of a `cfg` predicate: `true` or `false` when the predicate has
+ * that value in every build, `undefined` when it depends on the target or features.
+ * `test` is true because the anchor is judged as a test build sees it; `any()` is false
+ * and `all()` is true by definition.
+ */
+export function cfgPredicate(predicate: string): boolean | undefined {
+    const text = predicate.trim();
+    const call = /^(any|all|not)\((.*)\)$/s.exec(text);
+    if (call === null) return text === "test" ? true : undefined;
+    const args = splitCfgArguments(call[2] ?? "").map(cfgPredicate);
+    if (call[1] === "not") return args.length === 1 && args[0] !== undefined ? !args[0] : undefined;
+    if (call[1] === "any") return args.some((value) => value === true) ? true : args.every((value) => value === false) ? false : undefined;
+    return args.some((value) => value === false) ? false : args.every((value) => value === true) ? true : undefined;
+}
+
+/** Top-level comma-separated arguments of a `cfg` call, honoring nested parentheses. */
+function splitCfgArguments(text: string): string[] {
+    const out: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (char === "(") depth += 1;
+        else if (char === ")") depth -= 1;
+        else if (char === "," && depth === 0) {
+            out.push(text.slice(start, index));
+            start = index + 1;
+        }
+    }
+    const last = text.slice(start);
+    if (last.trim() !== "" || out.length > 0) out.push(last);
+    return out.map((arg) => arg.trim()).filter((arg) => arg !== "");
+}
+
+/**
+ * Names of the `test`, `it`, and `describe` calls in a TypeScript file whose first argument
+ * is a plain string, found by walking the text token by token so a call spelled inside a
+ * comment, a string, or a template literal is text rather than a declared check.
+ */
+export function typescriptDeclaredChecks(text: string): Set<string> {
+    const out = new Set<string>();
+    const call = /^(?:test|it|describe)(?:\.(?:only|skip|todo|concurrent|sequential))?\s*\(\s*/;
+    let index = 0;
+    while (index < text.length) {
+        const skipped = typescriptLexemeEnd(text, index);
+        if (skipped !== null) {
+            index = skipped;
+            continue;
+        }
+        const char = text[index] ?? "";
+        if (/[A-Za-z_$]/.test(char) && !/[A-Za-z0-9_$.]/.test(text[index - 1] ?? "")) {
+            const match = call.exec(text.slice(index, index + 64));
+            if (match !== null) {
+                const at = index + match[0].length;
+                const quote = text[at];
+                if (quote === '"' || quote === "'" || quote === "`") {
+                    const end = typescriptLexemeEnd(text, at);
+                    const literal = end === null ? "" : text.slice(at + 1, end - 1);
+                    if (!literal.includes("${") && !literal.includes("\\")) out.add(literal);
+                }
+            }
+            let cursor = index;
+            while (cursor < text.length && /[A-Za-z0-9_$]/.test(text[cursor] ?? "")) cursor += 1;
+            index = Math.max(cursor, index + 1);
+            continue;
+        }
+        index += 1;
+    }
+    return out;
+}
+
+/**
+ * Index just past the comment, string, or template literal that starts at `index`, or
+ * `null` when none does. A template literal ends at its closing backtick; a `${ ... }`
+ * substitution is skipped by brace depth, with strings inside it skipped in turn.
+ */
+function typescriptLexemeEnd(text: string, index: number): number | null {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === "/" && next === "/") {
+        const eol = text.indexOf("\n", index);
+        return eol === -1 ? text.length : eol;
+    }
+    if (char === "/" && next === "*") {
+        const close = text.indexOf("*/", index + 2);
+        return close === -1 ? text.length : close + 2;
+    }
+    if (char === '"' || char === "'") {
+        let cursor = index + 1;
+        while (cursor < text.length && text[cursor] !== char && text[cursor] !== "\n") cursor += text[cursor] === "\\" ? 2 : 1;
+        return cursor + 1;
+    }
+    if (char === "`") {
+        let cursor = index + 1;
+        while (cursor < text.length && text[cursor] !== "`") {
+            if (text[cursor] === "\\") {
+                cursor += 2;
+            } else if (text[cursor] === "$" && text[cursor + 1] === "{") {
+                let depth = 1;
+                cursor += 2;
+                while (cursor < text.length && depth > 0) {
+                    const inner = typescriptLexemeEnd(text, cursor);
+                    if (inner !== null) {
+                        cursor = inner;
+                        continue;
+                    }
+                    if (text[cursor] === "{") depth += 1;
+                    else if (text[cursor] === "}") depth -= 1;
+                    cursor += 1;
+                }
+            } else cursor += 1;
+        }
+        return cursor + 1;
+    }
+    return null;
 }
 
 
@@ -1887,9 +2014,18 @@ function rustLexemeEnd(text: string, index: number): number | null {
     return null;
 }
 
-/** Index just past the Rust item that starts at `from`: its closing brace or terminating `;`. */
+/**
+ * Index just past the Rust item or member that starts at `from`: its closing brace, its
+ * terminating `;`, or, for an enum variant or struct field, the `,` that ends the member.
+ * A `}` met before any `{` closes the enclosing type, so the member ends in front of it
+ * rather than swallowing the rest of the file. Commas inside parentheses, brackets, and
+ * generic angle brackets belong to the member; an angle bracket counts as generic when it
+ * directly follows an identifier, since an operator `<` in an item header is spaced.
+ */
 function rustItemEnd(text: string, from: number): number {
-    let depth = 0;
+    let braces = 0;
+    let groups = 0;
+    let angles = 0;
     let index = from;
     while (index < text.length) {
         const skipped = rustLexemeEnd(text, index);
@@ -1898,11 +2034,19 @@ function rustItemEnd(text: string, from: number): number {
             continue;
         }
         const char = text[index];
-        if (char === "{") depth += 1;
+        const previous = text[index - 1] ?? "";
+        if (char === "{") braces += 1;
         else if (char === "}") {
-            depth -= 1;
-            if (depth === 0) return index + 1;
-        } else if (char === ";" && depth === 0) return index + 1;
+            if (braces === 0) return index;
+            braces -= 1;
+            if (braces === 0) return index + 1;
+        } else if (braces === 0) {
+            if (char === "(" || char === "[") groups += 1;
+            else if (char === ")" || char === "]") groups = Math.max(0, groups - 1);
+            else if (char === "<" && /[A-Za-z0-9_>]/.test(previous)) angles += 1;
+            else if (char === ">" && previous !== "-" && angles > 0) angles -= 1;
+            else if ((char === ";" || char === ",") && groups === 0 && angles === 0) return index + 1;
+        }
         index += 1;
     }
     return text.length;
@@ -1911,26 +2055,34 @@ function rustItemEnd(text: string, from: number): number {
 /**
  * The source files a crate ships: every `.rs`, `.ts`, and `.tsx` under the crate except the
  * auto-discovered `tests/`, `benches/`, and `examples/` targets and any `[[test]]`,
- * `[[bench]]`, or `[[example]]` target the manifest names by path. A `[lib]` or `[[bin]]`
- * at a path outside `src/` is therefore scanned, as is a TypeScript file kept in a crate.
+ * `[[bench]]`, or `[[example]]` target the manifest names by path. A `[lib]`, `[[bin]]`, or
+ * build script the manifest names is scanned wherever it lives, even under one of those
+ * directory names, as is a TypeScript file kept in a crate.
  */
 export function productionCrateFiles(crateDir: string): string[] {
     const testOnly = new Set<string>();
+    const production = new Set<string>();
     const manifestPath = join(crateDir, "Cargo.toml");
     if (existsSync(manifestPath)) {
         const manifest = Bun.TOML.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
-        for (const kind of ["test", "bench", "example"]) {
-            const targets = manifest[kind];
-            if (!Array.isArray(targets)) continue;
-            for (const target of targets) {
+        const pathsOf = (value: unknown): string[] => {
+            const targets = Array.isArray(value) ? value : value === undefined ? [] : [value];
+            return targets.flatMap((target) => {
                 const path = (target as Record<string, unknown>).path;
-                if (typeof path === "string") testOnly.add(path.split(sep).join("/"));
-            }
-        }
+                return typeof path === "string" ? [path.split(sep).join("/")] : [];
+            });
+        };
+        for (const kind of ["test", "bench", "example"]) for (const path of pathsOf(manifest[kind])) testOnly.add(path);
+        // A library, binary, or build script the manifest places under a test directory
+        // name is still compiled into the crate, so it is scanned wherever it lives.
+        for (const kind of ["lib", "bin"]) for (const path of pathsOf(manifest[kind])) production.add(path);
+        const build = (manifest.package as Record<string, unknown> | undefined)?.build;
+        if (typeof build === "string") production.add(build.split(sep).join("/"));
     }
     return listFiles(crateDir, skipVendored).filter((rel) => {
         if (!rel.endsWith(".rs") && !rel.endsWith(".ts") && !rel.endsWith(".tsx")) return false;
         const normalized = rel.split(sep).join("/");
+        if (production.has(normalized)) return true;
         const top = normalized.split("/")[0];
         if (top === "tests" || top === "benches" || top === "examples") return false;
         return !testOnly.has(normalized);

@@ -5,9 +5,13 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
     NOT_APPLICABLE,
+    cfgPredicate,
+    pointerProblem,
     sha256,
+    typescriptDeclaredChecks,
     validateShape,
     verify,
+    withoutCfgTestItems,
     type CheckKind,
     type Context,
     fileSetDigest,
@@ -798,6 +802,105 @@ describe("shape: architecture impact", () => {
 // record names.
 const LEASE_SOURCE = "pub fn lease() {}\n#[test]\nfn lease_is_single_writer() {}\n";
 
+describe("check anchors and cfg(test) stripping", () => {
+    test("cfg predicates evaluate to a build-independent value or stay open", () => {
+        expect(cfgPredicate("any()")).toBe(false);
+        expect(cfgPredicate("all()")).toBe(true);
+        expect(cfgPredicate("test")).toBe(true);
+        expect(cfgPredicate("not(any())")).toBe(true);
+        expect(cfgPredicate("all(test, any())")).toBe(false);
+        expect(cfgPredicate("any(unix, any())")).toBeUndefined();
+        expect(cfgPredicate("unix")).toBeUndefined();
+        expect(cfgPredicate('all(unix, feature = "sqlite")')).toBeUndefined();
+        expect(cfgPredicate('not(feature = "x")')).toBeUndefined();
+    });
+
+    test("a Rust anchor must be a test that a build can run", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-anchor-"));
+        try {
+            mkdirSync(join(root, "crates/x/src"), { recursive: true });
+            writeFileSync(
+                join(root, "crates/x/src/lib.rs"),
+                [
+                    "#[cfg(any())]",
+                    "#[test]",
+                    "fn compiled_out() {}",
+                    "#[test]",
+                    "#[ignore]",
+                    "fn skipped() {}",
+                    "#[cfg(unix)]",
+                    "#[test]",
+                    "fn unix_only() {}",
+                    "#[cfg(all(test, not(any())))]",
+                    "#[tokio::test]",
+                    "async fn runs() {}",
+                    "",
+                ].join("\n"),
+            );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#compiled_out")).toBe(
+                "names compiled_out, which crates/x/src/lib.rs declares as a test that is compiled out by #[cfg(any())]",
+            );
+            expect(pointerProblem(root, "crates/x/src/lib.rs#skipped")).toBe("names skipped, which crates/x/src/lib.rs declares as a test that is marked #[ignore]");
+            expect(pointerProblem(root, "crates/x/src/lib.rs#unix_only")).toBeUndefined();
+            expect(pointerProblem(root, "crates/x/src/lib.rs#runs")).toBeUndefined();
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a TypeScript anchor is a call outside comments and strings", () => {
+        const text = [
+            '// test("in-comment", () => {})',
+            '/* it("in-block", () => {}) */',
+            'const s = \'describe("in-string", () => {})\';',
+            "const t = `test(\"in-template\", () => {}) ${describe(\"in-substitution\")}`;",
+            'test("real", () => {});',
+            "it('single', () => {});",
+            "describe.only(`backtick`, () => {});",
+            'test.skip("skipped", () => {});',
+        ].join("\n");
+        const declared = typescriptDeclaredChecks(text);
+        expect([...declared].sort()).toEqual(["backtick", "real", "single", "skipped"]);
+        const root = mkdtempSync(join(tmpdir(), "eidnara-anchor-"));
+        try {
+            mkdirSync(join(root, "packages/p/src"), { recursive: true });
+            writeFileSync(join(root, "packages/p/src/a.test.ts"), text);
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#in-comment")).toBe("names in-comment, which packages/p/src/a.test.ts does not declare");
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#in-string")).toBe("names in-string, which packages/p/src/a.test.ts does not declare");
+            expect(pointerProblem(root, "packages/p/src/a.test.ts#real")).toBeUndefined();
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("cfg(test) on a variant or field blanks that member only", () => {
+        const text = [
+            "pub enum Mode {",
+            "    Prod,",
+            "    #[cfg(test)]",
+            "    Test,",
+            "}",
+            "pub struct Cfg {",
+            "    pub a: HashMap<String, Vec<u8>>,",
+            "    #[cfg(test)]",
+            "    pub probe: Option<(u8, u8)>",
+            "}",
+            'pub const AFTER: &str = "after.db";',
+            "#[cfg(test)]",
+            "mod tests { const T: &str = \"only.db\"; }",
+            "",
+        ].join("\n");
+        const stripped = withoutCfgTestItems(text);
+        expect(stripped).toContain('"after.db"');
+        expect(stripped).toContain("pub struct Cfg {");
+        expect(stripped).toContain("    Prod,");
+        expect(stripped).not.toContain("Test,");
+        expect(stripped).not.toContain("probe");
+        expect(stripped).not.toContain("only.db");
+        expect(stripped.split("\n").length).toBe(text.split("\n").length);
+    });
+});
+
 describe("evidence: git-backed receipts", () => {
     let work: string;
     let source: string;
@@ -1377,11 +1480,16 @@ describe("evidence: git-backed receipts", () => {
     });
 
     test("registry scans follow Cargo targets rather than the src directory", () => {
-        // A crate whose library and binary live outside `src`, with a test target the
-        // manifest names by path and the auto-discovered test and example directories.
+        // A crate whose library, build script, and binary live outside `src` (two of them
+        // under test directory names), with a test target the manifest names by path and
+        // the auto-discovered test, example, and bench directories.
         const crate = join(destination, "crates/edge");
-        write(join(crate, "Cargo.toml"), '[package]\nname = "edge"\nversion = "0.1.0"\nedition = "2024"\n\n[lib]\npath = "lib.rs"\n\n[[bin]]\nname = "edge"\npath = "app/main.rs"\n\n[[test]]\nname = "named"\npath = "checks/named.rs"\n');
-        write(join(crate, "lib.rs"), 'pub const A: &str = "root-lib.db";\n');
+        write(
+            join(crate, "Cargo.toml"),
+            '[package]\nname = "edge"\nversion = "0.1.0"\nedition = "2024"\nbuild = "examples/build.rs"\n\n[lib]\npath = "tests/lib.rs"\n\n[[bin]]\nname = "edge"\npath = "app/main.rs"\n\n[[test]]\nname = "named"\npath = "checks/named.rs"\n',
+        );
+        write(join(crate, "tests/lib.rs"), 'pub const A: &str = "root-lib.db";\n');
+        write(join(crate, "examples/build.rs"), 'const G: &str = "build.db";\nfn main() {}\n');
         write(join(crate, "app/main.rs"), 'const B: &str = "bin.db";\nfn main() {}\n');
         write(join(crate, "checks/named.rs"), 'const C: &str = "named-test.db";\n');
         write(join(crate, "tests/it.rs"), 'const D: &str = "auto-test.db";\n');
@@ -1389,7 +1497,8 @@ describe("evidence: git-backed receipts", () => {
         write(join(crate, "benches/speed.rs"), 'const F: &str = "bench.db";\n');
         try {
             const errors = verify("registry", copy("registry"), ctx);
-            expect(errors).toContain('crates/edge/lib.rs: persistent literal "root-lib.db" has no family entry in the registry');
+            expect(errors).toContain('crates/edge/tests/lib.rs: persistent literal "root-lib.db" has no family entry in the registry');
+            expect(errors).toContain('crates/edge/examples/build.rs: persistent literal "build.db" has no family entry in the registry');
             expect(errors).toContain('crates/edge/app/main.rs: persistent literal "bin.db" has no family entry in the registry');
             for (const literal of ["named-test.db", "auto-test.db", "example.db", "bench.db"]) {
                 expect(errors.some((error) => error.includes(literal))).toBe(false);

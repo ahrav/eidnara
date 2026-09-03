@@ -421,6 +421,26 @@ mod sqlite_backend {
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
+    /// The first temp-schema object whose lower-cased name is one of `main_names`, if any.
+    fn temp_shadow_of(
+        conn: &Connection,
+        main_names: &std::collections::HashSet<String>,
+    ) -> Result<Option<String>, StoreError> {
+        let mut statement = conn
+            .prepare("SELECT name FROM temp.sqlite_schema ORDER BY name")
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        for name in rows {
+            let name = name.map_err(|e| StoreError::Backend(e.to_string()))?;
+            if main_names.contains(&name.to_ascii_lowercase()) {
+                return Ok(Some(name));
+            }
+        }
+        Ok(None)
+    }
+
     impl<'c> CallbackScope<'c> {
         /// Denies writes as well as the escapes, for a callback that must not mutate.
         fn read_only(conn: &'c Connection) -> Result<Self, StoreError> {
@@ -447,6 +467,16 @@ mod sqlite_backend {
         ) -> Result<Self, StoreError> {
             let infrastructure_before = infrastructure_objects(conn)?;
             let main_names = main_schema_names(conn)?;
+            // The authorizer denies a callback from creating a shadow, but maintenance
+            // through `with_conn_unfenced` may already have left one on this connection,
+            // and a callback's unqualified statement would resolve to it instead of the
+            // store's object.
+            if let Some(shadow) = temp_shadow_of(conn, &main_names)? {
+                return Err(StoreError::Backend(format!(
+                    "temporary object `{shadow}` shadows the store's `{shadow}` on this \
+                     connection; drop it before running a callback"
+                )));
+            }
             let scope = Self {
                 conn: Some(conn),
                 query_only_before,
@@ -2281,6 +2311,52 @@ mod tests {
             .with_conn(|conn| conn.query_row("SELECT count(*) FROM kv", [], |row| row.get(0)))
             .expect("count");
         assert_eq!(count, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A temp object that maintenance left under a main-schema name is refused when a
+    /// callback scope is installed, so a fenced write cannot commit into the shadow and a
+    /// read cannot answer from it; dropping the shadow restores both callbacks.
+    #[test]
+    fn a_preexisting_temp_shadow_refuses_callbacks_until_it_is_dropped() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_unfenced(|conn| {
+                conn.execute("CREATE TEMP TABLE KV (k TEXT PRIMARY KEY, v TEXT)", [])
+                    .map(|_| ())
+            })
+            .expect("maintenance creates a temp shadow");
+        let write = store.with_conn_fenced(|tx| {
+            tx.execute("INSERT INTO kv (k, v) VALUES ('a', 'b')", [])
+                .map(|_| ())
+        });
+        match write {
+            Err(StoreError::Backend(m)) => assert!(m.contains("shadows"), "{m}"),
+            other => panic!("the fenced callback must be refused, got {other:?}"),
+        }
+        let read = store.with_conn(|conn| {
+            conn.query_row("SELECT count(*) FROM kv", [], |row| row.get::<_, i64>(0))
+        });
+        match read {
+            Err(StoreError::Backend(m)) => assert!(m.contains("shadows"), "{m}"),
+            other => panic!("the read callback must be refused, got {other:?}"),
+        }
+        store
+            .with_conn_unfenced(|conn| conn.execute("DROP TABLE temp.KV", []).map(|_| ()))
+            .expect("maintenance drops the shadow");
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('a', 'b')", [])
+                    .map(|_| ())
+            })
+            .expect("the write reaches the store once the shadow is gone");
+        drop(store);
+        let reopened = open_sqlite(&d, KV_BASELINE).expect("reopen");
+        let count: i64 = reopened
+            .with_conn(|conn| conn.query_row("SELECT count(*) FROM kv", [], |row| row.get(0)))
+            .expect("count");
+        assert_eq!(count, 1, "the write after the drop is durable");
         let _ = std::fs::remove_dir_all(&root);
     }
 
