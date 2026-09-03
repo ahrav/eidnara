@@ -454,7 +454,7 @@
         "blob_sha": "d3173392fc353b22b4212bf352964ea3352d8bcd"
       },
       "destination": "crates/shm-transport/src/lease.rs",
-      "destination_sha256": "62460a87a1a4d14ddb2193b142065e379d8bd638fbbc9b1f531e5de741a5ed8c",
+      "destination_sha256": "b45004cc494dbb72223249dc342a3626ff5df07fbe349c31ba45fa6047bf2e74",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -480,7 +480,7 @@
         "blob_sha": "6b0ccd7089cc2c95c094724884827b0d1deea319"
       },
       "destination": "crates/shm-transport/src/lifecycle.rs",
-      "destination_sha256": "99d297f42bbae82a17671f5744d7ea0911ecdb2e1c6cfd8789d0b702c17dbd3e",
+      "destination_sha256": "3b0aff5a02f4bffc6826a1383e58d1e9c54aca899cfd641ee123149a056404b7",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -493,7 +493,7 @@
         "blob_sha": "ad5d90c9ebd03c0e51dadfbf36a3207a9dbd4a91"
       },
       "destination": "crates/shm-transport/src/profile.rs",
-      "destination_sha256": "415cf5d8c5e73025791db8074992718f6de6b3b1db5e32877d6d30d33664e40e",
+      "destination_sha256": "27338b7971769d6311d895ce27d54a7b27f7ff4f0c92662ffd0d9550345020a6",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -584,7 +584,7 @@
         "blob_sha": "f05ad6c56dee0883451abea88fb470663df7f4f0"
       },
       "destination": "crates/shm-transport/tests/ring.rs",
-      "destination_sha256": "cee8098ae5fdc6294c096c9a9cf56ffa89283e689e1b0e246bade4b4d22d9687",
+      "destination_sha256": "e66482441e50030a0dc46e8f404394bc631f8ef5f6af40bda51407cc3e6870b8",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -623,7 +623,7 @@
         "blob_sha": "99cde9828d4b571142f3a8c88cadd980e1a251d4"
       },
       "destination": "crates/tokenizer/gen/gen-claude-vocab.ts",
-      "destination_sha256": "02dab89b3a73e19006370961fa238ff135ee5aa712a583b97447b61850b630f6",
+      "destination_sha256": "2344c26d4ef064c7200a17adc86eff5c4f41591e15c9fcc659e4dd91798af695",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -790,7 +790,7 @@
         "blob_sha": "fc3b468c6305121f5b4c5f672523bc0a71453280"
       },
       "destination": "crates/host-runtime/examples/perf_load.rs",
-      "destination_sha256": "0adc895f59ed64efe6c294988cfc63718d95dbc92d042536eec2eb6b66095474",
+      "destination_sha256": "d27f099f610164f5f80433004aa9783a643c4b339361c918636f1987b02abb51",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -868,7 +868,7 @@
         "blob_sha": "9eecf6972428d434efce02616aa55fc9f709ba72"
       },
       "destination": "crates/host-runtime/src/config.rs",
-      "destination_sha256": "ff233bff1102184beefafb53e3064fa4f4ac67042487c879cb17e8e36a099c88",
+      "destination_sha256": "59079edc0571c37b7788ee08009a1fed5ecba86527f713be4bd1cfa3b7df74a7",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -998,7 +998,7 @@
         "blob_sha": "707162a54ea3dde08d328653d0e23992b8af981d"
       },
       "destination": "crates/host-runtime/src/instance.rs",
-      "destination_sha256": "0eb41de6b693bd41d3532908278fce69d3aa05e6a10a551b88a16b638ab11dbe",
+      "destination_sha256": "2f15bc303313d97885dc27b9b3674877767701fe127c0d49875e3d5040c6768c",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -1414,7 +1414,7 @@
         "blob_sha": "0b0d2a7c5d21ca089157371e854cf7b7490d3b6b"
       },
       "destination": "crates/host-runtime/tests/harness_closure.rs",
-      "destination_sha256": "52f87d6e76c3401af263b9a6af21c40fc86c4249187f3464344d6733556aa9a1",
+      "destination_sha256": "2bd84f3d243bae0189381226b67ec89b6fe9f1affd984f2698bc579bc17101e9",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -1583,7 +1583,7 @@
         "blob_sha": "0a032a48eb94a7c9659c3050e6ca2787494f1107"
       },
       "destination": "crates/host-runtime/tests/synapse_protocol.rs",
-      "destination_sha256": "14165449d691913549ec82202b0e2db277b9004c9e8e1c1f5b42e3d995d04bd5",
+      "destination_sha256": "682359c0cea8da20947e0b5a719ad1d9cc1b57604395e29c81505575ba811c3c",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -1997,7 +1997,7 @@
         "blob_sha": "30782fdaa82c6ec3fefa7ba55829c139d54141ac"
       },
       "destination": "docs/host-wire-protocol.md",
-      "destination_sha256": "d53b246b86de3e7d019aaa5a0c3145deadbe74040c87f6ee0e9b3ee5dc5a4fa9",
+      "destination_sha256": "a75415e67ed15185a9817b0bd80fdac11fc1343b2420b8456b671e8e86c021ea",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2042,9 +2042,977 @@
       }
     },
     {
+      "source": {
+        "repo": "host",
+        "blob_sha": "33b65a1644e04373f5ed6e871c5c6e331fb34add"
+      },
+      "destination": "docs/properties/shm-transport/catalog.md",
+      "destination_sha256": "a9c18bddc4859dea6d69840ae7d0284f8b259c7cf043057ef5f5a2b3ae8058a9",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "a4b3fababa9a0657888d6d794e84c54d0c75b036"
+      },
+      "destination": "docs/properties/shm-transport/existing-checks.md",
+      "destination_sha256": "02535d0d929c515488145ce7571e4c255b91efac52d1db1d465c7e6e30f7f11b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "688e871ee59ddddab5b3db2a2f6f288b07509411"
+      },
+      "destination": "docs/properties/shm-transport/fault-map.md",
+      "destination_sha256": "d794eb53d54ea7e9eb9d811c8bb9c64219e5ba0051aa324702fe59c91316c311",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "def2e8755cee91657bdd3435e671a92368c90d3f"
+      },
+      "destination": "docs/properties/shm-transport/portfolio-evaluation.md",
+      "destination_sha256": "b31e51603c39caf86a855299a158cfe6897b1fdf4a92f66f5f611d37080f3793",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shm-transport/index.json",
+      "destination_sha256": "54f0af8dd76542b07b34db487bb422f52c7d997892a31d2a1f79a5d9cf50f1e3",
+      "transformation": "generated",
+      "class": "generated",
+      "review_evidence": {
+        "regeneration": "bun scripts/eidnara-migration/generate-property-index.ts docs/properties/shm-transport --check"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "91d9cfa545c500ba9dff0516fd006ec45f0967d6"
+      },
+      "destination": "docs/properties/shm-transport/evidence/attach-binds-geometry-to-a-local-profile.md",
+      "destination_sha256": "6b17be3910ebd8fcbe5b18ac125ff4218b62d4236ec347e157d69294097393e7",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "4bdeb9b5fecbebf2aa581866849377daac0bfb60"
+      },
+      "destination": "docs/properties/shm-transport/evidence/capability-probe-gates-every-advertised-mechanism.md",
+      "destination_sha256": "3a8674b37d0d748ac3280d2d7f2b20a9cb275dac2cf5a741bb0965f6f0e14ae2",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "a9d773ee707de5c50817c13afe0944f745bbe4e4"
+      },
+      "destination": "docs/properties/shm-transport/evidence/charge-release-never-silently-strands.md",
+      "destination_sha256": "2263f55859fab04f5fd83820bf4276381ce2a93cb4c04b42238c7208abd72f85",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "b1cb5443671dacf37fc6b65ada07550d7ec05433"
+      },
+      "destination": "docs/properties/shm-transport/evidence/crashed-producer-does-not-wedge-the-sequence.md",
+      "destination_sha256": "e88cc1192b92a74855a6ca745f972bc088858331def6a622afb36dc0dc473a09",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "daaa617a3f70b6ac18994c569b2664ce877c72c0"
+      },
+      "destination": "docs/properties/shm-transport/evidence/decoder-totality-over-arbitrary-bytes.md",
+      "destination_sha256": "51d82074232619e41545ba8e17f254525f1648c9efdb5836cda3bb431d99c391",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "e3a32b0c410d06d79bd0782f758c87528d375166"
+      },
+      "destination": "docs/properties/shm-transport/evidence/fuzz-harness-encoding-tracks-the-production-descriptor.md",
+      "destination_sha256": "1f458ec31904aec6eb76aaef2cba7fbc894f7063f59483e956328ba3158d09dc",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "a70436fce358f0061cf3991957d8a6fbf0bbd958"
+      },
+      "destination": "docs/properties/shm-transport/evidence/grant-reserved-bytes-are-rejected-unless-zero.md",
+      "destination_sha256": "db7932cef9d3036d2a0c23d859b39e10ce97f92c8a2875e16b8cbb3ee97c2ff6",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "ed7fcfad6e3b47ea144bd00c521259ff36ff45bf"
+      },
+      "destination": "docs/properties/shm-transport/evidence/layout-region-offsets-are-real-page-aligned.md",
+      "destination_sha256": "d72dd349bc47fefcc558ddbc7601f394b46949ea7342a6e1b5e20b6e2bbf1729",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "7e94c0ad328da5531ff088f755d8992bd8cf4770"
+      },
+      "destination": "docs/properties/shm-transport/evidence/native-boundary-not-weaker-than-its-wrapper.md",
+      "destination_sha256": "5c7471c79252d6ae2f16b7d1ddc631f0e7dd47aa769bc79c9ade9ee7fa813129",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "b3b12f347f029250d0973ff8fe90715b3397c253"
+      },
+      "destination": "docs/properties/shm-transport/evidence/negative-tests-fail-for-their-stated-reason.md",
+      "destination_sha256": "2a5906c6115d85af3186ede2cafd78c77fbae9b2143c2e24bef74932dd82c251",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "493ccc42c7ab7cd12c0524bc4f1d6ae0b8c8e896"
+      },
+      "destination": "docs/properties/shm-transport/evidence/no-rust-reference-over-peer-writable-payload.md",
+      "destination_sha256": "6f26c14e4f20f33c9b4ce076fcacd8f8b4f99bd535bd9bd3320e776168831479",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "2c7277d6443877995497d5847550ed5b5dcd5552"
+      },
+      "destination": "docs/properties/shm-transport/evidence/one-profile-name-denotes-one-geometry.md",
+      "destination_sha256": "d72bb707f2788df497f16258dc4f72401e0e9cba04b55b31a0278b9537147d40",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "d812d674a10e35cbbe99f6b3452a2ac2a24bb492"
+      },
+      "destination": "docs/properties/shm-transport/evidence/quarantine-charge-transition-is-atomic.md",
+      "destination_sha256": "e4362c8a8732bd84fcbd6c2e2e2303cb6a8295e6c26e6d2838cb584e5b954d38",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "e05550028cfc477b41805cbcf99b6722e54ff1de"
+      },
+      "destination": "docs/properties/shm-transport/evidence/reclamation-keeps-pace-with-completion.md",
+      "destination_sha256": "e301b64518871191a62ce505e529b0c52d48ebba4c0198b1575506e65ee9de3c",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "9c93840e7bebf8197291f572c21026d3ef9a12d7"
+      },
+      "destination": "docs/properties/shm-transport/evidence/reservation-charge-visible-with-non-free-state.md",
+      "destination_sha256": "429cd152c2d4b791dbc5efd1838f5e373ce58072c19b2c8b7a5f7eb0e6354400",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "edc9a4c6a1e4aee4ec9681614ee32d6232c6f7b3"
+      },
+      "destination": "docs/properties/shm-transport/evidence/runtime-directory-authentication-is-a-precondition-not-a-container.md",
+      "destination_sha256": "06238cd17afc925ebfe30583f2f56530e762f26e7dbdedf96364b93b40aac275",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "f485b5600ade738fbbb5e9bd3cfc67560f152fff"
+      },
+      "destination": "docs/properties/shm-transport/evidence/runtime-directory-revalidation-rejects-a-substituted-directory.md",
+      "destination_sha256": "83f191ee06d80a6681f7055951c9ce045e7384e507c40ca0dea39d546785e1c1",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "a867280b7299ce3a692cfafeed2414a9b1234656"
+      },
+      "destination": "docs/properties/shm-transport/evidence/traceability-pointers-resolve.md",
+      "destination_sha256": "f01ad4c225b4129bf8c0c4c20c8c686907c63d4ef79df2bc112042d5efec663a",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "4eaca24f52a1f0472d79af26aae14d6462d5d372"
+      },
+      "destination": "docs/properties/shm-transport/evidence/wire-header-validation-precedes-every-consumer-action.md",
+      "destination_sha256": "e5bc802e2fadb85720f50ea53803cdc1a91bc4630f2a2767ff11d0f7fbee27f6",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "fafe8ae5ffe73376d6760f978b39fdbaeb8ed937"
+      },
+      "destination": "docs/properties/shm-transport/evidence/accepted-decode-consumes-its-declared-width.md",
+      "destination_sha256": "3a9436b7a0ed61474a59347271cc7c4ffe67dce96c469dd9aeb1253f2f7fa10b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "ab678a97909a5fe4495ae226e3a34ceb08968361"
+      },
+      "destination": "docs/properties/shm-transport/evidence/attach-reconciles-or-refuses-stale-shared-cursors.md",
+      "destination_sha256": "4ca6124b2fac3811b4d353b25c7838e97f051a0a1c23bf382d7174b06c2a93dd",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "830fe3da4724e71d242473ce1c320e1d5be1b566"
+      },
+      "destination": "docs/properties/shm-transport/evidence/attach-refuses-a-quarantined-object.md",
+      "destination_sha256": "a016018cd310f397fbfe5d16cb4533ddd0f26e881a10284f2eae64d10e7ec35b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "b44c7ba5ca680289899b9561657150375d326383"
+      },
+      "destination": "docs/properties/shm-transport/evidence/attach-validates-doorbell-eventfds.md",
+      "destination_sha256": "6c09b8ee62a820eb82cfaa29735c96e61365c820132b00dfcd84ef851f0a7a80",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "a17aa8855301d183800a43504c413e41f532355b"
+      },
+      "destination": "docs/properties/shm-transport/evidence/attach-validation-is-not-platform-weakened.md",
+      "destination_sha256": "14cd86e6513c72fe001dca3bced9a7445246b32a9a36c473607d4ea2884c1199",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "bae0c72aff3cf079d9bbcdc2802d0f9ddeab0cb6"
+      },
+      "destination": "docs/properties/shm-transport/evidence/backpressure-converges-in-a-bounded-reclaim-window.md",
+      "destination_sha256": "47feb63da74ad783b5ef15e5f268ae58e56bf4a8eff5c9660d931fa53c834c3c",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "8f3f788a0532c470c6945d3db14efdb8243b70e0"
+      },
+      "destination": "docs/properties/shm-transport/evidence/cancelled-frame-disposition-is-declared.md",
+      "destination_sha256": "d629c16554c70beaeec66a7c46f43df939a3e8ff99ab5b47d04dfc777f0ce74d",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "0cbbd5e598a55e1b1ec993b03fddd576e1b9ca57"
+      },
+      "destination": "docs/properties/shm-transport/evidence/capacity-recheck-after-a-wake-race.md",
+      "destination_sha256": "f7087f99463b8e4644b69e398098e7fe3c9410bf22fd8c9a8f45da735e3a6900",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "0b455bf44d6ad013ce4b76cfad4211f35d792638"
+      },
+      "destination": "docs/properties/shm-transport/evidence/clean-reclamation-is-reachable.md",
+      "destination_sha256": "a20cc4e730cb93f6be626df238df20abc06f02903621a0800a0fabac0ddf45b0",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "e5d7593bc3eca45a42d128d2b2cc0bee009c4117"
+      },
+      "destination": "docs/properties/shm-transport/evidence/custody-terminal-transition-exactly-once.md",
+      "destination_sha256": "c09bbf9ea86bf6fe128e80558d35fad962b3a31056111e058d7057fb5cee8ed3",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "81a4c27bd22553b1a19aeb1c8c6ab6eddea75287"
+      },
+      "destination": "docs/properties/shm-transport/evidence/dead-peer-charges-are-reclaimed-or-declared.md",
+      "destination_sha256": "29f2b5a657bf921edaa12a3c9bd246233908c8220046594677dc1205a37ea693",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "f8e6ca67bed12c2ea00bb42b7e731519a8e18fe0"
+      },
+      "destination": "docs/properties/shm-transport/evidence/documented-close-order-has-a-production-driver.md",
+      "destination_sha256": "b45c9c14f44094fc34a183f414bc44e7af2f96cf8fb0920f22a5529536319bb5",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "835818ddb1c4b444bc004108ef3a031af2e78c9b"
+      },
+      "destination": "docs/properties/shm-transport/evidence/duplex-overlap-is-reached.md",
+      "destination_sha256": "50ccc104e3f457eea2b83ce667ea7f08fa4cef6a0210cf1ff0df112126846931",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "ee0bcbbd5bd3aad4780e170a49ac1bbae37890d3"
+      },
+      "destination": "docs/properties/shm-transport/evidence/every-shm-header-consumer-applies-its-role-gate.md",
+      "destination_sha256": "d8cf4106f9b6ccc3a34f501d658408f754c873ffd81df49502582201848aac68",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "d24bef247bc5906a773821bcbfc79d38044bbb1c"
+      },
+      "destination": "docs/properties/shm-transport/evidence/header-rejection-effect-does-not-depend-on-the-catching-layer.md",
+      "destination_sha256": "47407f2a5c1129dc7fee8e4a362f85656f92169ffa0b8d8762b451c2e3003f80",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "c3433c0f0185286fd495ad9e23ec858d4e2c97bf"
+      },
+      "destination": "docs/properties/shm-transport/evidence/iceoryx-completion-is-observable-to-the-host.md",
+      "destination_sha256": "9c25aa92731b55ab7adfa92724dc8805c769fa3f3988810fb3820bd1fd4d575c",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "668efee68cd0a7d686e86f1d25015c425e9d2903"
+      },
+      "destination": "docs/properties/shm-transport/evidence/iceoryx-cross-process-pairing-is-reachable-or-declared.md",
+      "destination_sha256": "3444c2b9b4064d01b831613ef0416a252873ec48bb682e4cd0f73f8f5181ccd4",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "027e3180b221d44de190f5e244be6e682f8467ce"
+      },
+      "destination": "docs/properties/shm-transport/evidence/iceoryx-descriptor-rejection-is-terminal-or-declared.md",
+      "destination_sha256": "f82fa64eb28eadb1ca6bd8ee2f39f073b46b0c00fb26be54a97b32f4e6b8602f",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "973ea19fbf6c621917bfb5f37392e7e942ab8825"
+      },
+      "destination": "docs/properties/shm-transport/evidence/iceoryx-receive-expectation-tracks-the-delivered-stream.md",
+      "destination_sha256": "a86604a76cdadd1fdcdff09e98d7b140106a2d6bc68a5a6df04d3f5729df4b9a",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "978a21e31988e83329ea6b72f7ed4fabfa3fb718"
+      },
+      "destination": "docs/properties/shm-transport/evidence/iceoryx-saturation-is-bounded-non-blocking-backpressure.md",
+      "destination_sha256": "ab82adb594e28f3656ce5b2dbd9266f9c4f92da1b62c4f68dae5d87727bdba43",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "7b832448b7af53a3e1635350dc28b106e6cf366c"
+      },
+      "destination": "docs/properties/shm-transport/evidence/identity-and-schema-rejection-is-one-contract.md",
+      "destination_sha256": "741ba47b8a8c258b0f752be9bad79c3378194daff16445a0de0dbec480a5c2dd",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "fc29ac6ac6b940f386363bf3e9d53897ffef110e"
+      },
+      "destination": "docs/properties/shm-transport/evidence/ingress-charge-matches-the-bytes-copied-from-shared-storage.md",
+      "destination_sha256": "3a22dc480728fb3132d2f9bc9cba36e4bbb3322fd5b317f451f92b2109c12d34",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "63c76953469676ab0f45fead9a64b232f8c97863"
+      },
+      "destination": "docs/properties/shm-transport/evidence/lease-saturation-is-reached-then-drains.md",
+      "destination_sha256": "a5012bccb166f0d314bc1733ffabc41c3402a089d3b3933f56587c1ff344359f",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "62c2a9f715cf5b21bb153d5c5babf2edb34d7046"
+      },
+      "destination": "docs/properties/shm-transport/evidence/macos-object-creation-leaks-no-shm-name.md",
+      "destination_sha256": "310490f45da2a4350432431f22b04aee381dd964019c01d2d499e8ada22d49e2",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "1ad60e81da0fbbf70bd674b3c1435a355850dd87"
+      },
+      "destination": "docs/properties/shm-transport/evidence/macos-object-creation-outcome-is-attributed.md",
+      "destination_sha256": "f1cf113ecadd63abaf77bb65d146fffdd66fb7cf03921a6150ebed9ddecff6f9",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "1b5534e18b6afab53da7872c0bc862ced6b721ec"
+      },
+      "destination": "docs/properties/shm-transport/evidence/measured-transfer-is-witnessed-by-the-data.md",
+      "destination_sha256": "28321403f0c69f12157640e15b2be639251d4a1b184c3858d75f2a74b000ac8d",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "bc9557c2141fe826e8e8618bd30093feae8bfc4b"
+      },
+      "destination": "docs/properties/shm-transport/evidence/neither-direction-starves-the-other.md",
+      "destination_sha256": "d44f28a8a3612a5858a66de8e484e3636261a79a3396506c25b64893c03ed35d",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "a62ce1b8518ff05a438f00c9e603141b0fc54f4a"
+      },
+      "destination": "docs/properties/shm-transport/evidence/no-frame-observable-before-commit.md",
+      "destination_sha256": "d26fe5449b1b7f714738e2c5ccd2a9c51a28236c48dd6c2e20fdd6140b884c24",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "be7f3a2fb9986b2396d562274b1f1353c2483ed4"
+      },
+      "destination": "docs/properties/shm-transport/evidence/operation-counters-are-observed-not-declared.md",
+      "destination_sha256": "9360eb5ec1b612e6c73c8a843a357494aa76e0ee546308dae637dd4164e95966",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "e1c55b867734131607cd0cbe843d7dc177e462c1"
+      },
+      "destination": "docs/properties/shm-transport/evidence/page-size-dependent-setup-runs-on-a-non-4096-page-host.md",
+      "destination_sha256": "8393883b44269e4f5a7dc8ba0ed1abbd4dd9c31d4b211ec4e9c8a55401153a16",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "0712f949229939d41dbb81c0eb4fdc336049a642"
+      },
+      "destination": "docs/properties/shm-transport/evidence/publication-visibility-derives-only-from-the-published-cursor.md",
+      "destination_sha256": "e173887a73445a418f63d2bb9d88217b7be0173ff32568c4740b6a7fcc6aa83b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "f2fb8ffe9c60341ba7d0045bbe41a7d4742e690a"
+      },
+      "destination": "docs/properties/shm-transport/evidence/publish-signal-implies-committed-frame.md",
+      "destination_sha256": "4520b61a4bd091623af04f581c97d861290ecc9cad937e86eb0158c6025c5095",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "aa11682317482f53fc953d66f3506f6b92afe361"
+      },
+      "destination": "docs/properties/shm-transport/evidence/quarantine-authority-survives-peer-writes.md",
+      "destination_sha256": "156d77687e14417ffda27d8962bda8091e27651091371db9999b39cfe801018a",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "e838cb2a0b5dbe25cf86644b9b858df20ed9dd20"
+      },
+      "destination": "docs/properties/shm-transport/evidence/quarantine-gates-cover-every-storage-mutation.md",
+      "destination_sha256": "0256859dda1f84508174d9e0d6336488d806a35ed0f30ff24f006f6f7bed24cb",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "766cafcc6c0e2a8d728f0954fe769762a5c374c8"
+      },
+      "destination": "docs/properties/shm-transport/evidence/queued-write-needs-no-second-wake.md",
+      "destination_sha256": "9639c0c7ffd386c3f1edf00e9e0538034d769d03a522d6fec14a80f207057de4",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "6fad74d2e55a928a368a95c38d063f45a7c3122b"
+      },
+      "destination": "docs/properties/shm-transport/evidence/reactor-callback-is-one-in-flight.md",
+      "destination_sha256": "ffe0b5b5ce9668b66cf437b170741da43ed2139659340d08a02e427e0e032ef8",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "680803dd11ecd448cd76da8007cbdcbd65a9ff02"
+      },
+      "destination": "docs/properties/shm-transport/evidence/receive-failure-leaves-no-wedged-slot.md",
+      "destination_sha256": "d94d2b59813155633d46053af9c2a77b9afbb11a7177bf18c0feaa82ae5342fc",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "44616f21bb51de17b2184156b593fd82b4502f31"
+      },
+      "destination": "docs/properties/shm-transport/evidence/receive-resumes-when-lease-capacity-clears.md",
+      "destination_sha256": "ff9cef73163e5b1abdc01efb0f26a450314011cb651f8c46010b4982fd7ddb3c",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "ba3e0462a0c033d1b00433b8a0bf7bf983bd62e1"
+      },
+      "destination": "docs/properties/shm-transport/evidence/reclaim-advance-bounded-by-the-producer-reservation.md",
+      "destination_sha256": "1ad1398d51fdcaea9dd30e2756d355cd7eb98f2e4188ebc6b5814b1836880c04",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "99a1664a1c4d423f5c7d4e2fca0bf0fcb7d50e81"
+      },
+      "destination": "docs/properties/shm-transport/evidence/reclamation-excludes-pages-with-live-wrapped-bytes.md",
+      "destination_sha256": "762fcf9e27b25df996075677cb8a7bb8ba97f62d5d7cc90f333421de908ed847",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "f7e0336dfd46c1831d68eae0f69b563cec2c8510"
+      },
+      "destination": "docs/properties/shm-transport/evidence/release-authority-bound-to-lease-ownership.md",
+      "destination_sha256": "fabcae7727d130c75a3bc03f21da423588fb3c21818a6ae1199e6d742eaa580d",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "d84eefbafbf5b91dab129379ebc5c3f76ebd49a1"
+      },
+      "destination": "docs/properties/shm-transport/evidence/release-exactly-once-per-sequence.md",
+      "destination_sha256": "00e86e1f390ee3f8e70e0535558c0a9ddb7bc2fb8ac7bd7764b2e2f864da08a0",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "675d834ca5867b6a898fee88b80c86642bc19456"
+      },
+      "destination": "docs/properties/shm-transport/evidence/release-failure-is-observable.md",
+      "destination_sha256": "f673069c2aee68aa298a34f7adb8085a692c130edf57940347190eaddb12a36a",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "08a2d9d5135190f9a307e4af77a13adcd9fa3572"
+      },
+      "destination": "docs/properties/shm-transport/evidence/released-charges-wake-blocked-readers.md",
+      "destination_sha256": "f8203261ebcca2ad7ff34f4944b22fc9b9746ec4fcba2e29350f92cfb585cab2",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "458c6e9e1b23c5fdf09db3c9c947747515429c48"
+      },
+      "destination": "docs/properties/shm-transport/evidence/test-only-surface-absent-from-the-shipped-addon.md",
+      "destination_sha256": "cf516f9d1e55156f90d7462392815e875b2fa3c4b206e48ae342556e5f35cd54",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "9ee6a93346c179767d3491cefb70c765aa4021b1"
+      },
+      "destination": "docs/properties/shm-transport/evidence/validated-spans-are-disjoint-and-inside-the-arena.md",
+      "destination_sha256": "1283b9f0e83f7c231057736ab9366f584ca3aef4d80a52cf2b981fe93bc9ff34",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "ec66bf7180a9817c9252f9a0888fa49489ee219f"
+      },
+      "destination": "docs/properties/shm-transport/evidence/wake-published-during-readiness-callback-is-not-lost.md",
+      "destination_sha256": "629f9a8c3e68148d736f260175370b3c0f7751806e1434f59ad8f2eff8eeebf4",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "eba0ddfdcdcd544894b47d65000937b680d384cb"
+      },
+      "destination": "docs/properties/shm-transport/evidence/wire-header-field-authority-is-partitioned-and-coupled.md",
+      "destination_sha256": "b8d6b2d4dd0c299be3f7023eb8b7374054a709fb01854ab8997b0653d03e84e3",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "9a788b42353fc191f2c8241c316185b3acd86100"
+      },
+      "destination": "docs/properties/shm-transport/evidence/wire-header-fully-validated-before-any-consumer-acts.md",
+      "destination_sha256": "4318eb565e094bdbc08830fe2ddb140ff6e6dd6d3451446df330515cef9fe096",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shm-transport/evidence/setup-proof-vectors-pin-the-shared-hmac-transcript.md",
+      "destination_sha256": "32f94f7dd11179a05fc4afa74c5f771311395eafec3fafe34343c8c8006d2dd5",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
+      "destination_sha256": "4b074ef361a22a0991366d3b8dd336220bffcfdffc9345fb8dd557e33795f298",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "72d6e435364355bfbefec26c163576ff97e67245724a34e4060abd37d5fee0dd",
+      "destination_sha256": "bf9df26b37d8ca07ea0aa9057a907b209927a8260bd81c6658facb37684b5411",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -2055,76 +3023,11 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "a804315a319675f84e6e3050a39e5754b006b20e7e0d5cd0090e7e7537a4a397",
+      "destination_sha256": "6e5fda642a7ed905d7fbf98b6fbf51961727d50847f19de191972392cf605b9a",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
         "regeneration": "bun scripts/eidnara-migration/generate-property-index.ts docs/properties/host-runtime --check"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "aaae2a80ff94f9e9ee097ef4e9b5f4b096f44780"
-      },
-      "destination": "docs/properties/host-runtime/client-peer/existing-checks.md",
-      "destination_sha256": "6f49560810d1a6b6773ceecc165665822f0cb734944f66fb0cc0ae7adfc4a3c3",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "70f4eabbf2d12c461ce4b34170cd80179a121ac1"
-      },
-      "destination": "docs/properties/host-runtime/client-peer/fault-map.md",
-      "destination_sha256": "4c8e0f3383099307a029b815ea48ead61b3c6ab4e8d4bcec094a077e21bd3ff1",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "d8e2f4440eaee96fa53571ed433e8f9f073f996a"
-      },
-      "destination": "docs/properties/host-runtime/client-peer/portfolio-evaluation.md",
-      "destination_sha256": "ba746a69c933582342e2aba1d2a4b27ed0257be6c35264a23a99f5b4171d2f66",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "1aa5604c2183ea5068cccbb78fa47262dee1ce8e"
-      },
-      "destination": "docs/properties/host-runtime/client-peer/_lenses/lens-a-client-peer.md",
-      "destination_sha256": "323666fa095540445134dbfcb2377bf4e21ab536ab4228ae3dbb1c6c485dea2e",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "f1ea585a034d51f1e69ac7fc137f7f81e26f45ba"
-      },
-      "destination": "docs/properties/host-runtime/client-peer/_lenses/lens-b-claims-and-checks.md",
-      "destination_sha256": "3e46ae12f3ba163a8e42ece855e0273ace8a3a07fba4537be72e2d06b1fccd68",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
       }
     },
     {
@@ -2212,19 +3115,6 @@
       },
       "destination": "docs/properties/host-runtime/evidence/a-zero-length-read-ends-the-read-instead-of-looping.md",
       "destination_sha256": "75b22ebdc8c7e5257705ccebbc78f33db4d90801575911b3f3cb9b6c2d5e4a9b",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "958d50f3c6f0197b09ee3291f94eeaddcc17bf02"
-      },
-      "destination": "docs/properties/host-runtime/evidence/accepted-header-decode-is-a-bijection-on-twenty-one-bytes.md",
-      "destination_sha256": "84ee0cda09f9e2ba50a2852a25d204a3e4c1ace94a2c5532095fe865876b5bf9",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2323,199 +3213,6 @@
       }
     },
     {
-      "source": null,
-      "destination": "docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md",
-      "destination_sha256": "f4ab68867c1d24a166f2539ae865c9215f16c9193b80feda5e5524b2605ac9e5",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
-        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "23e57d62fe128fe33897ef394222c13fb696a467"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-a-clean-host-close-and-a-transport-failure-share-one-code.md",
-      "destination_sha256": "d7c1361c0790d09f62edeeca8b91ce16cdb4e50d8af3bb7828f65e34d3af4fa5",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "fea48f6591a5a9a25413dd7a7d405548a0cede59"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-a-close-completes-before-its-setup-goodbye-is-written.md",
-      "destination_sha256": "84601d8360076fb9a893811f96b8883525d11433e3e3da52416b46719b42a3c3",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "025598e756396f321e233440cc7bc752744c5789"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-a-dropped-pong-is-never-observable-to-the-client.md",
-      "destination_sha256": "31d2010daa5913cc3ce84e863d8377b6570d2b4fde2e54ae0b0ae7c05a3e1a24",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "12e9b57962cbd8a17fe4aa11995573f61f918211"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle.md",
-      "destination_sha256": "8446bc0ac2d70d2b48794e13fedf6a1fa2ab2c717a90c4417f64228e8e807ecd",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "39ababf10d7afa5180530bb6e306ba66e5c87c69"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-a-host-originated-cancel-retires-the-generation.md",
-      "destination_sha256": "4ab0c74de639f763e27b5b00dc95cf71c4f778c8428cd123dc1e9c40c24eb162",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "16e9fc8b78bad5b3c372cb70e9d9ded7278ddad2"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-a-retired-generation-forgets-why-it-retired.md",
-      "destination_sha256": "75ca9f32a70014b5eccd0f211c028772cf32ce1c9c8109f282a5b9456cb8c667",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "5e901e06126432ff27c2165a84b284bf80410690"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye.md",
-      "destination_sha256": "621ea35a9bef2ff6b07d8478cb1920cee9c7e4c6228fa375ef0fc43ee95279ed",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "d63d2dd9c79a620de075154803cd7b7452001754"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-every-in-flight-request-is-settled-with-a-classified-send-outcome.md",
-      "destination_sha256": "65af308fddf18344cc6bd92084b7358afd654a491a06ab9d51ee4917481eabe9",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "1fd048332ab8fcf13965f7bace34a135c5b98cbc"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-host-shutdown-success-rests-only-on-a-json-echo.md",
-      "destination_sha256": "26ff6c7e30b6d24e410a4cfb980c970954fb698182f2a2faf93027a3c1a9b423",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "755d30a924f9515430a48f3f2b5fee69015d1697"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-live-route-handles-are-bounded-only-by-the-host.md",
-      "destination_sha256": "a6fedffa175181b4b0dc412ebbd76954547da610fc147c0b316b9a7b8346231b",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "092f7aac20c842313b51c62fe9ebb8dc362f8d09"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-no-request-frame-carries-a-non-increasing-correlation.md",
-      "destination_sha256": "2d42ed81a5df10db9d538f8c726e92bbe125f96a4764e08e8763230d7d88d4d8",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "0b3c981863911b1424e0e49167d746f5c4261d7d"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget.md",
-      "destination_sha256": "ebecf524417585e499f987ed2f9dfe734fb70319b8f3dcaaa6fc970b6052f776",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "48e3ed5bd27f8c1eba7ae440b88c06a536244943"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-route-open-retries-treat-four-host-terminals-as-proof-of-no-bind.md",
-      "destination_sha256": "6321790987bd75a27d6d51e9f22a050ded00b6480245b09e50749ae7dbd3b14f",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "c4e034f1f802e4a36035dfc45c2c9fc63e34d729"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production.md",
-      "destination_sha256": "6330632aa2fab5e95440e01e29a96e71256447d0911a48a1ccbac9aa76ce2ff9",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
       "source": {
         "repo": "host",
         "blob_sha": "287d82bf2b868b7df668f67280dfce8c85c9068f"
@@ -2544,82 +3241,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "613d267de59c4dd43c889a094668d2a4f6025d7e"
-      },
-      "destination": "docs/properties/host-runtime/evidence/composite-panic-containment-covers-only-optional-health-and-shutdown.md",
-      "destination_sha256": "7a312b2d69653919b41e7ad698895bdabd9a0cb614269565da2c4d84c7365890",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "5ddbb9260a59ce9e8234059c6b8efdfcd0f21e27"
-      },
-      "destination": "docs/properties/host-runtime/evidence/composite-route-entry-is-removed-by-exactly-one-route-gone.md",
-      "destination_sha256": "3528963c7eab6d153b9909fb9c9d6c15b8a9ff98c611a2e30187e6e0fd45cbc2",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": null,
-      "destination": "docs/properties/host-runtime/evidence/coordination-locks-live-beside-the-managed-subtree.md",
-      "destination_sha256": "98cc2907840f03b15c9d6618aae6d0332cb313a2d68abe9f9ece0fafeddcc87d",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
-        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
-      }
-    },
-    {
-      "source": null,
-      "destination": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
-      "destination_sha256": "6f3a0e41f6a36b56241305fde45764ccbe29a2d672d0533a6ed61a78892ac3b6",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
-        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
         "blob_sha": "cd7cc85f40db5d6856c04add95a8e79edf8e063e"
       },
       "destination": "docs/properties/host-runtime/evidence/current-profile-never-names-an-unvalidatable-generation.md",
       "destination_sha256": "313182322f25163d7576006714e749ebf679ac7e4007ad362d101f0bdf3aaa34",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": null,
-      "destination": "docs/properties/host-runtime/evidence/data-root-resolves-under-the-managed-directory.md",
-      "destination_sha256": "09f59f26b48722fe24aad914ab9ccdab2cfd3fbdae4a8ba2da0e10e7f760b862",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
-        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "6247575b448e41ebd4bac7e555db7dab48b3e548"
-      },
-      "destination": "docs/properties/host-runtime/evidence/decode-header-is-total-over-arbitrary-bytes.md",
-      "destination_sha256": "f68aab5b491ce8074399fea28f02d5fdc1bbae682dc6e3679838d76e476a3599",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2646,19 +3271,6 @@
       },
       "destination": "docs/properties/host-runtime/evidence/draining-rendezvous-is-released-or-the-loss-is-declared.md",
       "destination_sha256": "2b414e8bf2e852159bd09c3e300b20a3f82ce2292161a967298b5678f12ac4c9",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "ae5f92c7ad057562d06dabf737070a8704acf269"
-      },
-      "destination": "docs/properties/host-runtime/evidence/encoder-never-emits-a-frame-its-own-decoder-rejects.md",
-      "destination_sha256": "6e410aa189010c2341a471154fbf25e7728bf0510b3d5e8aab691b8c7012a349",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2731,17 +3343,6 @@
       }
     },
     {
-      "source": null,
-      "destination": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "destination_sha256": "dcfc6d9dda7e1d813e292f0f8b87d155c4325daec60d72ece628aacefaa4e370",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
-        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
-      }
-    },
-    {
       "source": {
         "repo": "host",
         "blob_sha": "6fb7ea9d03cf6c1c991f1eaf7614cbdc38f3b5c5"
@@ -2752,17 +3353,6 @@
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": null,
-      "destination": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
-      "destination_sha256": "beb56db493a76f773db71a6102c7fb41462954bb13749b7b7365f8e3ee616020",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
-        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
       }
     },
     {
@@ -2976,188 +3566,6 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "81f3a90144aa2c458fea9bc91ec49ae619931b58"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-a-handler-outliving-every-host-deadline-is-reached.md",
-      "destination_sha256": "b4e893d8620899210b6d3aa4ec6195380540bd94c3f80f14b0a59a8d76380659",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "90b551431729f395017a30de38a9cc357adad396"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-a-handler-response-is-length-checked-and-never-content-checked.md",
-      "destination_sha256": "c1604367fa346d95f9e59ba968e7dcb9feeb31f5c8f6a92f07e927ce29d73f39",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "431cc29d7d16421c3bd29cb3fe720ebdc6c478dc"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired.md",
-      "destination_sha256": "9bbd015eb568c7dd776e15a8e9b23dc3ae9a0504eb74d21c004af887247fe7ed",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "ef10c93b852ecbcb2098b01560d8bc548ae887f4"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-a-response-publication-failure-never-reaches-the-settling-path.md",
-      "destination_sha256": "ad067e622440a530c23adf125ff2494a204e31fe3dfba88d1924701c1ea7e616",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "d4e353421135987c924d6b9ea4e296c637c8ce0c"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining.md",
-      "destination_sha256": "1049179f1d79f11e1af42a06a35b15cc517008435d3afc6a1b2f3c30ed6f3f3e",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "416a17134a8f289110fcdeaad99e3fdf02f67bf6"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-a-routed-terminal-carries-no-delivery-acknowledgement.md",
-      "destination_sha256": "51ff4c1ea783e22175b9ba349a97cc7a6b40da7ff24b3d3184d8f244d222e0b3",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "351343a57ee9d361057a51b12a12e70f9a95fe27"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame.md",
-      "destination_sha256": "adfa1774d7d9381b6e1347a37ff5cc371d9c93fcfa442eb68cb14e07760127ec",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "eda4633bd11d4873d935a27c849c8e0867ba7f4b"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-both-admission-classes-and-the-rejection-bound-saturate.md",
-      "destination_sha256": "ab14d41c7d04d2b03d34c4fd8b50beb56da524b48e94b000823af9cedf33e482",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "3d16a552b11d9be3316e4b75e52667a8df434f6f"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md",
-      "destination_sha256": "45a3bdd4f21702feed5d3a42e5b70398a4b72d1d6321061499359894282a4351",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "ec2cf71dac43e0890de4f03f22684189538b2f84"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-handler-authored-diagnostics-are-capped-before-any-egress-wait.md",
-      "destination_sha256": "bbcc55ea4b4ad4c34f6fb7b33693fe93aef0933cf2d9e9155335358a4b894c76",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "4d25ef64c763f7d875e56f4f82d185d6f7ca5b4d"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs.md",
-      "destination_sha256": "074531a95c991ae2145e341ac5b955731e2941bd4cb8003da72875b8bfacdcbe",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "a3efb462fe8c587f51dae4caeaa63d3f0c565839"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-no-emission-reaches-a-retired-generation-or-a-settled-correlation.md",
-      "destination_sha256": "e6c3d19e4722b019105ec50527581c886b740ae385ae39a9bd5b8034e0139fcf",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "82b4f34fe8769c752ff3ffd37b28dff87081d7af"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes.md",
-      "destination_sha256": "b9c5c1800318376bb2536ce4ae72dcd61dbc9a9f684c99d38af50c9fd9676d69",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "4cdf29607af55d15c344692be8e01e86a1ce83b1"
-      },
-      "destination": "docs/properties/host-runtime/evidence/req-a-three-control-rejection-paths-carry-three-different-bounds.md",
-      "destination_sha256": "b585abf0be7fb785bfb6e267a7e75e63e4cf8cf12712e5f100244ff3cd4bf7fb",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
         "blob_sha": "4cff0c3f49546e2e3eac4fb33c71fa763084c559"
       },
       "destination": "docs/properties/host-runtime/evidence/request-correlation-strictly-increases-per-generation.md",
@@ -3171,10 +3579,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "860b408ad11395579d8f05de0c8a67b8c2459f6e"
+        "blob_sha": "1a17fbceb0c495bade334d1b87109a29c4c7229c"
       },
-      "destination": "docs/properties/host-runtime/evidence/reserved-encodings-and-identity-pairings-reject-at-decode.md",
-      "destination_sha256": "f418b13758cd174140ac7e2013d6196f351e0483478ff2ad6660e7866d13565c",
+      "destination": "docs/properties/host-runtime/evidence/retirement-discards-only-through-the-discard-token.md",
+      "destination_sha256": "b1267f027f5ef89336223e4c226f06bb4448df599da607cfee4db9cd2ff91c54",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3184,10 +3592,205 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "1a17fbceb0c495bade334d1b87109a29c4c7229c"
+        "blob_sha": "8eb289d460ccbcd9c73410c1c6872fca3e672eb5"
       },
-      "destination": "docs/properties/host-runtime/evidence/retirement-discards-only-through-the-discard-token.md",
-      "destination_sha256": "b1267f027f5ef89336223e4c226f06bb4448df599da607cfee4db9cd2ff91c54",
+      "destination": "docs/properties/host-runtime/evidence/setup-readiness-is-decided-by-one-predicate.md",
+      "destination_sha256": "d8288e633d7ede4c0337526b29df212c07bcee0f2897bf9abcbe4c21954d6f41",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "334a90c5d64d2bbc40ee6b0fe75a6f2f021ff010"
+      },
+      "destination": "docs/properties/host-runtime/evidence/setup-selection-is-sticky-for-the-generation.md",
+      "destination_sha256": "97674876b89ccb168127ee512da34d371b1598e350a3fe05427076f1aef8f57c",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "6df4cd1f3e000a404848f37ed55eee9965b2dcbd"
+      },
+      "destination": "docs/properties/host-runtime/evidence/shutdown-commit-effects-are-all-or-nothing.md",
+      "destination_sha256": "9bad8d4c8b6c3cfc105e5d6d65a16d31ce26c0508c579b6f66f77ab40008dabd",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "1df694ceafe9c895f6897f10b64eb3125ba85cf2"
+      },
+      "destination": "docs/properties/host-runtime/evidence/shutdown-commits-exactly-once-on-write-ack.md",
+      "destination_sha256": "a48d2d0e6f54bbf27f7ea532e55bd6c13a63c98c2f2ad25a68bc06ffe6810bbb",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "d95b5b8631167d7ac267c8e7324617033779c8ce"
+      },
+      "destination": "docs/properties/host-runtime/evidence/slow-egress-alone-does-not-retire-a-probed-generation.md",
+      "destination_sha256": "66de8dc01204c34b7a3f43415bc78ad3c763c239426c5e2ed67576ac70f60bf4",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "772a2aa85d82d5550e85695c8f0eeceebe5b91ce"
+      },
+      "destination": "docs/properties/host-runtime/evidence/stopping-precedes-unpublication-on-every-path.md",
+      "destination_sha256": "aaa619c13fe61ee9bc979543180832a29246f689499136d95c0f21a7dc002ba9",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "2bd8adc26403875e01771a147f899fa280e596db"
+      },
+      "destination": "docs/properties/host-runtime/evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md",
+      "destination_sha256": "906f21a7f708f03558ee7b3e47b4f73a4fbbd999e4f9e8408d784b54d993e3ae",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "6c67e482c945f26c901a1e92e99c5fa193469755"
+      },
+      "destination": "docs/properties/host-runtime/evidence/the-client-body-budget-refusal-drain-is-never-entered.md",
+      "destination_sha256": "837634f433d8704b7aeb7f878a4429c06b8c9fb483d020883dc7bc97b19aa624",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "9b30d31d60c9f8033900ff4c2f0c21ee02faf15a"
+      },
+      "destination": "docs/properties/host-runtime/evidence/the-largest-lifecycle-proof-runs-in-ci.md",
+      "destination_sha256": "f6bf4e38dfd444594069aec5ddf2b610149a50ce93161f032796383c8d9af82d",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "87f479c57f62322dc86dca40a7a957cd90ad08ce"
+      },
+      "destination": "docs/properties/host-runtime/evidence/the-panic-hook-cannot-itself-fail.md",
+      "destination_sha256": "04b7eb602bcc417abbfdd541c189e4e8995708235d45c28188bfd2e13f6b1fdf",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "c886320ec67b68658a088d00874b782d450f9c48"
+      },
+      "destination": "docs/properties/host-runtime/evidence/the-writer-task-is-abortable-through-a-stated-owner.md",
+      "destination_sha256": "18f8c98b996d7aa3004881b11e9e7c2f4a0c8edac5d9df6bc2c319c11062f576",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "bcc61c305849809db45510ed1aa997c393e72aba"
+      },
+      "destination": "docs/properties/host-runtime/evidence/validation-and-enumeration-address-one-directory-object.md",
+      "destination_sha256": "789d37db5bb6cb78577addc5327e24527162600001aacfeb742dce3e7f41df22",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "958d50f3c6f0197b09ee3291f94eeaddcc17bf02"
+      },
+      "destination": "docs/properties/host-runtime/evidence/accepted-header-decode-is-a-bijection-on-twenty-one-bytes.md",
+      "destination_sha256": "84ee0cda09f9e2ba50a2852a25d204a3e4c1ace94a2c5532095fe865876b5bf9",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "6247575b448e41ebd4bac7e555db7dab48b3e548"
+      },
+      "destination": "docs/properties/host-runtime/evidence/decode-header-is-total-over-arbitrary-bytes.md",
+      "destination_sha256": "f68aab5b491ce8074399fea28f02d5fdc1bbae682dc6e3679838d76e476a3599",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "ae5f92c7ad057562d06dabf737070a8704acf269"
+      },
+      "destination": "docs/properties/host-runtime/evidence/encoder-never-emits-a-frame-its-own-decoder-rejects.md",
+      "destination_sha256": "6e410aa189010c2341a471154fbf25e7728bf0510b3d5e8aab691b8c7012a349",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "860b408ad11395579d8f05de0c8a67b8c2459f6e"
+      },
+      "destination": "docs/properties/host-runtime/evidence/reserved-encodings-and-identity-pairings-reject-at-decode.md",
+      "destination_sha256": "f418b13758cd174140ac7e2013d6196f351e0483478ff2ad6660e7866d13565c",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3370,188 +3973,6 @@
       },
       "destination": "docs/properties/host-runtime/evidence/ring-a-segmented-inbound-body-has-no-production-producer.md",
       "destination_sha256": "83ca5dd584135b65738fe43822736f559a41a27003fd08118d4411b3a639b5c1",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "87058c4797a7d0557e84a15d247f109d9824639d"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-a-closure-store-open-failure-is-classified-not-swallowed.md",
-      "destination_sha256": "cb3846e9d24e9d7e82d48bea674e47ed0bcae7222ac726a0dac70d558bdae8e5",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "2676c43418a0130f520c5730e5084fa58d53b862"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval.md",
-      "destination_sha256": "90d26924b54fcd10ca38331203e116ef0e62b5967d20d68202d63261c2a4720b",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "e47e1d8665ba814af7b236ac8911e717f214e225"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-an-initialized-handler-drains-without-publishing.md",
-      "destination_sha256": "df678ab5468087131620467b3242df45a55c7d8f6fe9163aa2c8d9349f15f1f2",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "b405d534896ea908e95e98a4645c104b4af33e53"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-an-unprobed-health-snapshot-is-distinguishable-from-a-degraded-one.md",
-      "destination_sha256": "1dd9fa0f273d4edb36999ed53c74beefa2ce26839596d1e83faf27d18bc9c37b",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "d210871819cd07ab9da2f56b3c64b69981c351b8"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-configuration-is-frozen-for-the-incarnation.md",
-      "destination_sha256": "b65b98f743eb885f2f3b398157619655a015a20407ab965bbf48b4e04b207d2b",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "05c483886b008e22ff9646594be76082af575001"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-every-published-configuration-field-changes-host-behaviour.md",
-      "destination_sha256": "502c10c6916e6f51a9fe421bf49f9c807122c9aed5ad6736e6ddbadaf3a3fbd2",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "93f84ddeeae3a80705e01196da3227f5b13585d1"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline.md",
-      "destination_sha256": "ffe5f2c6bfe558863deb65093ed6543722ed4e3ae5c25a6f4be3a02eecb5f2a2",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "0995c04525c11be3187f13b481f0aa39bba88faa"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-no-configured-limit-is-silently-clamped.md",
-      "destination_sha256": "550e886563f8a94aa2303cfa57461ecb819fa9528ddf015ae974ff7ebc973057",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "2e6c1890a59c92abc9ff31c254e891ffcfbed3f2"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration.md",
-      "destination_sha256": "ac977a1e288a7ddba5639b56f822fcddac3eca07b8104f0ee3064bea33d192fa",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "6b883b1a2422d0c42233a5462ff293339d7dec2f"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-startup-refuses-every-configuration-it-cannot-fund.md",
-      "destination_sha256": "13978cd55fac09425f12b80fca181deddb05ceef800ec5db871a8a0e6a122e26",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "81389f733b24c6a7bdaf4c1c44a0b5808b725ce5"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-the-activation-fast-probe-interval-is-entered.md",
-      "destination_sha256": "5f337e8b2233e140c8ac087c32d74b23be41074d60c614c19c01df7e628a9cd6",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "a62a0c7f295409465721d913f51e8174ce53de5d"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-the-default-configuration-arms-no-liveness-probe.md",
-      "destination_sha256": "5a3baafb3653b71b0839e5c953b204bc4c9e0807b59be33cdcf9dd5f87ae6dc3",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "a9ad120962180f59e47318318f0ac50892f929aa"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-the-ingress-pool-derivation-cannot-underflow.md",
-      "destination_sha256": "592f83c8700da1781cec75972bd4eb87a949d4ae400cbe870164597e943d785f",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "ebf714db4eced3f7f00b76ec052e24e21fa89744"
-      },
-      "destination": "docs/properties/host-runtime/evidence/rt-a-the-serial-setup-budget-triples-the-configured-transport-deadline.md",
-      "destination_sha256": "0845cd7addd742cc6f2ffdbbc737fbc1be0305a1851de95de6ffcf94b98c4773",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3756,10 +4177,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "8eb289d460ccbcd9c73410c1c6872fca3e672eb5"
+        "blob_sha": "23e57d62fe128fe33897ef394222c13fb696a467"
       },
-      "destination": "docs/properties/host-runtime/evidence/setup-readiness-is-decided-by-one-predicate.md",
-      "destination_sha256": "d8288e633d7ede4c0337526b29df212c07bcee0f2897bf9abcbe4c21954d6f41",
+      "destination": "docs/properties/host-runtime/evidence/client-a-a-clean-host-close-and-a-transport-failure-share-one-code.md",
+      "destination_sha256": "d7c1361c0790d09f62edeeca8b91ce16cdb4e50d8af3bb7828f65e34d3af4fa5",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3769,10 +4190,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "334a90c5d64d2bbc40ee6b0fe75a6f2f021ff010"
+        "blob_sha": "fea48f6591a5a9a25413dd7a7d405548a0cede59"
       },
-      "destination": "docs/properties/host-runtime/evidence/setup-selection-is-sticky-for-the-generation.md",
-      "destination_sha256": "97674876b89ccb168127ee512da34d371b1598e350a3fe05427076f1aef8f57c",
+      "destination": "docs/properties/host-runtime/evidence/client-a-a-close-completes-before-its-setup-goodbye-is-written.md",
+      "destination_sha256": "84601d8360076fb9a893811f96b8883525d11433e3e3da52416b46719b42a3c3",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3782,10 +4203,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "6df4cd1f3e000a404848f37ed55eee9965b2dcbd"
+        "blob_sha": "025598e756396f321e233440cc7bc752744c5789"
       },
-      "destination": "docs/properties/host-runtime/evidence/shutdown-commit-effects-are-all-or-nothing.md",
-      "destination_sha256": "9bad8d4c8b6c3cfc105e5d6d65a16d31ce26c0508c579b6f66f77ab40008dabd",
+      "destination": "docs/properties/host-runtime/evidence/client-a-a-dropped-pong-is-never-observable-to-the-client.md",
+      "destination_sha256": "31d2010daa5913cc3ce84e863d8377b6570d2b4fde2e54ae0b0ae7c05a3e1a24",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3795,10 +4216,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "1df694ceafe9c895f6897f10b64eb3125ba85cf2"
+        "blob_sha": "12e9b57962cbd8a17fe4aa11995573f61f918211"
       },
-      "destination": "docs/properties/host-runtime/evidence/shutdown-commits-exactly-once-on-write-ack.md",
-      "destination_sha256": "a48d2d0e6f54bbf27f7ea532e55bd6c13a63c98c2f2ad25a68bc06ffe6810bbb",
+      "destination": "docs/properties/host-runtime/evidence/client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle.md",
+      "destination_sha256": "8446bc0ac2d70d2b48794e13fedf6a1fa2ab2c717a90c4417f64228e8e807ecd",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3808,10 +4229,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "d95b5b8631167d7ac267c8e7324617033779c8ce"
+        "blob_sha": "39ababf10d7afa5180530bb6e306ba66e5c87c69"
       },
-      "destination": "docs/properties/host-runtime/evidence/slow-egress-alone-does-not-retire-a-probed-generation.md",
-      "destination_sha256": "66de8dc01204c34b7a3f43415bc78ad3c763c239426c5e2ed67576ac70f60bf4",
+      "destination": "docs/properties/host-runtime/evidence/client-a-a-host-originated-cancel-retires-the-generation.md",
+      "destination_sha256": "4ab0c74de639f763e27b5b00dc95cf71c4f778c8428cd123dc1e9c40c24eb162",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3821,10 +4242,504 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "772a2aa85d82d5550e85695c8f0eeceebe5b91ce"
+        "blob_sha": "16e9fc8b78bad5b3c372cb70e9d9ded7278ddad2"
       },
-      "destination": "docs/properties/host-runtime/evidence/stopping-precedes-unpublication-on-every-path.md",
-      "destination_sha256": "aaa619c13fe61ee9bc979543180832a29246f689499136d95c0f21a7dc002ba9",
+      "destination": "docs/properties/host-runtime/evidence/client-a-a-retired-generation-forgets-why-it-retired.md",
+      "destination_sha256": "75ca9f32a70014b5eccd0f211c028772cf32ce1c9c8109f282a5b9456cb8c667",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "5e901e06126432ff27c2165a84b284bf80410690"
+      },
+      "destination": "docs/properties/host-runtime/evidence/client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye.md",
+      "destination_sha256": "621ea35a9bef2ff6b07d8478cb1920cee9c7e4c6228fa375ef0fc43ee95279ed",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "d63d2dd9c79a620de075154803cd7b7452001754"
+      },
+      "destination": "docs/properties/host-runtime/evidence/client-a-every-in-flight-request-is-settled-with-a-classified-send-outcome.md",
+      "destination_sha256": "65af308fddf18344cc6bd92084b7358afd654a491a06ab9d51ee4917481eabe9",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "755d30a924f9515430a48f3f2b5fee69015d1697"
+      },
+      "destination": "docs/properties/host-runtime/evidence/client-a-live-route-handles-are-bounded-only-by-the-host.md",
+      "destination_sha256": "a6fedffa175181b4b0dc412ebbd76954547da610fc147c0b316b9a7b8346231b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "092f7aac20c842313b51c62fe9ebb8dc362f8d09"
+      },
+      "destination": "docs/properties/host-runtime/evidence/client-a-no-request-frame-carries-a-non-increasing-correlation.md",
+      "destination_sha256": "2d42ed81a5df10db9d538f8c726e92bbe125f96a4764e08e8763230d7d88d4d8",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "0b3c981863911b1424e0e49167d746f5c4261d7d"
+      },
+      "destination": "docs/properties/host-runtime/evidence/client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget.md",
+      "destination_sha256": "ebecf524417585e499f987ed2f9dfe734fb70319b8f3dcaaa6fc970b6052f776",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "48e3ed5bd27f8c1eba7ae440b88c06a536244943"
+      },
+      "destination": "docs/properties/host-runtime/evidence/client-a-route-open-retries-treat-four-host-terminals-as-proof-of-no-bind.md",
+      "destination_sha256": "6321790987bd75a27d6d51e9f22a050ded00b6480245b09e50749ae7dbd3b14f",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "c4e034f1f802e4a36035dfc45c2c9fc63e34d729"
+      },
+      "destination": "docs/properties/host-runtime/evidence/client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production.md",
+      "destination_sha256": "6330632aa2fab5e95440e01e29a96e71256447d0911a48a1ccbac9aa76ce2ff9",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "1fd048332ab8fcf13965f7bace34a135c5b98cbc"
+      },
+      "destination": "docs/properties/host-runtime/evidence/client-a-host-shutdown-success-rests-only-on-a-json-echo.md",
+      "destination_sha256": "26ff6c7e30b6d24e410a4cfb980c970954fb698182f2a2faf93027a3c1a9b423",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "613d267de59c4dd43c889a094668d2a4f6025d7e"
+      },
+      "destination": "docs/properties/host-runtime/evidence/composite-panic-containment-covers-only-optional-health-and-shutdown.md",
+      "destination_sha256": "7a312b2d69653919b41e7ad698895bdabd9a0cb614269565da2c4d84c7365890",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "5ddbb9260a59ce9e8234059c6b8efdfcd0f21e27"
+      },
+      "destination": "docs/properties/host-runtime/evidence/composite-route-entry-is-removed-by-exactly-one-route-gone.md",
+      "destination_sha256": "3528963c7eab6d153b9909fb9c9d6c15b8a9ff98c611a2e30187e6e0fd45cbc2",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "81f3a90144aa2c458fea9bc91ec49ae619931b58"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-a-handler-outliving-every-host-deadline-is-reached.md",
+      "destination_sha256": "b4e893d8620899210b6d3aa4ec6195380540bd94c3f80f14b0a59a8d76380659",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "90b551431729f395017a30de38a9cc357adad396"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-a-handler-response-is-length-checked-and-never-content-checked.md",
+      "destination_sha256": "c1604367fa346d95f9e59ba968e7dcb9feeb31f5c8f6a92f07e927ce29d73f39",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "431cc29d7d16421c3bd29cb3fe720ebdc6c478dc"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired.md",
+      "destination_sha256": "9bbd015eb568c7dd776e15a8e9b23dc3ae9a0504eb74d21c004af887247fe7ed",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "ef10c93b852ecbcb2098b01560d8bc548ae887f4"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-a-response-publication-failure-never-reaches-the-settling-path.md",
+      "destination_sha256": "ad067e622440a530c23adf125ff2494a204e31fe3dfba88d1924701c1ea7e616",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "d4e353421135987c924d6b9ea4e296c637c8ce0c"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining.md",
+      "destination_sha256": "1049179f1d79f11e1af42a06a35b15cc517008435d3afc6a1b2f3c30ed6f3f3e",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "416a17134a8f289110fcdeaad99e3fdf02f67bf6"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-a-routed-terminal-carries-no-delivery-acknowledgement.md",
+      "destination_sha256": "51ff4c1ea783e22175b9ba349a97cc7a6b40da7ff24b3d3184d8f244d222e0b3",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "351343a57ee9d361057a51b12a12e70f9a95fe27"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame.md",
+      "destination_sha256": "adfa1774d7d9381b6e1347a37ff5cc371d9c93fcfa442eb68cb14e07760127ec",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "eda4633bd11d4873d935a27c849c8e0867ba7f4b"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-both-admission-classes-and-the-rejection-bound-saturate.md",
+      "destination_sha256": "ab14d41c7d04d2b03d34c4fd8b50beb56da524b48e94b000823af9cedf33e482",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "3d16a552b11d9be3316e4b75e52667a8df434f6f"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md",
+      "destination_sha256": "45a3bdd4f21702feed5d3a42e5b70398a4b72d1d6321061499359894282a4351",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "ec2cf71dac43e0890de4f03f22684189538b2f84"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-handler-authored-diagnostics-are-capped-before-any-egress-wait.md",
+      "destination_sha256": "bbcc55ea4b4ad4c34f6fb7b33693fe93aef0933cf2d9e9155335358a4b894c76",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "4d25ef64c763f7d875e56f4f82d185d6f7ca5b4d"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs.md",
+      "destination_sha256": "074531a95c991ae2145e341ac5b955731e2941bd4cb8003da72875b8bfacdcbe",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "a3efb462fe8c587f51dae4caeaa63d3f0c565839"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-no-emission-reaches-a-retired-generation-or-a-settled-correlation.md",
+      "destination_sha256": "e6c3d19e4722b019105ec50527581c886b740ae385ae39a9bd5b8034e0139fcf",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "82b4f34fe8769c752ff3ffd37b28dff87081d7af"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes.md",
+      "destination_sha256": "b9c5c1800318376bb2536ce4ae72dcd61dbc9a9f684c99d38af50c9fd9676d69",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "4cdf29607af55d15c344692be8e01e86a1ce83b1"
+      },
+      "destination": "docs/properties/host-runtime/evidence/req-a-three-control-rejection-paths-carry-three-different-bounds.md",
+      "destination_sha256": "b585abf0be7fb785bfb6e267a7e75e63e4cf8cf12712e5f100244ff3cd4bf7fb",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "87058c4797a7d0557e84a15d247f109d9824639d"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-a-closure-store-open-failure-is-classified-not-swallowed.md",
+      "destination_sha256": "cb3846e9d24e9d7e82d48bea674e47ed0bcae7222ac726a0dac70d558bdae8e5",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "2676c43418a0130f520c5730e5084fa58d53b862"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval.md",
+      "destination_sha256": "90d26924b54fcd10ca38331203e116ef0e62b5967d20d68202d63261c2a4720b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "e47e1d8665ba814af7b236ac8911e717f214e225"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-an-initialized-handler-drains-without-publishing.md",
+      "destination_sha256": "df678ab5468087131620467b3242df45a55c7d8f6fe9163aa2c8d9349f15f1f2",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "b405d534896ea908e95e98a4645c104b4af33e53"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-an-unprobed-health-snapshot-is-distinguishable-from-a-degraded-one.md",
+      "destination_sha256": "1dd9fa0f273d4edb36999ed53c74beefa2ce26839596d1e83faf27d18bc9c37b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "d210871819cd07ab9da2f56b3c64b69981c351b8"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-configuration-is-frozen-for-the-incarnation.md",
+      "destination_sha256": "b65b98f743eb885f2f3b398157619655a015a20407ab965bbf48b4e04b207d2b",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "05c483886b008e22ff9646594be76082af575001"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-every-published-configuration-field-changes-host-behaviour.md",
+      "destination_sha256": "502c10c6916e6f51a9fe421bf49f9c807122c9aed5ad6736e6ddbadaf3a3fbd2",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "93f84ddeeae3a80705e01196da3227f5b13585d1"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline.md",
+      "destination_sha256": "ffe5f2c6bfe558863deb65093ed6543722ed4e3ae5c25a6f4be3a02eecb5f2a2",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "0995c04525c11be3187f13b481f0aa39bba88faa"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-no-configured-limit-is-silently-clamped.md",
+      "destination_sha256": "550e886563f8a94aa2303cfa57461ecb819fa9528ddf015ae974ff7ebc973057",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "2e6c1890a59c92abc9ff31c254e891ffcfbed3f2"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration.md",
+      "destination_sha256": "ac977a1e288a7ddba5639b56f822fcddac3eca07b8104f0ee3064bea33d192fa",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "6b883b1a2422d0c42233a5462ff293339d7dec2f"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-startup-refuses-every-configuration-it-cannot-fund.md",
+      "destination_sha256": "13978cd55fac09425f12b80fca181deddb05ceef800ec5db871a8a0e6a122e26",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "81389f733b24c6a7bdaf4c1c44a0b5808b725ce5"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-the-activation-fast-probe-interval-is-entered.md",
+      "destination_sha256": "5f337e8b2233e140c8ac087c32d74b23be41074d60c614c19c01df7e628a9cd6",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "a62a0c7f295409465721d913f51e8174ce53de5d"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-the-default-configuration-arms-no-liveness-probe.md",
+      "destination_sha256": "5a3baafb3653b71b0839e5c953b204bc4c9e0807b59be33cdcf9dd5f87ae6dc3",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "a9ad120962180f59e47318318f0ac50892f929aa"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-the-ingress-pool-derivation-cannot-underflow.md",
+      "destination_sha256": "592f83c8700da1781cec75972bd4eb87a949d4ae400cbe870164597e943d785f",
+      "transformation": "adapted",
+      "class": "human-authored",
+      "review_evidence": {
+        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+      }
+    },
+    {
+      "source": {
+        "repo": "host",
+        "blob_sha": "ebf714db4eced3f7f00b76ec052e24e21fa89744"
+      },
+      "destination": "docs/properties/host-runtime/evidence/rt-a-the-serial-setup-budget-triples-the-configured-transport-deadline.md",
+      "destination_sha256": "0845cd7addd742cc6f2ffdbbc737fbc1be0305a1851de95de6ffcf94b98c4773",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3833,8 +4748,8 @@
     },
     {
       "source": null,
-      "destination": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "destination_sha256": "22b926daf535c989038c8492dbaf5e9b69db7c6cdcc1aa103ef16dcfbff0527f",
+      "destination": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
+      "destination_sha256": "beb56db493a76f773db71a6102c7fb41462954bb13749b7b7365f8e3ee616020",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3843,81 +4758,69 @@
       }
     },
     {
-      "source": {
-        "repo": "host",
-        "blob_sha": "2bd8adc26403875e01771a147f899fa280e596db"
-      },
-      "destination": "docs/properties/host-runtime/evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md",
-      "destination_sha256": "906f21a7f708f03558ee7b3e47b4f73a4fbbd999e4f9e8408d784b54d993e3ae",
-      "transformation": "adapted",
-      "class": "human-authored",
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/data-root-resolves-under-the-managed-directory.md",
+      "destination_sha256": "09f59f26b48722fe24aad914ab9ccdab2cfd3fbdae4a8ba2da0e10e7f760b862",
+      "transformation": "authored",
+      "class": "new-authored",
       "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
       }
     },
     {
-      "source": {
-        "repo": "host",
-        "blob_sha": "6c67e482c945f26c901a1e92e99c5fa193469755"
-      },
-      "destination": "docs/properties/host-runtime/evidence/the-client-body-budget-refusal-drain-is-never-entered.md",
-      "destination_sha256": "837634f433d8704b7aeb7f878a4429c06b8c9fb483d020883dc7bc97b19aa624",
-      "transformation": "adapted",
-      "class": "human-authored",
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/coordination-locks-live-beside-the-managed-subtree.md",
+      "destination_sha256": "98cc2907840f03b15c9d6618aae6d0332cb313a2d68abe9f9ece0fafeddcc87d",
+      "transformation": "authored",
+      "class": "new-authored",
       "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
       }
     },
     {
-      "source": {
-        "repo": "host",
-        "blob_sha": "9b30d31d60c9f8033900ff4c2f0c21ee02faf15a"
-      },
-      "destination": "docs/properties/host-runtime/evidence/the-largest-lifecycle-proof-runs-in-ci.md",
-      "destination_sha256": "f6bf4e38dfd444594069aec5ddf2b610149a50ce93161f032796383c8d9af82d",
-      "transformation": "adapted",
-      "class": "human-authored",
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md",
+      "destination_sha256": "f4ab68867c1d24a166f2539ae865c9215f16c9193b80feda5e5524b2605ac9e5",
+      "transformation": "authored",
+      "class": "new-authored",
       "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
       }
     },
     {
-      "source": {
-        "repo": "host",
-        "blob_sha": "87f479c57f62322dc86dca40a7a957cd90ad08ce"
-      },
-      "destination": "docs/properties/host-runtime/evidence/the-panic-hook-cannot-itself-fail.md",
-      "destination_sha256": "04b7eb602bcc417abbfdd541c189e4e8995708235d45c28188bfd2e13f6b1fdf",
-      "transformation": "adapted",
-      "class": "human-authored",
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
+      "destination_sha256": "a19f0008d039f7675e010b6b09270a937141105a53dd3d70c6a5dd22b7d1c36c",
+      "transformation": "authored",
+      "class": "new-authored",
       "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
       }
     },
     {
-      "source": {
-        "repo": "host",
-        "blob_sha": "c886320ec67b68658a088d00874b782d450f9c48"
-      },
-      "destination": "docs/properties/host-runtime/evidence/the-writer-task-is-abortable-through-a-stated-owner.md",
-      "destination_sha256": "18f8c98b996d7aa3004881b11e9e7c2f4a0c8edac5d9df6bc2c319c11062f576",
-      "transformation": "adapted",
-      "class": "human-authored",
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
+      "destination_sha256": "6f3a0e41f6a36b56241305fde45764ccbe29a2d672d0533a6ed61a78892ac3b6",
+      "transformation": "authored",
+      "class": "new-authored",
       "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
       }
     },
     {
-      "source": {
-        "repo": "host",
-        "blob_sha": "bcc61c305849809db45510ed1aa997c393e72aba"
-      },
-      "destination": "docs/properties/host-runtime/evidence/validation-and-enumeration-address-one-directory-object.md",
-      "destination_sha256": "789d37db5bb6cb78577addc5327e24527162600001aacfeb742dce3e7f41df22",
-      "transformation": "adapted",
-      "class": "human-authored",
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
+      "destination_sha256": "9148dae822e0519002063f159c2baca0ced6b494ab96170926f2fd2f2d229fcb",
+      "transformation": "authored",
+      "class": "new-authored",
       "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
       }
     },
     {
@@ -4014,71 +4917,6 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "c5ce17ce8527c656a1ffa10d2116b87bc678378d"
-      },
-      "destination": "docs/properties/host-runtime/request-path/existing-checks.md",
-      "destination_sha256": "e2a7f516ff0019ab6c48856cfcaa66026756ee10f96d004ce09056c47677b09a",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "78f8739a6744caba2ec78fdb8e621234c04c63e1"
-      },
-      "destination": "docs/properties/host-runtime/request-path/fault-map.md",
-      "destination_sha256": "cdea9a6ee3a33f5629ba3397ddec7e1e6df64d7e19b93d2ae20e5a75a8aba2eb",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "acfc8478e46a9cfd3a121b17b169be91b69be900"
-      },
-      "destination": "docs/properties/host-runtime/request-path/portfolio-evaluation.md",
-      "destination_sha256": "ed8700a9ea43f1dc9dae173f6fb126270b466daf1324dc07fa09859d6ac8b1d4",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "3e0de5c80b2f45102d301109483f669af5d7ed93"
-      },
-      "destination": "docs/properties/host-runtime/request-path/_lenses/lens-a-request-path.md",
-      "destination_sha256": "6cab36fcd9c347331e58feda2530c9bc02849222c06fa092ba05294df93f1847",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "59f784b1f8eef6fea97ec28433449774cc9ac26c"
-      },
-      "destination": "docs/properties/host-runtime/request-path/_lenses/lens-b-claims-and-checks.md",
-      "destination_sha256": "5f1375c5bb006f93e1389444fcb141003f45f5d68c7be1cfbf672c44e2c243cd",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
         "blob_sha": "f8515045a38eacfda1f8afd4cff46d885cbe41e3"
       },
       "destination": "docs/properties/host-runtime/ring-datapath/existing-checks.md",
@@ -4135,71 +4973,6 @@
       },
       "destination": "docs/properties/host-runtime/ring-datapath/_lenses/lens-b-claims-and-checks.md",
       "destination_sha256": "8d7dd4da60161a029c2c26a48c4fcaef232c39c7f800c2d18777f89021546781",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "1144b315ef48ae1769a35a4e455a3df593c903be"
-      },
-      "destination": "docs/properties/host-runtime/runtime-config/existing-checks.md",
-      "destination_sha256": "22c744ac1af45d31a6efca0709541e60d0288c7a6ae2864035f43ef850080683",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "1a2e5738ccd45d31eeced4f10bf2762cbf03017d"
-      },
-      "destination": "docs/properties/host-runtime/runtime-config/fault-map.md",
-      "destination_sha256": "d78c77a3a4b4f622d8d28ab85042448bf46aa0cc78429f32fa56832c97b0f291",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "4267659171d2978bae42cf7981482a7828ed9bb9"
-      },
-      "destination": "docs/properties/host-runtime/runtime-config/portfolio-evaluation.md",
-      "destination_sha256": "15c1ea0062565e0d081634faeabaa80c1b674cb6422c6b30fd1eb3bd53638017",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "1ba0da8761f2f0d10e8be31a455f9c3fb29f23f5"
-      },
-      "destination": "docs/properties/host-runtime/runtime-config/_lenses/lens-a-runtime-and-config.md",
-      "destination_sha256": "07048e00223d0c9939cedbb60b41fb625a7041f2bdd1ad957aefc08519a08639",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "6ed358df24841f76ec52e17202fa3a8f0784e702"
-      },
-      "destination": "docs/properties/host-runtime/runtime-config/_lenses/lens-b-claims-and-checks.md",
-      "destination_sha256": "1124833aaf1f0cb2748aacbc32e78f3eb432e406c8a2621ebe29251ec5d99329",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4274,10 +5047,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "33b65a1644e04373f5ed6e871c5c6e331fb34add"
+        "blob_sha": "70f4eabbf2d12c461ce4b34170cd80179a121ac1"
       },
-      "destination": "docs/properties/shm-transport/catalog.md",
-      "destination_sha256": "6bdfb5c2bea6bce8c8806f77d2fa32d540d7bac6c23b45663b4f5159bacec019",
+      "destination": "docs/properties/host-runtime/client-peer/fault-map.md",
+      "destination_sha256": "4c8e0f3383099307a029b815ea48ead61b3c6ab4e8d4bcec094a077e21bd3ff1",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4287,10 +5060,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "a4b3fababa9a0657888d6d794e84c54d0c75b036"
+        "blob_sha": "d8e2f4440eaee96fa53571ed433e8f9f073f996a"
       },
-      "destination": "docs/properties/shm-transport/existing-checks.md",
-      "destination_sha256": "02535d0d929c515488145ce7571e4c255b91efac52d1db1d465c7e6e30f7f11b",
+      "destination": "docs/properties/host-runtime/client-peer/portfolio-evaluation.md",
+      "destination_sha256": "ba746a69c933582342e2aba1d2a4b27ed0257be6c35264a23a99f5b4171d2f66",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4300,10 +5073,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "688e871ee59ddddab5b3db2a2f6f288b07509411"
+        "blob_sha": "aaae2a80ff94f9e9ee097ef4e9b5f4b096f44780"
       },
-      "destination": "docs/properties/shm-transport/fault-map.md",
-      "destination_sha256": "d794eb53d54ea7e9eb9d811c8bb9c64219e5ba0051aa324702fe59c91316c311",
+      "destination": "docs/properties/host-runtime/client-peer/existing-checks.md",
+      "destination_sha256": "6f49560810d1a6b6773ceecc165665822f0cb734944f66fb0cc0ae7adfc4a3c3",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4311,774 +5084,12 @@
       }
     },
     {
-      "source": null,
-      "destination": "docs/properties/shm-transport/index.json",
-      "destination_sha256": "53ee3798a835e5e32bad3fa9b640d24fd5e70b2b9984f619e457a58680c908d9",
-      "transformation": "generated",
-      "class": "generated",
-      "review_evidence": {
-        "regeneration": "bun scripts/eidnara-migration/generate-property-index.ts docs/properties/shm-transport --check"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "def2e8755cee91657bdd3435e671a92368c90d3f"
-      },
-      "destination": "docs/properties/shm-transport/portfolio-evaluation.md",
-      "destination_sha256": "b31e51603c39caf86a855299a158cfe6897b1fdf4a92f66f5f611d37080f3793",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "fafe8ae5ffe73376d6760f978b39fdbaeb8ed937"
-      },
-      "destination": "docs/properties/shm-transport/evidence/accepted-decode-consumes-its-declared-width.md",
-      "destination_sha256": "3a9436b7a0ed61474a59347271cc7c4ffe67dce96c469dd9aeb1253f2f7fa10b",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "91d9cfa545c500ba9dff0516fd006ec45f0967d6"
-      },
-      "destination": "docs/properties/shm-transport/evidence/attach-binds-geometry-to-a-local-profile.md",
-      "destination_sha256": "6b17be3910ebd8fcbe5b18ac125ff4218b62d4236ec347e157d69294097393e7",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "ab678a97909a5fe4495ae226e3a34ceb08968361"
-      },
-      "destination": "docs/properties/shm-transport/evidence/attach-reconciles-or-refuses-stale-shared-cursors.md",
-      "destination_sha256": "4ca6124b2fac3811b4d353b25c7838e97f051a0a1c23bf382d7174b06c2a93dd",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "830fe3da4724e71d242473ce1c320e1d5be1b566"
-      },
-      "destination": "docs/properties/shm-transport/evidence/attach-refuses-a-quarantined-object.md",
-      "destination_sha256": "a016018cd310f397fbfe5d16cb4533ddd0f26e881a10284f2eae64d10e7ec35b",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "b44c7ba5ca680289899b9561657150375d326383"
-      },
-      "destination": "docs/properties/shm-transport/evidence/attach-validates-doorbell-eventfds.md",
-      "destination_sha256": "6c09b8ee62a820eb82cfaa29735c96e61365c820132b00dfcd84ef851f0a7a80",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "a17aa8855301d183800a43504c413e41f532355b"
-      },
-      "destination": "docs/properties/shm-transport/evidence/attach-validation-is-not-platform-weakened.md",
-      "destination_sha256": "14cd86e6513c72fe001dca3bced9a7445246b32a9a36c473607d4ea2884c1199",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "bae0c72aff3cf079d9bbcdc2802d0f9ddeab0cb6"
-      },
-      "destination": "docs/properties/shm-transport/evidence/backpressure-converges-in-a-bounded-reclaim-window.md",
-      "destination_sha256": "47feb63da74ad783b5ef15e5f268ae58e56bf4a8eff5c9660d931fa53c834c3c",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "8f3f788a0532c470c6945d3db14efdb8243b70e0"
-      },
-      "destination": "docs/properties/shm-transport/evidence/cancelled-frame-disposition-is-declared.md",
-      "destination_sha256": "d629c16554c70beaeec66a7c46f43df939a3e8ff99ab5b47d04dfc777f0ce74d",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "4bdeb9b5fecbebf2aa581866849377daac0bfb60"
-      },
-      "destination": "docs/properties/shm-transport/evidence/capability-probe-gates-every-advertised-mechanism.md",
-      "destination_sha256": "3a8674b37d0d748ac3280d2d7f2b20a9cb275dac2cf5a741bb0965f6f0e14ae2",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "0cbbd5e598a55e1b1ec993b03fddd576e1b9ca57"
-      },
-      "destination": "docs/properties/shm-transport/evidence/capacity-recheck-after-a-wake-race.md",
-      "destination_sha256": "f7087f99463b8e4644b69e398098e7fe3c9410bf22fd8c9a8f45da735e3a6900",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "a9d773ee707de5c50817c13afe0944f745bbe4e4"
-      },
-      "destination": "docs/properties/shm-transport/evidence/charge-release-never-silently-strands.md",
-      "destination_sha256": "2263f55859fab04f5fd83820bf4276381ce2a93cb4c04b42238c7208abd72f85",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "0b455bf44d6ad013ce4b76cfad4211f35d792638"
-      },
-      "destination": "docs/properties/shm-transport/evidence/clean-reclamation-is-reachable.md",
-      "destination_sha256": "a20cc4e730cb93f6be626df238df20abc06f02903621a0800a0fabac0ddf45b0",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "b1cb5443671dacf37fc6b65ada07550d7ec05433"
-      },
-      "destination": "docs/properties/shm-transport/evidence/crashed-producer-does-not-wedge-the-sequence.md",
-      "destination_sha256": "e88cc1192b92a74855a6ca745f972bc088858331def6a622afb36dc0dc473a09",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "e5d7593bc3eca45a42d128d2b2cc0bee009c4117"
-      },
-      "destination": "docs/properties/shm-transport/evidence/custody-terminal-transition-exactly-once.md",
-      "destination_sha256": "c09bbf9ea86bf6fe128e80558d35fad962b3a31056111e058d7057fb5cee8ed3",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "81a4c27bd22553b1a19aeb1c8c6ab6eddea75287"
-      },
-      "destination": "docs/properties/shm-transport/evidence/dead-peer-charges-are-reclaimed-or-declared.md",
-      "destination_sha256": "29f2b5a657bf921edaa12a3c9bd246233908c8220046594677dc1205a37ea693",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "daaa617a3f70b6ac18994c569b2664ce877c72c0"
-      },
-      "destination": "docs/properties/shm-transport/evidence/decoder-totality-over-arbitrary-bytes.md",
-      "destination_sha256": "51d82074232619e41545ba8e17f254525f1648c9efdb5836cda3bb431d99c391",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "f8e6ca67bed12c2ea00bb42b7e731519a8e18fe0"
-      },
-      "destination": "docs/properties/shm-transport/evidence/documented-close-order-has-a-production-driver.md",
-      "destination_sha256": "b45c9c14f44094fc34a183f414bc44e7af2f96cf8fb0920f22a5529536319bb5",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "835818ddb1c4b444bc004108ef3a031af2e78c9b"
-      },
-      "destination": "docs/properties/shm-transport/evidence/duplex-overlap-is-reached.md",
-      "destination_sha256": "50ccc104e3f457eea2b83ce667ea7f08fa4cef6a0210cf1ff0df112126846931",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "ee0bcbbd5bd3aad4780e170a49ac1bbae37890d3"
-      },
-      "destination": "docs/properties/shm-transport/evidence/every-shm-header-consumer-applies-its-role-gate.md",
-      "destination_sha256": "d8cf4106f9b6ccc3a34f501d658408f754c873ffd81df49502582201848aac68",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "e3a32b0c410d06d79bd0782f758c87528d375166"
-      },
-      "destination": "docs/properties/shm-transport/evidence/fuzz-harness-encoding-tracks-the-production-descriptor.md",
-      "destination_sha256": "1f458ec31904aec6eb76aaef2cba7fbc894f7063f59483e956328ba3158d09dc",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "a70436fce358f0061cf3991957d8a6fbf0bbd958"
-      },
-      "destination": "docs/properties/shm-transport/evidence/grant-reserved-bytes-are-rejected-unless-zero.md",
-      "destination_sha256": "db7932cef9d3036d2a0c23d859b39e10ce97f92c8a2875e16b8cbb3ee97c2ff6",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "d24bef247bc5906a773821bcbfc79d38044bbb1c"
-      },
-      "destination": "docs/properties/shm-transport/evidence/header-rejection-effect-does-not-depend-on-the-catching-layer.md",
-      "destination_sha256": "47407f2a5c1129dc7fee8e4a362f85656f92169ffa0b8d8762b451c2e3003f80",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "c3433c0f0185286fd495ad9e23ec858d4e2c97bf"
-      },
-      "destination": "docs/properties/shm-transport/evidence/iceoryx-completion-is-observable-to-the-host.md",
-      "destination_sha256": "9c25aa92731b55ab7adfa92724dc8805c769fa3f3988810fb3820bd1fd4d575c",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "668efee68cd0a7d686e86f1d25015c425e9d2903"
-      },
-      "destination": "docs/properties/shm-transport/evidence/iceoryx-cross-process-pairing-is-reachable-or-declared.md",
-      "destination_sha256": "3444c2b9b4064d01b831613ef0416a252873ec48bb682e4cd0f73f8f5181ccd4",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "027e3180b221d44de190f5e244be6e682f8467ce"
-      },
-      "destination": "docs/properties/shm-transport/evidence/iceoryx-descriptor-rejection-is-terminal-or-declared.md",
-      "destination_sha256": "f82fa64eb28eadb1ca6bd8ee2f39f073b46b0c00fb26be54a97b32f4e6b8602f",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "973ea19fbf6c621917bfb5f37392e7e942ab8825"
-      },
-      "destination": "docs/properties/shm-transport/evidence/iceoryx-receive-expectation-tracks-the-delivered-stream.md",
-      "destination_sha256": "a86604a76cdadd1fdcdff09e98d7b140106a2d6bc68a5a6df04d3f5729df4b9a",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "978a21e31988e83329ea6b72f7ed4fabfa3fb718"
-      },
-      "destination": "docs/properties/shm-transport/evidence/iceoryx-saturation-is-bounded-non-blocking-backpressure.md",
-      "destination_sha256": "ab82adb594e28f3656ce5b2dbd9266f9c4f92da1b62c4f68dae5d87727bdba43",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "7b832448b7af53a3e1635350dc28b106e6cf366c"
-      },
-      "destination": "docs/properties/shm-transport/evidence/identity-and-schema-rejection-is-one-contract.md",
-      "destination_sha256": "741ba47b8a8c258b0f752be9bad79c3378194daff16445a0de0dbec480a5c2dd",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "fc29ac6ac6b940f386363bf3e9d53897ffef110e"
-      },
-      "destination": "docs/properties/shm-transport/evidence/ingress-charge-matches-the-bytes-copied-from-shared-storage.md",
-      "destination_sha256": "3a22dc480728fb3132d2f9bc9cba36e4bbb3322fd5b317f451f92b2109c12d34",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "ed7fcfad6e3b47ea144bd00c521259ff36ff45bf"
-      },
-      "destination": "docs/properties/shm-transport/evidence/layout-region-offsets-are-real-page-aligned.md",
-      "destination_sha256": "d72dd349bc47fefcc558ddbc7601f394b46949ea7342a6e1b5e20b6e2bbf1729",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "63c76953469676ab0f45fead9a64b232f8c97863"
-      },
-      "destination": "docs/properties/shm-transport/evidence/lease-saturation-is-reached-then-drains.md",
-      "destination_sha256": "a5012bccb166f0d314bc1733ffabc41c3402a089d3b3933f56587c1ff344359f",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "62c2a9f715cf5b21bb153d5c5babf2edb34d7046"
-      },
-      "destination": "docs/properties/shm-transport/evidence/macos-object-creation-leaks-no-shm-name.md",
-      "destination_sha256": "310490f45da2a4350432431f22b04aee381dd964019c01d2d499e8ada22d49e2",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "1ad60e81da0fbbf70bd674b3c1435a355850dd87"
-      },
-      "destination": "docs/properties/shm-transport/evidence/macos-object-creation-outcome-is-attributed.md",
-      "destination_sha256": "f1cf113ecadd63abaf77bb65d146fffdd66fb7cf03921a6150ebed9ddecff6f9",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "1b5534e18b6afab53da7872c0bc862ced6b721ec"
-      },
-      "destination": "docs/properties/shm-transport/evidence/measured-transfer-is-witnessed-by-the-data.md",
-      "destination_sha256": "28321403f0c69f12157640e15b2be639251d4a1b184c3858d75f2a74b000ac8d",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "7e94c0ad328da5531ff088f755d8992bd8cf4770"
-      },
-      "destination": "docs/properties/shm-transport/evidence/native-boundary-not-weaker-than-its-wrapper.md",
-      "destination_sha256": "5c7471c79252d6ae2f16b7d1ddc631f0e7dd47aa769bc79c9ade9ee7fa813129",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "b3b12f347f029250d0973ff8fe90715b3397c253"
-      },
-      "destination": "docs/properties/shm-transport/evidence/negative-tests-fail-for-their-stated-reason.md",
-      "destination_sha256": "2a5906c6115d85af3186ede2cafd78c77fbae9b2143c2e24bef74932dd82c251",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "bc9557c2141fe826e8e8618bd30093feae8bfc4b"
-      },
-      "destination": "docs/properties/shm-transport/evidence/neither-direction-starves-the-other.md",
-      "destination_sha256": "d44f28a8a3612a5858a66de8e484e3636261a79a3396506c25b64893c03ed35d",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "a62ce1b8518ff05a438f00c9e603141b0fc54f4a"
-      },
-      "destination": "docs/properties/shm-transport/evidence/no-frame-observable-before-commit.md",
-      "destination_sha256": "d26fe5449b1b7f714738e2c5ccd2a9c51a28236c48dd6c2e20fdd6140b884c24",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "493ccc42c7ab7cd12c0524bc4f1d6ae0b8c8e896"
-      },
-      "destination": "docs/properties/shm-transport/evidence/no-rust-reference-over-peer-writable-payload.md",
-      "destination_sha256": "6f26c14e4f20f33c9b4ce076fcacd8f8b4f99bd535bd9bd3320e776168831479",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": null,
-      "destination": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
-      "destination_sha256": "28ad259abe3fec933aa0174d39a7bbca79aebc88c12944585944f681bde449d2",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
-        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "2c7277d6443877995497d5847550ed5b5dcd5552"
-      },
-      "destination": "docs/properties/shm-transport/evidence/one-profile-name-denotes-one-geometry.md",
-      "destination_sha256": "d72bb707f2788df497f16258dc4f72401e0e9cba04b55b31a0278b9537147d40",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "be7f3a2fb9986b2396d562274b1f1353c2483ed4"
-      },
-      "destination": "docs/properties/shm-transport/evidence/operation-counters-are-observed-not-declared.md",
-      "destination_sha256": "9360eb5ec1b612e6c73c8a843a357494aa76e0ee546308dae637dd4164e95966",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "e1c55b867734131607cd0cbe843d7dc177e462c1"
-      },
-      "destination": "docs/properties/shm-transport/evidence/page-size-dependent-setup-runs-on-a-non-4096-page-host.md",
-      "destination_sha256": "8393883b44269e4f5a7dc8ba0ed1abbd4dd9c31d4b211ec4e9c8a55401153a16",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "0712f949229939d41dbb81c0eb4fdc336049a642"
-      },
-      "destination": "docs/properties/shm-transport/evidence/publication-visibility-derives-only-from-the-published-cursor.md",
-      "destination_sha256": "e173887a73445a418f63d2bb9d88217b7be0173ff32568c4740b6a7fcc6aa83b",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "f2fb8ffe9c60341ba7d0045bbe41a7d4742e690a"
-      },
-      "destination": "docs/properties/shm-transport/evidence/publish-signal-implies-committed-frame.md",
-      "destination_sha256": "4520b61a4bd091623af04f581c97d861290ecc9cad937e86eb0158c6025c5095",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "aa11682317482f53fc953d66f3506f6b92afe361"
-      },
-      "destination": "docs/properties/shm-transport/evidence/quarantine-authority-survives-peer-writes.md",
-      "destination_sha256": "156d77687e14417ffda27d8962bda8091e27651091371db9999b39cfe801018a",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "d812d674a10e35cbbe99f6b3452a2ac2a24bb492"
-      },
-      "destination": "docs/properties/shm-transport/evidence/quarantine-charge-transition-is-atomic.md",
-      "destination_sha256": "e4362c8a8732bd84fcbd6c2e2e2303cb6a8295e6c26e6d2838cb584e5b954d38",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "e838cb2a0b5dbe25cf86644b9b858df20ed9dd20"
-      },
-      "destination": "docs/properties/shm-transport/evidence/quarantine-gates-cover-every-storage-mutation.md",
-      "destination_sha256": "0256859dda1f84508174d9e0d6336488d806a35ed0f30ff24f006f6f7bed24cb",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "766cafcc6c0e2a8d728f0954fe769762a5c374c8"
-      },
-      "destination": "docs/properties/shm-transport/evidence/queued-write-needs-no-second-wake.md",
-      "destination_sha256": "9639c0c7ffd386c3f1edf00e9e0538034d769d03a522d6fec14a80f207057de4",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "6fad74d2e55a928a368a95c38d063f45a7c3122b"
-      },
-      "destination": "docs/properties/shm-transport/evidence/reactor-callback-is-one-in-flight.md",
-      "destination_sha256": "ffe0b5b5ce9668b66cf437b170741da43ed2139659340d08a02e427e0e032ef8",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "680803dd11ecd448cd76da8007cbdcbd65a9ff02"
-      },
-      "destination": "docs/properties/shm-transport/evidence/receive-failure-leaves-no-wedged-slot.md",
-      "destination_sha256": "d94d2b59813155633d46053af9c2a77b9afbb11a7177bf18c0feaa82ae5342fc",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "44616f21bb51de17b2184156b593fd82b4502f31"
-      },
-      "destination": "docs/properties/shm-transport/evidence/receive-resumes-when-lease-capacity-clears.md",
-      "destination_sha256": "ff9cef73163e5b1abdc01efb0f26a450314011cb651f8c46010b4982fd7ddb3c",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "ba3e0462a0c033d1b00433b8a0bf7bf983bd62e1"
-      },
-      "destination": "docs/properties/shm-transport/evidence/reclaim-advance-bounded-by-the-producer-reservation.md",
-      "destination_sha256": "1ad1398d51fdcaea9dd30e2756d355cd7eb98f2e4188ebc6b5814b1836880c04",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "99a1664a1c4d423f5c7d4e2fca0bf0fcb7d50e81"
-      },
-      "destination": "docs/properties/shm-transport/evidence/reclamation-excludes-pages-with-live-wrapped-bytes.md",
-      "destination_sha256": "762fcf9e27b25df996075677cb8a7bb8ba97f62d5d7cc90f333421de908ed847",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "e05550028cfc477b41805cbcf99b6722e54ff1de"
-      },
-      "destination": "docs/properties/shm-transport/evidence/reclamation-keeps-pace-with-completion.md",
-      "destination_sha256": "e301b64518871191a62ce505e529b0c52d48ebba4c0198b1575506e65ee9de3c",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "f7e0336dfd46c1831d68eae0f69b563cec2c8510"
-      },
-      "destination": "docs/properties/shm-transport/evidence/release-authority-bound-to-lease-ownership.md",
-      "destination_sha256": "fabcae7727d130c75a3bc03f21da423588fb3c21818a6ae1199e6d742eaa580d",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "d84eefbafbf5b91dab129379ebc5c3f76ebd49a1"
-      },
-      "destination": "docs/properties/shm-transport/evidence/release-exactly-once-per-sequence.md",
-      "destination_sha256": "00e86e1f390ee3f8e70e0535558c0a9ddb7bc2fb8ac7bd7764b2e2f864da08a0",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
       "source": {
         "repo": "host",
-        "blob_sha": "675d834ca5867b6a898fee88b80c86642bc19456"
+        "blob_sha": "1aa5604c2183ea5068cccbb78fa47262dee1ce8e"
       },
-      "destination": "docs/properties/shm-transport/evidence/release-failure-is-observable.md",
-      "destination_sha256": "f673069c2aee68aa298a34f7adb8085a692c130edf57940347190eaddb12a36a",
+      "destination": "docs/properties/host-runtime/client-peer/_lenses/lens-a-client-peer.md",
+      "destination_sha256": "323666fa095540445134dbfcb2377bf4e21ab536ab4228ae3dbb1c6c485dea2e",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5088,10 +5099,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "08a2d9d5135190f9a307e4af77a13adcd9fa3572"
+        "blob_sha": "f1ea585a034d51f1e69ac7fc137f7f81e26f45ba"
       },
-      "destination": "docs/properties/shm-transport/evidence/released-charges-wake-blocked-readers.md",
-      "destination_sha256": "f8203261ebcca2ad7ff34f4944b22fc9b9746ec4fcba2e29350f92cfb585cab2",
+      "destination": "docs/properties/host-runtime/client-peer/_lenses/lens-b-claims-and-checks.md",
+      "destination_sha256": "3e46ae12f3ba163a8e42ece855e0273ace8a3a07fba4537be72e2d06b1fccd68",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5101,10 +5112,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "9c93840e7bebf8197291f572c21026d3ef9a12d7"
+        "blob_sha": "c5ce17ce8527c656a1ffa10d2116b87bc678378d"
       },
-      "destination": "docs/properties/shm-transport/evidence/reservation-charge-visible-with-non-free-state.md",
-      "destination_sha256": "429cd152c2d4b791dbc5efd1838f5e373ce58072c19b2c8b7a5f7eb0e6354400",
+      "destination": "docs/properties/host-runtime/request-path/existing-checks.md",
+      "destination_sha256": "e2a7f516ff0019ab6c48856cfcaa66026756ee10f96d004ce09056c47677b09a",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5114,10 +5125,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "edc9a4c6a1e4aee4ec9681614ee32d6232c6f7b3"
+        "blob_sha": "78f8739a6744caba2ec78fdb8e621234c04c63e1"
       },
-      "destination": "docs/properties/shm-transport/evidence/runtime-directory-authentication-is-a-precondition-not-a-container.md",
-      "destination_sha256": "06238cd17afc925ebfe30583f2f56530e762f26e7dbdedf96364b93b40aac275",
+      "destination": "docs/properties/host-runtime/request-path/fault-map.md",
+      "destination_sha256": "cdea9a6ee3a33f5629ba3397ddec7e1e6df64d7e19b93d2ae20e5a75a8aba2eb",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5127,34 +5138,23 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "f485b5600ade738fbbb5e9bd3cfc67560f152fff"
+        "blob_sha": "acfc8478e46a9cfd3a121b17b169be91b69be900"
       },
-      "destination": "docs/properties/shm-transport/evidence/runtime-directory-revalidation-rejects-a-substituted-directory.md",
-      "destination_sha256": "83f191ee06d80a6681f7055951c9ce045e7384e507c40ca0dea39d546785e1c1",
+      "destination": "docs/properties/host-runtime/request-path/portfolio-evaluation.md",
+      "destination_sha256": "ed8700a9ea43f1dc9dae173f6fb126270b466daf1324dc07fa09859d6ac8b1d4",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": null,
-      "destination": "docs/properties/shm-transport/evidence/setup-proof-vectors-pin-the-shared-hmac-transcript.md",
-      "destination_sha256": "32f94f7dd11179a05fc4afa74c5f771311395eafec3fafe34343c8c8006d2dd5",
-      "transformation": "authored",
-      "class": "new-authored",
-      "review_evidence": {
-        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
-        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
       }
     },
     {
       "source": {
         "repo": "host",
-        "blob_sha": "458c6e9e1b23c5fdf09db3c9c947747515429c48"
+        "blob_sha": "3e0de5c80b2f45102d301109483f669af5d7ed93"
       },
-      "destination": "docs/properties/shm-transport/evidence/test-only-surface-absent-from-the-shipped-addon.md",
-      "destination_sha256": "cf516f9d1e55156f90d7462392815e875b2fa3c4b206e48ae342556e5f35cd54",
+      "destination": "docs/properties/host-runtime/request-path/_lenses/lens-a-request-path.md",
+      "destination_sha256": "6cab36fcd9c347331e58feda2530c9bc02849222c06fa092ba05294df93f1847",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5164,10 +5164,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "a867280b7299ce3a692cfafeed2414a9b1234656"
+        "blob_sha": "59f784b1f8eef6fea97ec28433449774cc9ac26c"
       },
-      "destination": "docs/properties/shm-transport/evidence/traceability-pointers-resolve.md",
-      "destination_sha256": "f01ad4c225b4129bf8c0c4c20c8c686907c63d4ef79df2bc112042d5efec663a",
+      "destination": "docs/properties/host-runtime/request-path/_lenses/lens-b-claims-and-checks.md",
+      "destination_sha256": "5f1375c5bb006f93e1389444fcb141003f45f5d68c7be1cfbf672c44e2c243cd",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5177,10 +5177,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "9ee6a93346c179767d3491cefb70c765aa4021b1"
+        "blob_sha": "1a2e5738ccd45d31eeced4f10bf2762cbf03017d"
       },
-      "destination": "docs/properties/shm-transport/evidence/validated-spans-are-disjoint-and-inside-the-arena.md",
-      "destination_sha256": "1283b9f0e83f7c231057736ab9366f584ca3aef4d80a52cf2b981fe93bc9ff34",
+      "destination": "docs/properties/host-runtime/runtime-config/fault-map.md",
+      "destination_sha256": "d78c77a3a4b4f622d8d28ab85042448bf46aa0cc78429f32fa56832c97b0f291",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5190,10 +5190,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "ec66bf7180a9817c9252f9a0888fa49489ee219f"
+        "blob_sha": "4267659171d2978bae42cf7981482a7828ed9bb9"
       },
-      "destination": "docs/properties/shm-transport/evidence/wake-published-during-readiness-callback-is-not-lost.md",
-      "destination_sha256": "629f9a8c3e68148d736f260175370b3c0f7751806e1434f59ad8f2eff8eeebf4",
+      "destination": "docs/properties/host-runtime/runtime-config/portfolio-evaluation.md",
+      "destination_sha256": "15c1ea0062565e0d081634faeabaa80c1b674cb6422c6b30fd1eb3bd53638017",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5203,10 +5203,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "eba0ddfdcdcd544894b47d65000937b680d384cb"
+        "blob_sha": "1144b315ef48ae1769a35a4e455a3df593c903be"
       },
-      "destination": "docs/properties/shm-transport/evidence/wire-header-field-authority-is-partitioned-and-coupled.md",
-      "destination_sha256": "b8d6b2d4dd0c299be3f7023eb8b7374054a709fb01854ab8997b0653d03e84e3",
+      "destination": "docs/properties/host-runtime/runtime-config/existing-checks.md",
+      "destination_sha256": "22c744ac1af45d31a6efca0709541e60d0288c7a6ae2864035f43ef850080683",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5216,10 +5216,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "9a788b42353fc191f2c8241c316185b3acd86100"
+        "blob_sha": "1ba0da8761f2f0d10e8be31a455f9c3fb29f23f5"
       },
-      "destination": "docs/properties/shm-transport/evidence/wire-header-fully-validated-before-any-consumer-acts.md",
-      "destination_sha256": "4318eb565e094bdbc08830fe2ddb140ff6e6dd6d3451446df330515cef9fe096",
+      "destination": "docs/properties/host-runtime/runtime-config/_lenses/lens-a-runtime-and-config.md",
+      "destination_sha256": "07048e00223d0c9939cedbb60b41fb625a7041f2bdd1ad957aefc08519a08639",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5229,10 +5229,10 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "4eaca24f52a1f0472d79af26aae14d6462d5d372"
+        "blob_sha": "6ed358df24841f76ec52e17202fa3a8f0784e702"
       },
-      "destination": "docs/properties/shm-transport/evidence/wire-header-validation-precedes-every-consumer-action.md",
-      "destination_sha256": "e5bc802e2fadb85720f50ea53803cdc1a91bc4630f2a2767ff11d0f7fbee27f6",
+      "destination": "docs/properties/host-runtime/runtime-config/_lenses/lens-b-claims-and-checks.md",
+      "destination_sha256": "1124833aaf1f0cb2748aacbc32e78f3eb432e406c8a2621ebe29251ec5d99329",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5274,7 +5274,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "5ac87dab87fb1fd26c57b02fab006f1bf5452ebe022a6478e5469beb5557b312",
+      "destination_sha256": "494b0dd396742a6fdb0ea8d46df9828a659dba71a01d31d3f45a24768c1165bc",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5285,7 +5285,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "e2d3464bc694594ada627140be62657326c1fe81999b2c919e6dc9e1650f6be7",
+      "destination_sha256": "f40fd1a378e7e14195d9b019642c8984f8e095904d1486c0f2259b220900404e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5307,7 +5307,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/review-notes.md",
-      "destination_sha256": "ff2742cf4992324c21eeb4bcfbd37fcef494cff750b06f97c69887bcfb523087",
+      "destination_sha256": "de1d6442ade3a422b2afbc0d94d65267fc3af659518eb217efd9d85f108be213",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5340,7 +5340,7 @@
     {
       "source": null,
       "destination": "package.json",
-      "destination_sha256": "9b95543ea5962442f9be252b8a485d486690419b84f3f1f1e2190689a24ccc94",
+      "destination_sha256": "5777b58feffa44eb9322f5ebe96f7139ab8e60088fccdd15b3d8f3050998776b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5384,7 +5384,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/receipt.json",
-      "destination_sha256": "a01feb360a0dd0ef90f120ea399410837c9efb7dc22ecba9db8637d28c4439f1",
+      "destination_sha256": "9c469cde51b53b2c8e79bfb468ed56418b6fc73d6f6f69e9781176d838d18976",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5395,7 +5395,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/receipt.json",
-      "destination_sha256": "97a5297de60a782a07ea7ff1fed4e801c757e99455ebb2fca517feaab74a661b",
+      "destination_sha256": "1cf1d294737fa1ec4583c0c2bf18055c8448cdd3cf1794526e4b012c9cc01e2d",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5416,7 +5416,7 @@
     {
       "source": null,
       "destination": "bun.lock",
-      "destination_sha256": "115ed7b18b32a2df85cd4d44a7ffed1ad789c5159190a0d20b7155fc39044ef9",
+      "destination_sha256": "4b4a80766026ac6c1943ff94f04b8fb5e4a045991af4ff55c24aa9855d38cb76",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {

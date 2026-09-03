@@ -9,7 +9,7 @@
       "catalog_commit": "39e8230371b15966a5767771daf001e44d191aac"
     }
   ],
-  "destination_commit": "a343d10da820fe64826d04c2ceeeb0d85d28ffc0",
+  "destination_commit": "b6b75c7b9475c13f7c94b52f0a13f00d442e22da",
   "touched_files": [
     "crates/host-runtime/benches/ipc_budget.rs",
     "crates/host-runtime/benches/support/atomic.rs",
@@ -1722,16 +1722,16 @@
       "strategy_decision": "Example test spelling the id and every geometry literal, added at U3 for the renamed profile id; the addon package test states the same geometry independently.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
-      "evidence_digest": "28ad259abe3fec933aa0174d39a7bbca79aebc88c12944585944f681bde449d2",
+      "evidence_digest": "4b074ef361a22a0991366d3b8dd336220bffcfdffc9345fb8dd557e33795f298",
       "check_pointer": "crates/shm-transport/src/profile.rs#host_test_ring_profile_names_one_geometry",
-      "check_hash": "415cf5d8c5e73025791db8074992718f6de6b3b1db5e32877d6d30d33664e40e",
-      "code_hash": "e628e900f9e92b78ec8f0ae44c972e71a89bcf9a7c8d4fb810de490e3896e385",
+      "check_hash": "27338b7971769d6311d895ce27d54a7b27f7ff4f0c92662ffd0d9550345020a6",
+      "code_hash": "55b1f584f2d249032f150c64593653fe1e1e8aa04b94573fc66b70699691faf9",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "28ad259abe3fec933aa0174d39a7bbca79aebc88c12944585944f681bde449d2",
+        "digest": "4b074ef361a22a0991366d3b8dd336220bffcfdffc9345fb8dd557e33795f298",
         "description": "U3 evidence record docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5029,8 +5029,8 @@
       "evidence_pointer": "docs/properties/host-runtime/evidence/data-root-resolves-under-the-managed-directory.md",
       "evidence_digest": "09f59f26b48722fe24aad914ab9ccdab2cfd3fbdae4a8ba2da0e10e7f760b862",
       "check_pointer": "crates/host-runtime/src/instance.rs#default_root_follows_xdg_then_home",
-      "check_hash": "0eb41de6b693bd41d3532908278fce69d3aa05e6a10a551b88a16b638ab11dbe",
-      "code_hash": "14f6e5ba8ad08b4b799cfb6317be800775186213c70c3f5cba21c2ae4c0f0814",
+      "check_hash": "2f15bc303313d97885dc27b9b3674877767701fe127c0d49875e3d5040c6768c",
+      "code_hash": "e427d278ed5365b39fce4a7c638ea68d5f705357e784176cf96edff2a08f6c17",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -5120,16 +5120,16 @@
       "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), regenerated once at U3 for the renamed schema id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "evidence_digest": "dcfc6d9dda7e1d813e292f0f8b87d155c4325daec60d72ece628aacefaa4e370",
-      "check_pointer": "crates/host-runtime/tests/harness_closure.rs#rust_and_typescript_share_the_canonical_manifest_digest",
-      "check_hash": "52f87d6e76c3401af263b9a6af21c40fc86c4249187f3464344d6733556aa9a1",
-      "code_hash": "a015de7f0a7f47e2da1713e669398f4a34f458a30eb0fe11c5685ff06c5b2333",
+      "evidence_digest": "a19f0008d039f7675e010b6b09270a937141105a53dd3d70c6a5dd22b7d1c36c",
+      "check_pointer": "crates/host-runtime/tests/harness_closure.rs#canonical_manifest_digest_is_pinned",
+      "check_hash": "2bd84f3d243bae0189381226b67ec89b6fe9f1affd984f2698bc579bc17101e9",
+      "code_hash": "33522d9f0e47aea6049b5c925ce929174dca199bae0b4743da481ab08687d5af",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "dcfc6d9dda7e1d813e292f0f8b87d155c4325daec60d72ece628aacefaa4e370",
+        "digest": "a19f0008d039f7675e010b6b09270a937141105a53dd3d70c6a5dd22b7d1c36c",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5181,7 +5181,7 @@
       "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint) plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "evidence_digest": "22b926daf535c989038c8492dbaf5e9b69db7c6cdcc1aa103ef16dcfbff0527f",
+      "evidence_digest": "9148dae822e0519002063f159c2baca0ced6b494ab96170926f2fd2f2d229fcb",
       "check_pointer": "crates/host-runtime/tests/synapse_bundle.rs#the_committed_fixture_carries_its_canonical_fingerprint",
       "check_hash": "e8219707a8e980b66102e9e25131097261068f7f6a94ac8af705359285826820",
       "code_hash": "da53a5ad117797ad46a227538b68a603e539c2de9eba36a0a1d81f161a73a320",
@@ -5190,7 +5190,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "22b926daf535c989038c8492dbaf5e9b69db7c6cdcc1aa103ef16dcfbff0527f",
+        "digest": "9148dae822e0519002063f159c2baca0ced6b494ab96170926f2fd2f2d229fcb",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5402,18 +5402,18 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "partial",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "partial",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/synapse/inference.rs",
+      "check_pointer": "crates/host-runtime/src/synapse/inference.rs#source_replacement_cannot_change_verified_loader_bytes",
       "evidence_pointer": "docs/properties/host-runtime/catalog.md"
     },
     {

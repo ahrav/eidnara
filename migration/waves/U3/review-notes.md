@@ -23,9 +23,6 @@ rename table and formatting is `renamed`; a file with any hand edit is
 
 ## Doc-rigor: Rust sources
 
-The review depth for this wave is not uniform, and the receipt should be read
-with that in mind.
-
 Read in full, with docs written or corrected where the lints required it:
 `crates/shm-transport/src/{lib,descriptor,lease,lifecycle,harness}.rs`,
 `crates/shm-transport/src/backend/sample.rs`, `crates/shm-transport/src/profile.rs`,
@@ -63,37 +60,42 @@ What was checked and changed:
   `runtime.rs`, `tests/dispatch.rs`, and the `gen` field in `routing.rs` are
   `generation`; the routing test helper that was named `generation` is
   `generation_core`. `std::env::set_var` is unsafe: `instance.rs` splits the
-  data-root resolver into `default_data_root(xdg, home)` so its test passes
-  values instead of mutating the process environment, and the fixture child
-  in `tests/broca_subprocess.rs` marks its writes `unsafe` with the
-  single-thread argument.
+  data-root resolver into `default_data_root(DataRootEnv { xdg_data_home, home })`
+  so its test passes values instead of mutating the process environment (the
+  struct's named fields keep the two values from being swapped at the one
+  call site), and the fixture child in `tests/broca_subprocess.rs` marks its
+  writes `unsafe` with the single-thread argument.
 - `tests/ring.rs`: the unsealed-object test counted every ring mapping in the
   process and raced other tests in the same binary (it failed about half the
   runs here); it now counts mappings of the object it created.
 - `tests/synapse_protocol.rs`: `boundary_waiters_with_maximal_texts_are_all_admitted`
   opens 33 ring clients, but `MAX_RING_RESIDENT_BYTES` admits eight rings per
   process, so the ninth setup socket closes and the test hangs on the paused
-  clock. Source CI never ran this file. The test is `#[ignore]` with that
-  reason and the receipt records it under `known_red`; the fix belongs
-  upstream.
+  clock. Source CI never ran this file. Its ring-free half (the startup formula
+  admits the boundary and refuses boundary-plus-one) is split out as
+  `waiter_boundary_is_the_last_feasible_startup_configuration` and runs; the
+  ring half is `#[ignore]` with that reason and the receipt records it under
+  `known_red`. The fix belongs upstream.
 - `tests/perf_budget_runner.rs` reads the perf script from the crate's own
   `scripts/` directory; the script's `ROOT` is three levels up.
 - `tests/harness_closure.rs` reads the closure fixture from the crate's own
-  `tests/fixtures/` directory.
+  `tests/fixtures/` directory; the digest test is `canonical_manifest_digest_is_pinned`,
+  renamed from a name that claimed a cross-language agreement no test in this
+  tree performs (the TypeScript side lands in U7).
 - Two checks were added for renamed identities the source never pinned:
   `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/src/profile.rs`)
   and `credential_fingerprint_matches_the_committed_vector`
   (`crates/host-runtime/src/broca/subprocess.rs`).
-- Comments state mechanism in the present tense; the source's task references
-  and repository paths were removed from every comment and doc the rename
-  touched.
+- The source's task references and repository paths were removed from every
+  comment and doc the rename touched.
 
 ## Doc-rigor: TypeScript and scripts
 
 `packages/shm-native/index.ts` and its four test files were read in full for
 the loader contract (payload package selection, capability reporting, the
-error taxonomy) and typecheck under the package's own `tsconfig.json`; the
-Bun suite passes against a release build of the cdylib. The tokenizer
+error taxonomy). `index.ts` and `tests/runtime.ts` typecheck under the
+package's own `tsconfig.json`, which includes only those two; the Bun suite
+passes against a release build of the cdylib. The tokenizer
 generators resolve `ai-tokenizer` from the repository root, where it is a dev
 dependency, and `gen-claude-vocab.ts` handles the two indexed reads the
 stricter root `tsconfig.json` flags. `crates/host-runtime/scripts/perf-host.sh`
@@ -148,9 +150,9 @@ lists it as a `byte-stable` fixture pinned by this receipt:
 | `protocol_vectors.rs` canonical `route.open` header | module id | byte count of the literal body |
 | `crates/tokenizer/testdata/token-golden.json` | corpus texts | `gen/gen-token-golden.ts` against `ai-tokenizer@1.0.6` |
 
-Behavior-only goldens (the transport fuzz corpus, the bench manifest, the
-Synapse tiny model and corpus, the vocabulary asset) are byte-identical to
-their source blobs.
+Behavior-only goldens (the transport fuzz corpus, the Synapse tiny model and
+corpus, the vocabulary asset) are byte-identical to their source blobs. The
+bench manifest's `experiment` name carried the crate prefix and is renamed.
 
 ## Binary and generated inputs
 
@@ -167,8 +169,9 @@ recorded as `generated` with its regeneration command. `Cargo.lock` and
 `migration/waves/U3/{receipt,property-impact,architecture-impact,waivers}.json`
 and this file implement the wave's requirements: the receipt pins every source
 blob and destination hash and declares the four source trees as scope; the
-impact closure classifies 221 records over 61 production files (10 `core`,
-14 `invalidated`, the rest `carried-forward` with the source status verbatim);
+impact closure classifies every record of the three catalogs over the wave's
+Rust files (`core`, `invalidated`, or `carried-forward` with the source status
+verbatim; the counts are in the file);
 the architecture record holds the pre-port and post-integration reports with
 three recorded, non-blocking candidates. The registry gains the renamed
 identities, the addon's TypeScript classification, the fixtures, and the
