@@ -85,7 +85,14 @@ const BLOB_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 const PROVENANCE_RE = /^[a-z0-9][a-z0-9-]*@[0-9a-f]{7,64}$/;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?Z)?$/;
 
-export const PERSISTENT_LITERAL_RE = /"([^"\n]*\.(?:db|sqlite|bin|lock|jsonl|handle))"/g;
+// A persistent filename in every string form of the scanned language. Rust strings are
+// `"…"`, `b"…"`, `r"…"`, and `r#"…"#`; a backtick in Rust is a doc-comment code span, not a
+// string. TypeScript strings are `"…"`, `'…'`, and the template form `` `…` ``.
+const PERSISTENT_NAME = String.raw`\.(?:db|sqlite|bin|lock|jsonl|handle)`;
+export const PERSISTENT_LITERAL_RE: Record<".rs" | ".ts", RegExp> = {
+    ".rs": new RegExp(String.raw`(?:\b[br]#*)?"([^"\n]*${PERSISTENT_NAME})"#*`, "g"),
+    ".ts": new RegExp(String.raw`"([^"\n]*${PERSISTENT_NAME})"|'([^'\n]*${PERSISTENT_NAME})'|` + "`([^`\\n]*" + PERSISTENT_NAME + ")`", "g"),
+};
 
 // Every Eidnara-owned SQL family has exactly one baseline; a version ledger or a
 // runner that upgrades one schema into another has no place in destination code.
@@ -778,7 +785,16 @@ function validatePropertyCatalogShape(root: JsonObject, errors: string[]): void 
 interface PropertyImpactShape {
     pointers: { path: string; pointer: string }[];
     /// Core records whose hashes must match the destination bytes they claim to cover.
-    cores: { path: string; files: string[]; check_pointer: string | undefined; code_hash: string | undefined; check_hash: string | undefined }[];
+    cores: {
+        path: string;
+        files: string[];
+        check_pointer: string | undefined;
+        evidence_pointer: string | undefined;
+        code_hash: string | undefined;
+        check_hash: string | undefined;
+        evidence_digest: string | undefined;
+        new_evidence_digest: string | undefined;
+    }[];
 }
 
 const SOURCE_EXERCISED = ["yes", "partial", "not-yet"] as const;
@@ -880,18 +896,29 @@ function validatePropertyImpactShape(root: JsonObject, errors: string[]): Proper
                 const source = validateSourceStatus(record, "source_status", path, errors);
                 requireString(record, "strategy_decision", path, errors);
                 const auditVerdict = requireEnum(record, "audit_verdict", ["pass", "fail", "vacuous", "pending"], path, errors);
-                requireDigest(record, "evidence_digest", path, errors);
+                // Every digest names the file it is compared against: `evidence_digest` is
+                // the evidence record, `check_hash` the file the check pointer names, and
+                // `code_hash` the covered files. A digest without a file is never compared.
+                const evidenceDigest = requireDigest(record, "evidence_digest", path, errors);
+                const evidencePointer = requireString(record, "evidence_pointer", path, errors);
                 const codeHash = requireDigest(record, "code_hash", path, errors);
-                // `check_hash` is the digest of the file `check_pointer` names, so a core
-                // record without the pointer would carry a hash nothing is compared against.
                 const checkPointer = requireString(record, "check_pointer", path, errors);
+                if (checkPointer !== undefined && !checkPointer.includes("#")) {
+                    errors.push(`${path}.check_pointer must name the check as path#check`);
+                }
                 const checkHash = requireDigest(record, "check_hash", path, errors);
+                if (checkPointer !== undefined) pointers.push({ path: `${path}.check_pointer`, pointer: checkPointer });
+                if (evidencePointer !== undefined) pointers.push({ path: `${path}.evidence_pointer`, pointer: evidencePointer });
+                const newEvidence = isObject(record.new_evidence) ? record.new_evidence : undefined;
                 cores.push({
                     path,
                     files,
                     check_pointer: checkPointer,
+                    evidence_pointer: evidencePointer,
                     code_hash: codeHash,
                     check_hash: checkHash,
+                    evidence_digest: evidenceDigest,
+                    new_evidence_digest: typeof newEvidence?.digest === "string" ? newEvidence.digest : undefined,
                 });
                 const targets = requireStringArray(record, "target_configurations", path, errors);
                 const attempts = requireInteger(record, "evidence_attempts", path, errors);
@@ -1188,13 +1215,30 @@ function skipVendored(rel: string): boolean {
     return rel.split("/").some((segment) => SKIP_DIRS.has(segment));
 }
 
-// A pointer is `path` or `path#Lnn`; the file must exist under the root.
-function pointerResolves(root: string, pointer: string): boolean {
-    const [filePart] = pointer.split("#");
-    if (filePart === undefined || filePart === "") return false;
+/**
+ * A pointer is `path` or `path#check`, where `check` names a declared test in the file: a
+ * `fn check` in Rust or a `test("check"`, `it("check"`, or `describe("check"` in TypeScript.
+ * A line number would keep resolving after the cited check moved, so it is not an anchor.
+ * Returns the reason a pointer does not resolve, or undefined when it does.
+ */
+export function pointerProblem(root: string, pointer: string): string | undefined {
+    const hash = pointer.indexOf("#");
+    const filePart = hash === -1 ? pointer : pointer.slice(0, hash);
+    const anchor = hash === -1 ? undefined : pointer.slice(hash + 1);
+    if (filePart === "") return "names no file";
     const full = resolve(root, filePart);
-    if (!full.startsWith(resolve(root))) return false;
-    return existsSync(full) && statSync(full).isFile();
+    if (!full.startsWith(resolve(root))) return "escapes the destination root";
+    if (!existsSync(full) || !statSync(full).isFile()) return "does not resolve in the destination tree";
+    if (anchor === undefined) return undefined;
+    if (/^L\d+$/.test(anchor)) return "uses a line anchor; name the check instead";
+    if (!/^[A-Za-z_][A-Za-z0-9_ -]*$/.test(anchor)) return `has an anchor "${anchor}" that is not a check name`;
+    const text = readFileSync(full, "utf8");
+    const declared = filePart.endsWith(".rs")
+        ? new RegExp(`^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${anchor}\\b`, "m").test(text)
+        : filePart.endsWith(".ts")
+          ? new RegExp(`\\b(?:test|it|describe)\\(\\s*"${anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`).test(text)
+          : false;
+    return declared ? undefined : `names ${anchor}, which ${filePart} does not declare`;
 }
 
 
@@ -1224,11 +1268,17 @@ function snapshotTrees(checkout: string, commit: string): Set<string> | string {
     return trees;
 }
 
-/// Blob ids under a tree, without their paths.
-function treeBlobs(checkout: string, tree: string): Set<string> | string {
+/// Blob ids under a tree with the number of paths each occupies. Two paths with identical
+/// bytes share one blob id, so a set would let one receipt entry account for both files.
+function treeBlobs(checkout: string, tree: string): Map<string, number> | string {
     const result = git(checkout, ["ls-tree", "-r", "--object-only", tree]);
     if (!result.ok) return result.error;
-    return new Set(result.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== ""));
+    const counts = new Map<string, number>();
+    for (const line of result.stdout.split("\n")) {
+        const blob = line.trim();
+        if (blob !== "") counts.set(blob, (counts.get(blob) ?? 0) + 1);
+    }
+    return counts;
 }
 
 function blobBytes(checkout: string, blob: string): Buffer | string {
@@ -1371,11 +1421,15 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
 
     // Every blob under a scoped source tree is either carried or explicitly excluded, so a
     // file dropped from a source crate cannot pass unnoticed.
-    const disposed = new Set<string>();
+    const disposed = new Map<string, number>();
+    const dispose = (repo: string, blob: string) => {
+        const key = `${repo}\u0000${blob}`;
+        disposed.set(key, (disposed.get(key) ?? 0) + 1);
+    };
     for (const file of shape.files) {
-        if (file.source !== null) disposed.add(`${file.source.repo}\u0000${file.source.blob_sha}`);
+        if (file.source !== null) dispose(file.source.repo, file.source.blob_sha);
     }
-    for (const entry of shape.excluded) disposed.add(`${entry.repo}\u0000${entry.blob_sha}`);
+    for (const entry of shape.excluded) dispose(entry.repo, entry.blob_sha);
     const snapshotCache = new Map<string, Set<string> | undefined>();
     shape.scope.forEach((entry, index) => {
         const checkout = checkoutFor(ctx, entry.repo);
@@ -1404,9 +1458,12 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             return;
         }
         if (blobs.size === 0) errors.push(`$.scope[${index}].tree ${entry.tree} lists no blobs`);
-        for (const blob of blobs) {
-            if (!disposed.has(`${entry.repo}\u0000${blob}`)) {
+        for (const [blob, paths] of blobs) {
+            const accounted = disposed.get(`${entry.repo}\u0000${blob}`) ?? 0;
+            if (accounted === 0) {
                 errors.push(`$.scope[${index}] ${entry.repo} tree ${entry.tree} has blob ${blob} missing from the receipt`);
+            } else if (accounted < paths) {
+                errors.push(`$.scope[${index}] ${entry.repo} tree ${entry.tree} has blob ${blob} at ${paths} paths but the receipt disposes of it ${accounted} time(s)`);
             }
         }
     });
@@ -1595,10 +1652,11 @@ function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): v
             const parts = rel.split("/");
             if (parts[1] !== "src") continue;
             if (/(^|[./_-])tests?([./_-]|$)/.test(rel)) continue;
-            if (!rel.endsWith(".rs") && !rel.endsWith(".ts")) continue;
+            const language = rel.endsWith(".rs") ? ".rs" : rel.endsWith(".ts") ? ".ts" : undefined;
+            if (language === undefined) continue;
             const text = readFileSync(join(treeRoot, rel), "utf8");
-            for (const match of text.matchAll(PERSISTENT_LITERAL_RE)) {
-                const literal = match[1];
+            for (const match of text.matchAll(PERSISTENT_LITERAL_RE[language])) {
+                const literal = match[1] ?? match[2] ?? match[3];
                 if (literal === undefined || literalOwners.has(literal)) continue;
                 errors.push(`${tree}/${rel}: persistent literal "${literal}" has no family entry in the registry`);
             }
@@ -1680,10 +1738,25 @@ function verifyKind(kind: CheckKind, root: JsonObject, ctx: Context): string[] {
                         errors.push(`${core.path}.check_pointer names ${checkFile}, which is not a file in the destination tree; the check_hash cannot be verified`);
                     }
                 }
+                if (core.evidence_pointer !== undefined) {
+                    const full = join(ctx.root, core.evidence_pointer);
+                    if (existsSync(full) && statSync(full).isFile()) {
+                        const actual = sha256(readFileSync(full));
+                        if (core.evidence_digest !== undefined && actual !== core.evidence_digest) {
+                            errors.push(`${core.path}.evidence_digest is stale: ${core.evidence_pointer} hashes to ${actual}; regenerate the record against the checked tree`);
+                        }
+                    } else {
+                        errors.push(`${core.path}.evidence_pointer names ${core.evidence_pointer}, which is not a file in the destination tree; the evidence_digest cannot be verified`);
+                    }
+                }
+                if (core.new_evidence_digest !== undefined && core.evidence_digest !== undefined && core.new_evidence_digest !== core.evidence_digest) {
+                    errors.push(`${core.path}.new_evidence.digest ${core.new_evidence_digest} does not equal evidence_digest; both name the same evidence record`);
+                }
             }
             for (const pointer of shape.pointers) {
-                if (!pointerResolves(ctx.root, pointer.pointer)) {
-                    errors.push(`${pointer.path} ${pointer.pointer} does not resolve in the destination tree; reclassify the record as core or excluded`);
+                const problem = pointerProblem(ctx.root, pointer.pointer);
+                if (problem !== undefined) {
+                    errors.push(`${pointer.path} ${pointer.pointer} ${problem}; reclassify the record as core or excluded`);
                 }
             }
             break;

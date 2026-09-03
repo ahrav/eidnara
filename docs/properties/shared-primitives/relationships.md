@@ -62,7 +62,7 @@ The steady-state mode property does not dominate path-target stability. A test c
 
 ### Lease-root topology (unresolved shared dependency)
 
-`distinct-lease-keys-do-not-alias`, `lease-file-growth-trigger-is-observed`, `filesystem-lock-scope-matches-deployment`, and `logical-store-has-single-lease-identity` depend on whether a consumer places many logical stores under one root. The lease crate describes a shared root (`crates/lease/src/lib.rs:11-15`); the in-repo SQLite consumer derives one root per database parent in `open_sqlite` (`crates/storage/src/lib.rs:660-672`, ending at `FileLeaseStore::new(&parent)`); the density measurement implies at least one external consumer uses a high-cardinality shared root (`lease-store-density.md:7-11`). Impact remains conditional until deployment topology is supplied.
+`distinct-lease-keys-do-not-alias`, `lease-file-growth-trigger-is-observed`, `filesystem-lock-scope-matches-deployment`, and `logical-store-has-single-lease-identity` depend on whether a consumer places many logical stores under one root. The lease crate describes a shared root (`crates/lease/src/lib.rs:11-15`); the in-repo SQLite consumer derives one root per database parent in `open_sqlite` (`crates/storage/src/lib.rs:660-676`, ending at `FileLeaseStore::new(&parent)`); the density measurement implies at least one external consumer uses a high-cardinality shared root (`lease-store-density.md:7-11`). Impact remains conditional until deployment topology is supplied.
 
 ### Resource mechanism
 

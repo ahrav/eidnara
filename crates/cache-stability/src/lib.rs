@@ -79,12 +79,19 @@ pub struct FrozenUnit {
     pub reset_rule: String,
 }
 
-/// The rebuild counter holds `u64::MAX`, so a `Soft` or `Hard` pass has no distinct
-/// version left to stamp. The state is returned unchanged; the harness must not write it
-/// back as if the pass had run.
+/// A pass that cannot run against the loaded state. The state is returned unchanged; the
+/// harness must not write it back as if the pass had run.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("cache version {0} is exhausted; no further rebuild can be stamped")]
-pub struct VersionExhausted(pub u64);
+pub enum StepError {
+    /// The rebuild counter holds `u64::MAX`, so a `Soft` or `Hard` pass has no distinct
+    /// version left to stamp.
+    #[error("cache version {0} is exhausted; no further rebuild can be stamped")]
+    VersionExhausted(u64),
+    /// Two frozen units share a key. `apply_units` replaces the first match, so the second
+    /// would stay in the cached prefix as stale bytes on every pass until a `Hard` rebuild.
+    #[error("frozen unit key {0:?} appears more than once in the loaded state")]
+    DuplicateFrozenKey(String),
+}
 
 /// The core's durable per-pass state. One atomic value: the harness writes it back
 /// whole (units + boundary + version), never per-field, under the store's single-writer
@@ -175,12 +182,21 @@ impl CoreState {
     /// Apply one pass. Returns the executed [`StepResult`] and mutates `self` in place
     /// (the harness then CAS-writes the whole value back).
     ///
-    /// A `Soft` or `Hard` pass stamps `version + 1`; when no such value exists the pass is
-    /// refused before any field changes, since a wrapped counter would reuse a version the
-    /// harness has already seen.
-    pub fn step(&mut self, input: PassInput) -> Result<StepResult, VersionExhausted> {
+    /// The loaded state is validated before any field changes: a `Soft` or `Hard` pass
+    /// stamps `version + 1`, so no such value may exist, and every frozen key must be
+    /// unique, since the state is deserialized from durable storage and a duplicate would
+    /// replay stale bytes on every pass.
+    pub fn step(&mut self, input: PassInput) -> Result<StepResult, StepError> {
         if matches!(input.proposed, Action::Soft | Action::Hard) && self.version == u64::MAX {
-            return Err(VersionExhausted(self.version));
+            return Err(StepError::VersionExhausted(self.version));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(self.frozen_units.len());
+        if let Some(duplicate) = self
+            .frozen_units
+            .iter()
+            .find(|unit| !seen.insert(unit.key.as_str()))
+        {
+            return Err(StepError::DuplicateFrozenKey(duplicate.key.clone()));
         }
         let boundary_match = input.boundary_present == self.boundary_id;
 
@@ -803,7 +819,7 @@ mod tests {
             let err = state
                 .step(PassInput::new(action, "b0"))
                 .expect_err("an exhausted version must refuse a rebuild");
-            assert_eq!(err, VersionExhausted(u64::MAX));
+            assert_eq!(err, StepError::VersionExhausted(u64::MAX));
             assert_eq!(state, before, "a refused pass leaves every field as it was");
         }
         let r = state
@@ -811,5 +827,26 @@ mod tests {
             .expect("a defer stamps no version");
         assert_eq!(r.action, Action::SoftPlus);
         assert_eq!(state.version, u64::MAX);
+    }
+
+    /// Two frozen units with one key cannot be stepped: the first would be replaced and the
+    /// second replayed as stale bytes. Every action refuses, and the state is untouched.
+    #[test]
+    fn duplicate_frozen_keys_in_loaded_state_are_refused_unchanged() {
+        let mut state = state_with(
+            vec![
+                unit("k", "old", DurabilityClass::Lineage),
+                unit("k", "older", DurabilityClass::Lineage),
+            ],
+            "b0",
+        );
+        let before = state.clone();
+        for action in [Action::SoftPlus, Action::Soft, Action::Hard] {
+            let err = state
+                .step(PassInput::new(action, "b0"))
+                .expect_err("a duplicate frozen key must refuse every pass");
+            assert_eq!(err, StepError::DuplicateFrozenKey("k".into()));
+            assert_eq!(state, before);
+        }
     }
 }

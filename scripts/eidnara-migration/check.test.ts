@@ -171,7 +171,8 @@ const valid: Record<CheckKind, Json> = {
                 audit_verdict: "pass",
                 evidence_digest: digest,
                 code_hash: digest,
-                check_pointer: "crates/lease/src/lib.rs#L1",
+                check_pointer: "crates/lease/src/lib.rs#lease_is_single_writer",
+                evidence_pointer: "docs/properties/shared-primitives/evidence/lease-single-writer.md",
                 check_hash: digest,
                 target_configurations: ["linux-x64"],
                 evidence_attempts: 1,
@@ -184,7 +185,7 @@ const valid: Record<CheckKind, Json> = {
                 provenance: `source@${commit}`,
                 source_status: { exercised: "partial", check_status: "unaudited", portfolio_verdict: "not-evaluated", known_violation: false },
                 destination_status: { exercised: "partial", check_status: "unaudited", portfolio_verdict: "not-evaluated", known_violation: false },
-                check_pointer: "crates/lease/src/key.rs#L10",
+                check_pointer: "crates/lease/src/key.rs#key_derivation_is_stable",
                 evidence_pointer: "docs/properties/shared-primitives/evidence/lease-key-derivation.md",
             },
         ],
@@ -791,6 +792,10 @@ describe("shape: architecture impact", () => {
     });
 });
 
+// The lease source carried verbatim into the destination; it declares the check the core
+// record names.
+const LEASE_SOURCE = "pub fn lease() {}\n#[test]\nfn lease_is_single_writer() {}\n";
+
 describe("evidence: git-backed receipts", () => {
     let work: string;
     let source: string;
@@ -821,7 +826,7 @@ describe("evidence: git-backed receipts", () => {
         gitIn(source, ["init", "-q", "-b", "main"]);
         gitIn(source, ["config", "user.email", "t@example.com"]);
         gitIn(source, ["config", "user.name", "t"]);
-        write(join(source, "crates/lease/src/lib.rs"), "pub fn lease() {}\n");
+        write(join(source, "crates/lease/src/lib.rs"), LEASE_SOURCE);
         write(join(source, "crates/lease/src/key.rs"), "pub struct LeaseKey;\n");
         write(join(source, "crates/lease/Cargo.toml"), "[package]\nname = \"lease\"\n");
         write(
@@ -835,8 +840,9 @@ describe("evidence: git-backed receipts", () => {
         leaseBlob = gitIn(source, ["rev-parse", `HEAD:crates/lease/src/lib.rs`]);
         keyBlob = gitIn(source, ["rev-parse", `HEAD:crates/lease/src/key.rs`]);
 
-        write(join(destination, "crates/lease/src/lib.rs"), "pub fn lease() {}\n");
-        write(join(destination, "crates/lease/src/key.rs"), "pub struct LeaseKey; // adapted\n");
+        write(join(destination, "crates/lease/src/lib.rs"), LEASE_SOURCE);
+        write(join(destination, "crates/lease/src/key.rs"), "pub struct LeaseKey; // adapted\n#[test]\nfn key_derivation_is_stable() {}\n");
+        write(join(destination, "docs/properties/shared-primitives/evidence/lease-single-writer.md"), "# evidence\n");
         write(join(destination, "crates/lease/Cargo.toml"), "[package]\nname = \"lease\"\n");
         write(join(destination, "docs/properties/shared-primitives/evidence/lease-key-derivation.md"), "# evidence\n");
         write(
@@ -895,6 +901,7 @@ describe("evidence: git-backed receipts", () => {
             record.code_hash = sha256(bytes);
             const checkFile = typeof record.check_pointer === "string" ? record.check_pointer.split("#")[0]! : undefined;
             if (checkFile !== undefined) record.check_hash = sha256(readFileSync(join(destination, checkFile)));
+            if (typeof record.evidence_pointer === "string") record.evidence_digest = sha256(readFileSync(join(destination, record.evidence_pointer)));
         }
         return impact;
     }
@@ -916,7 +923,7 @@ describe("evidence: git-backed receipts", () => {
                 {
                     source: { repo: "source", blob_sha: leaseBlob },
                     destination: "crates/lease/src/lib.rs",
-                    destination_sha256: sha256("pub fn lease() {}\n"),
+                    destination_sha256: sha256(LEASE_SOURCE),
                     transformation: "verbatim",
                     class: "human-authored",
                     review_evidence: { doc_rigor: "review/U2/lib.json" },
@@ -924,7 +931,7 @@ describe("evidence: git-backed receipts", () => {
                 {
                     source: { repo: "source", blob_sha: keyBlob },
                     destination: "crates/lease/src/key.rs",
-                    destination_sha256: sha256("pub struct LeaseKey; // adapted\n"),
+                    destination_sha256: sha256("pub struct LeaseKey; // adapted\n#[test]\nfn key_derivation_is_stable() {}\n"),
                     transformation: "adapted",
                     class: "human-authored",
                     review_evidence: { doc_rigor: "review/U2/key.json" },
@@ -985,7 +992,7 @@ describe("evidence: git-backed receipts", () => {
     test("a core record whose check pointer names a missing file is an error", () => {
         const impact = impactFor(sourceCommit);
         const core = records(impact).find((record) => record.classification === "core")!;
-        core.check_pointer = "crates/lease/src/absent.rs#L1";
+        core.check_pointer = "crates/lease/src/absent.rs#lease_is_single_writer";
         const errors = verify("property-impact", impact, ctx);
         expect(errors.some((error) => error.includes("check_pointer names crates/lease/src/absent.rs"))).toBe(true);
     });
@@ -1097,7 +1104,7 @@ describe("evidence: git-backed receipts", () => {
         files(value).push({
             source: null,
             destination: "crates/lease/src/lib.rs",
-            destination_sha256: sha256("pub fn lease() {}\n"),
+            destination_sha256: sha256(LEASE_SOURCE),
             transformation: "authored",
             class: "new-authored",
             review_evidence: { design_review: "x", negative_tests: "y" },
@@ -1110,12 +1117,59 @@ describe("evidence: git-backed receipts", () => {
 
     test("carried-forward pointers must resolve in the destination tree (AE25)", () => {
         const impact = impactFor(sourceCommit);
-        records(impact)[1]!.check_pointer = "crates/lease/src/gone.rs#L1";
+        records(impact)[1]!.check_pointer = "crates/lease/src/gone.rs#key_derivation_is_stable";
         const errors = verify("property-impact", impact, ctx);
         expect(errors).toContain(
-            "$.records[1].check_pointer crates/lease/src/gone.rs#L1 does not resolve in the destination tree; reclassify the record as core or excluded",
+            "$.records[1].check_pointer crates/lease/src/gone.rs#key_derivation_is_stable does not resolve in the destination tree; reclassify the record as core or excluded",
         );
         expect(verify("property-impact", impactFor(sourceCommit), ctx)).toEqual([]);
+    });
+
+    test("a check pointer names a declared check, never a line", () => {
+        const byLine = impactFor(sourceCommit);
+        records(byLine)[1]!.check_pointer = "crates/lease/src/key.rs#L10";
+        expect(verify("property-impact", byLine, ctx)).toContain(
+            "$.records[1].check_pointer crates/lease/src/key.rs#L10 uses a line anchor; name the check instead; reclassify the record as core or excluded",
+        );
+        const renamed = impactFor(sourceCommit);
+        records(renamed)[1]!.check_pointer = "crates/lease/src/key.rs#key_derivation_was_renamed";
+        expect(verify("property-impact", renamed, ctx)).toContain(
+            "$.records[1].check_pointer crates/lease/src/key.rs#key_derivation_was_renamed names key_derivation_was_renamed, which crates/lease/src/key.rs does not declare; reclassify the record as core or excluded",
+        );
+        const bare = impactFor(sourceCommit);
+        const core = records(bare).find((record) => record.classification === "core")!;
+        core.check_pointer = "crates/lease/src/lib.rs";
+        expect(verify("property-impact", bare, ctx)).toContain("$.records[0].check_pointer must name the check as path#check");
+    });
+
+    test("a core record's evidence digest is compared against its evidence file", () => {
+        const stale = impactFor(sourceCommit);
+        const core = records(stale).find((record) => record.classification === "core")!;
+        core.evidence_digest = "2".repeat(64);
+        (core.new_evidence as Json | undefined) && ((core.new_evidence as Json).digest = "2".repeat(64));
+        expect(verify("property-impact", stale, ctx).some((error) => error.includes(".evidence_digest is stale"))).toBe(true);
+        const split = impactFor(sourceCommit);
+        const splitCore = records(split).find((record) => record.classification === "core")!;
+        splitCore.new_evidence = { digest: "3".repeat(64), description: "fresh" };
+        splitCore.source_status = { exercised: "partial", check_status: "unaudited", portfolio_verdict: "not-evaluated", known_violation: false };
+        expect(verify("property-impact", split, ctx).some((error) => error.includes("new_evidence.digest") && error.includes("does not equal evidence_digest"))).toBe(true);
+    });
+
+    test("a source blob at two paths must be disposed of twice", () => {
+        write(join(source, "crates/lease/src/copy.rs"), LEASE_SOURCE);
+        gitIn(source, ["add", "-A"]);
+        gitIn(source, ["commit", "-q", "-m", "duplicate bytes at a second path"]);
+        const newer = gitIn(source, ["rev-parse", "HEAD"]);
+        try {
+            const value = receipt();
+            (value.sources as Json[])[0] = { repo: "source", commit: newer };
+            (value.catalogs as Json[])[0] = { repo: "source", commit: newer };
+            (value.scope as Json[])[0] = { repo: "source", tree: gitIn(source, ["rev-parse", "HEAD:crates/lease"]) };
+            const errors = verify("receipt", value, ctx);
+            expect(errors).toContain(`$.scope[0] source tree ${gitIn(source, ["rev-parse", "HEAD:crates/lease"])} has blob ${leaseBlob} at 2 paths but the receipt disposes of it 1 time(s)`);
+        } finally {
+            gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
     });
 
     test("registry scans catch migration machinery in non-test code (AE11)", () => {
@@ -1133,13 +1187,22 @@ describe("evidence: git-backed receipts", () => {
     });
 
     test("registry scans catch unowned persistent literals (AE7)", () => {
-        write(join(destination, "crates/lease/src/paths.rs"), 'const DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\n');
+        write(
+            join(destination, "crates/lease/src/paths.rs"),
+            'const DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\nconst RAW: &str = r#"raw.db"#;\nconst BYTES: &[u8] = b"bytes.lock";\n',
+        );
+        write(join(destination, "crates/lease/src/paths.ts"), "const a = 'single.db';\nconst b = `template.jsonl`;\n");
         try {
             const errors = verify("registry", copy("registry"), ctx);
             expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "mystery.db" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "raw.db" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "bytes.lock" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.ts: persistent literal "single.db" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.ts: persistent literal "template.jsonl" has no family entry in the registry');
             expect(errors.some((error) => error.includes('"core.sqlite"'))).toBe(false);
         } finally {
             rmSync(join(destination, "crates/lease/src/paths.rs"));
+            rmSync(join(destination, "crates/lease/src/paths.ts"));
         }
     });
 

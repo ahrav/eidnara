@@ -56,5 +56,7 @@ A `no` means every safety check threatened by that fault can pass without the fa
 | A callback error after a fence claim | `fenced-write-is-atomic` |
 | A negative stored epoch or a holder epoch above `i64::MAX` | `fence-epoch-outside-sqlite-range-fails-closed` |
 | A baseline text that attaches a database, writes a pragma, or opens a transaction | `store-schema-identity-matches-the-baseline` |
-| A stored cache `version` of `u64::MAX` before a rebuild | none; `CoreState::step` returns `VersionExhausted` with the state unchanged (`an_exhausted_version_refuses_a_rebuild_and_leaves_the_state_unchanged`) |
+| A stored cache `version` of `u64::MAX` before a rebuild | none; `CoreState::step` returns `StepError::VersionExhausted` with the state unchanged (`an_exhausted_version_refuses_a_rebuild_and_leaves_the_state_unchanged`) |
+| Two frozen units under one key in loaded cache state | none; `CoreState::step` returns `StepError::DuplicateFrozenKey` with the state unchanged (`duplicate_frozen_keys_in_loaded_state_are_refused_unchanged`) |
+| A foreign database with committed WAL frames, or a foreign `fence` row, at the store path | `store-schema-identity-matches-the-baseline` |
 

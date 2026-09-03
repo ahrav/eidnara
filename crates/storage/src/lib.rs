@@ -664,7 +664,11 @@ mod sqlite_backend {
         std::fs::create_dir_all(&parent).map_err(StoreError::Io)?;
 
         refuse_unfit_store_files(Path::new(&path))?;
-        let epoch_floor = read_fence_epoch(Path::new(&path))?;
+        // An existing file is inspected on a read-only connection before anything can
+        // change it. A read-write open would let SQLite recover or checkpoint a foreign
+        // WAL and rewrite the file on close, and a fence row in a foreign file would
+        // otherwise raise the lease floor before the file was ever classified.
+        let epoch_floor = expected.inspect_existing(Path::new(&path))?;
         let db_file_name = Path::new(&path)
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -685,8 +689,9 @@ mod sqlite_backend {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-        // Identity is settled before any pragma, transaction, or mode change can touch the
-        // file, so a refused file keeps every byte and every permission bit it had.
+        // The read-write connection re-establishes identity so the connection handed out
+        // is classified on its own view of the file, not on the inspection that preceded
+        // the lease.
         let state = expected.classify(&conn)?;
         // Pre-existing permissive files are narrowed before the fence claim writes any bytes.
         for suffix in ["", "-wal", "-shm"] {
@@ -777,30 +782,6 @@ mod sqlite_backend {
         #[cfg(not(unix))]
         let _ = path;
         Ok(())
-    }
-
-    fn read_fence_epoch(path: &Path) -> Result<u64, StoreError> {
-        if !path.try_exists().map_err(StoreError::Io)? {
-            return Ok(0);
-        }
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .map_err(|e| StoreError::Backend(e.to_string()))?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-        let has_fence: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'fence')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-        if !has_fence {
-            return Ok(0);
-        }
-        read_fence_epoch_in(&conn)
     }
 
     const FENCE_EPOCH_SQL: &str = "SELECT COALESCE((SELECT epoch FROM fence WHERE id = 0), 0)";
@@ -923,6 +904,28 @@ mod sqlite_backend {
                 digest,
                 objects,
             })
+        }
+
+        /// Classifies an existing file on a read-only connection and returns the fence
+        /// epoch it stores, or zero for a missing or pristine file. A read-only connection
+        /// neither recovers nor checkpoints a WAL, so a refused file keeps its database,
+        /// `-wal`, and `-shm` bytes; the epoch is read only after the file is known to be
+        /// this store's, so a foreign `fence` row cannot raise the lease floor.
+        fn inspect_existing(&self, path: &Path) -> Result<u64, StoreError> {
+            if !path.try_exists().map_err(StoreError::Io)? {
+                return Ok(0);
+            }
+            let conn = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+            conn.busy_timeout(Duration::from_secs(5))
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            match self.classify(&conn)? {
+                FileState::Pristine => Ok(0),
+                FileState::Baseline => read_fence_epoch_in(&conn),
+            }
         }
 
         /// Reads only: a file that is refused keeps every byte it had.
@@ -1282,6 +1285,78 @@ mod tests {
             other => panic!("attaching a file must be rejected, got {other:?}"),
         }
         assert!(!external.exists(), "the attached path must not be created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A foreign database with committed WAL frames is refused without SQLite recovering or
+    /// checkpointing it: the database, `-wal`, and `-shm` bytes are untouched.
+    #[test]
+    fn a_refused_foreign_wal_database_is_left_unrecovered() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        std::fs::create_dir_all(&root).expect("root");
+        // Build the WAL elsewhere, then copy the frames alongside a copy of the database
+        // before the writer closes; closing the last connection would checkpoint them.
+        let origin = root.join("origin.db");
+        {
+            let foreign = rusqlite::Connection::open(&origin).expect("foreign database");
+            foreign
+                .execute_batch(
+                    "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; \
+                     CREATE TABLE theirs (k TEXT); INSERT INTO theirs VALUES ('frame');",
+                )
+                .expect("foreign schema in the WAL");
+            std::fs::copy(&origin, path).expect("copy database");
+            std::fs::copy(format!("{}-wal", origin.display()), format!("{path}-wal"))
+                .expect("copy wal");
+        }
+        let wal_before = std::fs::read(format!("{path}-wal")).expect("wal bytes");
+        assert!(!wal_before.is_empty(), "the copied WAL must carry frames");
+        let db_before = std::fs::read(path).expect("db bytes");
+        assert!(matches!(
+            open_sqlite(&d, "").map(|_| ()),
+            Err(StoreError::Baseline(_))
+        ));
+        assert_eq!(
+            std::fs::read(format!("{path}-wal")).expect("wal after"),
+            wal_before
+        );
+        assert_eq!(std::fs::read(path).expect("db after"), db_before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `fence` row in a foreign file is not a floor: the lease epoch stays untouched when
+    /// the file is refused, so the path is usable again once the foreign file is gone.
+    #[test]
+    fn a_foreign_fence_row_does_not_raise_the_lease_floor() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        std::fs::create_dir_all(&root).expect("root");
+        {
+            let foreign = rusqlite::Connection::open(path).expect("foreign database");
+            foreign
+                .execute_batch(&format!(
+                    "CREATE TABLE fence (id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL); \
+                     INSERT INTO fence VALUES (0, {}); CREATE TABLE theirs (k TEXT);",
+                    i64::MAX
+                ))
+                .expect("foreign fence");
+        }
+        assert!(matches!(
+            open_sqlite(&d, "").map(|_| ()),
+            Err(StoreError::Baseline(_))
+        ));
+        std::fs::remove_file(path).expect("remove the foreign file");
+        let store = open_sqlite(&d, "").expect("a fresh store opens once the foreign file is gone");
+        assert_eq!(
+            store.epoch(),
+            1,
+            "the lease was never raised by the foreign row"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
