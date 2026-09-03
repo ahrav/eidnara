@@ -1215,6 +1215,8 @@ describe("evidence: git-backed receipts", () => {
             ["docs/note.md", "The Old-Name service.\n"],
             ["crates/lease/src/paths.rs", 'const DIR: &str = "old_name";\n'],
             ["scripts/run.sh", "oldname-host --flag\n"],
+            ["scripts/compound.sh", "old-name-host --flag\n"],
+            ["scripts/prefixed.sh", "run_old_name --flag\n"],
         ] as const) {
             write(join(destination, file), text);
             gitIn(destination, ["add", "-A"]);

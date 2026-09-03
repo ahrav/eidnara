@@ -1765,16 +1765,21 @@ function retiredIdentityScanFiles(root: string): string[] {
 }
 
 /**
- * Every word-like token in `text`, plus each `-`/`_`-separated part of it, in normalized
- * form; a retired name embedded in a compound such as `name-host` is found through its part.
+ * Every word-like token in `text` and every contiguous run of its `-`/`_`-separated parts,
+ * joined and lower-cased. `old-name-host` yields `old`, `name`, `host`, `oldname`,
+ * `namehost`, and `oldnamehost`, so a retired name that keeps its delimiter inside a
+ * compound is found through the run that spells it.
  */
-function normalizedTokens(text: string): Set<string> {
+export function normalizedTokens(text: string): Set<string> {
     const out = new Set<string>();
     for (const match of text.matchAll(/[A-Za-z][A-Za-z0-9_-]*/g)) {
-        const token = match[0];
-        out.add(token.toLowerCase().replace(/[-_]/g, ""));
-        for (const part of token.split(/[-_]+/)) {
-            if (part !== "") out.add(part.toLowerCase());
+        const parts = match[0].toLowerCase().split(/[-_]+/).filter((part) => part !== "");
+        for (let start = 0; start < parts.length; start += 1) {
+            let run = "";
+            for (let end = start; end < parts.length; end += 1) {
+                run += parts[end];
+                out.add(run);
+            }
         }
     }
     return out;
