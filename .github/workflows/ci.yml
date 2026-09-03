@@ -118,6 +118,12 @@ jobs:
           cargo +1.98 check --workspace --no-default-features --locked
           cargo +1.98 check --workspace --all-features --locked
 
+      - name: Fuzz workspace (excluded from the root workspace)
+        run: |
+          cargo +1.98 fmt --manifest-path crates/shm-transport/fuzz/Cargo.toml --all -- --check
+          cargo +1.98 check --manifest-path crates/shm-transport/fuzz/Cargo.toml --locked --bins
+          cargo +stable check --manifest-path crates/shm-transport/fuzz/Cargo.toml --locked --bins
+
       - name: Pinned toolchain with unlocked latest dependencies
         run: |
           set -euo pipefail
