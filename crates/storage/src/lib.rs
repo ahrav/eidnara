@@ -379,6 +379,22 @@ mod sqlite_backend {
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
+    /// Lower-cased names of every main-schema object; SQLite resolves unqualified names
+    /// through the temp schema first, so a temp object under one of these names would
+    /// capture the writes a callback believes it makes to the store.
+    fn main_schema_names(
+        conn: &Connection,
+    ) -> Result<std::collections::HashSet<String>, StoreError> {
+        let mut statement = conn
+            .prepare("SELECT lower(name) FROM main.sqlite_schema")
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
     impl<'c> CallbackScope<'c> {
         /// Denies writes as well as the escapes, for a callback that must not mutate.
         fn read_only(conn: &'c Connection) -> Result<Self, StoreError> {
@@ -400,13 +416,16 @@ mod sqlite_backend {
             query_only_before: Option<bool>,
         ) -> Result<Self, StoreError> {
             let infrastructure_before = infrastructure_objects(conn)?;
+            let main_names = main_schema_names(conn)?;
             let scope = Self {
                 conn: Some(conn),
                 query_only_before,
                 infrastructure_before,
             };
-            conn.authorizer(Some(deny_scope_escapes))
-                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                deny_scope_escapes(context, &main_names)
+            }))
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
             Ok(scope)
         }
 
@@ -515,12 +534,27 @@ mod sqlite_backend {
     /// Main-schema DDL is denied whatever it targets: the file's schema is the baseline
     /// the next open compares against, so a committed `CREATE`, `ALTER`, or `DROP` would
     /// make the store fail to reopen. Temporary objects live outside that comparison and
-    /// stay allowed unless they carry an infrastructure name.
+    /// stay allowed unless they carry an infrastructure name, shadow a main-schema name, or
+    /// are triggers on a main-schema table: any of those would redirect or rewrite the
+    /// writes of this and every later callback on the shared connection.
     fn deny_scope_escapes(
         context: rusqlite::hooks::AuthContext<'_>,
+        main_names: &std::collections::HashSet<String>,
     ) -> rusqlite::hooks::Authorization {
         use rusqlite::hooks::{AuthAction, Authorization};
+        let shadows = |name: &str| main_names.contains(&name.to_ascii_lowercase());
         match context.action {
+            AuthAction::CreateTempTable { table_name } if shadows(table_name) => {
+                Authorization::Deny
+            }
+            AuthAction::CreateTempView { view_name } if shadows(view_name) => Authorization::Deny,
+            AuthAction::CreateTempIndex { index_name, .. } if shadows(index_name) => {
+                Authorization::Deny
+            }
+            AuthAction::CreateTempTrigger {
+                trigger_name,
+                table_name,
+            } if shadows(trigger_name) || shadows(table_name) => Authorization::Deny,
             AuthAction::Pragma {
                 pragma_value: Some(_),
                 ..
@@ -756,14 +790,17 @@ mod sqlite_backend {
     }
 
     /// SQLite URI for `path` with `immutable=1`: the connection takes no locks, reads no
-    /// `-wal`, and creates no sidecar. `%`, `?`, and `#` are the only bytes the URI grammar
-    /// reserves inside the path.
-    fn immutable_uri(path: &Path) -> String {
+    /// `-wal`, and creates no sidecar. Every byte outside the unreserved ASCII set is
+    /// percent-encoded, so `%`, `?`, `#`, spaces, and each byte of a non-ASCII name reach
+    /// SQLite's decoder as the bytes the filesystem holds.
+    pub(crate) fn immutable_uri(path: &Path) -> String {
         let mut out = String::from("file:");
         for byte in path.as_os_str().as_encoded_bytes() {
             match byte {
-                b'%' | b'?' | b'#' => out.push_str(&format!("%{byte:02X}")),
-                _ => out.push(char::from(*byte)),
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                    out.push(char::from(*byte))
+                }
+                _ => out.push_str(&format!("%{byte:02X}")),
             }
         }
         out.push_str("?immutable=1");
@@ -1291,6 +1328,7 @@ pub use sqlite_backend::{
 mod tests {
     use super::sqlite_backend::{
         FileIdentity, FileState, claim_fence, claim_fence_strict, create_database_file_owner_only,
+        immutable_uri,
     };
     use super::*;
     use std::path::Path;
@@ -1706,6 +1744,82 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o664, "a refused file keeps its mode");
         assert_eq!(std::fs::read(path).expect("bytes after"), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A store whose path holds non-ASCII bytes reopens cleanly: the inspection URI carries
+    /// each path byte percent-encoded rather than as a re-encoded scalar.
+    #[test]
+    fn a_store_under_a_non_ascii_path_reopens() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let odd_dir = root.join("Ünïcødé dir #1 100%");
+        let odd_path = odd_dir.join("store.db");
+        let odd = StorageDescriptor {
+            backend: StorageBackend::Sqlite {
+                path: odd_path.to_string_lossy().into_owned(),
+            },
+            ..d.clone()
+        };
+        let _ = path;
+        assert_eq!(open_sqlite(&odd, "").expect("first open").epoch(), 1);
+        assert!(
+            !std::path::Path::new(&format!("{}-wal", odd_path.display())).exists(),
+            "a clean close leaves no WAL, so the reopen inspects through the immutable URI"
+        );
+        assert_eq!(open_sqlite(&odd, "").expect("reopen").epoch(), 2);
+        assert_eq!(
+            immutable_uri(Path::new("/tmp/ü %?#.sqlite3")),
+            "file:/tmp/%C3%BC%20%25%3F%23.sqlite3?immutable=1"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A temp object under a main-schema name, or a temp trigger on a main table, would
+    /// capture the writes of every later callback on the connection; both are denied while
+    /// an unrelated scratch table stays allowed.
+    #[test]
+    fn a_callback_cannot_shadow_a_baseline_table_with_a_temp_object() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        for ddl in [
+            "CREATE TEMP TABLE kv (k TEXT PRIMARY KEY, v TEXT)",
+            "CREATE TEMP TABLE KV (k TEXT)",
+            "CREATE TEMP VIEW kv AS SELECT 'x' AS k, 'y' AS v",
+            "CREATE TEMP TRIGGER swallow BEFORE INSERT ON kv BEGIN SELECT RAISE(IGNORE); END",
+        ] {
+            let result = store.with_conn_fenced(|tx| tx.execute(ddl, []).map(|_| ()));
+            match result {
+                Err(StoreError::Backend(m)) => {
+                    assert!(
+                        m.contains("not authorized"),
+                        "{ddl}: unexpected message: {m}"
+                    )
+                }
+                other => panic!("{ddl} must be denied, got {other:?}"),
+            }
+        }
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("CREATE TEMP TABLE scratch (k TEXT)", [])
+                    .map(|_| ())
+            })
+            .expect("a scratch table under a fresh name stays allowed");
+        // The write reaches the durable table and survives a reopen.
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('a', 'b')", [])
+                    .map(|_| ())
+            })
+            .expect("write");
+        drop(store);
+        let reopened = open_sqlite(&d, KV_BASELINE).expect("reopen");
+        let count: i64 = reopened
+            .with_conn(|conn| conn.query_row("SELECT count(*) FROM kv", [], |row| row.get(0)))
+            .expect("count");
+        assert_eq!(count, 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 

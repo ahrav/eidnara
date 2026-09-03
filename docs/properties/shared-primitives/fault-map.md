@@ -51,7 +51,7 @@ A `no` means every safety check threatened by that fault can pass without the fa
 | A regenerated or edited golden fixture | `cache-stability-golden-vectors-are-byte-stable`, `storage-descriptor-golden-vectors-are-byte-stable` |
 | A renamed serde field or tag | `descriptor-wire-shape-round-trips` |
 | A file whose `application_id`, `user_version`, `sqlite_schema` inventory, or format-marker digest differs from the baseline, or a baseline text that does not apply | `store-schema-identity-matches-the-baseline` |
-| A callback that writes, lowers a pragma, or panics | `read-callbacks-cannot-write`, `callback-scope-is-restored-after-unwind`, `protected-transactions-pin-fence-durability` |
+| A callback that writes, lowers a pragma, panics, or creates a temp object that shadows a baseline table | `read-callbacks-cannot-write`, `callback-scope-is-restored-after-unwind`, `protected-transactions-pin-fence-durability` |
 | A permissive database, WAL, or SHM file at reopen | `store-files-are-owner-only-after-open` |
 | A callback error after a fence claim | `fenced-write-is-atomic` |
 | A negative stored epoch or a holder epoch above `i64::MAX` | `fence-epoch-outside-sqlite-range-fails-closed` |
