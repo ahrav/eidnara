@@ -973,6 +973,10 @@ impl Ring {
     /// data, and drains a stale token, so a publish that raced this call is not missed.
     /// Returns `true` only when blocking is correct; `false` means data or a generation change
     /// is already visible and the caller should poll again instead.
+    ///
+    /// A wait armed while `max_leases` leases are outstanding is woken by the next publish,
+    /// not by this handle's own releases: release runs on the thread that would block here.
+    /// Release leases, then poll again, before blocking.
     pub fn arm_data_wait(&self) -> Result<bool, RingError> {
         if self.is_quarantined() {
             return Err(RingError::Quarantined);
@@ -1223,8 +1227,16 @@ impl Ring {
         if self.is_quarantined() {
             return Err(RingError::Quarantined);
         }
-        self.try_receive_inner()
-            .map_err(|error| self.quarantine_with(error))
+        let lease = self
+            .try_receive_inner()
+            .map_err(|error| self.quarantine_with(error))?;
+        // A peer quarantine that landed while the slot was being taken leaves the frame leased
+        // on a terminal ring; the caller must not read it as delivered.
+        if self.is_quarantined() {
+            drop(lease);
+            return Err(RingError::Quarantined);
+        }
+        Ok(lease)
     }
 
     fn try_receive_inner(&self) -> Result<Option<ReceiveLease<'_>>, RingError> {
@@ -1355,9 +1367,15 @@ impl Ring {
     }
 
     /// Returns a leased frame to the producer. Checks incarnation, lane, and sequence against
-    /// the grant and the slot, then moves the slot to release-pending and rings both
-    /// doorbells. Only `ReceiveLease` reaches this: an identity is `Copy`, so a public entry
+    /// the grant and the slot, then moves the slot to release-pending and rings the capacity
+    /// doorbell. Only `ReceiveLease` reaches this: an identity is `Copy`, so a public entry
     /// point would let a caller release a frame while still holding the lease that reads it.
+    ///
+    /// The data doorbell is left alone. This handle is the consumer, its doorbell end only
+    /// reaches the producer, and the thread releasing a lease is the thread that would poll
+    /// for data, so it is not blocked; a caller that parked on the lease limit must poll
+    /// again after releasing. Touching the data wake epoch here would clear this handle's own
+    /// parked marker and silence the next publish.
     ///
     /// The identity was validated when the lease was built, so every mismatch here means the
     /// peer rewrote the slot under a live lease. Each one quarantines; the variant names what
@@ -1443,7 +1461,6 @@ impl Ring {
             active_leases: active - 1,
         });
         self.signal_wake(self.capacity_wake_ptr(), &self.capacity_ready)
-            .and_then(|()| self.signal_wake(self.data_wake_ptr(), &self.data_ready))
             .map_err(|_| LeaseError::Quarantined)
     }
 
@@ -1641,7 +1658,9 @@ impl Ring {
         let outstanding = in_flight
             .checked_add(held)
             .ok_or(RingError::InvalidSharedState)?;
-        if active_leases > self.grant.max_leases
+        // One producer holds at most one reservation.
+        if descriptors.producer_reserved > 1
+            || active_leases > self.grant.max_leases
             || !matches(active_leases, descriptors.receiver_leased)
             || !matches(in_flight, descriptors.published)
             || !receiver_owned_ok
@@ -3499,6 +3518,72 @@ mod tests {
         let attachment = ring.attachment().unwrap();
         ring.enter_quarantine();
         assert!(matches!(attachment.attach(), Err(RingError::Quarantined)));
+    }
+
+    #[test]
+    fn receive_that_raced_a_quarantine_is_not_reported_as_delivered() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        let lifecycle = ring.lifecycle_ptr().unwrap();
+        // SAFETY: test-owned ring keeps the lifecycle page mapped.
+        unsafe { (*lifecycle).quarantined.store(1, Ordering::Release) };
+        // The wrapper's first check catches this; the inner path's own success is what the
+        // post-check guards, so drive it directly.
+        let lease = ring.try_receive_inner().unwrap();
+        assert!(lease.is_some());
+        drop(lease);
+        assert!(matches!(ring.try_receive(), Err(RingError::Quarantined)));
+    }
+
+    #[test]
+    fn two_producer_reserved_slots_are_impossible() {
+        let ring = ring();
+        let first = ring.slot_ptr(1).unwrap();
+        let second = ring.slot_ptr(2).unwrap();
+        // SAFETY: test-owned ring keeps both slots mapped.
+        unsafe {
+            (*first)
+                .state
+                .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release);
+            (*second)
+                .state
+                .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release);
+        }
+        assert!(matches!(
+            ring.attachment().unwrap().attach(),
+            Err(RingError::InvalidSharedState)
+        ));
+        assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
+    }
+
+    #[test]
+    fn release_leaves_the_consumers_data_wait_armed_for_the_next_publish() {
+        let producer = ring();
+        let consumer = producer.attachment().unwrap().attach().unwrap();
+        publish(&producer, &[1]);
+        let lease = consumer.try_receive().unwrap().unwrap();
+        assert!(
+            consumer.arm_data_wait().unwrap(),
+            "empty ring: blocking is correct"
+        );
+        lease.release().unwrap();
+        let wake = consumer.data_wake_ptr().unwrap();
+        // SAFETY: shared wake page is mapped by both handles.
+        assert_ne!(
+            unsafe { (*wake).parked.load(Ordering::Acquire) },
+            0,
+            "a release must not clear the consumer's own parked marker"
+        );
+        publish(&producer, &[2]);
+        assert!(
+            consumer
+                .data_ready
+                .wait_until(std::time::Instant::now() + std::time::Duration::from_secs(5))
+                .unwrap(),
+            "the publish after a release must still wake the parked consumer"
+        );
+        consumer.complete_data_wait().unwrap();
+        consumer.try_receive().unwrap().unwrap().release().unwrap();
     }
 
     #[test]
