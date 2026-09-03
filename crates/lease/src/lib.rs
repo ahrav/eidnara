@@ -69,6 +69,20 @@ fn protect_open_file(file: &File, path: &std::path::Path) -> std::io::Result<()>
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // SAFETY: `geteuid` reads the effective user id and has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        // A lease file another user owns was placed there by that user; locking it would
+        // hand the exclusion decision to a file this process does not control.
+        if metadata.uid() != euid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "lease file {} is owned by uid {}, not the running user {euid}",
+                    path.display(),
+                    metadata.uid()
+                ),
+            ));
+        }
         // A second name for this inode would receive the mode change and the epoch
         // overwrite, and two lease paths joined to one inode would share one lock and one
         // epoch despite their distinct keys.
@@ -99,16 +113,22 @@ fn non_regular_file(path: &std::path::Path) -> std::io::Error {
     )
 }
 
-/// The lease directory must not accept renames from another principal. Exclusion rests
-/// on every acquirer locking the inode the shared path names; a principal who can rename
-/// in the directory can point the path at a second inode between one acquirer's lock and
-/// the next acquirer's open, and both then hold a lease for one key. On Unix the
-/// directory must therefore be owned by the running user and carry no group or other
-/// write bit. Windows has no equivalent mode semantics, and the check is a no-op there.
+/// The lease directory and every directory above it must not accept renames from another
+/// principal. Exclusion rests on every acquirer locking the inode the shared path names; a
+/// principal who can rename in the directory can point the path at a second inode between
+/// one acquirer's lock and the next acquirer's open, and a principal who can rename in an
+/// ancestor can swap the whole directory for another the user owns, so both then hold a
+/// lease for one key. On Unix the directory must be owned by the running user with no group
+/// or other write bit, and each ancestor must be owned by the running user or root and be
+/// either not writable by group or other or sticky, since a sticky directory lets only an
+/// entry's owner rename it. Windows has no equivalent mode semantics, and the check is a
+/// no-op there.
 fn require_private_directory(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // SAFETY: `geteuid` reads the effective user id and has no preconditions.
+        let euid = unsafe { libc::geteuid() };
         let metadata = std::fs::symlink_metadata(dir)?;
         if !metadata.is_dir() {
             return Err(std::io::Error::new(
@@ -116,8 +136,6 @@ fn require_private_directory(dir: &std::path::Path) -> std::io::Result<()> {
                 format!("lease directory {} is not a directory", dir.display()),
             ));
         }
-        // SAFETY: `geteuid` reads the effective user id and has no preconditions.
-        let euid = unsafe { libc::geteuid() };
         if metadata.uid() != euid {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -138,6 +156,37 @@ fn require_private_directory(dir: &std::path::Path) -> std::io::Result<()> {
                     dir.display()
                 ),
             ));
+        }
+        // Symlinks along the way are resolved once, so the ancestors examined are the
+        // directories that hold the entries an attacker would rename.
+        let resolved = std::fs::canonicalize(dir)?;
+        for ancestor in resolved.ancestors().skip(1) {
+            let meta = std::fs::metadata(ancestor)?;
+            if meta.uid() != euid && meta.uid() != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "lease directory ancestor {} is owned by uid {}; another principal \
+                         could rename the lease directory away",
+                        ancestor.display(),
+                        meta.uid()
+                    ),
+                ));
+            }
+            let mode = meta.permissions().mode();
+            let writable_by_others = mode & 0o022 != 0;
+            let sticky = mode & 0o1000 != 0;
+            if writable_by_others && !sticky {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "lease directory ancestor {} has mode {:o} without the sticky bit; \
+                         another principal could rename the lease directory away",
+                        ancestor.display(),
+                        mode & 0o7777
+                    ),
+                ));
+            }
         }
     }
     #[cfg(not(unix))]
@@ -981,6 +1030,50 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
             .expect("restore directory mode");
         assert_eq!(store.acquire(&k).expect("acquire once private").epoch(), 1);
+    }
+
+    /// An ancestor another principal can rename in is refused unless it is sticky, since a
+    /// sticky directory lets only an entry's owner rename it; the lease directory's own
+    /// mode is not enough when the directory entry itself can be swapped.
+    #[cfg(unix)]
+    #[test]
+    fn acquisition_refuses_a_lease_directory_under_a_writable_non_sticky_ancestor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let outer = tempfile::tempdir().expect("outer");
+        let ancestor = outer.path().join("shared");
+        let base = ancestor.join("leases");
+        std::fs::create_dir_all(&base).expect("dirs");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).expect("base");
+        let store = FileLeaseStore::new(&base);
+        let k = key("ancestor");
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o777))
+            .expect("open ancestor");
+        match store.acquire(&k).map(|_| ()) {
+            Err(LeaseError::Io(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+                assert!(e.to_string().contains("without the sticky bit"), "{e}");
+            }
+            other => panic!("a writable non-sticky ancestor must be refused, got {other:?}"),
+        }
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o1777))
+            .expect("sticky ancestor");
+        assert_eq!(
+            store
+                .acquire(&k)
+                .expect("sticky ancestor is accepted")
+                .epoch(),
+            1
+        );
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o755))
+            .expect("private ancestor");
+        assert_eq!(
+            store
+                .acquire(&k)
+                .expect("private ancestor is accepted")
+                .epoch(),
+            2
+        );
     }
 
     /// A path re-pointed at another inode after the open is detected once the lock is held,

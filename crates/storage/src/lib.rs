@@ -200,6 +200,10 @@ mod sqlite_backend {
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
             let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            // A superseded writer must not touch the file at all, and the durability pin
+            // rewrites the journal mode. This read-only precheck refuses it before the
+            // pragmas run; the claim inside the transaction remains the authoritative check.
+            precheck_fence(&guard, self.epoch)?;
             pin_fence_durability(&guard)?;
             let tx = guard
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -706,6 +710,14 @@ mod sqlite_backend {
             StorageBackend::Sqlite { path } => path.clone(),
             other => return Err(StoreError::UnsupportedBackend(other.label().to_string())),
         };
+        // A relative path names a different file after every change of the process's
+        // working directory, so one descriptor could open two stores and two leases.
+        if !Path::new(&path).is_absolute() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("sqlite path {path} is not absolute"),
+            )));
+        }
 
         let parent = Path::new(&path)
             .parent()
@@ -1237,6 +1249,20 @@ mod sqlite_backend {
     /// Binds fence comparison and claim to the caller's protected transaction.
     ///
     /// An epoch equal to the stored epoch permits repeated writes.
+    /// Reads the fence outside any transaction and refuses a holder the database has
+    /// superseded. This is a filter, not a claim: a concurrent takeover after this read is
+    /// caught by `claim_fence` inside the transaction.
+    fn precheck_fence(conn: &Connection, holder_epoch: u64) -> Result<(), StoreError> {
+        let db_epoch = read_fence_epoch_in(conn)?.ok_or(StoreError::FenceMissing)?;
+        if db_epoch > holder_epoch {
+            return Err(StoreError::Fenced {
+                holder_epoch,
+                db_epoch,
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn claim_fence(
         tx: &rusqlite::Transaction<'_>,
         holder_epoch: u64,
@@ -1721,6 +1747,77 @@ mod tests {
         std::fs::write(&replacement, b"one").expect("write replacement");
         std::fs::rename(&replacement, path).expect("swap the file in");
         assert_ne!(FileIdentity::of(Path::new(path)).expect("identity"), first);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A relative database path is refused before any directory or file is created, since
+    /// the same descriptor would name a different store after a change of working directory.
+    #[test]
+    fn a_relative_sqlite_path_is_refused() {
+        let (root, d) = tmp();
+        let relative = StorageDescriptor {
+            backend: StorageBackend::Sqlite {
+                path: "relative/dir/store.db".into(),
+            },
+            ..d.clone()
+        };
+        match open_sqlite(&relative, "").map(|_| ()) {
+            Err(StoreError::Io(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}");
+                assert!(e.to_string().contains("not absolute"), "{e}");
+            }
+            other => panic!("a relative path must be refused, got {other:?}"),
+        }
+        assert!(!std::path::Path::new("relative").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A superseded writer is refused before the durability pin runs, so a journal mode
+    /// that maintenance on the newer writer chose is not switched back by the stale one.
+    #[test]
+    fn a_superseded_writer_does_not_change_the_journal_mode_before_being_fenced() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, KV_BASELINE).expect("seed schema"));
+        let stale = SqliteStore::for_test(rusqlite::Connection::open(path).unwrap(), 1);
+        let newer = SqliteStore::for_test(rusqlite::Connection::open(path).unwrap(), 2);
+        newer
+            .with_conn_fenced(|tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('owner', '2')", [])
+                    .map(|_| ())
+            })
+            .expect("the newer writer claims epoch 2");
+        newer
+            .with_conn_unfenced(|conn| {
+                conn.query_row("PRAGMA journal_mode = DELETE", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map(|_| ())
+            })
+            .expect("maintenance switches the journal mode");
+        let result = stale.with_conn_fenced(|tx| {
+            tx.execute("INSERT INTO kv (k, v) VALUES ('stale', '1')", [])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::Fenced {
+                    holder_epoch: 1,
+                    db_epoch: 2
+                })
+            ),
+            "the stale writer is fenced, got {result:?}"
+        );
+        let mode: String = stale
+            .with_conn(|conn| conn.query_row("PRAGMA journal_mode", [], |row| row.get(0)))
+            .expect("read journal mode");
+        assert!(
+            mode.eq_ignore_ascii_case("delete"),
+            "the fenced writer must not have re-pinned WAL, journal_mode is {mode}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
