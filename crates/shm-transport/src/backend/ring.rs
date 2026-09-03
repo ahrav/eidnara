@@ -602,6 +602,19 @@ impl Doorbell {
     }
 }
 
+fn set_cloexec(fd: &OwnedFd) -> Result<(), RingError> {
+    // SAFETY: F_GETFD and F_SETFD act on a live owned descriptor.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    if flags < 0 {
+        return Err(RingError::ObjectValidationFailed);
+    }
+    // SAFETY: same descriptor; only the close-on-exec bit changes.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(RingError::ObjectValidationFailed);
+    }
+    Ok(())
+}
+
 fn socket_option(fd: &OwnedFd, option: libc::c_int) -> Result<libc::c_int, RingError> {
     let mut value: libc::c_int = 0;
     let mut len = size_of::<libc::c_int>() as libc::socklen_t;
@@ -801,6 +814,13 @@ pub struct Ring {
     published_allocations: Vec<Cell<Option<(u64, u64)>>>,
     producer_cursors: Cell<ProducerCursors>,
     consumer_cursors: Cell<ConsumerCursors>,
+    /// Set once this handle has received; `conservation` then checks the consumer cursors
+    /// against this handle's record.
+    consumer: Cell<bool>,
+    /// Greatest `published` this handle has read. The producer's cursor is peer-writable from
+    /// the consumer's side, and a rewind to `consumed` would look like an empty ring while a
+    /// frame stays queued.
+    published_seen: Cell<u64>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -854,6 +874,8 @@ impl Ring {
                 consumed: 0,
                 active_leases: 0,
             }),
+            consumer: Cell::new(false),
+            published_seen: Cell::new(0),
             _not_send_or_sync: PhantomData,
         })
     }
@@ -861,6 +883,12 @@ impl Ring {
     /// Maps an existing ring from its three descriptors (mapping, data doorbell, capacity
     /// doorbell). The mapping's magic, layout, and grant fields must match `grant` exactly.
     pub fn attach(descriptors: [OwnedFd; 3], grant: RingGrant) -> Result<Self, RingError> {
+        // Descriptors received over `SCM_RIGHTS` without `MSG_CMSG_CLOEXEC` arrive inheritable;
+        // a child this process later execs would hold the mapping and the peer's doorbell ends
+        // open and hide this side's exit from the peer.
+        for descriptor in &descriptors {
+            set_cloexec(descriptor)?;
+        }
         let [mapping_fd, data_ready, capacity_ready] = descriptors;
         let layout = grant.checked_layout()?;
         let depth = usize::try_from(grant.descriptor_depth).map_err(|_| RingError::InvalidGrant)?;
@@ -900,6 +928,8 @@ impl Ring {
             published_allocations: allocation_shadow(depth),
             producer_cursors: Cell::new(producer_cursors),
             consumer_cursors: Cell::new(consumer_cursors),
+            consumer: Cell::new(false),
+            published_seen: Cell::new(producer_cursors.published),
             _not_send_or_sync: PhantomData,
         })
     }
@@ -1178,7 +1208,6 @@ impl Ring {
     }
 
     fn try_receive_inner(&self) -> Result<Option<ReceiveLease<'_>>, RingError> {
-        let producer = self.producer_ptr()?;
         let consumer = self.consumer_ptr()?;
         let ConsumerCursors {
             consumed,
@@ -1190,8 +1219,7 @@ impl Ring {
             // polls again.
             return Ok(None);
         }
-        // SAFETY: acquire pairs with producer publication.
-        let published = unsafe { (*producer).published.load(Ordering::Acquire) };
+        let published = self.verified_published()?;
         if consumed == published {
             return Ok(None);
         }
@@ -1239,6 +1267,7 @@ impl Ring {
             consumed: sequence,
             active_leases: active + 1,
         });
+        self.consumer.set(true);
         let body_len =
             usize::try_from(validated.body_len()).map_err(|_| RingError::InvalidLayout)?;
         // SAFETY: lease borrows self, spans stay mapped, callback context cannot outlive self.
@@ -1293,15 +1322,15 @@ impl Ring {
     }
 
     fn data_available(&self) -> Result<bool, RingError> {
-        let producer = self.producer_ptr()?;
         let ConsumerCursors {
             consumed,
             active_leases: active,
         } = self
             .verified_consumer_cursors()
             .map_err(|error| self.quarantine_with(error))?;
-        // SAFETY: producer page holds initialized shared atomics.
-        let published = unsafe { (*producer).published.load(Ordering::Acquire) };
+        let published = self
+            .verified_published()
+            .map_err(|error| self.quarantine_with(error))?;
         Ok(published != consumed && active < self.grant.max_leases)
     }
 
@@ -1398,8 +1427,9 @@ impl Ring {
     }
 
     /// Counts descriptors and arena bytes by ownership state. A quarantined ring reports
-    /// everything as quarantined; a live one must partition depth and capacity exactly, or
-    /// `InvalidSharedState` is returned.
+    /// everything as quarantined; a live one must partition depth and capacity exactly and
+    /// its cursors must agree with the slot states, or `InvalidSharedState` is returned and
+    /// the ring is quarantined.
     pub fn conservation(&self) -> Result<(DescriptorCounts, ArenaCounts), RingError> {
         if self.is_quarantined() {
             return Ok((
@@ -1413,6 +1443,11 @@ impl Ring {
                 },
             ));
         }
+        self.conservation_inner()
+            .map_err(|error| self.quarantine_with(error))
+    }
+
+    fn conservation_inner(&self) -> Result<(DescriptorCounts, ArenaCounts), RingError> {
         let mut descriptors = DescriptorCounts::default();
         let mut bytes = ArenaCounts::default();
         let mut charged = 0u64;
@@ -1482,10 +1517,66 @@ impl Ring {
             .arena_bytes
             .checked_sub(charged)
             .ok_or(RingError::InvalidSharedState)?;
+        self.check_cursor_invariants(&descriptors, &bytes)?;
         Ok((descriptors, bytes))
     }
 
-    /// `conservation` without the counts: `Ok` if shared state is consistent and not quarantined.
+    /// Cursors the slot walk did not read must agree with the counts it produced. A handle
+    /// that has acted in a role also requires that role's cursors to match its own record.
+    fn check_cursor_invariants(
+        &self,
+        descriptors: &DescriptorCounts,
+        bytes: &ArenaCounts,
+    ) -> Result<(), RingError> {
+        let producer = self.producer_ptr()?;
+        let consumer = self.consumer_ptr()?;
+        let reclaim = self.reclaim_ptr()?;
+        // SAFETY: the pages were bounds-checked and hold initialized atomics.
+        let (published, arena_write, consumed, active_leases, completed, arena_reclaimed) = unsafe {
+            (
+                (*producer).published.load(Ordering::Acquire),
+                (*producer).arena_write.load(Ordering::Acquire),
+                (*consumer).consumed.load(Ordering::Acquire),
+                (*consumer).active_leases.load(Ordering::Acquire),
+                (*reclaim).completed.load(Ordering::Acquire),
+                (*reclaim).arena_reclaimed.load(Ordering::Acquire),
+            )
+        };
+        let in_flight = published
+            .checked_sub(consumed)
+            .ok_or(RingError::InvalidSharedState)?;
+        let held = consumed
+            .checked_sub(completed)
+            .ok_or(RingError::InvalidSharedState)?;
+        let live_bytes = arena_write
+            .checked_sub(arena_reclaimed)
+            .ok_or(RingError::InvalidSharedState)?;
+        // `arena_write` advances at commit, so the cursor gap covers every charged slot except
+        // an uncommitted reservation.
+        let committed_bytes =
+            bytes.published + bytes.receiver_held + bytes.receiver_leased + bytes.release_pending;
+        if in_flight != descriptors.published
+            || held
+                != descriptors.receiver_held
+                    + descriptors.receiver_leased
+                    + descriptors.release_pending
+            || active_leases != descriptors.receiver_leased
+            || active_leases > self.grant.max_leases
+            || live_bytes != committed_bytes
+        {
+            return Err(RingError::InvalidSharedState);
+        }
+        if self.producer.get() {
+            self.verified_producer_cursors()?;
+        }
+        if self.consumer.get() {
+            self.verified_consumer_cursors()?;
+        }
+        Ok(())
+    }
+
+    /// `conservation` without the counts: `Ok` if shared state is consistent and not
+    /// quarantined. An inconsistency quarantines the ring, as any other operation would.
     pub fn probe(&self) -> Result<(), RingError> {
         if self.is_quarantined() {
             return Err(RingError::Quarantined);
@@ -1580,6 +1671,18 @@ impl Ring {
             return Err(RingError::InvalidSharedState);
         }
         Ok(shared)
+    }
+
+    /// Loads `published` and rejects a value below the greatest one this handle has seen.
+    fn verified_published(&self) -> Result<u64, RingError> {
+        let producer = self.producer_ptr()?;
+        // SAFETY: producer page holds initialized shared atomics; acquire pairs with publication.
+        let published = unsafe { (*producer).published.load(Ordering::Acquire) };
+        if published < self.published_seen.get() {
+            return Err(RingError::InvalidSharedState);
+        }
+        self.published_seen.set(published);
+        Ok(published)
     }
 
     /// Loads the consumer-owned cursors and checks them against this handle's own record.
@@ -2904,6 +3007,106 @@ mod tests {
             Ring::attach([short, data_ready, capacity_ready], grant),
             Err(RingError::ObjectValidationFailed)
         ));
+    }
+
+    #[test]
+    fn probe_checks_cursors_against_slot_states() {
+        let ring = ring();
+        publish(&ring, &[1; 100]);
+        let lease = ring.try_receive().unwrap().unwrap();
+        let held = ring.try_reserve(50, wire_v2_header(50).unwrap()).unwrap();
+        ring.probe().unwrap();
+        let (descriptors, bytes) = ring.conservation().unwrap();
+        assert_eq!(descriptors.receiver_leased, 1);
+        assert_eq!(descriptors.producer_reserved, 1);
+        assert_eq!(bytes.producer_reserved, 50);
+        held.abort();
+        lease.release().unwrap();
+
+        for forge in [
+            |ring: &Ring| {
+                let consumer = ring.consumer_ptr().unwrap();
+                // SAFETY: test-owned ring keeps the consumer page mapped.
+                unsafe {
+                    (*consumer)
+                        .active_leases
+                        .store(ring.grant().max_leases + 1, Ordering::Release)
+                };
+            },
+            |ring: &Ring| {
+                let consumer = ring.consumer_ptr().unwrap();
+                // SAFETY: test-owned ring keeps the consumer page mapped.
+                unsafe { (*consumer).consumed.store(5, Ordering::Release) };
+            },
+            |ring: &Ring| {
+                let producer = ring.producer_ptr().unwrap();
+                // SAFETY: test-owned ring keeps the producer page mapped.
+                unsafe { (*producer).arena_write.store(4096, Ordering::Release) };
+            },
+        ] {
+            let ring = self::ring();
+            publish(&ring, &[1]);
+            ring.probe().unwrap();
+            forge(&ring);
+            assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
+            assert!(
+                ring.is_quarantined(),
+                "probe must quarantine, not just report"
+            );
+        }
+    }
+
+    #[test]
+    fn rewound_published_cursor_does_not_hide_a_queued_frame() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        publish(&ring, &[2]);
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+        let producer = ring.producer_ptr().unwrap();
+        // `published == consumed` now, which an unguarded check reads as empty.
+        // SAFETY: test-owned ring keeps the producer page mapped.
+        unsafe { (*producer).published.store(1, Ordering::Release) };
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            ring.wait_for_data(started + std::time::Duration::from_secs(5)),
+            Err(RingError::InvalidSharedState)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(ring.is_quarantined());
+    }
+
+    #[test]
+    fn attach_sets_close_on_exec_on_every_descriptor() {
+        let ring = ring();
+        let (descriptors, grant) = ring.attachment().unwrap().into_parts();
+        for descriptor in &descriptors {
+            // SAFETY: F_GETFD and F_SETFD act on a live owned descriptor.
+            unsafe {
+                let flags = libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD);
+                assert!(flags >= 0);
+                assert_eq!(
+                    libc::fcntl(
+                        descriptor.as_raw_fd(),
+                        libc::F_SETFD,
+                        flags & !libc::FD_CLOEXEC
+                    ),
+                    0
+                );
+            }
+        }
+        let raw = descriptors.each_ref().map(AsRawFd::as_raw_fd);
+        let attached = Ring::attach(descriptors, grant).unwrap();
+        for fd in raw {
+            // SAFETY: the attached ring keeps these descriptors open.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0);
+            assert_ne!(
+                flags & libc::FD_CLOEXEC,
+                0,
+                "descriptor {fd} stayed inheritable"
+            );
+        }
+        drop(attached);
     }
 
     #[test]
