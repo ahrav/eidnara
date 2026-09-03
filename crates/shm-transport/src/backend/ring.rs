@@ -1521,18 +1521,22 @@ impl Ring {
             .arena_bytes
             .checked_sub(charged)
             .ok_or(RingError::InvalidSharedState)?;
-        self.check_cursor_invariants()?;
+        self.check_cursor_invariants(&descriptors)?;
         Ok((descriptors, bytes))
     }
 
     /// Cursor invariants that hold in every intermediate state of an honest peer's transitions,
     /// so a probe racing normal traffic cannot report corruption. Every cursor only advances,
     /// and each check reads its lower bound before its upper bound: the lower value is then at
-    /// most what it was when the upper value was read. Exact equalities between cursors and
-    /// slot counts are not checked here because the slot store and the cursor store of one
-    /// transition are separate writes. A handle that has acted in a role also requires that
-    /// role's cursors to match its own record, which only that handle writes.
-    fn check_cursor_invariants(&self) -> Result<(), RingError> {
+    /// most what it was when the upper value was read.
+    ///
+    /// Cursor-versus-slot comparisons allow one transition in flight. A receive stores the slot
+    /// before `consumed` and `active_leases`; a release stores the slot before `active_leases`;
+    /// a commit stores the slot before `published`. One endpoint performs one transition at a
+    /// time, so each count differs from its cursor by at most one between the two stores.
+    /// Exact agreement is enforced by the owning handle against its private record on every
+    /// operation, which is where a forged cursor would otherwise take effect.
+    fn check_cursor_invariants(&self, descriptors: &DescriptorCounts) -> Result<(), RingError> {
         let producer = self.producer_ptr()?;
         let consumer = self.consumer_ptr()?;
         let reclaim = self.reclaim_ptr()?;
@@ -1560,8 +1564,11 @@ impl Ring {
             let upper = upper();
             upper.saturating_sub(lower())
         };
+        let within_one = |cursor: u64, count: u64| cursor.abs_diff(count) <= 1;
         if active_leases() > self.grant.max_leases
+            || !within_one(active_leases(), descriptors.receiver_leased)
             || !ordered(&consumed, &published)
+            || !within_one(gap(&published, &consumed), descriptors.published)
             || !ordered(&completed, &consumed)
             || gap(&published, &completed) > self.grant.descriptor_depth
             || !ordered(&arena_reclaimed, &arena_write)
@@ -1580,6 +1587,12 @@ impl Ring {
 
     /// `conservation` without the counts: `Ok` if shared state is consistent and not
     /// quarantined. An inconsistency quarantines the ring, as any other operation would.
+    ///
+    /// The peer's cursors are checked against the bounds that hold while one of its
+    /// transitions is in flight, not for exact agreement with the slot states; the peer's own
+    /// handle enforces exact agreement against its private record on every operation. A probe
+    /// therefore never quarantines a healthy ring under traffic, and a forged peer cursor is
+    /// caught by the peer before it can act on it.
     pub fn probe(&self) -> Result<(), RingError> {
         if self.is_quarantined() {
             return Err(RingError::Quarantined);
@@ -3185,6 +3198,26 @@ mod tests {
         };
         lease.release().unwrap();
         ring.probe().unwrap();
+    }
+
+    #[test]
+    fn probe_rejects_a_lease_count_more_than_one_transition_from_the_slots() {
+        let ring = ring();
+        publish(&ring, &[1]);
+        publish(&ring, &[2]);
+        publish(&ring, &[3]);
+        let first = ring.try_receive().unwrap().unwrap();
+        let second = ring.try_receive().unwrap().unwrap();
+        let third = ring.try_receive().unwrap().unwrap();
+        let consumer = ring.consumer_ptr().unwrap();
+        // The consumer flag is cleared so only the cross-field bound, not this handle's own
+        // record, can catch the forgery; that is the producer-side probe's view.
+        ring.consumer.set(false);
+        // SAFETY: test-owned ring keeps the consumer page mapped.
+        unsafe { (*consumer).active_leases.store(0, Ordering::Release) };
+        assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
+        assert!(ring.is_quarantined());
+        drop((first, second, third));
     }
 
     #[test]
