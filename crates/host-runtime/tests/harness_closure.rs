@@ -1,15 +1,9 @@
-// This crate root must declare `file_mode` because `harness_closure.rs` uses `crate::file_mode`.
-#[path = "../src/file_mode.rs"]
-mod file_mode;
-#[path = "../src/harness_closure.rs"]
-mod harness_closure;
-
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use harness_closure::{
+use host_runtime::harness_closure::{
     ClosureCandidate, ClosureDependency, ClosureManifest, ClosureNode, DependencyKind,
     HarnessClosureStore, NodeKind, manifest_digest, validate_manifest,
 };

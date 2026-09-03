@@ -17,6 +17,7 @@ use rustix::fs::{
 use sha2::{Digest, Sha256};
 
 use crate::file_mode::raw_mode;
+use crate::instance::{S_IFDIR, S_IFMT, S_IFREG, hex, is_safe_ancestor, mode_bits, owner_uid};
 
 const MANIFEST_NAME: &str = "manifest.json";
 const FILES_NAME: &str = "files";
@@ -26,10 +27,6 @@ const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NODES: usize = 65_536;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_STRING_BYTES: usize = 1024;
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
-const S_ISVTX: u32 = 0o1000;
 
 /// `ClosureManifest` accepts only schema-1 harness closures.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1111,36 +1108,8 @@ fn open_or_create_store_path(path: &Path) -> Result<OwnedFd, HarnessClosureError
 
 fn verify_safe_ancestor(fd: &OwnedFd) -> Result<(), HarnessClosureError> {
     let stat = rustix::fs::fstat(fd).map_err(|_| invalid("store ancestor stat failed"))?;
-    let mode = mode_bits(&stat);
-    if mode & S_IFMT != S_IFDIR
-        || (stat.st_uid != owner_uid() && stat.st_uid != 0)
-        || (mode & 0o022 != 0 && mode & S_ISVTX == 0)
-    {
+    if !is_safe_ancestor(&stat) {
         return Err(invalid("closure store ancestor is insecure"));
     }
     Ok(())
-}
-
-fn owner_uid() -> u32 {
-    rustix::process::geteuid().as_raw()
-}
-
-#[cfg(target_os = "macos")]
-fn mode_bits(stat: &rustix::fs::Stat) -> u32 {
-    u32::from(stat.st_mode)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn mode_bits(stat: &rustix::fs::Stat) -> u32 {
-    stat.st_mode
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
