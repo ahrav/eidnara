@@ -337,7 +337,10 @@ pub enum ConfigError {
     #[error("daemon_ver must be nonempty")]
     EmptyDaemonVer,
     /// The error carries only the offending length to keep diagnostics bounded.
-    #[error("payload_manifest_digest must be 64 lowercase hex characters; got {len} bytes")]
+    #[error(
+        "payload_manifest_digest must be {} lowercase hex characters; got {len} bytes",
+        crate::lifecycle::PAYLOAD_MANIFEST_DIGEST_LEN
+    )]
     InvalidPayloadDigest { len: usize },
     #[error(
         "daemon_ver makes auth/publication too large ({auth_message_bytes}/{connection_file_bytes} bytes)"
@@ -359,6 +362,60 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrated_error_displays_remain_exact() {
+        let cases = [
+            (
+                ConfigError::LimitTooLarge {
+                    name: "max_routes",
+                    configured: 65_536,
+                    maximum: 65_535,
+                }
+                .to_string(),
+                "host limit max_routes is 65536; supported maximum is 65535",
+            ),
+            (
+                ConfigError::DurationTooLarge {
+                    name: "shutdown_deadline",
+                }
+                .to_string(),
+                "host duration shutdown_deadline exceeds the supported maximum of 31536000 seconds",
+            ),
+            (
+                ConfigError::InvalidPayloadDigest { len: 63 }.to_string(),
+                "payload_manifest_digest must be 64 lowercase hex characters; got 63 bytes",
+            ),
+            (
+                ConfigError::ResidentBytesBelowInteropMinimum {
+                    configured: 100,
+                    minimum: 200,
+                }
+                .to_string(),
+                "max_resident_bytes 100 is below the host floor 200 (one maximum frame plus the egress and scratch reservations); raise max_resident_bytes to at least 200",
+            ),
+            (
+                ConfigError::ResidentBytesTooLarge {
+                    configured: 4_294_967_296,
+                    maximum: 4_294_967_295,
+                }
+                .to_string(),
+                "max_resident_bytes 4294967296 exceeds supported maximum 4294967295",
+            ),
+            (
+                ConfigError::DaemonVerTooLarge {
+                    auth_message_bytes: 1_025,
+                    connection_file_bytes: 2_049,
+                }
+                .to_string(),
+                "daemon_ver makes auth/publication too large (1025/2049 bytes)",
+            ),
+        ];
+
+        for (actual, expected) in cases {
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn defaults_validate() {

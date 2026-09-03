@@ -1115,8 +1115,13 @@ mod tests {
 
     #[test]
     fn wrapped_host_errors_remain_source_less() {
-        let error = HostError::Io(std::io::Error::other("sentinel"));
-        assert!(std::error::Error::source(&error).is_none());
+        for error in [
+            HostError::Io(std::io::Error::other("sentinel")),
+            HostError::Config(crate::config::ConfigError::EmptyDaemonVer),
+            HostError::Instance(InstanceError::Random),
+        ] {
+            assert!(std::error::Error::source(&error).is_none());
+        }
     }
 
     fn stalled_generation(id: u64) -> (Arc<GenerationCore>, SenderQueue) {

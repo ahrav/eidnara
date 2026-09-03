@@ -520,6 +520,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn migrated_error_displays_remain_exact() {
+        let cases = [
+            (
+                AuthError::Io {
+                    stage: AuthStage::ClientHello,
+                    source: io::Error::other("sentinel io"),
+                }
+                .to_string(),
+                "auth ClientHello I/O error: sentinel io",
+            ),
+            (
+                AuthError::UnexpectedEof {
+                    stage: AuthStage::ServerProof,
+                    expected: 8,
+                    actual: 3,
+                }
+                .to_string(),
+                "auth ServerProof ended early: expected 8 bytes, got 3",
+            ),
+            (
+                AuthError::MessageTooLarge {
+                    stage: AuthStage::ClientAuth,
+                    len: 1_025,
+                    max: 1_024,
+                }
+                .to_string(),
+                "auth ClientAuth message length 1025 exceeds hard cap 1024",
+            ),
+        ];
+
+        for (actual, expected) in cases {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
     fn auth_error_preserves_source_edges() {
         let io = AuthError::Io {
             stage: AuthStage::ClientHello,
@@ -529,6 +565,23 @@ mod tests {
             std::error::Error::source(&io).map(ToString::to_string),
             Some("sentinel".to_owned())
         );
+
+        for error in [
+            AuthError::JsonEncode {
+                stage: AuthStage::ServerProof,
+                source: serde_json::from_str::<ServerProof>("{").unwrap_err(),
+            },
+            AuthError::JsonDecode {
+                stage: AuthStage::ClientHello,
+                source: serde_json::from_str::<ClientHello>("{").unwrap_err(),
+            },
+        ] {
+            assert!(
+                std::error::Error::source(&error)
+                    .unwrap()
+                    .is::<serde_json::Error>()
+            );
+        }
 
         let random = AuthError::Random(getrandom::Error::UNSUPPORTED);
         assert!(std::error::Error::source(&random).is_none());

@@ -799,6 +799,38 @@ mod tests {
     const TEST_DIGEST: &str = "3d7f9a1c5b2e8f0a6d4c7b9e1f3a5c8d2b4e6f0a1c3d5e7f9b0d2f4a6c8e0b1d";
 
     #[test]
+    fn migrated_error_displays_remain_exact() {
+        let path = PathBuf::from("/tmp/eidnara");
+        let cases = [
+            (
+                InstanceError::Io {
+                    op: "open",
+                    path: path.clone(),
+                    source: io::Error::other("sentinel io"),
+                }
+                .to_string(),
+                "instance open failed for /tmp/eidnara: sentinel io",
+            ),
+            (
+                InstanceError::Insecure {
+                    what: "runtime directory",
+                    path,
+                }
+                .to_string(),
+                "refusing insecure runtime directory at /tmp/eidnara: wrong type, owner, mode, or link count",
+            ),
+            (
+                InstanceError::InvalidPayloadDigest.to_string(),
+                "payload-manifest digest must be 64 lowercase hex characters",
+            ),
+        ];
+
+        for (actual, expected) in cases {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
     fn io_error_remains_a_source() {
         let error = InstanceError::Io {
             op: "read",

@@ -267,6 +267,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn migrated_error_displays_remain_exact() {
+        let path = PathBuf::from("/tmp/connection.json");
+        let cases = [
+            (
+                ConnectionFileError::Io {
+                    op: "read",
+                    path: path.clone(),
+                    source: io::Error::other("sentinel io"),
+                }
+                .to_string(),
+                "connection file read failed for /tmp/connection.json: sentinel io",
+            ),
+            (
+                ConnectionFileError::Insecure { path: path.clone() }.to_string(),
+                "refusing insecure connection file at /tmp/connection.json: wrong type, owner, mode, or link count",
+            ),
+            (
+                ConnectionFileError::TooLarge { path, max: 16_384 }.to_string(),
+                "connection file /tmp/connection.json exceeds 16384 byte limit",
+            ),
+            (
+                ConnectionFileError::WireVersionMismatch {
+                    file: 1,
+                    supported: 2,
+                }
+                .to_string(),
+                "connection file wire version 1 does not match supported wire version 2",
+            ),
+        ];
+
+        for (actual, expected) in cases {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
     fn io_and_json_errors_remain_sources() {
         let io = ConnectionFileError::Io {
             op: "read",
@@ -283,10 +319,13 @@ mod tests {
             path: PathBuf::from("connection"),
             source: json_source,
         };
-        assert!(std::error::Error::source(&json).is_some());
+        assert!(
+            std::error::Error::source(&json)
+                .unwrap()
+                .is::<serde_json::Error>()
+        );
     }
 
-    /// `mode_bits` widens `st_mode` to match this crate's `u32` mode constants on Darwin and Linux.
     /// `mode_bits` widens `st_mode` to match this crate's `u32` mode constants on Darwin and Linux.
     #[test]
     fn mode_arithmetic_goes_through_the_portable_accessor() {

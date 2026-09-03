@@ -555,6 +555,32 @@ pub fn pure_header_flags() -> Flags {
 mod tests {
     use super::*;
 
+    #[test]
+    fn migrated_error_displays_remain_exact() {
+        let cases = [
+            (
+                DecodeError::TooShortForHeader { have: 10, need: 21 }.to_string(),
+                "header too short for version: have 10 bytes, need 21",
+            ),
+            (
+                DecodeError::ReservedFlagBits { flags: 0b1000_0001 }.to_string(),
+                "reserved flag bits set in flags 0b10000001",
+            ),
+            (
+                DecodeError::SheddableIllegalFrameType {
+                    ty: FrameType::Goodbye,
+                    flags: 0b0010_0000,
+                }
+                .to_string(),
+                "SHEDDABLE admission class is illegal on Goodbye in flags 0b00100000",
+            ),
+        ];
+
+        for (actual, expected) in cases {
+            assert_eq!(actual, expected);
+        }
+    }
+
     fn hdr(len: u32, ty: FrameType, flags: Flags, channel: u16, corr: u64) -> EnvelopeHeader {
         hdr_with_epoch(len, ty, flags, channel, u32::from(channel != 0), corr)
     }
