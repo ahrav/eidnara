@@ -4,7 +4,9 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::arena::MIN_ARENA_BYTES;
-use crate::descriptor::{HardwareProfileId, MAX_SPANS, TransportDescriptor};
+use crate::descriptor::{
+    HardwareProfileId, MAX_SPANS, SETUP_DOORBELL_COUNT, SETUP_MAPPING_COUNT, TransportDescriptor,
+};
 
 /// Which thread publishes and receives on a ring. Decides the `workers` charge: zero when
 /// the caller drives both directions, one per dedicated worker otherwise.
@@ -100,7 +102,7 @@ pub struct ProfileConfig {
     pub max_spans: usize,
     /// Receive leases outstanding at once per direction, 1 to `descriptor_depth`.
     pub max_leases: usize,
-    /// Mappings charged; must be at least 2, one per direction.
+    /// Mappings charged; at least `SETUP_MAPPING_COUNT`, one per direction.
     pub mappings: usize,
     /// Pinned workers charged; must be 0.
     pub pinned_workers: usize,
@@ -121,8 +123,9 @@ pub struct TargetProfile {
 
 impl TargetProfile {
     /// Validates `config` and derives the charges. Per-direction values are doubled; the file
-    /// descriptor charge is `mappings + 4` for the two doorbells per direction. Fails before
-    /// any mapping or worker exists, so a rejected profile costs nothing.
+    /// descriptor charge is `mappings + SETUP_DOORBELL_COUNT`, the same descriptors a grant
+    /// transfers. Fails before any mapping or worker exists, so a rejected profile costs
+    /// nothing.
     pub fn new(config: ProfileConfig) -> Result<Self, ProfileError> {
         if config.descriptor.schema_version() != crate::descriptor::DESCRIPTOR_SCHEMA_VERSION {
             return Err(ProfileError::UnsupportedSchema);
@@ -139,7 +142,7 @@ impl TargetProfile {
         if config.max_leases == 0 || config.max_leases > config.descriptor_depth {
             return Err(ProfileError::InvalidLeaseLimit);
         }
-        if config.mappings < 2 {
+        if config.mappings < SETUP_MAPPING_COUNT {
             return Err(ProfileError::InvalidMappingCharge);
         }
         if config.pinned_workers != 0 {
@@ -164,7 +167,7 @@ impl TargetProfile {
             leases,
             mappings: config.mappings as u64,
             file_descriptors: (config.mappings as u64)
-                .checked_add(4)
+                .checked_add(SETUP_DOORBELL_COUNT as u64)
                 .ok_or(ProfileError::ChargeOverflow)?,
             workers: match config.worker_topology {
                 WorkerTopology::CallerThread => 0,
@@ -222,11 +225,7 @@ impl TargetProfile {
     }
 }
 
-impl fmt::Debug for TargetProfile {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("TargetProfile(<redacted>)")
-    }
-}
+crate::redacted_debug!(TargetProfile);
 
 /// Process-wide ceilings. Quarantined charges count against every limit except `workers`
 /// and `pinned_workers`, because a quarantined ring keeps its memory but its threads exit.
@@ -247,11 +246,15 @@ pub struct HostLimits {
     /// Client instances, active plus quarantined.
     pub client_instances: u64,
     /// Pinned workers, active only; also capped by `VerifiedPhysicalCores` when supplied.
+    /// `TargetProfile::new` rejects any nonzero pinned charge, so no profile this crate can
+    /// build ever counts against this limit and it cannot refuse an admission today.
     pub pinned_workers: u64,
 }
 
 /// Number of distinct physical cores this process may run on, read from Linux topology
-/// files rather than trusted from configuration.
+/// files rather than trusted from configuration. Only bounds `HostLimits::pinned_workers`,
+/// which no profile this crate can build charges, so supplying it does not change any
+/// admission outcome until a pinned profile exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerifiedPhysicalCores(u64);
 
@@ -299,11 +302,22 @@ fn allowed_linux_cpus() -> Option<Vec<u32>> {
     let spec = status
         .lines()
         .find_map(|line| line.strip_prefix("Cpus_allowed_list:\t"))?;
+    parse_cpu_list(spec)
+}
+
+/// Kernel CPU-list syntax (`0-3,8,10-11`). Returns `None` if any item is malformed, including
+/// an inverted range, so a partial list is never returned as a verified one.
+#[cfg(any(target_os = "linux", test))]
+fn parse_cpu_list(spec: &str) -> Option<Vec<u32>> {
     let mut cpus = Vec::new();
     for item in spec.split(',') {
         if let Some((start, end)) = item.split_once('-') {
             let start: u32 = start.parse().ok()?;
             let end: u32 = end.parse().ok()?;
+            // An inverted range is empty, so reject it instead of accepting a smaller CPU list.
+            if start > end {
+                return None;
+            }
             cpus.extend(start..=end);
         } else {
             cpus.push(item.parse().ok()?);
@@ -355,11 +369,19 @@ pub struct AccountingSnapshot {
     /// Charges of live admissions.
     pub active: ResourceCharges,
     /// Charges retained by quarantined admissions. `workers` and `pinned_workers` are zero.
+    /// This total only grows; alarm on it, because once it approaches `HostLimits` every
+    /// `admit` fails and only a process restart recovers the capacity.
     pub quarantined: ResourceCharges,
 }
 
 /// Admits connections against `HostLimits`. One instance per process; `admit` charges,
 /// `Admission` refunds on drop or moves the charge to quarantine.
+///
+/// Quarantine is a one-way ratchet: a quarantined ring's memory may still be mapped by its
+/// peer, so nothing here can prove it unmapped and reclaim the charge. A peer that keeps
+/// triggering quarantine therefore consumes host capacity permanently. Callers wiring this
+/// into an accept path must export `snapshot().quarantined`, alarm on it, and treat process
+/// restart as the recovery.
 pub struct AdmissionController {
     limits: HostLimits,
     accounting: Mutex<Accounting>,
@@ -488,20 +510,24 @@ impl AdmissionController {
             .accounting
             .lock()
             .map_err(|_| AdmissionError::AccountingUnavailable)?;
-        accounting.active = accounting
-            .active
-            .checked_sub(charges)
-            .ok_or(AdmissionError::AccountingUnavailable)?;
-        accounting.release_spans(charges.spans_per_frame);
         let retained = ResourceCharges {
             workers: 0,
             pinned_workers: 0,
             ..charges
         };
-        accounting.quarantined = accounting
+        // Both totals are computed before either is stored, so a failed checked
+        // operation leaves `accounting` unchanged.
+        let active = accounting
+            .active
+            .checked_sub(charges)
+            .ok_or(AdmissionError::ChargeUnderflow)?;
+        let quarantined = accounting
             .quarantined
             .checked_add(retained)
             .ok_or(AdmissionError::ChargeOverflow)?;
+        accounting.active = active;
+        accounting.quarantined = quarantined;
+        accounting.release_spans(charges.spans_per_frame);
         Ok(())
     }
 }
@@ -539,11 +565,7 @@ impl Admission {
     }
 }
 
-impl fmt::Debug for Admission {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Admission(<redacted>)")
-    }
-}
+crate::redacted_debug!(Admission);
 
 impl Drop for Admission {
     fn drop(&mut self) {
@@ -560,11 +582,7 @@ pub struct QuarantineRecord {
     _private: (),
 }
 
-impl fmt::Debug for QuarantineRecord {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("QuarantineRecord(<redacted>)")
-    }
-}
+crate::redacted_debug!(QuarantineRecord);
 
 /// Why `TargetProfile::new` rejected a `ProfileConfig`.
 #[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -584,7 +602,7 @@ pub enum ProfileError {
     /// `max_leases` is zero or exceeds `descriptor_depth`.
     #[error("lease limit is invalid")]
     InvalidLeaseLimit,
-    /// `mappings` is below 2.
+    /// `mappings` is below `SETUP_MAPPING_COUNT`.
     #[error("mapping charge is invalid")]
     InvalidMappingCharge,
     /// `pinned_workers` is nonzero.
@@ -609,7 +627,8 @@ pub enum AdmissionError {
     #[error("physical-core topology is unverified")]
     PhysicalCoresUnverified,
     /// Active pinned workers would exceed the smaller of `HostLimits::pinned_workers` and the
-    /// verified core count.
+    /// verified core count. Unreachable while `TargetProfile::new` rejects every nonzero
+    /// pinned charge.
     #[error("physical-core budget exceeded")]
     PhysicalCoreBudgetExceeded,
     /// Descriptor commitment exceeds host limit.
@@ -636,6 +655,11 @@ pub enum AdmissionError {
     /// Adding the requested charges to the active or quarantined totals overflowed `u64`.
     #[error("host admission arithmetic overflow")]
     ChargeOverflow,
+    /// Moving an admission's charges out of the active total would take a field below zero.
+    /// Every admission is charged once and released once, so this means the accounting is
+    /// corrupt, not that the caller did anything wrong.
+    #[error("host admission accounting underflow")]
+    ChargeUnderflow,
     /// The accounting mutex is poisoned; a thread panicked while holding it.
     #[error("host admission accounting unavailable")]
     AccountingUnavailable,
@@ -666,7 +690,7 @@ pub fn host_test_ring_profile() -> Result<TargetProfile, ProfileError> {
         arena_bytes: MIN_ARENA_BYTES,
         max_spans: 2,
         max_leases: HOST_TEST_RING_DEPTH,
-        mappings: 2,
+        mappings: SETUP_MAPPING_COUNT,
         pinned_workers: 0,
         worker_topology: WorkerTopology::Fused,
     })
@@ -680,8 +704,30 @@ pub fn ring_profile(hardware: HardwareProfileId) -> Result<TargetProfile, Profil
         arena_bytes: MIN_ARENA_BYTES,
         max_spans: 2,
         max_leases: 32,
-        mappings: 2,
+        mappings: SETUP_MAPPING_COUNT,
         pinned_workers: 0,
         worker_topology: WorkerTopology::CallerThread,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cpu_list;
+
+    #[test]
+    fn cpu_list_accepts_singletons_and_ascending_ranges() {
+        assert_eq!(parse_cpu_list("0"), Some(vec![0]));
+        assert_eq!(
+            parse_cpu_list("0-3,8,10-11"),
+            Some(vec![0, 1, 2, 3, 8, 10, 11])
+        );
+        assert_eq!(parse_cpu_list("5-5"), Some(vec![5]));
+    }
+
+    #[test]
+    fn cpu_list_rejects_every_malformed_item_rather_than_returning_a_subset() {
+        for spec in ["3-1", "0-3,9-7", "", "0,", "a", "0-", "-1", "0--1", "1-2-3"] {
+            assert_eq!(parse_cpu_list(spec), None, "spec {spec:?} must not parse");
+        }
+    }
 }

@@ -1,15 +1,18 @@
-use shm_transport::arena::{ArenaCounts, ArenaSpan, MAX_FRAME_BYTES, SpanPlan};
+use shm_transport::arena::{
+    ArenaCounts, ArenaError, ArenaSpan, MAX_FRAME_BYTES, MIN_ARENA_BYTES, SpanPlan,
+};
 use shm_transport::backend::sample::{SAMPLE_PREFIX_BYTES, SamplePrefix};
 use shm_transport::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor,
     HardwareProfileId, Incarnation, ReleaseIdentity, TransportDescriptor, WIRE_V2_HEADER_BYTES,
+    WIRE_V2_VERSION,
 };
 use shm_transport::lifecycle::{CloseState, Lifecycle, LifecycleError};
 
 fn header(len: usize) -> [u8; WIRE_V2_HEADER_BYTES] {
     let mut header = [0u8; WIRE_V2_HEADER_BYTES];
     header[..4].copy_from_slice(&(len as u32).to_le_bytes());
-    header[4] = 2;
+    header[4] = WIRE_V2_VERSION;
     header
 }
 
@@ -228,7 +231,6 @@ fn arena_plans_wrap_and_conserves_all_states() {
     let prefix = plan.prefix(6).unwrap();
     assert_eq!(prefix.span(0).unwrap().len(), 4);
     assert_eq!(prefix.span(1).unwrap().len(), 2);
-
     assert!(
         ArenaCounts {
             free: 1,
@@ -254,6 +256,123 @@ fn arena_plans_wrap_and_conserves_all_states() {
         }
         .conserves(7)
     );
+}
+
+#[test]
+fn arena_reserve_and_prefix_report_every_failure_mode() {
+    let capacity = MIN_ARENA_BYTES;
+    let full = capacity as u64;
+
+    assert_eq!(
+        SpanPlan::reserve(capacity - 1, 0, 0, 1),
+        Err(ArenaError::BelowMinimumCapacity)
+    );
+    assert_eq!(
+        SpanPlan::reserve(0, 0, 0, 1),
+        Err(ArenaError::BelowMinimumCapacity)
+    );
+    assert_eq!(
+        SpanPlan::reserve(capacity, 0, 0, MAX_FRAME_BYTES + 1),
+        Err(ArenaError::FrameTooLarge)
+    );
+    // `reclaimed` ahead of `write` and a hold larger than the arena are both malformed cursors.
+    assert_eq!(
+        SpanPlan::reserve(capacity, 4, 8, 1),
+        Err(ArenaError::InvalidCursor)
+    );
+    assert_eq!(
+        SpanPlan::reserve(capacity, full + 1, 0, 1),
+        Err(ArenaError::InvalidCursor)
+    );
+    // Holding all but one byte leaves no room for a two-byte frame.
+    assert_eq!(
+        SpanPlan::reserve(capacity, full - 1, 0, 2),
+        Err(ArenaError::Exhausted)
+    );
+    // Holding exactly the full arena still admits nothing but an empty frame.
+    assert_eq!(
+        SpanPlan::reserve(capacity, full, 0, 1),
+        Err(ArenaError::Exhausted)
+    );
+    assert!(SpanPlan::reserve(capacity, full, 0, 0).is_ok());
+    // A write cursor at `u64::MAX` cannot advance without overflowing.
+    assert_eq!(
+        SpanPlan::reserve(capacity, u64::MAX, u64::MAX, 1),
+        Err(ArenaError::ArithmeticOverflow)
+    );
+
+    let plan = SpanPlan::reserve(capacity, 0, 0, 8).unwrap();
+    assert_eq!(plan.prefix(9), Err(ArenaError::ExceedsAllocation));
+    // A narrowed plan cannot widen again, even within the original allocation: the spans no
+    // longer describe the reserved bytes past the committed prefix, so widening would
+    // fabricate a wrap at offset zero.
+    let narrowed = plan.prefix(2).unwrap();
+    assert_eq!(narrowed.prefix(3), Err(ArenaError::ExceedsAllocation));
+    assert_eq!(narrowed.prefix(2).unwrap().span_count(), 1);
+    assert_eq!(narrowed.prefix(1).unwrap().span(0).unwrap().len(), 1);
+    // Narrowing a wrapped plan below the first span drops the second span.
+    let wrapped = SpanPlan::reserve(capacity, full - 4, full - 4, 8).unwrap();
+    let unwrapped = wrapped.prefix(3).unwrap();
+    assert_eq!(unwrapped.span_count(), 1);
+    assert_eq!(unwrapped.span(0).unwrap().len(), 3);
+    assert_eq!(unwrapped.prefix(4), Err(ArenaError::ExceedsAllocation));
+    let shortened = plan.prefix(8).unwrap();
+    assert_eq!(shortened.allocation_len(), 8);
+    assert_eq!(shortened.span(0).unwrap().len(), 8);
+    let empty = plan.prefix(0).unwrap();
+    assert_eq!(empty.allocation_len(), 8);
+    assert_eq!(empty.span_count(), 1);
+    assert!(empty.span(0).unwrap().is_empty());
+}
+
+#[test]
+fn span_accessors_return_none_past_span_count_without_panicking() {
+    let wrapped = SpanPlan::reserve(
+        MAX_FRAME_BYTES,
+        MAX_FRAME_BYTES as u64 - 4,
+        MAX_FRAME_BYTES as u64 - 4,
+        8,
+    )
+    .unwrap();
+    assert!(wrapped.span(1).is_some());
+    assert!(wrapped.span(2).is_none());
+    assert!(wrapped.span(usize::MAX).is_none());
+
+    let single = SpanPlan::reserve(MAX_FRAME_BYTES, 0, 0, 8).unwrap();
+    assert_eq!(single.span_count(), 1);
+    assert!(single.span(0).is_some());
+    assert!(single.span(1).is_none());
+    assert!(single.span(2).is_none());
+
+    let frame = valid_descriptor()
+        .validate(identity(), MAX_FRAME_BYTES)
+        .unwrap();
+    assert!(frame.span(1).is_some());
+    assert!(frame.span(2).is_none());
+    assert!(frame.span(usize::MAX).is_none());
+}
+
+#[test]
+fn hardware_profile_id_deserialization_enforces_constructor_rules() {
+    let valid = HardwareProfileId::new("gpu-a100.v2_x").unwrap();
+    let encoded = serde_json::to_string(&valid).unwrap();
+    assert_eq!(encoded, "\"gpu-a100.v2_x\"");
+    let decoded: HardwareProfileId = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, valid);
+
+    let too_long = format!("\"{}\"", "a".repeat(65));
+    for rejected in [
+        "\"\"",
+        "\"has space\"",
+        "\"ünïcode\"",
+        "\"slash/id\"",
+        too_long.as_str(),
+    ] {
+        assert!(
+            serde_json::from_str::<HardwareProfileId>(rejected).is_err(),
+            "{rejected} deserialized"
+        );
+    }
 }
 
 #[test]
@@ -477,7 +596,7 @@ fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
         (
             {
                 let mut wire = header(4);
-                wire[4] = 1;
+                wire[4] = WIRE_V2_VERSION - 1;
                 base(DESCRIPTOR_SCHEMA_VERSION, wire, expected, 4)
             },
             expected,
@@ -492,6 +611,18 @@ fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
             Err(error)
         );
     }
+
+    // Allocation bounds are checked before the wire header, matching
+    // `FrameDescriptor::validate`: a body that overruns the allocation reports
+    // `InvalidAllocation` even when the wire header also disagrees.
+    let overrun_and_mismatch =
+        sample_payload(DESCRIPTOR_SCHEMA_VERSION, header(5), expected, 1024, &body);
+    assert_eq!(
+        SamplePrefix::snapshot(&overrun_and_mismatch)
+            .unwrap()
+            .validate(overrun_and_mismatch.len(), expected),
+        Err(DescriptorError::InvalidAllocation)
+    );
 
     // A body declared longer than the allocation holds is rejected.
     let excessive = sample_payload(
@@ -546,6 +677,37 @@ fn frame_descriptor_rejects_span_count_and_allocation_extremes() {
     assert_eq!(
         valid_descriptor().validate(identity, 0),
         Err(DescriptorError::InvalidAllocation)
+    );
+    // An allocation overrun takes precedence over a conflicting wire header.
+    let overrun_and_mismatch = FrameDescriptor::from_untrusted(
+        DESCRIPTOR_SCHEMA_VERSION,
+        header(7),
+        identity,
+        8,
+        0,
+        arena as u64 + 1,
+        1,
+        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+    );
+    assert_eq!(
+        overrun_and_mismatch.validate(identity, arena),
+        Err(DescriptorError::InvalidAllocation)
+    );
+    let mut stale_version = header(8);
+    stale_version[4] = WIRE_V2_VERSION - 1;
+    let wrong_version = FrameDescriptor::from_untrusted(
+        DESCRIPTOR_SCHEMA_VERSION,
+        stale_version,
+        identity,
+        8,
+        0,
+        8,
+        1,
+        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+    );
+    assert_eq!(
+        wrong_version.validate(identity, arena),
+        Err(DescriptorError::WireHeaderMismatch)
     );
 }
 #[test]

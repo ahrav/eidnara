@@ -6,17 +6,46 @@ use crate::arena::{ArenaSpan, MAX_FRAME_BYTES};
 
 /// Shared descriptor schema version.
 pub const DESCRIPTOR_SCHEMA_VERSION: u16 = 3;
-/// File descriptors a grant transfers over the setup socket: the arena mapping and two
-/// doorbells per direction. `setup_auth` re-exports this as `RING_DESCRIPTOR_COUNT`.
-pub const SETUP_DESCRIPTOR_COUNT: usize = 6;
+/// Arena mappings a grant transfers, one per direction.
+pub const SETUP_MAPPING_COUNT: usize = 2;
+/// Doorbell descriptors a grant transfers, two per direction. `profile` charges this many
+/// file descriptors on top of the mappings, so the admission budget and the setup transfer
+/// count cannot drift apart.
+pub const SETUP_DOORBELL_COUNT: usize = 4;
+/// File descriptors a grant transfers over the setup socket: the arena mappings and the
+/// doorbells. `setup_auth` re-exports this as `RING_DESCRIPTOR_COUNT`.
+pub const SETUP_DESCRIPTOR_COUNT: usize = SETUP_MAPPING_COUNT + SETUP_DOORBELL_COUNT;
 /// Frozen wire-v2 header length.
 pub const WIRE_V2_HEADER_BYTES: usize = 21;
+/// Version byte at `wire_header[4]`.
+pub const WIRE_V2_VERSION: u8 = 2;
 /// A complete-frame descriptor contains at most two shared spans.
 pub const MAX_SPANS: usize = 2;
 
+/// Shared by `FrameDescriptor::validate` and `SamplePrefix::validate` so both paths agree on
+/// which wire headers are admissible.
+pub(crate) fn check_wire_header(
+    wire_header: &[u8; WIRE_V2_HEADER_BYTES],
+    body_len: u64,
+) -> Result<(), DescriptorError> {
+    let declared_len = u32::from_le_bytes([
+        wire_header[0],
+        wire_header[1],
+        wire_header[2],
+        wire_header[3],
+    ]);
+    if u64::from(declared_len) != body_len || wire_header[4] != WIRE_V2_VERSION {
+        return Err(DescriptorError::WireHeaderMismatch);
+    }
+    Ok(())
+}
+
 /// Validated opaque hardware-profile identifier.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+///
+/// Deserialization calls [`HardwareProfileId::new`], so decoded values are validated;
+/// serialization emits the contained string.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct HardwareProfileId(String);
 
 impl HardwareProfileId {
@@ -41,11 +70,21 @@ impl HardwareProfileId {
     }
 }
 
-impl fmt::Debug for HardwareProfileId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("HardwareProfileId(<redacted>)")
+impl TryFrom<String> for HardwareProfileId {
+    type Error = DescriptorError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
+
+impl Serialize for HardwareProfileId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+crate::redacted_debug!(HardwareProfileId);
 
 /// Fixed ring profile identity carried by an authenticated grant.
 #[derive(Clone, PartialEq, Eq)]
@@ -74,11 +113,7 @@ impl TransportDescriptor {
     }
 }
 
-impl fmt::Debug for TransportDescriptor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("TransportDescriptor(<redacted>)")
-    }
-}
+crate::redacted_debug!(TransportDescriptor);
 
 /// 128-bit identity drawn once per ring attachment. A frame from an earlier attachment
 /// carries a different incarnation, so its descriptor fails `validate` even if the lane and
@@ -106,11 +141,7 @@ impl Incarnation {
     }
 }
 
-impl fmt::Debug for Incarnation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Incarnation(<redacted>)")
-    }
-}
+crate::redacted_debug!(Incarnation);
 
 /// The triple a completion must echo back exactly: incarnation, lane, and per-lane sequence.
 /// Any mismatch means the release belongs to another frame or another attachment.
@@ -145,13 +176,27 @@ impl ReleaseIdentity {
     pub const fn sequence(self) -> u64 {
         self.sequence
     }
-}
 
-impl fmt::Debug for ReleaseIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ReleaseIdentity(<redacted>)")
+    /// Identity mismatches are reported before any bounds check so a stale frame surfaces as
+    /// stale, not malformed.
+    pub(crate) fn check(self, expected: ReleaseIdentity) -> Result<(), DescriptorError> {
+        if self.sequence == 0 {
+            return Err(DescriptorError::InvalidSequence);
+        }
+        if self.incarnation != expected.incarnation {
+            return Err(DescriptorError::WrongIncarnation);
+        }
+        if self.lane != expected.lane {
+            return Err(DescriptorError::WrongLane);
+        }
+        if self.sequence != expected.sequence {
+            return Err(DescriptorError::InvalidSequence);
+        }
+        Ok(())
     }
 }
+
+crate::redacted_debug!(ReleaseIdentity);
 
 /// Metadata for one frame, copied out of shared memory before any check runs. Copying first
 /// means a peer that rewrites the descriptor mid-validation cannot make one field pass and
@@ -222,18 +267,7 @@ impl FrameDescriptor {
         if schema_version != DESCRIPTOR_SCHEMA_VERSION {
             return Err(DescriptorError::UnsupportedSchema);
         }
-        if identity.sequence == 0 {
-            return Err(DescriptorError::InvalidSequence);
-        }
-        if identity.incarnation != expected.incarnation {
-            return Err(DescriptorError::WrongIncarnation);
-        }
-        if identity.lane != expected.lane {
-            return Err(DescriptorError::WrongLane);
-        }
-        if identity.sequence != expected.sequence {
-            return Err(DescriptorError::InvalidSequence);
-        }
+        identity.check(expected)?;
         if body_len > MAX_FRAME_BYTES as u64 {
             return Err(DescriptorError::FrameTooLarge);
         }
@@ -285,15 +319,7 @@ impl FrameDescriptor {
             _ => return Err(DescriptorError::InvalidSpanCount),
         }
 
-        let declared_len = u32::from_le_bytes([
-            wire_header[0],
-            wire_header[1],
-            wire_header[2],
-            wire_header[3],
-        ]);
-        if u64::from(declared_len) != body_len || wire_header[4] != 2 {
-            return Err(DescriptorError::WireHeaderMismatch);
-        }
+        check_wire_header(&wire_header, body_len)?;
 
         Ok(ValidatedFrame {
             wire_header,
@@ -307,11 +333,7 @@ impl FrameDescriptor {
     }
 }
 
-impl fmt::Debug for FrameDescriptor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("FrameDescriptor(<redacted>)")
-    }
-}
+crate::redacted_debug!(FrameDescriptor);
 
 /// A frame descriptor that passed `FrameDescriptor::validate`; its spans are in bounds and
 /// its lengths agree, so the receiver may build a lease over them.
@@ -357,17 +379,16 @@ impl ValidatedFrame {
         self.span_count
     }
 
-    /// The span at `index`, or `None` past `span_count`.
+    /// The span at `index`, or `None` if `index >= span_count`. `validate` rejects
+    /// `span_count > MAX_SPANS`, so the slice bound is in range.
     pub fn span(self, index: usize) -> Option<ArenaSpan> {
-        (index < usize::from(self.span_count)).then_some(self.spans[index])
+        self.spans[..usize::from(self.span_count)]
+            .get(index)
+            .copied()
     }
 }
 
-impl fmt::Debug for ValidatedFrame {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ValidatedFrame(<redacted>)")
-    }
-}
+crate::redacted_debug!(ValidatedFrame);
 
 /// How many descriptors sit in each ownership state. `conserves` checks that the states
 /// partition the ring depth.
@@ -435,7 +456,8 @@ pub enum DescriptorError {
     /// `body_len` exceeds `MAX_FRAME_BYTES`.
     #[error("frame exceeds protocol maximum")]
     FrameTooLarge,
-    /// The allocation is empty, exceeds the arena, or is shorter than the body.
+    /// The arena is empty, or the allocation exceeds the arena or is shorter than the body.
+    /// A zero-length allocation is legal for a zero-length body.
     #[error("arena allocation is invalid")]
     InvalidAllocation,
     /// The span count is not 1 or 2.
