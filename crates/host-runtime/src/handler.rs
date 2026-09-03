@@ -486,27 +486,13 @@ impl std::fmt::Debug for RequestCtx {
 }
 
 /// Output reservation or streaming cannot proceed after admission rejection, cancellation, terminal selection, or connection loss.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("request output is no longer accepted")]
 pub struct StreamClosed;
 
-impl std::fmt::Display for StreamClosed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "request output is no longer accepted")
-    }
-}
-
-impl std::error::Error for StreamClosed {}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("handler initialization failed: {0}")]
 pub struct InitError(pub String);
-
-impl std::fmt::Display for InitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "handler initialization failed: {}", self.0)
-    }
-}
-
-impl std::error::Error for InitError {}
 
 /// The directly linked handler the host dispatches to. One implementation serves every
 /// module in the static composite; the host owns the wire, routes, and lifecycle, and

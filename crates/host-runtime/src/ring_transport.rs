@@ -99,16 +99,9 @@ pub(crate) struct PreparedRing {
     pub(crate) read_cancel: CancellationToken,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("shared-memory ring is unavailable")]
 pub struct RingUnavailable;
-
-impl std::fmt::Display for RingUnavailable {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("shared-memory ring is unavailable")
-    }
-}
-
-impl std::error::Error for RingUnavailable {}
 
 impl RingTransport {
     /// Builds the process-wide transport with finite admission limits.
@@ -765,7 +758,8 @@ fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N], RingClientError> {
 }
 
 /// Redacted test-peer attachment or I/O failure.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, thiserror::Error)]
+#[error("shared-memory peer operation failed")]
 pub struct RingClientError;
 
 impl fmt::Debug for RingClientError {
@@ -773,14 +767,6 @@ impl fmt::Debug for RingClientError {
         formatter.write_str("RingClientError(<redacted>)")
     }
 }
-
-impl fmt::Display for RingClientError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("shared-memory peer operation failed")
-    }
-}
-
-impl std::error::Error for RingClientError {}
 
 #[cfg(test)]
 mod tests {

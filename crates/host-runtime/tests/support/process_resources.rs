@@ -34,7 +34,8 @@ impl ResourceCounts {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, thiserror::Error)]
+#[error("process resource observation failed for counter {counter}")]
 pub struct ObserveError {
     counter: &'static str,
 }
@@ -44,18 +45,6 @@ impl fmt::Debug for ObserveError {
         write!(formatter, "ObserveError({})", self.counter)
     }
 }
-
-impl fmt::Display for ObserveError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "process resource observation failed for counter {}",
-            self.counter
-        )
-    }
-}
-
-impl std::error::Error for ObserveError {}
 
 fn fail(counter: &'static str) -> ObserveError {
     ObserveError { counter }

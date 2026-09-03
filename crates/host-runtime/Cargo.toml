@@ -25,6 +25,7 @@ rustix = { workspace = true, features = ["event", "fs", "net", "process", "threa
 getrandom = { workspace = true }
 libc = { workspace = true }
 shm-transport = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
