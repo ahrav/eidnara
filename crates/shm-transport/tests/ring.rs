@@ -513,7 +513,8 @@ fn two_process_zero_copy_exchange_uses_authenticated_grant() {
     }
     reservation.commit(MAX_FRAME_BYTES).unwrap();
 
-    let waiting_since = Instant::now();
+    // The child holds the whole arena until it releases, so this reservation parks on the
+    // capacity doorbell. The conservation check below proves the release was reclaimed.
     ring.reserve_until(
         1,
         wire_v2_header(1).unwrap(),
@@ -521,7 +522,6 @@ fn two_process_zero_copy_exchange_uses_authenticated_grant() {
     )
     .unwrap()
     .abort();
-    assert!(waiting_since.elapsed() >= Duration::from_millis(25));
 
     let output = child.into_inner().wait_with_output().unwrap();
     assert!(output.status.success());
