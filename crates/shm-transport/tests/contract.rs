@@ -228,7 +228,6 @@ fn arena_plans_wrap_and_conserves_all_states() {
     let prefix = plan.prefix(6).unwrap();
     assert_eq!(prefix.span(0).unwrap().len(), 4);
     assert_eq!(prefix.span(1).unwrap().len(), 2);
-
     assert!(
         ArenaCounts {
             free: 1,
@@ -254,6 +253,56 @@ fn arena_plans_wrap_and_conserves_all_states() {
         }
         .conserves(7)
     );
+}
+
+#[test]
+fn span_accessors_return_none_past_span_count_without_panicking() {
+    let wrapped = SpanPlan::reserve(
+        MAX_FRAME_BYTES,
+        MAX_FRAME_BYTES as u64 - 4,
+        MAX_FRAME_BYTES as u64 - 4,
+        8,
+    )
+    .unwrap();
+    assert!(wrapped.span(1).is_some());
+    assert!(wrapped.span(2).is_none());
+    assert!(wrapped.span(usize::MAX).is_none());
+
+    let single = SpanPlan::reserve(MAX_FRAME_BYTES, 0, 0, 8).unwrap();
+    assert_eq!(single.span_count(), 1);
+    assert!(single.span(0).is_some());
+    assert!(single.span(1).is_none());
+    assert!(single.span(2).is_none());
+
+    let frame = valid_descriptor()
+        .validate(identity(), MAX_FRAME_BYTES)
+        .unwrap();
+    assert!(frame.span(1).is_some());
+    assert!(frame.span(2).is_none());
+    assert!(frame.span(usize::MAX).is_none());
+}
+
+#[test]
+fn hardware_profile_id_deserialization_enforces_constructor_rules() {
+    let valid = HardwareProfileId::new("gpu-a100.v2_x").unwrap();
+    let encoded = serde_json::to_string(&valid).unwrap();
+    assert_eq!(encoded, "\"gpu-a100.v2_x\"");
+    let decoded: HardwareProfileId = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, valid);
+
+    let too_long = format!("\"{}\"", "a".repeat(65));
+    for rejected in [
+        "\"\"",
+        "\"has space\"",
+        "\"ünïcode\"",
+        "\"slash/id\"",
+        too_long.as_str(),
+    ] {
+        assert!(
+            serde_json::from_str::<HardwareProfileId>(rejected).is_err(),
+            "{rejected} deserialized"
+        );
+    }
 }
 
 #[test]

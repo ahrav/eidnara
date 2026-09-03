@@ -15,8 +15,11 @@ pub const WIRE_V2_HEADER_BYTES: usize = 21;
 pub const MAX_SPANS: usize = 2;
 
 /// Validated opaque hardware-profile identifier.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+///
+/// Deserialization calls [`HardwareProfileId::new`], so decoded values are validated;
+/// serialization emits the contained string.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct HardwareProfileId(String);
 
 impl HardwareProfileId {
@@ -38,6 +41,20 @@ impl HardwareProfileId {
     /// Whether this identifier spells exactly `value`.
     pub fn matches(&self, value: &str) -> bool {
         self.0 == value
+    }
+}
+
+impl TryFrom<String> for HardwareProfileId {
+    type Error = DescriptorError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl Serialize for HardwareProfileId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
     }
 }
 
@@ -357,9 +374,12 @@ impl ValidatedFrame {
         self.span_count
     }
 
-    /// The span at `index`, or `None` past `span_count`.
+    /// The span at `index`, or `None` past `span_count`. Slice lookup keeps any `index`
+    /// panic-free; `from_untrusted` rejects a `span_count` above `MAX_SPANS`.
     pub fn span(self, index: usize) -> Option<ArenaSpan> {
-        (index < usize::from(self.span_count)).then_some(self.spans[index])
+        self.spans[..usize::from(self.span_count)]
+            .get(index)
+            .copied()
     }
 }
 

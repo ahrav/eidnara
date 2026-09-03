@@ -158,9 +158,12 @@ impl SpanPlan {
         self.span_count
     }
 
-    /// The span at `index`, or `None` past `span_count`.
+    /// The span at `index`, or `None` past `span_count`. Slice lookup keeps any `index`
+    /// panic-free; `span_count` never exceeds the array length by construction.
     pub fn span(self, index: usize) -> Option<ArenaSpan> {
-        (index < usize::from(self.span_count)).then_some(self.spans[index])
+        self.spans[..usize::from(self.span_count)]
+            .get(index)
+            .copied()
     }
 }
 
