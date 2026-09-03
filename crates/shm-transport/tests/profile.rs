@@ -19,6 +19,34 @@ fn fixed_ring_identity_survives_profile_validation() {
 }
 
 #[test]
+fn debug_redacts_profile_admission_and_quarantine_record() {
+    let sentinel = "SENTINEL_profile_id";
+    let profile = ring_profile(HardwareProfileId::new(sentinel).unwrap()).unwrap();
+    let controller = Arc::new(AdmissionController::new(HostLimits {
+        descriptors: 1024,
+        arena_bytes: 1 << 30,
+        leases: 1024,
+        mappings: 1024,
+        file_descriptors: 1024,
+        workers: 1024,
+        client_instances: 1024,
+        pinned_workers: 0,
+    }));
+    let admission = controller.admit(&profile, None).unwrap();
+    let formatted_profile = format!("{profile:?}");
+    let formatted_admission = format!("{admission:?}");
+    let record = admission.quarantine().unwrap();
+    let formatted_record = format!("{record:?}");
+
+    assert_eq!(formatted_profile, "TargetProfile(<redacted>)");
+    assert_eq!(formatted_admission, "Admission(<redacted>)");
+    assert_eq!(formatted_record, "QuarantineRecord(<redacted>)");
+    for formatted in [formatted_profile, formatted_admission, formatted_record] {
+        assert!(!formatted.contains("SENTINEL"));
+    }
+}
+
+#[test]
 fn host_admission_retains_quarantined_commitments() {
     let profile = ring_profile(HardwareProfileId::new("contract-host").unwrap()).unwrap();
     let charges = profile.charges();

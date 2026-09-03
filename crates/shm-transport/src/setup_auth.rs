@@ -1,6 +1,7 @@
 //! Setup-handshake proof transcript. Both ends of the handshake link this module rather
-//! than keeping their own copy, so the MAC inputs cannot drift apart. `compute_proof` is
-//! the whole transcript; `vectors` pins its output.
+//! than keeping their own copy, so the MAC inputs cannot drift apart. `compute_proof`
+//! produces a proof and `verify_proof` checks a received one; both run the same private
+//! transcript, so neither peer compares proof bytes itself. `vectors` pins the output.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -42,6 +43,55 @@ pub fn compute_proof(
     daemon_ver: &str,
     daemon_id: &[u8],
 ) -> [u8; PROOF_LEN] {
+    transcript_mac(
+        key,
+        domain,
+        client_nonce,
+        server_nonce,
+        daemon_ver,
+        daemon_id,
+    )
+    .finalize()
+    .into_bytes()
+    .into()
+}
+
+/// `Mac::verify_slice` performs a constant-time comparison. Callers must use this rather
+/// than `==` on proof bytes.
+pub fn verify_proof(
+    key: &[u8],
+    domain: &str,
+    client_nonce: &[u8; NONCE_LEN],
+    server_nonce: &[u8; NONCE_LEN],
+    daemon_ver: &str,
+    daemon_id: &[u8],
+    proof: &[u8; PROOF_LEN],
+) -> Result<(), ProofMismatch> {
+    transcript_mac(
+        key,
+        domain,
+        client_nonce,
+        server_nonce,
+        daemon_ver,
+        daemon_id,
+    )
+    .verify_slice(proof)
+    .map_err(|_| ProofMismatch)
+}
+
+/// Carries nothing, so it cannot leak which byte differed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("setup proof does not match transcript")]
+pub struct ProofMismatch;
+
+fn transcript_mac(
+    key: &[u8],
+    domain: &str,
+    client_nonce: &[u8; NONCE_LEN],
+    server_nonce: &[u8; NONCE_LEN],
+    daemon_ver: &str,
+    daemon_id: &[u8],
+) -> Hmac<Sha256> {
     let daemon_ver_bytes = daemon_ver.as_bytes();
     let daemon_ver_len =
         u32::try_from(daemon_ver_bytes.len()).expect("auth messages bound daemon_ver to u32");
@@ -52,7 +102,7 @@ pub fn compute_proof(
     mac.update(&daemon_ver_len.to_be_bytes());
     mac.update(daemon_ver_bytes);
     mac.update(daemon_id);
-    mac.finalize().into_bytes().into()
+    mac
 }
 
 /// Committed proof vectors. Public rather than `cfg(test)` so both ends assert against the
@@ -98,7 +148,174 @@ mod tests {
 
     #[test]
     fn descriptor_count_matches_setup_contract() {
-        assert_eq!(RING_DESCRIPTOR_COUNT, 6);
+        // The admission charge and the setup transfer count describe the same descriptors.
+        let profile = crate::profile::host_test_ring_profile().unwrap();
+        assert_eq!(
+            profile.charges().file_descriptors,
+            RING_DESCRIPTOR_COUNT as u64
+        );
+    }
+
+    #[test]
+    fn verify_proof_accepts_committed_vectors_and_rejects_every_altered_input() {
+        let (key, client_nonce, server_nonce, daemon_id) = vectors::inputs();
+        assert_eq!(
+            verify_proof(
+                &key,
+                SERVER_PROOF_DOMAIN,
+                &client_nonce,
+                &server_nonce,
+                vectors::DAEMON_VER,
+                &daemon_id,
+                &vectors::SERVER_PROOF,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            verify_proof(
+                &key,
+                CLIENT_AUTH_DOMAIN,
+                &client_nonce,
+                &server_nonce,
+                vectors::DAEMON_VER,
+                &daemon_id,
+                &vectors::CLIENT_AUTH,
+            ),
+            Ok(())
+        );
+
+        let mut wrong_key = key;
+        wrong_key[0] ^= 1;
+        let mut wrong_client_nonce = client_nonce;
+        wrong_client_nonce[NONCE_LEN - 1] ^= 1;
+        let mut wrong_server_nonce = server_nonce;
+        wrong_server_nonce[0] ^= 1;
+        let mut wrong_daemon_id = daemon_id;
+        wrong_daemon_id[0] ^= 1;
+        let mut wrong_proof = vectors::SERVER_PROOF;
+        wrong_proof[PROOF_LEN - 1] ^= 1;
+
+        let rejects = |key: &[u8],
+                       domain: &str,
+                       client_nonce: &[u8; NONCE_LEN],
+                       server_nonce: &[u8; NONCE_LEN],
+                       daemon_ver: &str,
+                       daemon_id: &[u8],
+                       proof: &[u8; PROOF_LEN],
+                       altered: &str| {
+            assert_eq!(
+                verify_proof(
+                    key,
+                    domain,
+                    client_nonce,
+                    server_nonce,
+                    daemon_ver,
+                    daemon_id,
+                    proof
+                ),
+                Err(ProofMismatch),
+                "altered {altered} must not verify"
+            );
+        };
+        let ver = vectors::DAEMON_VER;
+        let ok = &vectors::SERVER_PROOF;
+        rejects(
+            &wrong_key,
+            SERVER_PROOF_DOMAIN,
+            &client_nonce,
+            &server_nonce,
+            ver,
+            &daemon_id,
+            ok,
+            "key",
+        );
+        rejects(
+            &key,
+            CLIENT_AUTH_DOMAIN,
+            &client_nonce,
+            &server_nonce,
+            ver,
+            &daemon_id,
+            ok,
+            "domain",
+        );
+        rejects(
+            &key,
+            SERVER_PROOF_DOMAIN,
+            &wrong_client_nonce,
+            &server_nonce,
+            ver,
+            &daemon_id,
+            ok,
+            "client nonce",
+        );
+        rejects(
+            &key,
+            SERVER_PROOF_DOMAIN,
+            &client_nonce,
+            &wrong_server_nonce,
+            ver,
+            &daemon_id,
+            ok,
+            "server nonce",
+        );
+        rejects(
+            &key,
+            SERVER_PROOF_DOMAIN,
+            &client_nonce,
+            &server_nonce,
+            "eidnara-host/9.9.9",
+            &daemon_id,
+            ok,
+            "daemon_ver",
+        );
+        rejects(
+            &key,
+            SERVER_PROOF_DOMAIN,
+            &client_nonce,
+            &server_nonce,
+            ver,
+            &wrong_daemon_id,
+            ok,
+            "daemon_id",
+        );
+        rejects(
+            &key,
+            SERVER_PROOF_DOMAIN,
+            &client_nonce,
+            &server_nonce,
+            ver,
+            &daemon_id,
+            &wrong_proof,
+            "proof",
+        );
+    }
+
+    #[test]
+    fn verify_proof_agrees_with_compute_proof() {
+        let key = [7u8; 32];
+        let client_nonce = [1u8; NONCE_LEN];
+        let server_nonce = [2u8; NONCE_LEN];
+        let proof = compute_proof(
+            &key,
+            CLIENT_AUTH_DOMAIN,
+            &client_nonce,
+            &server_nonce,
+            "ab",
+            b"cd",
+        );
+        assert_eq!(
+            verify_proof(
+                &key,
+                CLIENT_AUTH_DOMAIN,
+                &client_nonce,
+                &server_nonce,
+                "ab",
+                b"cd",
+                &proof
+            ),
+            Ok(())
+        );
     }
 
     #[test]
