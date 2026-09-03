@@ -1,0 +1,18 @@
+[package]
+name = "tokenizer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Claude byte-BPE token counting, matching ai-tokenizer's claude encoding id for id."
+
+[dependencies]
+tiktoken-rs = "=0.11.0"
+base64 = "0.22"
+rustc-hash = "1.1"
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

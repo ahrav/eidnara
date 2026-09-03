@@ -23,7 +23,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "0a0e5c23d4ede4851a51e923ad82066f158083383a578c73d20c1c5f696779d4",
+      "destination_sha256": "761242be15d800c978d9e26fafcfa4322b2ff9b128923d7bd0861ff8ba074fe0",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -34,7 +34,7 @@
     {
       "source": null,
       "destination": "package.json",
-      "destination_sha256": "d7bf3b974b34713505df1735cdddc96d352eafa615fa3041df1eeeeaf867139a",
+      "destination_sha256": "90dc2d0ffd184970cd5bf3bc4fe6ad314b47faf6045fae3f80bd3b5eb52fe6b4",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -45,7 +45,7 @@
     {
       "source": null,
       "destination": "tsconfig.json",
-      "destination_sha256": "d50b385e0f68e05ba32e17ad6f37d41e500f38f36331673006336b535e7c7f20",
+      "destination_sha256": "65ef51fda5eeb65fece80734b08c98a9b0bdee93fe26b84f4b7f9bf259fe3b42",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -300,7 +300,7 @@
     {
       "source": null,
       "destination": "bun.lock",
-      "destination_sha256": "45583d9e02c9b346333f1c7f159948af707e2fba38fc91de525b28595390fa74",
+      "destination_sha256": "191485dff9d74e73153bc01df5ed669bffac6e56381f109f30a25ce719aceab6",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
