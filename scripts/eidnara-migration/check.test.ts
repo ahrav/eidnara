@@ -1172,6 +1172,51 @@ describe("evidence: git-backed receipts", () => {
         }
     });
 
+    test("a waiver expires when the wave it names has landed, in any receipt (AE30)", () => {
+        const u1 = {
+            schema_version: 1,
+            wave: "U1",
+            waivers: [
+                {
+                    id: "W-U1-example",
+                    gate: "example-gate",
+                    kind: "release",
+                    owner: "o",
+                    approver: "a",
+                    bead_id: "b",
+                    created_at: "2026-09-01",
+                    expires_by_wave: "U2",
+                    closure_condition: "close it",
+                    evidence: ["e"],
+                },
+            ],
+        };
+        write(join(destination, "migration/waves/U1/waivers.json"), JSON.stringify(u1));
+        try {
+            expect(verify("receipt", receipt(), ctx)).toContain(
+                "migration/waves/U1/waivers.json W-U1-example expired: expires_by_wave U2 is not after wave U2; close the gate before recording this wave",
+            );
+            u1.waivers[0]!.expires_by_wave = "U3";
+            write(join(destination, "migration/waves/U1/waivers.json"), JSON.stringify(u1));
+            expect(verify("receipt", receipt(), ctx)).toEqual([]);
+            // The U2 receipt exists in the tree, so a U2 waiver naming U2 as its expiry is
+            // already due when its own receipt is checked.
+            const own = receipt();
+            const waivers = { schema_version: 1, wave: "U2", waivers: [{ ...u1.waivers[0]!, id: "W-U2-example", expires_by_wave: "U3" }] };
+            write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify(waivers));
+            (own.gates as Json)["example-gate"] = "not_run";
+            expect(verify("receipt", own, ctx)).toEqual([]);
+            waivers.waivers[0]!.expires_by_wave = "U2";
+            write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify(waivers));
+            const errors = verify("receipt", own, ctx);
+            expect(errors).toContain("$.waivers W-U2-example expired: expires_by_wave U2 and wave U2 has landed; close the gate or record a new waiver");
+            expect(errors).toContain("$.gates.example-gate blocks the wave with status not_run");
+        } finally {
+            rmSync(join(destination, "migration/waves/U1/waivers.json"), { force: true });
+            write(join(destination, "migration/waves/U2/waivers.json"), JSON.stringify({ schema_version: 1, wave: "U2", waivers: [] }));
+        }
+    });
+
     test("the impact's touched files must include every implementation file the receipt changes", () => {
         const impact = impactFor(sourceCommit);
         impact.touched_files = ["crates/lease/src/lib.rs"];

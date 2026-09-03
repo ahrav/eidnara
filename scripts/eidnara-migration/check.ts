@@ -1302,6 +1302,9 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
         }
     }
     let waiverGates = new Set<string>();
+    // A waiver expires when the wave it names has landed, whichever receipt is being
+    // checked: the waiver's own wave is where it was written, not where it stops applying.
+    const landed = landedWave(ctx.root, wave);
     if (shape.waivers !== undefined) {
         const waivers = readJson(join(ctx.root, shape.waivers), errors, "$.waivers");
         if (waivers !== undefined) {
@@ -1311,7 +1314,16 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             if (waiverShape.wave !== undefined && waiverShape.wave !== wave) {
                 errors.push(`$.waivers names wave ${waiverShape.wave}, receipt is ${wave}`);
             }
+            for (const expired of expiredWaivers(waivers, landed)) {
+                errors.push(`$.waivers ${expired.id} expired: expires_by_wave ${expired.expires} and wave ${landed} has landed; close the gate or record a new waiver`);
+                waiverShape.gates.delete(expired.gate);
+            }
             waiverGates = waiverShape.gates;
+        }
+    }
+    for (const earlier of earlierWaiverFiles(ctx.root, wave)) {
+        for (const expired of expiredWaivers(earlier.waivers, wave)) {
+            errors.push(`${earlier.path} ${expired.id} expired: expires_by_wave ${expired.expires} is not after wave ${wave}; close the gate before recording this wave`);
         }
     }
     for (const [name, status] of Object.entries(shape.gates)) {
@@ -1487,6 +1499,54 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             errors.push(`${scopes.join(",")} ${repo} has blob ${blob} at ${paths} paths but the receipt disposes of it ${accounted} time(s)`);
         }
     }
+}
+
+/// The highest wave with a receipt under the destination root, or `current` when none is
+/// higher; a receipt being written counts as landed for its own waivers.
+function landedWave(root: string, current: string): string {
+    let highest = current;
+    const waves = join(root, "migration", "waves");
+    if (!existsSync(waves)) return highest;
+    for (const wave of readdirSync(waves)) {
+        if (waveIndex(wave) === -1 || !existsSync(join(waves, wave, "receipt.json"))) continue;
+        if (waveIndex(wave) > waveIndex(highest)) highest = wave;
+    }
+    return highest;
+}
+
+/// Waiver files of waves earlier than `current`, read as they are on disk.
+function earlierWaiverFiles(root: string, current: string): { path: string; waivers: JsonObject }[] {
+    const out: { path: string; waivers: JsonObject }[] = [];
+    const waves = join(root, "migration", "waves");
+    if (!existsSync(waves)) return out;
+    for (const wave of readdirSync(waves).sort()) {
+        if (waveIndex(wave) === -1 || waveIndex(wave) >= waveIndex(current)) continue;
+        const path = join("migration", "waves", wave, "waivers.json");
+        if (!existsSync(join(root, path))) continue;
+        try {
+            const waivers = JSON.parse(readFileSync(join(root, path), "utf8")) as JsonObject;
+            if (isObject(waivers)) out.push({ path, waivers });
+        } catch {
+            // A malformed waiver file fails its own wave's check.
+        }
+    }
+    return out;
+}
+
+/// Waivers in `waivers` whose `expires_by_wave` is not after `wave`.
+function expiredWaivers(waivers: JsonObject, wave: string): { id: string; gate: string; expires: string }[] {
+    const out: { id: string; gate: string; expires: string }[] = [];
+    for (const entry of Array.isArray(waivers.waivers) ? waivers.waivers : []) {
+        if (!isObject(entry) || typeof entry.expires_by_wave !== "string" || waveIndex(entry.expires_by_wave) === -1) continue;
+        if (waveIndex(entry.expires_by_wave) <= waveIndex(wave)) {
+            out.push({
+                id: typeof entry.id === "string" ? entry.id : "<unnamed>",
+                gate: typeof entry.gate === "string" ? entry.gate : "",
+                expires: entry.expires_by_wave,
+            });
+        }
+    }
+    return out;
 }
 
 /// Destinations named by every wave receipt under the destination root.

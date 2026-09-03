@@ -57,6 +57,10 @@ pub enum StoreError {
          fence.epoch to at least the highest epoch a writer has used"
     )]
     FenceCorrupt { db_epoch: i64 },
+    /// An initialized store carries no `fence` row. The row is the writer authority, so
+    /// its absence is corruption rather than a fresh start at epoch zero.
+    #[error("database fence row is missing from an initialized store; restore it before reopening")]
+    FenceMissing,
 }
 
 /// The lease key includes the module, backend, storage namespace, and the
@@ -461,7 +465,8 @@ mod sqlite_backend {
         }
     }
 
-    /// A baseline is DDL for the main schema and nothing else. An attached database is
+    /// A baseline is DDL for the main schema and nothing else, and it writes no row into the
+    /// store's own tables. An attached database is
     /// outside the file and outside the identity comparison, and a file-backed attachment
     /// reaches a database the store holds no lease on. A pragma write outlives the
     /// baseline: `writable_schema` or `ignore_check_constraints` set here would stay in
@@ -485,6 +490,17 @@ mod sqlite_backend {
                 pragma_name,
                 pragma_value: None,
             } if is_side_effecting_pragma(pragma_name) => Authorization::Deny,
+            // A row written into `fence` or `format_marker` by the baseline would be the
+            // authority every later open checks against; the first claim and the marker
+            // write are the only writers of those tables. The baseline's own DDL creates
+            // them, so only row operations are denied here.
+            AuthAction::Insert { table_name }
+            | AuthAction::Update { table_name, .. }
+            | AuthAction::Delete { table_name }
+                if is_infrastructure_table(table_name) =>
+            {
+                Authorization::Deny
+            }
             _ => Authorization::Allow,
         }
     }
@@ -728,7 +744,7 @@ mod sqlite_backend {
         if state == FileState::Pristine {
             expected.apply(&tx)?;
         }
-        claim_fence_strict(&tx, epoch)?;
+        claim_fence_strict(&tx, epoch, state)?;
         tx.commit()
             .map_err(|e| StoreError::Backend(e.to_string()))?;
 
@@ -737,6 +753,75 @@ mod sqlite_backend {
             epoch,
             _lease: Some(lease),
         })
+    }
+
+    /// SQLite URI for `path` with `immutable=1`: the connection takes no locks, reads no
+    /// `-wal`, and creates no sidecar. `%`, `?`, and `#` are the only bytes the URI grammar
+    /// reserves inside the path.
+    fn immutable_uri(path: &Path) -> String {
+        let mut out = String::from("file:");
+        for byte in path.as_os_str().as_encoded_bytes() {
+            match byte {
+                b'%' | b'?' | b'#' => out.push_str(&format!("%{byte:02X}")),
+                _ => out.push(char::from(*byte)),
+            }
+        }
+        out.push_str("?immutable=1");
+        out
+    }
+
+    /// A private copy of a database and its sidecars, removed on drop. Reading the copy
+    /// through an ordinary connection replays its WAL without touching the original files.
+    struct InspectionCopy {
+        directory: PathBuf,
+        database: PathBuf,
+    }
+
+    impl InspectionCopy {
+        fn of(path: &Path) -> Result<Self, StoreError> {
+            let parent = path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let file_name = path.file_name().ok_or_else(|| {
+                StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{} has no file name", path.display()),
+                ))
+            })?;
+            let directory = parent.join(format!(
+                ".inspect-{}-{}",
+                std::process::id(),
+                unique_nanos()
+            ));
+            std::fs::create_dir(&directory).map_err(StoreError::Io)?;
+            let copy = Self {
+                database: directory.join(file_name),
+                directory,
+            };
+            for suffix in ["", "-wal", "-shm"] {
+                let source = PathBuf::from(format!("{}{suffix}", path.display()));
+                if source.try_exists().map_err(StoreError::Io)? {
+                    let target = PathBuf::from(format!("{}{suffix}", copy.database.display()));
+                    std::fs::copy(&source, &target).map_err(StoreError::Io)?;
+                }
+            }
+            Ok(copy)
+        }
+    }
+
+    impl Drop for InspectionCopy {
+        fn drop(&mut self) {
+            // Drop ignores cleanup errors because it cannot return them.
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn unique_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
     }
 
     /// The device and inode of a store file, read without following a final symlink. Two
@@ -827,14 +912,21 @@ mod sqlite_backend {
         Ok(())
     }
 
-    const FENCE_EPOCH_SQL: &str = "SELECT COALESCE((SELECT epoch FROM fence WHERE id = 0), 0)";
+    const FENCE_EPOCH_SQL: &str = "SELECT epoch FROM fence WHERE id = 0";
 
-    /// The caller guarantees that `fence` exists.
-    fn read_fence_epoch_in(conn: &Connection) -> Result<u64, StoreError> {
-        let epoch: i64 = conn
+    /// The fence epoch, or `None` when the row is absent. The caller guarantees that the
+    /// `fence` table exists; only the transaction that initializes a pristine file may see
+    /// no row, since the baseline creates the table and the first claim writes the row.
+    fn read_fence_epoch_in(conn: &Connection) -> Result<Option<u64>, StoreError> {
+        let epoch: Option<i64> = conn
             .query_row(FENCE_EPOCH_SQL, [], |row| row.get(0))
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        decode_fence_epoch(epoch)
+        epoch.map(decode_fence_epoch).transpose()
     }
 
     /// One row of `sqlite_schema` without its root page, which varies with allocation
@@ -868,7 +960,7 @@ mod sqlite_backend {
 
     /// Whether an opened file may receive the baseline or already carries it.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum FileState {
+    pub(crate) enum FileState {
         Pristine,
         Baseline,
     }
@@ -961,18 +1053,43 @@ mod sqlite_backend {
                 return Ok((0, None));
             }
             let identity = FileIdentity::of(path).map_err(StoreError::Io)?;
-            let conn = Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-            )
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-            conn.busy_timeout(Duration::from_secs(5))
+            // Any ordinary SQLite connection to a WAL-mode file creates the `-wal` and
+            // `-shm` sidecars if they are missing, so the inspection never opens the file
+            // itself in that mode. Without a `-wal` the main file is the whole database
+            // and an `immutable` open reads it while creating nothing. With a `-wal`, the
+            // main file may lag or be torn mid-checkpoint, so the database and its sidecars
+            // are copied into a private directory and the copy is read; the originals are
+            // never opened. The copy costs one pass over the file and runs only when a
+            // writer did not checkpoint on close.
+            let wal = PathBuf::from(format!("{}-wal", path.display()));
+            let floor = if wal.try_exists().map_err(StoreError::Io)? {
+                let scratch = InspectionCopy::of(path)?;
+                let conn = Connection::open_with_flags(
+                    &scratch.database,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                )
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
-            let floor = match self.classify(&conn)? {
-                FileState::Pristine => 0,
-                FileState::Baseline => read_fence_epoch_in(&conn)?,
+                self.floor_of(&conn)?
+            } else {
+                let conn = Connection::open_with_flags(
+                    immutable_uri(path),
+                    OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | OpenFlags::SQLITE_OPEN_NOFOLLOW
+                        | OpenFlags::SQLITE_OPEN_URI,
+                )
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+                self.floor_of(&conn)?
             };
             Ok((floor, Some(identity)))
+        }
+
+        /// The fence floor an inspected connection yields: zero for a pristine file, the
+        /// stored epoch for this store's file, and a refusal for anything else.
+        fn floor_of(&self, conn: &Connection) -> Result<u64, StoreError> {
+            match self.classify(conn)? {
+                FileState::Pristine => Ok(0),
+                FileState::Baseline => read_fence_epoch_in(conn)?.ok_or(StoreError::FenceMissing),
+            }
         }
 
         /// Reads only: a file that is refused keeps every byte it had.
@@ -1079,7 +1196,8 @@ mod sqlite_backend {
         holder_epoch: u64,
     ) -> Result<(), StoreError> {
         let holder_epoch_sql = fence_epoch_sql_value(holder_epoch)?;
-        let db_epoch = read_fence_epoch_in(tx)?;
+        // Fenced writes run on an initialized store, where the row is the authority.
+        let db_epoch = read_fence_epoch_in(tx)?.ok_or(StoreError::FenceMissing)?;
 
         if db_epoch > holder_epoch {
             return Err(StoreError::Fenced {
@@ -1097,9 +1215,17 @@ mod sqlite_backend {
     pub(crate) fn claim_fence_strict(
         tx: &rusqlite::Transaction<'_>,
         holder_epoch: u64,
+        state: FileState,
     ) -> Result<(), StoreError> {
         let holder_epoch_sql = fence_epoch_sql_value(holder_epoch)?;
-        let db_epoch = read_fence_epoch_in(tx)?;
+        // A pristine file has no fence row until this claim writes it. On an initialized
+        // file the row is the writer authority; a file that lost it is not adopted at epoch
+        // zero, since a reissued epoch could readmit a retained stale writer.
+        let db_epoch = match (read_fence_epoch_in(tx)?, state) {
+            (Some(epoch), _) => epoch,
+            (None, FileState::Pristine) => 0,
+            (None, FileState::Baseline) => return Err(StoreError::FenceMissing),
+        };
 
         if holder_epoch <= db_epoch {
             return Err(StoreError::Fenced {
@@ -1164,7 +1290,7 @@ pub use sqlite_backend::{
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::sqlite_backend::{
-        FileIdentity, claim_fence, claim_fence_strict, create_database_file_owner_only,
+        FileIdentity, FileState, claim_fence, claim_fence_strict, create_database_file_owner_only,
     };
     use super::*;
     use std::path::Path;
@@ -1292,17 +1418,35 @@ mod tests {
                 "ATTACH ':memory:' AS aux; CREATE TABLE aux.t (k TEXT); DETACH aux;",
                 "not authorized",
             ),
+            (
+                "INSERT INTO fence VALUES (0, 9223372036854775807);",
+                "not authorized",
+            ),
+            (
+                "UPDATE format_marker SET baseline_sha256 = baseline_sha256;",
+                "not authorized",
+            ),
+            ("DELETE FROM fence;", "not authorized"),
             ("PRAGMA writable_schema = ON;", "not authorized"),
             ("PRAGMA ignore_check_constraints = ON;", "not authorized"),
             ("PRAGMA foreign_keys = OFF;", "not authorized"),
             ("PRAGMA shrink_memory;", "not authorized"),
             ("BEGIN; CREATE TABLE t (k TEXT); COMMIT;", "not authorized"),
+            // Dropping a table deletes its rows, which the authorizer refuses first.
             (
                 "DROP TABLE fence; CREATE TABLE fence (id INTEGER PRIMARY KEY CHECK (id = 0), epoch INTEGER NOT NULL CHECK (epoch = 1));",
-                "redefines infrastructure object `fence`",
+                "not authorized",
             ),
             (
                 "DROP TABLE format_marker; CREATE TABLE format_marker (id INTEGER PRIMARY KEY, baseline_sha256 TEXT);",
+                "not authorized",
+            ),
+            (
+                "ALTER TABLE fence ADD COLUMN extra TEXT;",
+                "redefines infrastructure object `fence`",
+            ),
+            (
+                "ALTER TABLE format_marker RENAME COLUMN baseline_sha256 TO digest;",
                 "redefines infrastructure object `format_marker`",
             ),
         ] {
@@ -1374,6 +1518,108 @@ mod tests {
             wal_before
         );
         assert_eq!(std::fs::read(path).expect("db after"), db_before);
+        assert!(
+            !std::path::Path::new(&format!("{path}-shm")).exists(),
+            "inspection must not create the foreign store's shared-memory file"
+        );
+        assert!(
+            std::fs::read_dir(&root).expect("root").all(|e| {
+                !e.expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".inspect-")
+            }),
+            "the inspection copy is removed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A WAL-mode foreign database that was closed cleanly has no sidecars; the refusal
+    /// creates none, since the inspection opens the file `immutable`.
+    #[test]
+    fn a_refused_foreign_wal_mode_database_gains_no_sidecars() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        std::fs::create_dir_all(&root).expect("root");
+        {
+            let foreign = rusqlite::Connection::open(path).expect("foreign database");
+            foreign
+                .execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE theirs (k TEXT);")
+                .expect("foreign schema");
+        }
+        assert!(!std::path::Path::new(&format!("{path}-wal")).exists());
+        let before = std::fs::read(path).expect("bytes before");
+        assert!(matches!(
+            open_sqlite(&d, "").map(|_| ()),
+            Err(StoreError::Baseline(_))
+        ));
+        assert_eq!(std::fs::read(path).expect("bytes after"), before);
+        for suffix in ["-wal", "-shm"] {
+            assert!(
+                !std::path::Path::new(&format!("{path}{suffix}")).exists(),
+                "refusal must not create {suffix}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A store whose last writer left its frames in the WAL reopens with the epoch those
+    /// frames hold as the floor, so a lost lease sidecar cannot reissue it.
+    #[test]
+    fn a_store_left_with_wal_frames_reopens_above_the_wal_epoch() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let store = open_sqlite(&d, "").expect("first open");
+        assert_eq!(store.epoch(), 1);
+        // The store is still open, so its baseline and fence live in the WAL. Copy the
+        // database and WAL to a fresh path with no lease sidecar: a crashed writer's state.
+        let crashed_root = root.join("crashed");
+        std::fs::create_dir_all(&crashed_root).expect("crashed root");
+        let crashed_path = crashed_root.join("store.db");
+        std::fs::copy(path, &crashed_path).expect("copy database");
+        std::fs::copy(
+            format!("{path}-wal"),
+            format!("{}-wal", crashed_path.display()),
+        )
+        .expect("copy wal");
+        drop(store);
+        let crashed = StorageDescriptor {
+            backend: StorageBackend::Sqlite {
+                path: crashed_path.to_string_lossy().into_owned(),
+            },
+            ..d.clone()
+        };
+        let reopened = open_sqlite(&crashed, "").expect("reopen from WAL state");
+        assert_eq!(
+            reopened.epoch(),
+            2,
+            "the floor comes from the fence row in the WAL, not from the empty main file"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An initialized store whose fence row is gone is refused rather than adopted at epoch
+    /// zero.
+    #[test]
+    fn an_initialized_store_without_a_fence_row_is_refused() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, "").expect("first open"));
+        {
+            let raw = rusqlite::Connection::open(path).expect("raw connection");
+            raw.execute("DELETE FROM fence", [])
+                .expect("remove the fence row");
+        }
+        match open_sqlite(&d, "").map(|_| ()) {
+            Err(StoreError::FenceMissing) => {}
+            other => panic!("a missing fence row must be refused, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1802,7 +2048,7 @@ mod tests {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .expect("claim transaction");
-        match claim_fence_strict(&tx, stored) {
+        match claim_fence_strict(&tx, stored, FileState::Baseline) {
             Err(StoreError::Fenced {
                 holder_epoch,
                 db_epoch,
@@ -1816,7 +2062,8 @@ mod tests {
             claim_fence(&tx, stored).is_ok(),
             "an equal epoch stays authorized for a holder that already claimed it"
         );
-        claim_fence_strict(&tx, stored + 1).expect("a strictly greater epoch claims");
+        claim_fence_strict(&tx, stored + 1, FileState::Baseline)
+            .expect("a strictly greater epoch claims");
         drop(tx);
 
         let _ = std::fs::remove_dir_all(&root);

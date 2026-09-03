@@ -55,7 +55,9 @@ A `no` means every safety check threatened by that fault can pass without the fa
 | A permissive database, WAL, or SHM file at reopen | `store-files-are-owner-only-after-open` |
 | A callback error after a fence claim | `fenced-write-is-atomic` |
 | A negative stored epoch or a holder epoch above `i64::MAX` | `fence-epoch-outside-sqlite-range-fails-closed` |
-| A baseline text that attaches a database, writes a pragma, or opens a transaction | `store-schema-identity-matches-the-baseline` |
+| A baseline text that attaches a database, writes a pragma, opens a transaction, or writes a `fence` or `format_marker` row | `store-schema-identity-matches-the-baseline` |
+| An initialized store whose `fence` row is gone | `store-schema-identity-matches-the-baseline`, `stale-writer-write-is-rejected`; refused with `FenceMissing` (`an_initialized_store_without_a_fence_row_is_refused`) |
+| A store whose last writer left frames in the WAL and no lease sidecar | `store-schema-identity-matches-the-baseline`; the inspection copy replays the WAL for the floor (`a_store_left_with_wal_frames_reopens_above_the_wal_epoch`) |
 | A stored cache `version` of `u64::MAX` before a rebuild | none; `CoreState::step` returns `StepError::VersionExhausted` with the state unchanged (`an_exhausted_version_refuses_a_rebuild_and_leaves_the_state_unchanged`) |
 | Two frozen units under one key in loaded cache state | none; `CoreState::step` returns `StepError::DuplicateFrozenKey` with the state unchanged (`duplicate_frozen_keys_in_loaded_state_are_refused_unchanged`) |
 | A foreign database with committed WAL frames, or a foreign `fence` row, at the store path | `store-schema-identity-matches-the-baseline` |
