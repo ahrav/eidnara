@@ -915,7 +915,7 @@ impl Ring {
                 },
             )
         };
-        Ok(Self {
+        let ring = Self {
             mapping,
             layout,
             grant,
@@ -931,7 +931,11 @@ impl Ring {
             consumer: Cell::new(false),
             published_seen: Cell::new(producer_cursors.published),
             _not_send_or_sync: PhantomData,
-        })
+        };
+        // The baseline becomes this handle's record, so a mapping the peer already broke is
+        // refused here rather than adopted as truth.
+        ring.conservation_inner()?;
+        Ok(ring)
     }
 
     /// Grant a peer needs to attach to this ring.
@@ -1428,8 +1432,8 @@ impl Ring {
 
     /// Counts descriptors and arena bytes by ownership state. A quarantined ring reports
     /// everything as quarantined; a live one must partition depth and capacity exactly and
-    /// its cursors must agree with the slot states, or `InvalidSharedState` is returned and
-    /// the ring is quarantined.
+    /// its cursors must satisfy the protocol's ordering bounds, or `InvalidSharedState` is
+    /// returned and the ring is quarantined.
     pub fn conservation(&self) -> Result<(DescriptorCounts, ArenaCounts), RingError> {
         if self.is_quarantined() {
             return Ok((
@@ -1517,52 +1521,51 @@ impl Ring {
             .arena_bytes
             .checked_sub(charged)
             .ok_or(RingError::InvalidSharedState)?;
-        self.check_cursor_invariants(&descriptors, &bytes)?;
+        self.check_cursor_invariants()?;
         Ok((descriptors, bytes))
     }
 
-    /// Cursors the slot walk did not read must agree with the counts it produced. A handle
-    /// that has acted in a role also requires that role's cursors to match its own record.
-    fn check_cursor_invariants(
-        &self,
-        descriptors: &DescriptorCounts,
-        bytes: &ArenaCounts,
-    ) -> Result<(), RingError> {
+    /// Cursor invariants that hold in every intermediate state of an honest peer's transitions,
+    /// so a probe racing normal traffic cannot report corruption. Every cursor only advances,
+    /// and each check reads its lower bound before its upper bound: the lower value is then at
+    /// most what it was when the upper value was read. Exact equalities between cursors and
+    /// slot counts are not checked here because the slot store and the cursor store of one
+    /// transition are separate writes. A handle that has acted in a role also requires that
+    /// role's cursors to match its own record, which only that handle writes.
+    fn check_cursor_invariants(&self) -> Result<(), RingError> {
         let producer = self.producer_ptr()?;
         let consumer = self.consumer_ptr()?;
         let reclaim = self.reclaim_ptr()?;
         // SAFETY: the pages were bounds-checked and hold initialized atomics.
-        let (published, arena_write, consumed, active_leases, completed, arena_reclaimed) = unsafe {
-            (
-                (*producer).published.load(Ordering::Acquire),
-                (*producer).arena_write.load(Ordering::Acquire),
-                (*consumer).consumed.load(Ordering::Acquire),
-                (*consumer).active_leases.load(Ordering::Acquire),
-                (*reclaim).completed.load(Ordering::Acquire),
-                (*reclaim).arena_reclaimed.load(Ordering::Acquire),
-            )
+        let published = || unsafe { (*producer).published.load(Ordering::Acquire) };
+        // SAFETY: same as above.
+        let arena_write = || unsafe { (*producer).arena_write.load(Ordering::Acquire) };
+        // SAFETY: same as above.
+        let consumed = || unsafe { (*consumer).consumed.load(Ordering::Acquire) };
+        // SAFETY: same as above.
+        let active_leases = || unsafe { (*consumer).active_leases.load(Ordering::Acquire) };
+        // SAFETY: same as above.
+        let completed = || unsafe { (*reclaim).completed.load(Ordering::Acquire) };
+        // SAFETY: same as above.
+        let arena_reclaimed = || unsafe { (*reclaim).arena_reclaimed.load(Ordering::Acquire) };
+
+        // `lower <= upper` with the lower cursor read first.
+        let ordered = |lower: &dyn Fn() -> u64, upper: &dyn Fn() -> u64| {
+            let lower = lower();
+            lower <= upper()
         };
-        let in_flight = published
-            .checked_sub(consumed)
-            .ok_or(RingError::InvalidSharedState)?;
-        let held = consumed
-            .checked_sub(completed)
-            .ok_or(RingError::InvalidSharedState)?;
-        let live_bytes = arena_write
-            .checked_sub(arena_reclaimed)
-            .ok_or(RingError::InvalidSharedState)?;
-        // `arena_write` advances at commit, so the cursor gap covers every charged slot except
-        // an uncommitted reservation.
-        let committed_bytes =
-            bytes.published + bytes.receiver_held + bytes.receiver_leased + bytes.release_pending;
-        if in_flight != descriptors.published
-            || held
-                != descriptors.receiver_held
-                    + descriptors.receiver_leased
-                    + descriptors.release_pending
-            || active_leases != descriptors.receiver_leased
-            || active_leases > self.grant.max_leases
-            || live_bytes != committed_bytes
+        // `upper - lower <= bound` with the upper cursor read first; a lower cursor that has
+        // since passed it means nothing is in flight.
+        let gap = |upper: &dyn Fn() -> u64, lower: &dyn Fn() -> u64| {
+            let upper = upper();
+            upper.saturating_sub(lower())
+        };
+        if active_leases() > self.grant.max_leases
+            || !ordered(&consumed, &published)
+            || !ordered(&completed, &consumed)
+            || gap(&published, &completed) > self.grant.descriptor_depth
+            || !ordered(&arena_reclaimed, &arena_write)
+            || gap(&arena_write, &arena_reclaimed) > self.grant.arena_bytes
         {
             return Err(RingError::InvalidSharedState);
         }
@@ -3107,6 +3110,81 @@ mod tests {
             );
         }
         drop(attached);
+    }
+
+    #[test]
+    fn attach_refuses_a_mapping_whose_cursors_already_break_the_protocol() {
+        for forge in [
+            |ring: &Ring| {
+                let consumer = ring.consumer_ptr().unwrap();
+                // SAFETY: test-owned ring keeps the consumer page mapped.
+                unsafe {
+                    (*consumer)
+                        .active_leases
+                        .store(ring.grant().max_leases + 1, Ordering::Release)
+                };
+            },
+            |ring: &Ring| {
+                let consumer = ring.consumer_ptr().unwrap();
+                // SAFETY: test-owned ring keeps the consumer page mapped.
+                unsafe { (*consumer).consumed.store(3, Ordering::Release) };
+            },
+        ] {
+            let ring = ring();
+            publish(&ring, &[1]);
+            forge(&ring);
+            assert!(matches!(
+                ring.attachment().unwrap().attach(),
+                Err(RingError::InvalidSharedState)
+            ));
+        }
+        // A live ring with traffic in flight attaches.
+        let ring = ring();
+        publish(&ring, &[1; 4096]);
+        let _lease = ring.try_receive().unwrap().unwrap();
+        ring.attachment().unwrap().attach().unwrap();
+    }
+
+    #[test]
+    fn probe_tolerates_every_intermediate_state_of_honest_transitions() {
+        // `publish_commit` stores the slot before `published`, and `release` moves the slot
+        // before decrementing `active_leases`; a probe between those stores must pass.
+        let ring = ring();
+        let mut reservation = ring.try_reserve(4, wire_v2_header(4).unwrap()).unwrap();
+        reservation.write(&[1; 4]).unwrap();
+        let slot = ring.slot_ptr(1).unwrap();
+        // SAFETY: test-owned ring keeps the slot mapped; this mimics the first store of commit.
+        unsafe {
+            (*slot)
+                .state
+                .store(super::SLOT_PUBLISHED, Ordering::Release)
+        };
+        ring.probe().unwrap();
+        // SAFETY: restore the reservation's own state so the abort below is well-formed.
+        unsafe {
+            (*slot)
+                .state
+                .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release)
+        };
+        reservation.abort();
+
+        publish(&ring, &[2; 4]);
+        let lease = ring.try_receive().unwrap().unwrap();
+        // SAFETY: mimic the slot transition of `release` before its count decrement.
+        unsafe {
+            (*slot)
+                .state
+                .store(super::SLOT_RELEASE_PENDING, Ordering::Release)
+        };
+        ring.probe().unwrap();
+        // SAFETY: restore so the lease's release finds the slot it expects.
+        unsafe {
+            (*slot)
+                .state
+                .store(super::SLOT_RECEIVER_LEASED, Ordering::Release)
+        };
+        lease.release().unwrap();
+        ring.probe().unwrap();
     }
 
     #[test]
