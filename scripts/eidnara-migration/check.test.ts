@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
     NOT_APPLICABLE,
     sha256,
@@ -1125,6 +1125,20 @@ describe("evidence: git-backed receipts", () => {
         expect(verify("property-impact", impactFor(sourceCommit), ctx)).toEqual([]);
     });
 
+    test("a pointer into a sibling directory that extends the root's name is rejected", () => {
+        const twin = `${destination}-twin`;
+        write(join(twin, "crates/lease/src/lib.rs"), LEASE_SOURCE);
+        try {
+            const impact = impactFor(sourceCommit);
+            records(impact)[1]!.check_pointer = `../${basename(twin)}/crates/lease/src/lib.rs#lease_is_single_writer`;
+            expect(verify("property-impact", impact, ctx)).toContain(
+                `$.records[1].check_pointer ../${basename(twin)}/crates/lease/src/lib.rs#lease_is_single_writer escapes the destination root; reclassify the record as core or excluded`,
+            );
+        } finally {
+            rmSync(twin, { recursive: true, force: true });
+        }
+    });
+
     test("a check pointer names a declared check, never a line", () => {
         const byLine = impactFor(sourceCommit);
         records(byLine)[1]!.check_pointer = "crates/lease/src/key.rs#L10";
@@ -1272,7 +1286,7 @@ describe("evidence: git-backed receipts", () => {
     test("registry scans catch unowned persistent literals (AE7)", () => {
         write(
             join(destination, "crates/lease/src/paths.rs"),
-            'const DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\nconst RAW: &str = r#"raw.db"#;\nconst BYTES: &[u8] = b"bytes.lock";\n',
+            'const DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\nconst RAW: &str = r#"raw.db"#;\nconst BYTES: &[u8] = b"bytes.lock";\nconst BOTH: &[u8] = br#"both.jsonl"#;\n',
         );
         write(join(destination, "crates/lease/src/paths.ts"), "const a = 'single.db';\nconst b = `template.jsonl`;\n");
         try {
@@ -1280,6 +1294,7 @@ describe("evidence: git-backed receipts", () => {
             expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "mystery.db" has no family entry in the registry');
             expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "raw.db" has no family entry in the registry');
             expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "bytes.lock" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "both.jsonl" has no family entry in the registry');
             expect(errors).toContain('crates/lease/src/paths.ts: persistent literal "single.db" has no family entry in the registry');
             expect(errors).toContain('crates/lease/src/paths.ts: persistent literal "template.jsonl" has no family entry in the registry');
             expect(errors.some((error) => error.includes('"core.sqlite"'))).toBe(false);

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type CheckKind =
@@ -86,11 +86,11 @@ const PROVENANCE_RE = /^[a-z0-9][a-z0-9-]*@[0-9a-f]{7,64}$/;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?Z)?$/;
 
 // A persistent filename in every string form of the scanned language. Rust strings are
-// `"…"`, `b"…"`, `r"…"`, and `r#"…"#`; a backtick in Rust is a doc-comment code span, not a
-// string. TypeScript strings are `"…"`, `'…'`, and the template form `` `…` ``.
+// `"…"`, `b"…"`, `r"…"`, `r#"…"#`, and `br#"…"#`; a backtick in Rust is a doc-comment code
+// span, not a string. TypeScript strings are `"…"`, `'…'`, and the template form `` `…` ``.
 const PERSISTENT_NAME = String.raw`\.(?:db|sqlite|bin|lock|jsonl|handle)`;
 export const PERSISTENT_LITERAL_RE: Record<".rs" | ".ts", RegExp> = {
-    ".rs": new RegExp(String.raw`(?:\b[br]#*)?"([^"\n]*${PERSISTENT_NAME})"#*`, "g"),
+    ".rs": new RegExp(String.raw`(?:\b(?:br|b|r)#*)?"([^"\n]*${PERSISTENT_NAME})"#*`, "g"),
     ".ts": new RegExp(String.raw`"([^"\n]*${PERSISTENT_NAME})"|'([^'\n]*${PERSISTENT_NAME})'|` + "`([^`\\n]*" + PERSISTENT_NAME + ")`", "g"),
 };
 
@@ -1227,7 +1227,10 @@ export function pointerProblem(root: string, pointer: string): string | undefine
     const anchor = hash === -1 ? undefined : pointer.slice(hash + 1);
     if (filePart === "") return "names no file";
     const full = resolve(root, filePart);
-    if (!full.startsWith(resolve(root))) return "escapes the destination root";
+    // A prefix comparison would admit a sibling directory whose name extends the root's;
+    // the relative path decides containment.
+    const inside = relative(resolve(root), full);
+    if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) return "escapes the destination root";
     if (!existsSync(full) || !statSync(full).isFile()) return "does not resolve in the destination tree";
     if (anchor === undefined) return undefined;
     if (/^L\d+$/.test(anchor)) return "uses a line anchor; name the check instead";

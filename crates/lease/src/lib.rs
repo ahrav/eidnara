@@ -99,6 +99,76 @@ fn non_regular_file(path: &std::path::Path) -> std::io::Error {
     )
 }
 
+/// The lease directory must not accept renames from another principal. Exclusion rests
+/// on every acquirer locking the inode the shared path names; a principal who can rename
+/// in the directory can point the path at a second inode between one acquirer's lock and
+/// the next acquirer's open, and both then hold a lease for one key. On Unix the
+/// directory must therefore be owned by the running user and carry no group or other
+/// write bit. Windows has no equivalent mode semantics, and the check is a no-op there.
+fn require_private_directory(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = std::fs::symlink_metadata(dir)?;
+        if !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("lease directory {} is not a directory", dir.display()),
+            ));
+        }
+        // SAFETY: `geteuid` reads the effective user id and has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        if metadata.uid() != euid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "lease directory {} is owned by uid {}, not the running user {euid}",
+                    dir.display(),
+                    metadata.uid()
+                ),
+            ));
+        }
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o022 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "lease directory {} has mode {mode:o}; group or other write access lets \
+                     another principal replace lease files",
+                    dir.display()
+                ),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+/// After the lock is held, the path must still name the locked inode. A rename between
+/// this acquirer's open and its lock would leave it holding a lock on a file the path no
+/// longer names, so the next acquirer would lock a different inode for the same key.
+fn require_path_still_names(file: &File, path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held = file.metadata()?;
+        let named = std::fs::symlink_metadata(path)?;
+        if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "lease path {} was replaced while the lease was being acquired",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (file, path);
+    Ok(())
+}
+
 fn lease_open_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.read(true).write(true).truncate(false);
@@ -267,6 +337,7 @@ impl FileLeaseStore {
         recovery_floor: Option<u64>,
     ) -> Result<HeldFileLease, LeaseError> {
         std::fs::create_dir_all(&self.base_dir).map_err(LeaseError::Io)?;
+        require_private_directory(&self.base_dir).map_err(LeaseError::Io)?;
         let path = self.lease_path(key);
         let mut file = open_lease_file(&path).map_err(LeaseError::Io)?;
         match file.try_lock() {
@@ -276,6 +347,10 @@ impl FileLeaseStore {
             }
             Err(TryLockError::Error(e)) => return Err(LeaseError::Io(e)),
         }
+        require_path_still_names(&file, &path).map_err(|error| {
+            let _ = file.unlock();
+            LeaseError::Io(error)
+        })?;
 
         let epoch = bump_epoch_above(&mut file, recovery_floor).map_err(|error| {
             let _ = file.unlock();
@@ -301,6 +376,7 @@ impl FileLeaseStore {
     /// [`LeaseError::Io`] when the lease file cannot be opened or read.
     pub fn acquire_shared(&self, key: &LeaseKey) -> Result<HeldFileLease, LeaseError> {
         std::fs::create_dir_all(&self.base_dir).map_err(LeaseError::Io)?;
+        require_private_directory(&self.base_dir).map_err(LeaseError::Io)?;
         let path = self.lease_path(key);
         let mut file = open_lease_file(&path).map_err(LeaseError::Io)?;
         match file.try_lock_shared() {
@@ -310,6 +386,10 @@ impl FileLeaseStore {
             }
             Err(TryLockError::Error(e)) => return Err(LeaseError::Io(e)),
         }
+        require_path_still_names(&file, &path).map_err(|error| {
+            let _ = file.unlock();
+            LeaseError::Io(error)
+        })?;
 
         let epoch = read_epoch(&mut file).map_err(|error| {
             let _ = file.unlock();
@@ -863,6 +943,63 @@ mod tests {
             );
             assert_eq!(writer.inner.into_inner(), case.expected_bytes);
         }
+    }
+
+    /// A lease directory that another principal could write to is refused by both acquisition
+    /// modes before any lease file is created, and accepted again once the write bits are gone.
+    #[cfg(unix)]
+    #[test]
+    fn acquisition_refuses_a_group_or_world_writable_lease_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (store, dir) = tmp_store();
+        let k = key("writable-dir");
+        for mode in [0o770, 0o707, 0o777] {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode))
+                .expect("set directory mode");
+            for result in [
+                store.acquire(&k).map(|_| ()),
+                store.acquire_shared(&k).map(|_| ()),
+            ] {
+                match result {
+                    Err(LeaseError::Io(e)) => {
+                        assert_eq!(
+                            e.kind(),
+                            std::io::ErrorKind::PermissionDenied,
+                            "{mode:o}: {e}"
+                        );
+                        assert!(e.to_string().contains("write access"), "{mode:o}: {e}");
+                    }
+                    other => panic!("mode {mode:o} must be refused, got {other:?}"),
+                }
+            }
+            assert!(
+                !store.lease_path(&k).exists(),
+                "no lease file is created under a refused directory"
+            );
+        }
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore directory mode");
+        assert_eq!(store.acquire(&k).expect("acquire once private").epoch(), 1);
+    }
+
+    /// A path re-pointed at another inode after the open is detected once the lock is held,
+    /// so the acquirer never returns a lease on a file the path no longer names.
+    #[cfg(unix)]
+    #[test]
+    fn a_lease_path_replaced_after_open_is_detected_before_the_lease_is_returned() {
+        let (store, dir) = tmp_store();
+        let k = key("replaced-after-open");
+        let path = store.lease_path(&k);
+        let held = open_lease_file(&path).expect("open the lease file");
+        require_path_still_names(&held, &path).expect("the path still names the opened inode");
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"00000000000000000041").expect("write replacement");
+        std::fs::rename(&replacement, &path).expect("rename over the lease path");
+        let error =
+            require_path_still_names(&held, &path).expect_err("the path names another inode");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("was replaced"), "{error}");
     }
 
     /// A lease path that is a second name for another file is refused before the mode change

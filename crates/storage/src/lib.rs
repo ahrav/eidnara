@@ -711,7 +711,16 @@ mod sqlite_backend {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        std::fs::create_dir_all(&parent).map_err(StoreError::Io)?;
+        // The lease refuses a directory another principal can rename in, so a directory
+        // this crate creates is owner-only from the start rather than left to the umask.
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&parent).map_err(StoreError::Io)?;
 
         refuse_unfit_store_files(Path::new(&path))?;
         // An existing file is inspected on a read-only connection before anything can
