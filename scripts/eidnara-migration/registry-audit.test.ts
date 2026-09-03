@@ -65,6 +65,20 @@ describe("registry audit", () => {
         expect(checkGate({ ...gate, npm_version: "10.9.0" }, now)).toContain("npm_version 10.9.0 does not support npm trust; need >= 11");
     });
 
+    test("a view probe that lost its package name or summary is an error, not a skipped package", () => {
+        const gate = audit(fakeRunner({}), now);
+        const probes = gate.probes as unknown as Record<string, unknown>[];
+        const view = probes.findIndex((probe) => probe.command === "npm view @eidnara/cli versions dist-tags --json");
+        expect(view).toBeGreaterThanOrEqual(0);
+        const nameless = { ...gate, probes: probes.map((probe, index) => (index === view ? { ...probe, name: null } : probe)) };
+        expect(checkGate(nameless, now, { requireReservation: true })).toContain(
+            "probes[" + view + "] (npm view @eidnara/cli versions dist-tags --json) must name the package it viewed",
+        );
+        expect(checkGate(nameless, now, { requireReservation: true })).toContain("@eidnara/cli has no usable view summary");
+        const summaryless = { ...gate, probes: probes.map((probe, index) => (index === view ? { ...probe, summary: null } : probe)) };
+        expect(checkGate(summaryless, now)).toContain("probes[" + view + "] (npm view @eidnara/cli versions dist-tags --json) is missing its summary");
+    });
+
     test("rejects a non-prerelease @eidnara version", () => {
         const runner = fakeRunner({
             "view @eidnara/cli versions dist-tags --json": ok(JSON.stringify({ versions: ["1.0.0-reserved.1", "1.0.0"], "dist-tags": { latest: "1.0.0" } })),

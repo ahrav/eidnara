@@ -764,6 +764,7 @@ mod sqlite_backend {
             .map(|f| f.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.clone());
         let lease = FileLeaseStore::new(&parent)
+            .map_err(StoreError::Io)?
             .acquire_above(&lease_key(descriptor, &db_file_name), epoch_floor)
             .map_err(StoreError::Lease)?;
         let epoch = lease.epoch();
@@ -850,13 +851,13 @@ mod sqlite_backend {
     /// A private copy of a database and its sidecars, removed on drop. Opening the copy
     /// read-write replays its WAL or rolls its hot journal back without touching the
     /// original files.
-    struct InspectionCopy {
-        directory: PathBuf,
-        database: PathBuf,
+    pub(crate) struct InspectionCopy {
+        pub(crate) directory: PathBuf,
+        pub(crate) database: PathBuf,
     }
 
     impl InspectionCopy {
-        fn of(path: &Path) -> Result<Self, StoreError> {
+        pub(crate) fn of(path: &Path) -> Result<Self, StoreError> {
             let parent = path
                 .parent()
                 .map(Path::to_path_buf)
@@ -872,7 +873,15 @@ mod sqlite_backend {
                 std::process::id(),
                 unique_nanos()
             ));
-            std::fs::create_dir(&directory).map_err(StoreError::Io)?;
+            // The copy holds the store's contents, so the directory is owner-only from
+            // creation rather than left to the umask.
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(&directory).map_err(StoreError::Io)?;
             let copy = Self {
                 database: directory.join(file_name),
                 directory,
@@ -890,14 +899,7 @@ mod sqlite_backend {
     /// a final symlink and refusing anything that is not a regular file, so a path swapped
     /// for a symlink or a FIFO after the unfit check is neither followed nor waited on.
     fn copy_regular_file(source: &Path, target: &Path) -> Result<(), StoreError> {
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        let mut from = match options.open(source) {
+        let mut from = match open_no_follow(source) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(StoreError::Io(e)),
@@ -909,7 +911,16 @@ mod sqlite_backend {
                 source.display()
             )));
         }
-        let mut to = std::fs::File::create(target).map_err(StoreError::Io)?;
+        // The copy holds the store's contents, so it is owner-only from creation rather
+        // than left to the umask.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut to = options.open(target).map_err(StoreError::Io)?;
         std::io::copy(&mut from, &mut to).map_err(StoreError::Io)?;
         Ok(())
     }
@@ -930,38 +941,52 @@ mod sqlite_backend {
 
     /// The database and its sidecars must each be a regular file with exactly one name.
     /// A FIFO or device would block or misbehave inside SQLite's open or the inspection
-    /// copy before any timeout applies, a symlink is an alias, and two names for one inode
+    /// copy before any timeout applies, a symlink is an alias, and two names for one file
     /// derive two leases and two sidecar sets, so neither writer sees the other's fence
-    /// claim.
+    /// claim. The link count comes from an opened handle so the rule holds on Windows too.
     fn refuse_unfit_store_files(path: &Path) -> Result<(), StoreError> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            for suffix in ["", "-wal", "-shm", "-journal"] {
-                let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
-                match std::fs::symlink_metadata(&candidate) {
-                    Ok(meta) if !meta.is_file() => {
-                        return Err(StoreError::Baseline(format!(
-                            "{} is not a regular file",
-                            candidate.display()
-                        )));
-                    }
-                    Ok(meta) if meta.nlink() > 1 => {
-                        return Err(StoreError::Baseline(format!(
-                            "{} has {} names; a store file must have exactly one",
-                            candidate.display(),
-                            meta.nlink()
-                        )));
-                    }
-                    Ok(_) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(StoreError::Io(e)),
-                }
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
+            let meta = match std::fs::symlink_metadata(&candidate) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(StoreError::Io(e)),
+            };
+            if !meta.is_file() {
+                return Err(StoreError::Baseline(format!(
+                    "{} is not a regular file",
+                    candidate.display()
+                )));
+            }
+            let file = open_no_follow(&candidate).map_err(StoreError::Io)?;
+            let names = lease::link_count(&file).map_err(StoreError::Io)?;
+            if names > 1 {
+                return Err(StoreError::Baseline(format!(
+                    "{} has {names} names; a store file must have exactly one",
+                    candidate.display()
+                )));
             }
         }
-        #[cfg(not(unix))]
-        let _ = path;
         Ok(())
+    }
+
+    /// Opens `path` for reading without following a final symlink and without waiting on a
+    /// FIFO; on Windows a reparse point is opened as itself.
+    fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        options.open(path)
     }
 
     /// Creates the database file with mode `0600` when it does not exist.
@@ -1387,7 +1412,8 @@ pub use sqlite_backend::{
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::sqlite_backend::{
-        FileState, claim_fence, claim_fence_strict, create_database_file_owner_only, immutable_uri,
+        FileState, InspectionCopy, claim_fence, claim_fence_strict,
+        create_database_file_owner_only, immutable_uri,
     };
     use super::*;
     use lease::FileIdentity;
@@ -1971,6 +1997,40 @@ mod tests {
             .with_conn(|conn| conn.query_row("SELECT count(*) FROM kv", [], |row| row.get(0)))
             .expect("row count");
         assert_eq!(rows, 0, "the uncommitted rows were rolled back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The inspection copy is owner-only whatever the umask, since it holds the store's bytes
+    /// for the length of the inspection.
+    #[cfg(unix)]
+    #[test]
+    fn the_inspection_copy_is_owner_only_under_a_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let store = open_sqlite(&d, "").expect("open");
+        // The store is still open, so a WAL sidecar exists to be copied along.
+        // SAFETY: `umask` only reads and sets the process file-mode creation mask.
+        let previous = unsafe { libc::umask(0o022) };
+        let copy = InspectionCopy::of(Path::new(path));
+        // SAFETY: restores the mask read above.
+        unsafe { libc::umask(previous) };
+        let copy = copy.expect("inspection copy");
+        let dir_mode = std::fs::metadata(&copy.directory)
+            .expect("copy directory")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "copy directory mode {dir_mode:o}");
+        for suffix in ["", "-wal"] {
+            let file = format!("{}{suffix}", copy.database.display());
+            let mode = std::fs::metadata(&file).expect(&file).permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{file} has mode {mode:o}");
+        }
+        drop(copy);
+        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 

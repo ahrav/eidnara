@@ -247,7 +247,9 @@ impl CoreState {
     }
 
     /// Soft bust: the volatile delta re-renders, the stable baseline (m0 frozen bytes) stays
-    /// frozen. Freeze the rendered delta units (replace same-key, append new).
+    /// frozen. Freeze the rendered delta units (replace same-key, append new). A SOFT whose
+    /// anchor is absent marks `reconcile_pending`, since m0 is then anchored to a missing
+    /// item exactly as after a defer that observed the loss.
     ///
     /// `boundary_id` is the COVERAGE anchor (the last raw item any summary covers, m0 OR the
     /// delta). A SOFT MAY advance it when `new_boundary_id` is `Some` — used when the volatile
@@ -268,6 +270,14 @@ impl CoreState {
     /// a shared cache-stability primitive, so the guard is enforced in the core, not assumed.
     fn step_soft(&mut self, input: PassInput, boundary_match: bool) -> StepResult {
         self.apply_units(input.rendered_units);
+        // A SOFT that finds its anchor gone has the same stale m0 a defer would: the frozen
+        // baseline is anchored to an item that is no longer present, and only a HARD
+        // rematerializes it. The loss is recorded here so the result routes the next pass
+        // to that HARD instead of reporting a healthy prefix; the empty boundary is the
+        // never-minted sentinel and carries nothing to reconcile.
+        if !boundary_match && !self.boundary_id.is_empty() {
+            self.reconcile_pending = true;
+        }
         if boundary_match
             && !self.reconcile_pending
             && let Some(new_boundary) = input.new_boundary_id
@@ -848,5 +858,37 @@ mod tests {
             assert_eq!(err, StepError::DuplicateFrozenKey("k".into()));
             assert_eq!(state, before);
         }
+    }
+
+    /// A SOFT that arrives with the anchor already gone, with no defer having observed the
+    /// loss, still reports a pending reconcile: the frozen baseline is anchored to an absent
+    /// item and only a HARD rematerializes it. The rendered delta is applied and the anchor
+    /// does not advance.
+    #[test]
+    fn soft_with_an_absent_anchor_marks_reconcile_pending() {
+        let mut state = state_with(vec![unit("m0", "base", DurabilityClass::Lineage)], "b0");
+        assert!(!state.reconcile_pending);
+        let mut soft = PassInput::new(Action::Soft, "-");
+        soft.rendered_units = vec![unit("delta", "new", DurabilityClass::Episode)];
+        soft.new_boundary_id = Some("b1".into());
+        let r = state.step(soft).expect("version headroom");
+        assert_eq!(r.action, Action::Soft);
+        assert!(
+            r.reconcile_pending,
+            "the lost anchor is reported on the soft pass itself"
+        );
+        assert!(state.reconcile_pending);
+        assert_eq!(
+            state.boundary_id, "b0",
+            "the anchor does not advance while reconcile is pending"
+        );
+        assert_eq!(state.cached_prefix_bytes(), "basenew");
+        // The never-minted sentinel carries nothing to reconcile, so a fresh store's SOFT
+        // against the empty boundary stays clean.
+        let mut fresh = state_with(vec![], "");
+        fresh
+            .step(PassInput::new(Action::Soft, "-"))
+            .expect("version headroom");
+        assert!(!fresh.reconcile_pending);
     }
 }

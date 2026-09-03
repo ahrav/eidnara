@@ -47,6 +47,7 @@ A `no` means every safety check threatened by that fault can pass without the fa
 | A hard bust that leaves queued units pending | `hard-bust-drains-deferred-work` |
 | A fresh store with the empty boundary sentinel | `never-minted-boundary-is-not-reconcile-pending` |
 | A coverage-extending `Soft` while a reconcile is pending | `anchor-holds-while-reconcile-pending` |
+| A `Soft` whose anchor is absent with no prior defer | `anchor-holds-while-reconcile-pending`; the pass records the loss (`soft_with_an_absent_anchor_marks_reconcile_pending`) |
 | A run boundary with mixed durability classes | `episode-units-reset-at-run-boundary` |
 | A regenerated or edited golden fixture | `cache-stability-golden-vectors-are-byte-stable`, `storage-descriptor-golden-vectors-are-byte-stable` |
 | A renamed serde field or tag | `descriptor-wire-shape-round-trips` |
@@ -59,6 +60,13 @@ A `no` means every safety check threatened by that fault can pass without the fa
 | An initialized store whose `fence` row holds `i64::MAX` | `fence-epoch-outside-sqlite-range-fails-closed`; refused with `FenceExhausted` before the lease sidecar advances (`a_fence_at_the_integer_maximum_is_refused_before_the_lease_advances`) |
 | An initialized store whose `fence` row is gone | `store-schema-identity-matches-the-baseline`, `stale-writer-write-is-rejected`; refused with `FenceMissing` (`an_initialized_store_without_a_fence_row_is_refused`) |
 | A rollback-mode store whose writer died with spilled pages and a hot `-journal` | `store-schema-identity-matches-the-baseline`; the inspection copy rolls the journal back before classifying (`a_store_with_a_hot_rollback_journal_is_classified_after_rollback`) |
+| A lease path hard-linked to another file | `unix-lease-file-is-owner-only`, `distinct-lease-keys-do-not-alias`; `protect_open_file` refuses a file with more than one name (`acquisition_refuses_a_hard_linked_lease_file_and_leaves_the_other_name_untouched`) |
+| A lease directory writable by group or other, or owned by another user | `at-most-one-exclusive-holder-per-key`; refused before any lease file exists (`acquisition_refuses_a_group_or_world_writable_lease_directory`) |
+| A lease directory whose ancestor another principal can rename in without the sticky bit | `at-most-one-exclusive-holder-per-key`; refused (`acquisition_refuses_a_lease_directory_under_a_writable_non_sticky_ancestor`) |
+| A rename onto the lease path between an acquirer's open and its lock | `at-most-one-exclusive-holder-per-key`; the post-lock identity check refuses the lease (`a_lease_path_replaced_after_open_is_detected_before_the_lease_is_returned`) |
+| A relative lease root or a relative SQLite path | `at-most-one-exclusive-holder-per-key`, `logical-store-has-single-lease-identity`; the lease root is resolved once at construction and a relative database path is refused (`a_relative_root_is_resolved_when_the_store_is_built`, `a_relative_sqlite_path_is_refused`) |
+| A different regular file renamed onto the store path between inspection and open | `store-schema-identity-matches-the-baseline`; refused before the first statement, with the `open(2)`-to-`stat(2)` interval recorded as open (`file_identity_follows_the_inode_not_the_bytes`) |
+| A superseded writer reaching the durability pin after maintenance changed the journal mode | `stale-writer-write-is-rejected`; the read-only precheck refuses it before the pragmas (`a_superseded_writer_does_not_change_the_journal_mode_before_being_fenced`) |
 | A symlink on the lease path owned by another user, or a user-owned symlink in a directory others can write to | `at-most-one-exclusive-holder-per-key`; refused (`a_lease_path_through_a_foreign_owned_symlink_is_refused`) |
 | A store whose last writer left frames in the WAL and no lease sidecar | `store-schema-identity-matches-the-baseline`; the inspection copy replays the WAL for the floor (`a_store_left_with_wal_frames_reopens_above_the_wal_epoch`) |
 | A stored cache `version` of `u64::MAX` before a rebuild | none; `CoreState::step` returns `StepError::VersionExhausted` with the state unchanged (`an_exhausted_version_refuses_a_rebuild_and_leaves_the_state_unchanged`) |

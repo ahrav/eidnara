@@ -152,8 +152,17 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
         if (!(typeof item.exit_status === "number" || item.exit_status === null)) {
             errors.push(`probes[${index}] (${command}) is missing exit_status`);
         }
-        if (command.startsWith("npm view ") && typeof item.name === "string" && item.summary !== null && typeof item.summary === "object") {
-            viewed.set(item.name, item.summary as Record<string, unknown>);
+        if (command.startsWith("npm view ")) {
+            // A view probe without its package name or summary would satisfy the command
+            // check while contributing no evidence, so it is an error rather than skipped.
+            const expected = /^npm view (\S+) versions dist-tags --json$/.exec(command)?.[1];
+            if (typeof item.name !== "string" || item.name !== expected) {
+                errors.push(`probes[${index}] (${command}) must name the package it viewed`);
+            } else if (item.summary === null || typeof item.summary !== "object") {
+                errors.push(`probes[${index}] (${command}) is missing its summary`);
+            } else {
+                viewed.set(item.name, item.summary as Record<string, unknown>);
+            }
         }
     });
 
@@ -168,7 +177,10 @@ export function checkGate(value: unknown, now: Date, options: CheckOptions = { r
 
     for (const name of EIDNARA_PACKAGES) {
         const summary = viewed.get(name);
-        if (summary === undefined) continue;
+        if (summary === undefined) {
+            errors.push(`${name} has no usable view summary`);
+            continue;
+        }
         const versions = Array.isArray(summary.versions) ? (summary.versions as string[]) : [];
         const ga = versions.filter((version) => !PRERELEASE_RE.test(version));
         if (ga.length > 0) errors.push(`${name} has non-prerelease versions ${ga.join(", ")}; genesis has not been published`);

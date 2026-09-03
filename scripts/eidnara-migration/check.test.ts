@@ -1158,6 +1158,13 @@ describe("evidence: git-backed receipts", () => {
         const core = records(bare).find((record) => record.classification === "core")!;
         core.check_pointer = "crates/lease/src/lib.rs";
         expect(verify("property-impact", bare, ctx)).toContain("$.records[0].check_pointer must name the check as path#check");
+        // `lease` is a plain function in the fixture source; a name without a test attribute
+        // is not an executable check.
+        const helper = impactFor(sourceCommit);
+        records(helper)[1]!.check_pointer = "crates/lease/src/lib.rs#lease";
+        expect(verify("property-impact", helper, ctx)).toContain(
+            "$.records[1].check_pointer crates/lease/src/lib.rs#lease names lease, which crates/lease/src/lib.rs declares without a test attribute; reclassify the record as core or excluded",
+        );
     });
 
     test("a core record's evidence digest is compared against its evidence file", () => {
@@ -1341,7 +1348,7 @@ describe("evidence: git-backed receipts", () => {
     test("registry scans cover test-named modules under src and skip cfg(test) items", () => {
         write(
             join(destination, "crates/lease/src/test_support.rs"),
-            'pub const DB: &str = "support.db";\n#[cfg(test)]\nmod tests {\n    /* outer /* inner */ still a comment { */\n    const T: &str = "only-in-tests.db";\n    fn f() { let s = "}"; }\n}\n#[cfg(all(test, feature = "x"))]\nconst U: &str = "also-only.db";\npub const AFTER: &str = "after.db";\n',
+            'pub const DB: &str = "support.db";\n#[cfg(test)]\nmod tests {\n    /* outer /* inner */ still a comment { */\n    const T: &str = "only-in-tests.db";\n    fn f() { let s = "}"; let long = r##########"}" { "##########; }\n}\n#[cfg(all(test, feature = "x"))]\nconst U: &str = "also-only.db";\npub const AFTER: &str = "after.db";\n',
         );
         try {
             const errors = verify("registry", copy("registry"), ctx);
@@ -1376,6 +1383,7 @@ describe("evidence: git-backed receipts", () => {
             'const DB: &str = "mystery.db";\nconst OK: &str = "core.sqlite";\nconst RAW: &str = r#"raw.db"#;\nconst BYTES: &[u8] = b"bytes.lock";\nconst BOTH: &[u8] = br#"both.jsonl"#;\n',
         );
         write(join(destination, "crates/lease/src/paths.ts"), "const a = 'single.db';\nconst b = `template.jsonl`;\n");
+        write(join(destination, "crates/lease/src/view.tsx"), 'export const p = "component.db";\n');
         try {
             const errors = verify("registry", copy("registry"), ctx);
             expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "mystery.db" has no family entry in the registry');
@@ -1384,10 +1392,12 @@ describe("evidence: git-backed receipts", () => {
             expect(errors).toContain('crates/lease/src/paths.rs: persistent literal "both.jsonl" has no family entry in the registry');
             expect(errors).toContain('crates/lease/src/paths.ts: persistent literal "single.db" has no family entry in the registry');
             expect(errors).toContain('crates/lease/src/paths.ts: persistent literal "template.jsonl" has no family entry in the registry');
+            expect(errors).toContain('crates/lease/src/view.tsx: persistent literal "component.db" has no family entry in the registry');
             expect(errors.some((error) => error.includes('"core.sqlite"'))).toBe(false);
         } finally {
             rmSync(join(destination, "crates/lease/src/paths.rs"));
             rmSync(join(destination, "crates/lease/src/paths.ts"));
+            rmSync(join(destination, "crates/lease/src/view.tsx"));
         }
     });
 

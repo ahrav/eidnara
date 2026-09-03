@@ -58,6 +58,19 @@ fn protect_open_file(file: &File, path: &std::path::Path) -> std::io::Result<()>
     if !metadata.is_file() {
         return Err(non_regular_file(path));
     }
+    // A second name for this file would receive the mode change and the epoch overwrite,
+    // and two lease paths joined to one file would share one lock and one epoch despite
+    // their distinct keys.
+    let names = link_count(file)?;
+    if names > 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "lease file {} has {names} names; a lease file must have exactly one",
+                path.display()
+            ),
+        ));
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -80,19 +93,6 @@ fn protect_open_file(file: &File, path: &std::path::Path) -> std::io::Result<()>
                     "lease file {} is owned by uid {}, not the running user {euid}",
                     path.display(),
                     metadata.uid()
-                ),
-            ));
-        }
-        // A second name for this inode would receive the mode change and the epoch
-        // overwrite, and two lease paths joined to one inode would share one lock and one
-        // epoch despite their distinct keys.
-        if metadata.nlink() > 1 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "lease file {} has {} names; a lease file must have exactly one",
-                    path.display(),
-                    metadata.nlink()
                 ),
             ));
         }
@@ -387,6 +387,45 @@ impl FileIdentity {
     }
 }
 
+/// The number of names a file has, on Unix from `st_nlink` and on Windows from
+/// `nNumberOfLinks`, so a hard-linked file is recognized on both.
+///
+/// # Errors
+///
+/// Returns the I/O error from querying the handle, or `Unsupported` on a target that is
+/// neither Unix nor Windows.
+pub fn link_count(file: &File) -> std::io::Result<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(file.metadata()?.nlink())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: `file` holds an open handle for the duration of the call, and `info`
+        // points at writable storage of the exact type the call fills in on success.
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a non-zero return means the call initialized every field.
+        Ok(u64::from(unsafe { info.assume_init() }.nNumberOfLinks))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "link counts are available on Unix and Windows only",
+        ))
+    }
+}
+
 /// After the lock is held, the path must still name the locked file. A rename between this
 /// acquirer's open and its lock would leave it holding a lock on a file the path no longer
 /// names, so the next acquirer would lock a different file for the same key. On Windows the
@@ -529,10 +568,21 @@ pub struct FileLeaseStore {
 }
 
 impl FileLeaseStore {
-    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            base_dir: base_dir.into(),
-        }
+    /// A store over `base_dir`, resolved to an absolute path once. A relative root would
+    /// name a different directory after each change of the process's working directory, so
+    /// one store could hold two live leases for one key.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O error from reading the current directory when `base_dir` is relative.
+    pub fn new(base_dir: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let base_dir = base_dir.into();
+        let base_dir = if base_dir.is_absolute() {
+            base_dir
+        } else {
+            std::env::current_dir()?.join(base_dir)
+        };
+        Ok(Self { base_dir })
     }
 
     fn lease_path(&self, key: &LeaseKey) -> PathBuf {
@@ -793,7 +843,7 @@ mod tests {
 
     fn tmp_store() -> (FileLeaseStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("create temporary lease directory");
-        (FileLeaseStore::new(dir.path()), dir)
+        (FileLeaseStore::new(dir.path()).expect("absolute root"), dir)
     }
 
     fn seed_epoch(store: &FileLeaseStore, key: &LeaseKey, bytes: &[u8]) -> PathBuf {
@@ -1180,6 +1230,19 @@ mod tests {
         }
     }
 
+    /// A relative root is pinned to the working directory at construction, so a later change
+    /// of directory does not move the store's lease files.
+    #[test]
+    fn a_relative_root_is_resolved_when_the_store_is_built() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileLeaseStore::new("relative/leases").expect("relative root");
+        let expected = std::env::current_dir()
+            .expect("cwd")
+            .join("relative/leases");
+        assert_eq!(store.base_dir, expected);
+        drop(dir);
+    }
+
     /// A lease directory that another principal could write to is refused by both acquisition
     /// modes before any lease file is created, and accepted again once the write bits are gone.
     #[cfg(unix)]
@@ -1231,7 +1294,7 @@ mod tests {
         let base = ancestor.join("leases");
         std::fs::create_dir_all(&base).expect("dirs");
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).expect("base");
-        let store = FileLeaseStore::new(&base);
+        let store = FileLeaseStore::new(&base).expect("absolute root");
         let k = key("ancestor");
         std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o777))
             .expect("open ancestor");
@@ -1729,7 +1792,7 @@ mod tests {
         assert_eq!(g.epoch(), 1);
         drop(g);
         // A fresh store over the same directory continues the persisted epoch.
-        let store2 = FileLeaseStore::new(dir.path());
+        let store2 = FileLeaseStore::new(dir.path()).expect("absolute root");
         let g2 = store2.acquire(&k).expect("re-acquire");
         assert_eq!(g2.epoch(), 2);
         drop(g2);

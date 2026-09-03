@@ -1249,11 +1249,30 @@ export function pointerProblem(root: string, pointer: string): string | undefine
     if (/^L\d+$/.test(anchor)) return "uses a line anchor; name the check instead";
     if (!/^[A-Za-z_][A-Za-z0-9_ -]*$/.test(anchor)) return `has an anchor "${anchor}" that is not a check name`;
     const text = readFileSync(full, "utf8");
-    const declared = filePart.endsWith(".rs")
-        ? new RegExp(`^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${anchor}\\b`, "m").test(text)
-        : filePart.endsWith(".ts")
-          ? new RegExp(`\\b(?:test|it|describe)\\(\\s*"${anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`).test(text)
-          : false;
+    if (filePart.endsWith(".rs")) {
+        // The anchor must be a test: a `fn` whose attribute block carries `#[test]` or a
+        // `#[...test]` attribute such as `#[tokio::test]`. A production helper with the same
+        // name is a function, not an executable check.
+        const declaration = new RegExp(`^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${anchor}\\b`, "m");
+        const lines = text.split("\n");
+        let found = false;
+        for (let index = 0; index < lines.length; index += 1) {
+            if (!declaration.test(lines[index] ?? "")) continue;
+            found = true;
+            for (let back = index - 1; back >= 0; back -= 1) {
+                const line = (lines[back] ?? "").trim();
+                if (line.startsWith("#[") || line.startsWith("///") || line.startsWith("//") || line === "") {
+                    if (/^#\[(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b/.test(line)) return undefined;
+                    continue;
+                }
+                break;
+            }
+        }
+        return found ? `names ${anchor}, which ${filePart} declares without a test attribute` : `names ${anchor}, which ${filePart} does not declare`;
+    }
+    const declared = filePart.endsWith(".ts") || filePart.endsWith(".tsx")
+        ? new RegExp(`\\b(?:test|it|describe)\\(\\s*"${anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`).test(text)
+        : false;
     return declared ? undefined : `names ${anchor}, which ${filePart} does not declare`;
 }
 
@@ -1838,8 +1857,12 @@ function rustItemEnd(text: string, from: number): number {
             }
             continue;
         }
-        const raw = /^b?r(#*)"/.exec(text.slice(index, index + 8));
-        if (raw !== null && !/[A-Za-z0-9_]/.test(text[index - 1] ?? "")) {
+        // A raw string may carry up to 255 `#` in its delimiter, so the opener is matched on
+        // the remaining text rather than a fixed window.
+        const raw = (char === "r" || (char === "b" && next === "r")) && !/[A-Za-z0-9_]/.test(text[index - 1] ?? "")
+            ? /^b?r(#{0,255})"/.exec(text.slice(index, index + 260))
+            : null;
+        if (raw !== null) {
             const terminator = `"${raw[1]}`;
             const close = text.indexOf(terminator, index + raw[0].length);
             index = close === -1 ? text.length : close + terminator.length;
@@ -1909,7 +1932,7 @@ function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): v
         for (const rel of listFiles(treeRoot, skipVendored)) {
             const parts = rel.split("/");
             if (parts[1] !== "src") continue;
-            const language = rel.endsWith(".rs") ? ".rs" : rel.endsWith(".ts") ? ".ts" : undefined;
+            const language = rel.endsWith(".rs") ? ".rs" : rel.endsWith(".ts") || rel.endsWith(".tsx") ? ".ts" : undefined;
             if (language === undefined) continue;
             // A test-like file name carries no compile-time meaning, so every file under
             // `src` is scanned; only the bodies Rust compiles for tests alone are skipped.
