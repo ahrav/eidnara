@@ -9,8 +9,17 @@
       "catalog_commit": "39e8230371b15966a5767771daf001e44d191aac"
     }
   ],
-  "destination_commit": "89137deed6ec03c519a3f85da4648191aab65a87",
+  "destination_commit": "f3d03d2c9a312f7df441018c425bc177721af6d1",
   "touched_files": [
+    "crates/host-runtime/benches/ipc_budget.rs",
+    "crates/host-runtime/benches/support/atomic.rs",
+    "crates/host-runtime/benches/support/evidence.rs",
+    "crates/host-runtime/benches/support/linux_topology.rs",
+    "crates/host-runtime/benches/support/ring.rs",
+    "crates/host-runtime/examples/perf_host.rs",
+    "crates/host-runtime/examples/perf_load.rs",
+    "crates/host-runtime/examples/synapse_host.rs",
+    "crates/host-runtime/examples/synapse_perf.rs",
     "crates/host-runtime/src/auth.rs",
     "crates/host-runtime/src/broca/backend.rs",
     "crates/host-runtime/src/broca/config.rs",
@@ -47,6 +56,38 @@
     "crates/host-runtime/src/synapse/mod.rs",
     "crates/host-runtime/src/synapse/protocol.rs",
     "crates/host-runtime/src/wire.rs",
+    "crates/host-runtime/tests/activation.rs",
+    "crates/host-runtime/tests/broca_protocol.rs",
+    "crates/host-runtime/tests/broca_subprocess.rs",
+    "crates/host-runtime/tests/broca_supervisor.rs",
+    "crates/host-runtime/tests/client.rs",
+    "crates/host-runtime/tests/composite_routing.rs",
+    "crates/host-runtime/tests/dispatch.rs",
+    "crates/host-runtime/tests/handler_contract.rs",
+    "crates/host-runtime/tests/harness_closure.rs",
+    "crates/host-runtime/tests/host_roundtrip.rs",
+    "crates/host-runtime/tests/instance_security.rs",
+    "crates/host-runtime/tests/ipc_budget_evidence.rs",
+    "crates/host-runtime/tests/ipc_budget_topology.rs",
+    "crates/host-runtime/tests/lifecycle.rs",
+    "crates/host-runtime/tests/perf_budget_runner.rs",
+    "crates/host-runtime/tests/perf_measurement.rs",
+    "crates/host-runtime/tests/protocol_vectors.rs",
+    "crates/host-runtime/tests/routing.rs",
+    "crates/host-runtime/tests/shm_failure_modes.rs",
+    "crates/host-runtime/tests/shm_soak.rs",
+    "crates/host-runtime/tests/support/broca.rs",
+    "crates/host-runtime/tests/support/echo_host.rs",
+    "crates/host-runtime/tests/support/mod.rs",
+    "crates/host-runtime/tests/support/perf_measurement.rs",
+    "crates/host-runtime/tests/support/process_resources.rs",
+    "crates/host-runtime/tests/support/raw_client.rs",
+    "crates/host-runtime/tests/support/synapse.rs",
+    "crates/host-runtime/tests/synapse_bundle.rs",
+    "crates/host-runtime/tests/synapse_jobs.rs",
+    "crates/host-runtime/tests/synapse_protocol.rs",
+    "crates/host-runtime/tests/synapse_roundtrip.rs",
+    "crates/shm-transport/benches/hardware_envelope.rs",
     "crates/shm-transport/fuzz/fuzz_targets/frame_descriptor.rs",
     "crates/shm-transport/fuzz/fuzz_targets/provider_grant.rs",
     "crates/shm-transport/fuzz/fuzz_targets/provider_sample.rs",
@@ -62,9 +103,13 @@
     "crates/shm-transport/src/lifecycle.rs",
     "crates/shm-transport/src/profile.rs",
     "crates/shm-transport/src/setup_auth.rs",
+    "crates/shm-transport/tests/contract.rs",
+    "crates/shm-transport/tests/fuzz_corpus.rs",
+    "crates/shm-transport/tests/ring.rs",
     "crates/tokenizer/gen/gen-claude-vocab.ts",
     "crates/tokenizer/gen/gen-token-golden.ts",
     "crates/tokenizer/src/lib.rs",
+    "crates/tokenizer/tests/token_golden.rs",
     "packages/shm-native/build.rs",
     "packages/shm-native/index.ts",
     "packages/shm-native/src/lib.rs",
@@ -82,7 +127,8 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -156,7 +202,8 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/profile.rs"
+        "crates/shm-transport/src/profile.rs",
+        "crates/shm-transport/tests/contract.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -216,7 +263,8 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -241,7 +289,8 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -341,7 +390,8 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -469,6 +519,7 @@
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/ring_transport.rs",
         "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/shm_failure_modes.rs",
         "crates/shm-transport/src/backend/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
@@ -522,7 +573,8 @@
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
         "crates/shm-transport/src/descriptor.rs",
-        "crates/shm-transport/src/harness.rs"
+        "crates/shm-transport/src/harness.rs",
+        "crates/shm-transport/tests/contract.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -623,6 +675,7 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/connection.rs",
+        "crates/host-runtime/src/ring_transport.rs",
         "crates/shm-transport/src/profile.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
@@ -669,7 +722,8 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/shm-transport/src/evidence.rs"
+        "crates/shm-transport/src/evidence.rs",
+        "crates/shm-transport/tests/contract.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -692,21 +746,7 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/shm-transport/fuzz/fuzz_targets/frame_descriptor.rs",
-        "crates/shm-transport/fuzz/fuzz_targets/provider_grant.rs",
-        "crates/shm-transport/fuzz/fuzz_targets/provider_sample.rs",
-        "crates/shm-transport/src/arena.rs",
-        "crates/shm-transport/src/backend/mod.rs",
-        "crates/shm-transport/src/backend/ring.rs",
-        "crates/shm-transport/src/backend/sample.rs",
-        "crates/shm-transport/src/descriptor.rs",
-        "crates/shm-transport/src/evidence.rs",
-        "crates/shm-transport/src/harness.rs",
-        "crates/shm-transport/src/lease.rs",
-        "crates/shm-transport/src/lib.rs",
-        "crates/shm-transport/src/lifecycle.rs",
-        "crates/shm-transport/src/profile.rs",
-        "crates/shm-transport/src/setup_auth.rs"
+        "crates/shm-transport/benches/hardware_envelope.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -721,7 +761,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/fuzz/fuzz_targets/frame_descriptor.rs",
+      "check_pointer": "crates/shm-transport/benches/hardware_envelope.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/measured-transfer-is-witnessed-by-the-data.md"
     },
     {
@@ -752,21 +792,7 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/shm-transport/fuzz/fuzz_targets/frame_descriptor.rs",
-        "crates/shm-transport/fuzz/fuzz_targets/provider_grant.rs",
-        "crates/shm-transport/fuzz/fuzz_targets/provider_sample.rs",
-        "crates/shm-transport/src/arena.rs",
-        "crates/shm-transport/src/backend/mod.rs",
-        "crates/shm-transport/src/backend/ring.rs",
-        "crates/shm-transport/src/backend/sample.rs",
-        "crates/shm-transport/src/descriptor.rs",
-        "crates/shm-transport/src/evidence.rs",
-        "crates/shm-transport/src/harness.rs",
-        "crates/shm-transport/src/lease.rs",
-        "crates/shm-transport/src/lib.rs",
-        "crates/shm-transport/src/lifecycle.rs",
-        "crates/shm-transport/src/profile.rs",
-        "crates/shm-transport/src/setup_auth.rs"
+        "crates/shm-transport/tests/fuzz_corpus.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -781,7 +807,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/fuzz/fuzz_targets/frame_descriptor.rs",
+      "check_pointer": "crates/shm-transport/tests/fuzz_corpus.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/negative-tests-fail-for-their-stated-reason.md"
     },
     {
@@ -789,7 +815,8 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/shm-transport/src/lifecycle.rs"
+        "crates/shm-transport/src/lifecycle.rs",
+        "crates/shm-transport/tests/contract.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -812,6 +839,7 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
+        "crates/shm-transport/benches/hardware_envelope.rs",
         "crates/shm-transport/fuzz/fuzz_targets/frame_descriptor.rs",
         "crates/shm-transport/fuzz/fuzz_targets/provider_grant.rs",
         "crates/shm-transport/fuzz/fuzz_targets/provider_sample.rs",
@@ -826,7 +854,10 @@
         "crates/shm-transport/src/lib.rs",
         "crates/shm-transport/src/lifecycle.rs",
         "crates/shm-transport/src/profile.rs",
-        "crates/shm-transport/src/setup_auth.rs"
+        "crates/shm-transport/src/setup_auth.rs",
+        "crates/shm-transport/tests/contract.rs",
+        "crates/shm-transport/tests/fuzz_corpus.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -841,7 +872,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/fuzz/fuzz_targets/frame_descriptor.rs",
+      "check_pointer": "crates/shm-transport/benches/hardware_envelope.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/capability-probe-gates-every-advertised-mechanism.md"
     },
     {
@@ -888,7 +919,8 @@
         "crates/shm-transport/src/backend/sample.rs",
         "crates/shm-transport/src/descriptor.rs",
         "crates/shm-transport/src/harness.rs",
-        "crates/shm-transport/src/lease.rs"
+        "crates/shm-transport/src/lease.rs",
+        "crates/shm-transport/tests/contract.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -967,7 +999,8 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -1038,7 +1071,8 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -1191,6 +1225,7 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/shm_failure_modes.rs",
         "crates/shm-transport/src/backend/ring.rs",
         "crates/shm-transport/src/descriptor.rs"
       ],
@@ -1320,7 +1355,9 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/host-runtime/tests/support/process_resources.rs",
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -1345,7 +1382,8 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -1370,6 +1408,7 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/support/process_resources.rs",
         "crates/shm-transport/src/backend/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
@@ -1395,7 +1434,8 @@
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -1569,7 +1609,8 @@
       "files": [
         "crates/host-runtime/src/client.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/shm-transport/src/backend/ring.rs"
+        "crates/shm-transport/src/backend/ring.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -1699,10 +1740,10 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
+        "packages/shm-native/build.rs",
         "packages/shm-native/src/lib.rs",
-        "packages/shm-native/src/napi_buffers.rs",
         "packages/shm-native/src/lifecycle.rs",
-        "packages/shm-native/build.rs"
+        "packages/shm-native/src/napi_buffers.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -1748,8 +1789,8 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "packages/shm-native/src/setup.rs",
-        "packages/shm-native/index.ts"
+        "packages/shm-native/index.ts",
+        "packages/shm-native/src/setup.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -1938,7 +1979,8 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/connection.rs",
-        "crates/host-runtime/src/runtime.rs"
+        "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/dispatch.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -2626,9 +2668,35 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/lifecycle.rs",
+        "crates/host-runtime/benches/ipc_budget.rs",
+        "crates/host-runtime/benches/support/atomic.rs",
+        "crates/host-runtime/benches/support/evidence.rs",
+        "crates/host-runtime/benches/support/linux_topology.rs",
+        "crates/host-runtime/benches/support/ring.rs",
+        "crates/host-runtime/examples/perf_host.rs",
+        "crates/host-runtime/examples/perf_load.rs",
+        "crates/host-runtime/examples/synapse_host.rs",
+        "crates/host-runtime/examples/synapse_perf.rs",
         "crates/host-runtime/src/connection.rs",
-        "crates/host-runtime/src/runtime.rs"
+        "crates/host-runtime/src/lifecycle.rs",
+        "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/activation.rs",
+        "crates/host-runtime/tests/broca_subprocess.rs",
+        "crates/host-runtime/tests/client.rs",
+        "crates/host-runtime/tests/host_roundtrip.rs",
+        "crates/host-runtime/tests/instance_security.rs",
+        "crates/host-runtime/tests/ipc_budget_evidence.rs",
+        "crates/host-runtime/tests/ipc_budget_topology.rs",
+        "crates/host-runtime/tests/perf_budget_runner.rs",
+        "crates/host-runtime/tests/perf_measurement.rs",
+        "crates/host-runtime/tests/shm_soak.rs",
+        "crates/host-runtime/tests/support/broca.rs",
+        "crates/host-runtime/tests/support/echo_host.rs",
+        "crates/host-runtime/tests/support/mod.rs",
+        "crates/host-runtime/tests/support/perf_measurement.rs",
+        "crates/host-runtime/tests/support/raw_client.rs",
+        "crates/host-runtime/tests/support/synapse.rs",
+        "crates/host-runtime/tests/synapse_roundtrip.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -2643,7 +2711,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/lifecycle.rs",
+      "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/the-largest-lifecycle-proof-runs-in-ci.md"
     },
     {
@@ -3030,7 +3098,8 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/connection.rs",
-        "crates/host-runtime/src/ring_transport.rs"
+        "crates/host-runtime/src/ring_transport.rs",
+        "crates/shm-transport/tests/contract.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -3056,7 +3125,8 @@
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/frame_channel.rs",
         "crates/host-runtime/src/instance.rs",
-        "crates/host-runtime/src/ring_transport.rs"
+        "crates/host-runtime/src/ring_transport.rs",
+        "crates/shm-transport/tests/contract.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -3208,7 +3278,8 @@
         "crates/host-runtime/src/frame_channel.rs",
         "crates/host-runtime/src/ring_transport.rs",
         "crates/shm-transport/src/backend/ring.rs",
-        "crates/shm-transport/src/lease.rs"
+        "crates/shm-transport/src/lease.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -3418,7 +3489,8 @@
         "crates/host-runtime/src/handler.rs",
         "crates/host-runtime/src/lib.rs",
         "crates/host-runtime/src/routing.rs",
-        "crates/host-runtime/src/wire.rs"
+        "crates/host-runtime/src/wire.rs",
+        "crates/host-runtime/tests/protocol_vectors.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -3445,7 +3517,9 @@
         "crates/host-runtime/src/config.rs",
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
-        "crates/host-runtime/src/setup_socket.rs"
+        "crates/host-runtime/src/setup_socket.rs",
+        "crates/host-runtime/tests/lifecycle.rs",
+        "crates/host-runtime/tests/protocol_vectors.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -3644,7 +3718,9 @@
       "files": [
         "crates/host-runtime/src/config.rs",
         "crates/host-runtime/src/connection.rs",
-        "crates/host-runtime/src/runtime.rs"
+        "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/handler_contract.rs",
+        "crates/host-runtime/tests/lifecycle.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -3670,7 +3746,8 @@
         "crates/host-runtime/src/config.rs",
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/frame_channel.rs",
-        "crates/host-runtime/src/ring_transport.rs"
+        "crates/host-runtime/src/ring_transport.rs",
+        "crates/host-runtime/tests/shm_failure_modes.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -3695,7 +3772,8 @@
       "files": [
         "crates/host-runtime/src/config.rs",
         "crates/host-runtime/src/connection.rs",
-        "crates/host-runtime/src/setup_socket.rs"
+        "crates/host-runtime/src/setup_socket.rs",
+        "crates/host-runtime/tests/shm_failure_modes.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -3911,7 +3989,8 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/client.rs",
-        "crates/host-runtime/src/connection.rs"
+        "crates/host-runtime/src/connection.rs",
+        "crates/host-runtime/tests/shm_failure_modes.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4172,7 +4251,8 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/dispatch.rs"
+        "crates/host-runtime/src/dispatch.rs",
+        "crates/host-runtime/tests/dispatch.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4195,7 +4275,8 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/dispatch.rs"
+        "crates/host-runtime/src/dispatch.rs",
+        "crates/host-runtime/tests/routing.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4219,7 +4300,8 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/connection.rs",
-        "crates/host-runtime/src/dispatch.rs"
+        "crates/host-runtime/src/dispatch.rs",
+        "crates/host-runtime/tests/dispatch.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4246,7 +4328,8 @@
         "crates/host-runtime/src/dispatch.rs",
         "crates/host-runtime/src/harness_closure.rs",
         "crates/host-runtime/src/routing.rs",
-        "crates/host-runtime/src/runtime.rs"
+        "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/routing.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4373,7 +4456,8 @@
         "crates/host-runtime/src/config.rs",
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/dispatch.rs",
-        "crates/host-runtime/src/runtime.rs"
+        "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/dispatch.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4444,7 +4528,8 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/dispatch.rs",
-        "crates/host-runtime/src/routing.rs"
+        "crates/host-runtime/src/routing.rs",
+        "crates/host-runtime/tests/lifecycle.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4468,7 +4553,8 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/connection.rs",
-        "crates/host-runtime/src/dispatch.rs"
+        "crates/host-runtime/src/dispatch.rs",
+        "crates/host-runtime/tests/routing.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4518,7 +4604,8 @@
         "crates/host-runtime/src/dispatch.rs",
         "crates/host-runtime/src/panic_boundary.rs",
         "crates/host-runtime/src/routing.rs",
-        "crates/host-runtime/src/runtime.rs"
+        "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/composite_routing.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4541,7 +4628,8 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/composite.rs"
+        "crates/host-runtime/src/composite.rs",
+        "crates/host-runtime/tests/composite_routing.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -4896,7 +4984,8 @@
       "classification": "core",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/auth.rs"
+        "crates/host-runtime/src/auth.rs",
+        "crates/host-runtime/tests/protocol_vectors.rs"
       ],
       "disposition": "pass",
       "source_status": {
@@ -4911,7 +5000,7 @@
       "evidence_digest": "beb56db493a76f773db71a6102c7fb41462954bb13749b7b7365f8e3ee616020",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#committed_auth_proof_vectors_pin_the_construction",
       "check_hash": "54cb4044dd96cda50a9feae25630da0e1cab686751469cab7d1e0fb0026a2216",
-      "code_hash": "0f6894a9bc2c2e996d315cea1d43c31dc548b7035ea0ed4cb21933c29f80288c",
+      "code_hash": "daa6da21254c7478f44ab3aaafc4024878badec62e6212bd83034decc0734e43",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -4987,7 +5076,8 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/control.rs",
-        "crates/host-runtime/src/wire.rs"
+        "crates/host-runtime/src/wire.rs",
+        "crates/host-runtime/tests/protocol_vectors.rs"
       ],
       "disposition": "pass",
       "source_status": {
@@ -5002,7 +5092,7 @@
       "evidence_digest": "f4ab68867c1d24a166f2539ae865c9215f16c9193b80feda5e5524b2605ac9e5",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#canonical_route_open_body_is_167_bytes",
       "check_hash": "54cb4044dd96cda50a9feae25630da0e1cab686751469cab7d1e0fb0026a2216",
-      "code_hash": "4fb81b05c33b6de9b14139820827f0150b13a248f578fa267558f7025372d1f7",
+      "code_hash": "9d0b929dcf3fa2acd517e007da6264a58acd2c2f64a23a77b7df4fabca3fba0d",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -5017,7 +5107,8 @@
       "classification": "core",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/harness_closure.rs"
+        "crates/host-runtime/src/harness_closure.rs",
+        "crates/host-runtime/tests/harness_closure.rs"
       ],
       "disposition": "pass",
       "source_status": {
@@ -5032,7 +5123,7 @@
       "evidence_digest": "dcfc6d9dda7e1d813e292f0f8b87d155c4325daec60d72ece628aacefaa4e370",
       "check_pointer": "crates/host-runtime/tests/harness_closure.rs#rust_and_typescript_share_the_canonical_manifest_digest",
       "check_hash": "52f87d6e76c3401af263b9a6af21c40fc86c4249187f3464344d6733556aa9a1",
-      "code_hash": "645ca46578d041bb591f17dc025444e6b0c0ea115f5358f46ea4e0584ca9306f",
+      "code_hash": "a015de7f0a7f47e2da1713e669398f4a34f458a30eb0fe11c5685ff06c5b2333",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -5077,7 +5168,8 @@
       "classification": "core",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/synapse/bundle.rs"
+        "crates/host-runtime/src/synapse/bundle.rs",
+        "crates/host-runtime/tests/synapse_bundle.rs"
       ],
       "disposition": "pass",
       "source_status": {
@@ -5092,7 +5184,7 @@
       "evidence_digest": "22b926daf535c989038c8492dbaf5e9b69db7c6cdcc1aa103ef16dcfbff0527f",
       "check_pointer": "crates/host-runtime/tests/synapse_bundle.rs#the_committed_fixture_carries_its_canonical_fingerprint",
       "check_hash": "e8219707a8e980b66102e9e25131097261068f7f6a94ac8af705359285826820",
-      "code_hash": "2eae8ecf0424f275ea9ce62c45c942ddcd2425cf836af09319751f7f2a3fc070",
+      "code_hash": "da53a5ad117797ad46a227538b68a603e539c2de9eba36a0a1d81f161a73a320",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -5107,8 +5199,9 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
+        "crates/host-runtime/src/broca/mod.rs",
         "crates/host-runtime/src/broca/supervisor.rs",
-        "crates/host-runtime/src/broca/mod.rs"
+        "crates/host-runtime/tests/broca_supervisor.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -5131,8 +5224,9 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
+        "crates/host-runtime/src/broca/backend.rs",
         "crates/host-runtime/src/broca/supervisor.rs",
-        "crates/host-runtime/src/broca/backend.rs"
+        "crates/host-runtime/tests/broca_supervisor.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -5155,9 +5249,9 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/broca/subprocess.rs",
         "crates/host-runtime/src/broca/opencode.rs",
-        "crates/host-runtime/src/broca/pi.rs"
+        "crates/host-runtime/src/broca/pi.rs",
+        "crates/host-runtime/src/broca/subprocess.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -5172,7 +5266,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/broca/subprocess.rs",
+      "check_pointer": "crates/host-runtime/src/broca/opencode.rs",
       "evidence_pointer": "docs/properties/host-runtime/catalog.md"
     },
     {
@@ -5180,8 +5274,9 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
+        "crates/host-runtime/src/broca/config.rs",
         "crates/host-runtime/src/broca/subprocess.rs",
-        "crates/host-runtime/src/broca/config.rs"
+        "crates/host-runtime/tests/broca_protocol.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -5204,8 +5299,9 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
+        "crates/host-runtime/src/broca/config.rs",
         "crates/host-runtime/src/broca/protocol.rs",
-        "crates/host-runtime/src/broca/config.rs"
+        "crates/host-runtime/tests/broca_protocol.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -5229,7 +5325,8 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/synapse/jobs.rs",
-        "crates/host-runtime/src/synapse/mod.rs"
+        "crates/host-runtime/src/synapse/mod.rs",
+        "crates/host-runtime/tests/synapse_jobs.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -5253,7 +5350,8 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/synapse/bundle.rs",
-        "crates/host-runtime/src/synapse/mod.rs"
+        "crates/host-runtime/src/synapse/mod.rs",
+        "crates/host-runtime/tests/synapse_bundle.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -5276,7 +5374,8 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/synapse/protocol.rs"
+        "crates/host-runtime/src/synapse/protocol.rs",
+        "crates/host-runtime/tests/synapse_protocol.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -5322,8 +5421,9 @@
       "classification": "core",
       "relationship": "mapped",
       "files": [
+        "crates/tokenizer/gen/gen-token-golden.ts",
         "crates/tokenizer/src/lib.rs",
-        "crates/tokenizer/gen/gen-token-golden.ts"
+        "crates/tokenizer/tests/token_golden.rs"
       ],
       "disposition": "pass",
       "source_status": {
@@ -5338,7 +5438,7 @@
       "evidence_digest": "e7c90753adef928456425c6ead1e39f8bfaa5805b598ff18f6f129639a5428ca",
       "check_pointer": "crates/tokenizer/tests/token_golden.rs#encode_ordinary_matches_ai_tokenizer_ids",
       "check_hash": "235fbabb982f112ced2c9de421da81973e8c0946f1729953fd88fba195186a56",
-      "code_hash": "547254b569f2b3bf6d7d1b7b95f4b443a982b34496ca3485710e579797529238",
+      "code_hash": "7f5d842394dfaabfa2e5063bb1221d788df8f26125dd808df868d0b93bdff906",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -5353,8 +5453,8 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/tokenizer/src/lib.rs",
-        "crates/tokenizer/gen/gen-claude-vocab.ts"
+        "crates/tokenizer/gen/gen-claude-vocab.ts",
+        "crates/tokenizer/src/lib.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -5369,7 +5469,7 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/tokenizer/src/lib.rs",
+      "check_pointer": "crates/tokenizer/gen/gen-claude-vocab.ts",
       "evidence_pointer": "docs/properties/tokenizer/catalog.md"
     }
   ]

@@ -910,6 +910,176 @@
         "packages/shm-native/index.ts",
         "packages/shm-native/package.json"
       ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/tokenizer/testdata/token-golden.json",
+      "role": "byte-stable",
+      "rationale": "Tokenizer golden corpus: ids from the ai-tokenizer oracle for 36 texts. Byte-stable under R18; regenerated only by the registered generator as part of a reviewed contract change.",
+      "evidence": [
+        "migration/waves/U3/receipt.json",
+        "docs/properties/tokenizer/evidence/tokenizer-encoding-matches-the-independent-oracle.md"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/tokenizer/assets/claude.tiktoken",
+      "role": "byte-stable",
+      "rationale": "Embedded claude BPE vocabulary. Byte-stable; regenerated only by the registered generator.",
+      "evidence": [
+        "migration/waves/U3/receipt.json",
+        "crates/tokenizer/src/lib.rs"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/host-runtime/tests/fixtures/harness-closures/pi-valid.json",
+      "role": "byte-stable",
+      "rationale": "Harness-closure manifest whose canonical digest the Rust and TypeScript sides must agree on. Byte-stable under R18.",
+      "evidence": [
+        "migration/waves/U3/receipt.json",
+        "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/host-runtime/tests/fixtures/synapse-tiny/manifest.json",
+      "role": "byte-stable",
+      "rationale": "Synapse tiny-bundle manifest carrying the canonical fingerprint of the committed artifacts. Byte-stable under R18; regenerated only by the registered generator.",
+      "evidence": [
+        "migration/waves/U3/receipt.json",
+        "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/tokenizer/gen/gen-token-golden.ts",
+      "role": "generator",
+      "fixture": "crates/tokenizer/testdata/token-golden.json",
+      "rationale": "Generator for the tokenizer golden corpus; its corpus texts are fixture content.",
+      "evidence": [
+        "crates/tokenizer/tests/token_golden.rs"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/tokenizer/gen/gen-claude-vocab.ts",
+      "role": "generator",
+      "fixture": "crates/tokenizer/assets/claude.tiktoken",
+      "rationale": "Generator for the embedded vocabulary asset.",
+      "evidence": [
+        "crates/tokenizer/src/lib.rs"
+      ]
+    },
+    {
+      "kind": "fixture",
+      "path": "crates/host-runtime/tests/fixtures/generate-synapse-tiny.py",
+      "role": "generator",
+      "fixture": "crates/host-runtime/tests/fixtures/synapse-tiny/manifest.json",
+      "rationale": "Generator for the Synapse tiny bundle and its manifest; mirrors canonical_fingerprint.",
+      "evidence": [
+        "crates/host-runtime/tests/synapse_bundle.rs"
+      ]
+    },
+    {
+      "kind": "authored",
+      "path": "crates/tokenizer/testdata/token-golden.json",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "crates/host-runtime/tests/fixtures/synapse-tiny/manifest.json",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "crates/host-runtime/tests/fixtures/harness-closures/pi-valid.json",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/catalog.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/coordination-locks-live-beside-the-managed-subtree.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/data-root-resolves-under-the-managed-directory.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/setup-proof-vectors-pin-the-shared-hmac-transcript.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/catalog.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/evidence/tokenizer-encoding-matches-the-independent-oracle.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U3/property-impact.json",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U3/architecture-impact.json",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U3/waivers.json",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U3/review-notes.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "migration/waves/U3/receipt.json",
+      "rationale": "U3 receipt."
     }
   ]
 }

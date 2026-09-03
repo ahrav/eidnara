@@ -756,7 +756,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "00665090bda2876827d38f4cef9b89d9e9f1dee34ec91696d5c619e3cf27d97e",
+      "destination_sha256": "67dc985e9a0b1d2950ee088c61a99909178f1335d7b5e067efe92d8f99e1c2dc",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -767,7 +767,7 @@
     {
       "source": null,
       "destination": "package.json",
-      "destination_sha256": "90dc2d0ffd184970cd5bf3bc4fe6ad314b47faf6045fae3f80bd3b5eb52fe6b4",
+      "destination_sha256": "9b95543ea5962442f9be252b8a485d486690419b84f3f1f1e2190689a24ccc94",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -778,7 +778,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "e46703bc9597114c90527c0d804243b70e9dfe95b65980891411eab59e53682f",
+      "destination_sha256": "b305248b174d4d90ec2deee27feac0df55988293625dbc89509057989c4488d1",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
