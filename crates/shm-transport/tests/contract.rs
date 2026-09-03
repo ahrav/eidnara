@@ -1,0 +1,735 @@
+use shm_transport::arena::{
+    ArenaCounts, ArenaError, ArenaSpan, MAX_FRAME_BYTES, MIN_ARENA_BYTES, SpanPlan,
+};
+use shm_transport::backend::sample::{SAMPLE_PREFIX_BYTES, SamplePrefix};
+use shm_transport::descriptor::{
+    DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor,
+    HardwareProfileId, Incarnation, ReleaseIdentity, TransportDescriptor, WIRE_V2_HEADER_BYTES,
+    WIRE_V2_VERSION,
+};
+use shm_transport::lifecycle::{CloseState, Lifecycle, LifecycleError};
+
+fn header(len: usize) -> [u8; WIRE_V2_HEADER_BYTES] {
+    let mut header = [0u8; WIRE_V2_HEADER_BYTES];
+    header[..4].copy_from_slice(&(len as u32).to_le_bytes());
+    header[4] = WIRE_V2_VERSION;
+    header
+}
+
+fn sample_payload(
+    schema: u16,
+    wire_header: [u8; WIRE_V2_HEADER_BYTES],
+    identity: ReleaseIdentity,
+    declared_body_len: u64,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(SAMPLE_PREFIX_BYTES + body.len());
+    payload.extend_from_slice(&schema.to_le_bytes());
+    payload.extend_from_slice(&wire_header);
+    payload.extend_from_slice(&identity.incarnation().into_bytes());
+    payload.extend_from_slice(&identity.lane().to_le_bytes());
+    payload.extend_from_slice(&identity.sequence().to_le_bytes());
+    payload.extend_from_slice(&declared_body_len.to_le_bytes());
+    payload.extend_from_slice(body);
+    payload
+}
+
+fn identity() -> ReleaseIdentity {
+    ReleaseIdentity::new(Incarnation::from_bytes([7; 16]), 3, 9)
+}
+
+fn valid_descriptor() -> FrameDescriptor {
+    FrameDescriptor::from_untrusted(
+        DESCRIPTOR_SCHEMA_VERSION,
+        header(8),
+        identity(),
+        8,
+        MAX_FRAME_BYTES as u64 - 4,
+        8,
+        2,
+        [
+            ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
+            ArenaSpan::from_untrusted(0, 4),
+        ],
+    )
+}
+
+#[test]
+fn descriptor_rejects_every_untrusted_identity_and_span_failure() {
+    assert!(
+        valid_descriptor()
+            .validate(identity(), MAX_FRAME_BYTES)
+            .is_ok()
+    );
+
+    let cases = [
+        (
+            FrameDescriptor::from_untrusted(
+                99,
+                header(8),
+                identity(),
+                8,
+                MAX_FRAME_BYTES as u64 - 4,
+                8,
+                2,
+                [
+                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
+                    ArenaSpan::from_untrusted(0, 4),
+                ],
+            ),
+            DescriptorError::UnsupportedSchema,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(8),
+                ReleaseIdentity::new(identity().incarnation(), identity().lane(), 0),
+                8,
+                MAX_FRAME_BYTES as u64 - 4,
+                8,
+                2,
+                [
+                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
+                    ArenaSpan::from_untrusted(0, 4),
+                ],
+            ),
+            DescriptorError::InvalidSequence,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(8),
+                identity(),
+                8,
+                MAX_FRAME_BYTES as u64 - 3,
+                8,
+                2,
+                [
+                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
+                    ArenaSpan::from_untrusted(0, 4),
+                ],
+            ),
+            DescriptorError::InvalidWrapMetadata,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(8),
+                identity(),
+                8,
+                MAX_FRAME_BYTES as u64 - 4,
+                8,
+                2,
+                [
+                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 5),
+                    ArenaSpan::from_untrusted(0, 3),
+                ],
+            ),
+            DescriptorError::OutOfBounds,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(8),
+                identity(),
+                8,
+                MAX_FRAME_BYTES as u64 - 4,
+                8,
+                1,
+                [
+                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 8),
+                    ArenaSpan::default(),
+                ],
+            ),
+            DescriptorError::OutOfBounds,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(7),
+                identity(),
+                8,
+                MAX_FRAME_BYTES as u64 - 4,
+                8,
+                2,
+                [
+                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
+                    ArenaSpan::from_untrusted(0, 4),
+                ],
+            ),
+            DescriptorError::WireHeaderMismatch,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(8),
+                identity(),
+                9,
+                MAX_FRAME_BYTES as u64 - 4,
+                9,
+                2,
+                [
+                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
+                    ArenaSpan::from_untrusted(0, 4),
+                ],
+            ),
+            DescriptorError::LengthMismatch,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(0),
+                identity(),
+                0,
+                u64::MAX,
+                1,
+                1,
+                [
+                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 1, 0),
+                    ArenaSpan::default(),
+                ],
+            ),
+            DescriptorError::Overflow,
+        ),
+    ];
+    for (descriptor, expected) in cases {
+        assert_eq!(
+            descriptor.validate(identity(), MAX_FRAME_BYTES),
+            Err(expected)
+        );
+    }
+
+    let wrong_incarnation = ReleaseIdentity::new(Incarnation::from_bytes([8; 16]), 3, 9);
+    assert_eq!(
+        valid_descriptor().validate(wrong_incarnation, MAX_FRAME_BYTES),
+        Err(DescriptorError::WrongIncarnation)
+    );
+    let wrong_lane = ReleaseIdentity::new(identity().incarnation(), 4, 9);
+    assert_eq!(
+        valid_descriptor().validate(wrong_lane, MAX_FRAME_BYTES),
+        Err(DescriptorError::WrongLane)
+    );
+    let wrong_sequence = ReleaseIdentity::new(identity().incarnation(), 3, 10);
+    assert_eq!(
+        valid_descriptor().validate(wrong_sequence, MAX_FRAME_BYTES),
+        Err(DescriptorError::InvalidSequence)
+    );
+}
+
+#[test]
+fn arena_plans_wrap_and_conserves_all_states() {
+    let plan = SpanPlan::reserve(
+        MAX_FRAME_BYTES,
+        MAX_FRAME_BYTES as u64 - 4,
+        MAX_FRAME_BYTES as u64 - 4,
+        8,
+    )
+    .unwrap();
+    assert_eq!(plan.span_count(), 2);
+    assert_eq!(plan.span(0).unwrap().len(), 4);
+    assert_eq!(plan.span(1).unwrap().len(), 4);
+    let prefix = plan.prefix(6).unwrap();
+    assert_eq!(prefix.span(0).unwrap().len(), 4);
+    assert_eq!(prefix.span(1).unwrap().len(), 2);
+    assert!(
+        ArenaCounts {
+            free: 1,
+            producer_reserved: 2,
+            published: 3,
+            receiver_held: 4,
+            receiver_leased: 5,
+            release_pending: 6,
+            pad: 7,
+            quarantined: 8,
+        }
+        .conserves(36)
+    );
+    assert!(
+        DescriptorCounts {
+            free: 1,
+            producer_reserved: 1,
+            published: 1,
+            receiver_held: 1,
+            receiver_leased: 1,
+            release_pending: 1,
+            quarantined: 1,
+        }
+        .conserves(7)
+    );
+}
+
+#[test]
+fn arena_reserve_and_prefix_report_every_failure_mode() {
+    let capacity = MIN_ARENA_BYTES;
+    let full = capacity as u64;
+
+    assert_eq!(
+        SpanPlan::reserve(capacity - 1, 0, 0, 1),
+        Err(ArenaError::BelowMinimumCapacity)
+    );
+    assert_eq!(
+        SpanPlan::reserve(0, 0, 0, 1),
+        Err(ArenaError::BelowMinimumCapacity)
+    );
+    assert_eq!(
+        SpanPlan::reserve(capacity, 0, 0, MAX_FRAME_BYTES + 1),
+        Err(ArenaError::FrameTooLarge)
+    );
+    // `reclaimed` ahead of `write` and a hold larger than the arena are both malformed cursors.
+    assert_eq!(
+        SpanPlan::reserve(capacity, 4, 8, 1),
+        Err(ArenaError::InvalidCursor)
+    );
+    assert_eq!(
+        SpanPlan::reserve(capacity, full + 1, 0, 1),
+        Err(ArenaError::InvalidCursor)
+    );
+    // Holding all but one byte leaves no room for a two-byte frame.
+    assert_eq!(
+        SpanPlan::reserve(capacity, full - 1, 0, 2),
+        Err(ArenaError::Exhausted)
+    );
+    // Holding exactly the full arena still admits nothing but an empty frame.
+    assert_eq!(
+        SpanPlan::reserve(capacity, full, 0, 1),
+        Err(ArenaError::Exhausted)
+    );
+    assert!(SpanPlan::reserve(capacity, full, 0, 0).is_ok());
+    // A write cursor at `u64::MAX` cannot advance without overflowing.
+    assert_eq!(
+        SpanPlan::reserve(capacity, u64::MAX, u64::MAX, 1),
+        Err(ArenaError::ArithmeticOverflow)
+    );
+
+    let plan = SpanPlan::reserve(capacity, 0, 0, 8).unwrap();
+    assert_eq!(plan.prefix(9), Err(ArenaError::ExceedsAllocation));
+    // A narrowed plan cannot widen again, even within the original allocation: the spans no
+    // longer describe the reserved bytes past the committed prefix, so widening would
+    // fabricate a wrap at offset zero.
+    let narrowed = plan.prefix(2).unwrap();
+    assert_eq!(narrowed.prefix(3), Err(ArenaError::ExceedsAllocation));
+    assert_eq!(narrowed.prefix(2).unwrap().span_count(), 1);
+    assert_eq!(narrowed.prefix(1).unwrap().span(0).unwrap().len(), 1);
+    // Narrowing a wrapped plan below the first span drops the second span.
+    let wrapped = SpanPlan::reserve(capacity, full - 4, full - 4, 8).unwrap();
+    let unwrapped = wrapped.prefix(3).unwrap();
+    assert_eq!(unwrapped.span_count(), 1);
+    assert_eq!(unwrapped.span(0).unwrap().len(), 3);
+    assert_eq!(unwrapped.prefix(4), Err(ArenaError::ExceedsAllocation));
+    let shortened = plan.prefix(8).unwrap();
+    assert_eq!(shortened.allocation_len(), 8);
+    assert_eq!(shortened.span(0).unwrap().len(), 8);
+    let empty = plan.prefix(0).unwrap();
+    assert_eq!(empty.allocation_len(), 8);
+    assert_eq!(empty.span_count(), 1);
+    assert!(empty.span(0).unwrap().is_empty());
+}
+
+#[test]
+fn span_accessors_return_none_past_span_count_without_panicking() {
+    let wrapped = SpanPlan::reserve(
+        MAX_FRAME_BYTES,
+        MAX_FRAME_BYTES as u64 - 4,
+        MAX_FRAME_BYTES as u64 - 4,
+        8,
+    )
+    .unwrap();
+    assert!(wrapped.span(1).is_some());
+    assert!(wrapped.span(2).is_none());
+    assert!(wrapped.span(usize::MAX).is_none());
+
+    let single = SpanPlan::reserve(MAX_FRAME_BYTES, 0, 0, 8).unwrap();
+    assert_eq!(single.span_count(), 1);
+    assert!(single.span(0).is_some());
+    assert!(single.span(1).is_none());
+    assert!(single.span(2).is_none());
+
+    let frame = valid_descriptor()
+        .validate(identity(), MAX_FRAME_BYTES)
+        .unwrap();
+    assert!(frame.span(1).is_some());
+    assert!(frame.span(2).is_none());
+    assert!(frame.span(usize::MAX).is_none());
+}
+
+#[test]
+fn hardware_profile_id_deserialization_enforces_constructor_rules() {
+    let valid = HardwareProfileId::new("gpu-a100.v2_x").unwrap();
+    let encoded = serde_json::to_string(&valid).unwrap();
+    assert_eq!(encoded, "\"gpu-a100.v2_x\"");
+    let decoded: HardwareProfileId = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, valid);
+
+    let too_long = format!("\"{}\"", "a".repeat(65));
+    for rejected in [
+        "\"\"",
+        "\"has space\"",
+        "\"ünïcode\"",
+        "\"slash/id\"",
+        too_long.as_str(),
+    ] {
+        assert!(
+            serde_json::from_str::<HardwareProfileId>(rejected).is_err(),
+            "{rejected} deserialized"
+        );
+    }
+}
+
+#[test]
+fn lifecycle_accepts_only_diagram_edges_and_quarantine_is_terminal() {
+    assert_eq!(
+        Lifecycle::new().advance(CloseState::ReleasingSamples),
+        Err(LifecycleError::InvalidTransition)
+    );
+
+    let mut skipped_revoke = Lifecycle::new();
+    skipped_revoke.advance(CloseState::Quiescing).unwrap();
+    assert_eq!(
+        skipped_revoke.advance(CloseState::RevokingJsOnEnv),
+        Err(LifecycleError::InvalidTransition)
+    );
+
+    let mut late_quarantine = Lifecycle::new();
+    for state in [
+        CloseState::Quiescing,
+        CloseState::DrainingPublished,
+        CloseState::StoppingEnvScheduling,
+        CloseState::RevokingJsOnEnv,
+        CloseState::AsyncCleanupJoin,
+    ] {
+        late_quarantine.advance(state).unwrap();
+    }
+    assert_eq!(
+        late_quarantine.advance(CloseState::Quarantined),
+        Err(LifecycleError::InvalidTransition)
+    );
+
+    let mut lifecycle = Lifecycle::new();
+    lifecycle.mark_prepared().unwrap();
+    assert!(lifecycle.must_fail_closed());
+    for state in [
+        CloseState::Quiescing,
+        CloseState::DrainingPublished,
+        CloseState::StoppingEnvScheduling,
+        CloseState::RevokingJsOnEnv,
+        CloseState::AsyncCleanupJoin,
+        CloseState::AwaitingRustScopes,
+        CloseState::ReleasingSamples,
+        CloseState::DroppingTransport,
+        CloseState::Joined,
+    ] {
+        lifecycle.advance(state).unwrap();
+    }
+    assert!(lifecycle.reusable());
+    assert_eq!(
+        lifecycle.advance(CloseState::Open),
+        Err(LifecycleError::Terminal)
+    );
+
+    let mut quarantined = Lifecycle::new();
+    for state in [
+        CloseState::Quiescing,
+        CloseState::DrainingPublished,
+        CloseState::StoppingEnvScheduling,
+        CloseState::RevokingJsOnEnv,
+        CloseState::Quarantined,
+    ] {
+        quarantined.advance(state).unwrap();
+    }
+    assert!(!quarantined.reusable());
+    assert_eq!(
+        quarantined.advance(CloseState::Joined),
+        Err(LifecycleError::Terminal)
+    );
+}
+#[test]
+fn debug_and_errors_redact_every_sentinel() {
+    let sentinel = "SENTINEL_descriptor_token_object_incarnation_address";
+    let transport = TransportDescriptor::new(HardwareProfileId::new(sentinel).unwrap());
+    let incarnation = Incarnation::from_bytes(*b"SENTINEL-SECRET!");
+    let release = ReleaseIdentity::new(incarnation, 0x5345_4e54, 0x494e_454c);
+    let descriptor = FrameDescriptor::from_untrusted(
+        DESCRIPTOR_SCHEMA_VERSION,
+        header(0),
+        release,
+        0,
+        0,
+        0,
+        1,
+        [ArenaSpan::default(), ArenaSpan::default()],
+    );
+    for formatted in [
+        format!("{transport:?}"),
+        format!("{incarnation:?}"),
+        format!("{release:?}"),
+        format!("{descriptor:?}"),
+        format!("{:?}", DescriptorError::WrongIncarnation),
+    ] {
+        assert!(!formatted.contains("SENTINEL"));
+        assert!(!formatted.contains(sentinel));
+        assert!(!formatted.contains("0x"));
+    }
+}
+
+fn sample_identity() -> ReleaseIdentity {
+    ReleaseIdentity::new(Incarnation::from_bytes([7; 16]), 3, 9)
+}
+
+#[test]
+fn sample_prefix_rejects_every_truncation_point_and_bounds_the_body() {
+    let body = [1u8, 2, 3, 4];
+    let payload = sample_payload(
+        DESCRIPTOR_SCHEMA_VERSION,
+        header(body.len()),
+        sample_identity(),
+        body.len() as u64,
+        &body,
+    );
+    let validated = SamplePrefix::snapshot(&payload)
+        .unwrap()
+        .validate(payload.len(), sample_identity())
+        .unwrap();
+    assert_eq!(validated.body_range(), SAMPLE_PREFIX_BYTES..payload.len());
+    assert_eq!(&payload[validated.body_range()], &body);
+
+    for cut in 0..SAMPLE_PREFIX_BYTES {
+        assert_eq!(
+            SamplePrefix::snapshot(&payload[..cut]),
+            Err(DescriptorError::Truncated),
+            "prefix truncated at byte {cut} must be rejected"
+        );
+    }
+    for cut in SAMPLE_PREFIX_BYTES..payload.len() {
+        assert_eq!(
+            SamplePrefix::snapshot(&payload[..cut])
+                .unwrap()
+                .validate(cut, sample_identity()),
+            Err(DescriptorError::InvalidAllocation),
+            "body truncated at byte {cut} must be rejected"
+        );
+    }
+
+    // Extra allocation bytes are legal but lie outside the validated body range.
+    let mut slack = payload.clone();
+    slack.extend_from_slice(&[0xEE; 7]);
+    let validated = SamplePrefix::snapshot(&slack)
+        .unwrap()
+        .validate(slack.len(), sample_identity())
+        .unwrap();
+    assert_eq!(validated.body_len(), body.len());
+    assert_eq!(
+        validated.body_range().end,
+        SAMPLE_PREFIX_BYTES + body.len(),
+        "slack bytes must stay outside the validated body range"
+    );
+}
+
+#[test]
+fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
+    let body = [9u8; 4];
+    let expected = sample_identity();
+    let base = |schema: u16, wire: [u8; WIRE_V2_HEADER_BYTES], id: ReleaseIdentity, len: u64| {
+        sample_payload(schema, wire, id, len, &body)
+    };
+
+    let cases: [(Vec<u8>, ReleaseIdentity, DescriptorError); 8] = [
+        (
+            base(99, header(4), expected, 4),
+            expected,
+            DescriptorError::UnsupportedSchema,
+        ),
+        (
+            base(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(4),
+                ReleaseIdentity::new(expected.incarnation(), expected.lane(), 0),
+                4,
+            ),
+            ReleaseIdentity::new(expected.incarnation(), expected.lane(), 0),
+            DescriptorError::InvalidSequence,
+        ),
+        (
+            base(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(4),
+                ReleaseIdentity::new(Incarnation::from_bytes([8; 16]), expected.lane(), 9),
+                4,
+            ),
+            expected,
+            DescriptorError::WrongIncarnation,
+        ),
+        (
+            base(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(4),
+                ReleaseIdentity::new(expected.incarnation(), 4, 9),
+                4,
+            ),
+            expected,
+            DescriptorError::WrongLane,
+        ),
+        (
+            base(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(4),
+                ReleaseIdentity::new(expected.incarnation(), expected.lane(), 10),
+                4,
+            ),
+            expected,
+            DescriptorError::InvalidSequence,
+        ),
+        (
+            base(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(4),
+                expected,
+                MAX_FRAME_BYTES as u64 + 1,
+            ),
+            expected,
+            DescriptorError::FrameTooLarge,
+        ),
+        (
+            base(DESCRIPTOR_SCHEMA_VERSION, header(5), expected, 4),
+            expected,
+            DescriptorError::WireHeaderMismatch,
+        ),
+        (
+            {
+                let mut wire = header(4);
+                wire[4] = WIRE_V2_VERSION - 1;
+                base(DESCRIPTOR_SCHEMA_VERSION, wire, expected, 4)
+            },
+            expected,
+            DescriptorError::WireHeaderMismatch,
+        ),
+    ];
+    for (payload, expected_identity, error) in cases {
+        assert_eq!(
+            SamplePrefix::snapshot(&payload)
+                .unwrap()
+                .validate(payload.len(), expected_identity),
+            Err(error)
+        );
+    }
+
+    // Allocation bounds are checked before the wire header, matching
+    // `FrameDescriptor::validate`: a body that overruns the allocation reports
+    // `InvalidAllocation` even when the wire header also disagrees.
+    let overrun_and_mismatch =
+        sample_payload(DESCRIPTOR_SCHEMA_VERSION, header(5), expected, 1024, &body);
+    assert_eq!(
+        SamplePrefix::snapshot(&overrun_and_mismatch)
+            .unwrap()
+            .validate(overrun_and_mismatch.len(), expected),
+        Err(DescriptorError::InvalidAllocation)
+    );
+
+    // A body declared longer than the allocation holds is rejected.
+    let excessive = sample_payload(
+        DESCRIPTOR_SCHEMA_VERSION,
+        header(1024),
+        expected,
+        1024,
+        &body,
+    );
+    assert_eq!(
+        SamplePrefix::snapshot(&excessive)
+            .unwrap()
+            .validate(excessive.len(), expected),
+        Err(DescriptorError::InvalidAllocation)
+    );
+}
+
+#[test]
+fn frame_descriptor_rejects_span_count_and_allocation_extremes() {
+    let arena = MAX_FRAME_BYTES;
+    let identity = identity();
+    for span_count in [0u8, 3] {
+        let descriptor = FrameDescriptor::from_untrusted(
+            DESCRIPTOR_SCHEMA_VERSION,
+            header(8),
+            identity,
+            8,
+            0,
+            8,
+            span_count,
+            [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+        );
+        assert_eq!(
+            descriptor.validate(identity, arena),
+            Err(DescriptorError::InvalidSpanCount)
+        );
+    }
+    let oversized_allocation = FrameDescriptor::from_untrusted(
+        DESCRIPTOR_SCHEMA_VERSION,
+        header(8),
+        identity,
+        8,
+        0,
+        arena as u64 + 1,
+        1,
+        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+    );
+    assert_eq!(
+        oversized_allocation.validate(identity, arena),
+        Err(DescriptorError::InvalidAllocation)
+    );
+    assert_eq!(
+        valid_descriptor().validate(identity, 0),
+        Err(DescriptorError::InvalidAllocation)
+    );
+    // An allocation overrun takes precedence over a conflicting wire header.
+    let overrun_and_mismatch = FrameDescriptor::from_untrusted(
+        DESCRIPTOR_SCHEMA_VERSION,
+        header(7),
+        identity,
+        8,
+        0,
+        arena as u64 + 1,
+        1,
+        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+    );
+    assert_eq!(
+        overrun_and_mismatch.validate(identity, arena),
+        Err(DescriptorError::InvalidAllocation)
+    );
+    let mut stale_version = header(8);
+    stale_version[4] = WIRE_V2_VERSION - 1;
+    let wrong_version = FrameDescriptor::from_untrusted(
+        DESCRIPTOR_SCHEMA_VERSION,
+        stale_version,
+        identity,
+        8,
+        0,
+        8,
+        1,
+        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+    );
+    assert_eq!(
+        wrong_version.validate(identity, arena),
+        Err(DescriptorError::WireHeaderMismatch)
+    );
+}
+#[test]
+fn sample_errors_redact_every_sentinel() {
+    let sentinel = b"SENTINEL";
+    let mut wire = [0u8; WIRE_V2_HEADER_BYTES];
+    wire[..sentinel.len()].copy_from_slice(sentinel);
+    let incarnation = Incarnation::from_bytes(*b"SENTINEL-SECRET!");
+    let identity = ReleaseIdentity::new(incarnation, 0x5345_4e54, 0x494e_454c);
+    let payload = sample_payload(0x4553, wire, identity, u64::MAX, b"SENTINEL-BODY");
+
+    let prefix = SamplePrefix::snapshot(&payload).unwrap();
+    let error = prefix
+        .validate(payload.len(), sample_identity())
+        .unwrap_err();
+    for formatted in [
+        format!("{prefix:?}"),
+        format!("{error}"),
+        format!("{error:?}"),
+        format!("{:?}", DescriptorError::Truncated),
+    ] {
+        assert!(!formatted.contains("SENTINEL"));
+        assert!(!formatted.contains("0x"));
+    }
+}
