@@ -162,6 +162,11 @@ impl SpanPlan {
     pub fn span(self, index: usize) -> Option<ArenaSpan> {
         (index < usize::from(self.span_count)).then_some(self.spans[index])
     }
+
+    /// Both spans as stored, second one zeroed when unused, for the shared descriptor.
+    pub(crate) const fn spans(self) -> [ArenaSpan; 2] {
+        self.spans
+    }
 }
 
 impl fmt::Debug for SpanPlan {
