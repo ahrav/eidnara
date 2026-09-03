@@ -302,11 +302,22 @@ fn allowed_linux_cpus() -> Option<Vec<u32>> {
     let spec = status
         .lines()
         .find_map(|line| line.strip_prefix("Cpus_allowed_list:\t"))?;
+    parse_cpu_list(spec)
+}
+
+/// Kernel CPU-list syntax (`0-3,8,10-11`). Returns `None` if any item is malformed, including
+/// an inverted range, so a partial list is never returned as a verified one.
+#[cfg(any(target_os = "linux", test))]
+fn parse_cpu_list(spec: &str) -> Option<Vec<u32>> {
     let mut cpus = Vec::new();
     for item in spec.split(',') {
         if let Some((start, end)) = item.split_once('-') {
             let start: u32 = start.parse().ok()?;
             let end: u32 = end.parse().ok()?;
+            // An inverted range is empty, so reject it instead of accepting a smaller CPU list.
+            if start > end {
+                return None;
+            }
             cpus.extend(start..=end);
         } else {
             cpus.push(item.parse().ok()?);
@@ -509,7 +520,7 @@ impl AdmissionController {
         let active = accounting
             .active
             .checked_sub(charges)
-            .ok_or(AdmissionError::AccountingUnavailable)?;
+            .ok_or(AdmissionError::ChargeUnderflow)?;
         let quarantined = accounting
             .quarantined
             .checked_add(retained)
@@ -644,6 +655,11 @@ pub enum AdmissionError {
     /// Adding the requested charges to the active or quarantined totals overflowed `u64`.
     #[error("host admission arithmetic overflow")]
     ChargeOverflow,
+    /// Moving an admission's charges out of the active total would take a field below zero.
+    /// Every admission is charged once and released once, so this means the accounting is
+    /// corrupt, not that the caller did anything wrong.
+    #[error("host admission accounting underflow")]
+    ChargeUnderflow,
     /// The accounting mutex is poisoned; a thread panicked while holding it.
     #[error("host admission accounting unavailable")]
     AccountingUnavailable,
@@ -692,4 +708,26 @@ pub fn ring_profile(hardware: HardwareProfileId) -> Result<TargetProfile, Profil
         pinned_workers: 0,
         worker_topology: WorkerTopology::CallerThread,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cpu_list;
+
+    #[test]
+    fn cpu_list_accepts_singletons_and_ascending_ranges() {
+        assert_eq!(parse_cpu_list("0"), Some(vec![0]));
+        assert_eq!(
+            parse_cpu_list("0-3,8,10-11"),
+            Some(vec![0, 1, 2, 3, 8, 10, 11])
+        );
+        assert_eq!(parse_cpu_list("5-5"), Some(vec![5]));
+    }
+
+    #[test]
+    fn cpu_list_rejects_every_malformed_item_rather_than_returning_a_subset() {
+        for spec in ["3-1", "0-3,9-7", "", "0,", "a", "0-", "-1", "0--1", "1-2-3"] {
+            assert_eq!(parse_cpu_list(spec), None, "spec {spec:?} must not parse");
+        }
+    }
 }

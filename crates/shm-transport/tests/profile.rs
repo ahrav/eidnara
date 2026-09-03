@@ -83,8 +83,10 @@ fn host_admission_retains_quarantined_commitments() {
 
 #[test]
 fn exact_aggregate_capacity_admits_n_and_rejects_n_plus_one_without_charging() {
-    let profile = ring_profile(HardwareProfileId::new("contract-capacity").unwrap()).unwrap();
+    // A nonzero worker charge makes `WorkerLimit` reachable in the rejection set.
+    let profile = host_test_ring_profile().unwrap();
     let one = profile.charges();
+    assert!(one.workers > 0);
     let count = 3;
     let controller = Arc::new(AdmissionController::new(HostLimits {
         descriptors: one.descriptors * count,
@@ -120,6 +122,32 @@ fn exact_aggregate_capacity_admits_n_and_rejects_n_plus_one_without_charging() {
     let reclaimed = controller.snapshot().unwrap();
     assert_eq!(reclaimed.active, ResourceCharges::ZERO);
     assert_eq!(reclaimed.quarantined, ResourceCharges::ZERO);
+}
+
+#[test]
+fn worker_limit_is_the_only_limit_that_refuses_a_second_fused_admission() {
+    let profile = host_test_ring_profile().unwrap();
+    let one = profile.charges();
+    // Every limit but `workers` has room for many admissions.
+    let controller = Arc::new(AdmissionController::new(HostLimits {
+        descriptors: one.descriptors * 16,
+        arena_bytes: one.arena_bytes * 16,
+        leases: one.leases * 16,
+        mappings: one.mappings * 16,
+        file_descriptors: one.file_descriptors * 16,
+        workers: one.workers,
+        client_instances: one.client_instances * 16,
+        pinned_workers: 0,
+    }));
+    let _first = controller.admit(&profile, None).unwrap();
+    assert!(matches!(
+        controller.admit(&profile, None),
+        Err(AdmissionError::WorkerLimit)
+    ));
+    assert!(matches!(
+        controller.can_admit(&profile, None),
+        Err(AdmissionError::WorkerLimit)
+    ));
 }
 
 fn span_profile(max_spans: usize) -> TargetProfile {

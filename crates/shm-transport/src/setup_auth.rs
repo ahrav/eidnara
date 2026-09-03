@@ -30,18 +30,20 @@ pub const SERVER_PROOF_DOMAIN: &str = "eidnara-server-v1";
 pub const CLIENT_AUTH_DOMAIN: &str = "eidnara-client-v1";
 /// Role string a connecting peer presents.
 pub const DEFAULT_CLIENT_ROLE: &str = "client";
+/// Prefix of every `daemon_ver` string the host publishes; the remainder is its version.
+pub const DAEMON_VER_PREFIX: &str = "eidnara-host/";
 
 /// HMAC-SHA256 over `domain || client_nonce || server_nonce || len(daemon_ver) as u32 BE
-/// || daemon_ver || daemon_id`. Binding `daemon_ver` stops a peer without the key from
-/// altering the reported version; the length prefix keeps `daemon_ver` and `daemon_id`
-/// from sliding into each other, so no two distinct pairs share a MAC input.
+/// || daemon_ver || daemon_id`. Including `daemon_ver` in the MAC prevents a peer without
+/// `key` from altering the reported version. `daemon_ver` has a length prefix and
+/// `daemon_id` has a fixed length, so distinct input tuples cannot share a MAC input.
 pub fn compute_proof(
     key: &[u8],
     domain: &str,
     client_nonce: &[u8; NONCE_LEN],
     server_nonce: &[u8; NONCE_LEN],
     daemon_ver: &str,
-    daemon_id: &[u8],
+    daemon_id: &[u8; DAEMON_ID_LEN],
 ) -> [u8; PROOF_LEN] {
     transcript_mac(
         key,
@@ -64,7 +66,7 @@ pub fn verify_proof(
     client_nonce: &[u8; NONCE_LEN],
     server_nonce: &[u8; NONCE_LEN],
     daemon_ver: &str,
-    daemon_id: &[u8],
+    daemon_id: &[u8; DAEMON_ID_LEN],
     proof: &[u8; PROOF_LEN],
 ) -> Result<(), ProofMismatch> {
     transcript_mac(
@@ -90,7 +92,7 @@ fn transcript_mac(
     client_nonce: &[u8; NONCE_LEN],
     server_nonce: &[u8; NONCE_LEN],
     daemon_ver: &str,
-    daemon_id: &[u8],
+    daemon_id: &[u8; DAEMON_ID_LEN],
 ) -> Hmac<Sha256> {
     let daemon_ver_bytes = daemon_ver.as_bytes();
     let daemon_ver_len =
@@ -200,7 +202,7 @@ mod tests {
                        client_nonce: &[u8; NONCE_LEN],
                        server_nonce: &[u8; NONCE_LEN],
                        daemon_ver: &str,
-                       daemon_id: &[u8],
+                       daemon_id: &[u8; DAEMON_ID_LEN],
                        proof: &[u8; PROOF_LEN],
                        altered: &str| {
             assert_eq!(
@@ -296,13 +298,14 @@ mod tests {
         let key = [7u8; 32];
         let client_nonce = [1u8; NONCE_LEN];
         let server_nonce = [2u8; NONCE_LEN];
+        let daemon_id = [3u8; DAEMON_ID_LEN];
         let proof = compute_proof(
             &key,
             CLIENT_AUTH_DOMAIN,
             &client_nonce,
             &server_nonce,
             "ab",
-            b"cd",
+            &daemon_id,
         );
         assert_eq!(
             verify_proof(
@@ -311,11 +314,17 @@ mod tests {
                 &client_nonce,
                 &server_nonce,
                 "ab",
-                b"cd",
+                &daemon_id,
                 &proof
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn committed_daemon_ver_carries_the_published_prefix() {
+        assert!(vectors::DAEMON_VER.starts_with(DAEMON_VER_PREFIX));
+        assert!(!DAEMON_VER_PREFIX.is_empty());
     }
 
     #[test]
@@ -365,31 +374,6 @@ mod tests {
             &daemon_id,
         );
         assert_ne!(baseline, tampered, "daemon_ver must change the proof");
-    }
-
-    #[test]
-    fn daemon_ver_length_prefix_prevents_field_sliding() {
-        let key = [7u8; 32];
-        let client_nonce = [1u8; NONCE_LEN];
-        let server_nonce = [2u8; NONCE_LEN];
-        assert_ne!(
-            compute_proof(
-                &key,
-                SERVER_PROOF_DOMAIN,
-                &client_nonce,
-                &server_nonce,
-                "ab",
-                b"cd"
-            ),
-            compute_proof(
-                &key,
-                SERVER_PROOF_DOMAIN,
-                &client_nonce,
-                &server_nonce,
-                "abc",
-                b"d"
-            ),
-        );
     }
 
     #[test]
