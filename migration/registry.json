@@ -82,6 +82,36 @@
       ]
     },
     {
+      "kind": "retired-identity",
+      "digest": "0aa581643df464a8873e4321b84b4a44c3ad4d32b870f03f76395136359194d0",
+      "rationale": "A source-implementation name, recorded as the SHA-256 of its lower-cased form with `-` and `_` removed so the registry enforces its absence without spelling it; any token or `-`/`_`-separated part of a token in a tracked text file that normalizes to it fails the registry gate."
+    },
+    {
+      "kind": "retired-identity",
+      "digest": "dbfaa5d6a74412605263d67e5d4b7bd4192ac6041cee36098252077896f134ff",
+      "rationale": "A source-implementation name, recorded as the SHA-256 of its lower-cased form with `-` and `_` removed so the registry enforces its absence without spelling it; any token or `-`/`_`-separated part of a token in a tracked text file that normalizes to it fails the registry gate."
+    },
+    {
+      "kind": "retired-identity",
+      "digest": "582a7917b38a9364b1223d351ccb50a0dbd9f049885ce16e4415a72463c231ea",
+      "rationale": "A source-implementation name, recorded as the SHA-256 of its lower-cased form with `-` and `_` removed so the registry enforces its absence without spelling it; any token or `-`/`_`-separated part of a token in a tracked text file that normalizes to it fails the registry gate."
+    },
+    {
+      "kind": "retired-identity",
+      "digest": "7331cf1b992a1abfe8d5cc595555a6ce6e33dabe880092ef4298c34a21be6c22",
+      "rationale": "A source-implementation name, recorded as the SHA-256 of its lower-cased form with `-` and `_` removed so the registry enforces its absence without spelling it; any token or `-`/`_`-separated part of a token in a tracked text file that normalizes to it fails the registry gate."
+    },
+    {
+      "kind": "retired-identity",
+      "digest": "6bc0f9c4ecb0acbebf1b9f6c816bdd66f4885f67c917d9e141cf893014fba936",
+      "rationale": "A source-implementation name, recorded as the SHA-256 of its lower-cased form with `-` and `_` removed so the registry enforces its absence without spelling it; any token or `-`/`_`-separated part of a token in a tracked text file that normalizes to it fails the registry gate."
+    },
+    {
+      "kind": "retired-identity",
+      "digest": "ce678bb075b9256738aba22be1ca63f5c4d21bfa748b6265f0489a198594b5df",
+      "rationale": "A source-implementation name, recorded as the SHA-256 of its lower-cased form with `-` and `_` removed so the registry enforces its absence without spelling it; any token or `-`/`_`-separated part of a token in a tracked text file that normalizes to it fails the registry gate."
+    },
+    {
       "kind": "fixture",
       "path": "crates/cache-stability/tests/golden/cache-stability-golden-vectors.json",
       "role": "byte-stable",

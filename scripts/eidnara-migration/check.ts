@@ -497,6 +497,7 @@ function validateReceiptShape(root: JsonObject, errors: string[]): ReceiptShape 
 
 interface RegistryShape {
     identities: { value: string; class: string }[];
+    retired: { digest: string }[];
     typescript: { path: string; class: string }[];
     families: { name: string; class: string; literals: string[] }[];
     authored: string[];
@@ -595,7 +596,8 @@ function validateFamilyEntry(
 
 function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShape {
     validateSchemaVersion(root, errors);
-    const shape: RegistryShape = { identities: [], typescript: [], families: [], authored: [], fixtures: [] };
+    const shape: RegistryShape = { identities: [], retired: [], typescript: [], families: [], authored: [], fixtures: [] };
+    const retiredDigests = new Set<string>();
     const identityValues = new Set<string>();
     const typescriptPaths = new Set<string>();
     const familyNames = new Set<string>();
@@ -610,8 +612,19 @@ function validateRegistryShape(root: JsonObject, errors: string[]): RegistryShap
         const path = `$.entries[${index}]`;
         const entry = requireObject(raw, path, errors);
         if (entry === undefined) return;
-        const kind = requireEnum(entry, "kind", ["identity", "typescript", "family", "authored", "fixture"], path, errors);
+        const kind = requireEnum(entry, "kind", ["identity", "retired-identity", "typescript", "family", "authored", "fixture"], path, errors);
         switch (kind) {
+            case "retired-identity": {
+                // The source implementation's names are recorded as digests of their normalized
+                // form, so the registry enforces their absence without spelling them.
+                const digest = requireDigest(entry, "digest", path, errors);
+                requireString(entry, "rationale", path, errors);
+                if (digest === undefined) return;
+                if (retiredDigests.has(digest)) errors.push(`${path}.digest is duplicated`);
+                retiredDigests.add(digest);
+                shape.retired.push({ digest });
+                break;
+            }
             case "identity": {
                 const identity = validateIdentityEntry(entry, path, errors);
                 if (identity === undefined) return;
@@ -1358,6 +1371,19 @@ function verifyReceipt(shape: ReceiptShape, ctx: Context, errors: string[]): voi
             const impactErrors = verifyKind("architecture-impact", impact, ctx);
             impactErrors.forEach((error) => errors.push(`$.architecture_impact: ${error}`));
             if (impact.wave !== wave) errors.push(`$.architecture_impact names wave ${String(impact.wave)}, receipt is ${wave}`);
+            // A pre-port report judges the source tree, so it must name a pinned source at
+            // the pinned commit; a report of another revision decides nothing about this wave.
+            (Array.isArray(impact.reports) ? impact.reports : []).forEach((entry, index) => {
+                if (!isObject(entry) || entry.phase !== "pre-port" || !isObject(entry.analyzed)) return;
+                const repo = typeof entry.analyzed.repo === "string" ? entry.analyzed.repo : undefined;
+                const commit = typeof entry.analyzed.commit === "string" ? entry.analyzed.commit : undefined;
+                const source = shape.sources.find((candidate) => candidate.repo === repo);
+                if (source === undefined) {
+                    errors.push(`$.architecture_impact.reports[${index}].analyzed.repo ${String(repo)} is not a pinned source of this receipt`);
+                } else if (commit !== source.commit) {
+                    errors.push(`$.architecture_impact.reports[${index}].analyzed.commit ${String(commit)} is not the pinned ${repo} commit ${source.commit}`);
+                }
+            });
         }
     }
 
@@ -1723,7 +1749,54 @@ export function validateReadinessShape(root: JsonObject, errors: string[]): void
 
 
 
+/**
+ * Normalized form of a name for the retired-identity digest: lower-case with `-` and `_`
+ * removed, so `Some-Name`, `some_name`, and `somename` share one digest.
+ */
+export function retiredIdentityDigest(name: string): string {
+    return sha256(name.toLowerCase().replace(/[-_]/g, ""));
+}
+
+/** Text files a retired identity is searched in: every tracked file except lock files. */
+function retiredIdentityScanFiles(root: string): string[] {
+    const listed = git(root, ["ls-files", "-z"]);
+    const files = listed.ok ? listed.stdout.split("\0").filter((f) => f !== "") : listFiles(root, skipVendored);
+    return files.filter((f) => !/(^|\/)(bun\.lock|Cargo\.lock|package-lock\.json)$/.test(f));
+}
+
+/**
+ * Every word-like token in `text`, plus each `-`/`_`-separated part of it, in normalized
+ * form; a retired name embedded in a compound such as `name-host` is found through its part.
+ */
+function normalizedTokens(text: string): Set<string> {
+    const out = new Set<string>();
+    for (const match of text.matchAll(/[A-Za-z][A-Za-z0-9_-]*/g)) {
+        const token = match[0];
+        out.add(token.toLowerCase().replace(/[-_]/g, ""));
+        for (const part of token.split(/[-_]+/)) {
+            if (part !== "") out.add(part.toLowerCase());
+        }
+    }
+    return out;
+}
+
 function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): void {
+    if (shape.retired.length > 0) {
+        const retired = new Set(shape.retired.map((entry) => entry.digest));
+        for (const rel of retiredIdentityScanFiles(ctx.root)) {
+            const full = join(ctx.root, rel);
+            if (!existsSync(full) || !statSync(full).isFile()) continue;
+            const bytes = readFileSync(full);
+            if (bytes.includes(0)) continue;
+            const text = bytes.toString("utf8");
+            for (const token of normalizedTokens(text)) {
+                if (retired.has(sha256(token))) {
+                    errors.push(`${rel}: names a retired source identity (digest ${sha256(token).slice(0, 12)}); the destination tree carries no source-implementation name`);
+                    break;
+                }
+            }
+        }
+    }
     const pinned = receiptDestinations(ctx.root);
     for (const fixture of shape.fixtures) {
         const full = join(ctx.root, fixture.path);

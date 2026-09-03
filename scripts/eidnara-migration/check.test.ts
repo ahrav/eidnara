@@ -12,6 +12,7 @@ import {
     type Context,
     fileSetDigest,
     modulesHash,
+    retiredIdentityDigest,
 } from "./check";
 
 const digest = "a".repeat(64);
@@ -884,8 +885,11 @@ describe("evidence: git-backed receipts", () => {
     function architectureFor(): Json {
         const architecture = copy("architecture-impact");
         for (const report of architecture.reports as Json[]) {
-            if (report.phase !== "post-integration") continue;
             const analyzed = report.analyzed as Json;
+            if (report.phase === "pre-port") {
+                analyzed.commit = sourceCommit;
+                continue;
+            }
             analyzed.commit = destinationCommit;
             analyzed.modules_hash = modulesHash(destination, analyzed.modules as string[], "$", []);
         }
@@ -1183,6 +1187,50 @@ describe("evidence: git-backed receipts", () => {
             expect(errors).toContain(`$.scope[0],$.scope[1] source has blob ${leaseBlob} at 2 paths but the receipt disposes of it 1 time(s)`);
         } finally {
             gitIn(source, ["reset", "-q", "--hard", sourceCommit]);
+        }
+    });
+
+    test("a pre-port architecture report must name a pinned source at its pinned commit", () => {
+        const stale = architectureFor();
+        ((stale.reports as Json[])[0]!.analyzed as Json).commit = "f".repeat(40);
+        write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(stale));
+        try {
+            expect(verify("receipt", receipt(), ctx)).toContain(
+                `$.architecture_impact.reports[0].analyzed.commit ${"f".repeat(40)} is not the pinned source commit ${sourceCommit}`,
+            );
+            const foreign = architectureFor();
+            ((foreign.reports as Json[])[0]!.analyzed as Json).repo = "elsewhere";
+            write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(foreign));
+            expect(verify("receipt", receipt(), ctx)).toContain("$.architecture_impact.reports[0].analyzed.repo elsewhere is not a pinned source of this receipt");
+        } finally {
+            write(join(destination, "migration/waves/U2/architecture-impact.json"), JSON.stringify(architectureFor()));
+        }
+        expect(verify("receipt", receipt(), ctx)).toEqual([]);
+    });
+
+    test("a retired source identity is found through its digest in any spelling or compound", () => {
+        const registry = copy("registry");
+        (registry.entries as Json[]).push({ kind: "retired-identity", digest: retiredIdentityDigest("old-name"), rationale: "retired" });
+        for (const [file, text] of [
+            ["docs/note.md", "The Old-Name service.\n"],
+            ["crates/lease/src/paths.rs", 'const DIR: &str = "old_name";\n'],
+            ["scripts/run.sh", "oldname-host --flag\n"],
+        ] as const) {
+            write(join(destination, file), text);
+            gitIn(destination, ["add", "-A"]);
+            try {
+                const errors = verify("registry", registry, ctx);
+                expect(errors.some((error) => error.startsWith(`${file}: names a retired source identity`))).toBe(true);
+            } finally {
+                gitIn(destination, ["rm", "-q", "-f", file]);
+            }
+        }
+        write(join(destination, "docs/note.md"), "An unrelated older name.\n");
+        gitIn(destination, ["add", "-A"]);
+        try {
+            expect(verify("registry", registry, ctx).some((error) => error.includes("retired source identity"))).toBe(false);
+        } finally {
+            gitIn(destination, ["rm", "-q", "-f", "docs/note.md"]);
         }
     });
 

@@ -61,6 +61,13 @@ pub enum StoreError {
     /// its absence is corruption rather than a fresh start at epoch zero.
     #[error("database fence row is missing from an initialized store; restore it before reopening")]
     FenceMissing,
+    /// The stored fence epoch has no representable successor, so no further writer epoch
+    /// can be issued for this store until the row is repaired.
+    #[error(
+        "database fence epoch {db_epoch} has no representable successor; repair fence.epoch \
+         before reopening"
+    )]
+    FenceExhausted { db_epoch: u64 },
 }
 
 /// The lease key includes the module, backend, storage namespace, and the
@@ -744,6 +751,14 @@ mod sqlite_backend {
         // WAL and rewrite the file on close, and a fence row in a foreign file would
         // otherwise raise the lease floor before the file was ever classified.
         let (epoch_floor, inspected) = expected.inspect_existing(Path::new(&path))?;
+        // The lease will issue at least `epoch_floor + 1`, and that value must be storable
+        // in the fence row; refusing here keeps an unrepresentable successor out of the
+        // lease sidecar, which would otherwise stay poisoned after the row was repaired.
+        if epoch_floor >= i64::MAX as u64 {
+            return Err(StoreError::FenceExhausted {
+                db_epoch: epoch_floor,
+            });
+        }
         let db_file_name = Path::new(&path)
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -1849,6 +1864,39 @@ mod tests {
         assert!(
             mode.eq_ignore_ascii_case("delete"),
             "the fenced writer must not have re-pinned WAL, journal_mode is {mode}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A fence at `i64::MAX` is refused before the lease is touched, so repairing the row is
+    /// enough to reopen; the lease sidecar never holds an epoch SQLite cannot store.
+    #[test]
+    fn a_fence_at_the_integer_maximum_is_refused_before_the_lease_advances() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, "").expect("first open"));
+        {
+            let raw = rusqlite::Connection::open(path).expect("raw connection");
+            raw.execute("UPDATE fence SET epoch = ?1 WHERE id = 0", [i64::MAX])
+                .expect("exhaust the fence");
+        }
+        match open_sqlite(&d, "").map(|_| ()) {
+            Err(StoreError::FenceExhausted { db_epoch }) => {
+                assert_eq!(db_epoch, i64::MAX as u64)
+            }
+            other => panic!("an exhausted fence must be refused, got {other:?}"),
+        }
+        {
+            let raw = rusqlite::Connection::open(path).expect("raw connection");
+            raw.execute("UPDATE fence SET epoch = 1 WHERE id = 0", [])
+                .expect("repair the fence");
+        }
+        assert_eq!(
+            open_sqlite(&d, "").expect("reopen after repair").epoch(),
+            2,
+            "the lease sidecar still holds epoch 1, so the repaired store issues 2"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
