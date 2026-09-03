@@ -1,0 +1,29 @@
+[package]
+name = "shm-native"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+getrandom = { workspace = true }
+libc = { workspace = true }
+shm-transport = { workspace = true }
+napi = { version = "=3.12.2", default-features = false, features = ["napi8"] }
+napi-derive = "=3.6.3"
+rustix = { workspace = true, features = ["event", "fs", "net"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+subtle = { workspace = true }
+
+[dev-dependencies]
+napi = { version = "=3.12.2", default-features = false, features = ["napi8", "dyn-symbols"] }
+
+[build-dependencies]
+napi-build = "2"
