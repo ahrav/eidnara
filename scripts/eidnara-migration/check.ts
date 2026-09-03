@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type CheckKind =
@@ -1812,22 +1812,79 @@ export function normalizedTokens(text: string): Set<string> {
 /**
  * `text` with every item under a `#[cfg(test)]` (or `cfg(all(test, ...))`) attribute
  * replaced by blank lines, so line numbers in later messages still match the file. The item
- * is the next `{ ... }` block or `;`-terminated declaration after the attribute. String
- * literals (including raw strings), character literals, and comments are skipped while
- * matching braces, so a brace inside a test string does not end the item early.
+ * is the next `{ ... }` block or `;`-terminated declaration after the attribute. The text is
+ * walked token by token: an attribute spelled inside a comment, a string literal, or a raw
+ * string is text, not an attribute, so it neither starts a blanked item nor ends one early.
  */
 export function withoutCfgTestItems(text: string): string {
-    const attribute = /#\[cfg\((?:test|all\(\s*test\b[^)]*\))\)\]/g;
+    const attribute = /^#\[cfg\((?:test|all\(\s*test\b[^)]*\))\)\]/;
     let out = "";
     let cursor = 0;
-    for (const match of text.matchAll(attribute)) {
-        if (match.index < cursor) continue;
-        const start = match.index;
-        const end = rustItemEnd(text, start + match[0].length);
-        out += text.slice(cursor, start) + text.slice(start, end).replace(/[^\n]/g, "");
-        cursor = end;
+    let index = 0;
+    while (index < text.length) {
+        const skipped = rustLexemeEnd(text, index);
+        if (skipped !== null) {
+            index = skipped;
+            continue;
+        }
+        if (text[index] === "#") {
+            const match = attribute.exec(text.slice(index, index + 200));
+            if (match !== null) {
+                const end = rustItemEnd(text, index + match[0].length);
+                out += text.slice(cursor, index) + text.slice(index, end).replace(/[^\n]/g, "");
+                cursor = end;
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
     }
     return out + text.slice(cursor);
+}
+
+/**
+ * Index just past the comment, string, byte string, raw string, or character literal that
+ * starts at `index`, or `null` when none does. Rust block comments nest, so a block comment
+ * ends at the terminator that returns to depth 0; a raw string may carry up to 255 `#` in
+ * its delimiter, so its opener is matched on the remaining text rather than a fixed window.
+ */
+function rustLexemeEnd(text: string, index: number): number | null {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === "/" && next === "/") {
+        const eol = text.indexOf("\n", index);
+        return eol === -1 ? text.length : eol;
+    }
+    if (char === "/" && next === "*") {
+        let comments = 1;
+        let cursor = index + 2;
+        while (cursor < text.length && comments > 0) {
+            if (text[cursor] === "/" && text[cursor + 1] === "*") {
+                comments += 1;
+                cursor += 2;
+            } else if (text[cursor] === "*" && text[cursor + 1] === "/") {
+                comments -= 1;
+                cursor += 2;
+            } else cursor += 1;
+        }
+        return cursor;
+    }
+    const identifierBefore = /[A-Za-z0-9_]/.test(text[index - 1] ?? "");
+    const raw = (char === "r" || (char === "b" && next === "r")) && !identifierBefore ? /^b?r(#{0,255})"/.exec(text.slice(index, index + 260)) : null;
+    if (raw !== null) {
+        const terminator = `"${raw[1]}`;
+        const close = text.indexOf(terminator, index + raw[0].length);
+        return close === -1 ? text.length : close + terminator.length;
+    }
+    if (char === '"' || (char === "b" && next === '"' && !identifierBefore)) {
+        let cursor = index + (char === "b" ? 2 : 1);
+        while (cursor < text.length && text[cursor] !== '"') cursor += text[cursor] === "\\" ? 2 : 1;
+        return cursor + 1;
+    }
+    if (char === "'" && /^'(?:\\.|[^\\'])'/.test(text.slice(index, index + 4))) {
+        return text.indexOf("'", index + 2) + 1;
+    }
+    return null;
 }
 
 /** Index just past the Rust item that starts at `from`: its closing brace or terminating `;`. */
@@ -1835,49 +1892,12 @@ function rustItemEnd(text: string, from: number): number {
     let depth = 0;
     let index = from;
     while (index < text.length) {
+        const skipped = rustLexemeEnd(text, index);
+        if (skipped !== null) {
+            index = skipped;
+            continue;
+        }
         const char = text[index];
-        const next = text[index + 1];
-        if (char === "/" && next === "/") {
-            const eol = text.indexOf("\n", index);
-            index = eol === -1 ? text.length : eol;
-            continue;
-        }
-        if (char === "/" && next === "*") {
-            // Rust block comments nest, so the terminator is the one that returns to depth 0.
-            let comments = 1;
-            index += 2;
-            while (index < text.length && comments > 0) {
-                if (text[index] === "/" && text[index + 1] === "*") {
-                    comments += 1;
-                    index += 2;
-                } else if (text[index] === "*" && text[index + 1] === "/") {
-                    comments -= 1;
-                    index += 2;
-                } else index += 1;
-            }
-            continue;
-        }
-        // A raw string may carry up to 255 `#` in its delimiter, so the opener is matched on
-        // the remaining text rather than a fixed window.
-        const raw = (char === "r" || (char === "b" && next === "r")) && !/[A-Za-z0-9_]/.test(text[index - 1] ?? "")
-            ? /^b?r(#{0,255})"/.exec(text.slice(index, index + 260))
-            : null;
-        if (raw !== null) {
-            const terminator = `"${raw[1]}`;
-            const close = text.indexOf(terminator, index + raw[0].length);
-            index = close === -1 ? text.length : close + terminator.length;
-            continue;
-        }
-        if (char === '"' || (char === "b" && next === '"' && !/[A-Za-z0-9_]/.test(text[index - 1] ?? ""))) {
-            index += char === "b" ? 2 : 1;
-            while (index < text.length && text[index] !== '"') index += text[index] === "\\" ? 2 : 1;
-            index += 1;
-            continue;
-        }
-        if (char === "'" && /^'(?:\\.|[^\\'])'/.test(text.slice(index, index + 4))) {
-            index = text.indexOf("'", index + 2) + 1;
-            continue;
-        }
         if (char === "{") depth += 1;
         else if (char === "}") {
             depth -= 1;
@@ -1886,6 +1906,35 @@ function rustItemEnd(text: string, from: number): number {
         index += 1;
     }
     return text.length;
+}
+
+/**
+ * The source files a crate ships: every `.rs`, `.ts`, and `.tsx` under the crate except the
+ * auto-discovered `tests/`, `benches/`, and `examples/` targets and any `[[test]]`,
+ * `[[bench]]`, or `[[example]]` target the manifest names by path. A `[lib]` or `[[bin]]`
+ * at a path outside `src/` is therefore scanned, as is a TypeScript file kept in a crate.
+ */
+export function productionCrateFiles(crateDir: string): string[] {
+    const testOnly = new Set<string>();
+    const manifestPath = join(crateDir, "Cargo.toml");
+    if (existsSync(manifestPath)) {
+        const manifest = Bun.TOML.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+        for (const kind of ["test", "bench", "example"]) {
+            const targets = manifest[kind];
+            if (!Array.isArray(targets)) continue;
+            for (const target of targets) {
+                const path = (target as Record<string, unknown>).path;
+                if (typeof path === "string") testOnly.add(path.split(sep).join("/"));
+            }
+        }
+    }
+    return listFiles(crateDir, skipVendored).filter((rel) => {
+        if (!rel.endsWith(".rs") && !rel.endsWith(".ts") && !rel.endsWith(".tsx")) return false;
+        const normalized = rel.split(sep).join("/");
+        const top = normalized.split("/")[0];
+        if (top === "tests" || top === "benches" || top === "examples") return false;
+        return !testOnly.has(normalized);
+    });
 }
 
 function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): void {
@@ -1926,27 +1975,37 @@ function verifyRegistry(shape: RegistryShape, ctx: Context, errors: string[]): v
     }
 
     const literalOwners = new Set(shape.families.flatMap((family) => family.literals));
-    for (const tree of ["crates", "packages"]) {
-        const treeRoot = join(ctx.root, tree);
-        if (!existsSync(treeRoot)) continue;
-        for (const rel of listFiles(treeRoot, skipVendored)) {
-            const parts = rel.split("/");
-            if (parts[1] !== "src") continue;
-            const language = rel.endsWith(".rs") ? ".rs" : rel.endsWith(".ts") || rel.endsWith(".tsx") ? ".ts" : undefined;
-            if (language === undefined) continue;
-            // A test-like file name carries no compile-time meaning, so every file under
-            // `src` is scanned; only the bodies Rust compiles for tests alone are skipped.
-            const text = language === ".rs" ? withoutCfgTestItems(readFileSync(join(treeRoot, rel), "utf8")) : readFileSync(join(treeRoot, rel), "utf8");
-            for (const match of text.matchAll(PERSISTENT_LITERAL_RE[language])) {
-                const literal = match[1] ?? match[2] ?? match[3];
-                if (literal === undefined || literalOwners.has(literal)) continue;
-                errors.push(`${tree}/${rel}: persistent literal "${literal}" has no family entry in the registry`);
+    const scanProduction = (path: string, language: ".rs" | ".ts"): void => {
+        // A test-like file name carries no compile-time meaning, so every production file is
+        // scanned; only the bodies Rust compiles for tests alone are skipped.
+        const source = readFileSync(join(ctx.root, path), "utf8");
+        const text = language === ".rs" ? withoutCfgTestItems(source) : source;
+        for (const match of text.matchAll(PERSISTENT_LITERAL_RE[language])) {
+            const literal = match[1] ?? match[2] ?? match[3];
+            if (literal === undefined || literalOwners.has(literal)) continue;
+            errors.push(`${path}: persistent literal "${literal}" has no family entry in the registry`);
+        }
+        text.split("\n").forEach((line, index) => {
+            for (const match of line.matchAll(MIGRATION_MACHINERY_RE)) {
+                errors.push(`${path}:${index + 1}: migration machinery "${match[0]}"; a family has one baseline and no version ledger`);
             }
-            text.split("\n").forEach((line, index) => {
-                for (const match of line.matchAll(MIGRATION_MACHINERY_RE)) {
-                    errors.push(`${tree}/${rel}:${index + 1}: migration machinery "${match[0]}"; a family has one baseline and no version ledger`);
-                }
-            });
+        });
+    };
+    const cratesRoot = join(ctx.root, "crates");
+    if (existsSync(cratesRoot)) {
+        for (const entry of readdirSync(cratesRoot, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            for (const rel of productionCrateFiles(join(cratesRoot, entry.name))) {
+                scanProduction(`crates/${entry.name}/${rel.split(sep).join("/")}`, rel.endsWith(".rs") ? ".rs" : ".ts");
+            }
+        }
+    }
+    const packagesTree = join(ctx.root, "packages");
+    if (existsSync(packagesTree)) {
+        for (const rel of listFiles(packagesTree, skipVendored)) {
+            const parts = rel.split(sep);
+            if (parts[1] !== "src") continue;
+            if (rel.endsWith(".ts") || rel.endsWith(".tsx")) scanProduction(`packages/${parts.join("/")}`, ".ts");
         }
     }
 

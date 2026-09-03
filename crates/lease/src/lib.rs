@@ -431,7 +431,8 @@ pub fn link_count(file: &File) -> std::io::Result<u64> {
 /// After the lock is held, the path must still name the locked file. A rename between this
 /// acquirer's open and its lock would leave it holding a lock on a file the path no longer
 /// names, so the next acquirer would lock a different file for the same key. On Windows the
-/// default share mode permits a rename of an open file, so the comparison applies there too.
+/// lease handle denies delete sharing, so a rename is refused once the handle is open; the
+/// comparison still covers a rename that completed before this acquirer's open.
 fn require_path_still_names(file: &File, path: &std::path::Path) -> std::io::Result<()> {
     if FileIdentity::of_file(file)? != FileIdentity::of_path(path)? {
         return Err(std::io::Error::new(
@@ -456,10 +457,32 @@ fn lease_open_options() -> OpenOptions {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        // Without delete sharing, a rename or delete of the lease file fails while any
+        // holder's handle is open, so the path keeps naming the locked file for the
+        // guard's lifetime; the default share mode would let another process re-point
+        // the path and lock a replacement for the same key.
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
     options
+}
+
+/// Creates the lease root and any missing ancestors owner-only, independent of the process
+/// umask, so a root this crate creates passes `require_private_directory` instead of being
+/// refused for the group or other write bits a permissive umask would leave on it. An
+/// existing directory is left as it is and judged by that check.
+fn create_lease_root(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
 }
 
 fn open_lease_file(path: &std::path::Path) -> std::io::Result<File> {
@@ -483,10 +506,10 @@ fn open_lease_file(path: &std::path::Path) -> std::io::Result<File> {
         let mut temp = tempfile::NamedTempFile::new_in(parent)?;
         persist_epoch(temp.as_file_mut(), 0)?;
         match temp.persist_noclobber(path) {
-            Ok(file) => {
-                protect_open_file(&file, path)?;
-                return Ok(file);
-            }
+            // The handle `persist` returns was opened by `tempfile` under its own sharing
+            // and flags, so the lease handle is taken by the next attempt's open through
+            // `lease_open_options` instead.
+            Ok(_created) => {}
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.error),
         }
@@ -623,7 +646,7 @@ impl FileLeaseStore {
         key: &LeaseKey,
         recovery_floor: Option<u64>,
     ) -> Result<HeldFileLease, LeaseError> {
-        std::fs::create_dir_all(&self.base_dir).map_err(LeaseError::Io)?;
+        create_lease_root(&self.base_dir).map_err(LeaseError::Io)?;
         require_private_directory(&self.base_dir).map_err(LeaseError::Io)?;
         let path = self.lease_path(key);
         let mut file = open_lease_file(&path).map_err(LeaseError::Io)?;
@@ -662,7 +685,7 @@ impl FileLeaseStore {
     /// Returns [`LeaseError::Held`] when an exclusive holder has the lease, or
     /// [`LeaseError::Io`] when the lease file cannot be opened or read.
     pub fn acquire_shared(&self, key: &LeaseKey) -> Result<HeldFileLease, LeaseError> {
-        std::fs::create_dir_all(&self.base_dir).map_err(LeaseError::Io)?;
+        create_lease_root(&self.base_dir).map_err(LeaseError::Io)?;
         require_private_directory(&self.base_dir).map_err(LeaseError::Io)?;
         let path = self.lease_path(key);
         let mut file = open_lease_file(&path).map_err(LeaseError::Io)?;
@@ -1325,6 +1348,57 @@ mod tests {
                 .epoch(),
             2
         );
+    }
+
+    /// A lease root that does not yet exist is created owner-only whatever the umask, so the
+    /// acquisition that creates it is not refused by its own directory check. The umask is
+    /// process-wide, so the permissive mask is set in a child process running only this
+    /// test; the parent asserts on that child's outcome.
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_lease_root_is_owner_only_under_a_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_MARKER: &str = "LEASE_UMASK_PROBE_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "tests::a_fresh_lease_root_is_owner_only_under_a_permissive_umask",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_MARKER, "1")
+                .output()
+                .expect("run the probe in a child process");
+            assert!(
+                output.status.success(),
+                "probe child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // SAFETY: `umask` only sets the file-mode creation mask of this child process.
+        unsafe { libc::umask(0o000) };
+        let outer = tempfile::tempdir().expect("outer");
+        std::fs::set_permissions(outer.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("owner-only outer");
+        let root = outer.path().join("nested").join("leases");
+        let store = FileLeaseStore::new(&root).expect("store");
+        let lease = store
+            .acquire(&key("a"))
+            .expect("acquisition creates and accepts its own root");
+        for dir in [&root, &outer.path().join("nested")] {
+            let mode = std::fs::metadata(dir).expect("dir").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} has mode {mode:o}", dir.display());
+        }
+        drop(lease);
+        let shared = store
+            .acquire_shared(&key("a"))
+            .expect("shared acquisition through the same root");
+        drop(shared);
     }
 
     /// A lease directory named through the running user's own final symlink is accepted:

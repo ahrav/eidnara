@@ -199,7 +199,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.ts",
-      "destination_sha256": "147826d628f4a5345ff5c779b8059a83b65985269aaff5d83fd6675caa373658",
+      "destination_sha256": "7baf291ad3e5afcf0d6940fa5ca8e80a3c11abb7d1c32b24298255d2e7b5f00e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -210,7 +210,7 @@
     {
       "source": null,
       "destination": "scripts/eidnara-migration/check.test.ts",
-      "destination_sha256": "793facced699742b9fd8aa644bdb0187ca118da897e1e19fce4d1260273b2567",
+      "destination_sha256": "afe7f4f420b1024349abd2e561b43b417168c6c5655aeddc02b3f24bc481fafa",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

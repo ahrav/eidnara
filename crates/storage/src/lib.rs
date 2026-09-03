@@ -76,12 +76,27 @@ pub enum StoreError {
 /// falsely contend. File names cannot contain `/`, so the `namespace/file`
 /// join is unambiguous.
 #[cfg(feature = "sqlite")]
-fn lease_key(descriptor: &StorageDescriptor, db_file_name: &str) -> LeaseKey {
-    LeaseKey::new(
+fn lease_key(descriptor: &StorageDescriptor, db_file_name: &str) -> Result<LeaseKey, StoreError> {
+    // `LeaseKey::identity` treats a U+001F inside a field as a programming error and
+    // panics; a descriptor is deserialized input, so the separator is refused here with
+    // an error instead.
+    for (name, field) in [
+        ("module_id", descriptor.module_id.as_str()),
+        ("storage_namespace", descriptor.storage_namespace.as_str()),
+        ("sqlite file name", db_file_name),
+    ] {
+        if field.contains('\u{1f}') {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("descriptor {name} {field:?} contains U+001F, the lease-key separator"),
+            )));
+        }
+    }
+    Ok(LeaseKey::new(
         &descriptor.module_id,
         descriptor.backend.label(),
         format!("{}/{}", descriptor.storage_namespace, db_file_name),
-    )
+    ))
 }
 
 #[cfg(feature = "sqlite")]
@@ -765,16 +780,38 @@ mod sqlite_backend {
             .unwrap_or_else(|| path.clone());
         let lease = FileLeaseStore::new(&parent)
             .map_err(StoreError::Io)?
-            .acquire_above(&lease_key(descriptor, &db_file_name), epoch_floor)
+            .acquire_above(&lease_key(descriptor, &db_file_name)?, epoch_floor)
             .map_err(StoreError::Lease)?;
         let epoch = lease.epoch();
 
+        let conn = open_claimed(&path, &expected, inspected, epoch)?;
+
+        Ok(SqliteStore {
+            conn: Mutex::new(conn),
+            epoch,
+            _lease: Some(lease),
+        })
+    }
+
+    /// Opens the read-write connection for `epoch`, which the lease has already issued,
+    /// and claims the fence. The file is refused if it was re-pointed since `inspected`
+    /// was taken; the connection then classifies it on its own view. On an initialized
+    /// file a fence row at or above `epoch` refuses the open before the durability
+    /// pragmas, so an opener superseded between inspection and claim leaves the journal
+    /// mode as it found it; the strict claim inside the transaction remains the authority
+    /// against an advance after that read.
+    pub(crate) fn open_claimed(
+        path: &str,
+        expected: &ExpectedIdentity,
+        inspected: Option<FileIdentity>,
+        epoch: u64,
+    ) -> Result<Connection, StoreError> {
         // Owner-only from creation: SQLite gives sidecars the database file's mode.
-        create_database_file_owner_only(Path::new(&path)).map_err(StoreError::Io)?;
+        create_database_file_owner_only(Path::new(path)).map_err(StoreError::Io)?;
         // `SQLITE_OPEN_NOFOLLOW` closes the window between the owner-only creation and this
         // open, so a symlink swapped in between is refused rather than followed.
         let mut conn = Connection::open_with_flags(
-            &path,
+            path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -786,7 +823,7 @@ mod sqlite_backend {
         // between SQLite's own `open(2)` and this `stat(2)` remains; the store directory is
         // created by this crate and the lease serializes cooperating writers.
         if let Some(pinned) = inspected {
-            let now = FileIdentity::of_path(Path::new(&path)).map_err(StoreError::Io)?;
+            let now = FileIdentity::of_path(Path::new(path)).map_err(StoreError::Io)?;
             if now != pinned {
                 return Err(StoreError::Baseline(format!(
                     "{path} was replaced between inspection and open"
@@ -797,6 +834,9 @@ mod sqlite_backend {
         // is classified on its own view of the file, not on the inspection that preceded
         // the lease.
         let state = expected.classify(&conn)?;
+        if state == FileState::Baseline {
+            precheck_fence(&conn, epoch)?;
+        }
         // Pre-existing permissive files are narrowed before the fence claim writes any bytes.
         for suffix in ["", "-wal", "-shm"] {
             protect_file(Path::new(&format!("{path}{suffix}")))
@@ -822,12 +862,7 @@ mod sqlite_backend {
         claim_fence_strict(&tx, epoch, state)?;
         tx.commit()
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-
-        Ok(SqliteStore {
-            conn: Mutex::new(conn),
-            epoch,
-            _lease: Some(lease),
-        })
+        Ok(conn)
     }
 
     /// SQLite URI for `path` with `immutable=1`: the connection takes no locks, reads no
@@ -1066,7 +1101,7 @@ mod sqlite_backend {
     }
 
     /// The identity every file opened against one baseline text must present.
-    struct ExpectedIdentity {
+    pub(crate) struct ExpectedIdentity {
         text: String,
         digest: String,
         objects: Vec<SchemaObject>,
@@ -1076,7 +1111,7 @@ mod sqlite_backend {
         /// The inventory comes from applying the text to an in-memory database, so
         /// the comparison uses SQLite's own normalization of the DDL rather than a
         /// second parser.
-        fn for_baseline(consumer: &str) -> Result<Self, StoreError> {
+        pub(crate) fn for_baseline(consumer: &str) -> Result<Self, StoreError> {
             let text = format!("{STORE_BASELINE}\n{consumer}");
             let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
             let scratch =
@@ -1412,8 +1447,8 @@ pub use sqlite_backend::{
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::sqlite_backend::{
-        FileState, InspectionCopy, claim_fence, claim_fence_strict,
-        create_database_file_owner_only, immutable_uri,
+        ExpectedIdentity, FileState, InspectionCopy, claim_fence, claim_fence_strict,
+        create_database_file_owner_only, immutable_uri, open_claimed,
     };
     use super::*;
     use lease::FileIdentity;
@@ -1897,6 +1932,113 @@ mod tests {
         assert!(
             mode.eq_ignore_ascii_case("delete"),
             "the fenced writer must not have re-pinned WAL, journal_mode is {mode}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An opener whose lease epoch is already at or below the fence row is refused on
+    /// its read-only look at the row, before `journal_mode = WAL` is pinned, so a store
+    /// that unfenced maintenance left in rollback-journal mode keeps that mode when a
+    /// superseded opener is turned away.
+    #[test]
+    fn a_stale_epoch_is_refused_before_the_journal_mode_is_pinned() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, KV_BASELINE).expect("seed schema"));
+        let expected = ExpectedIdentity::for_baseline(KV_BASELINE).expect("baseline");
+        let raw = rusqlite::Connection::open(path).expect("maintenance connection");
+        let mode: String = raw
+            .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+            .expect("switch to rollback journal");
+        assert!(
+            mode.eq_ignore_ascii_case("delete"),
+            "journal_mode is {mode}"
+        );
+        raw.execute("UPDATE fence SET epoch = 10 WHERE id = 0", [])
+            .expect("advance the fence");
+        drop(raw);
+
+        let result = open_claimed(path, &expected, None, 3);
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::Fenced {
+                    holder_epoch: 3,
+                    db_epoch: 10
+                })
+            ),
+            "a stale epoch is fenced, got {:?}",
+            result.map(|_| ())
+        );
+        let raw = rusqlite::Connection::open(path).expect("inspect journal mode");
+        let mode: String = raw
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal mode");
+        assert!(
+            mode.eq_ignore_ascii_case("delete"),
+            "the refused opener must not have pinned WAL, journal_mode is {mode}"
+        );
+        drop(raw);
+
+        let conn = open_claimed(path, &expected, None, 11).expect("a newer epoch opens");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal mode");
+        assert!(mode.eq_ignore_ascii_case("wal"), "journal_mode is {mode}");
+        let epoch: i64 = conn
+            .query_row("SELECT epoch FROM fence WHERE id = 0", [], |row| row.get(0))
+            .expect("read fence");
+        assert_eq!(epoch, 11);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A descriptor field holding U+001F, the lease-key separator, is refused as an
+    /// `InvalidInput` error instead of reaching `LeaseKey::identity`, which panics on it.
+    #[test]
+    fn a_descriptor_field_holding_the_lease_separator_is_refused_without_panicking() {
+        let (root, base) = tmp();
+        let StorageBackend::Sqlite { path } = &base.backend else {
+            panic!("sqlite descriptor");
+        };
+        let parent = std::path::Path::new(path)
+            .parent()
+            .expect("parent")
+            .to_path_buf();
+        let mut cases = vec![
+            StorageDescriptor {
+                module_id: "mod\u{1f}ule".to_string(),
+                ..base.clone()
+            },
+            StorageDescriptor {
+                storage_namespace: "ns\u{1f}".to_string(),
+                ..base.clone()
+            },
+        ];
+        cases.push(StorageDescriptor {
+            backend: StorageBackend::Sqlite {
+                path: parent
+                    .join("sep\u{1f}arated.db")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+            ..base.clone()
+        });
+        for descriptor in cases {
+            match open_sqlite(&descriptor, KV_BASELINE) {
+                Err(StoreError::Io(error)) => {
+                    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{error}");
+                    assert!(error.to_string().contains("U+001F"), "{error}");
+                }
+                Err(other) => panic!("expected an InvalidInput error, got {other}"),
+                Ok(_) => panic!("a separator in the descriptor must be refused"),
+            }
+        }
+        assert!(
+            std::fs::read_dir(&parent).map(|d| d.count()).unwrap_or(0) == 0,
+            "no lease or database is created for a refused descriptor"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

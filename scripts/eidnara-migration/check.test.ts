@@ -1360,6 +1360,45 @@ describe("evidence: git-backed receipts", () => {
         }
     });
 
+    test("registry scans ignore cfg(test) spelled inside comments and strings", () => {
+        write(
+            join(destination, "crates/lease/src/spelled.rs"),
+            '// example: #[cfg(test)]\npub const A: &str = "after-comment.db";\n/* #[cfg(test)] */ pub const B: &str = "after-block.db";\nconst S: &str = "#[cfg(test)]";\npub const C: &str = "after-string.db";\nconst R: &str = r#"#[cfg(test)]"#;\npub const D: &str = "after-raw.db";\n#[cfg(test)]\nmod t { const T: &str = "test-only.db"; }\n',
+        );
+        try {
+            const errors = verify("registry", copy("registry"), ctx);
+            for (const literal of ["after-comment.db", "after-block.db", "after-string.db", "after-raw.db"]) {
+                expect(errors).toContain(`crates/lease/src/spelled.rs: persistent literal "${literal}" has no family entry in the registry`);
+            }
+            expect(errors.some((error) => error.includes("test-only.db"))).toBe(false);
+        } finally {
+            rmSync(join(destination, "crates/lease/src/spelled.rs"));
+        }
+    });
+
+    test("registry scans follow Cargo targets rather than the src directory", () => {
+        // A crate whose library and binary live outside `src`, with a test target the
+        // manifest names by path and the auto-discovered test and example directories.
+        const crate = join(destination, "crates/edge");
+        write(join(crate, "Cargo.toml"), '[package]\nname = "edge"\nversion = "0.1.0"\nedition = "2024"\n\n[lib]\npath = "lib.rs"\n\n[[bin]]\nname = "edge"\npath = "app/main.rs"\n\n[[test]]\nname = "named"\npath = "checks/named.rs"\n');
+        write(join(crate, "lib.rs"), 'pub const A: &str = "root-lib.db";\n');
+        write(join(crate, "app/main.rs"), 'const B: &str = "bin.db";\nfn main() {}\n');
+        write(join(crate, "checks/named.rs"), 'const C: &str = "named-test.db";\n');
+        write(join(crate, "tests/it.rs"), 'const D: &str = "auto-test.db";\n');
+        write(join(crate, "examples/demo.rs"), 'const E: &str = "example.db";\n');
+        write(join(crate, "benches/speed.rs"), 'const F: &str = "bench.db";\n');
+        try {
+            const errors = verify("registry", copy("registry"), ctx);
+            expect(errors).toContain('crates/edge/lib.rs: persistent literal "root-lib.db" has no family entry in the registry');
+            expect(errors).toContain('crates/edge/app/main.rs: persistent literal "bin.db" has no family entry in the registry');
+            for (const literal of ["named-test.db", "auto-test.db", "example.db", "bench.db"]) {
+                expect(errors.some((error) => error.includes(literal))).toBe(false);
+            }
+        } finally {
+            rmSync(crate, { recursive: true });
+        }
+    });
+
     test("registry scans catch migration machinery in non-test code (AE11)", () => {
         write(join(destination, "crates/lease/src/ledger.rs"), "pub struct Migration { pub version: u32 }\npub fn migrate() {}\n");
         // A `tests` directory under `src` is compiled like any other module; only a

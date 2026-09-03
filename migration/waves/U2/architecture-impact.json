@@ -134,7 +134,7 @@
       "iteration": 1,
       "analyzed": {
         "repo": "eidnara",
-        "commit": "18a9c48528a020810213a82bf7f29d9abdf1cb72",
+        "commit": "a2ca516b242b86b081b56b97ea92135703993559",
         "scope_hash": "5ccab89a030986e9ec49211ef672c9ea0d0e3cfd9fe9b78746d255e3d253dbd7",
         "modules": [
           "crates/cache-stability",
@@ -142,7 +142,7 @@
           "crates/storage",
           "crates/storage-types"
         ],
-        "modules_hash": "ec99daa8cee7fc6ca8feec4f2808dc99744ac2d35d88be2dca45d4cbd15d0891"
+        "modules_hash": "f15326180b25d03ee00af21851b59356e3fd20e19ae6f333d3e08be9d6f87012"
       },
       "report_hash": "d765ddd76795c00501776218dc75d8ffaa665f34065a46bbd76a615053bc71c5",
       "report_path": "/tmp/architecture-review-20260902T190000Z-U2-post-integration.html",
