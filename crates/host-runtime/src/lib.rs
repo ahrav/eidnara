@@ -5,10 +5,13 @@
 #![deny(unsafe_code)]
 
 pub mod auth;
+pub mod client;
 pub mod composite;
 pub mod config;
 pub mod connection_file;
+pub mod generation;
 pub mod handler;
+pub mod harness_closure;
 pub mod lifecycle;
 #[doc(hidden)]
 pub mod ring_transport;
@@ -16,6 +19,7 @@ pub mod ring_transport;
 mod connection;
 mod control;
 mod dispatch;
+mod file_mode;
 #[doc(hidden)]
 pub mod frame_channel;
 mod instance;
@@ -33,6 +37,14 @@ pub use auth::{
     AuthError, AuthStage, Authenticated, CLIENT_AUTH_DOMAIN, ClientAuth, ClientAuthenticated,
     ClientHello, DEFAULT_CLIENT_ROLE, MAX_AUTH_MESSAGE_LEN, NONCE_LEN, PROOF_LEN,
     SERVER_PROOF_DOMAIN, ServerProof, authenticate_client, authenticate_server, compute_proof,
+};
+pub use client::{
+    CLIENT_CONTROL_QUEUE_FRAMES, CLIENT_DATA_QUEUE_FRAMES, CLIENT_FRAME_TIMEOUT,
+    CLIENT_HANDSHAKE_TIMEOUT, CLIENT_MAX_LIVE_STREAMS, CLIENT_MAX_PENDING_REQUESTS,
+    CLIENT_QUEUED_BYTES, CLIENT_REQUEST_TIMEOUT, CLIENT_RETAINED_RESPONSE_BYTES,
+    CLIENT_ROUTE_OPEN_TIMEOUT, CLIENT_SHUTDOWN_TIMEOUT, CLIENT_STREAM_QUEUE_ITEMS, CallError,
+    Client, ClientError, HostStatusSnapshot, RequestOptions, Response, ResponseStream, SendOutcome,
+    StreamItem,
 };
 pub use composite::{
     CompositeComponent, PrimaryComponent, SecondaryComponent, ShutdownError, StaticComposite,

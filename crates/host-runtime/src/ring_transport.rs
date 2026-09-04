@@ -801,8 +801,10 @@ mod tests {
     #[test]
     fn shared_memory_workers_have_no_periodic_polling() {
         let endpoint = include_str!("ring_transport.rs");
+        let client = include_str!("client.rs");
         let micro_poll = concat!("Duration::from_micros(", "50)");
         assert!(!endpoint.contains(micro_poll));
+        assert!(!client.contains(micro_poll));
         assert!(!endpoint.contains(concat!("POLL_", "INTERVAL")));
     }
 

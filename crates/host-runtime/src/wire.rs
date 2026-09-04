@@ -420,7 +420,7 @@ impl ByteBudget {
             })
     }
 
-    #[allow(dead_code)] // U1: used by client (U2)
+    #[allow(dead_code)] // U1: used by broca (U4)
     pub(crate) fn available(&self) -> usize {
         self.semaphore.available_permits()
     }
@@ -430,7 +430,6 @@ impl ByteBudget {
 #[derive(Debug)]
 pub struct ByteCharge {
     // Dropping `permit` returns its bytes to the budget.
-    #[allow(dead_code)] // U1: read via ByteCharge::bytes in client (U2)
     permit: Option<OwnedSemaphorePermit>,
 }
 
