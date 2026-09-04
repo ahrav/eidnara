@@ -54,7 +54,9 @@ pub const CLIENT_MAX_PENDING_REQUESTS: usize = 1_024;
 pub const CLIENT_MAX_LIVE_STREAMS: usize = 64;
 /// Each stream queues at most `CLIENT_STREAM_QUEUE_ITEMS` items; saturation cancels only that stream.
 pub const CLIENT_STREAM_QUEUE_ITEMS: usize = 16;
-/// `CLIENT_DATA_QUEUE_FRAMES` limits ordinary writer slots; reserved controls consume none.
+/// `CLIENT_DATA_QUEUE_FRAMES` caps ordinary frames admitted but not yet published; reserved controls consume none.
+///
+/// The writer's in-flight window is carved out of this cap, so queued plus in-flight frames never exceed it.
 pub const CLIENT_DATA_QUEUE_FRAMES: usize = 256;
 /// `CLIENT_CONTROL_QUEUE_FRAMES` reserves slots for pure-header Pong, Cancel, and Goodbye frames.
 pub const CLIENT_CONTROL_QUEUE_FRAMES: usize = 32;
@@ -388,7 +390,7 @@ impl Client {
             .set_nonblocking(false)
             .map_err(|_| setup_failed())?;
         setup_tx.send(setup_stream).map_err(|_| setup_failed())?;
-        let (data_tx, data_rx) = mpsc::channel(CLIENT_DATA_QUEUE_FRAMES);
+        let (data_tx, data_rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (control_tx, control_rx) = mpsc::channel(CLIENT_CONTROL_QUEUE_FRAMES);
         let bridge_wake = Arc::downgrade(&ring_tx.wake);
         let inner = Arc::new(Inner {
@@ -1219,8 +1221,10 @@ impl Inner {
                 return Err(error);
             }
         };
-        // Reserve inside the locks so a full queue rolls back the insert; the send itself
-        // runs the writer's waker and stays outside the locks.
+        // Reserve inside the locks so a full queue rolls back the insert. The send stays under
+        // `admission` because the host's ingress watermark rejects a correlation below the last one
+        // it saw: two admissions must enter the queue in allocation order. It runs after `pending`
+        // and `correlations` are released so the writer's waker never fires under those locks.
         let Ok(permit) = self.data_tx.try_reserve() else {
             correlations.restore(corr);
             return Err(CallError::local(
@@ -1238,8 +1242,8 @@ impl Inner {
         );
         drop(correlations);
         drop(pending);
-        drop(_admission);
         permit.send(frame);
+        drop(_admission);
         Ok((key, publish))
     }
 
@@ -1445,6 +1449,12 @@ impl Inner {
                     // A `Response` on identity 0/0 can carry a route bound for an `open_route` caller that dropped or timed out.
                     // An abandoned `open_route` on identity 0/0 cannot withdraw its bind because §6.2 permits no `Cancel`.
                     if header.ty == FrameType::Response && header.channel == 0 {
+                        // §7.1: every channel-0 body is a tagged JSON object, matched or not.
+                        if !is_tagged_control_body(&body) {
+                            drop(charge);
+                            self.retire("protocol_violation");
+                            return;
+                        }
                         self.release_stranded_route(&body);
                     }
                     return;
@@ -2253,6 +2263,9 @@ async fn start_ring_bridge(
 
 /// The bridge writes and completes one frame per iteration in receive order, so awaiting the head is FIFO-safe. commentlint: allow(JUDGE)
 const WRITER_WINDOW: usize = 32;
+/// Data channel depth: `CLIENT_DATA_QUEUE_FRAMES` less the frames the writer may hold in flight.
+const WRITER_QUEUE_FRAMES: usize = CLIENT_DATA_QUEUE_FRAMES - WRITER_WINDOW;
+const _: () = assert!(WRITER_QUEUE_FRAMES > 0);
 
 struct InFlight {
     publish: Option<Arc<AtomicU8>>,
@@ -2564,6 +2577,13 @@ fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec
     })
 }
 
+/// A channel-0 body is a JSON object carrying a string `op` (§7.1).
+fn is_tagged_control_body(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|value| value.get("op").and_then(Value::as_str).is_some())
+}
+
 fn parse_route_open(body: &[u8]) -> Result<RouteHandle, CallError> {
     let value = serde_json::from_slice::<Value>(body).map_err(|_| {
         CallError::local(
@@ -2678,7 +2698,7 @@ mod tests {
         mpsc::Receiver<QueuedFrame>,
         mpsc::Receiver<QueuedFrame>,
     ) {
-        let (data_tx, data_rx) = mpsc::channel(CLIENT_DATA_QUEUE_FRAMES);
+        let (data_tx, data_rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (control_tx, control_rx) = mpsc::channel(CLIENT_CONTROL_QUEUE_FRAMES);
         (
             Arc::new(Inner {
@@ -3706,7 +3726,7 @@ mod tests {
         let (inner, data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut receivers = Vec::new();
-        for _ in 0..CLIENT_DATA_QUEUE_FRAMES {
+        for _ in 0..WRITER_QUEUE_FRAMES {
             let (kind, rx) = unary_sender();
             inner
                 .admit(route(1), Vec::new(), false, kind, deadline)
@@ -3717,7 +3737,7 @@ mod tests {
         let (kind, _rx) = unary_sender();
         let error = inner
             .admit(route(1), Vec::new(), false, kind, deadline)
-            .expect_err("257th data frame is rejected");
+            .expect_err("a frame past the queue depth is rejected");
         assert_eq!(error.outcome(), SendOutcome::NotSent);
         assert_eq!(error.code(), "writer_queue_full");
         assert_eq!(lock_unpoisoned(&inner.correlations).next, next_before);
@@ -3733,7 +3753,7 @@ mod tests {
         let pong = control_rx.recv().await.expect("queued Pong");
         assert_eq!(pong.header.ty, FrameType::Pong);
         drop(pong);
-        assert_eq!(data_rx.len(), CLIENT_DATA_QUEUE_FRAMES);
+        assert_eq!(data_rx.len(), WRITER_QUEUE_FRAMES);
 
         inner.retire("test_done");
         drop(data_rx);
@@ -4792,6 +4812,86 @@ mod tests {
             ByteCharge::none(),
         );
         assert!(inner.retired.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn an_untagged_unmatched_control_response_retires() {
+        // §7.1: a channel-0 body that is not a tagged JSON object is a protocol violation even when no correlation matches.
+        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let body = b"not json".to_vec();
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: 0,
+                epoch: 0,
+                corr: 4242,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(inner.retired.load(Ordering::Acquire));
+
+        // A tagged stale response that names no route is dropped without retiring.
+        let (inner, _data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let body = br#"{"op":"host.status"}"#.to_vec();
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: 0,
+                epoch: 0,
+                corr: 4242,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(!inner.retired.load(Ordering::Acquire));
+        assert!(control_rx.is_empty());
+    }
+
+    #[test]
+    fn queued_and_in_flight_frames_share_the_data_frame_ceiling() {
+        assert_eq!(
+            WRITER_QUEUE_FRAMES + WRITER_WINDOW,
+            CLIENT_DATA_QUEUE_FRAMES
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_admissions_enter_the_queue_in_correlation_order() {
+        // The host's ingress watermark rejects a correlation below the last one it saw.
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut tasks = Vec::new();
+        for _ in 0..64 {
+            let inner = Arc::clone(&inner);
+            tasks.push(tokio::spawn(async move {
+                let (kind, _rx) = unary_sender();
+                inner
+                    .admit(route(1), Vec::new(), false, kind, deadline)
+                    .expect("admitted");
+            }));
+        }
+        for task in tasks {
+            task.await.expect("admission task");
+        }
+        let mut last = 0;
+        for _ in 0..64 {
+            let frame = data_rx.recv().await.expect("queued frame");
+            assert!(
+                frame.header.corr > last,
+                "correlation {} was queued after {}",
+                frame.header.corr,
+                last
+            );
+            last = frame.header.corr;
+        }
+        inner.retire("test_done");
     }
 
     #[tokio::test]
