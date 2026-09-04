@@ -202,7 +202,7 @@ pub struct InstanceGuard {
     launch_id: [u8; 16],
     payload_manifest_digest: String,
     publication: Option<PublicationIdentity>,
-    setup_socket: Option<PathBuf>,
+    setup_socket: Option<SetupSocketIdentity>,
     /// The stable incarnation fence, declared after `dir` so the runtime
     /// lock releases first and the lifetime fence outlives every
     /// descriptor-relative cleanup step.
@@ -211,6 +211,13 @@ pub struct InstanceGuard {
 
 /// Cleanup checks that the canonical file still names this publication before unlinking it.
 struct PublicationIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+/// Cleanup unlinks the setup socket through the runtime-directory descriptor and only while the name still resolves to the registered inode.
+struct SetupSocketIdentity {
+    name: std::ffi::OsString,
     dev: u64,
     ino: u64,
 }
@@ -300,8 +307,51 @@ impl InstanceGuard {
         &self.dir_path
     }
 
-    pub(crate) fn register_setup_socket(&mut self, path: PathBuf) {
-        self.setup_socket = Some(path);
+    /// Registers the bound setup socket for fenced removal on drop.
+    ///
+    /// `path` must name an entry directly inside the runtime directory.
+    /// A renamed or replaced `run` directory cannot redirect the descriptor-relative unlink,
+    /// and a replacement occupying the name fails the identity check and is left alone.
+    pub(crate) fn register_setup_socket(&mut self, path: &Path) -> Result<(), InstanceError> {
+        let name = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) if parent == self.dir_path => name.to_os_string(),
+            _ => {
+                return Err(InstanceError::Insecure {
+                    what: "setup socket outside the runtime directory",
+                    path: path.to_path_buf(),
+                });
+            }
+        };
+        let stat = rustix::fs::statat(&self.dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|e| io_err("stat_setup_socket", path, e))?;
+        if !is_own_socket(&stat) {
+            return Err(InstanceError::Insecure {
+                what: "setup socket",
+                path: path.to_path_buf(),
+            });
+        }
+        let (dev, ino) = stat_identity(&stat);
+        self.setup_socket = Some(SetupSocketIdentity { name, dev, ino });
+        Ok(())
+    }
+
+    /// Checks that the registered name resolves to the registered inode before unlinking.
+    /// Removal cannot exclude replacement between the identity check and the unlink.
+    fn remove_setup_socket(&mut self) {
+        let Some(socket) = self.setup_socket.take() else {
+            return;
+        };
+        let Ok(stat) = rustix::fs::statat(
+            &self.dir,
+            socket.name.as_os_str(),
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) else {
+            return;
+        };
+        if !is_own_socket(&stat) || stat_identity(&stat) != (socket.dev, socket.ino) {
+            return;
+        }
+        let _ = unlinkat(&self.dir, socket.name.as_os_str(), AtFlags::empty());
     }
 
     /// Atomically publishes the schema-1 connection file for this incarnation
@@ -354,12 +404,8 @@ impl InstanceGuard {
         }
 
         let stat = write_atomic_owner_only(&self.dir, &self.dir_path, CONNECTION_FILE_NAME, &json)?;
-        // `Stat` field types vary by platform; macOS defines `st_dev` as `i32`, so the casts are required there and are no-ops on Linux.
-        #[allow(clippy::unnecessary_cast)]
-        let identity = PublicationIdentity {
-            dev: stat.st_dev as u64,
-            ino: stat.st_ino as u64,
-        };
+        let (dev, ino) = stat_identity(&stat);
+        let identity = PublicationIdentity { dev, ino };
         self.publication = Some(identity);
         Ok(())
     }
@@ -396,9 +442,7 @@ impl InstanceGuard {
             self.publication = Some(identity);
             return;
         }
-        // `Stat` field types vary by platform; macOS defines `st_dev` as `i32`.
-        #[allow(clippy::unnecessary_cast)]
-        if stat.st_dev as u64 != identity.dev || stat.st_ino as u64 != identity.ino {
+        if stat_identity(&stat) != (identity.dev, identity.ino) {
             return;
         }
         let Ok(bytes) = read_all_fd(&fd, 65_536) else {
@@ -425,9 +469,7 @@ impl InstanceGuard {
 
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
-        if let Some(path) = self.setup_socket.take() {
-            let _ = std::fs::remove_file(path);
-        }
+        self.remove_setup_socket();
         // Idempotent: the graceful path already removed the publication and
         // took the retained identity, making this a no-op. The same
         // best-effort identity checks run before unlink on the drop path.
@@ -740,6 +782,14 @@ pub(crate) const S_IFDIR: u32 = 0o040000;
 pub(crate) const S_IFREG: u32 = 0o100000;
 #[allow(dead_code)] // U1: used by harness_closure (U2)
 pub(crate) const S_IFLNK: u32 = 0o120000;
+const S_IFSOCK: u32 = 0o140000;
+
+// `Stat::st_dev` is `i32` on macOS, so `stat_identity` casts it to `u64`.
+// The cast is required on platforms where `st_dev` is not `u64`.
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64) {
+    (stat.st_dev as u64, stat.st_ino as u64)
+}
 
 #[allow(dead_code)] // U1: used by harness_closure (U2)
 pub(crate) fn owner_uid() -> u32 {
@@ -822,6 +872,10 @@ pub(crate) fn is_owner_only_dir(stat: &rustix::fs::Stat) -> bool {
     (mode & S_IFMT) == S_IFDIR
         && stat.st_uid == rustix::process::geteuid().as_raw()
         && mode & 0o077 == 0
+}
+
+fn is_own_socket(stat: &rustix::fs::Stat) -> bool {
+    (mode_bits(stat) & S_IFMT) == S_IFSOCK && stat.st_uid == rustix::process::geteuid().as_raw()
 }
 
 /// Repairs owner-owned entries left without owner permissions when creation stops before `chmod`.
@@ -1335,6 +1389,86 @@ mod tests {
         assert!(file.exists());
         guard.remove_publication();
         assert!(!file.exists(), "our own publication must be removed");
+    }
+
+    /// The setup socket is unlinked through the runtime-directory descriptor and only while the name still resolves to the registered inode, matching the publication fence.
+    #[test]
+    fn setup_socket_cleanup_is_fenced_to_the_registered_inode() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::net::UnixListener;
+
+        // Registration refuses a path outside the runtime directory and a non-socket.
+        {
+            let root = temp_root();
+            let mut guard =
+                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+            assert!(matches!(
+                guard.register_setup_socket(&root.path().join("setup.sock")),
+                Err(InstanceError::Insecure {
+                    what: "setup socket outside the runtime directory",
+                    ..
+                })
+            ));
+            let plain = guard.dir_path().join("setup.sock");
+            std::fs::write(&plain, b"not a socket").expect("plant file");
+            assert!(matches!(
+                guard.register_setup_socket(&plain),
+                Err(InstanceError::Insecure {
+                    what: "setup socket",
+                    ..
+                })
+            ));
+            drop(guard);
+            assert!(plain.exists(), "an unregistered entry must survive drop");
+        }
+
+        {
+            let root = temp_root();
+            let mut guard =
+                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+            let socket = guard.dir_path().join("setup.sock");
+            let _listener = UnixListener::bind(&socket).expect("bind");
+            guard.register_setup_socket(&socket).expect("register");
+            drop(guard);
+            assert!(!socket.exists(), "our own socket must be removed on drop");
+        }
+
+        // A replacement occupying the name is not ours and survives drop.
+        {
+            let root = temp_root();
+            let mut guard =
+                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+            let socket = guard.dir_path().join("setup.sock");
+            let _ours = UnixListener::bind(&socket).expect("bind");
+            guard.register_setup_socket(&socket).expect("register");
+            std::fs::remove_file(&socket).expect("displace");
+            let _replacement = UnixListener::bind(&socket).expect("rebind");
+            drop(guard);
+            assert!(
+                std::fs::symlink_metadata(&socket)
+                    .expect("stat replacement")
+                    .file_type()
+                    .is_socket(),
+                "a replacement socket at the name must be left alone"
+            );
+        }
+
+        // Renaming the runtime directory does not strand the socket: the unlink follows the descriptor, not the path.
+        {
+            let root = temp_root();
+            let mut guard =
+                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+            let socket = guard.dir_path().join("setup.sock");
+            let _listener = UnixListener::bind(&socket).expect("bind");
+            guard.register_setup_socket(&socket).expect("register");
+            let moved = root.path().join("eidnara").join("run-moved");
+            std::fs::rename(guard.dir_path(), &moved).expect("rename runtime dir");
+            drop(guard);
+            assert!(
+                !moved.join("setup.sock").exists(),
+                "the socket in the displaced directory must be removed"
+            );
+        }
     }
 
     #[test]

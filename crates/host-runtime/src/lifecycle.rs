@@ -17,7 +17,7 @@ use crate::instance::{
     CONNECTION_FILE_NAME, InstanceError, InstanceGuard, S_IFMT, S_IFREG, data_dir_path,
     flock_bounded, flock_exclusive_bounded, hex, io_err, is_owner_only_dir, is_safe_ancestor,
     is_secure_regular, mode_bits, open_secure_dir_existing, read_all_fd, repair_owner_access,
-    runtime_dir_path, secure_runtime_dir,
+    runtime_dir_path, secure_runtime_dir, stat_identity,
 };
 
 /// `LIFECYCLE_RECORD_NAME` identifies the lifecycle record in the runtime directory.
@@ -541,13 +541,6 @@ impl std::fmt::Debug for NamespaceAnchor {
             )
             .finish_non_exhaustive()
     }
-}
-
-// `Stat::st_dev` is `i32` on macOS, so `stat_identity` casts it to `u64`.
-// The cast is required on platforms where `st_dev` is not `u64`.
-#[allow(clippy::unnecessary_cast)]
-fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64) {
-    (stat.st_dev as u64, stat.st_ino as u64)
 }
 
 impl NamespaceAnchor {
