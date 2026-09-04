@@ -16,6 +16,7 @@ use rustix::{
     fs::{Mode, OFlags, openat},
 };
 use serde::{Deserialize, Serialize};
+use shm_transport::setup_auth::DAEMON_VER_PREFIX;
 
 use crate::{
     instance::{S_IFDIR, S_IFMT, is_safe_ancestor, is_secure_regular, mode_bits, read_all_fd},
@@ -78,6 +79,13 @@ impl ConnectionInfo {
         }
         if self.daemon_ver.is_empty() {
             return Err(ConnectionFileError::Invalid("empty daemon version"));
+        }
+        // The client later authenticates whatever version the file names, so a file that
+        // escapes the published prefix must be refused here rather than trusted downstream.
+        if !self.daemon_ver.starts_with(DAEMON_VER_PREFIX) {
+            return Err(ConnectionFileError::Invalid(
+                "daemon version lacks the published prefix",
+            ));
         }
         Ok(())
     }
@@ -365,7 +373,20 @@ mod tests {
             key: vec![7; KEY_LEN],
             daemon_id: [8; DAEMON_ID_LEN],
             pid: 9,
-            daemon_ver: "test".to_owned(),
+            daemon_ver: format!("{DAEMON_VER_PREFIX}test"),
+        }
+    }
+
+    #[test]
+    fn daemon_version_must_carry_the_published_prefix() {
+        assert!(info().validate().is_ok());
+        for daemon_ver in ["", "test", "v1", "eidnara-host", "Eidnara-host/1"] {
+            let mut candidate = info();
+            candidate.daemon_ver = daemon_ver.to_owned();
+            assert!(
+                matches!(candidate.validate(), Err(ConnectionFileError::Invalid(_))),
+                "daemon_ver {daemon_ver:?} must fail validation"
+            );
         }
     }
 
