@@ -72,10 +72,10 @@ pub const CLIENT_CONTROL_QUEUED_BYTES: usize = CLIENT_CONTROL_QUEUE_FRAMES * HEA
 /// An admitted connection must accept every otherwise-valid frame, so this reservation covers the framing maximum separately from `CLIENT_RETAINED_RESPONSE_BYTES`.
 /// `CLIENT_INBOUND_FRAME_BYTES` is a per-connection ceiling because one reader decodes one frame at a time.
 pub const CLIENT_INBOUND_FRAME_BYTES: usize = MAX_BODY_LEN as usize;
-/// `CLIENT_RETAINED_RESPONSE_BYTES` caps owner-wide bytes retained in pending stream queues.
+/// `CLIENT_RETAINED_RESPONSE_BYTES` caps owner-wide bytes retained in pending stream queues and in unary responses their callers have not yet polled.
 ///
 /// Queueing charges each item before a consumer reads it.
-/// Exhausting `CLIENT_RETAINED_RESPONSE_BYTES` cancels only the saturating stream.
+/// Exhausting `CLIENT_RETAINED_RESPONSE_BYTES` cancels only the saturating stream or fails only the saturating unary request.
 /// `CLIENT_RETAINED_RESPONSE_BYTES` admits one maximum-sized item plus 1_048_576 bytes.
 /// One connection can retain at most `CLIENT_RETAINED_RESPONSE_BYTES + CLIENT_INBOUND_FRAME_BYTES` bytes.
 pub const CLIENT_RETAINED_RESPONSE_BYTES: usize = MAX_BODY_LEN as usize + 1_048_576;
@@ -140,19 +140,19 @@ impl CallError {
         Self::new(outcome, code, message)
     }
 
-    fn host_terminal(body: &[u8]) -> Self {
-        let code = serde_json::from_slice::<Value>(body)
-            .ok()
-            .and_then(|value| value.get("code")?.as_str().map(str::to_owned))
-            .map(|code| bounded_code(&code))
-            .unwrap_or_else(|| "remote_error".to_owned());
+    /// `None` means the body is not a canonical `ErrorBody` (§6.2): a JSON object
+    /// with string `code` and `message`. Unknown members are permitted.
+    fn host_terminal(body: &[u8]) -> Option<Self> {
+        let value = serde_json::from_slice::<Value>(body).ok()?;
+        let code = value.get("code")?.as_str()?;
+        value.get("message")?.as_str()?;
         // Raw terminal messages may contain request, credential, or identity data.
         // `CallError` retains the bounded terminal code and discards the raw terminal message.
-        Self::new(
+        Some(Self::new(
             SendOutcome::Terminal,
-            code,
+            bounded_code(code),
             "host returned a terminal error (message redacted)",
-        )
+        ))
     }
 
     /// Send classification.
@@ -919,8 +919,23 @@ struct PendingState {
     kind: PendingKind,
 }
 
+/// A unary response held for its caller. `_charge` returns the body's bytes to
+/// `retained_budget` when the caller consumes or abandons the response.
+struct RetainedResponse {
+    response: Response,
+    _charge: ByteCharge,
+}
+
+impl fmt::Debug for RetainedResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.response.fmt(f)
+    }
+}
+
+type UnaryTerminal = Result<RetainedResponse, CallError>;
+
 enum PendingKind {
-    Unary(oneshot::Sender<Result<Response, CallError>>),
+    Unary(oneshot::Sender<UnaryTerminal>),
     Stream {
         items: mpsc::Sender<ChargedItem>,
         terminal: oneshot::Sender<Result<(), CallError>>,
@@ -986,7 +1001,7 @@ impl Inner {
         let cancelled = cancellation.unwrap_or_default();
         // The stop branches borrow `rx` after `select!` because `dispatch` removes the pending entry before sending a terminal; a stop in that window must await the authoritative result.
         enum Stopped {
-            Terminal(Result<Response, CallError>),
+            Terminal(UnaryTerminal),
             Cancelled,
             DeadlineExpired,
         }
@@ -1022,7 +1037,8 @@ impl Inner {
             }
         };
         guard.disarm();
-        result
+        // Consuming the response releases its retained charge with `_charge`.
+        result.map(|retained| retained.response)
     }
 
     fn start_stream(
@@ -1220,11 +1236,11 @@ impl Inner {
     async fn stop_or_take_terminal(
         &self,
         key: PendingKey,
-        rx: &mut oneshot::Receiver<Result<Response, CallError>>,
+        rx: &mut oneshot::Receiver<UnaryTerminal>,
         publish: &AtomicU8,
         code: &'static str,
         message: &'static str,
-    ) -> Result<Response, CallError> {
+    ) -> UnaryTerminal {
         let stopped = match self.cancel_key(key, code) {
             Ok(PendingRemoval::AlreadyTaken) => {
                 return rx
@@ -1258,10 +1274,7 @@ impl Inner {
         } else {
             SendOutcome::OutcomeUnknown
         };
-        self.finish_pending(
-            state,
-            Err(CallError::local(outcome, code, "request stopped")),
-        );
+        self.finish_pending(state, CallError::local(outcome, code, "request stopped"));
         if outcome == SendOutcome::OutcomeUnknown {
             // Control requests use identity 0/0, but §6.2 permits `Cancel` only for a pending nonzero correlation on a current nonzero route.
             // `cancel_key` preserves `OutcomeUnknown` because the request may already have reached the host.
@@ -1392,15 +1405,51 @@ impl Inner {
                     }
                     return;
                 };
-                drop(charge);
+                // A malformed `Error` body is structurally illegal (§6.2) and closes the generation.
+                let host_error = if header.ty == FrameType::Error {
+                    match CallError::host_terminal(&body) {
+                        Some(error) => Some(error),
+                        None => {
+                            drop(charge);
+                            self.finish_pending(
+                                state,
+                                CallError::local(
+                                    SendOutcome::OutcomeUnknown,
+                                    "protocol_violation",
+                                    "host sent a malformed error body",
+                                ),
+                            );
+                            self.retire("protocol_violation");
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
                 match state.kind {
                     PendingKind::Unary(tx) => {
                         let result = match header.ty {
-                            FrameType::Response => Ok(Response {
-                                body,
-                                binary: header.flags.is_binary(),
-                            }),
-                            FrameType::Error => Err(CallError::host_terminal(&body)),
+                            FrameType::Response => {
+                                // The response is retained until the caller polls it, so its bytes
+                                // move from the read reservation to the retained budget; a caller that
+                                // never polls cannot hold more than `CLIENT_RETAINED_RESPONSE_BYTES`.
+                                match self.retained_budget.charge(body.len()) {
+                                    Some(retained) => Ok(RetainedResponse {
+                                        response: Response {
+                                            body,
+                                            binary: header.flags.is_binary(),
+                                        },
+                                        _charge: retained,
+                                    }),
+                                    None => Err(CallError::local(
+                                        // The host completed the request; only the local copy is lost.
+                                        SendOutcome::OutcomeUnknown,
+                                        "response_retention_exhausted",
+                                        "retained response capacity exhausted",
+                                    )),
+                                }
+                            }
+                            FrameType::Error => Err(host_error.expect("validated above")),
                             FrameType::StreamEnd => Err(CallError::local(
                                 SendOutcome::Terminal,
                                 "unexpected_stream",
@@ -1408,19 +1457,21 @@ impl Inner {
                             )),
                             _ => unreachable!(),
                         };
+                        drop(charge);
                         // A receiver dropped between `pending.remove(&key)` and `tx.send(result)` strands a successful bind exactly like an absent pending entry.
-                        if let Err(Ok(response)) = tx.send(result)
+                        if let Err(Ok(retained)) = tx.send(result)
                             && header.channel == 0
                         {
-                            self.release_stranded_route(&response.body);
+                            self.release_stranded_route(&retained.response.body);
                         }
                     }
                     PendingKind::Stream { terminal, .. } => {
+                        drop(charge);
                         // Direct settlement retires the deadline watcher without calling `finish_pending`.
                         // `PendingKind::Stream::_settled`.
                         let terminal_result = match header.ty {
                             FrameType::StreamEnd => Ok(()),
-                            FrameType::Error => Err(CallError::host_terminal(&body)),
+                            FrameType::Error => Err(host_error.expect("validated above")),
                             FrameType::Response => Err(CallError::local(
                                 SendOutcome::Terminal,
                                 "unexpected_response",
@@ -1449,7 +1500,7 @@ impl Inner {
                         drop(pending);
                         self.finish_pending(
                             state,
-                            Err(CallError::local(
+                            CallError::local(
                                 // The best-effort `Cancel` may leave the run executing or committing.
                                 // `Terminal` would suppress OutcomeUnknown recovery.
                                 // The frame handler does not drain stream frames for a unary correlation.
@@ -1458,7 +1509,7 @@ impl Inner {
                                 SendOutcome::OutcomeUnknown,
                                 "unexpected_stream",
                                 "unary request received stream data",
-                            )),
+                            ),
                         );
                         let _ = self.send_control(
                             FrameType::Cancel,
@@ -1489,7 +1540,7 @@ impl Inner {
                             drop(pending);
                             self.finish_pending(
                                 state,
-                                Err(CallError::local(
+                                CallError::local(
                                     // The handler uses `OutcomeUnknown` because local overflow occurs after sending the request.
                                     // The handler observed no terminal frame.
                                     // The best-effort `Cancel` may not reach the host.
@@ -1498,7 +1549,7 @@ impl Inner {
                                     SendOutcome::OutcomeUnknown,
                                     "stream_saturated",
                                     "stream consumer queue saturated",
-                                )),
+                                ),
                             );
                             let _ = self.send_control(
                                 FrameType::Cancel,
@@ -1547,14 +1598,13 @@ impl Inner {
         }
     }
 
-    fn finish_pending(&self, state: PendingState, result: Result<Response, CallError>) {
+    fn finish_pending(&self, state: PendingState, error: CallError) {
         match state.kind {
             PendingKind::Unary(tx) => {
-                let _ = tx.send(result);
+                let _ = tx.send(Err(error));
             }
             PendingKind::Stream { terminal, .. } => {
-                let terminal_result = result.map(|_| ());
-                let _ = terminal.send(terminal_result);
+                let _ = terminal.send(Err(error));
                 // Dropping `state` retires the deadline watcher.
                 // see `PendingKind::Stream::_settled`.
                 self.release_stream();
@@ -1591,7 +1641,7 @@ impl Inner {
             let outcome = cancel_classification(&state.publish);
             self.finish_pending(
                 state,
-                Err(CallError::local(outcome, "route_gone", "request stopped")),
+                CallError::local(outcome, "route_gone", "request stopped"),
             );
         }
         true
@@ -1606,11 +1656,7 @@ impl Inner {
             let outcome = cancel_classification(&state.publish);
             self.finish_pending(
                 state,
-                Err(CallError::local(
-                    outcome,
-                    code,
-                    "connection generation closed",
-                )),
+                CallError::local(outcome, code, "connection generation closed"),
             );
         }
     }
@@ -1619,9 +1665,13 @@ impl Inner {
         if self.retired.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.closed.store(true, Ordering::Release);
+        // `open_route` checks `closed` and inserts under `routes`; storing `closed` and clearing the cache under the same lock keeps a retired generation from publishing a handle.
+        {
+            let mut routes = lock_unpoisoned(&self.routes);
+            self.closed.store(true, Ordering::Release);
+            routes.clear();
+        }
         self.settle_all(code);
-        lock_unpoisoned(&self.routes).clear();
         self.cancel.cancel();
     }
 
@@ -1667,16 +1717,12 @@ impl Inner {
 struct UnaryAdmissionGuard {
     inner: Arc<Inner>,
     key: PendingKey,
-    rx: oneshot::Receiver<Result<Response, CallError>>,
+    rx: oneshot::Receiver<UnaryTerminal>,
     armed: bool,
 }
 
 impl UnaryAdmissionGuard {
-    const fn new(
-        inner: Arc<Inner>,
-        key: PendingKey,
-        rx: oneshot::Receiver<Result<Response, CallError>>,
-    ) -> Self {
+    const fn new(inner: Arc<Inner>, key: PendingKey, rx: oneshot::Receiver<UnaryTerminal>) -> Self {
         Self {
             inner,
             key,
@@ -1701,9 +1747,9 @@ impl Drop for UnaryAdmissionGuard {
             self.inner.cancel_key(self.key, "caller_dropped"),
             Ok(PendingRemoval::AlreadyTaken)
         ) && self.key.channel == 0
-            && let Ok(Ok(response)) = self.rx.try_recv()
+            && let Ok(Ok(retained)) = self.rx.try_recv()
         {
-            self.inner.release_stranded_route(&response.body);
+            self.inner.release_stranded_route(&retained.response.body);
         }
     }
 }
@@ -2520,7 +2566,17 @@ mod tests {
         RouteHandle { channel: 7, epoch }
     }
 
-    fn unary_sender() -> (PendingKind, oneshot::Receiver<Result<Response, CallError>>) {
+    fn retained_fixture(body: &[u8]) -> RetainedResponse {
+        RetainedResponse {
+            response: Response {
+                body: body.to_vec(),
+                binary: false,
+            },
+            _charge: ByteCharge::none(),
+        }
+    }
+
+    fn unary_sender() -> (PendingKind, oneshot::Receiver<UnaryTerminal>) {
         let (tx, rx) = oneshot::channel();
         (PendingKind::Unary(tx), rx)
     }
@@ -3243,10 +3299,7 @@ mod tests {
             .expect("entry exists");
         match state.kind {
             PendingKind::Unary(tx) => tx
-                .send(Ok(Response {
-                    body: b"authoritative".to_vec(),
-                    binary: false,
-                }))
+                .send(Ok(retained_fixture(b"authoritative")))
                 .expect("terminal published"),
             PendingKind::Stream { .. } => unreachable!("admitted a unary request"),
         }
@@ -3256,7 +3309,7 @@ mod tests {
             .stop_or_take_terminal(key, &mut rx, &publish, "cancelled", "request was cancelled")
             .await
             .expect("the observed terminal wins over the local stop");
-        assert_eq!(response.body, b"authoritative");
+        assert_eq!(response.response.body, b"authoritative");
     }
 
     #[tokio::test]
@@ -3295,15 +3348,12 @@ mod tests {
         let publish_terminal = async {
             // `publish_terminal` waits after `stop` observes the absent entry and before the owner publishes.
             tokio::task::yield_now().await;
-            tx.send(Ok(Response {
-                body: b"authoritative".to_vec(),
-                binary: false,
-            }))
-            .expect("terminal published");
+            tx.send(Ok(retained_fixture(b"authoritative")))
+                .expect("terminal published");
         };
         let (result, ()) = tokio::join!(stop, publish_terminal);
         let response = result.expect("the in-flight terminal wins over the local stop");
-        assert_eq!(response.body, b"authoritative");
+        assert_eq!(response.response.body, b"authoritative");
     }
 
     #[tokio::test]
@@ -4435,11 +4485,147 @@ mod tests {
             "message": sentinel
         }))
         .expect("serialize");
-        let error = CallError::host_terminal(&body);
+        let error = CallError::host_terminal(&body).expect("canonical error body");
         let rendered = format!("{error:?} {error}");
         assert_eq!(error.outcome(), SendOutcome::Terminal);
         assert_eq!(error.code(), "stable_code");
         assert!(!rendered.contains(sentinel));
+    }
+
+    #[test]
+    fn only_a_canonical_error_body_parses() {
+        for body in [
+            &b"not json"[..],
+            br#"{"message":"m"}"#,
+            br#"{"code":"c"}"#,
+            br#"{"code":1,"message":"m"}"#,
+            br#"{"code":"c","message":null}"#,
+            br#"["code","message"]"#,
+        ] {
+            assert!(
+                CallError::host_terminal(body).is_none(),
+                "{} must be rejected",
+                String::from_utf8_lossy(body)
+            );
+        }
+        let error = CallError::host_terminal(
+            br#"{"code":"c","message":"m","retry_after_ms":5,"extra":true}"#,
+        )
+        .expect("unknown members are permitted");
+        assert_eq!(error.code(), "c");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_error_body_retires_the_generation() {
+        // §6.2: a structurally illegal body closes the generation.
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let (kind, rx) = unary_sender();
+        let (key, publish) = inner
+            .admit(
+                route(1),
+                Vec::new(),
+                false,
+                kind,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("admitted");
+        assert!(claim_for_write(&publish));
+        drop(data_rx.recv().await);
+        let body = b"{\"message\":\"no code\"}".to_vec();
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Error,
+                flags: response_flags(false, false),
+                channel: key.channel,
+                epoch: key.epoch,
+                corr: key.corr,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(inner.retired.load(Ordering::Acquire));
+        let error = rx.await.expect("settled").expect_err("retired");
+        assert_eq!(error.code(), "protocol_violation");
+        assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
+    }
+
+    #[tokio::test]
+    async fn an_unconsumed_unary_response_holds_a_retained_charge() {
+        // A caller that never polls cannot hold bytes past `CLIENT_RETAINED_RESPONSE_BYTES`.
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let deliver = |key: PendingKey, body: Vec<u8>| {
+            inner.dispatch(
+                EnvelopeHeader {
+                    len: u32::try_from(body.len()).expect("fits"),
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType::Response,
+                    flags: response_flags(false, false),
+                    channel: key.channel,
+                    epoch: key.epoch,
+                    corr: key.corr,
+                },
+                body,
+                ByteCharge::none(),
+            );
+        };
+        let (kind, first_rx) = unary_sender();
+        let (first, publish) = inner
+            .admit(route(1), Vec::new(), false, kind, deadline)
+            .expect("admitted");
+        assert!(claim_for_write(&publish));
+        drop(data_rx.recv().await);
+        deliver(first, vec![0u8; MAX_BODY_LEN as usize]);
+        assert_eq!(inner.retained_budget.used(), MAX_BODY_LEN as usize);
+
+        // The remaining 1 MiB admits a smaller response but not a second maximum one.
+        let (kind, second_rx) = unary_sender();
+        let (second, publish) = inner
+            .admit(route(1), Vec::new(), false, kind, deadline)
+            .expect("admitted");
+        assert!(claim_for_write(&publish));
+        drop(data_rx.recv().await);
+        deliver(second, vec![0u8; MAX_BODY_LEN as usize]);
+        let error = second_rx
+            .await
+            .expect("settled")
+            .expect_err("retention is exhausted");
+        assert_eq!(error.code(), "response_retention_exhausted");
+        assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
+        assert!(
+            !inner.retired.load(Ordering::Acquire),
+            "only the saturating request fails"
+        );
+
+        // Consuming the first response returns its bytes.
+        let retained = first_rx.await.expect("settled").expect("delivered");
+        assert_eq!(retained.response.body.len(), MAX_BODY_LEN as usize);
+        drop(retained);
+        assert_eq!(inner.retained_budget.used(), 0);
+        inner.retire("test_done");
+    }
+
+    #[test]
+    fn retire_sets_closed_under_the_routes_lock() {
+        // `open_route` checks `closed` and inserts while holding `routes`.
+        // Holding `routes` here must block `retire` from advancing past `closed` until the insert is visible to it.
+        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let routes = lock_unpoisoned(&inner.routes);
+        let retiring = std::thread::spawn({
+            let inner = Arc::clone(&inner);
+            move || inner.retire("test_race")
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !inner.closed.load(Ordering::Acquire),
+            "closed must not flip while an opener holds the route lock"
+        );
+        drop(routes);
+        retiring.join().expect("retire completes");
+        assert!(inner.closed.load(Ordering::Acquire));
+        assert!(lock_unpoisoned(&inner.routes).is_empty());
     }
 
     #[test]
