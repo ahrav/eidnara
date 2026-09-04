@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+pub mod broca;
 pub mod echo_host;
 pub mod process_resources;
 pub mod raw_client;
@@ -23,8 +24,6 @@ use raw_client::Discovered;
 
 pub const LINKED_MODULE_ID: &str = "context";
 pub const MODULE_VERSION: &str = "0.1.0-test";
-// U1: value of `host_runtime::broca::config::DECLARED_RETAINED_RESIDENT_BYTES` until Broca lands (U4).
-const DECLARED_RETAINED_RESIDENT_BYTES: u64 = 292_700_160;
 
 /// Canary values: if any of these reach a diagnostic sink, redaction failed.
 pub const CANARY_SESSION: &str = "CANARY-SESSION-9d3f";
@@ -854,7 +853,7 @@ impl CompositeTestHost {
             daemon_ver: "eidnara-host/test".to_owned(),
             limits: HostLimits {
                 max_resident_bytes: host_runtime::config::MIN_RESIDENT_BYTES * 2
-                    + DECLARED_RETAINED_RESIDENT_BYTES,
+                    + host_runtime::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
                 ..Default::default()
             },
             ..Default::default()
