@@ -2,6 +2,11 @@
 //!
 //! A closure preserves the qualified package layout under `files/`.
 //! The canonical manifest commits every launch root, dependency edge, extension position, source identity, file mode, size, and hash.
+//!
+//! Mutating entry points (`materialize`, `prune`) are not serialized by this module.
+//! Callers must hold `transaction.lock` across them; `prune` additionally reclaims
+//! staging temps only after [`STALE_TEMP_AFTER`] to avoid deleting an unlocked
+//! concurrent `materialize`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CStr;
@@ -9,14 +14,14 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use rustix::fd::OwnedFd;
-use rustix::fs::{
-    AtFlags, CWD, Dir, Mode, OFlags, RenameFlags, fsync, mkdirat, openat, renameat_with, unlinkat,
-};
+use rustix::fs::{AtFlags, CWD, Dir, Mode, OFlags, fsync, mkdirat, openat, unlinkat};
 use sha2::{Digest, Sha256};
 
 use crate::file_mode::raw_mode;
+use crate::store_fs::{dup_cloexec, rename_no_replace};
 
 const MANIFEST_NAME: &str = "manifest.json";
 const FILES_NAME: &str = "files";
@@ -30,6 +35,9 @@ const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const S_ISVTX: u32 = 0o1000;
+
+/// `prune` treats a staging temp older than this as abandoned.
+pub const STALE_TEMP_AFTER: Duration = Duration::from_secs(600);
 
 /// `ClosureManifest` accepts only schema-1 harness closures.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -195,6 +203,9 @@ impl ResolvedHarnessNode {
     }
 
     /// `module_path` is descriptor-rooted only when that path resolves like the file itself; otherwise it uses the closure pathname.
+    ///
+    /// A descriptor-rooted `module_path` identifies this node by descriptor number; the child
+    /// must retain that descriptor through `exec` via [`Self::inherit_in_child`].
     pub fn module_path(&self) -> &Path {
         if DESCRIPTOR_PATHS_ARE_FILE_LIKE {
             &self.descriptor_path
@@ -207,14 +218,27 @@ impl ResolvedHarnessNode {
         &self.closure_path
     }
 
+    /// The descriptor is close-on-exec until [`Self::inherit_in_child`] runs in the child.
     pub fn inherited_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 
     /// The child must inherit this descriptor to use [`Self::module_path`].
     /// The inherited descriptor is `None` when `module_path` uses an ordinary pathname.
+    /// The descriptor is close-on-exec until [`Self::inherit_in_child`] runs in the child.
     pub fn module_inherited_fd(&self) -> Option<RawFd> {
         DESCRIPTOR_PATHS_ARE_FILE_LIKE.then(|| self.fd.as_raw_fd())
+    }
+
+    /// `Command::pre_exec` runs after `fork` and before `exec`, so clearing close-on-exec
+    /// there affects only the child's descriptor table; the parent's descriptor stays
+    /// close-on-exec and unrelated spawns never inherit it.
+    ///
+    /// `dup2(N, N)` is not a substitute: it leaves close-on-exec set, `exec` closes the node
+    /// descriptor, and the child's `/proc/self/fd/N` can name an unrelated file.
+    pub fn inherit_in_child(&self) -> std::io::Result<()> {
+        rustix::io::fcntl_setfd(&self.fd, rustix::io::FdFlags::empty())
+            .map_err(std::io::Error::from)
     }
 }
 
@@ -556,17 +580,11 @@ impl HarnessClosureStore {
             let _ = remove_tree(&self.root_fd, &temp_name);
             return Err(error);
         }
-        match renameat_with(
-            &self.root_fd,
-            temp_name.as_str(),
-            &self.root_fd,
-            digest.as_str(),
-            RenameFlags::NOREPLACE,
-        ) {
-            Ok(()) => {
+        match rename_no_replace(&self.root_fd, &temp_name, &digest) {
+            Ok(true) => {
                 fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))?;
             }
-            Err(rustix::io::Errno::EXIST) | Err(rustix::io::Errno::NOTEMPTY) => {
+            Ok(false) => {
                 // Deleting `temp_name` before `validate` prevents validation errors from leaving the staging tree behind.
                 remove_tree(&self.root_fd, &temp_name)?;
                 return self.validate(&digest);
@@ -579,17 +597,30 @@ impl HarnessClosureStore {
         self.validate(&digest)
     }
 
+    /// `prune` preserves staging temps younger than [`STALE_TEMP_AFTER`] because an
+    /// in-flight `materialize` may still own them.
+    ///
+    /// One unremovable entry does not stop the sweep: every reclaimable entry is removed
+    /// first, then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<(), HarnessClosureError> {
+        let mut first_error = None;
         for name in list_names(&self.root_fd)? {
             if protected.contains(&name) {
                 continue;
             }
-            if !name.starts_with(TEMP_PREFIX) && validate_hash(&name).is_err() {
+            if name.starts_with(TEMP_PREFIX) {
+                if !is_stale_temp(&self.root_fd, &name) {
+                    continue;
+                }
+            } else if validate_hash(&name).is_err() {
                 continue;
             }
-            remove_tree(&self.root_fd, &name)?;
+            if let Err(error) = remove_tree(&self.root_fd, &name) {
+                first_error.get_or_insert(error);
+            }
         }
-        fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))
+        fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))?;
+        first_error.map_or(Ok(()), Err)
     }
 
     pub fn validate(&self, digest: &str) -> Result<ValidatedHarnessClosure, HarnessClosureError> {
@@ -639,10 +670,17 @@ impl HarnessClosureStore {
                 .map_err(|_| invalid("temporary name generation failed"))?;
             let name = format!("{TEMP_PREFIX}{}", hex(&random));
             match mkdirat(&self.root_fd, name.as_str(), Mode::from_raw_mode(0o700)) {
-                Ok(()) => return Ok((name.clone(), open_owned_dir(&self.root_fd, &name)?)),
+                Ok(()) => {}
                 Err(rustix::io::Errno::EXIST) => continue,
                 Err(_) => return Err(invalid("temporary closure creation failed")),
             }
+            return match open_created_dir(&self.root_fd, &name) {
+                Ok(fd) => Ok((name, fd)),
+                Err(error) => {
+                    let _ = remove_tree(&self.root_fd, &name);
+                    Err(error)
+                }
+            };
         }
         Err(invalid("temporary closure name collision"))
     }
@@ -654,7 +692,7 @@ impl HarnessClosureStore {
     ) -> Result<(), HarnessClosureError> {
         mkdirat(temp_fd, FILES_NAME, Mode::from_raw_mode(0o700))
             .map_err(|_| invalid("closure files directory creation failed"))?;
-        let files_fd = open_owned_dir(temp_fd, FILES_NAME)?;
+        let files_fd = open_created_dir(temp_fd, FILES_NAME)?;
         let source_fds = open_source_roots(&candidate.source_roots)?;
         for node in &candidate.manifest.nodes {
             let source_root = source_fds
@@ -732,11 +770,10 @@ fn copy_node(
         .map_err(|_| invalid("closure node chmod failed"))?;
 
     let mut reader = std::fs::File::from(
-        rustix::io::dup(&source).map_err(|_| invalid("source node descriptor dup failed"))?,
+        dup_cloexec(&source).map_err(|_| invalid("source node descriptor dup failed"))?,
     );
     let mut writer = std::fs::File::from(
-        rustix::io::dup(&destination)
-            .map_err(|_| invalid("destination node descriptor dup failed"))?,
+        dup_cloexec(&destination).map_err(|_| invalid("destination node descriptor dup failed"))?,
     );
     let mut hasher = Sha256::new();
     let mut copied = 0u64;
@@ -791,16 +828,16 @@ fn create_parent_dirs(
 ) -> Result<(OwnedFd, String), HarnessClosureError> {
     let mut parts = relative.split('/').peekable();
     let mut current =
-        rustix::io::dup(root).map_err(|_| invalid("closure files descriptor dup failed"))?;
+        dup_cloexec(root).map_err(|_| invalid("closure files descriptor dup failed"))?;
     while let Some(part) = parts.next() {
         if parts.peek().is_none() {
             return Ok((current, part.to_owned()));
         }
-        match mkdirat(&current, part, Mode::from_raw_mode(0o700)) {
-            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        current = match mkdirat(&current, part, Mode::from_raw_mode(0o700)) {
+            Ok(()) => open_created_dir(&current, part)?,
+            Err(rustix::io::Errno::EXIST) => open_owned_dir(&current, part)?,
             Err(_) => return Err(invalid("closure layout directory creation failed")),
-        }
-        current = open_owned_dir(&current, part)?;
+        };
     }
     Err(invalid("closure node path is empty"))
 }
@@ -828,7 +865,13 @@ fn validate_tree(
         match mode_bits(&stat) & S_IFMT {
             S_IFDIR => {
                 let prefix = format!("{relative}/");
-                if !expected.keys().any(|path| path.starts_with(&prefix)) {
+                // Keys sharing `prefix` are contiguous in the sorted map, so the first key
+                // at or after `prefix` decides membership in O(log n) rather than a full scan.
+                let listed = expected
+                    .range(prefix.as_str()..)
+                    .next()
+                    .is_some_and(|(path, _)| path.starts_with(prefix.as_str()));
+                if !listed {
                     return Err(invalid("closure contains an unlisted directory"));
                 }
                 verify_owned_directory(&fd)?;
@@ -854,7 +897,7 @@ fn verify_node_file(fd: &OwnedFd, node: &ClosureNode) -> Result<(), HarnessClosu
         return Err(invalid("closure node size diverges from manifest"));
     }
     let mut reader = std::fs::File::from(
-        rustix::io::dup(fd).map_err(|_| invalid("closure node descriptor dup failed"))?,
+        dup_cloexec(fd).map_err(|_| invalid("closure node descriptor dup failed"))?,
     );
     let mut hasher = Sha256::new();
     let mut total = 0u64;
@@ -896,8 +939,7 @@ fn verify_secure_file(fd: &OwnedFd, expected_mode: u32) -> Result<(), HarnessClo
 fn open_relative_file(root: &OwnedFd, relative: &str) -> Result<OwnedFd, HarnessClosureError> {
     validate_relative_path(relative)?;
     let mut parts = relative.split('/').peekable();
-    let mut current =
-        rustix::io::dup(root).map_err(|_| invalid("directory descriptor dup failed"))?;
+    let mut current = dup_cloexec(root).map_err(|_| invalid("directory descriptor dup failed"))?;
     while let Some(part) = parts.next() {
         let last = parts.peek().is_none();
         let flags = if last {
@@ -929,14 +971,41 @@ fn open_direct_file(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClos
 }
 
 fn open_owned_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosureError> {
-    let fd = openat(
+    let fd = open_dir_nofollow(parent, name)?;
+    verify_owned_directory(&fd)?;
+    Ok(fd)
+}
+
+/// `mkdirat` applies the umask; `chmodat` restores mode `0o700`, which `verify_owned_directory` requires.
+/// The caller's own `mkdirat` of `name` must have succeeded.
+fn open_created_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosureError> {
+    rustix::fs::chmodat(parent, name, Mode::from_raw_mode(0o700), AtFlags::empty())
+        .map_err(|_| invalid("closure directory chmod failed"))?;
+    let fd = open_dir_nofollow(parent, name)?;
+    rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))
+        .map_err(|_| invalid("closure directory chmod failed"))?;
+    verify_owned_directory(&fd)?;
+    Ok(fd)
+}
+
+fn open_dir_nofollow(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosureError> {
+    openat(
         parent,
         name,
         OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|_| invalid("closure directory open failed"))?;
-    verify_owned_directory(&fd)?;
+    .map_err(|_| invalid("closure directory open failed"))
+}
+
+/// Removal accepts directories owned by `owner_uid()` regardless of their mode bits, so a
+/// stale entry with a foreign mode can still be reclaimed.
+fn open_dir_for_removal(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosureError> {
+    let fd = open_dir_nofollow(parent, name)?;
+    let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("closure directory stat failed"))?;
+    if mode_bits(&stat) & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() {
+        return Err(invalid("removal target is not an owned directory"));
+    }
     Ok(fd)
 }
 
@@ -977,7 +1046,7 @@ fn cstr_name(name: &CStr) -> Result<String, HarnessClosureError> {
 
 fn read_bounded(fd: &OwnedFd, cap: usize) -> Result<Vec<u8>, HarnessClosureError> {
     let reader = std::fs::File::from(
-        rustix::io::dup(fd).map_err(|_| invalid("closure file descriptor dup failed"))?,
+        dup_cloexec(fd).map_err(|_| invalid("closure file descriptor dup failed"))?,
     );
     let mut bytes = Vec::new();
     reader
@@ -1006,7 +1075,7 @@ fn write_new_file(
     rustix::fs::fchmod(&fd, Mode::from_raw_mode(raw_mode(mode)))
         .map_err(|_| invalid("closure metadata file chmod failed"))?;
     let mut writer = std::fs::File::from(
-        rustix::io::dup(&fd).map_err(|_| invalid("closure metadata descriptor dup failed"))?,
+        dup_cloexec(&fd).map_err(|_| invalid("closure metadata descriptor dup failed"))?,
     );
     writer
         .write_all(bytes)
@@ -1032,12 +1101,26 @@ fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), HarnessClosureError> 
         Err(rustix::io::Errno::ISDIR) | Err(rustix::io::Errno::PERM) => {}
         Err(_) => return Err(invalid("temporary closure removal failed")),
     }
-    let dir = open_owned_dir(parent, name)?;
+    let dir = open_dir_for_removal(parent, name)?;
     for child in list_names(&dir)? {
         remove_tree(&dir, &child)?;
     }
     unlinkat(parent, name, AtFlags::REMOVEDIR)
         .map_err(|_| invalid("temporary closure directory removal failed"))
+}
+
+/// Unreadable or future mtimes count as live: only a provably old temp is reclaimable.
+fn is_stale_temp(parent: &OwnedFd, name: &str) -> bool {
+    let Ok(stat) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) else {
+        return false;
+    };
+    let Ok(secs) = u64::try_from(stat.st_mtime) else {
+        return false;
+    };
+    let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+    SystemTime::now()
+        .duration_since(modified)
+        .is_ok_and(|age| age >= STALE_TEMP_AFTER)
 }
 
 fn open_or_create_store_path(path: &Path) -> Result<OwnedFd, HarnessClosureError> {
@@ -1079,16 +1162,28 @@ fn open_or_create_store_path(path: &Path) -> Result<OwnedFd, HarnessClosureError
         if *component == std::ffi::OsStr::new(".") {
             continue;
         }
-        match openat(
+        let last = index + 1 == components.len();
+        let created = match openat(
             &current,
             component.as_bytes(),
             OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
-            Ok(next) => current = next,
+            Ok(next) => {
+                current = next;
+                false
+            }
             Err(rustix::io::Errno::NOENT) => {
                 mkdirat(&current, component.as_bytes(), Mode::from_raw_mode(0o700))
                     .map_err(|_| invalid("closure store directory creation failed"))?;
+                // `mkdirat` applies the umask; `chmodat` restores `0o700` before reopening the created entry.
+                rustix::fs::chmodat(
+                    &current,
+                    component.as_bytes(),
+                    Mode::from_raw_mode(0o700),
+                    AtFlags::empty(),
+                )
+                .map_err(|_| invalid("closure store directory chmod failed"))?;
                 current = openat(
                     &current,
                     component.as_bytes(),
@@ -1096,12 +1191,26 @@ fn open_or_create_store_path(path: &Path) -> Result<OwnedFd, HarnessClosureError
                     Mode::empty(),
                 )
                 .map_err(|_| invalid("closure store directory open failed"))?;
+                true
             }
             Err(_) => return Err(invalid("closure store path traversal failed")),
-        }
-        if index + 1 == components.len() {
+        };
+        if last {
+            // An owned store root with a wider mode is repaired to `0o700` through its pinned descriptor.
+            // The ownership check precedes the repair so `fchmod` never touches a directory this user does not own.
+            let stat = rustix::fs::fstat(&current)
+                .map_err(|_| invalid("closure store directory stat failed"))?;
+            if mode_bits(&stat) & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() {
+                return Err(invalid("closure directory is not owner-only"));
+            }
+            rustix::fs::fchmod(&current, Mode::from_raw_mode(0o700))
+                .map_err(|_| invalid("closure store directory chmod failed"))?;
             verify_owned_directory(&current)?;
         } else {
+            if created {
+                rustix::fs::fchmod(&current, Mode::from_raw_mode(0o700))
+                    .map_err(|_| invalid("closure store directory chmod failed"))?;
+            }
             verify_safe_ancestor(&current)?;
         }
     }

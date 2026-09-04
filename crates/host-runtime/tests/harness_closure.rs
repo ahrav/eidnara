@@ -1,8 +1,10 @@
-// This crate root must declare `file_mode` because `harness_closure.rs` uses `crate::file_mode`.
+// This crate root must declare `file_mode` and `store_fs` because `harness_closure.rs` uses them through `crate::`.
 #[path = "../src/file_mode.rs"]
 mod file_mode;
 #[path = "../src/harness_closure.rs"]
 mod harness_closure;
+#[path = "../src/store_fs.rs"]
+mod store_fs;
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -545,6 +547,29 @@ fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
     );
 }
 
+/// The helper sets the entry's mtime to twice `STALE_TEMP_AFTER` ago so `prune` treats it as abandoned.
+fn age_past_stale_threshold(path: &Path) {
+    let old = std::time::SystemTime::now() - harness_closure::STALE_TEMP_AFTER * 2;
+    let secs = old
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    let stamp = rustix::fs::Timespec {
+        tv_sec: secs as _,
+        tv_nsec: 0,
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        path,
+        &rustix::fs::Timestamps {
+            last_access: stamp,
+            last_modification: stamp,
+        },
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .expect("age entry");
+}
+
 #[test]
 fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
     let (temp, _source, candidate) = setup();
@@ -553,12 +578,13 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
     let closure = store.materialize(&candidate).expect("materialize");
     let digest = closure.digest().to_owned();
 
-    std::fs::create_dir(store_root.join(".tmp-deadbeefdeadbeef")).expect("stale temp");
-    std::fs::set_permissions(
-        store_root.join(".tmp-deadbeefdeadbeef"),
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .expect("temp mode");
+    // A stale temp inherits the ambient umask; `prune` must not require mode `0o700`.
+    let stale = store_root.join(".tmp-deadbeefdeadbeef");
+    std::fs::create_dir(&stale).expect("stale temp");
+    std::fs::write(stale.join("partial"), b"torn").expect("partial file");
+    age_past_stale_threshold(&stale);
+    let live = store_root.join(".tmp-0123456789abcdef");
+    std::fs::create_dir(&live).expect("live temp");
     std::fs::create_dir(store_root.join("foreign-entry")).expect("foreign entry");
 
     let protected = std::collections::BTreeSet::from([digest.clone()]);
@@ -567,9 +593,10 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
         store_root.join(&digest).is_dir(),
         "protected digest survives"
     );
+    assert!(!stale.exists(), "stale staging directory is reclaimed");
     assert!(
-        !store_root.join(".tmp-deadbeefdeadbeef").exists(),
-        "stale staging directory is reclaimed"
+        live.is_dir(),
+        "a young staging directory may belong to an in-flight materialize and survives"
     );
     assert!(
         store_root.join("foreign-entry").is_dir(),
@@ -586,6 +613,99 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
         !store_root.join(&digest).is_dir(),
         "unprotected digest is reclaimed"
     );
+}
+
+/// Opening an existing owned store root repairs mode `0o755` to `0o700` instead of refusing the store.
+#[test]
+fn an_existing_owned_store_root_is_repaired_to_owner_only() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    std::fs::create_dir(&store_root).expect("pre-created store root");
+    std::fs::set_permissions(&store_root, std::fs::Permissions::from_mode(0o755)).expect("mode");
+
+    let store = HarnessClosureStore::open(&store_root).expect("open repairs the mode");
+    assert_eq!(
+        std::fs::metadata(&store_root)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    store.materialize(&candidate).expect("materialize");
+}
+
+/// One unremovable entry must not abort reclamation of the entries sorted after it.
+#[test]
+fn prune_continues_past_an_unremovable_entry() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let digest = store
+        .materialize(&candidate)
+        .expect("materialize")
+        .digest()
+        .to_owned();
+
+    // The `.tmp-*` entry sorts before the digest. Mode `0o000` prevents listing its child, so removal fails; `prune` must still reclaim the later digest.
+    let blocked = store_root.join(".tmp-00000000000000000000");
+    std::fs::create_dir(&blocked).expect("blocked temp");
+    std::fs::write(blocked.join("child"), b"x").expect("child");
+    age_past_stale_threshold(&blocked);
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("mode");
+
+    let result = store.prune(&std::collections::BTreeSet::new());
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).expect("restore");
+    assert!(result.is_err(), "the blocked entry is reported");
+    assert!(
+        !store_root.join(&digest).is_dir(),
+        "the digest sorted after the blocked entry is still reclaimed"
+    );
+}
+
+/// The child must see the node at the exact descriptor number `module_path` names, and only
+/// after `inherit_in_child` clears close-on-exec in the forked child.
+#[cfg(target_os = "linux")]
+#[test]
+fn inherit_in_child_exposes_the_node_at_its_descriptor_path() {
+    use std::os::unix::process::CommandExt;
+
+    let (temp, _source, candidate) = setup();
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    let closure = store.materialize(&candidate).expect("materialize");
+    let node = closure
+        .resolve_node_descriptor("node_modules/pi/dist/helper.js")
+        .expect("resolve node");
+    let module_path = node.module_path().to_path_buf();
+    assert_eq!(
+        module_path,
+        Path::new("/proc/self/fd").join(node.inherited_fd().to_string())
+    );
+
+    // Without `inherit_in_child`, close-on-exec closes the descriptor before the child can read it.
+    let closed = std::process::Command::new("cat")
+        .arg(&module_path)
+        .env_clear()
+        .output()
+        .expect("run cat without inheritance");
+    assert!(
+        !closed.status.success(),
+        "a close-on-exec descriptor must not be visible to the child"
+    );
+
+    let mut command = std::process::Command::new("cat");
+    command.arg(&module_path).env_clear();
+    // SAFETY: `inherit_in_child` performs one `fcntl` and no allocation or locking between fork and exec.
+    unsafe {
+        command.pre_exec(move || node.inherit_in_child());
+    }
+    let output = command.output().expect("run cat with inheritance");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"export const answer = 42");
 }
 
 #[test]

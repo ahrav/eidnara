@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, Mode, OFlags, fsync, mkdirat, openat, renameat, unlinkat};
@@ -31,6 +32,7 @@ use crate::instance::{
     secure_runtime_dir, write_all_fd,
 };
 use crate::lifecycle::{is_canonical_payload_digest, lifecycle_dir_path};
+use crate::store_fs::{dup_cloexec, rename_no_replace};
 
 pub const GENERATIONS_DIR_NAME: &str = "generations";
 
@@ -41,6 +43,12 @@ pub const GENERATION_MANIFEST_NAME: &str = "manifest.json";
 
 /// Pruning removes incomplete staging directories whose names begin `tmp-`.
 pub const STAGING_TEMP_PREFIX: &str = "tmp-";
+
+/// `prune` reclaims a leftover profile temp only once it is older than this.
+pub const STALE_PROFILE_TEMP_AFTER: Duration = Duration::from_secs(600);
+
+const PROFILE_TEMP_PREFIX: &str = ".current-profile.json.";
+const PROFILE_TEMP_SUFFIX: &str = ".tmp";
 
 /// Manifest and lifecycle-evidence readers each cap input at 1 MiB.
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
@@ -367,9 +375,8 @@ fn verify_file_against_entry(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), G
         return Err(invalid("file size diverges from the manifest"));
     }
     let mut hasher = sha2::Sha256::new();
-    let mut file = std::fs::File::from(
-        rustix::io::dup(fd).map_err(|_| invalid("file descriptor dup failed"))?,
-    );
+    let mut file =
+        std::fs::File::from(dup_cloexec(fd).map_err(|_| invalid("file descriptor dup failed"))?);
     let mut buf = vec![0u8; 64 * 1024];
     let mut total: u64 = 0;
     loop {
@@ -415,6 +422,7 @@ impl std::fmt::Debug for GenerationStore {
 pub struct PruneReport {
     pub removed_generations: usize,
     pub removed_temps: usize,
+    pub removed_profile_temps: usize,
     pub quarantined: usize,
 }
 
@@ -545,6 +553,10 @@ impl GenerationStore {
             || stat.st_nlink != 1
         {
             return Err(invalid("generation manifest failed security checks"));
+        }
+        // Oversized manifests are preserved and never exchange-repaired, matching `is_quarantined_schema`.
+        if stat.st_size as u64 > MAX_MANIFEST_BYTES as u64 {
+            return Err(GenerationError::UnsupportedStateSchema);
         }
         let bytes = read_all_fd(&manifest_fd, MAX_MANIFEST_BYTES)
             .map_err(|_| invalid("generation manifest read failed"))?;
@@ -748,7 +760,14 @@ impl GenerationStore {
         digest: &str,
         protected: &BTreeSet<String>,
     ) -> Result<(), GenerationError> {
-        if rename_no_replace(&self.generations_fd, temp_name, digest)? {
+        let result = match rename_no_replace(&self.generations_fd, temp_name, digest) {
+            Ok(renamed) => renamed,
+            Err(rustix::io::Errno::NOSPC) | Err(rustix::io::Errno::DQUOT) => {
+                return Err(GenerationError::InsufficientStorage);
+            }
+            Err(_) => return Err(invalid("generation rename failed")),
+        };
+        if result {
             fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
             return Ok(());
         }
@@ -774,24 +793,61 @@ impl GenerationStore {
         Ok(())
     }
 
+    /// A failed write or rename unlinks this attempt's temp; a crash leaves it for
+    /// `sweep_stale_profile_temps`.
     fn replace_profile(&self, digest: &str) -> Result<(), GenerationError> {
         let profile = WireProfile {
             schema: 1,
             current: digest.to_owned(),
         };
         let bytes = serde_json::to_vec(&profile).expect("profile serialization cannot fail");
-        let temp_name = format!(".{CURRENT_PROFILE_NAME}.{}.tmp", std::process::id());
-        let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
-        write_new_file(&self.root_fd, &temp_name, &bytes, 0o600)?;
-        renameat(
-            &self.root_fd,
-            temp_name.as_str(),
-            &self.root_fd,
-            CURRENT_PROFILE_NAME,
-        )
-        .map_err(|_| invalid("profile rename failed"))?;
+        let mut suffix = [0u8; 8];
+        getrandom::getrandom(&mut suffix)
+            .map_err(|_| GenerationError::Instance(InstanceError::Random))?;
+        let temp_name = format!("{PROFILE_TEMP_PREFIX}{}{PROFILE_TEMP_SUFFIX}", hex(&suffix));
+        let result = write_new_file(&self.root_fd, &temp_name, &bytes, 0o600).and_then(|()| {
+            renameat(
+                &self.root_fd,
+                temp_name.as_str(),
+                &self.root_fd,
+                CURRENT_PROFILE_NAME,
+            )
+            .map_err(|_| invalid("profile rename failed"))
+        });
+        if result.is_err() {
+            let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
+        }
+        result?;
         fsync_preserving_storage(&self.root_fd, "lifecycle root fsync failed")?;
         Ok(())
+    }
+
+    fn sweep_stale_profile_temps(&self) -> Result<usize, GenerationError> {
+        let mut removed = 0;
+        for name in read_dir_names(&self.root_fd)? {
+            if !name.starts_with(PROFILE_TEMP_PREFIX) || !name.ends_with(PROFILE_TEMP_SUFFIX) {
+                continue;
+            }
+            let Ok(stat) =
+                rustix::fs::statat(&self.root_fd, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+            else {
+                continue;
+            };
+            if (mode_bits(&stat) & S_IFMT) != S_IFREG || stat.st_uid != owner_uid() {
+                continue;
+            }
+            let Ok(secs) = u64::try_from(stat.st_mtime) else {
+                continue;
+            };
+            let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+            let stale = SystemTime::now()
+                .duration_since(modified)
+                .is_ok_and(|age| age >= STALE_PROFILE_TEMP_AFTER);
+            if stale && unlinkat(&self.root_fd, name.as_str(), AtFlags::empty()).is_ok() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     /// `is_quarantined_schema` decodes only the manifest because every non-quarantined outcome is removable.
@@ -858,6 +914,10 @@ impl GenerationStore {
             }
         }
         fsync(&self.generations_fd).map_err(|_| invalid("generations fsync failed"))?;
+        report.removed_profile_temps = self.sweep_stale_profile_temps()?;
+        if report.removed_profile_temps > 0 {
+            fsync(&self.root_fd).map_err(|_| invalid("lifecycle root fsync failed"))?;
+        }
         Ok(report)
     }
 }
@@ -940,7 +1000,7 @@ fn copy_source_into(temp_fd: &OwnedFd, spec: &SourceSpec) -> Result<ManifestFile
 
     let mut hasher = sha2::Sha256::new();
     let mut reader = std::fs::File::from(
-        rustix::io::dup(&source_fd).map_err(|_| invalid("source descriptor dup failed"))?,
+        dup_cloexec(&source_fd).map_err(|_| invalid("source descriptor dup failed"))?,
     );
     let mut buf = vec![0u8; 128 * 1024];
     let mut total: u64 = 0;
@@ -1038,38 +1098,6 @@ fn exchange_dirs(_dir: &OwnedFd, _a: &str, _b: &str) -> Result<(), GenerationErr
     Err(invalid(
         "atomic digest-target exchange is unsupported on this platform",
     ))
-}
-
-/// `rename_noreplace` returns `Ok(true)` after renaming and `Ok(false)` when `to` is occupied.
-/// Callers decide how to handle an occupied target.
-///
-/// `RENAME_NOREPLACE` atomically rejects an occupied target on Linux.
-/// When renameat2 flags are unavailable, check occupancy while transaction.lock excludes trusted concurrent creators.
-/// Every mutating entry point holds `transaction.lock`, excluding trusted concurrent creators.
-fn rename_no_replace(dir: &OwnedFd, from: &str, to: &str) -> Result<bool, GenerationError> {
-    #[cfg(target_os = "linux")]
-    {
-        match rustix::fs::renameat_with(dir, from, dir, to, rustix::fs::RenameFlags::NOREPLACE) {
-            Ok(()) => return Ok(true),
-            Err(rustix::io::Errno::EXIST) | Err(rustix::io::Errno::NOTEMPTY) => return Ok(false),
-            Err(rustix::io::Errno::NOSPC) => return Err(GenerationError::InsufficientStorage),
-            Err(rustix::io::Errno::INVAL)
-            | Err(rustix::io::Errno::NOSYS)
-            | Err(rustix::io::Errno::OPNOTSUPP) => {}
-            Err(_) => return Err(invalid("generation rename failed")),
-        }
-    }
-    match rustix::fs::statat(dir, to, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(_) => return Ok(false),
-        Err(rustix::io::Errno::NOENT) => {}
-        Err(_) => return Err(invalid("generation target stat failed")),
-    }
-    match renameat(dir, from, dir, to) {
-        Ok(()) => Ok(true),
-        Err(rustix::io::Errno::EXIST) | Err(rustix::io::Errno::NOTEMPTY) => Ok(false),
-        Err(rustix::io::Errno::NOSPC) => Err(GenerationError::InsufficientStorage),
-        Err(_) => Err(invalid("generation rename failed")),
-    }
 }
 
 /// A lifecycle root is an owned directory whose ancestry cannot be replaced under the process.
@@ -1905,5 +1933,94 @@ mod tests {
             oversized,
             "an undecidable manifest must be preserved byte-for-byte"
         );
+    }
+
+    /// Promotion rejects an occupant whose manifest exceeds the read cap and preserves its bytes.
+    #[test]
+    fn an_oversized_digest_occupant_is_never_repaired() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let manifest_path = store
+            .root()
+            .join(GENERATIONS_DIR_NAME)
+            .join(&digest)
+            .join(GENERATION_MANIFEST_NAME);
+        let mut oversized = br#"{"schema":2,"pad":""#.to_vec();
+        oversized.resize(oversized.len() + MAX_MANIFEST_BYTES, b'x');
+        oversized.extend_from_slice(br#""}"#);
+        std::fs::write(&manifest_path, &oversized).expect("write oversized manifest");
+
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::UnsupportedStateSchema)
+        ));
+        // The same sources reproduce `digest`, so promotion targets the oversized occupant.
+        let err = store
+            .stage_and_promote(&sources_in(src.path()), &meta(), &BTreeSet::new())
+            .expect_err("an oversized occupant must not be exchange-repaired");
+        assert!(matches!(err, GenerationError::UnsupportedStateSchema));
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("occupant still there"),
+            oversized
+        );
+    }
+
+    fn age_past_stale_threshold(path: &Path) {
+        let old = SystemTime::now() - STALE_PROFILE_TEMP_AFTER * 2;
+        let secs = old
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs();
+        let stamp = rustix::fs::Timespec {
+            tv_sec: secs as _,
+            tv_nsec: 0,
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            path,
+            &rustix::fs::Timestamps {
+                last_access: stamp,
+                last_modification: stamp,
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .expect("age entry");
+    }
+
+    /// `prune` reclaims a stale profile temp and leaves younger and unrelated temps alone.
+    #[test]
+    fn prune_sweeps_stale_profile_temps_only() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+
+        let stale = store.root().join(format!(
+            "{PROFILE_TEMP_PREFIX}0011223344556677{PROFILE_TEMP_SUFFIX}"
+        ));
+        std::fs::write(&stale, b"{\"torn\":true}").expect("stale temp");
+        age_past_stale_threshold(&stale);
+        let live = store.root().join(format!(
+            "{PROFILE_TEMP_PREFIX}8899aabbccddeeff{PROFILE_TEMP_SUFFIX}"
+        ));
+        std::fs::write(&live, b"{\"torn\":true}").expect("live temp");
+        let unrelated = store.root().join(".other.tmp");
+        std::fs::write(&unrelated, b"x").expect("unrelated temp");
+        age_past_stale_threshold(&unrelated);
+
+        let report = store.prune(&BTreeSet::new()).expect("prune");
+        assert_eq!(report.removed_profile_temps, 1);
+        assert!(!stale.exists(), "the stale profile temp is reclaimed");
+        assert!(
+            live.exists(),
+            "a young profile temp may belong to a live writer"
+        );
+        assert!(unrelated.exists(), "only profile temps are swept");
+        assert!(matches!(
+            store.read_current().expect("read"),
+            CurrentProfile::Current(_)
+        ));
     }
 }

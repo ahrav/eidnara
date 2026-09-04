@@ -28,6 +28,7 @@ mod routing;
 mod runtime;
 #[doc(hidden)]
 pub mod setup_socket;
+mod store_fs;
 // Ring setup and tests name raw envelope types, while the managed client API
 // exposes only responses, stream items, and call errors.
 #[doc(hidden)]
