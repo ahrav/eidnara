@@ -976,17 +976,9 @@ fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), GenerationError> {
     crate::store_fs::remove_tree(parent, name).map_err(|_| invalid("entry removal failed"))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> Result<(), GenerationError> {
-    rustix::fs::renameat_with(dir, a, dir, b, rustix::fs::RenameFlags::EXCHANGE)
+    crate::store_fs::exchange_dirs(dir, a, b)
         .map_err(|_| invalid("atomic digest-target exchange failed"))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn exchange_dirs(_dir: &OwnedFd, _a: &str, _b: &str) -> Result<(), GenerationError> {
-    Err(invalid(
-        "atomic digest-target exchange is unsupported on this platform",
-    ))
 }
 
 /// A lifecycle root is an owned directory whose ancestry cannot be replaced under the process.

@@ -23,9 +23,9 @@ use crate::instance::{
 };
 use crate::lifecycle::is_canonical_payload_digest;
 use crate::store_fs::{
-    HARDENED_DIR_FLAGS, create_owned_dir, hash_copy, is_stale_mtime, open_created_dir,
-    open_dir_for_removal, open_rel_nofollow, read_dir_names, remove_tree, rename_no_replace,
-    write_new_file,
+    HARDENED_DIR_FLAGS, create_owned_dir, exchange_dirs, hash_copy, is_stale_mtime,
+    open_created_dir, open_dir_for_removal, open_rel_nofollow, read_dir_names, remove_tree,
+    rename_no_replace, write_new_file,
 };
 
 const MANIFEST_NAME: &str = "manifest.json";
@@ -548,19 +548,26 @@ impl std::fmt::Debug for HarnessClosureStore {
 impl HarnessClosureStore {
     /// The operation opens or creates an owner-only store without following symlinks in any path component.
     /// An existing owned root with a wider mode is repaired to `0o700` through its pinned descriptor.
+    ///
+    /// A relative `root` is made absolute against the working directory at open time, so the
+    /// pathnames a closure hands out keep naming the opened store after a later `chdir`.
     pub fn open(root: &Path) -> Result<Self, HarnessClosureError> {
+        let root = std::path::absolute(root)
+            .map_err(|_| invalid("closure store path cannot be made absolute"))?;
         let root_fd =
-            secure_runtime_dir(root).map_err(|_| invalid("closure store path is insecure"))?;
+            secure_runtime_dir(&root).map_err(|_| invalid("closure store path is insecure"))?;
         verify_owned_directory(&root_fd)?;
-        Ok(Self {
-            root: root.to_path_buf(),
-            root_fd,
-        })
+        Ok(Self { root, root_fd })
     }
 
     /// An existing digest directory that fails validation is a torn closure (crash between
-    /// promotion and durability, or later corruption). Because the caller holds
-    /// `transaction.lock`, nothing else owns it, so `materialize` removes it and restages.
+    /// promotion and durability, or later corruption). The replacement is staged in full before
+    /// the occupant is touched and then swapped in atomically, so a staging failure leaves the
+    /// store unchanged and the digest name is never absent. Because the caller holds
+    /// `transaction.lock`, nothing else mutates the occupant during the swap.
+    ///
+    /// A harness running from the torn tree keeps its open inodes; later opens under
+    /// `closure_path` resolve to the replacement.
     ///
     /// A "closure store fsync failed" error after promotion means the digest may already be
     /// named by the store but its durability is unproven; retrying revalidates it in place.
@@ -574,36 +581,36 @@ impl HarnessClosureStore {
         if let Ok(validated) = self.validate(&digest) {
             return Ok(validated);
         }
-        if child_exists(&self.root_fd, &digest)? {
-            if open_dir_for_removal(&self.root_fd, &digest).is_err() {
-                return Err(invalid("digest target exists but is invalid"));
-            }
-            remove_tree(&self.root_fd, &digest)
-                .map_err(|_| invalid("torn closure removal failed"))?;
-        }
 
         let (temp_name, temp_fd) = self.create_temp()?;
-        let staged = self.stage_candidate(&temp_fd, candidate);
-        if let Err(error) = staged {
-            let _ = remove_tree(&self.root_fd, &temp_name);
-            return Err(error);
-        }
-        match rename_no_replace(&self.root_fd, &temp_name, &digest) {
-            Ok(true) => {
-                fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))?;
-            }
-            Ok(false) => {
-                // The occupant is the result; a failed temp removal must not mask it. A temp that
-                // survives here ages past `STALE_TEMP_AFTER` and is reclaimed by `prune`.
-                let _ = remove_tree(&self.root_fd, &temp_name);
-                return self.validate(&digest);
-            }
-            Err(_) => {
-                let _ = remove_tree(&self.root_fd, &temp_name);
-                return Err(invalid("closure promotion failed"));
-            }
-        }
+        let promoted = self
+            .stage_candidate(&temp_fd, candidate)
+            .and_then(|()| self.promote_temp(&temp_name, &digest));
+        // After a successful exchange the torn tree sits at `temp_name`; after any failure the
+        // staged tree does. Either way the temp is discarded, best effort: a survivor ages past
+        // `STALE_TEMP_AFTER` and `prune` reclaims it.
+        let _ = remove_tree(&self.root_fd, &temp_name);
+        promoted?;
+        fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))?;
         self.validate(&digest)
+    }
+
+    /// Moves the staged temp to `digest`. When the name is occupied, a valid occupant wins and
+    /// the temp is left for the caller to discard; an owned invalid occupant is swapped out.
+    fn promote_temp(&self, temp_name: &str, digest: &str) -> Result<(), HarnessClosureError> {
+        match rename_no_replace(&self.root_fd, temp_name, digest) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(_) => return Err(invalid("closure promotion failed")),
+        }
+        if self.validate(digest).is_ok() {
+            return Ok(());
+        }
+        if open_dir_for_removal(&self.root_fd, digest).is_err() {
+            return Err(invalid("digest target exists but is invalid"));
+        }
+        exchange_dirs(&self.root_fd, temp_name, digest)
+            .map_err(|_| invalid("torn closure exchange failed"))
     }
 
     /// `prune` preserves staging temps younger than [`STALE_TEMP_AFTER`] because an
@@ -972,14 +979,6 @@ fn list_names(dir: &OwnedFd) -> Result<BTreeSet<String>, HarnessClosureError> {
         return Err(invalid("closure entry name is invalid"));
     }
     Ok(names.into_iter().collect())
-}
-
-fn child_exists(parent: &OwnedFd, name: &str) -> Result<bool, HarnessClosureError> {
-    match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(_) => Ok(true),
-        Err(rustix::io::Errno::NOENT) => Ok(false),
-        Err(_) => Err(invalid("digest target stat failed")),
-    }
 }
 
 fn is_stale_temp(parent: &OwnedFd, name: &str) -> bool {

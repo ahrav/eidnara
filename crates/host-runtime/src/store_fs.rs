@@ -67,6 +67,17 @@ pub(crate) fn rename_no_replace(
     }
 }
 
+/// Atomically swaps the entries `a` and `b` under `dir`; both must exist.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> rustix::io::Result<()> {
+    rustix::fs::renameat_with(dir, a, dir, b, rustix::fs::RenameFlags::EXCHANGE)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn exchange_dirs(_dir: &OwnedFd, _a: &str, _b: &str) -> rustix::io::Result<()> {
+    Err(rustix::io::Errno::OPNOTSUPP)
+}
+
 /// Opens `rel` under `dir` component by component with `O_NOFOLLOW`, so no intermediate or
 /// final symlink is followed. Empty, `.`, and `..` components fail with `EINVAL`.
 ///

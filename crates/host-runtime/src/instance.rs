@@ -597,6 +597,9 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
                 if created {
                     rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))
                         .map_err(|e| io_err("fchmod_component", &walked, e))?;
+                    // Only the parent's fsync makes the new component's dirent durable; stores
+                    // under this directory fsync their own contents but never their ancestors.
+                    fsync(&current).map_err(|e| io_err("fsync_parent", &walked, e))?;
                 }
                 fd
             }

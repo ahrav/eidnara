@@ -700,12 +700,36 @@ fn a_torn_digest_directory_is_repaired_by_materialize() {
         "closure is missing a manifest-listed node"
     );
 
+    // A restage that fails must leave the torn occupant untouched rather than unlink it first.
+    let mut unstageable = candidate.clone();
+    unstageable.source_roots.insert(
+        "install".to_owned(),
+        temp.path().join("missing-source-root"),
+    );
+    assert_eq!(
+        store
+            .materialize(&unstageable)
+            .expect_err("missing source root cannot stage")
+            .detail(),
+        "source root open failed"
+    );
+    assert!(
+        torn.join("manifest.json").is_file(),
+        "a failed restage must not remove the torn occupant"
+    );
+
     let closure = store
         .materialize(&candidate)
         .expect("materialize repairs the torn digest");
     assert_eq!(closure.digest(), digest);
     store.validate(&digest).expect("repaired closure validates");
     assert!(torn.join("files/bin/node").is_file());
+    let leftover_temps = std::fs::read_dir(&store_root)
+        .expect("read store")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+        .count();
+    assert_eq!(leftover_temps, 0, "the swapped-out torn tree is removed");
 }
 
 /// The child must see the node at the exact descriptor number `module_path` names, and only
