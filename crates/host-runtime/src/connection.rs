@@ -86,8 +86,6 @@ pub struct GenerationCore {
     /// The connection owner is released after shutdown queues Goodbye so it cannot tear down the writer while the producer fence drains.
     pub shutdown_complete: CancellationToken,
     pub writer: FrameSender,
-    /// The generation's route map only looks up routes; the registry inserts routes at bind and removes them at close.
-    pub membership: Mutex<HashMap<u16, u32>>,
     pub pending: Mutex<HashMap<PendingKey, PendingEntry>>,
     /// The `pings` map stores outstanding host-originated Pings by correlation with their flags and send time.
     pub pings: Mutex<HashMap<u64, PingProbe>>,
@@ -240,7 +238,6 @@ fn new_generation<H: HostHandler>(
         read_tasks: TaskTracker::new(),
         shutdown_complete: CancellationToken::new(),
         writer,
-        membership: Mutex::new(HashMap::new()),
         pending: Mutex::new(HashMap::new()),
         pings: Mutex::new(HashMap::new()),
         busy_rejects: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_BUSY_REJECTS)),
@@ -295,12 +292,6 @@ async fn serve_generation<H: HostHandler>(
         // the generation continues draining in protocol order.
         // A cancelled `generation.token` indicates retirement rather than draining, so the code falls through to the silent close.
         ReadExit::HostCancelled if !generation.token.is_cancelled() => {}
-        // For `PeerKeepQueue`, wait for the promised terminal before retiring.
-        ReadExit::PeerKeepQueue(terminal_written) => {
-            let _ = terminal_written.await;
-            generation.token.cancel();
-            generation.writer.discard();
-        }
         // Peer-driven retirement closes silently.
         // Cancelling `generation.token` prevents off-reader emissions from succeeding.
         // Discarding `generation.writer` drops queued frames.
@@ -340,15 +331,10 @@ fn discard_unregistered_generation(generation: &GenerationCore) {
     generation.writer.discard();
 }
 
-/// Only `HostCancelled` may keep the writer draining.
-/// `Peer` retires silently; `PeerKeepQueue` flushes its authoritative early terminal before retirement.
-/// `PeerKeepQueue` permits its authoritative early terminal to flush before the writer discards the remaining queue.
-/// The early terminal is authoritative for its correlation.
+/// Only `HostCancelled` may keep the writer draining; `Peer` retires silently.
 enum ReadExit {
     HostCancelled,
     Peer,
-    /// The receiver completes only after the authoritative terminal reaches the socket.
-    PeerKeepQueue(tokio::sync::oneshot::Receiver<()>),
 }
 
 /// Serves validated frames until close. Returning retires the generation.
@@ -361,26 +347,14 @@ async fn read_loop<H: HostHandler>(
     // closes the generation before dispatch (protocol §8.3, V44). A promoted
     // candidate starts at 2 so application correlations begin at 3 (§7.7.4).
     let mut watermark: u64 = 0;
-    // Written-signal of the most recent rejected-frame terminal: if the
-    // transport's realignment then fails, the close fences exactly that
-    // authoritative frame (protocol §7.1).
-    let mut reject_written: Option<tokio::sync::oneshot::Receiver<()>> = None;
 
     loop {
         let event = match channel.recv().await {
             Ok(event) => event,
             Err(ReadClose::Cancelled) => return ReadExit::HostCancelled,
-            Err(ReadClose::RejectedDrainFailed) => {
-                // `read_loop` preserves the queued early terminal when declared-body drain fails because its correlation remains authoritative (protocol §7.1).
-                return match reject_written.take() {
-                    Some(terminal_rx) => ReadExit::PeerKeepQueue(terminal_rx),
-                    None => ReadExit::Peer,
-                };
+            Err(ReadClose::CleanEof) | Err(ReadClose::Corrupt(_)) | Err(ReadClose::Overloaded) => {
+                return ReadExit::Peer;
             }
-            Err(ReadClose::CleanEof)
-            | Err(ReadClose::Corrupt(_))
-            | Err(ReadClose::Io(_))
-            | Err(ReadClose::Overloaded) => return ReadExit::Peer,
         };
 
         match event {
@@ -407,8 +381,6 @@ async fn read_loop<H: HostHandler>(
                     generation.writer.discard();
                     return ReadExit::Peer;
                 };
-                let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
-                reject_written = Some(terminal_rx);
                 let shared_task = Arc::clone(shared);
                 let gen_task = Arc::clone(generation);
                 shared.spawn_tracked(generation.read_tasks.track_future(async move {
@@ -419,7 +391,6 @@ async fn read_loop<H: HostHandler>(
                         FrameId::control(corr),
                         CODE_INVALID_CONTROL_REQUEST,
                         "control body exceeds profile cap",
-                        terminal_tx,
                     )
                     .await;
                 }));
@@ -546,11 +517,7 @@ fn decode_contiguous<T>(
     frame: &crate::frame_channel::InboundFrame,
     decode: impl FnOnce(&[u8]) -> T,
 ) -> T {
-    let copies = frame.copy_counter();
-    frame.with_lease(|lease| match lease.contiguous_bytes() {
-        Some(body) => decode(body),
-        None => decode(&lease.to_owned(&copies)),
-    })
+    frame.with_lease(|lease| decode(lease.bytes()))
 }
 
 fn decode_control_frame(
@@ -925,7 +892,6 @@ mod tests {
             read_tasks: TaskTracker::new(),
             shutdown_complete: CancellationToken::new(),
             writer,
-            membership: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             pings: Mutex::new(HashMap::new()),
             busy_rejects: Arc::new(tokio::sync::Semaphore::new(1)),

@@ -750,7 +750,6 @@ pub(crate) async fn emit_authoritative_rejection<H: HostHandler>(
     id: FrameId,
     code: &'static str,
     message: &'static str,
-    written_tx: oneshot::Sender<()>,
 ) {
     let Ok((body, deadline)) =
         charged_error_body(&shared.egress_budget, generation, code, message, None).await
@@ -772,9 +771,7 @@ pub(crate) async fn emit_authoritative_rejection<H: HostHandler>(
                 tail: Vec::new(),
                 direct: None,
                 charge,
-                written: Some(Box::new(move |_completed_at| {
-                    let _ = written_tx.send(());
-                })),
+                written: None,
             },
             deadline,
         )

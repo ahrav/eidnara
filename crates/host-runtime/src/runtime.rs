@@ -787,9 +787,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
     drop(manifests);
 
     let ring_limits = crate::ring_transport::process_limits(config.limits.max_connections)
-        .ok_or_else(|| {
-            HostError::InitFailed("shared-memory resource limits overflow".to_owned())
-        })?;
+        .map_err(|err| HostError::InitFailed(err.to_string()))?;
     let ring = Arc::new(crate::ring_transport::RingTransport::for_ring_profile(
         ring_limits,
     ));
@@ -1202,7 +1200,6 @@ mod tests {
                 read_tasks: TaskTracker::new(),
                 shutdown_complete: CancellationToken::new(),
                 writer,
-                membership: std::sync::Mutex::new(HashMap::new()),
                 pending: std::sync::Mutex::new(HashMap::new()),
                 pings: std::sync::Mutex::new(HashMap::new()),
                 busy_rejects: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1227,7 +1224,7 @@ mod tests {
         );
         for queue in [&mut first_queue, &mut second_queue] {
             let frame = queue.try_recv().expect("Goodbye was queued concurrently");
-            assert_eq!(frame.frame.bytes[5], crate::wire::FrameType::Goodbye as u8);
+            assert_eq!(frame.bytes[5], crate::wire::FrameType::Goodbye as u8);
         }
     }
 }
