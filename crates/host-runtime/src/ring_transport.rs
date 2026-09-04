@@ -1901,13 +1901,9 @@ mod tests {
             rings.second.try_receive().unwrap().is_none(),
             "the aborted reservation leaves no frame in the ring"
         );
-        peer.send_bounded(
-            header,
-            &[1],
-            now + Duration::from_secs(1),
-            now + Duration::from_secs(1),
-        )
-        .expect("a live frame deadline publishes");
+        let live_deadline = StdInstant::now() + Duration::from_secs(1);
+        peer.send_bounded(header, &[1], live_deadline, live_deadline)
+            .expect("a live frame deadline publishes");
         assert!(rings.second.try_receive().unwrap().is_some());
     }
 
