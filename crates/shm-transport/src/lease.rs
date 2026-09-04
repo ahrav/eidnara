@@ -67,10 +67,10 @@ impl<'lease> LeaseSpan<'lease> {
         if destination.len() != self.len {
             return Err(LeaseError::LengthMismatch);
         }
-        // SAFETY: the constructor's contract keeps `len` source bytes readable for `'lease`,
-        // and `destination` is a live exclusive slice of the same length that cannot overlap
-        // the mapping.
-        unsafe { atomic_copy(self.base.as_ptr(), destination.as_mut_ptr(), self.len) };
+        // SAFETY: the constructor's contract keeps `len` source bytes readable for `'lease`
+        // with no Rust reference over them, and `destination` is a live exclusive slice of the
+        // same length that cannot overlap the mapping.
+        unsafe { copy_out(self.base.as_ptr(), destination) };
         Ok(())
     }
 
@@ -92,22 +92,38 @@ impl fmt::Debug for LeaseSpan<'_> {
     }
 }
 
-/// Copies `len` bytes with one relaxed atomic load and store per byte, so either side may be
-/// shared memory another process writes or reads concurrently. Every access through a span
-/// is one byte wide, so a byte-wide peer store can never be a mixed-size race.
+/// Copies `destination.len()` bytes out of shared memory at `source`, one relaxed atomic load
+/// per byte, so a peer store during the copy yields a stale byte rather than a data race. The
+/// destination is ordinary Rust memory and takes plain stores.
 ///
 /// # Safety
-/// `source..source.add(len)` must be readable and `destination..destination.add(len)` must be
-/// writable for the duration of the call, the two ranges must not overlap, and no Rust
-/// reference may cover either range while the call runs.
-pub(crate) unsafe fn atomic_copy(source: *const u8, destination: *mut u8, len: usize) {
-    for offset in 0..len {
-        // SAFETY: `offset < len`, so both pointers stay inside the caller's ranges; `AtomicU8`
-        // has alignment 1.
-        unsafe {
-            let byte = AtomicU8::from_ptr(source.add(offset).cast_mut()).load(Ordering::Relaxed);
-            AtomicU8::from_ptr(destination.add(offset)).store(byte, Ordering::Relaxed);
-        }
+/// `source..source.add(destination.len())` must be readable for the duration of the call and
+/// must not overlap `destination`, and no Rust reference may cover that source range while the
+/// call runs.
+pub(crate) unsafe fn copy_out(source: *const u8, destination: &mut [u8]) {
+    for (offset, slot) in destination.iter_mut().enumerate() {
+        // SAFETY: `offset < destination.len()`, so the pointer stays inside the caller's range;
+        // `AtomicU8` has alignment 1. The caller vouches that the range is shared memory with no
+        // Rust reference over it, which is what `from_ptr` requires.
+        *slot =
+            unsafe { AtomicU8::from_ptr(source.add(offset).cast_mut()) }.load(Ordering::Relaxed);
+    }
+}
+
+/// Copies `source` into shared memory at `destination`, one relaxed atomic store per byte, so a
+/// peer reading during the copy observes whole bytes. The source is ordinary Rust memory and
+/// takes plain loads.
+///
+/// # Safety
+/// `destination..destination.add(source.len())` must be writable for the duration of the call
+/// and must not overlap `source`, and no Rust reference may cover that destination range while
+/// the call runs.
+pub(crate) unsafe fn copy_in(source: &[u8], destination: *mut u8) {
+    for (offset, byte) in source.iter().enumerate() {
+        // SAFETY: `offset < source.len()`, so the pointer stays inside the caller's range;
+        // `AtomicU8` has alignment 1. The caller vouches that the range is shared memory with no
+        // Rust reference over it, which is what `from_ptr` requires.
+        unsafe { AtomicU8::from_ptr(destination.add(offset)) }.store(*byte, Ordering::Relaxed);
     }
 }
 
@@ -284,7 +300,7 @@ impl fmt::Debug for LeaseError {
 mod tests {
     use std::cell::Cell;
 
-    use super::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, atomic_copy};
+    use super::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, copy_in, copy_out};
     use crate::descriptor::{Incarnation, ReleaseIdentity};
 
     struct CallLog {
@@ -342,25 +358,33 @@ mod tests {
     }
 
     #[test]
-    fn atomic_copy_matches_plain_copy_at_every_alignment_and_length() {
+    fn copy_in_then_copy_out_round_trips_at_every_alignment_and_length() {
+        use std::sync::atomic::AtomicU8;
         let source: Vec<u8> = (0..64u8).collect();
         for start in 0..16 {
-            for destination_shift in 0..16 {
+            for shared_shift in 0..16 {
                 for len in 0..40 {
-                    let mut destination = vec![0xff; len + destination_shift];
-                    // SAFETY: both ranges are inside live, non-overlapping allocations, and
-                    // no reference to either is live during the call.
+                    let shared: Vec<AtomicU8> = (0..len + shared_shift)
+                        .map(|_| AtomicU8::new(0xff))
+                        .collect();
+                    let shared_ptr = shared.as_ptr().cast_mut().cast::<u8>();
+                    let mut back = vec![0u8; len];
+                    // SAFETY: `shared` is live for both calls and no `&[u8]` or `&mut [u8]` is
+                    // formed over it; the atomics are the only accesses.
                     unsafe {
-                        atomic_copy(
-                            source.as_ptr().add(start),
-                            destination.as_mut_ptr().add(destination_shift),
-                            len,
-                        );
+                        copy_in(&source[start..start + len], shared_ptr.add(shared_shift));
+                        copy_out(shared_ptr.add(shared_shift), &mut back);
                     }
                     assert_eq!(
-                        destination[destination_shift..],
+                        back,
                         source[start..start + len],
-                        "start {start} shift {destination_shift} len {len}"
+                        "start {start} shift {shared_shift} len {len}"
+                    );
+                    assert!(
+                        shared[..shared_shift]
+                            .iter()
+                            .all(|cell| cell.load(std::sync::atomic::Ordering::Relaxed) == 0xff),
+                        "bytes before the shift are untouched"
                     );
                 }
             }

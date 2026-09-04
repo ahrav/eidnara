@@ -37,7 +37,7 @@ use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor, Incarnation,
     MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES, WIRE_V2_VERSION, check_wire_header,
 };
-use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, atomic_copy};
+use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, copy_in};
 use crate::profile::TargetProfile;
 
 const MAPPING_MAGIC: u64 = 0x4d43_5348_4d52_3031;
@@ -202,7 +202,7 @@ struct LifecyclePage {
 
 /// Volatile copy of the plain `LifecyclePage` fields. Those fields are peer-writable and not
 /// atomic, so no `&LifecyclePage` is ever formed; `validate_lifecycle` compares this copy.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 struct LifecycleSnapshot {
     magic: u64,
     layout_version: u16,
@@ -424,15 +424,10 @@ fn remove_pages(base: NonNull<u8>, offset: usize, len: usize) -> Result<(), Ring
 
 fn system_page_size() -> usize {
     static PAGE_SIZE_CACHE: OnceLock<usize> = OnceLock::new();
-    *PAGE_SIZE_CACHE.get_or_init(|| {
-        Some(sys::page_size())
-            .filter(|size| *size > 0)
-            .unwrap_or(PAGE_SIZE)
+    *PAGE_SIZE_CACHE.get_or_init(|| match sys::page_size() {
+        0 => PAGE_SIZE,
+        size => size,
     })
-}
-
-fn residency_vector_len(mapping_len: usize, page_size: usize) -> usize {
-    mapping_len.div_ceil(page_size.max(1))
 }
 
 struct Mapping {
@@ -498,42 +493,39 @@ impl Mapping {
         Ok(unsafe { &*ptr })
     }
 
-    pub(crate) fn producer(&self, layout: Layout) -> Result<&ProducerPage, RingError> {
+    fn producer(&self, layout: Layout) -> Result<&ProducerPage, RingError> {
         // SAFETY: `ProducerPage` is two `AtomicU64`s.
         unsafe { self.shared_page(layout.producer) }
     }
 
-    pub(crate) fn consumer(&self, layout: Layout) -> Result<&ConsumerPage, RingError> {
+    fn consumer(&self, layout: Layout) -> Result<&ConsumerPage, RingError> {
         // SAFETY: `ConsumerPage` is two `AtomicU64`s.
         unsafe { self.shared_page(layout.consumer) }
     }
 
-    pub(crate) fn reclaim(&self, layout: Layout) -> Result<&ReclaimPage, RingError> {
+    fn reclaim(&self, layout: Layout) -> Result<&ReclaimPage, RingError> {
         // SAFETY: `ReclaimPage` is two `AtomicU64`s.
         unsafe { self.shared_page(layout.reclaim) }
     }
 
-    pub(crate) fn data_wake(&self, layout: Layout) -> Result<&WakeEpoch, RingError> {
+    fn data_wake(&self, layout: Layout) -> Result<&WakeEpoch, RingError> {
         // SAFETY: `WakeEpoch` is two `AtomicU64`s.
         unsafe { self.shared_page(layout.data_wake) }
     }
 
-    pub(crate) fn capacity_wake(&self, layout: Layout) -> Result<&WakeEpoch, RingError> {
+    fn capacity_wake(&self, layout: Layout) -> Result<&WakeEpoch, RingError> {
         // SAFETY: `WakeEpoch` is two `AtomicU64`s.
         unsafe { self.shared_page(layout.capacity_wake) }
     }
 
     /// Slot at ring index `index` (not sequence); the caller reduces modulo depth.
-    pub(crate) fn slot(&self, layout: Layout, index: usize) -> Result<&DescriptorSlot, RingError> {
+    fn slot(&self, layout: Layout, index: usize) -> Result<&DescriptorSlot, RingError> {
         // SAFETY: `DescriptorSlot` is an `AtomicU8`, two `AtomicU64`s, and an
         // `UnsafeCell<SharedDescriptor>` that is only ever accessed volatilely.
         unsafe { self.shared_page(layout.slot_offset(index)?) }
     }
 
-    pub(crate) fn lifecycle_snapshot(
-        &self,
-        layout: Layout,
-    ) -> Result<LifecycleSnapshot, RingError> {
+    fn lifecycle_snapshot(&self, layout: Layout) -> Result<LifecycleSnapshot, RingError> {
         let page = self.ptr_at::<LifecyclePage>(layout.lifecycle)?;
         // SAFETY: `ptr_at` bounds-checked the page; `addr_of!` projects each field without
         // forming a reference, and every field read is a plain integer or byte array valid for
@@ -555,7 +547,7 @@ impl Mapping {
 
     /// The one atomic field of the lifecycle page. Only that field is referenced; the plain
     /// fields around it stay behind the raw pointer.
-    pub(crate) fn lifecycle_quarantined(&self, layout: Layout) -> Result<&AtomicU8, RingError> {
+    fn lifecycle_quarantined(&self, layout: Layout) -> Result<&AtomicU8, RingError> {
         let page = self.ptr_at::<LifecyclePage>(layout.lifecycle)?;
         // SAFETY: `ptr_at` bounds-checked the page and the mapping outlives `&self`;
         // `addr_of!` projects the field without touching its neighbors, and an `AtomicU8`
@@ -571,10 +563,11 @@ impl Mapping {
         if end > self.len {
             return Err(RingError::InvalidLayout);
         }
-        let mut residency = vec![0u8; residency_vector_len(len, system_page_size())];
+        let page_size = system_page_size();
+        let mut residency = vec![0u8; sys::residency_vector_len(len, page_size)];
         // SAFETY: `offset + len <= self.len` was checked above, and the mapping lives as long
         // as `&self`.
-        unsafe { sys::mincore(self.base, offset, len, &mut residency) }
+        unsafe { sys::mincore(self.base, offset, len, page_size, &mut residency) }
             .map_err(|_| RingError::ObjectValidationFailed)?;
         Ok(residency.into_iter().filter(|entry| entry & 1 == 1).count())
     }
@@ -823,10 +816,6 @@ impl Doorbell {
             Err(_) => Err(RingError::DoorbellFailed),
         }
     }
-}
-
-fn set_cloexec(fd: &OwnedFd) -> Result<(), RingError> {
-    sys::set_cloexec(fd.as_fd()).map_err(|_| RingError::ObjectValidationFailed)
 }
 
 /// Everything a peer needs to attach: layout version, incarnation, lane, and geometry. Sent
@@ -1085,7 +1074,7 @@ impl Ring {
         // a child this process later execs would hold the mapping and the peer's doorbell ends
         // open and hide this side's exit from the peer.
         for descriptor in &descriptors {
-            set_cloexec(descriptor)?;
+            sys::set_cloexec(descriptor.as_fd()).map_err(|_| RingError::ObjectValidationFailed)?;
         }
         let [mapping_fd, data_ready, capacity_ready] = descriptors;
         let layout = grant.checked_layout()?;
@@ -1173,45 +1162,51 @@ impl Ring {
     /// not by this handle's own releases: release runs on the thread that would block here.
     /// Release leases, then poll again, before blocking.
     pub fn arm_data_wait(&self) -> Result<bool, RingError> {
+        match self.arm_data_wait_guarded()? {
+            Some(guard) => {
+                // The caller owns `parked` until `complete_data_wait` clears it.
+                std::mem::forget(guard);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// `arm_data_wait` that returns the live guard instead of handing `parked` to the caller;
+    /// dropping the guard unparks. `None` means blocking is not correct and the caller should
+    /// poll again.
+    fn arm_data_wait_guarded(&self) -> Result<Option<ParkGuard<'_>>, RingError> {
         if self.is_quarantined() {
             return Err(RingError::Quarantined);
         }
         if self.data_available()? {
-            return Ok(false);
+            return Ok(None);
         }
         let wake = self.data_wake()?;
         let (generation, guard) = ParkGuard::arm(wake);
         if !self.armed_wait_holds(wake, generation)? {
-            return Ok(false);
+            return Ok(None);
         }
         self.data_ready
             .drain()
             .map_err(|error| self.quarantine_with(error))?;
-        let holds = self.armed_wait_holds(wake, generation)?;
-        if holds {
-            // On `Ok(true)`, the caller owns `parked` until `complete_data_wait` clears it.
-            std::mem::forget(guard);
+        if !self.armed_wait_holds(wake, generation)? {
+            return Ok(None);
         }
-        Ok(holds)
+        Ok(Some(guard))
     }
 
     /// Re-checks, after `parked` is set, that blocking is still correct: no quarantine, no
     /// data, and no wake generation change. `enter_quarantine` rings the doorbell only for a
     /// handle it sees parked, so a quarantine that lands between the first check and the
-    /// `parked` store sends no token; this re-check covers that window. Clears `parked` on
-    /// every path that does not return `Ok(true)`.
+    /// `parked` store sends no token; this re-check covers that window. The caller's
+    /// `ParkGuard` clears `parked` on every path that does not return `Ok(true)`.
     fn armed_wait_holds(&self, wake: &WakeEpoch, generation: u64) -> Result<bool, RingError> {
-        let unpark = || wake.parked.store(0, Ordering::Release);
         if self.is_quarantined() {
-            unpark();
             return Err(RingError::Quarantined);
         }
-        let available = self.data_available().inspect_err(|_| unpark())?;
-        if available || wake.generation.load(Ordering::SeqCst) != generation {
-            unpark();
-            return Ok(false);
-        }
-        Ok(true)
+        let available = self.data_available()?;
+        Ok(!available && wake.generation.load(Ordering::SeqCst) == generation)
     }
 
     /// Clears the parked marker set by `arm_data_wait` and drains the doorbell token. A
@@ -1466,11 +1461,9 @@ impl Ring {
             if Instant::now() >= deadline {
                 return Ok(false);
             }
-            if !self.arm_data_wait()? {
+            let Some(_guard) = self.arm_data_wait_guarded()? else {
                 continue;
-            }
-            // `arm_data_wait` left `parked` set; the guard clears it on every exit below.
-            let _guard = ParkGuard(self.data_wake()?);
+            };
             let ready = self
                 .data_ready
                 .wait_until(deadline)
@@ -2395,10 +2388,9 @@ impl Ring {
                 .arena_ptr(self.layout, self.arena_bytes(), offset, take)
                 .map_err(ProducerError::Ring)?;
             // SAFETY: `arena_ptr` checked `[offset, offset + take)` against the arena and the
-            // mapping; `copied + take <= bytes.len()` keeps the source in the slice; the
-            // reservation owns this arena range until commit or abort, so no reader has a
-            // lease over it.
-            unsafe { atomic_copy(bytes.as_ptr().add(copied), destination, take) };
+            // mapping, and no Rust reference covers arena bytes; the reservation owns this
+            // arena range until commit or abort, so no reader has a lease over it.
+            unsafe { copy_in(&bytes[copied..copied + take], destination) };
             copied += take;
         }
         Ok(())
@@ -3009,7 +3001,7 @@ mod tests {
 
     use super::{
         Doorbell, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError, RingGrant,
-        SyscallCounters, removal_ranges, residency_vector_len, sys, wire_v2_header,
+        SyscallCounters, removal_ranges, sys, wire_v2_header,
     };
 
     fn ring() -> Ring {
@@ -3046,6 +3038,11 @@ mod tests {
             !ring
                 .wait_for_data(Instant::now() + Duration::from_millis(5))
                 .unwrap()
+        );
+        assert_eq!(
+            ring.data_wake().unwrap().parked.load(Ordering::Acquire),
+            0,
+            "a timed-out data wait must not leave the consumer marked parked"
         );
         assert_eq!(
             ring.syscall_counters().since(before),
@@ -3320,7 +3317,7 @@ mod tests {
     #[test]
     fn armed_wait_recheck_sees_a_quarantine_that_sent_no_token() {
         let ring = ring();
-        assert!(ring.arm_data_wait().unwrap());
+        let guard = ring.arm_data_wait_guarded().unwrap().unwrap();
         let wake = ring.data_wake().unwrap();
         let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
         // A peer that quarantined before observing `parked` writes only the flag.
@@ -3330,7 +3327,13 @@ mod tests {
             ring.armed_wait_holds(wake, generation),
             Err(RingError::Quarantined)
         ));
-        assert_eq!(wake.parked.load(Ordering::Acquire), 0);
+        assert_ne!(
+            wake.parked.load(Ordering::Acquire),
+            0,
+            "predicate does not unpark"
+        );
+        drop(guard);
+        assert_eq!(wake.parked.load(Ordering::Acquire), 0, "guard drop unparks");
     }
 
     #[test]
@@ -4013,8 +4016,8 @@ mod tests {
     #[test]
     fn residency_vector_tracks_runtime_page_size() {
         let mapping_len = 128 * 1024 + 1;
-        assert_eq!(residency_vector_len(mapping_len, 16 * 1024), 9);
-        assert_eq!(residency_vector_len(mapping_len, 64 * 1024), 3);
+        assert_eq!(sys::residency_vector_len(mapping_len, 16 * 1024), 9);
+        assert_eq!(sys::residency_vector_len(mapping_len, 64 * 1024), 3);
     }
 
     #[test]

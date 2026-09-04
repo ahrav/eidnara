@@ -29,11 +29,7 @@ pub(crate) fn memfd_create(name: &CStr) -> io::Result<OwnedFd> {
     // SAFETY: `name` is a valid NUL-terminated string for the call's duration; a
     // non-negative return is a new descriptor this process owns and nothing else has seen.
     unsafe {
-        let raw = libc::syscall(
-            libc::SYS_memfd_create,
-            name.as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        ) as libc::c_int;
+        let raw = libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING);
         check(raw).map(|raw| OwnedFd::from_raw_fd(raw))
     }
 }
@@ -153,6 +149,11 @@ pub(crate) unsafe fn madvise_remove(
         .map(drop)
 }
 
+/// Bytes `mincore` needs for a mapping of `mapping_len` bytes at `page_size`.
+pub(crate) fn residency_vector_len(mapping_len: usize, page_size: usize) -> usize {
+    mapping_len.div_ceil(page_size.max(1))
+}
+
 /// Fills `residency` with one byte per page of `base + offset .. + len`.
 ///
 /// # Safety
@@ -162,10 +163,10 @@ pub(crate) unsafe fn mincore(
     base: NonNull<u8>,
     offset: usize,
     len: usize,
+    page_size: usize,
     residency: &mut [u8],
 ) -> io::Result<()> {
-    let page = page_size();
-    if residency.len() < len.div_ceil(page.max(1)) {
+    if residency.len() < residency_vector_len(len, page_size) {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
     // SAFETY: the caller guarantees the range is inside a live mapping, so the pointer

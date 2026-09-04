@@ -4,16 +4,18 @@ Companion to `docs/plans/2026-09-04-0652-refactor-unsafe-surface-confinement-pla
 
 ## Remaining unsafe, by file
 
-| File | Lines | Category | Guard |
-|---|---:|---|---|
-| `crates/shm-transport/src/backend/sys.rs` | 17 | one libc call per wrapper; `munmap`, `madvise_remove`, `mincore` are `unsafe fn` with `# Safety` | `undocumented_unsafe_blocks`, `unsafe_op_in_unsafe_fn`, valgrind |
-| `crates/shm-transport/src/backend/ring.rs` (before `mod tests`) | 21 | `Mapping` accessors (`ptr_at`, `shared_page`, page refs, `lifecycle_snapshot`, `lifecycle_quarantined`, `initialize_page`, `arena_ptr`, `resident_pages`, `Drop`), `DescriptorSlot` volatile read/write, two private `Ring` calls into `LeaseSpan::new` and `atomic_copy` | same lints, Miri (`backend::ring::miri`), valgrind |
-| `crates/shm-transport/src/backend/ring.rs` (`mod tests`) | 1 | `BorrowedFd::borrow_raw` in a cloexec test | `undocumented_unsafe_blocks` |
-| `crates/shm-transport/src/lease.rs` | 9 | `LeaseSpan::new` (`unsafe fn`), `atomic_copy` (`unsafe fn`), per-byte `AtomicU8::from_ptr` loads, test fixtures | same lints, Miri (`lease::`) |
-| `crates/shm-transport/tests/ring.rs` | 8 | `ftruncate`/`fchmod`/`memfd_create` probes and inherited-fd adoption in the child role | `undocumented_unsafe_blocks` at the test crate root, valgrind |
-| `crates/shm-transport/benches/hardware_envelope.rs` | 11 | `fork`, `mmap`, `getrusage`, `sched_yield`, `waitpid`, `kill` for the bench harness | `undocumented_unsafe_blocks` at the bench crate root; not shipped |
-| `crates/lease/src/lib.rs` | 8 | two `geteuid` reads, Windows `GetFileInformationByHandle` + `assume_init`, test `umask`/`mkfifo` | `deny(unsafe_code)` with `#[allow(unsafe_code)]` on six named items |
-| `crates/storage/src/lib.rs` | 8 | test-only `umask`/`mkfifo` | `deny(unsafe_code)` with `#[allow(unsafe_code)]` on five test functions |
+Counts are `unsafe { }` blocks plus `unsafe fn` declarations at the commit that added this record.
+
+| File | Blocks + fns | Category | Guard |
+|---|---|---|---|
+| `crates/shm-transport/src/backend/sys.rs` | 22 + 3 | one libc call per wrapper; `munmap`, `madvise_remove`, `mincore` are `unsafe fn` with `# Safety` | `undocumented_unsafe_blocks`, `unsafe_op_in_unsafe_fn`, valgrind |
+| `crates/shm-transport/src/backend/ring.rs` (before `mod tests`) | 20 + 1 | `Mapping` accessors (`ptr_at`, `shared_page` as the one `unsafe fn`, page refs, `lifecycle_snapshot`, `lifecycle_quarantined`, `initialize_page`, `arena_ptr`, `resident_pages`, `Drop`), `DescriptorSlot` volatile read/write, two private `Ring` calls into `LeaseSpan::new` and `copy_in` | same lints, Miri (`backend::ring::miri`), valgrind |
+| `crates/shm-transport/src/backend/ring.rs` (`mod tests`) | 1 + 0 | `BorrowedFd::borrow_raw` in a cloexec test | `undocumented_unsafe_blocks` |
+| `crates/shm-transport/src/lease.rs` | 9 + 3 | `LeaseSpan::new`, `copy_out`, `copy_in` (`unsafe fn`); per-byte `AtomicU8::from_ptr` on the mapping side only; test fixtures | same lints, Miri (`lease::`) |
+| `crates/shm-transport/tests/ring.rs` | 8 + 0 | `ftruncate`/`fchmod`/`memfd_create` probes and inherited-fd adoption in the child role | `undocumented_unsafe_blocks` at the test crate root, valgrind |
+| `crates/shm-transport/benches/hardware_envelope.rs` | 11 + 0 | `fork`, `mmap`, `getrusage`, `sched_yield`, `waitpid`, `kill` for the bench harness | `undocumented_unsafe_blocks` at the bench crate root; not shipped |
+| `crates/lease/src/lib.rs` | 8 + 0 | two `geteuid` reads, Windows `GetFileInformationByHandle` + `assume_init`, test `umask`/`mkfifo` | `deny(unsafe_code)` with `#[allow(unsafe_code)]` on six named items |
+| `crates/storage/src/lib.rs` | 8 + 0 | test-only `umask`/`mkfifo` | `deny(unsafe_code)` with `#[allow(unsafe_code)]` on five test functions |
 | `crates/storage-types`, `crates/cache-stability`, `crates/tokenizer` | 0 | | `forbid(unsafe_code)` |
 
 Baseline before the refactor: 103 production blocks across three files, 91 of them in `ring.rs`, 14 without a safety comment, two private `unsafe fn` without a `# Safety` section, and an `unsafe fn` release callback carrying a `*const ()` context.
@@ -52,6 +54,7 @@ Each row is a one-line edit made, observed, and reverted. A guard that no edit t
 | `Doorbell::from_fd` socket-type check | delete the `socket_type == SOCK_STREAM` branch | `doorbell_attachment_requires_connected_unix_stream_socket` fails on the `UnixDatagram::pair` case |
 | valgrind gate | `std::mem::forget(Box::new([7u8; 64]))` in an integration test | `64 bytes in 1 blocks are definitely lost`, `ERROR SUMMARY: 1 errors`, exit 1 |
 | Miri concurrent-writer test | word-wide `AtomicUsize` copy against byte-wide writer stores (tried during U5) | `Undefined Behavior: Race condition detected between (1) 1-byte atomic store ... and (2) 8-byte atomic load`; this is why every span access is one byte wide |
+| `AtomicU8::from_ptr` read-write precondition | review finding: the first `atomic_copy` passed a `&[u8]`-derived pointer to `from_ptr`, which requires write validity | split into `copy_out`/`copy_in` so only mapping-side pointers reach `from_ptr`; slice sides use plain access |
 
 ## Assumptions the tools cannot check
 
@@ -61,4 +64,4 @@ Each row is a one-line edit made, observed, and reverted. A guard that no edit t
 
 ## Measured
 
-`atomic_copy` per-byte relaxed atomics vs the previous `[u8; 8]` volatile copy, release build, this host: 256 B 52 ns vs 141 ns; 4 KiB 1.2 us vs 2.2 us; 64 KiB 17 us vs 36 us. A word-wide atomic path measured 30 GB/s but requires the peer to match access width; recorded as follow-up work in the plan.
+`copy_out`/`copy_in` per-byte relaxed atomics vs the previous `[u8; 8]` volatile copy, release build, this host: 256 B 52 ns vs 141 ns; 4 KiB 1.2 us vs 2.2 us; 64 KiB 17 us vs 36 us. A word-wide atomic path measured 30 GB/s but requires the peer to match access width; recorded as follow-up work in the plan.
