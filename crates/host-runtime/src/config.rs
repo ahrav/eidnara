@@ -10,6 +10,8 @@ use crate::connection_file::{
 };
 use crate::wire::{HEADER_LEN, MAX_BODY_LEN, PROTOCOL_VERSION};
 
+pub use shm_transport::setup_auth::DAEMON_VER_PREFIX;
+
 /// floor.
 pub const MIN_RESIDENT_BYTES: u64 =
     MAX_BODY_LEN as u64 + EGRESS_RESERVED_BYTES + SCRATCH_RESERVED_BYTES;
@@ -228,7 +230,7 @@ impl Default for HostConfig {
     fn default() -> Self {
         Self {
             data_dir: None,
-            daemon_ver: format!("eidnara-host/{}", env!("CARGO_PKG_VERSION")),
+            daemon_ver: format!("{DAEMON_VER_PREFIX}{}", env!("CARGO_PKG_VERSION")),
             payload_manifest_digest: UNSTAGED_PAYLOAD_MANIFEST_DIGEST.to_owned(),
             init: HostInit::default(),
             limits: HostLimits::default(),
@@ -243,6 +245,11 @@ impl HostConfig {
         self.limits.validate()?;
         if self.daemon_ver.is_empty() {
             return Err(ConfigError::EmptyDaemonVer);
+        }
+        if !self.daemon_ver.starts_with(DAEMON_VER_PREFIX) {
+            return Err(ConfigError::DaemonVerMissingPrefix {
+                expected: DAEMON_VER_PREFIX,
+            });
         }
         if !crate::lifecycle::is_canonical_payload_digest(&self.payload_manifest_digest) {
             return Err(ConfigError::InvalidPayloadDigest {
@@ -336,6 +343,10 @@ pub enum ConfigError {
         name: &'static str,
     },
     EmptyDaemonVer,
+    /// `daemon_ver` is bound into every handshake proof, so peers expect the published prefix.
+    DaemonVerMissingPrefix {
+        expected: &'static str,
+    },
     /// The error carries only the offending length to keep diagnostics bounded.
     InvalidPayloadDigest {
         len: usize,
@@ -373,6 +384,9 @@ impl std::fmt::Display for ConfigError {
                 MAX_CONFIG_DURATION.as_secs()
             ),
             Self::EmptyDaemonVer => write!(f, "daemon_ver must be nonempty"),
+            Self::DaemonVerMissingPrefix { expected } => {
+                write!(f, "daemon_ver must start with {expected:?}")
+            }
             Self::InvalidPayloadDigest { len } => write!(
                 f,
                 "payload_manifest_digest must be 64 lowercase hex characters; got {len} bytes"
@@ -537,10 +551,11 @@ mod tests {
 
     #[test]
     fn daemon_version_boundary_keeps_auth_and_discovery_readable() {
+        let versioned = |len: usize| format!("{DAEMON_VER_PREFIX}{}", "v".repeat(len));
         let mut first_rejected = None;
         for len in 1..=10_000 {
             let config = HostConfig {
-                daemon_ver: "v".repeat(len),
+                daemon_ver: versioned(len),
                 ..Default::default()
             };
             if matches!(
@@ -553,19 +568,48 @@ mod tests {
         }
         let first_rejected = first_rejected.expect("a finite auth cap exists");
         HostConfig {
-            daemon_ver: "v".repeat(first_rejected - 1),
+            daemon_ver: versioned(first_rejected - 1),
             ..Default::default()
         }
         .validate()
         .expect("the exact accepted boundary is usable");
         assert!(matches!(
             HostConfig {
-                daemon_ver: "v".repeat(first_rejected),
+                daemon_ver: versioned(first_rejected),
                 ..Default::default()
             }
             .validate(),
             Err(ConfigError::DaemonVerTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn daemon_version_must_carry_the_published_prefix() {
+        assert!(
+            HostConfig::default()
+                .daemon_ver
+                .starts_with(DAEMON_VER_PREFIX)
+        );
+        for daemon_ver in [
+            "1.2.3",
+            "host/1.2.3",
+            "eidnara-host-1.2.3",
+            " eidnara-host/1.2.3",
+        ] {
+            let config = HostConfig {
+                daemon_ver: daemon_ver.to_owned(),
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    config.validate(),
+                    Err(ConfigError::DaemonVerMissingPrefix {
+                        expected: DAEMON_VER_PREFIX
+                    })
+                ),
+                "daemon_ver {daemon_ver:?} must fail validation"
+            );
+        }
     }
 
     #[test]

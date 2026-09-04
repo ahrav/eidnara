@@ -370,7 +370,12 @@ impl OutputBuffer {
     pub(crate) fn into_parts(self) -> OutputParts {
         match self.direct {
             Some(direct) => OutputParts::Direct(direct, self.charge),
-            None => OutputParts::Owned(self.body, self.charge),
+            None => {
+                // Release the reserved capacity beyond the encoded frame before transferring ownership.
+                let mut charge = self.charge;
+                charge.shrink_to(self.body.len() + crate::wire::HEADER_LEN);
+                OutputParts::Owned(self.body, charge)
+            }
         }
     }
 }
@@ -560,4 +565,61 @@ pub trait HostHandler: Send + Sync + 'static {
     /// Implementations must tolerate partially initialized state by cancelling, closing, and draining existing resources.
     /// Implementations must not assert that initialization finished.
     fn shutdown(&self) -> impl Future<Output = ()> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::{ByteBudget, HEADER_LEN};
+
+    #[test]
+    fn into_parts_returns_the_unused_output_reservation() {
+        let budget = ByteBudget::new(1024);
+        let max_len = 512;
+        let charge = budget.try_charge(max_len + HEADER_LEN).expect("fits");
+        let mut output = OutputBuffer {
+            body: Vec::with_capacity(max_len + HEADER_LEN),
+            direct: None,
+            charge,
+            max_len,
+        };
+        output.extend_from_slice(&[7; 100]).expect("within max_len");
+        assert_eq!(budget.available(), 1024 - (max_len + HEADER_LEN));
+
+        let OutputParts::Owned(body, charge) = output.into_parts() else {
+            panic!("owned output");
+        };
+        assert_eq!(body.len(), 100);
+        assert_eq!(
+            charge.bytes(),
+            100 + HEADER_LEN,
+            "the frame keeps exactly its encoded size"
+        );
+        assert_eq!(
+            budget.available(),
+            1024 - (100 + HEADER_LEN),
+            "the unused reservation is released immediately"
+        );
+        drop(charge);
+        assert_eq!(budget.available(), 1024);
+    }
+
+    #[test]
+    fn into_parts_never_grows_a_charge_below_the_encoded_size() {
+        let budget = ByteBudget::new(1024);
+        // A charge already smaller than the encoded frame stays unchanged.
+        let charge = budget.try_charge(10).expect("fits");
+        let mut output = OutputBuffer {
+            body: Vec::new(),
+            direct: None,
+            charge,
+            max_len: 64,
+        };
+        output.extend_from_slice(&[1; 64]).expect("within max_len");
+        let OutputParts::Owned(_, charge) = output.into_parts() else {
+            panic!("owned output");
+        };
+        assert_eq!(charge.bytes(), 10);
+        assert_eq!(budget.available(), 1014);
+    }
 }
