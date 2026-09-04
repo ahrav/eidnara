@@ -370,10 +370,8 @@ mod tests {
     #[test]
     fn span_null_base_is_refused() {
         // SAFETY: a null pointer with zero length names no memory.
-        assert_eq!(
-            unsafe { LeaseSpan::new(std::ptr::null_mut(), 0) }.err(),
-            Some(LeaseError::InvalidSpan)
-        );
+        let refused = unsafe { LeaseSpan::new(std::ptr::null_mut(), 0) };
+        assert_eq!(refused.err(), Some(LeaseError::InvalidSpan));
     }
 
     /// A peer may store into the bytes a span is reading at any time. The span's reads are
