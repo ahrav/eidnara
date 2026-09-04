@@ -2,12 +2,14 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::descriptor::ReleaseIdentity;
 
 /// Raw view of one arena span, readable for `'lease`. The peer can still write the mapping,
 /// so there is no `&[u8]` accessor: reads go through `read_byte`, `copy_to`, or `checksum`,
-/// each of which tolerates concurrent mutation without undefined behavior.
+/// each of which loads every byte atomically so a concurrent peer store is a stale value, not
+/// a data race.
 #[derive(Clone, Copy)]
 pub struct LeaseSpan<'lease> {
     base: NonNull<u8>,
@@ -20,7 +22,10 @@ impl<'lease> LeaseSpan<'lease> {
     /// Wraps `len` bytes at `base`. Fails only on a null `base`.
     ///
     /// # Safety
-    /// `base..base.add(len)` must remain mapped and readable for `'lease`.
+    /// `base..base.add(len)` must remain mapped and readable for `'lease`, and this process
+    /// must not form a `&[u8]` or `&mut [u8]` over any of those bytes while the span exists.
+    /// Every access through the span is an atomic byte load; a foreign process writing the
+    /// same bytes must use whole-byte stores, which every store instruction does.
     pub(crate) unsafe fn new(base: *mut u8, len: usize) -> Result<Self, LeaseError> {
         let base = NonNull::new(base).ok_or(LeaseError::InvalidSpan)?;
         Ok(Self {
@@ -47,13 +52,14 @@ impl<'lease> LeaseSpan<'lease> {
         self.len == 0
     }
 
-    /// One volatile byte read, or `None` past `len`.
+    /// One atomic byte read, or `None` past `len`.
     pub fn read_byte(self, index: usize) -> Option<u8> {
         if index >= self.len {
             return None;
         }
-        // SAFETY: constructor bound covers len and index was checked.
-        Some(unsafe { self.base.as_ptr().add(index).read_volatile() })
+        // SAFETY: `index < self.len`, and the constructor's contract keeps `len` bytes mapped
+        // for `'lease` with no Rust reference formed over them; `AtomicU8` has alignment 1.
+        Some(unsafe { AtomicU8::from_ptr(self.base.as_ptr().add(index)) }.load(Ordering::Relaxed))
     }
 
     /// Copies every byte into `destination`, which must be exactly `len` long.
@@ -62,8 +68,9 @@ impl<'lease> LeaseSpan<'lease> {
             return Err(LeaseError::LengthMismatch);
         }
         // SAFETY: the constructor's contract keeps `len` source bytes readable for `'lease`,
-        // and `destination` is a live exclusive slice of the same length.
-        unsafe { volatile_copy(self.base.as_ptr(), destination.as_mut_ptr(), self.len) };
+        // and `destination` is a live exclusive slice of the same length that cannot overlap
+        // the mapping.
+        unsafe { atomic_copy(self.base.as_ptr(), destination.as_mut_ptr(), self.len) };
         Ok(())
     }
 
@@ -71,8 +78,9 @@ impl<'lease> LeaseSpan<'lease> {
     pub fn checksum(self) -> u64 {
         // The peer may write these bytes at any time, so no `&[u8]` is ever formed over them.
         (0..self.len).fold(0u64, |sum, index| {
-            // SAFETY: constructor bound covers len and index is below it.
-            let byte = unsafe { self.base.as_ptr().add(index).read_volatile() };
+            // SAFETY: `index < self.len`; same contract as `read_byte`.
+            let byte = unsafe { AtomicU8::from_ptr(self.base.as_ptr().add(index)) }
+                .load(Ordering::Relaxed);
             sum.wrapping_add(u64::from(byte))
         })
     }
@@ -84,33 +92,22 @@ impl fmt::Debug for LeaseSpan<'_> {
     }
 }
 
-/// `[u8; WORD]` has alignment 1, so word-sized volatile accesses work at any byte offset.
+/// Copies `len` bytes with one relaxed atomic load and store per byte, so either side may be
+/// shared memory another process writes or reads concurrently. Every access through a span
+/// is one byte wide, so a byte-wide peer store can never be a mixed-size race.
 ///
 /// # Safety
 /// `source..source.add(len)` must be readable and `destination..destination.add(len)` must be
-/// writable for the duration of the call, and the two ranges must not overlap.
-pub(crate) unsafe fn volatile_copy(source: *const u8, destination: *mut u8, len: usize) {
-    const WORD: usize = std::mem::size_of::<usize>();
-    let mut offset = 0usize;
-    while len - offset >= WORD {
-        // SAFETY: caller keeps both ranges valid for `len` bytes and `offset + WORD <= len`.
+/// writable for the duration of the call, the two ranges must not overlap, and no Rust
+/// reference may cover either range while the call runs.
+pub(crate) unsafe fn atomic_copy(source: *const u8, destination: *mut u8, len: usize) {
+    for offset in 0..len {
+        // SAFETY: `offset < len`, so both pointers stay inside the caller's ranges; `AtomicU8`
+        // has alignment 1.
         unsafe {
-            let word = source.add(offset).cast::<[u8; WORD]>().read_volatile();
-            destination
-                .add(offset)
-                .cast::<[u8; WORD]>()
-                .write_volatile(word);
+            let byte = AtomicU8::from_ptr(source.add(offset).cast_mut()).load(Ordering::Relaxed);
+            AtomicU8::from_ptr(destination.add(offset)).store(byte, Ordering::Relaxed);
         }
-        offset += WORD;
-    }
-    while offset < len {
-        // SAFETY: caller keeps both ranges valid for `len` bytes and `offset < len`.
-        unsafe {
-            destination
-                .add(offset)
-                .write_volatile(source.add(offset).read_volatile());
-        }
-        offset += 1;
     }
 }
 
@@ -287,7 +284,7 @@ impl fmt::Debug for LeaseError {
 mod tests {
     use std::cell::Cell;
 
-    use super::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, volatile_copy};
+    use super::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, atomic_copy};
     use crate::descriptor::{Incarnation, ReleaseIdentity};
 
     struct CallLog {
@@ -345,21 +342,80 @@ mod tests {
     }
 
     #[test]
-    fn volatile_copy_matches_plain_copy_at_every_offset_and_length() {
+    fn atomic_copy_matches_plain_copy_at_every_alignment_and_length() {
         let source: Vec<u8> = (0..64u8).collect();
         for start in 0..16 {
-            for len in 0..40 {
-                let mut destination = vec![0xff; len];
-                // SAFETY: both ranges are inside live, non-overlapping allocations.
-                unsafe {
-                    volatile_copy(source.as_ptr().add(start), destination.as_mut_ptr(), len);
+            for destination_shift in 0..16 {
+                for len in 0..40 {
+                    let mut destination = vec![0xff; len + destination_shift];
+                    // SAFETY: both ranges are inside live, non-overlapping allocations, and
+                    // no reference to either is live during the call.
+                    unsafe {
+                        atomic_copy(
+                            source.as_ptr().add(start),
+                            destination.as_mut_ptr().add(destination_shift),
+                            len,
+                        );
+                    }
+                    assert_eq!(
+                        destination[destination_shift..],
+                        source[start..start + len],
+                        "start {start} shift {destination_shift} len {len}"
+                    );
                 }
-                assert_eq!(
-                    destination,
-                    source[start..start + len],
-                    "start {start} len {len}"
-                );
             }
         }
+    }
+
+    #[test]
+    fn span_null_base_is_refused() {
+        // SAFETY: a null pointer with zero length names no memory.
+        assert_eq!(
+            unsafe { LeaseSpan::new(std::ptr::null_mut(), 0) }.err(),
+            Some(LeaseError::InvalidSpan)
+        );
+    }
+
+    /// A peer may store into the bytes a span is reading at any time. The span's reads are
+    /// atomic, so under Miri this is a race-free program and every observed byte is one the
+    /// writer stored.
+    #[test]
+    fn span_reads_tolerate_a_concurrent_writer() {
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+        const LEN: usize = 64;
+        let rounds = if cfg!(miri) { 4 } else { 64 };
+        let shared: [AtomicU8; LEN] = std::array::from_fn(|_| AtomicU8::new(0x11));
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut value = 0x11u8;
+                while !stop.load(Ordering::Relaxed) {
+                    value = if value == 0x11 { 0x22 } else { 0x11 };
+                    for cell in shared.iter() {
+                        cell.store(value, Ordering::Relaxed);
+                    }
+                }
+            });
+            // SAFETY: `shared` outlives the scope, so the bytes stay mapped for the span's
+            // lifetime, and the only accesses are the writer's atomic stores and the span's
+            // atomic loads.
+            let span =
+                unsafe { LeaseSpan::new(shared.as_ptr().cast_mut().cast::<u8>(), LEN) }.unwrap();
+            let mut copy = [0u8; LEN];
+            for _ in 0..rounds {
+                for index in 0..LEN {
+                    let byte = span.read_byte(index).unwrap();
+                    assert!(byte == 0x11 || byte == 0x22, "torn byte {byte:#x}");
+                }
+                span.copy_to(&mut copy).unwrap();
+                assert!(copy.iter().all(|byte| *byte == 0x11 || *byte == 0x22));
+                let sum = span.checksum();
+                assert!(
+                    sum >= 0x11 * LEN as u64 && sum <= 0x22 * LEN as u64,
+                    "{sum}"
+                );
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
     }
 }

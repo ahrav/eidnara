@@ -107,10 +107,30 @@ pub(crate) fn mmap_shared(fd: BorrowedFd<'_>, len: usize) -> io::Result<NonNull<
     NonNull::new(mapped.cast()).ok_or_else(|| io::Error::from(io::ErrorKind::Other))
 }
 
+#[cfg(test)]
+pub(crate) fn mmap_anonymous(len: usize) -> io::Result<NonNull<u8>> {
+    // SAFETY: A null hint lets the kernel pick the address; no descriptor is involved. A failed
+    // call returns `MAP_FAILED` rather than touching memory.
+    let mapped = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if mapped == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    NonNull::new(mapped.cast()).ok_or_else(|| io::Error::from(io::ErrorKind::Other))
+}
+
 /// # Safety
 ///
-/// `base` and `len` must be exactly what one successful `mmap_shared` returned and accepted,
-/// and nothing may reference the mapping afterwards.
+/// `base` and `len` must be exactly what one successful `mmap_shared` or `mmap_anonymous`
+/// call returned and accepted, and nothing may reference the mapping afterwards.
 pub(crate) unsafe fn munmap(base: NonNull<u8>, len: usize) -> io::Result<()> {
     // SAFETY: the caller guarantees `base..base + len` is one live mapping unmapped once here.
     check(unsafe { libc::munmap(base.as_ptr().cast(), len) }).map(drop)

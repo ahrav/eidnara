@@ -37,7 +37,7 @@ use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor, Incarnation,
     MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES, WIRE_V2_VERSION, check_wire_header,
 };
-use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, volatile_copy};
+use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, atomic_copy};
 use crate::profile::TargetProfile;
 
 const MAPPING_MAGIC: u64 = 0x4d43_5348_4d52_3031;
@@ -251,6 +251,7 @@ struct Layout {
     data_wake: usize,
     capacity_wake: usize,
     slots: usize,
+    depth: usize,
     arena: usize,
     lifecycle: usize,
     total: usize,
@@ -318,13 +319,19 @@ impl Layout {
             data_wake,
             capacity_wake,
             slots,
+            depth,
             arena,
             lifecycle,
             total,
         })
     }
 
+    /// Byte offset of slot `index`; an index at or past `depth` would land in the arena, so it
+    /// is refused here rather than by the mapping bound.
     fn slot_offset(&self, index: usize) -> Result<usize, RingError> {
+        if index >= self.depth {
+            return Err(RingError::InvalidLayout);
+        }
         self.slots
             .checked_add(
                 index
@@ -440,6 +447,15 @@ impl Mapping {
 
         validate_object(&fd, len)?;
         let base = sys::mmap_shared(fd.as_fd(), len).map_err(|_| RingError::ObjectSetupFailed)?;
+        Ok(Self { fd, base, len })
+    }
+
+    /// Anonymous private mapping with a placeholder descriptor, for accessor tests that must
+    /// run under Miri, which cannot map a memfd.
+    #[cfg(test)]
+    fn anonymous(len: usize) -> Result<Self, RingError> {
+        let fd = sys::eventfd().map_err(|_| RingError::ObjectSetupFailed)?;
+        let base = sys::mmap_anonymous(len).map_err(|_| RingError::ObjectSetupFailed)?;
         Ok(Self { fd, base, len })
     }
 
@@ -2382,7 +2398,7 @@ impl Ring {
             // mapping; `copied + take <= bytes.len()` keeps the source in the slice; the
             // reservation owns this arena range until commit or abort, so no reader has a
             // lease over it.
-            unsafe { volatile_copy(bytes.as_ptr().add(copied), destination, take) };
+            unsafe { atomic_copy(bytes.as_ptr().add(copied), destination, take) };
             copied += take;
         }
         Ok(())
@@ -2827,6 +2843,153 @@ fn create_linux_memfd(len: usize) -> Result<OwnedFd, RingError> {
 
 fn seal_object(fd: &OwnedFd) -> Result<(), RingError> {
     sys::add_seals(fd.as_fd(), sys::RING_SEALS).map_err(|_| RingError::ObjectSetupFailed)
+}
+
+/// Accessor tests over an anonymous mapping. Miri cannot map a memfd, punch pages, or open a
+/// doorbell, so this module exercises the one layer of `ring.rs` that touches raw memory
+/// without constructing a `Ring`.
+#[cfg(test)]
+mod miri {
+    use std::sync::atomic::Ordering;
+
+    use super::{
+        DescriptorSlot, Incarnation, LAYOUT_VERSION, Layout, MAPPING_MAGIC, Mapping, RingError,
+        RingGrant, SLOT_FREE, SLOT_PUBLISHED, SharedDescriptor, initialize_mapping,
+        validate_lifecycle,
+    };
+
+    const DEPTH: usize = 4;
+
+    fn fixture() -> (Mapping, Layout, RingGrant) {
+        let arena_bytes = super::system_page_size();
+        let layout = Layout::new(DEPTH, arena_bytes).unwrap();
+        let grant = RingGrant {
+            layout_version: LAYOUT_VERSION,
+            incarnation: Incarnation::from_bytes([9; 16]),
+            lane: 3,
+            descriptor_depth: DEPTH as u64,
+            arena_bytes: arena_bytes as u64,
+            max_leases: 2,
+            total_bytes: layout.total as u64,
+        };
+        let mapping = Mapping::anonymous(layout.total).unwrap();
+        initialize_mapping(&mapping, layout, grant).unwrap();
+        (mapping, layout, grant)
+    }
+
+    #[test]
+    fn every_page_accessor_reads_the_initialized_zero_state() {
+        let (mapping, layout, _) = fixture();
+        assert_eq!(
+            mapping
+                .producer(layout)
+                .unwrap()
+                .published
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            mapping
+                .consumer(layout)
+                .unwrap()
+                .consumed
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            mapping
+                .reclaim(layout)
+                .unwrap()
+                .completed
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            mapping
+                .data_wake(layout)
+                .unwrap()
+                .parked
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            mapping
+                .capacity_wake(layout)
+                .unwrap()
+                .generation
+                .load(Ordering::Relaxed),
+            0
+        );
+        for index in 0..DEPTH {
+            let slot = mapping.slot(layout, index).unwrap();
+            assert_eq!(slot.state.load(Ordering::Relaxed), SLOT_FREE);
+            assert_eq!(slot.read_descriptor().sequence, 0);
+        }
+        assert_eq!(
+            mapping
+                .lifecycle_quarantined(layout)
+                .unwrap()
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn slot_index_past_depth_is_refused_before_any_dereference() {
+        let (mapping, layout, _) = fixture();
+        assert!(matches!(
+            mapping.slot(layout, DEPTH),
+            Err(RingError::InvalidLayout | RingError::ArithmeticOverflow)
+        ));
+        assert!(matches!(
+            mapping.ptr_at::<DescriptorSlot>(mapping.len),
+            Err(RingError::InvalidLayout)
+        ));
+    }
+
+    #[test]
+    fn descriptor_round_trips_through_the_volatile_cell() {
+        let (mapping, layout, _) = fixture();
+        let slot = mapping.slot(layout, 1).unwrap();
+        let written = SharedDescriptor {
+            sequence: 17,
+            lane: 3,
+            body_len: 40,
+            allocation_start: 128,
+            allocation_len: 64,
+            span_count: 1,
+            span_offsets: [128, 0],
+            span_lengths: [40, 0],
+            ..SharedDescriptor::ZERO
+        };
+        slot.write_descriptor(written);
+        slot.state.store(SLOT_PUBLISHED, Ordering::Release);
+        let read = slot.read_descriptor();
+        assert_eq!(read.sequence, 17);
+        assert_eq!(read.allocation_start, 128);
+        assert_eq!(read.span_lengths, [40, 0]);
+        assert_eq!(slot.state.load(Ordering::Acquire), SLOT_PUBLISHED);
+    }
+
+    #[test]
+    fn lifecycle_snapshot_sees_a_write_made_through_the_raw_page() {
+        let (mapping, layout, grant) = fixture();
+        validate_lifecycle(&mapping, layout, grant).unwrap();
+        let snapshot = mapping.lifecycle_snapshot(layout).unwrap();
+        assert_eq!(snapshot.magic, MAPPING_MAGIC);
+        assert_eq!(snapshot.lane, 3);
+        let page = mapping
+            .ptr_at::<super::LifecyclePage>(layout.lifecycle)
+            .unwrap();
+        // SAFETY: `ptr_at` bounds-checked the page; this is the peer's view, a raw write to a
+        // plain field with no reference outstanding.
+        unsafe { std::ptr::write_volatile(std::ptr::addr_of_mut!((*page).lane), 4) };
+        assert_eq!(mapping.lifecycle_snapshot(layout).unwrap().lane, 4);
+        assert!(matches!(
+            validate_lifecycle(&mapping, layout, grant),
+            Err(RingError::InvalidGrant)
+        ));
+    }
 }
 
 #[cfg(test)]
