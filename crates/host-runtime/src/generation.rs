@@ -240,6 +240,12 @@ pub struct ValidatedGeneration {
 impl ValidatedGeneration {
     /// In-process loaders may use the descriptor-rooted path only while `ValidatedGeneration` remains alive.
     ///
+    /// The retained descriptor pins the validated directory inode against pathname replacement.
+    /// The retained descriptor does not re-prove file contents on later opens; same-UID writers
+    /// can modify owner-writable retained files in place after validation. Loaders that resolve
+    /// imports by pathname cannot rehash every opened file; callers needing content proof use
+    /// [`Self::open_verified_file`].
+    ///
     /// `descriptor_root_path` supports directory traversal only on Linux.
     pub fn descriptor_root_path(&self) -> PathBuf {
         crate::harness_closure::descriptor_path(self.dir.as_raw_fd())
@@ -405,6 +411,11 @@ impl GenerationStore {
         if !is_secure_regular(&stat) {
             return Err(invalid("current profile failed security checks"));
         }
+        // An oversized profile cannot be decoded to learn its schema, so it is quarantined rather
+        // than reported corrupt, matching the manifest cap in `validate_in_dir`.
+        if stat.st_size as u64 > MAX_MANIFEST_BYTES as u64 {
+            return Ok(CurrentProfile::Quarantined);
+        }
         let bytes = read_all_fd(&fd, MAX_MANIFEST_BYTES)
             .map_err(|_| invalid("current profile read failed"))?;
         match decode_with_schema::<WireProfile>(&bytes) {
@@ -479,7 +490,7 @@ impl GenerationStore {
             verify_file_against_entry(&fd, entry)?;
         }
         let mut found: BTreeSet<String> = BTreeSet::new();
-        walk_generation_tree(dir, "", &mut found)?;
+        walk_generation_tree(dir, "", &expected, &mut found)?;
         for path in &found {
             if path != GENERATION_MANIFEST_NAME && !expected.contains(path) {
                 return Err(invalid("generation contains an unlisted file"));
@@ -1015,9 +1026,13 @@ fn open_child_dir_existing(
         .ok_or_else(|| invalid("generations directory failed security checks"))
 }
 
+/// Every directory must be an ancestor of at least one manifest-listed file. Without that rule an
+/// extra empty directory would pass validation, and two trees with different observable layouts
+/// would share one content digest.
 fn walk_generation_tree(
     dir: &OwnedFd,
     prefix: &str,
+    expected: &BTreeSet<String>,
     found: &mut BTreeSet<String>,
 ) -> Result<(), GenerationError> {
     let names = read_dir_names(dir).map_err(|_| invalid("directory listing failed"))?;
@@ -1033,9 +1048,19 @@ fn walk_generation_tree(
         match mode_bits(&stat) & S_IFMT {
             S_IFLNK => return Err(invalid("generation contains a symlink")),
             S_IFDIR => {
+                let dir_prefix = format!("{rel}/");
+                // Keys sharing `dir_prefix` are contiguous in the sorted set, so the first key at
+                // or after it decides membership in O(log n).
+                let listed = expected
+                    .range(dir_prefix.clone()..)
+                    .next()
+                    .is_some_and(|path| path.starts_with(&dir_prefix));
+                if !listed {
+                    return Err(invalid("generation contains an unlisted directory"));
+                }
                 let child = open_child_dir(dir, &name)
                     .ok_or_else(|| invalid("generation subdirectory failed security checks"))?;
-                walk_generation_tree(&child, &rel, found)?;
+                walk_generation_tree(&child, &rel, expected, found)?;
             }
             S_IFREG => {
                 found.insert(rel);
@@ -1232,6 +1257,28 @@ mod tests {
         expect_invalid(&store);
         std::fs::remove_file(gen_dir.join("extra")).expect("remove extra");
 
+        // An empty directory adds nothing to the found set, so only an explicit ancestor check
+        // can reject it; otherwise two trees with different layouts share one digest.
+        std::fs::create_dir(gen_dir.join("empty-dir")).expect("empty dir");
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "generation contains an unlisted directory"
+            })
+        ));
+        std::fs::remove_dir(gen_dir.join("empty-dir")).expect("remove empty dir");
+        std::fs::create_dir(gen_dir.join("bin/nested")).expect("nested empty dir");
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "generation contains an unlisted directory"
+            })
+        ));
+        std::fs::remove_dir(gen_dir.join("bin/nested")).expect("remove nested empty dir");
+        store
+            .validate(&digest)
+            .expect("generation validates once the extra directories are gone");
+
         // Loose mode.
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
         expect_invalid(&store);
@@ -1308,6 +1355,61 @@ mod tests {
             std::fs::read(&profile_path).expect("reread profile"),
             profile_bytes
         );
+
+        // A profile past the read cap cannot reveal its schema; it is quarantined, not corrupt.
+        let oversized = vec![b' '; MAX_MANIFEST_BYTES + 1];
+        std::fs::write(&profile_path, &oversized).expect("write oversized profile");
+        assert_eq!(
+            store.read_current().expect("read oversized"),
+            CurrentProfile::Quarantined
+        );
+        assert!(matches!(
+            store.prune(&BTreeSet::new()),
+            Err(GenerationError::UnsupportedStateSchema)
+        ));
+        assert_eq!(
+            std::fs::read(&profile_path)
+                .expect("reread oversized profile")
+                .len(),
+            oversized.len()
+        );
+    }
+
+    /// A crash between `mkdirat` and `chmodat` under a restrictive umask leaves an empty
+    /// `tmp-*` directory that cannot be opened for traversal. `prune` must still reclaim it and
+    /// keep sweeping the entries sorted after it.
+    #[test]
+    fn an_unopenable_empty_staging_temp_is_still_pruned() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let obsolete = stage_default(&store, src.path());
+        let current = store
+            .stage_and_promote(
+                &[SourceSpec {
+                    rel_path: "bin/eidnara-host".to_owned(),
+                    source: write_source(src.path(), "launcher-new", b"#successor-binary"),
+                    executable: true,
+                    expected_size: None,
+                    expected_sha256: None,
+                }],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .expect("stage successor");
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        let blocked = generations.join("tmp-0000000000000000");
+        std::fs::create_dir(&blocked).expect("blocked temp");
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("mode");
+
+        let report = store
+            .prune(&BTreeSet::new())
+            .expect("prune reclaims the mode-000 temp");
+        assert_eq!(report.removed_temps, 1);
+        assert_eq!(report.removed_generations, 1);
+        assert!(!blocked.exists(), "the empty unopenable temp is removed");
+        assert!(!generations.join(&obsolete).exists());
+        assert!(store.validate(&current).is_ok());
     }
 
     #[test]

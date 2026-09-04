@@ -122,6 +122,9 @@ pub(crate) fn open_dir_for_removal(parent: &OwnedFd, name: &str) -> rustix::io::
 }
 
 /// Removes `name` under `parent`, recursing through owned directories. A missing entry is `Ok`.
+///
+/// A directory that cannot be opened for traversal (mode `000` left by a crash between `mkdirat`
+/// and `chmodat`) is still removed if it is empty: `rmdir` needs only write access to `parent`.
 pub(crate) fn remove_tree(parent: &OwnedFd, name: &str) -> rustix::io::Result<()> {
     match unlinkat(parent, name, AtFlags::empty()) {
         Ok(()) | Err(rustix::io::Errno::NOENT) => return Ok(()),
@@ -129,7 +132,12 @@ pub(crate) fn remove_tree(parent: &OwnedFd, name: &str) -> rustix::io::Result<()
         Err(rustix::io::Errno::ISDIR) | Err(rustix::io::Errno::PERM) => {}
         Err(e) => return Err(e),
     }
-    let dir = open_dir_for_removal(parent, name)?;
+    let dir = match open_dir_for_removal(parent, name) {
+        Ok(dir) => dir,
+        Err(open_error) => {
+            return unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|_| open_error);
+        }
+    };
     for child in read_dir_names(&dir)? {
         remove_tree(&dir, &child)?;
     }

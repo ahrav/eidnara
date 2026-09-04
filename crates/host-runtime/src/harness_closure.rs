@@ -138,12 +138,14 @@ impl ValidatedHarnessClosure {
         &self.path
     }
 
-    /// The node-opening method re-proves cheap identity invariants for one listed node.
+    /// The node-opening method re-proves one listed node's shape, mode, size, and hash on the
+    /// descriptor it hands out.
     ///
-    /// The per-request launch path re-checks the regular-file shape, owner-only single-link mode, and manifest size.
-    /// Validation proved the regular-file shape, owner-only single-link mode, and manifest size.
-    /// The retained descriptor and no-follow traversal preserve the validated object against path swaps.
-    /// The duplicated descriptor shares the original descriptor's file offset.
+    /// The retained directory descriptor and no-follow traversal defend against pathname swaps,
+    /// but retained files stay owner-writable, so a same-UID writer can overwrite bytes in place
+    /// after `validate` without changing mode, link count, or size. Rehashing the opened
+    /// descriptor closes that window for the object that is about to be launched; the cost is one
+    /// read of the node per resolution, paid on the launch path rather than per request.
     pub fn resolve_node_descriptor(
         &self,
         node_path: &str,
@@ -156,11 +158,8 @@ impl ValidatedHarnessClosure {
             .ok_or_else(|| invalid("resolved node is not listed by the manifest"))?;
         let fd = open_relative_file(&self.files_fd, node_path)
             .map_err(|_| invalid("resolved node is missing or insecure"))?;
-        verify_secure_file(&fd, node.mode)?;
-        let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("closure node stat failed"))?;
-        if stat.st_size as u64 != node.size_bytes {
-            return Err(invalid("closure node size diverges from manifest"));
-        }
+        verify_node_file(&fd, node)?;
+        // Hashing advanced the offset; a child opening `/dev/fd/N` shares it and must start at 0.
         rustix::fs::seek(&fd, rustix::fs::SeekFrom::Start(0))
             .map_err(|_| invalid("resolved node rewind failed"))?;
         Ok(ResolvedHarnessNode {
@@ -594,9 +593,9 @@ impl HarnessClosureStore {
                 fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))?;
             }
             Ok(false) => {
-                // Deleting `temp_name` before `validate` prevents validation errors from leaving the staging tree behind.
-                remove_tree(&self.root_fd, &temp_name)
-                    .map_err(|_| invalid("temporary closure removal failed"))?;
+                // The occupant is the result; a failed temp removal must not mask it. A temp that
+                // survives here ages past `STALE_TEMP_AFTER` and is reclaimed by `prune`.
+                let _ = remove_tree(&self.root_fd, &temp_name);
                 return self.validate(&digest);
             }
             Err(_) => {

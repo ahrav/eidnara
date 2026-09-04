@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -167,11 +166,17 @@ fn resolved_descriptor_is_rewound_after_verification() {
         offset, 0,
         "a handed-out node descriptor must be positioned at the start of the file"
     );
-    let mut bytes = Vec::new();
-    std::fs::File::from(rustix::io::dup(inherited).expect("duplicate inherited descriptor"))
-        .read_to_end(&mut bytes)
-        .expect("read inherited descriptor");
-    assert_eq!(bytes, b"export const answer = 42");
+    // `pread` reads at an explicit offset without advancing the open file description's shared
+    // offset; a `dup` + `read` would advance `node.inherited_fd()` itself.
+    let mut bytes = vec![0u8; 64];
+    let count = rustix::io::pread(inherited, &mut bytes, 0).expect("pread inherited descriptor");
+    assert_eq!(&bytes[..count], b"export const answer = 42");
+    let offset_after = rustix::fs::seek(inherited, rustix::fs::SeekFrom::Current(0))
+        .expect("query descriptor offset after read");
+    assert_eq!(
+        offset_after, 0,
+        "reading the bytes must not move the shared offset"
+    );
 }
 
 #[test]
@@ -346,6 +351,16 @@ fn source_and_retained_hash_mismatches_fail_closed() {
             .expect_err("retained hash mismatch")
             .detail(),
         "closure node hash diverges from manifest"
+    );
+    // The overwrite kept the length, mode, and link count, so only a rehash on the handed-out
+    // descriptor can catch it after the closure was already validated.
+    assert_eq!(
+        closure
+            .resolve_node_descriptor("node_modules/pi/dist/helper.js")
+            .err()
+            .map(|error| error.detail()),
+        Some("closure node hash diverges from manifest"),
+        "resolution must rehash the retained node"
     );
 }
 
@@ -756,20 +771,17 @@ fn native_edges_and_native_addons_must_correspond_exactly() {
         "native dependency kind must correspond exactly to a native addon target"
     );
 
-    // Validation rejects a `NativeAddon` with no inbound `Native` dependency even if graph traversal reaches it.
+    // Native edges are checked before reachability, so the missing edge is reported first.
     let mut unclaimed = candidate.clone();
-    unclaimed.manifest.nodes[2].dependencies = vec![
-        dependency(
-            "node_modules/pi/dist/addon.node",
-            DependencyKind::FiniteDynamic,
-        ),
-        dependency("node_modules/pi/dist/helper.js", DependencyKind::Static),
-    ];
+    unclaimed.manifest.nodes[2].dependencies = vec![dependency(
+        "node_modules/pi/dist/helper.js",
+        DependencyKind::Static,
+    )];
     assert_eq!(
         validate_manifest(&unclaimed.manifest)
-            .expect_err("finite_dynamic edge onto native addon")
+            .expect_err("native addon without an inbound native edge")
             .detail(),
-        "native dependency kind must correspond exactly to a native addon target"
+        "native addon lacks an explicit native dependency edge"
     );
 }
 
