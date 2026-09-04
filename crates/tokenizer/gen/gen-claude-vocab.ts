@@ -71,10 +71,10 @@ async function main(): Promise<void> {
 
     // eslint-disable-next-line no-console
     console.log(
-        `wrote ${rows.length} vocab entries (ranks ${ranks.length ? Math.min(...ranks) : 0}..${
-            ranks.length ? Math.max(...ranks) : 0
+        `wrote ${rows.length} vocab entries (ranks ${rows[0]?.[1] ?? 0}..${
+            rows[rows.length - 1]?.[1] ?? 0
         }) -> ${vocabPath}\nwrote pat_str (${patStr.length} chars) -> ${patPath}`,
     );
 }
 
-main();
+await main();

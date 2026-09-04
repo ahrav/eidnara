@@ -15,13 +15,14 @@ struct GoldenCase {
 
 fn load_golden() -> Vec<GoldenCase> {
     let raw = include_str!("../testdata/token-golden.json");
-    serde_json::from_str(raw).expect("token-golden.json is malformed")
+    let cases: Vec<GoldenCase> = serde_json::from_str(raw).expect("token-golden.json is malformed");
+    assert!(!cases.is_empty(), "golden corpus is empty");
+    cases
 }
 
 #[test]
 fn encode_ordinary_matches_ai_tokenizer_ids() {
     let cases = load_golden();
-    assert!(!cases.is_empty(), "golden corpus is empty");
     let mut failures = Vec::new();
     for c in &cases {
         if !c.text.is_empty() {
@@ -65,6 +66,31 @@ fn deterministic_across_calls() {
     let first = estimate_tokens(text);
     for _ in 0..1000 {
         assert_eq!(estimate_tokens(text), first);
+    }
+}
+
+#[test]
+fn deterministic_across_threads() {
+    let cases = load_golden();
+    let per_thread: Vec<Vec<(Vec<u32>, usize)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                s.spawn(|| {
+                    cases
+                        .iter()
+                        .map(|c| (encode_ordinary(&c.text), estimate_tokens(&c.text)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (i, (ids, count)) in per_thread[0].iter().enumerate() {
+        assert_eq!(ids, &cases[i].ids, "case '{}'", cases[i].label);
+        assert_eq!(*count, ids.len(), "case '{}'", cases[i].label);
+    }
+    for other in &per_thread[1..] {
+        assert_eq!(other, &per_thread[0]);
     }
 }
 

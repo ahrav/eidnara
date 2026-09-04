@@ -132,4 +132,4 @@ async function main(): Promise<void> {
     console.log(`wrote ${cases.length} golden cases (${totalToks} total tokens) -> ${outPath}`);
 }
 
-main();
+await main();

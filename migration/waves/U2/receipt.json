@@ -767,7 +767,7 @@
     {
       "source": null,
       "destination": "package.json",
-      "destination_sha256": "90dc2d0ffd184970cd5bf3bc4fe6ad314b47faf6045fae3f80bd3b5eb52fe6b4",
+      "destination_sha256": "0c1040255629c9873a262cd9bd93ff5e3662dc20df02e57d1407fdc5350ec36b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

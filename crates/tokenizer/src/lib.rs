@@ -41,7 +41,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use fancy_regex::Regex;
 use rustc_hash::FxHashMap;
-use tiktoken_rs::{CoreBPE, Rank};
+use tiktoken_rs::CoreBPE;
+pub use tiktoken_rs::Rank;
 
 /// Vocabulary as `<base64 token> <rank>` lines, embedded so counting needs no file or network.
 const CLAUDE_TIKTOKEN: &str = include_str!("../assets/claude.tiktoken");
@@ -81,14 +82,17 @@ pub const MAX_PIECE_BYTES: usize = 4096;
 fn tokenizer() -> &'static CoreBPE {
     static TOKENIZER: OnceLock<CoreBPE> = OnceLock::new();
     TOKENIZER.get_or_init(|| {
-        let mut encoder: FxHashMap<Vec<u8>, Rank> = FxHashMap::default();
+        let mut encoder: FxHashMap<Vec<u8>, Rank> = FxHashMap::with_capacity_and_hasher(
+            CLAUDE_TIKTOKEN.lines().count(),
+            Default::default(),
+        );
         for line in CLAUDE_TIKTOKEN.lines() {
             if line.is_empty() {
                 continue;
             }
-            let mut parts = line.split(' ');
-            let raw = parts.next().expect("vocab line missing token field");
-            let rank_str = parts.next().expect("vocab line missing rank field");
+            let (raw, rank_str) = line
+                .split_once(' ')
+                .expect("vocab line missing token or rank field");
             let bytes = STANDARD
                 .decode(raw)
                 .expect("vocab token is not valid base64");
