@@ -35,6 +35,11 @@
 //! seam tokens; every piece at or below the cap is encoded exactly as the reference does.
 #![warn(missing_docs)]
 
+#[cfg(test)]
+mod parity_tests;
+#[cfg(test)]
+mod reference_impl;
+
 use std::sync::OnceLock;
 
 use base64::Engine as _;
