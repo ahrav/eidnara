@@ -326,6 +326,8 @@ describe("raw N-API descriptor boundary", () => {
             ]);
         } finally {
             clearTimeout(laterTimeout!);
+            // The later pair's own trailing wake must find nothing to poll.
+            later = null;
             addon.close(laterPair.first);
             addon.close(laterPair.second);
         }
