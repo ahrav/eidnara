@@ -141,15 +141,21 @@ pub struct Attempt {
 
 impl Attempt {
     /// Attempt creation refuses a preexisting directory without modifying it.
+    /// `create_dir` on the leaf makes the check and the creation one step, so two
+    /// collectors racing on the same name cannot both claim it.
     pub fn begin(run_dir: &Path, attempt_name: &str, manifest: Manifest) -> Result<Self, String> {
         let dir = run_dir.join(attempt_name);
-        if dir.exists() {
-            return Err(format!(
-                "attempt directory {} already exists; refusing to append",
-                dir.display()
-            ));
-        }
-        std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+        std::fs::create_dir_all(run_dir).map_err(|err| format!("{}: {err}", run_dir.display()))?;
+        std::fs::create_dir(&dir).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "attempt directory {} already exists; refusing to append",
+                    dir.display()
+                )
+            } else {
+                format!("{}: {err}", dir.display())
+            }
+        })?;
         let attempt = Self { dir, manifest };
         attempt.write_manifest(RUNNING_MANIFEST)?;
         Ok(attempt)
@@ -402,9 +408,13 @@ pub struct GapRow {
     /// Rows from different topology classes are not statistically comparable.
     pub class: Option<String>,
     pub pair: (u32, u32),
+    /// Median of per-batch means, each averaging `exchanges_per_batch` RTTs. Not a per-request order statistic.
     pub atomic_rtt_ns: f64,
+    /// Per-request median.
     pub ring_p50_ns: f64,
+    /// `ring_p50_ns - atomic_rtt_ns`: a per-request median against a batch mean, not a like-for-like median contrast.
     pub gap_ns: f64,
+    /// `ring_p50_ns / atomic_rtt_ns`.
     pub ratio: f64,
 }
 
@@ -569,10 +579,14 @@ pub fn median(values: &mut [f64]) -> Option<f64> {
     })
 }
 
+/// Fewer analysis units than this yields `None`: a resampled median of one or
+/// three blocks is zero-width or the observed range, not a 95% interval.
+pub const BOOTSTRAP_MIN_SAMPLES: usize = 5;
+
 /// Each bootstrap sample contains `values.len()` elements sampled with replacement.
 /// `seed` initializes the deterministic resampling sequence.
 pub fn bootstrap_interval(values: &[f64], iterations: u32, seed: u64) -> Option<(f64, f64)> {
-    if values.is_empty() || iterations == 0 {
+    if values.len() < BOOTSTRAP_MIN_SAMPLES || iterations == 0 {
         return None;
     }
     let mut state = seed.max(1);

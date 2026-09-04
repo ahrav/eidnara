@@ -93,6 +93,7 @@ fn shm_role_client() {
                 RequestOptions {
                     timeout: Duration::from_secs(3600),
                     cancellation: None,
+                    binary: false,
                 },
             );
             tokio::pin!(request);

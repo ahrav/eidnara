@@ -1,19 +1,16 @@
 //! The module defines a private complete-frame channel boundary between the connection engine and a transport.
-//! a transport.
 //!
 //! The contract is directional: a cloneable [`FrameSender`] admits complete
 //! outbound frames in FIFO order against one logical writer, and the
 //! single-owner receive side yields complete, structurally validated
-//! inbound frames. Direct producers fill bounded transport spans through a
-//! cursor and commit one exact length. Receive bytes are visible only through
-//! a lexical [`ReceiveLease`]; contiguous consumers use the explicit
-//! copying adapter before entering asynchronous work.
+//! inbound frames. Receive bytes are visible only through a lexical
+//! [`ReceiveLease`]; consumers that need owned bytes use the explicit copying
+//! adapter before entering asynchronous work.
 
 use std::io;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use tokio::sync::mpsc;
 
@@ -28,25 +25,19 @@ pub(crate) mod contract_tests;
 
 /// ReadClose identifies why a generation is retired without another frame.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum ReadClose {
     /// CleanEof reports a clean close at a frame boundary before any byte of the next frame.
     CleanEof,
-    /// Corrupt reports structural stream corruption or a read-deadline expiry.
+    /// Corrupt reports structural stream corruption, a transport fault, or a read-deadline expiry.
     Corrupt(&'static str),
-    /// The generation or host was cancelled while reading.
+    /// The read side was cancelled; the writer may still be draining.
     Cancelled,
     /// A resource wait (ingress budget) outlasted its deadline: the peer
     /// and the transport are healthy, so retirement is clean backpressure,
     /// not a structural fault.
     Overloaded,
-    Io(std::io::Error),
-    /// RejectedDrainFailed reports failed realignment after a rejected frame.
-    RejectedDrainFailed,
 }
 
-/// one place.
-///
 pub(crate) fn validate_inbound_header(header: EnvelopeHeader) -> Result<(), ReadClose> {
     if header.len > MAX_BODY_LEN {
         return Err(ReadClose::Corrupt("body over interoperability cap"));
@@ -67,207 +58,6 @@ pub(crate) fn validate_inbound_header(header: EnvelopeHeader) -> Result<(), Read
     Ok(())
 }
 
-///
-/// Direct/leased paths leave this at zero. Flattening adapters add exactly one
-/// for each body they copy into owned semantic storage.
-#[derive(Clone, Default)]
-pub struct CopyCounter(Arc<AtomicU64>);
-
-impl CopyCounter {
-    pub fn copies(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn record_copy(&self) {
-        self.0.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProducerError {
-    BoundExceedsSpans,
-    /// A write would cross the checked bound.
-    Overflow,
-    /// Committed length is greater than the reservation.
-    CommitOutsideReservation,
-    /// Cursor does not equal the committed exact length.
-    Underfill,
-    /// An earlier error already aborted the reservation.
-    Aborted,
-}
-
-/// `ProducerReservation` writes directly into backend-owned spans and tracks its cursor.
-///
-/// `C` is the backend's descriptor/byte charge guard. It moves into
-/// [`ProducedBody`] on success and drops immediately on constructor failure,
-/// The charge guard drops on overflow, underfill, explicit abort, and ordinary drop.
-/// `C` returns its charge when it drops.
-#[must_use = "producer reservations must be committed or aborted"]
-pub struct ProducerReservation<'storage, C> {
-    spans: &'storage mut [&'storage mut [u8]],
-    bound: usize,
-    cursor: usize,
-    charge: Option<C>,
-    aborted: bool,
-}
-
-impl<'storage, C> ProducerReservation<'storage, C> {
-    pub fn new(
-        spans: &'storage mut [&'storage mut [u8]],
-        bound: usize,
-        charge: C,
-    ) -> Result<Self, ProducerError> {
-        let capacity = spans
-            .iter()
-            .try_fold(0usize, |total, span| total.checked_add(span.len()));
-        if capacity.is_none_or(|capacity| bound > capacity) {
-            return Err(ProducerError::BoundExceedsSpans);
-        }
-        Ok(Self {
-            spans,
-            bound,
-            cursor: 0,
-            charge: Some(charge),
-            aborted: false,
-        })
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.bound
-    }
-
-    pub fn written(&self) -> usize {
-        self.cursor
-    }
-
-    pub fn remaining(&self) -> usize {
-        self.bound.saturating_sub(self.cursor)
-    }
-
-    /// The method writes all bytes or aborts without modifying any span.
-    pub fn write(&mut self, bytes: &[u8]) -> Result<(), ProducerError> {
-        if self.aborted {
-            return Err(ProducerError::Aborted);
-        }
-        let Some(end) = self.cursor.checked_add(bytes.len()) else {
-            self.abort_on_error();
-            return Err(ProducerError::Overflow);
-        };
-        if end > self.bound {
-            self.abort_on_error();
-            return Err(ProducerError::Overflow);
-        }
-
-        let mut source = bytes;
-        let mut absolute = self.cursor;
-        for span in self.spans.iter_mut() {
-            if source.is_empty() {
-                break;
-            }
-            if absolute >= span.len() {
-                absolute -= span.len();
-                continue;
-            }
-            let available = span.len() - absolute;
-            let take = available.min(source.len());
-            span[absolute..absolute + take].copy_from_slice(&source[..take]);
-            source = &source[take..];
-            absolute = 0;
-        }
-        debug_assert!(
-            source.is_empty(),
-            "validated span capacity must cover write"
-        );
-        self.cursor = end;
-        Ok(())
-    }
-
-    /// `commit` drops the charge guard when `body_len > bound` or `cursor != body_len`.
-    /// consuming transition.
-    pub fn commit(mut self, body_len: usize) -> Result<ProducedBody<'storage, C>, ProducerError> {
-        if self.aborted {
-            return Err(ProducerError::Aborted);
-        }
-        if body_len > self.bound {
-            self.abort_on_error();
-            return Err(ProducerError::CommitOutsideReservation);
-        }
-        if self.cursor != body_len {
-            self.abort_on_error();
-            return Err(ProducerError::Underfill);
-        }
-        Ok(ProducedBody {
-            spans: std::mem::take(&mut self.spans),
-            len: body_len,
-            _charge: self.charge.take(),
-        })
-    }
-
-    pub fn abort(mut self) {
-        self.abort_on_error();
-    }
-
-    fn abort_on_error(&mut self) {
-        self.aborted = true;
-        drop(self.charge.take());
-    }
-}
-
-/// Backends publish these segments, then drop the value to return its descriptor and byte charges once.
-#[must_use = "a committed body must be published or discarded"]
-pub struct ProducedBody<'storage, C> {
-    spans: &'storage mut [&'storage mut [u8]],
-    len: usize,
-    /// Held only for its drop: releasing the body returns the charge.
-    _charge: Option<C>,
-}
-
-impl<C> ProducedBody<'_, C> {
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn segment_count(&self) -> usize {
-        let mut remaining = self.len;
-        let mut count = 0;
-        for span in self.spans.iter() {
-            if remaining == 0 {
-                break;
-            }
-            if span.is_empty() {
-                continue;
-            }
-            count += 1;
-            remaining = remaining.saturating_sub(span.len());
-        }
-        count
-    }
-
-    pub fn segment(&self, index: usize) -> Option<&[u8]> {
-        let mut remaining = self.len;
-        for (current, span) in self
-            .spans
-            .iter()
-            .filter(|span| !span.is_empty())
-            .enumerate()
-        {
-            if remaining == 0 {
-                break;
-            }
-            let take = remaining.min(span.len());
-            if current == index {
-                return Some(&span[..take]);
-            }
-            remaining -= take;
-        }
-        None
-    }
-}
-
 /// The `Rc` marker makes this view `!Send`.
 ///
 /// The callback can return only values that do not borrow the leased bytes.
@@ -286,147 +76,42 @@ impl<C> ProducedBody<'_, C> {
 /// require_static(ReceiveLease::contiguous(&bytes));
 /// ```
 pub struct ReceiveLease<'lease> {
-    first: &'lease [u8],
-    second: Option<&'lease [u8]>,
-    tracker: Option<LeaseTracker>,
+    bytes: &'lease [u8],
     _not_send: PhantomData<Rc<()>>,
 }
 
 impl<'lease> ReceiveLease<'lease> {
     pub fn contiguous(bytes: &'lease [u8]) -> Self {
-        Self::segmented(bytes, None)
-    }
-
-    pub fn segmented(first: &'lease [u8], second: Option<&'lease [u8]>) -> Self {
         Self {
-            first,
-            second,
-            tracker: None,
-            _not_send: PhantomData,
-        }
-    }
-
-    fn tracked(first: &'lease [u8], second: Option<&'lease [u8]>, tracker: LeaseTracker) -> Self {
-        tracker.acquire();
-        Self {
-            first,
-            second,
-            tracker: Some(tracker),
+            bytes,
             _not_send: PhantomData,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.first
-            .len()
-            .saturating_add(self.second.map_or(0, <[u8]>::len))
+        self.bytes.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.bytes.is_empty()
     }
 
-    pub fn segment_count(&self) -> usize {
-        usize::from(!self.first.is_empty())
-            + usize::from(self.second.is_some_and(|s| !s.is_empty()))
+    pub fn bytes(&self) -> &[u8] {
+        self.bytes
     }
 
-    pub fn segment(&self, index: usize) -> Option<&[u8]> {
-        match (index, self.first.is_empty()) {
-            (0, false) => Some(self.first),
-            (0, true) => self.second.filter(|segment| !segment.is_empty()),
-            (1, false) => self.second.filter(|segment| !segment.is_empty()),
-            _ => None,
-        }
-    }
-
-    pub fn contiguous_bytes(&self) -> Option<&[u8]> {
-        self.second.is_none().then_some(self.first)
-    }
-
-    /// Explicit contiguous-body adapter. One call records one body copy even
-    /// when the body is empty.
-    pub fn to_owned(&self, counter: &CopyCounter) -> Vec<u8> {
-        let mut body = Vec::with_capacity(self.len());
-        body.extend_from_slice(self.first);
-        if let Some(second) = self.second {
-            body.extend_from_slice(second);
-        }
-        counter.record_copy();
-        body
-    }
-}
-
-impl Drop for ReceiveLease<'_> {
-    fn drop(&mut self) {
-        if let Some(tracker) = self.tracker.take() {
-            tracker.release();
-        }
-    }
-}
-
-#[derive(Default)]
-struct LeaseState {
-    active: usize,
-    quarantined: bool,
-}
-
-/// A close gate prevents storage reuse while a receive lease is active.
-#[derive(Clone, Default)]
-pub struct LeaseTracker(Arc<Mutex<LeaseState>>);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeaseClose {
-    Drained,
-    Quarantined,
-}
-
-impl LeaseTracker {
-    pub fn lease<'lease>(
-        &self,
-        first: &'lease [u8],
-        second: Option<&'lease [u8]>,
-    ) -> ReceiveLease<'lease> {
-        ReceiveLease::tracked(first, second, self.clone())
-    }
-
-    /// Close never reports reusable storage while any lexical lease is live.
-    /// bounded-quarantine branch.
-    pub fn close(&self) -> LeaseClose {
-        let mut state = self.0.lock().expect("lease tracker lock");
-        if state.active == 0 && !state.quarantined {
-            LeaseClose::Drained
-        } else {
-            state.quarantined = true;
-            LeaseClose::Quarantined
-        }
-    }
-
-    pub fn active(&self) -> usize {
-        self.0.lock().expect("lease tracker lock").active
-    }
-
-    pub fn is_quarantined(&self) -> bool {
-        self.0.lock().expect("lease tracker lock").quarantined
-    }
-
-    fn acquire(&self) {
-        self.0.lock().expect("lease tracker lock").active += 1;
-    }
-
-    fn release(&self) {
-        let mut state = self.0.lock().expect("lease tracker lock");
-        state.active = state.active.saturating_sub(1);
+    /// Explicit owned-body adapter for consumers that outlive the lease.
+    pub fn to_owned(&self) -> Vec<u8> {
+        self.bytes.to_vec()
     }
 }
 
 /// One admitted inbound frame. Body bytes can only be observed through
-/// [`InboundFrame::with_lease`] or moved/copied through [`InboundFrame::into_owned`].
+/// [`InboundFrame::with_lease`] or moved through [`InboundFrame::into_owned`].
 pub struct InboundFrame {
     pub header: EnvelopeHeader,
     body: Vec<u8>,
     charge: crate::wire::ByteCharge,
-    copies: CopyCounter,
 }
 
 impl InboundFrame {
@@ -434,23 +119,12 @@ impl InboundFrame {
         header: EnvelopeHeader,
         body: Vec<u8>,
         charge: crate::wire::ByteCharge,
-        copies: CopyCounter,
     ) -> Self {
         Self {
             header,
             body,
             charge,
-            copies,
         }
-    }
-
-    /// `CopyCounter` excludes copies made when an adapter flattens wrapped bodies into owned storage outside this module.
-    pub(crate) fn copy_counter(&self) -> CopyCounter {
-        self.copies.clone()
-    }
-
-    pub fn body_len(&self) -> usize {
-        self.body.len()
     }
 
     /// `with_lease` confines transport-byte decoding to a non-escaping lexical scope.
@@ -464,7 +138,6 @@ impl InboundFrame {
             header,
             body,
             charge,
-            copies: _,
         } = self;
         OwnedInboundFrame {
             header,
@@ -536,76 +209,33 @@ pub struct OutboundFrame {
     pub written: Option<Box<dyn FnOnce(Instant) + Send>>,
 }
 
-const QUEUED: u8 = 0;
-const CANCELLED: u8 = 1;
-const PUBLISHED: u8 = 2;
-pub(crate) const COMPLETE: u8 = 3;
-
-pub(crate) struct QueuedOutboundFrame {
-    pub(crate) frame: OutboundFrame,
-    pub(crate) state: Arc<AtomicU8>,
-    on_publish: Option<Box<dyn FnOnce() + Send>>,
-}
-
-impl QueuedOutboundFrame {
-    pub(crate) fn begin_publication(&mut self) -> bool {
-        if self
-            .state
-            .compare_exchange(QUEUED, PUBLISHED, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
-        }
-        if let Some(on_publish) = self.on_publish.take() {
-            on_publish();
-        }
-        true
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendOutcome {
-    NotSent,
-    PossibleSend,
-}
-
-#[derive(Clone)]
-pub struct FrameSendTicket {
-    state: Arc<AtomicU8>,
-}
-
-impl FrameSendTicket {
-    pub fn cancel(&self) -> SendOutcome {
-        match self
-            .state
-            .compare_exchange(QUEUED, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-        {
-            Ok(_) => SendOutcome::NotSent,
-            Err(_) => SendOutcome::PossibleSend,
-        }
-    }
-}
+/// Senders hold `admission` shared across the retired re-check and the queue push; the finishing endpoint takes it exclusively so its final empty `try_recv` proves no admitted frame is still landing. commentlint: allow(JUDGE)
+type AdmissionGate = Arc<RwLock<()>>;
 
 #[derive(Clone)]
 pub struct FrameSender {
-    tx: mpsc::Sender<QueuedOutboundFrame>,
+    tx: mpsc::Sender<OutboundFrame>,
     retired: CancellationToken,
     generation: CancellationToken,
     discard: CancellationToken,
     finish: CancellationToken,
+    admission: AdmissionGate,
     admission_timeout: Duration,
 }
 
 impl FrameSender {
+    /// Closes admission before the endpoint drains, so every frame `send` admitted is published and none admitted afterwards is silently dropped. commentlint: allow(JUDGE)
     pub fn finish(&self) {
+        self.retired.cancel();
         self.finish.cancel();
     }
 
+    /// Closes admission, then drops every queued frame.
     pub fn discard(&self) {
+        self.retired.cancel();
         self.discard.cancel();
     }
 
-    /// Admission adapter for callers that do not need a ticket.
     pub async fn send(&self, frame: OutboundFrame) -> Result<(), WriterGone> {
         self.send_before(frame, self.admission_deadline()).await
     }
@@ -614,43 +244,34 @@ impl FrameSender {
         Instant::now() + self.admission_timeout
     }
 
-    /// Admission adapter for callers that do not need a ticket.
+    /// An expired admission deadline retires the writer and the generation.
     pub async fn send_before(
         &self,
         frame: OutboundFrame,
         deadline: Instant,
     ) -> Result<(), WriterGone> {
-        self.send_ticket_before(frame, deadline, None)
-            .await
-            .map(drop)
-    }
-
-    pub async fn send_ticket_before(
-        &self,
-        frame: OutboundFrame,
-        deadline: Instant,
-        on_publish: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<FrameSendTicket, WriterGone> {
-        let state = Arc::new(AtomicU8::new(QUEUED));
-        let queued = QueuedOutboundFrame {
-            frame,
-            state: Arc::clone(&state),
-            on_publish,
-        };
-        tokio::select! {
+        let permit = tokio::select! {
             biased;
-            () = self.retired.cancelled() => Err(WriterGone),
-            sent = timeout_at(deadline, self.tx.send(queued)) => match sent {
-                Ok(sent) => sent
-                    .map(|()| FrameSendTicket { state })
-                    .map_err(|_| WriterGone),
+            () = self.retired.cancelled() => return Err(WriterGone),
+            reserved = timeout_at(deadline, self.tx.reserve()) => match reserved {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) => return Err(WriterGone),
                 Err(_) => {
                     self.retired.cancel();
                     self.generation.cancel();
-                    Err(WriterGone)
+                    return Err(WriterGone);
                 }
             },
+        };
+        let _admitted = self
+            .admission
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.retired.is_cancelled() {
+            return Err(WriterGone);
         }
+        permit.send(frame);
+        Ok(())
     }
 
     pub fn is_retired(&self) -> bool {
@@ -662,19 +283,32 @@ impl FrameSender {
 pub struct WriterGone;
 
 pub(crate) struct SenderQueue {
-    rx: mpsc::Receiver<QueuedOutboundFrame>,
+    rx: mpsc::Receiver<OutboundFrame>,
+    admission: AdmissionGate,
     pub retired: CancellationToken,
     pub discard: CancellationToken,
     pub finish: CancellationToken,
 }
 
 impl SenderQueue {
-    pub(crate) async fn recv(&mut self) -> Option<QueuedOutboundFrame> {
+    pub(crate) async fn recv(&mut self) -> Option<OutboundFrame> {
         self.rx.recv().await
     }
 
-    pub(crate) fn try_recv(&mut self) -> Result<QueuedOutboundFrame, mpsc::error::TryRecvError> {
+    pub(crate) fn try_recv(&mut self) -> Result<OutboundFrame, mpsc::error::TryRecvError> {
         self.rx.try_recv()
+    }
+
+    /// Takes the next queued frame after `finish`. `None` is final: admission is closed and every push that passed its retired check has landed. commentlint: allow(JUDGE)
+    pub(crate) fn drain_finished(&mut self) -> Option<OutboundFrame> {
+        if let Ok(frame) = self.rx.try_recv() {
+            return Some(frame);
+        }
+        let _exclusive = self
+            .admission
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.rx.try_recv().ok()
     }
 }
 
@@ -683,20 +317,23 @@ pub(crate) fn frame_sender(
     generation: CancellationToken,
     admission_timeout: Duration,
 ) -> (FrameSender, SenderQueue) {
-    let (tx, rx) = mpsc::channel::<QueuedOutboundFrame>(queue_frames);
+    let (tx, rx) = mpsc::channel::<OutboundFrame>(queue_frames);
     let retired = CancellationToken::new();
     let discard = CancellationToken::new();
     let finish = CancellationToken::new();
+    let admission: AdmissionGate = Arc::new(RwLock::new(()));
     let sender = FrameSender {
         tx,
         retired: retired.clone(),
         generation: generation.clone(),
         discard: discard.clone(),
         finish: finish.clone(),
+        admission: Arc::clone(&admission),
         admission_timeout,
     };
     let queue = SenderQueue {
         rx,
+        admission,
         retired,
         discard,
         finish,
