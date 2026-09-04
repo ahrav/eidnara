@@ -689,15 +689,15 @@ impl RingClientEndpoint {
         header: EnvelopeHeader,
         body: &[u8],
         deadline: StdInstant,
-    ) -> Result<(), RingClientError> {
+    ) -> Result<(), SendFailure> {
         let mut reservation = self
             .to_host
             .reserve_until(body.len(), header.encode(), deadline)
-            .map_err(|_| RingClientError)?;
-        reservation.write(body).map_err(|_| RingClientError)?;
+            .map_err(|_| SendFailure::Unreserved)?;
+        reservation.write(body).map_err(|_| SendFailure::Reserved)?;
         reservation
             .commit(body.len())
-            .map_err(|_| RingClientError)?;
+            .map_err(|_| SendFailure::Reserved)?;
         Ok(())
     }
 
@@ -767,6 +767,17 @@ fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N], RingClientError> {
 /// Redacted test-peer attachment or I/O failure.
 #[derive(Clone, Copy)]
 pub struct RingClientError;
+
+/// The stage at which [`RingClientEndpoint::send`] failed.
+///
+/// A frame that never obtained a reservation wrote zero bytes; after reservation, the host's view is unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendFailure {
+    /// `reserve_until` failed; no bytes reached the ring.
+    Unreserved,
+    /// A reservation existed when the write or commit failed.
+    Reserved,
+}
 
 impl fmt::Debug for RingClientError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

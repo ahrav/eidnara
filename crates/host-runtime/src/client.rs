@@ -33,6 +33,7 @@ use crate::{
     connection_file::{ConnectionInfo, DAEMON_ID_LEN, read_for_client},
     control::{OP_HOST_SHUTDOWN, OP_HOST_STATUS, OP_ROUTE_OPEN},
     handler::{HealthStatus, RouteHandle, RouteIdentity, RouteTarget, TargetKind},
+    ring_transport::SendFailure,
     wire::{
         AdmissionClass, EnvelopeHeader, Flags, FrameId, FrameType, HEADER_LEN, MAX_BODY_LEN,
         MAX_CONTROL_BODY_LEN, PROTOCOL_VERSION, Priority, frame_header, pure_header_flags,
@@ -357,7 +358,8 @@ impl Client {
             cancel.clone(),
             Arc::clone(&read_budget),
             deadline,
-        )?;
+        )
+        .await?;
         let (data_tx, data_rx) = mpsc::channel(CLIENT_DATA_QUEUE_FRAMES);
         let (control_tx, control_rx) = mpsc::channel(CLIENT_CONTROL_QUEUE_FRAMES);
         let inner = Arc::new(Inner {
@@ -1788,7 +1790,7 @@ struct QueuedFrame {
 struct RingWrite {
     header: EnvelopeHeader,
     body: Vec<u8>,
-    completed: oneshot::Sender<Result<(), ()>>,
+    completed: oneshot::Sender<Result<(), SendFailure>>,
     deadline: StdInstant,
 }
 
@@ -1839,7 +1841,7 @@ fn drain_eventfd(fd: &OwnedFd) {
     let _ = rustix::io::read(fd, &mut value);
 }
 
-fn start_ring_bridge(
+async fn start_ring_bridge(
     descriptor: serde_json::Value,
     descriptors: [OwnedFd; crate::setup_socket::RING_DESCRIPTOR_COUNT],
     mut setup: StdUnixStream,
@@ -1858,7 +1860,7 @@ fn start_ring_bridge(
     let worker_wake = Arc::clone(&wake_fd);
     read_budget.set_wake(&wake_fd);
     let (read_tx, read_rx) = mpsc::channel(CLIENT_DATA_QUEUE_FRAMES);
-    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<(), ()>>();
     std::thread::Builder::new()
         .name("host-ring-client".to_owned())
         .spawn(move || {
@@ -1887,9 +1889,7 @@ fn start_ring_bridge(
                 let mut wrote = false;
                 match write_rx.try_recv() {
                     Ok(write) => {
-                        let result = endpoint
-                            .send(write.header, &write.body, write.deadline)
-                            .map_err(|_| ());
+                        let result = endpoint.send(write.header, &write.body, write.deadline);
                         let failed = result.is_err();
                         let _ = write.completed.send(result);
                         if failed {
@@ -2000,20 +2000,13 @@ fn start_ring_bridge(
             let _ = setup.shutdown(std::net::Shutdown::Both);
         })
         .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
-    // The attachment wait expires at the handshake deadline.
-    // A bridge thread stalled in descriptor validation would otherwise block this async worker without bound.
+    // The attachment wait expires at the handshake deadline and yields while it waits.
+    // A synchronous wait would hold this worker for the whole remaining budget on a stalled attach.
     // A thread that reports readiness after the timeout sees a dropped receiver and returns without joining.
-    let remaining = ready_deadline.saturating_duration_since(Instant::now());
-    ready_rx
-        .recv_timeout(remaining)
-        .map_err(|error| match error {
-            std::sync::mpsc::RecvTimeoutError::Timeout => {
-                ClientError::new("handshake_timeout", "client handshake timed out")
-            }
-            std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                ClientError::new("setup_failed", "shared-memory setup failed")
-            }
-        })?
+    timeout_at(ready_deadline, ready_rx)
+        .await
+        .map_err(|_| ClientError::new("handshake_timeout", "client handshake timed out"))?
+        .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?
         .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
     Ok((
         RingWriteSender {
@@ -2074,9 +2067,20 @@ async fn writer_loop(
             () = inner.cancel.cancelled() => break,
             result = timeout_at(frame.deadline, completed_rx) => result,
         };
-        if !matches!(written, Ok(Ok(Ok(())))) {
-            inner.retire("write_failed");
-            break;
+        match written {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(SendFailure::Unreserved))) => {
+                // Zero bytes reached the ring, so the frame returns to `QUEUED` and retirement classifies it `NotSent`.
+                if let Some(state) = &frame.publish {
+                    state.store(QUEUED, Ordering::Release);
+                }
+                inner.retire("write_failed");
+                break;
+            }
+            _ => {
+                inner.retire("write_failed");
+                break;
+            }
         }
         if let Some(state) = &frame.publish {
             state.store(WRITTEN, Ordering::Release);
@@ -2609,15 +2613,7 @@ mod tests {
         assert!(!claim_for_write(&publish));
         assert!(control_rx.try_recv().is_err(), "not-sent needs no Cancel");
 
-        let (write, writes) = std::sync::mpsc::sync_channel(1);
-        let wake = Arc::new(
-            rustix::event::eventfd(
-                0,
-                rustix::event::EventfdFlags::CLOEXEC | rustix::event::EventfdFlags::NONBLOCK,
-            )
-            .unwrap(),
-        );
-        let write = RingWriteSender { tx: write, wake };
+        let (write, writes) = fake_ring_writer();
         let writer_inner = Arc::clone(&inner);
         let writer = tokio::spawn(async move {
             writer_loop(writer_inner, write, data_rx, control_rx).await;
@@ -2654,6 +2650,67 @@ mod tests {
         drop(data_rx.recv().await);
         drop(cancel);
         assert_eq!(inner.queue_budget.used(), 0);
+    }
+
+    fn fake_ring_writer() -> (RingWriteSender, std::sync::mpsc::Receiver<RingWrite>) {
+        let (tx, writes) = std::sync::mpsc::sync_channel(1);
+        let wake = Arc::new(
+            rustix::event::eventfd(
+                0,
+                rustix::event::EventfdFlags::CLOEXEC | rustix::event::EventfdFlags::NONBLOCK,
+            )
+            .unwrap(),
+        );
+        (RingWriteSender { tx, wake }, writes)
+    }
+
+    async fn settle_one_write_with(failure: SendFailure) -> CallError {
+        let (inner, data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let (kind, rx) = unary_sender();
+        let (_key, publish) = inner
+            .admit(
+                route(1),
+                b"never-reserved".to_vec(),
+                kind,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("admitted");
+        let (write, writes) = fake_ring_writer();
+        let writer_inner = Arc::clone(&inner);
+        let writer = tokio::spawn(async move {
+            writer_loop(writer_inner, write, data_rx, control_rx).await;
+        });
+        let ring_write = tokio::task::spawn_blocking(move || {
+            writes
+                .recv_timeout(Duration::from_secs(2))
+                .expect("writer hands the frame to the bridge")
+        })
+        .await
+        .expect("bridge receive task");
+        assert_eq!(publish.load(Ordering::Acquire), WRITING);
+        ring_write
+            .completed
+            .send(Err(failure))
+            .expect("writer awaits completion");
+        writer.await.expect("writer exits after retiring");
+        assert!(inner.retired.load(Ordering::Acquire));
+        rx.await.expect("settled").expect_err("retired")
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_never_reserved_ring_space_settles_not_sent() {
+        // `reserve_until` expiry proves zero bytes reached the host, so the
+        // caller may retry on a fresh generation.
+        let error = settle_one_write_with(SendFailure::Unreserved).await;
+        assert_eq!(error.outcome(), SendOutcome::NotSent);
+        assert_eq!(error.code(), "write_failed");
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_failed_after_reservation_stays_outcome_unknown() {
+        let error = settle_one_write_with(SendFailure::Reserved).await;
+        assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
+        assert_eq!(error.code(), "write_failed");
     }
 
     #[tokio::test]
@@ -4204,6 +4261,7 @@ mod tests {
             Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
             Instant::now() + CLIENT_HANDSHAKE_TIMEOUT,
         )
+        .await
         .expect("bridge");
 
         let outbound = EnvelopeHeader {
@@ -4263,8 +4321,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ring_bridge_retires_when_host_drops_setup_socket() {
+    #[tokio::test]
+    async fn ring_bridge_retires_when_host_drops_setup_socket() {
         let rings = shm_transport::backend::ring::DuplexRing::create(
             &crate::ring_transport::ring_profile(),
         )
@@ -4280,9 +4338,10 @@ mod tests {
             Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
             Instant::now() + CLIENT_HANDSHAKE_TIMEOUT,
         )
+        .await
         .expect("bridge");
         drop(host_end);
         // A hang here means the bridge never observed the dead setup socket.
-        assert!(read_rx.blocking_recv().is_none());
+        assert!(read_rx.recv().await.is_none());
     }
 }
