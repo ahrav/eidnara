@@ -82,7 +82,7 @@ pub const CLIENT_INBOUND_FRAME_BYTES: usize = MAX_BODY_LEN as usize;
 /// The two pools are owner-wide, not per-request: exhausting one fails whichever frame charges it next, which need not be the frame holding the bytes.
 /// A failed stream item cancels only that stream; a failed unary response fails only that request.
 /// Each pool admits one maximum-sized item plus 1_048_576 bytes.
-/// One connection can retain at most `CLIENT_RETAINED_RESPONSE_BYTES + CLIENT_INBOUND_FRAME_BYTES` bytes.
+/// One connection can retain at most `2 * CLIENT_RETAINED_RESPONSE_BYTES + CLIENT_INBOUND_FRAME_BYTES` bytes: one pool each for stream items and unary responses, plus the frame being decoded.
 pub const CLIENT_RETAINED_RESPONSE_BYTES: usize = MAX_BODY_LEN as usize + 1_048_576;
 
 /// `CLIENT_DISCOVERY_SLOTS` caps concurrent connection-file snapshots process-wide.
@@ -2073,48 +2073,63 @@ async fn start_ring_bridge(
             let setup_events = rustix::event::PollFlags::IN
                 | rustix::event::PollFlags::HUP
                 | rustix::event::PollFlags::ERR;
+            // A write waiting for peer-to-host capacity stays here across loop
+            // iterations so inbound frames keep draining between its slices.
+            let mut pending: Option<RingWrite> = None;
             while !cancel.is_cancelled() {
                 let mut wrote = false;
-                match write_rx.try_recv() {
-                    Ok(write) => {
-                        // `reserve_until` parks on the peer's capacity doorbell, which
-                        // cancellation cannot ring, so the wait is taken in slices. A dead
-                        // host never frees capacity, so the setup socket is probed between slices.
-                        let result = loop {
-                            let slice = StdInstant::now() + BRIDGE_RESERVE_SLICE;
-                            match endpoint.send_bounded(
-                                write.header,
-                                &write.body,
-                                write.deadline.min(slice),
-                                write.deadline,
-                            ) {
-                                Err(SendFailure::Deadline)
-                                    if StdInstant::now() < write.deadline
-                                        && !cancel.is_cancelled() =>
-                                {
-                                    if setup_peer_closed(&setup) {
-                                        break Err(SendFailure::Unreserved);
-                                    }
-                                }
-                                result => break result,
-                            }
-                        };
-                        let failed = result.is_err();
-                        if matches!(result, Err(SendFailure::Deadline | SendFailure::Unreserved))
-                            && let Some(state) = &write.publish
-                        {
-                            // Zero bytes were published; the state is restored before the
-                            // failure is observable so a concurrent stop classifies `NotSent`.
-                            state.store(QUEUED, Ordering::Release);
-                        }
-                        let _ = write.completed.send(result);
-                        if failed {
-                            break;
-                        }
-                        wrote = true;
+                if pending.is_none() {
+                    match write_rx.try_recv() {
+                        Ok(write) => pending = Some(write),
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
                     }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+                if let Some(write) = pending.take() {
+                    // `reserve_until` parks on the peer's capacity doorbell, which
+                    // cancellation cannot ring, so the wait is taken in slices. The
+                    // host may itself be parked on host-to-client capacity that only
+                    // this thread's inbound drain frees, so one slice runs per
+                    // iteration and the drain below runs before the next. A dead host
+                    // never frees capacity, so the setup socket is probed between slices.
+                    let slice = StdInstant::now() + BRIDGE_RESERVE_SLICE;
+                    let result = match endpoint.send_bounded(
+                        write.header,
+                        &write.body,
+                        write.deadline.min(slice),
+                        write.deadline,
+                    ) {
+                        Err(SendFailure::Deadline)
+                            if StdInstant::now() < write.deadline && !cancel.is_cancelled() =>
+                        {
+                            if setup_peer_closed(&setup) {
+                                Some(Err(SendFailure::Unreserved))
+                            } else {
+                                None
+                            }
+                        }
+                        result => Some(result),
+                    };
+                    match result {
+                        None => pending = Some(write),
+                        Some(result) => {
+                            let failed = result.is_err();
+                            if matches!(
+                                result,
+                                Err(SendFailure::Deadline | SendFailure::Unreserved)
+                            ) && let Some(state) = &write.publish
+                            {
+                                // Zero bytes were published; the state is restored before the
+                                // failure is observable so a concurrent stop classifies `NotSent`.
+                                state.store(QUEUED, Ordering::Release);
+                            }
+                            let _ = write.completed.send(result);
+                            if failed {
+                                break;
+                            }
+                            wrote = true;
+                        }
+                    }
                 }
                 // `endpoint.try_recv_with` advances the ring's consumed cursor,
                 // so refusing a charge would discard a valid response. Waiting
@@ -2172,7 +2187,8 @@ async fn start_ring_bridge(
                     Ok(None) => {}
                     Err(_) => break,
                 }
-                if wrote {
+                // A pending write retries its next slice rather than parking on the data doorbell.
+                if wrote || pending.is_some() {
                     continue;
                 }
                 if setup_peer_closed(&setup) {
