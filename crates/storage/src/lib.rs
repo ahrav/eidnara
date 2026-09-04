@@ -14,6 +14,7 @@
 //! `(module_id, backend, storage_namespace/database file name)`, so stores that share
 //! a lease root do not collide. The persisted epoch serves as the fence token for
 //! epoch-checked writes.
+#![deny(unsafe_code)]
 
 pub use storage_types::{
     Isolation, StorageBackend, StorageDescriptor, postgres_database_name, sqlite_store_path,
@@ -1578,6 +1579,7 @@ mod tests {
     /// A FIFO at the database path would block SQLite's open before any timeout applies.
     #[cfg(unix)]
     #[test]
+    #[allow(unsafe_code)]
     fn a_fifo_at_the_database_path_is_refused_before_sqlite_opens_it() {
         let (root, d) = tmp();
         let StorageBackend::Sqlite { path } = &d.backend else {
@@ -1600,6 +1602,7 @@ mod tests {
     /// would copy it, so the open cannot block on it.
     #[cfg(unix)]
     #[test]
+    #[allow(unsafe_code)]
     fn a_fifo_at_the_journal_path_is_refused_before_inspection() {
         let (root, d) = tmp();
         let StorageBackend::Sqlite { path } = &d.backend else {
@@ -2213,6 +2216,7 @@ mod tests {
     /// for the length of the inspection.
     #[cfg(unix)]
     #[test]
+    #[allow(unsafe_code)]
     fn the_inspection_copy_is_owner_only_under_a_permissive_umask() {
         use std::os::unix::fs::PermissionsExt;
         let (root, d) = tmp();
@@ -2568,6 +2572,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(unsafe_code)]
     fn new_database_file_is_owner_only_at_creation() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -3038,6 +3043,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(unsafe_code)]
     fn fresh_open_creates_owner_only_sidecars_under_a_permissive_umask() {
         use std::os::unix::fs::PermissionsExt;
 

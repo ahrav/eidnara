@@ -19,6 +19,7 @@
 //! - The descriptor a module receives is fully **resolved and least-privilege**:
 //!   it never carries central config or an admin credential. For postgres the DSN
 //!   reaches only the module's own database.
+#![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 
