@@ -45,7 +45,7 @@
     {
       "source": null,
       "destination": "tsconfig.json",
-      "destination_sha256": "88a8eef1139948f7b3f96e15925c107ef707c33ed46ee59f71ef394b86545ee1",
+      "destination_sha256": "65ef51fda5eeb65fece80734b08c98a9b0bdee93fe26b84f4b7f9bf259fe3b42",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
