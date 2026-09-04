@@ -961,6 +961,15 @@ struct PendingState {
     kind: PendingKind,
 }
 
+/// Who held the channel-0 response handed to `release_stranded_route`.
+#[derive(Clone, Copy)]
+enum BindOwner {
+    /// The response's caller dropped it, or it could not be retained; the bind is unowned.
+    Abandoned,
+    /// No pending entry matched; a duplicate terminal for a bind another caller owns must be dropped.
+    None,
+}
+
 /// A route `Goodbye` can arrive after the bind response has woken `open_route`
 /// but before it inserts the handle. `publishing` holds handles in that window,
 /// and `torn_down` the subset the host has closed, so the insert can refuse a
@@ -1500,7 +1509,7 @@ impl Inner {
                     // An abandoned `open_route` on identity 0/0 cannot withdraw its bind because §6.2 permits no `Cancel`.
                     if header.ty == FrameType::Response && header.channel == 0 {
                         drop(charge);
-                        self.release_stranded_route(&body);
+                        self.release_stranded_route(&body, BindOwner::None);
                     }
                     return;
                 };
@@ -1531,7 +1540,10 @@ impl Inner {
                                     None => {
                                         // The body is discarded, so a route the host bound for this caller can only be released here.
                                         if header.channel == 0 {
-                                            self.release_stranded_route(&body);
+                                            self.release_stranded_route(
+                                                &body,
+                                                BindOwner::Abandoned,
+                                            );
                                         }
                                         Err(CallError::local(
                                             // The reader observed the host's terminal; only the local copy is lost, so a retry would duplicate a completed operation.
@@ -1555,7 +1567,10 @@ impl Inner {
                         if let Err(Ok(retained)) = tx.send(result)
                             && header.channel == 0
                         {
-                            self.release_stranded_route(&retained.response.body);
+                            self.release_stranded_route(
+                                &retained.response.body,
+                                BindOwner::Abandoned,
+                            );
                         }
                     }
                     PendingKind::Stream { terminal, .. } => {
@@ -1678,7 +1693,7 @@ impl Inner {
     /// A cached bind belongs to the caller that received it.
     /// The handler does not treat a duplicate terminal for a cached bind as stranded.
     /// Sending `Goodbye` would close a route still in use.
-    fn release_stranded_route(&self, body: &[u8]) {
+    fn release_stranded_route(&self, body: &[u8], owner: BindOwner) {
         // §7.1: every channel-0 body is a tagged JSON object; an untagged one is a
         // protocol violation whether or not a caller was waiting for it.
         if !is_tagged_control_body(body) {
@@ -1696,14 +1711,25 @@ impl Inner {
                 return;
             }
         };
-        if lock_unpoisoned(&self.routes).contains(&route) {
-            return;
-        }
-        // No caller will publish this bind, so its tracking ends here.
         {
+            // `routes` is taken before `binds`, matching `open_route`.
+            let routes = lock_unpoisoned(&self.routes);
             let mut binds = lock_unpoisoned(&self.binds);
-            binds.publishing.remove(&route);
-            binds.torn_down.remove(&route);
+            match owner {
+                // A duplicate terminal for a route that is live or still being published is dropped (§6.2).
+                BindOwner::None if routes.contains(&route) || binds.publishing.contains(&route) => {
+                    return;
+                }
+                BindOwner::None => {}
+                // The response's own caller is gone, so its tracking ends here.
+                BindOwner::Abandoned => {
+                    if routes.contains(&route) {
+                        return;
+                    }
+                    binds.publishing.remove(&route);
+                    binds.torn_down.remove(&route);
+                }
+            }
         }
         if self
             .send_control(
@@ -1915,7 +1941,8 @@ impl Drop for UnaryAdmissionGuard {
             // `close` makes a concurrent `tx.send` fail and hand the value back to `dispatch`, which releases it; a value already sent is still readable here.
             self.rx.close();
             if let Ok(Ok(retained)) = self.rx.try_recv() {
-                self.inner.release_stranded_route(&retained.response.body);
+                self.inner
+                    .release_stranded_route(&retained.response.body, BindOwner::Abandoned);
             }
         }
     }
@@ -2772,7 +2799,7 @@ fn encode_data_frame(
 /// cheap length and depth inspection rather than by a full encoding.
 fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Result<(), CallError> {
     use crate::control::{
-        MAX_ADMISSION_FACTS_DEPTH, MAX_CAPABILITIES, MAX_CAPABILITY_LEN,
+        MAX_ADMISSION_FACTS_BYTES, MAX_ADMISSION_FACTS_DEPTH, MAX_CAPABILITIES, MAX_CAPABILITY_LEN,
         MAX_CREDENTIAL_FINGERPRINTS, MAX_HARNESS_LEN, MAX_LAUNCH_NONCE_LEN, MAX_MODULE_ID_LEN,
         MAX_PROJECT_ROOT_LEN, MAX_SESSION_LEN, check_string, value_depth,
     };
@@ -2820,14 +2847,33 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
         check_string("consumer capability", capability, MAX_CAPABILITY_LEN, false)
             .map_err(invalid)?;
     }
-    if identity
-        .admission_facts
-        .as_ref()
-        .is_some_and(|facts| value_depth(facts) > MAX_ADMISSION_FACTS_DEPTH)
-    {
+    if identity.admission_facts.as_ref().is_some_and(|facts| {
+        value_depth(facts) > MAX_ADMISSION_FACTS_DEPTH
+            || !compact_json_fits(facts, MAX_ADMISSION_FACTS_BYTES)
+    }) {
         return Err(invalid(String::new()));
     }
     Ok(())
+}
+
+/// Whether `value`'s compact encoding is at most `cap` bytes, measured by a counting
+/// writer that stops the serializer as soon as the cap is exceeded, so the cost is
+/// bounded by `cap` rather than by the caller-supplied value.
+fn compact_json_fits(value: &Value, cap: usize) -> bool {
+    struct Remaining(usize);
+    impl std::io::Write for Remaining {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.len() > self.0 {
+                return Err(std::io::Error::other("cap exceeded"));
+            }
+            self.0 -= buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Remaining(cap), value).is_ok()
 }
 
 fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec<u8>, CallError> {
@@ -3503,6 +3549,58 @@ mod tests {
             !claim_for_publish(&publish),
             "the bridge must skip a cancelled frame"
         );
+        inner.retire("test_done");
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_bind_terminal_during_publication_is_dropped() {
+        // The bind was delivered to its caller (so it is `publishing`); a duplicate unmatched terminal must not release it.
+        let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let control = RouteHandle {
+            channel: 0,
+            epoch: 0,
+        };
+        let (tx, _rx) = oneshot::channel();
+        let (key, publish) = inner
+            .admit(
+                control,
+                Vec::new(),
+                false,
+                PendingKind::Unary(tx),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .expect("control request admitted");
+        assert!(bridge_claims(&publish));
+        drop(data_rx.recv().await);
+        let bound = RouteHandle {
+            channel: 9,
+            epoch: 3,
+        };
+        let body = serde_json::to_vec(&serde_json::json!({
+            "op": "route.open",
+            "route_channel": bound.channel,
+            "route_epoch": bound.epoch,
+        }))
+        .expect("body encodes");
+        let header = |corr: u64| EnvelopeHeader {
+            len: u32::try_from(body.len()).expect("fits"),
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Response,
+            flags: response_flags(false, false),
+            channel: 0,
+            epoch: 0,
+            corr,
+        };
+        inner.dispatch(header(key.corr), body.clone(), ByteCharge::none());
+        assert!(lock_unpoisoned(&inner.binds).publishing.contains(&bound));
+        // The duplicate arrives before `open_route` inserts the handle.
+        inner.dispatch(header(key.corr), body, ByteCharge::none());
+        assert!(
+            control_rx.try_recv().is_err(),
+            "a duplicate terminal for a bind being published sends no Goodbye"
+        );
+        assert!(lock_unpoisoned(&inner.binds).publishing.contains(&bound));
+        assert!(!inner.retired.load(Ordering::Acquire));
         inner.retire("test_done");
     }
 
@@ -4269,14 +4367,18 @@ mod tests {
         );
 
         let mut identity = identity_fixture();
-        identity.admission_facts =
-            Some(serde_json::json!({"blob": "x".repeat(MAX_CONTROL_BODY_LEN as usize)}));
+        identity.admission_facts = Some(serde_json::json!({
+            "blob": "x".repeat(crate::control::MAX_ADMISSION_FACTS_BYTES)
+        }));
         assert_eq!(
             route_open_body(&target, &identity)
-                .expect_err("body over the control cap")
+                .expect_err("facts over the byte cap")
                 .code(),
             "invalid_identity"
         );
+        let mut identity = identity_fixture();
+        identity.admission_facts = Some(serde_json::json!({"blob": "x".repeat(64)}));
+        route_open_body(&target, &identity).expect("small facts encode");
     }
 
     #[tokio::test]
