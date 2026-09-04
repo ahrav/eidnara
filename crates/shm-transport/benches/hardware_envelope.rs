@@ -49,7 +49,9 @@ const UNIMPLEMENTED_ARMS: &[&str] = &[
     "h2_rust_napi_runtime_crossing",
 ];
 
-/// `syscalls` is `None` when an arm has no syscall counter.
+/// `syscalls` is `None` when an arm has no syscall counter; otherwise it is
+/// `doorbell_syscalls + other_syscalls`, and `page_removal_syscalls` is the part of
+/// `other_syscalls` the ring spent punching dead arena pages.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Measurement {
     schema: u32,
@@ -62,6 +64,9 @@ struct Measurement {
     body_copies: u64,
     native_allocations: u64,
     syscalls: Option<u64>,
+    doorbell_syscalls: u64,
+    other_syscalls: u64,
+    page_removal_syscalls: u64,
     park_wakes: u64,
     generic_queue_hops: u64,
     scheduler_handoffs: u64,
@@ -74,7 +79,7 @@ struct ArmRun {
     elapsed: Duration,
     body_copies: u64,
     native_allocations: u64,
-    syscalls: Option<u64>,
+    syscalls: Option<SyscallSplit>,
     park_wakes: u64,
     scheduler_handoffs: u64,
     checksum: u64,
@@ -83,13 +88,31 @@ struct ArmRun {
 /// `PeerReport` carries the peer's final timed-operation counters; the producer reads them
 /// only after observing `done`. The peer samples its counter baselines only after observing
 /// `start`, which the producer sets when its timed window opens.
+/// Timed-path syscalls split by whether a doorbell issued them, since the purity gate excuses
+/// only doorbell calls.
+#[derive(Clone, Copy, Default)]
+struct SyscallSplit {
+    doorbell: u64,
+    /// Includes `page_removals`.
+    other: u64,
+    page_removals: u64,
+}
+
+impl SyscallSplit {
+    const fn total(self) -> u64 {
+        self.doorbell + self.other
+    }
+}
+
 #[repr(C)]
 struct PeerReport {
     start: AtomicU64,
     done: AtomicU64,
     checksum: AtomicU64,
     scheduler_handoffs: AtomicU64,
-    syscalls: AtomicU64,
+    doorbell_syscalls: AtomicU64,
+    other_syscalls: AtomicU64,
+    page_removal_syscalls: AtomicU64,
     park_wakes: AtomicU64,
 }
 
@@ -100,7 +123,9 @@ impl PeerReport {
             done: AtomicU64::new(0),
             checksum: AtomicU64::new(0),
             scheduler_handoffs: AtomicU64::new(0),
-            syscalls: AtomicU64::new(0),
+            doorbell_syscalls: AtomicU64::new(0),
+            other_syscalls: AtomicU64::new(0),
+            page_removal_syscalls: AtomicU64::new(0),
             park_wakes: AtomicU64::new(0),
         }
     }
@@ -109,13 +134,31 @@ impl PeerReport {
         await_line(&self.start, 1, Instant::now() + PEER_DEADLINE).is_some()
     }
 
-    fn publish(&self, checksum: u64, scheduler_handoffs: u64, syscalls: u64, park_wakes: u64) {
+    fn publish(
+        &self,
+        checksum: u64,
+        scheduler_handoffs: u64,
+        syscalls: SyscallSplit,
+        park_wakes: u64,
+    ) {
         self.checksum.store(checksum, Ordering::Relaxed);
         self.scheduler_handoffs
             .store(scheduler_handoffs, Ordering::Relaxed);
-        self.syscalls.store(syscalls, Ordering::Relaxed);
+        self.doorbell_syscalls
+            .store(syscalls.doorbell, Ordering::Relaxed);
+        self.other_syscalls.store(syscalls.other, Ordering::Relaxed);
+        self.page_removal_syscalls
+            .store(syscalls.page_removals, Ordering::Relaxed);
         self.park_wakes.store(park_wakes, Ordering::Relaxed);
         self.done.store(1, Ordering::Release);
+    }
+
+    fn syscalls(&self) -> SyscallSplit {
+        SyscallSplit {
+            doorbell: self.doorbell_syscalls.load(Ordering::Relaxed),
+            other: self.other_syscalls.load(Ordering::Relaxed),
+            page_removals: self.page_removal_syscalls.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -226,11 +269,14 @@ fn main() {
             "injected_avoidable_operations": "ring",
         },
         "order_blocks": ["ABBA", "BAAB"],
-        "counter_fields": ["body_copies", "native_allocations", "syscalls", "park_wakes", "generic_queue_hops", "scheduler_handoffs"],
+        "counter_fields": ["body_copies", "native_allocations", "syscalls", "doorbell_syscalls", "other_syscalls", "page_removal_syscalls", "park_wakes", "generic_queue_hops", "scheduler_handoffs"],
         "counter_scopes": {
-            "body_copies": "producer body clones plus receiver to_vec copies, counted by the bench",
-            "native_allocations": "one per counted copy",
-            "syscalls": "ring doorbell send, recv, and poll calls plus madvise page removals in both processes, and the producer's tail-wait sched_yield calls; h0 sched_yield calls in both processes",
+            "body_copies": "producer writes of the body into the arena plus receiver to_vec copies, counted by the bench",
+            "native_allocations": "one per receiver to_vec copy",
+            "syscalls": "doorbell_syscalls + other_syscalls",
+            "doorbell_syscalls": "ring doorbell send, recv, and poll calls in both processes; the only syscalls a qualified park excuses",
+            "other_syscalls": "madvise page removals in both processes; h0 sched_yield calls in both processes; never excused",
+            "page_removal_syscalls": "the madvise(MADV_REMOVE) part of other_syscalls",
             "park_wakes": "blocking doorbell polls in both processes, after a zero-timeout probe found nothing ready",
             "generic_queue_hops": "structurally zero: the ring is the only hand-off",
             "scheduler_handoffs": "voluntary context switches (ru_nvcsw) of both processes over the timed window",
@@ -260,19 +306,26 @@ fn measure(arm: &str, iterations: u64, payload: usize) -> Measurement {
     match result {
         Ok(run) => {
             let mut syscalls = run.syscalls;
+            let split = run.syscalls.unwrap_or_default();
             let mut counters = OperationCounters {
                 body_copies: run.body_copies,
                 native_allocations: run.native_allocations,
-                syscalls: run.syscalls.unwrap_or(0),
+                doorbell_syscalls: split.doorbell,
+                other_syscalls: split.other,
                 park_wakes: run.park_wakes,
                 generic_queue_hops: 0,
                 scheduler_handoffs: run.scheduler_handoffs,
             };
             if arm == "injected_avoidable_operations" {
-                syscalls = Some(1);
+                syscalls = Some(SyscallSplit {
+                    doorbell: 1,
+                    other: 1,
+                    page_removals: 0,
+                });
                 counters.body_copies = 1;
                 counters.native_allocations = 1;
-                counters.syscalls = 1;
+                counters.doorbell_syscalls = 1;
+                counters.other_syscalls = 1;
                 counters.park_wakes = 1;
                 counters.generic_queue_hops = 1;
                 counters.scheduler_handoffs = 1;
@@ -293,7 +346,10 @@ fn measure(arm: &str, iterations: u64, payload: usize) -> Measurement {
                 elapsed_ns: run.elapsed.as_nanos(),
                 body_copies: counters.body_copies,
                 native_allocations: counters.native_allocations,
-                syscalls,
+                syscalls: syscalls.map(SyscallSplit::total),
+                doorbell_syscalls: counters.doorbell_syscalls,
+                other_syscalls: counters.other_syscalls,
+                page_removal_syscalls: split.page_removals,
                 park_wakes: counters.park_wakes,
                 generic_queue_hops: counters.generic_queue_hops,
                 scheduler_handoffs: counters.scheduler_handoffs,
@@ -317,6 +373,9 @@ fn failed(arm: &str, payload: usize, iterations: u64, reason: &str) -> Measureme
         body_copies: 0,
         native_allocations: 0,
         syscalls: None,
+        doorbell_syscalls: 0,
+        other_syscalls: 0,
+        page_removal_syscalls: 0,
         park_wakes: 0,
         generic_queue_hops: 0,
         scheduler_handoffs: 0,
@@ -347,6 +406,21 @@ fn await_line(line: &AtomicU64, expected: u64, deadline: Instant) -> Option<u64>
         }
         unsafe { libc::sched_yield() };
         yields += 1;
+    }
+}
+
+/// Spins without yielding, so the wait adds no syscall to the timed path.
+fn spin_until(line: &AtomicU64, expected: u64, deadline: Instant) -> bool {
+    loop {
+        for _ in 0..SPIN_BURST {
+            if line.load(Ordering::Acquire) == expected {
+                return true;
+            }
+            std::hint::spin_loop();
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
     }
 }
 
@@ -453,7 +527,11 @@ fn run_h0(iterations: u64) -> Result<ArmRun, &'static str> {
         shared.report.publish(
             0,
             voluntary_switches().saturating_sub(switches_before),
-            yields,
+            SyscallSplit {
+                doorbell: 0,
+                other: yields,
+                page_removals: 0,
+            },
             0,
         );
         0
@@ -489,7 +567,11 @@ fn run_h0(iterations: u64) -> Result<ArmRun, &'static str> {
         elapsed,
         body_copies: 0,
         native_allocations: 0,
-        syscalls: Some(yields + shared.report.syscalls.load(Ordering::Relaxed)),
+        syscalls: Some(SyscallSplit {
+            doorbell: 0,
+            other: yields + shared.report.syscalls().other,
+            page_removals: 0,
+        }),
         park_wakes: 0,
         scheduler_handoffs: scheduler_handoffs
             + shared.report.scheduler_handoffs.load(Ordering::Relaxed),
@@ -529,20 +611,18 @@ fn run_ring(
     let start = Instant::now();
     report.start.store(1, Ordering::Release);
     let produced = produce(&ring, &body, header, iterations, copied_producer);
-    // The tail wait spins and yields inside the window; its yields are timed-path syscalls.
-    let tail_yields = if produced.is_ok() {
-        await_line(&report.done, 1, Instant::now() + PEER_DEADLINE)
-    } else {
-        None
-    };
+    // The receiver's last copies, checksums, and releases end the window, so the producer
+    // spins for `done` without yielding rather than adding its own syscalls to the path.
+    let peer_finished =
+        produced.is_ok() && spin_until(&report.done, 1, Instant::now() + PEER_DEADLINE);
     let elapsed = start.elapsed();
     let scheduler_handoffs = voluntary_switches().saturating_sub(switches_before);
     let syscalls = ring.syscall_counters().since(syscalls_before);
 
-    let (copies, allocations) = produced?;
-    let Some(tail_yields) = tail_yields else {
+    let copies = produced?;
+    if !peer_finished {
         return Err("ring peer stalled");
-    };
+    }
     if peer.wait()? != 0 {
         return Err("ring peer failed");
     }
@@ -553,13 +633,17 @@ fn run_ring(
     if checksum != expected_checksum {
         return Err("ring peer observed a different payload than the producer published");
     }
-    let peer_syscalls = report.syscalls.load(Ordering::Relaxed);
+    let peer_syscalls = report.syscalls();
     let peer_parks = report.park_wakes.load(Ordering::Relaxed);
     Ok(ArmRun {
         elapsed,
         body_copies: copies + if copied_receiver { iterations } else { 0 },
-        native_allocations: allocations + if copied_receiver { iterations } else { 0 },
-        syscalls: Some(syscalls.total() + tail_yields + peer_syscalls),
+        native_allocations: if copied_receiver { iterations } else { 0 },
+        syscalls: Some(SyscallSplit {
+            doorbell: syscalls.doorbell + peer_syscalls.doorbell,
+            other: syscalls.page_removals + peer_syscalls.other,
+            page_removals: syscalls.page_removals + peer_syscalls.page_removals,
+        }),
         park_wakes: syscalls.parks + peer_parks,
         scheduler_handoffs: scheduler_handoffs + report.scheduler_handoffs.load(Ordering::Relaxed),
         checksum,
@@ -572,10 +656,9 @@ fn produce(
     header: [u8; shm_transport::WIRE_V2_HEADER_BYTES],
     iterations: u64,
     copied_producer: bool,
-) -> Result<(u64, u64), &'static str> {
+) -> Result<u64, &'static str> {
     let payload_len = body.len();
     let mut copies = 0u64;
-    let mut allocations = 0u64;
     for _ in 0..iterations {
         let mut reservation = match ring.try_reserve(payload_len, header) {
             Ok(reservation) => reservation,
@@ -585,10 +668,8 @@ fn produce(
             Err(_) => return Err("reserve"),
         };
         if copied_producer {
-            let copied = body.to_vec();
             copies += 1;
-            allocations += 1;
-            reservation.write(&copied).map_err(|_| "write")?;
+            reservation.write(body).map_err(|_| "write")?;
         } else {
             for index in 0..reservation.segment_count() {
                 let span = reservation
@@ -603,7 +684,7 @@ fn produce(
         reservation.commit(payload_len).map_err(|_| "commit")?;
     }
     black_box(body);
-    Ok((copies, allocations))
+    Ok(copies)
 }
 
 fn ring_consumer(ring: &Ring, iterations: u64, copied_receiver: bool, report: &PeerReport) -> i32 {
@@ -649,7 +730,11 @@ fn ring_consumer(ring: &Ring, iterations: u64, copied_receiver: bool, report: &P
     report.publish(
         checksum,
         voluntary_switches().saturating_sub(switches_before),
-        syscalls.total(),
+        SyscallSplit {
+            doorbell: syscalls.doorbell,
+            other: syscalls.page_removals,
+            page_removals: syscalls.page_removals,
+        },
         syscalls.parks,
     );
     0

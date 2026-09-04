@@ -9,8 +9,10 @@ pub struct OperationCounters {
     pub body_copies: u64,
     /// Heap allocations in the transport during the timed path.
     pub native_allocations: u64,
-    /// Syscalls during the timed path, including doorbell reads and writes.
-    pub syscalls: u64,
+    /// Syscalls the doorbell issued during the timed path.
+    pub doorbell_syscalls: u64,
+    /// Syscalls during the timed path not issued by the doorbell.
+    pub other_syscalls: u64,
     /// Thread park and wake transitions.
     pub park_wakes: u64,
     /// Hand-offs through a general-purpose queue rather than the ring.
@@ -20,10 +22,9 @@ pub struct OperationCounters {
 }
 
 impl OperationCounters {
-    /// One reason per nonzero counter. Body copies, allocations, and queue hops always
-    /// disqualify. Syscalls, park/wakes, and scheduler hand-offs are allowed only when
-    /// `doorbell_wake_qualified` is set and a park was recorded, since the ring's doorbell is
-    /// the one wake path the design permits and nothing else on the timed path may block.
+    /// Body copies, allocations, queue hops, and non-doorbell syscalls disqualify. Doorbell
+    /// syscalls, park/wakes, and scheduler hand-offs are allowed only when
+    /// `doorbell_wake_qualified` is true and `park_wakes` is nonzero.
     pub fn disqualifications(self, doorbell_wake_qualified: bool) -> Vec<&'static str> {
         let mut reasons = Vec::new();
         if self.body_copies != 0 {
@@ -36,7 +37,7 @@ impl OperationCounters {
             reasons.push("generic_queue_hop");
         }
         let wake_allowed = doorbell_wake_qualified && self.park_wakes != 0;
-        if self.syscalls != 0 && !wake_allowed {
+        if self.other_syscalls != 0 || (self.doorbell_syscalls != 0 && !wake_allowed) {
             reasons.push("timed_path_syscall");
         }
         if self.park_wakes != 0 && !wake_allowed {
