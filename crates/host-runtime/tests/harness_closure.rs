@@ -753,6 +753,74 @@ fn inherit_in_child_exposes_the_node_at_its_descriptor_path() {
     assert_eq!(output.stdout, b"export const answer = 42");
 }
 
+/// A shebang script launched through `path()` makes the kernel pass `/proc/self/fd/N` to the
+/// interpreter as its script argument; the interpreter reopens that name after exec, so the
+/// descriptor must survive exec via `inherit_in_child`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_shebang_executable_launches_through_its_descriptor_path() {
+    use std::os::unix::process::CommandExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(source.join("bin")).expect("bin");
+    let script = b"#!/bin/sh\nprintf '%s' launched\n";
+    std::fs::write(source.join("bin/run"), script).expect("script");
+    let manifest = ClosureManifest {
+        schema: "eidnara.host-harness-closure/v1".to_owned(),
+        harness: "sh".to_owned(),
+        package: "script".to_owned(),
+        version: "1".to_owned(),
+        argument_variant: "run".to_owned(),
+        source_roots: vec!["install".to_owned()],
+        executable: Some("bin/run".to_owned()),
+        interpreter: None,
+        entrypoint: None,
+        extensions: vec![],
+        nodes: vec![node(
+            "bin/run",
+            "bin/run",
+            NodeKind::Executable,
+            script,
+            vec![],
+        )],
+    };
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    let closure = store
+        .materialize(&ClosureCandidate {
+            manifest,
+            source_roots: BTreeMap::from([("install".to_owned(), source)]),
+        })
+        .expect("materialize");
+    let node = closure
+        .resolve_node_descriptor("bin/run")
+        .expect("resolve executable");
+    let exec_path = node.path().to_path_buf();
+
+    let closed = std::process::Command::new(&exec_path)
+        .env_clear()
+        .output()
+        .expect("launch without inheritance");
+    assert!(
+        !closed.status.success(),
+        "the interpreter cannot reopen a descriptor path that exec closed"
+    );
+
+    let mut command = std::process::Command::new(&exec_path);
+    command.env_clear();
+    // SAFETY: `inherit_in_child` performs one `fcntl` and no allocation or locking between fork and exec.
+    unsafe {
+        command.pre_exec(move || node.inherit_in_child());
+    }
+    let output = command.output().expect("launch with inheritance");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"launched");
+}
+
 #[test]
 fn native_edges_and_native_addons_must_correspond_exactly() {
     let (_temp, _source, candidate) = setup();
