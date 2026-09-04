@@ -54,7 +54,7 @@ pub type Rank = u32;
 
 /// Vocabulary decoded by `build.rs` from `assets/claude.tiktoken` (layout documented there),
 /// embedded so counting needs no file or network.
-const VOCAB_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vocab.bin"));
+const VOCAB_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vocab.blob"));
 
 /// The unit tests derive [`CLAUDE_PAT_STR`] from this upstream pattern.
 #[cfg(test)]

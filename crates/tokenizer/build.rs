@@ -1,8 +1,8 @@
-//! Decodes `assets/claude.tiktoken` once at build time into `$OUT_DIR/vocab.bin` so the first
+//! Decodes `assets/claude.tiktoken` once at build time into `$OUT_DIR/vocab.blob` so the first
 //! call pays for hash inserts only, not 65k base64 decodes and allocations.
 //! `src/vocab_blob_tests.rs` re-derives the blob from the asset and asserts equality.
 //!
-//! `vocab.bin` layout, little-endian: `u32 count`, then `count` records of `u16 len, u32 rank`,
+//! `vocab.blob` layout, little-endian: `u32 count`, then `count` records of `u16 len, u32 rank`,
 //! then the concatenated token bytes in record order.
 
 use std::io::Write as _;
@@ -39,8 +39,8 @@ fn main() {
         blob.extend_from_slice(&rank.to_le_bytes());
     }
     blob.extend_from_slice(&bytes);
-    std::fs::File::create(out.join("vocab.bin"))
-        .expect("create vocab.bin")
+    std::fs::File::create(out.join("vocab.blob"))
+        .expect("create vocab.blob")
         .write_all(&blob)
-        .expect("write vocab.bin");
+        .expect("write vocab.blob");
 }
