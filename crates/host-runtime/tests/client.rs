@@ -81,6 +81,7 @@ async fn ring_stream_and_control_traffic_share_one_live_generation() {
             RequestOptions {
                 timeout: Duration::from_secs(2),
                 cancellation: None,
+                binary: false,
             },
         )
         .await
@@ -162,6 +163,7 @@ async fn caller_cancellation_is_correlation_scoped() {
         RequestOptions {
             timeout: Duration::from_secs(2),
             cancellation: Some(cancel),
+            binary: false,
         },
     );
     tokio::spawn(async move {
@@ -201,6 +203,7 @@ async fn request_deadline_is_one_absolute_owner_and_honors_overrides() {
             RequestOptions {
                 timeout: Duration::from_millis(20),
                 cancellation: None,
+                binary: false,
             },
         )
         .await
@@ -215,6 +218,7 @@ async fn request_deadline_is_one_absolute_owner_and_honors_overrides() {
             RequestOptions {
                 timeout: Duration::from_millis(200),
                 cancellation: None,
+                binary: false,
             },
         )
         .await

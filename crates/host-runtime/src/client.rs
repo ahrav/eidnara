@@ -253,6 +253,9 @@ pub struct RequestOptions {
     /// Total operation budget. Queueing, publication, and terminal wait share it.
     pub timeout: Duration,
     pub cancellation: Option<CancellationToken>,
+    /// Sets the frame's binary flag; the host exposes it as `RequestCtx::binary`.
+    /// Routed bodies are opaque to transport, so either encoding is legal (§7.1).
+    pub binary: bool,
 }
 
 impl Default for RequestOptions {
@@ -260,6 +263,7 @@ impl Default for RequestOptions {
         Self {
             timeout: CLIENT_REQUEST_TIMEOUT,
             cancellation: None,
+            binary: false,
         }
     }
 }
@@ -338,29 +342,35 @@ impl Client {
                 .map_err(|_| {
                     ClientError::new("authentication_failed", "daemon authentication failed")
                 })?;
+        let setup_failed = || ClientError::new("setup_failed", "shared-memory setup failed");
         let (descriptor, descriptors) = crate::setup_socket::activate_client(&mut stream, deadline)
             .await
-            .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
-        crate::setup_socket::commit_activation(&mut stream, deadline)
-            .await
-            .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
-        let setup_stream = stream
-            .into_std()
-            .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
-        setup_stream
-            .set_nonblocking(false)
-            .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
+            .map_err(|_| setup_failed())?;
         let cancel = CancellationToken::new();
         let read_budget = Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES));
-        let (ring_tx, ring_rx) = start_ring_bridge(
+        // §11.2: the client attaches both directions, then commits activation.
+        // The bridge thread owns the attached rings, so commit waits for its readiness report and only then hands it the setup socket.
+        let RingBridge {
+            write: ring_tx,
+            read: ring_rx,
+            setup: setup_tx,
+            thread: bridge,
+        } = start_ring_bridge(
             descriptor,
             descriptors,
-            setup_stream,
             cancel.clone(),
             Arc::clone(&read_budget),
             deadline,
         )
         .await?;
+        crate::setup_socket::commit_activation(&mut stream, deadline)
+            .await
+            .map_err(|_| setup_failed())?;
+        let setup_stream = stream.into_std().map_err(|_| setup_failed())?;
+        setup_stream
+            .set_nonblocking(false)
+            .map_err(|_| setup_failed())?;
+        setup_tx.send(setup_stream).map_err(|_| setup_failed())?;
         let (data_tx, data_rx) = mpsc::channel(CLIENT_DATA_QUEUE_FRAMES);
         let (control_tx, control_rx) = mpsc::channel(CLIENT_CONTROL_QUEUE_FRAMES);
         let inner = Arc::new(Inner {
@@ -383,6 +393,7 @@ impl Client {
             close_lock: tokio::sync::Mutex::new(()),
             reader: tokio::sync::Mutex::new(None),
             writer: tokio::sync::Mutex::new(None),
+            bridge: Mutex::new(Some(bridge)),
         });
         let writer_inner = Arc::clone(&inner);
         let writer = tokio::spawn(async move {
@@ -445,6 +456,7 @@ impl Client {
                         epoch: 0,
                     },
                     body.clone(),
+                    false,
                     deadline,
                     None,
                 )
@@ -514,7 +526,7 @@ impl Client {
         self.require_route(route)?;
         let deadline = request_deadline(options.timeout)?;
         self.inner
-            .unary(route, body, deadline, options.cancellation)
+            .unary(route, body, options.binary, deadline, options.cancellation)
             .await
     }
 
@@ -575,6 +587,7 @@ impl Client {
                     epoch: 0,
                 },
                 body,
+                false,
                 deadline,
                 None,
             )
@@ -627,6 +640,7 @@ impl Client {
                 },
                 serde_json::to_vec(&serde_json::json!({"op": OP_HOST_STATUS}))
                     .expect("static host.status request serializes"),
+                false,
                 deadline,
                 None,
             )
@@ -940,6 +954,8 @@ struct Inner {
     close_lock: tokio::sync::Mutex<()>,
     reader: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     writer: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    /// The ring bridge thread, joined by `join_tasks_until` after the writer and reader.
+    bridge: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Inner {
@@ -947,6 +963,7 @@ impl Inner {
         self: &Arc<Self>,
         route: RouteHandle,
         body: Vec<u8>,
+        binary: bool,
         deadline: Instant,
         cancellation: Option<CancellationToken>,
     ) -> Result<Response, CallError> {
@@ -965,7 +982,7 @@ impl Inner {
         }
         let (tx, rx) = oneshot::channel();
         let mut rx = rx;
-        let (key, publish) = self.admit(route, body, PendingKind::Unary(tx), deadline)?;
+        let (key, publish) = self.admit(route, body, binary, PendingKind::Unary(tx), deadline)?;
         let mut guard = UnaryAdmissionGuard::new(Arc::clone(self), key);
         let cancelled = cancellation.unwrap_or_default();
         // The stop branches borrow `rx` after `select!` because `dispatch` removes the pending entry before sending a terminal; a stop in that window must await the authoritative result.
@@ -1045,6 +1062,7 @@ impl Inner {
         let admitted = self.admit(
             route,
             body,
+            options.binary,
             PendingKind::Stream {
                 items: item_tx,
                 terminal: terminal_tx,
@@ -1093,6 +1111,7 @@ impl Inner {
         &self,
         route: RouteHandle,
         body: Vec<u8>,
+        binary: bool,
         kind: PendingKind,
         deadline: Instant,
     ) -> Result<(PendingKey, Arc<AtomicU8>), CallError> {
@@ -1162,14 +1181,20 @@ impl Inner {
         };
         let key = PendingKey::new(route, corr);
         let publish = Arc::new(AtomicU8::new(QUEUED));
-        let frame =
-            match encode_data_frame(route, corr, body, Arc::clone(&publish), &self.queue_budget) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    correlations.restore(corr);
-                    return Err(error);
-                }
-            };
+        let frame = match encode_data_frame(
+            route,
+            corr,
+            body,
+            binary,
+            Arc::clone(&publish),
+            &self.queue_budget,
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                correlations.restore(corr);
+                return Err(error);
+            }
+        };
         pending.insert(
             key,
             PendingState {
@@ -1617,6 +1642,24 @@ impl Inner {
                 let _ = task.await;
             }
         }
+        // The bridge exits on its own once cancelled: the writer's dropped
+        // `RingWriteSender` wakes its poll, the reader's dropped receiver fails
+        // its `blocking_send`, and a capacity wait re-checks cancellation every
+        // `BRIDGE_RESERVE_SLICE`. Joining it here keeps the setup socket and
+        // mappings from outliving a successful `close`.
+        let bridge = lock_unpoisoned(&self.bridge).take();
+        if let Some(bridge) = bridge
+            && tokio::time::timeout_at(
+                deadline,
+                tokio::task::spawn_blocking(move || {
+                    let _ = bridge.join();
+                }),
+            )
+            .await
+            .is_err()
+        {
+            within_deadline = false;
+        }
         within_deadline
     }
 }
@@ -1842,14 +1885,27 @@ fn drain_eventfd(fd: &OwnedFd) {
     let _ = rustix::io::read(fd, &mut value);
 }
 
+/// One attached ring bridge. The thread is parked until `setup` delivers the
+/// committed setup socket, so attachment completes before activation commits.
+struct RingBridge {
+    write: RingWriteSender,
+    read: RingFrameReceiver,
+    setup: oneshot::Sender<StdUnixStream>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+/// Upper bound on one uninterruptible capacity wait inside the bridge. A full
+/// outbound ring otherwise parks `reserve_until` until the frame deadline,
+/// which no cancellation can reach.
+const BRIDGE_RESERVE_SLICE: Duration = Duration::from_millis(50);
+
 async fn start_ring_bridge(
     descriptor: serde_json::Value,
     descriptors: [OwnedFd; crate::setup_socket::RING_DESCRIPTOR_COUNT],
-    mut setup: StdUnixStream,
     cancel: CancellationToken,
     read_budget: Arc<ByteCounter>,
     ready_deadline: Instant,
-) -> Result<(RingWriteSender, RingFrameReceiver), ClientError> {
+) -> Result<RingBridge, ClientError> {
     let (write_tx, write_rx) = std::sync::mpsc::sync_channel::<RingWrite>(CLIENT_DATA_QUEUE_FRAMES);
     let wake_fd = Arc::new(
         rustix::event::eventfd(
@@ -1862,7 +1918,8 @@ async fn start_ring_bridge(
     read_budget.set_wake(&wake_fd);
     let (read_tx, read_rx) = mpsc::channel(CLIENT_DATA_QUEUE_FRAMES);
     let (ready_tx, ready_rx) = oneshot::channel::<Result<(), ()>>();
-    std::thread::Builder::new()
+    let (setup_tx, setup_rx) = oneshot::channel::<StdUnixStream>();
+    let thread = std::thread::Builder::new()
         .name("host-ring-client".to_owned())
         .spawn(move || {
             let endpoint = crate::ring_transport::RingClientEndpoint::attach_with_descriptors(
@@ -1880,6 +1937,10 @@ async fn start_ring_bridge(
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
+            // A dropped sender means activation never committed; the rings are released with the thread.
+            let Ok(mut setup) = setup_rx.blocking_recv() else {
+                return;
+            };
             // A half-close or a post-setup write makes the setup socket readable
             // with no `HUP`; `setup_peer_closed` treats both as teardown, so the
             // idle poll watches `IN` alongside `HUP | ERR`.
@@ -1890,7 +1951,21 @@ async fn start_ring_bridge(
                 let mut wrote = false;
                 match write_rx.try_recv() {
                     Ok(write) => {
-                        let result = endpoint.send(write.header, &write.body, write.deadline);
+                        // `reserve_until` parks on the peer's capacity doorbell, which
+                        // cancellation cannot ring, so the wait is taken in slices.
+                        let result = loop {
+                            let slice = StdInstant::now() + BRIDGE_RESERVE_SLICE;
+                            match endpoint.send(
+                                write.header,
+                                &write.body,
+                                write.deadline.min(slice),
+                            ) {
+                                Err(SendFailure::Unreserved)
+                                    if StdInstant::now() < write.deadline
+                                        && !cancel.is_cancelled() => {}
+                                result => break result,
+                            }
+                        };
                         let failed = result.is_err();
                         let _ = write.completed.send(result);
                         if failed {
@@ -2009,13 +2084,15 @@ async fn start_ring_bridge(
         .map_err(|_| ClientError::new("handshake_timeout", "client handshake timed out"))?
         .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?
         .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
-    Ok((
-        RingWriteSender {
+    Ok(RingBridge {
+        write: RingWriteSender {
             tx: write_tx,
             wake: wake_fd,
         },
-        read_rx,
-    ))
+        read: read_rx,
+        setup: setup_tx,
+        thread,
+    })
 }
 
 async fn writer_loop(
@@ -2188,12 +2265,13 @@ fn encode_data_frame(
     route: RouteHandle,
     corr: u64,
     body: Vec<u8>,
+    binary: bool,
     publish: Arc<AtomicU8>,
     budget: &Arc<ByteCounter>,
 ) -> Result<QueuedFrame, CallError> {
     let header = frame_header(
         FrameType::Request,
-        Flags::new(false, Priority::Interactive, false),
+        Flags::new(binary, Priority::Interactive, false),
         FrameId::routed(route, corr),
         body.len(),
     )
@@ -2415,6 +2493,7 @@ mod tests {
                 close_lock: tokio::sync::Mutex::new(()),
                 reader: tokio::sync::Mutex::new(None),
                 writer: tokio::sync::Mutex::new(None),
+                bridge: Mutex::new(None),
             }),
             data_rx,
             control_rx,
@@ -2459,7 +2538,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let (first_kind, _first_rx) = unary_sender();
         let (key, _) = inner
-            .admit(route(1), Vec::new(), first_kind, deadline)
+            .admit(route(1), Vec::new(), false, first_kind, deadline)
             .expect("u64::MAX is admitted once");
         assert_eq!(key.corr, u64::MAX);
         let charged = inner.queue_budget.used();
@@ -2467,7 +2546,7 @@ mod tests {
 
         let (second_kind, _second_rx) = unary_sender();
         let error = inner
-            .admit(route(1), Vec::new(), second_kind, deadline)
+            .admit(route(1), Vec::new(), false, second_kind, deadline)
             .expect_err("correlation space is exhausted");
         assert_eq!(error.outcome(), SendOutcome::NotSent);
         assert_eq!(error.code(), "correlations_exhausted");
@@ -2515,6 +2594,7 @@ mod tests {
                 inner.admit(
                     route(1),
                     b"must-not-write".to_vec(),
+                    false,
                     kind,
                     Instant::now() + Duration::from_secs(1),
                 )
@@ -2558,6 +2638,7 @@ mod tests {
                 inner.admit(
                     route(1),
                     b"must-not-write".to_vec(),
+                    false,
                     kind,
                     Instant::now() + Duration::from_secs(1),
                 )
@@ -2583,7 +2664,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let (kind, rx) = unary_sender();
         let (_key, publish) = inner
-            .admit(route(1), b"admitted".to_vec(), kind, deadline)
+            .admit(route(1), b"admitted".to_vec(), false, kind, deadline)
             .expect("admission wins");
         let client = Client {
             inner: Arc::clone(&inner),
@@ -2605,7 +2686,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let (kind, rx) = unary_sender();
         let (key, publish) = inner
-            .admit(route(1), b"must-not-send".to_vec(), kind, deadline)
+            .admit(route(1), b"must-not-send".to_vec(), false, kind, deadline)
             .expect("admitted");
         inner.cancel_key(key, "cancelled").expect("cancel queued");
         let error = rx.await.expect("settled").expect_err("cancelled");
@@ -2637,6 +2718,7 @@ mod tests {
             .admit(
                 route(1),
                 b"possibly-sent".to_vec(),
+                false,
                 kind,
                 Instant::now() + Duration::from_secs(1),
             )
@@ -2672,6 +2754,7 @@ mod tests {
             .admit(
                 route(1),
                 b"never-reserved".to_vec(),
+                false,
                 kind,
                 Instant::now() + Duration::from_secs(5),
             )
@@ -2715,6 +2798,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_binary_request_sets_the_frame_binary_flag() {
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (kind, _rx) = unary_sender();
+        inner
+            .admit(route(1), vec![0xff, 0x00], true, kind, deadline)
+            .expect("binary request admitted");
+        let frame = data_rx.recv().await.expect("queued frame");
+        assert!(frame.header.flags.is_binary());
+
+        let (kind, _rx) = unary_sender();
+        inner
+            .admit(route(1), b"{}".to_vec(), false, kind, deadline)
+            .expect("json request admitted");
+        let frame = data_rx.recv().await.expect("queued frame");
+        assert!(!frame.header.flags.is_binary());
+        inner.retire("test_done");
+    }
+
+    #[tokio::test]
     async fn failed_cancel_enqueue_keeps_outcome_unknown() {
         let (inner, mut data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
         let (kind, rx) = unary_sender();
@@ -2722,6 +2825,7 @@ mod tests {
             .admit(
                 route(1),
                 b"possibly-sent".to_vec(),
+                false,
                 kind,
                 Instant::now() + Duration::from_secs(1),
             )
@@ -2757,6 +2861,7 @@ mod tests {
                 .admit(
                     route(1),
                     Vec::new(),
+                    false,
                     PendingKind::Stream {
                         items: items_tx,
                         terminal: terminal_tx,
@@ -2812,6 +2917,7 @@ mod tests {
                 .admit(
                     route,
                     Vec::new(),
+                    false,
                     kind,
                     Instant::now() + Duration::from_secs(60),
                 )
@@ -2993,6 +3099,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 PendingKind::Stream {
                     items: items_tx,
                     terminal: terminal_tx,
@@ -3049,6 +3156,7 @@ mod tests {
                 RequestOptions {
                     timeout: Duration::from_secs(30),
                     cancellation: Some(cancelled),
+                    binary: false,
                 },
             )
             .expect_err("an already-cancelled token admits nothing");
@@ -3076,6 +3184,7 @@ mod tests {
             .unary(
                 route(1),
                 b"must-not-send".to_vec(),
+                false,
                 Instant::now() + Duration::from_secs(30),
                 Some(cancelled),
             )
@@ -3102,6 +3211,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 kind,
                 Instant::now() + Duration::from_secs(60),
             )
@@ -3143,6 +3253,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 kind,
                 Instant::now() + Duration::from_secs(60),
             )
@@ -3189,6 +3300,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 kind,
                 Instant::now() + Duration::from_secs(60),
             )
@@ -3316,6 +3428,7 @@ mod tests {
                 .unary(
                     route(1),
                     b"stalled-peer".to_vec(),
+                    false,
                     Instant::now() + Duration::from_secs(60),
                     None,
                 )
@@ -3380,14 +3493,14 @@ mod tests {
         for _ in 0..CLIENT_DATA_QUEUE_FRAMES {
             let (kind, rx) = unary_sender();
             inner
-                .admit(route(1), Vec::new(), kind, deadline)
+                .admit(route(1), Vec::new(), false, kind, deadline)
                 .expect("data slot");
             receivers.push(rx);
         }
         let next_before = lock_unpoisoned(&inner.correlations).next;
         let (kind, _rx) = unary_sender();
         let error = inner
-            .admit(route(1), Vec::new(), kind, deadline)
+            .admit(route(1), Vec::new(), false, kind, deadline)
             .expect_err("257th data frame is rejected");
         assert_eq!(error.outcome(), SendOutcome::NotSent);
         assert_eq!(error.code(), "writer_queue_full");
@@ -3452,6 +3565,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 kind,
                 Instant::now() + Duration::from_secs(1),
             )
@@ -3491,6 +3605,7 @@ mod tests {
             .admit(
                 route(2),
                 Vec::new(),
+                false,
                 kind,
                 Instant::now() + Duration::from_secs(1),
             )
@@ -3526,6 +3641,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 PendingKind::Stream {
                     items: items_tx,
                     terminal: terminal_tx,
@@ -3540,6 +3656,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 unary_kind,
                 Instant::now() + Duration::from_secs(1),
             )
@@ -3600,6 +3717,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 kind,
                 Instant::now() + Duration::from_secs(60),
             )
@@ -3643,6 +3761,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 PendingKind::Stream {
                     items: items_tx,
                     terminal: terminal_tx,
@@ -3725,6 +3844,7 @@ mod tests {
             .admit(
                 control,
                 Vec::new(),
+                false,
                 PendingKind::Unary(tx),
                 Instant::now() + Duration::from_secs(60),
             )
@@ -3800,6 +3920,7 @@ mod tests {
             .admit(
                 control,
                 Vec::new(),
+                false,
                 PendingKind::Unary(tx),
                 Instant::now() + Duration::from_secs(60),
             )
@@ -3900,6 +4021,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 PendingKind::Stream {
                     items: items_tx,
                     terminal: terminal_tx,
@@ -3979,6 +4101,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 PendingKind::Stream {
                     items: items_tx,
                     terminal: terminal_tx,
@@ -4037,6 +4160,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 PendingKind::Stream {
                     items: items_tx,
                     terminal: terminal_tx,
@@ -4092,6 +4216,7 @@ mod tests {
             .admit(
                 route(1),
                 Vec::new(),
+                false,
                 PendingKind::Stream {
                     items: items_tx,
                     terminal: terminal_tx,
@@ -4254,16 +4379,23 @@ mod tests {
         let (descriptor, descriptors) =
             crate::ring_transport::worker_descriptor(&rings).expect("descriptor");
         let (client_end, _host_end) = StdUnixStream::pair().expect("socket pair");
-        let (write, mut read_rx) = start_ring_bridge(
+        let RingBridge {
+            write,
+            read: mut read_rx,
+            setup,
+            thread: _,
+        } = start_ring_bridge(
             descriptor,
             descriptors,
-            client_end,
             CancellationToken::new(),
             Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
             Instant::now() + CLIENT_HANDSHAKE_TIMEOUT,
         )
         .await
         .expect("bridge");
+        setup
+            .send(client_end)
+            .expect("bridge awaits the setup socket");
 
         let outbound = EnvelopeHeader {
             len: 0,
@@ -4331,16 +4463,23 @@ mod tests {
         let (descriptor, descriptors) =
             crate::ring_transport::worker_descriptor(&rings).expect("descriptor");
         let (client_end, host_end) = StdUnixStream::pair().expect("socket pair");
-        let (_write_tx, mut read_rx) = start_ring_bridge(
+        let RingBridge {
+            write: _write_tx,
+            read: mut read_rx,
+            setup,
+            thread: _,
+        } = start_ring_bridge(
             descriptor,
             descriptors,
-            client_end,
             CancellationToken::new(),
             Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
             Instant::now() + CLIENT_HANDSHAKE_TIMEOUT,
         )
         .await
         .expect("bridge");
+        setup
+            .send(client_end)
+            .expect("bridge awaits the setup socket");
         drop(host_end);
         // A hang here means the bridge never observed the dead setup socket.
         assert!(read_rx.recv().await.is_none());

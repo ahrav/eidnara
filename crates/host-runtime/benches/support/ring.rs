@@ -73,6 +73,7 @@ async fn request(
             host_runtime::RequestOptions {
                 timeout: DRAIN_BUDGET,
                 cancellation: None,
+                binary: false,
             },
         )
         .await
