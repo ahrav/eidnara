@@ -7,7 +7,12 @@
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["bun-types"]
+    "types": [
+      "bun"
+    ]
   },
-  "include": ["scripts/**/*.ts"]
+  "include": [
+    "scripts/**/*.ts",
+    "crates/tokenizer/gen/*.ts"
+  ]
 }
