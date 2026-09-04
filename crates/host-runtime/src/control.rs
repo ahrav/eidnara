@@ -508,11 +508,7 @@ pub fn host_status_response_json(
     report: &crate::handler::HealthReport,
     shared_memory: serde_json::Value,
 ) -> Vec<u8> {
-    let health = match report.status {
-        crate::handler::HealthStatus::Ok => "ok",
-        crate::handler::HealthStatus::Degraded => "degraded",
-        crate::handler::HealthStatus::Failing => "failing",
-    };
+    let health = report.status.as_str();
     let mut components = serde_json::Map::new();
     let raw_components = report
         .metrics
@@ -538,7 +534,7 @@ pub fn host_status_response_json(
         let Some(status) = component.get("status").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        if !matches!(status, "ok" | "degraded" | "failing") {
+        if crate::handler::HealthStatus::parse(status).is_none() {
             continue;
         }
         let Some(state) = component

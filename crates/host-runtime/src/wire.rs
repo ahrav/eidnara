@@ -511,6 +511,27 @@ pub struct EncodeError {
     pub body_len: usize,
 }
 
+pub fn frame_header(
+    ty: FrameType,
+    flags: Flags,
+    id: FrameId,
+    body_len: usize,
+) -> Result<EnvelopeHeader, EncodeError> {
+    if body_len > MAX_BODY_LEN as usize {
+        return Err(EncodeError { body_len });
+    }
+    let len = u32::try_from(body_len).map_err(|_| EncodeError { body_len })?;
+    Ok(EnvelopeHeader {
+        len,
+        ver: PROTOCOL_VERSION,
+        ty,
+        flags,
+        channel: id.channel,
+        epoch: id.epoch,
+        corr: id.corr,
+    })
+}
+
 /// The writer emits the frame in one logical write.
 #[cfg(test)]
 pub fn encode_frame(
@@ -519,23 +540,7 @@ pub fn encode_frame(
     id: FrameId,
     body: &[u8],
 ) -> Result<Vec<u8>, EncodeError> {
-    if body.len() > MAX_BODY_LEN as usize {
-        return Err(EncodeError {
-            body_len: body.len(),
-        });
-    }
-    let len = u32::try_from(body.len()).map_err(|_| EncodeError {
-        body_len: body.len(),
-    })?;
-    let header = EnvelopeHeader {
-        len,
-        ver: PROTOCOL_VERSION,
-        ty,
-        flags,
-        channel: id.channel,
-        epoch: id.epoch,
-        corr: id.corr,
-    };
+    let header = frame_header(ty, flags, id, body.len())?;
     let mut buf = Vec::with_capacity(HEADER_LEN + body.len());
     buf.extend_from_slice(&header.encode());
     buf.extend_from_slice(body);
@@ -548,23 +553,8 @@ pub fn encode_owned_frame(
     id: FrameId,
     mut body: Vec<u8>,
 ) -> Result<Vec<u8>, EncodeError> {
-    if body.len() > MAX_BODY_LEN as usize {
-        return Err(EncodeError {
-            body_len: body.len(),
-        });
-    }
     let body_len = body.len();
-    let len = u32::try_from(body_len).map_err(|_| EncodeError { body_len })?;
-    let header = EnvelopeHeader {
-        len,
-        ver: PROTOCOL_VERSION,
-        ty,
-        flags,
-        channel: id.channel,
-        epoch: id.epoch,
-        corr: id.corr,
-    }
-    .encode();
+    let header = frame_header(ty, flags, id, body_len)?.encode();
     // Exact-size growth avoids `reserve` doubling a full-capacity body.
     body.reserve_exact(HEADER_LEN);
     body.resize(body_len + HEADER_LEN, 0);
@@ -586,21 +576,7 @@ pub fn encode_split_frame(
     if body.len() < SPLIT_WRITE_MIN_BODY {
         return Ok((encode_owned_frame(ty, flags, id, body)?, Vec::new()));
     }
-    let body_len = body.len();
-    if body_len > MAX_BODY_LEN as usize {
-        return Err(EncodeError { body_len });
-    }
-    let len = u32::try_from(body_len).map_err(|_| EncodeError { body_len })?;
-    let header = EnvelopeHeader {
-        len,
-        ver: PROTOCOL_VERSION,
-        ty,
-        flags,
-        channel: id.channel,
-        epoch: id.epoch,
-        corr: id.corr,
-    }
-    .encode();
+    let header = frame_header(ty, flags, id, body.len())?.encode();
     Ok((header.to_vec(), body))
 }
 

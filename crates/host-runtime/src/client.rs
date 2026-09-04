@@ -31,11 +31,11 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use crate::{
     auth::authenticate_client,
     connection_file::{ConnectionInfo, DAEMON_ID_LEN, read_for_client},
-    handler::{RouteHandle, RouteIdentity, RouteTarget, TargetKind},
+    control::{OP_HOST_SHUTDOWN, OP_HOST_STATUS, OP_ROUTE_OPEN},
+    handler::{HealthStatus, RouteHandle, RouteIdentity, RouteTarget, TargetKind},
     wire::{
         AdmissionClass, EnvelopeHeader, Flags, FrameId, FrameType, HEADER_LEN, MAX_BODY_LEN,
-        MAX_CONTROL_BODY_LEN, PROTOCOL_VERSION, Priority, decode_header, encode_owned_frame,
-        pure_header_flags,
+        MAX_CONTROL_BODY_LEN, PROTOCOL_VERSION, Priority, frame_header, pure_header_flags,
     },
 };
 
@@ -233,7 +233,7 @@ pub struct Response {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostStatusSnapshot {
-    pub health: String,
+    pub health: HealthStatus,
     pub metrics: serde_json::Value,
     pub shared_memory: serde_json::Value,
 }
@@ -465,11 +465,13 @@ impl Client {
                     // Returning that handle would produce `Ok` even though its first use fails with `client_closed`.
                     // `close` takes precedence over a concurrent successful route open.
                     // `close` sends connection `Goodbye`, so this race needs no route `Goodbye`.
+                    // A successful `parse_route_open` proves the request bytes reached the host.
+                    // Returning `NotSent` would falsely mark the route open replay-safe.
                     {
                         let mut routes = lock_unpoisoned(&self.inner.routes);
                         if self.inner.closed.load(Ordering::Acquire) {
                             return Err(CallError::local(
-                                SendOutcome::NotSent,
+                                SendOutcome::OutcomeUnknown,
                                 "client_closed",
                                 "client is closed",
                             ));
@@ -550,7 +552,8 @@ impl Client {
                 "client is closed",
             ));
         }
-        let body = br#"{"op":"host.shutdown"}"#.to_vec();
+        let body = serde_json::to_vec(&serde_json::json!({"op": OP_HOST_SHUTDOWN}))
+            .expect("static host.shutdown request serializes");
         let deadline = Instant::now() + CLIENT_SHUTDOWN_TIMEOUT;
         let response = self
             .inner
@@ -570,7 +573,7 @@ impl Client {
                 value
                     .get("op")
                     .and_then(serde_json::Value::as_str)
-                    .map(|op| op == "host.shutdown")
+                    .map(|op| op == OP_HOST_SHUTDOWN)
             })
             .unwrap_or(false);
         if !acknowledged {
@@ -585,8 +588,9 @@ impl Client {
 
     /// Reads the host-owned readiness snapshot without opening a route or sending an application body.
     pub async fn host_status(&self) -> Result<HostStatusSnapshot, CallError> {
+        // Unknown members are tolerated so a host that adds a field does not turn
+        // every status read into a terminal error on older clients.
         #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct WireStatus {
             op: String,
             health: String,
@@ -609,7 +613,8 @@ impl Client {
                     channel: 0,
                     epoch: 0,
                 },
-                br#"{"op":"host.status"}"#.to_vec(),
+                serde_json::to_vec(&serde_json::json!({"op": OP_HOST_STATUS}))
+                    .expect("static host.status request serializes"),
                 deadline,
                 None,
             )
@@ -621,17 +626,19 @@ impl Client {
                 "host.status response is malformed",
             )
         })?;
-        if decoded.op != "host.status"
-            || !matches!(decoded.health.as_str(), "ok" | "degraded" | "failing")
-        {
-            return Err(CallError::local(
+        let invalid_identity = || {
+            CallError::local(
                 SendOutcome::Terminal,
                 "invalid_host_status_response",
                 "host.status response has an invalid identity",
-            ));
+            )
+        };
+        if decoded.op != OP_HOST_STATUS {
+            return Err(invalid_identity());
         }
+        let health = HealthStatus::parse(&decoded.health).ok_or_else(invalid_identity)?;
         Ok(HostStatusSnapshot {
-            health: decoded.health,
+            health,
             metrics: decoded.metrics,
             shared_memory: decoded.shared_memory,
         })
@@ -1132,20 +1139,14 @@ impl Inner {
         })?;
         let key = PendingKey::new(route, corr);
         let publish = Arc::new(AtomicU8::new(QUEUED));
-        let frame = match encode_data_frame(
-            route,
-            corr,
-            body,
-            Arc::clone(&publish),
-            &self.queue_budget,
-            deadline,
-        ) {
-            Ok(frame) => frame,
-            Err(error) => {
-                correlations.restore(corr);
-                return Err(error);
-            }
-        };
+        let frame =
+            match encode_data_frame(route, corr, body, Arc::clone(&publish), &self.queue_budget) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    correlations.restore(corr);
+                    return Err(error);
+                }
+            };
         pending.insert(
             key,
             PendingState {
@@ -1256,7 +1257,7 @@ impl Inner {
         if self.retired.load(Ordering::Acquire) {
             return Err(retired_error(SendOutcome::NotSent));
         }
-        let bytes = encode_owned_frame(ty, flags, id, Vec::new()).map_err(|_| {
+        let header = frame_header(ty, flags, id, 0).map_err(|_| {
             CallError::local(
                 SendOutcome::NotSent,
                 "encode_failed",
@@ -1265,7 +1266,7 @@ impl Inner {
         })?;
         // `send_control` uses the reserved pool so ordinary requests cannot prevent control-frame admission.
         // self-inflicted teardown.
-        let charge = self.control_budget.charge(bytes.len()).ok_or_else(|| {
+        let charge = self.control_budget.charge(HEADER_LEN).ok_or_else(|| {
             self.retire("control_capacity_exhausted");
             CallError::local(
                 SendOutcome::Terminal,
@@ -1274,7 +1275,8 @@ impl Inner {
             )
         })?;
         let frame = QueuedFrame {
-            bytes,
+            header,
+            body: Vec::new(),
             charge,
             publish: None,
             ack,
@@ -1652,6 +1654,10 @@ struct ByteCounter {
     cap: usize,
     used: Mutex<usize>,
     wake: Mutex<Option<Weak<OwnedFd>>>,
+    /// Set while the bridge thread is parked waiting for this budget.
+    /// A release signals the wake fd only then, avoiding a syscall when no
+    /// thread waits.
+    parked: AtomicBool,
 }
 
 impl ByteCounter {
@@ -1660,6 +1666,7 @@ impl ByteCounter {
             cap,
             used: Mutex::new(0),
             wake: Mutex::new(None),
+            parked: AtomicBool::new(false),
         }
     }
 
@@ -1715,9 +1722,12 @@ impl Drop for ByteCharge {
                 let mut used = lock_unpoisoned(&owner.used);
                 *used = used.saturating_sub(self.bytes);
             }
-            if let Some(wake) = lock_unpoisoned(&owner.wake)
-                .as_ref()
-                .and_then(Weak::upgrade)
+            // Read `parked` only after releasing `used`; the waiter sets it before its
+            // final `charge` under the same lock, which rules out a lost wake. commentlint: allow(JUDGE)
+            if owner.parked.load(Ordering::SeqCst)
+                && let Some(wake) = lock_unpoisoned(&owner.wake)
+                    .as_ref()
+                    .and_then(Weak::upgrade)
             {
                 signal_eventfd(&wake);
             }
@@ -1742,15 +1752,22 @@ impl ChargedItem {
 }
 
 struct QueuedFrame {
-    bytes: Vec<u8>,
+    header: EnvelopeHeader,
+    body: Vec<u8>,
     charge: ByteCharge,
     publish: Option<Arc<AtomicU8>>,
     ack: Option<oneshot::Sender<()>>,
+    /// The ring write uses a connection-scoped deadline, not the caller's
+    /// request deadline. Expiry here retires the whole generation, so a
+    /// request-scoped value would let one short request fail every other
+    /// in-flight request; the request's own deadline watcher settles that
+    /// single caller.
     deadline: Instant,
 }
 
 struct RingWrite {
-    bytes: Vec<u8>,
+    header: EnvelopeHeader,
+    body: Vec<u8>,
     completed: oneshot::Sender<Result<(), ()>>,
     deadline: StdInstant,
 }
@@ -1839,17 +1856,19 @@ fn start_ring_bridge(
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
+            // A half-close or a post-setup write makes the setup socket readable
+            // with no `HUP`; `setup_peer_closed` treats both as teardown, so the
+            // idle poll watches `IN` alongside `HUP | ERR`.
+            let setup_events = rustix::event::PollFlags::IN
+                | rustix::event::PollFlags::HUP
+                | rustix::event::PollFlags::ERR;
             while !cancel.is_cancelled() {
-                if setup_peer_closed(&setup) {
-                    break;
-                }
                 let mut wrote = false;
                 match write_rx.try_recv() {
                     Ok(write) => {
-                        let deadline = write.deadline;
-                        let result = decode_outbound(&write.bytes).and_then(|(header, body)| {
-                            endpoint.send(header, body, deadline).map_err(|_| ())
-                        });
+                        let result = endpoint
+                            .send(write.header, &write.body, write.deadline)
+                            .map_err(|_| ());
                         let failed = result.is_err();
                         let _ = write.completed.send(result);
                         if failed {
@@ -1866,39 +1885,45 @@ fn start_ring_bridge(
                 // each queued charge as it drains; cancellation ends the wait.
                 // Frames wider than `read_budget.capacity()` cannot be admitted
                 // by any drain, so they refuse without waiting.
-                let charge = |bytes: usize| loop {
+                let charge = |bytes: usize| {
                     if bytes > read_budget.capacity() {
                         return None;
                     }
                     if let Some(charge) = read_budget.charge(bytes) {
                         return Some(charge);
                     }
-                    if cancel.is_cancelled() {
-                        return None;
-                    }
-                    let mut fds = [
-                        rustix::event::PollFd::new(&*worker_wake, rustix::event::PollFlags::IN),
-                        rustix::event::PollFd::new(
-                            &setup,
-                            rustix::event::PollFlags::HUP | rustix::event::PollFlags::ERR,
-                        ),
-                    ];
-                    loop {
-                        match rustix::event::poll(&mut fds, None) {
-                            Ok(_) => break,
-                            Err(rustix::io::Errno::INTR) if !cancel.is_cancelled() => continue,
-                            Err(_) => return None,
+                    // `parked` must be visible before the next `charge` attempt so a
+                    // release between that attempt and `poll` still signals the fd.
+                    read_budget.parked.store(true, Ordering::SeqCst);
+                    let admitted = loop {
+                        if let Some(charge) = read_budget.charge(bytes) {
+                            break Some(charge);
                         }
-                    }
-                    if fds[1]
-                        .revents()
-                        .intersects(rustix::event::PollFlags::HUP | rustix::event::PollFlags::ERR)
-                    {
-                        return None;
-                    }
-                    if fds[0].revents().contains(rustix::event::PollFlags::IN) {
-                        drain_eventfd(&worker_wake);
-                    }
+                        if cancel.is_cancelled() {
+                            break None;
+                        }
+                        let mut fds = [
+                            rustix::event::PollFd::new(&*worker_wake, rustix::event::PollFlags::IN),
+                            rustix::event::PollFd::new(&setup, setup_events),
+                        ];
+                        let polled = loop {
+                            match rustix::event::poll(&mut fds, None) {
+                                Ok(_) => break true,
+                                Err(rustix::io::Errno::INTR) if !cancel.is_cancelled() => {
+                                    continue;
+                                }
+                                Err(_) => break false,
+                            }
+                        };
+                        if !polled || fds[1].revents().intersects(setup_events) {
+                            break None;
+                        }
+                        if fds[0].revents().contains(rustix::event::PollFlags::IN) {
+                            drain_eventfd(&worker_wake);
+                        }
+                    };
+                    read_budget.parked.store(false, Ordering::SeqCst);
+                    admitted
                 };
                 match endpoint.try_recv_with(charge) {
                     Ok(Some(frame)) => {
@@ -1913,6 +1938,9 @@ fn start_ring_bridge(
                 if wrote {
                     continue;
                 }
+                if setup_peer_closed(&setup) {
+                    break;
+                }
                 match endpoint.from_host.arm_data_wait() {
                     Ok(false) => continue,
                     Ok(true) => {}
@@ -1921,10 +1949,7 @@ fn start_ring_bridge(
                 let mut fds = [
                     rustix::event::PollFd::new(&*worker_wake, rustix::event::PollFlags::IN),
                     rustix::event::PollFd::new(&data_ready, rustix::event::PollFlags::IN),
-                    rustix::event::PollFd::new(
-                        &setup,
-                        rustix::event::PollFlags::HUP | rustix::event::PollFlags::ERR,
-                    ),
+                    rustix::event::PollFd::new(&setup, setup_events),
                 ];
                 let poll_ready = loop {
                     match rustix::event::poll(&mut fds, None) {
@@ -1944,10 +1969,7 @@ fn start_ring_bridge(
                 {
                     break;
                 }
-                if fds[2]
-                    .revents()
-                    .intersects(rustix::event::PollFlags::HUP | rustix::event::PollFlags::ERR)
-                {
+                if fds[2].revents().intersects(setup_events) {
                     break;
                 }
             }
@@ -1968,19 +1990,6 @@ fn start_ring_bridge(
         },
         read_rx,
     ))
-}
-
-fn decode_outbound(bytes: &[u8]) -> Result<(EnvelopeHeader, &[u8]), ()> {
-    if bytes.len() < HEADER_LEN {
-        return Err(());
-    }
-    let header_bytes: &[u8; HEADER_LEN] = bytes[..HEADER_LEN].try_into().map_err(|_| ())?;
-    let header = decode_header(header_bytes).map_err(|_| ())?;
-    let body = &bytes[HEADER_LEN..];
-    if body.len() != header.len as usize {
-        return Err(());
-    }
-    Ok((header, body))
 }
 
 async fn writer_loop(
@@ -2016,7 +2025,8 @@ async fn writer_loop(
         let (completed_tx, completed_rx) = oneshot::channel();
         if write
             .try_send(RingWrite {
-                bytes: frame.bytes,
+                header: frame.header,
+                body: frame.body,
                 completed: completed_tx,
                 deadline: frame.deadline.into_std(),
             })
@@ -2141,13 +2151,12 @@ fn encode_data_frame(
     body: Vec<u8>,
     publish: Arc<AtomicU8>,
     budget: &Arc<ByteCounter>,
-    deadline: Instant,
 ) -> Result<QueuedFrame, CallError> {
-    let bytes = encode_owned_frame(
+    let header = frame_header(
         FrameType::Request,
         Flags::new(false, Priority::Interactive, false),
         FrameId::routed(route, corr),
-        body,
+        body.len(),
     )
     .map_err(|_| {
         CallError::local(
@@ -2156,7 +2165,7 @@ fn encode_data_frame(
             "request body exceeds wire limit",
         )
     })?;
-    let charge = budget.charge(bytes.len()).ok_or_else(|| {
+    let charge = budget.charge(HEADER_LEN + body.len()).ok_or_else(|| {
         CallError::local(
             SendOutcome::NotSent,
             "queued_byte_capacity",
@@ -2164,11 +2173,12 @@ fn encode_data_frame(
         )
     })?;
     Ok(QueuedFrame {
-        bytes,
+        header,
+        body,
         charge,
         publish: Some(publish),
         ack: None,
-        deadline,
+        deadline: Instant::now() + CLIENT_FRAME_TIMEOUT,
     })
 }
 
@@ -2185,7 +2195,7 @@ fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec
         TargetKind::ManagementSurface => "management_surface",
     };
     let mut request = serde_json::json!({
-        "op": "route.open",
+        "op": OP_ROUTE_OPEN,
         "target": {"kind": kind, "module_id": target.module_id},
         "identity": {
             "project_root": project_root,
@@ -2225,7 +2235,7 @@ fn parse_route_open(body: &[u8]) -> Result<RouteHandle, CallError> {
             "host returned an invalid route-open response",
         )
     })?;
-    if value.get("op").and_then(Value::as_str) != Some("route.open") {
+    if value.get("op").and_then(Value::as_str) != Some(OP_ROUTE_OPEN) {
         return Err(CallError::local(
             SendOutcome::Terminal,
             "invalid_route_response",
@@ -2582,7 +2592,7 @@ mod tests {
         let error = rx.await.expect("settled").expect_err("cancelled");
         assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
         let cancel = control_rx.recv().await.expect("Cancel queued");
-        assert_eq!(cancel.bytes[5], FrameType::Cancel as u8);
+        assert_eq!(cancel.header.ty, FrameType::Cancel);
         assert_eq!(publish.load(Ordering::Acquire), WRITING);
         drop(data_rx.recv().await);
         drop(cancel);
@@ -2828,9 +2838,9 @@ mod tests {
             inner.dispatch(ping, Vec::new(), ByteCharge::none());
 
             let pong = control_rx.recv().await.expect("Pong queued");
-            assert_eq!(pong.bytes[5], FrameType::Pong as u8);
+            assert_eq!(pong.header.ty, FrameType::Pong);
             assert_eq!(
-                pong.bytes[6], flags.0,
+                pong.header.flags, flags,
                 "the Pong must echo the Ping's flag byte, not the client's default"
             );
             assert!(!inner.retired.load(Ordering::Acquire));
@@ -3152,7 +3162,7 @@ mod tests {
 
         assert!(lock_unpoisoned(&inner.pending).is_empty());
         let cancel = control_rx.recv().await.expect("possibly-sent Cancel");
-        assert_eq!(cancel.bytes[5], FrameType::Cancel as u8);
+        assert_eq!(cancel.header.ty, FrameType::Cancel);
         drop(frame);
         drop(cancel);
         assert_eq!(inner.queue_budget.used(), 0);
@@ -3222,7 +3232,7 @@ mod tests {
             )
             .expect("reserved control remains available");
         let pong = control_rx.recv().await.expect("queued Pong");
-        assert_eq!(pong.bytes[5], FrameType::Pong as u8);
+        assert_eq!(pong.header.ty, FrameType::Pong);
         drop(pong);
         assert_eq!(data_rx.len(), CLIENT_DATA_QUEUE_FRAMES);
 
@@ -3296,7 +3306,7 @@ mod tests {
         );
         assert_eq!(inner.control_budget.used(), HEADER_LEN);
         let queued = control_rx.try_recv().expect("Pong queued");
-        assert_eq!(queued.bytes[5], FrameType::Pong as u8);
+        assert_eq!(queued.header.ty, FrameType::Pong);
 
         drop(data_rx);
         drop(control_rx);
@@ -3390,7 +3400,7 @@ mod tests {
         // Saturation occurs after publication without a terminal frame; because Cancel is best-effort, report `OutcomeUnknown` rather than `Terminal`.
         assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
         let cancel = control_rx.recv().await.expect("stream Cancel");
-        assert_eq!(cancel.bytes[5], FrameType::Cancel as u8);
+        assert_eq!(cancel.header.ty, FrameType::Cancel);
 
         inner.dispatch(
             EnvelopeHeader {
@@ -3447,7 +3457,7 @@ mod tests {
         assert_eq!(error.code(), "unexpected_stream");
         assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
         let cancel = control_rx.recv().await.expect("scoped Cancel");
-        assert_eq!(cancel.bytes[5], FrameType::Cancel as u8);
+        assert_eq!(cancel.header.ty, FrameType::Cancel);
         inner.retire("test_done");
     }
 
@@ -3521,7 +3531,7 @@ mod tests {
                 .is_none()
         );
         let cancel = control_rx.recv().await.expect("scoped Cancel");
-        assert_eq!(cancel.bytes[5], FrameType::Cancel as u8);
+        assert_eq!(cancel.header.ty, FrameType::Cancel);
         inner.retire("test_done");
         drop(stream);
     }
@@ -3591,8 +3601,8 @@ mod tests {
         let goodbye = control_rx
             .try_recv()
             .expect("a stranded bind is released with a route Goodbye");
-        assert_eq!(goodbye.bytes[5], FrameType::Goodbye as u8);
-        let header = decode_header(&goodbye.bytes).expect("the Goodbye decodes");
+        assert_eq!(goodbye.header.ty, FrameType::Goodbye);
+        let header = goodbye.header;
         assert_eq!(header.channel, bound.channel, "the exact stranded channel");
         assert_eq!(header.epoch, bound.epoch, "the exact stranded epoch");
         assert_eq!(header.corr, 0, "a route Goodbye carries correlation 0");
@@ -3889,7 +3899,7 @@ mod tests {
         assert_eq!(error.code(), "stream_saturated");
         assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
         let cancel = control_rx.recv().await.expect("stream Cancel");
-        assert_eq!(cancel.bytes[5], FrameType::Cancel as u8);
+        assert_eq!(cancel.header.ty, FrameType::Cancel);
         assert!(
             !inner.retired.load(Ordering::Acquire),
             "a saturated consumer must not retire the generation"
@@ -3925,7 +3935,7 @@ mod tests {
         });
 
         let frame = data_rx.recv().await.expect("route.open request");
-        let header = decode_header(&frame.bytes).expect("request header");
+        let header = frame.header;
         inner.dispatch(
             EnvelopeHeader {
                 len: 0,
@@ -4032,16 +4042,15 @@ mod tests {
             channel: 1,
             epoch: 1,
             corr: 1,
-        }
-        .encode()
-        .to_vec();
+        };
         let mut completions = Vec::new();
         for _ in 0..8 {
             let (completed, rx) = oneshot::channel();
             write
                 .tx
                 .try_send(RingWrite {
-                    bytes: outbound.clone(),
+                    header: outbound,
+                    body: Vec::new(),
                     completed,
                     deadline: StdInstant::now() + Duration::from_secs(1),
                 })
