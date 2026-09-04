@@ -143,16 +143,33 @@ fn severity(status: HealthStatus) -> u8 {
     }
 }
 
+/// `ChildPanic` marks a caught child panic. The payload never leaves `catch_child_panic`: it is
+/// destroyed inside `catch_unwind` by `discard_payload`, so a payload whose own `Drop` panics
+/// cannot unwind into the composite.
+#[derive(Debug, PartialEq, Eq)]
+struct ChildPanic;
+
+/// `discard_payload` drops a caught panic payload inside `catch_unwind`. A payload whose `Drop`
+/// panics is leaked, which bounds the regress at one level.
+fn discard_payload(payload: Box<dyn std::any::Any + Send + 'static>) -> ChildPanic {
+    if let Err(second) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        drop(payload);
+    })) {
+        std::mem::forget(second);
+    }
+    ChildPanic
+}
+
 /// `catch_child_panic` takes a thunk rather than a future so that a panic in the synchronous
 /// setup of a `fn -> impl Future` callback is caught as well as a panic while polling or
 /// dropping the future. Every panic during callback setup, polling, or future drop returns
-/// `Err(payload)`.
+/// `Err(ChildPanic)`.
 async fn catch_child_panic<F: Future>(
     callback: impl FnOnce() -> F,
-) -> Result<F::Output, Box<dyn std::any::Any + Send + 'static>> {
-    let mut guard = ChildFuture(Some(std::panic::catch_unwind(
-        std::panic::AssertUnwindSafe(|| Box::pin(callback())),
-    )?));
+) -> Result<F::Output, ChildPanic> {
+    let future = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Box::pin(callback())))
+        .map_err(discard_payload)?;
+    let mut guard = ChildFuture(Some(future));
     let output = std::future::poll_fn(|cx| {
         let future = guard
             .0
@@ -160,13 +177,14 @@ async fn catch_child_panic<F: Future>(
             .expect("child future is present until completion");
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
             Ok(poll) => poll.map(Ok),
-            Err(payload) => std::task::Poll::Ready(Err(payload)),
+            Err(payload) => std::task::Poll::Ready(Err(discard_payload(payload))),
         }
     })
     .await;
     // Dropping the future runs child `Drop` impls, which are child code too.
     let future = guard.0.take();
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(future)))?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(future)))
+        .map_err(discard_payload)?;
     output
 }
 
@@ -177,17 +195,19 @@ struct ChildFuture<F>(Option<std::pin::Pin<Box<F>>>);
 
 impl<F> Drop for ChildFuture<F> {
     fn drop(&mut self) {
-        if let Some(future) = self.0.take() {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(future)));
+        if let Some(future) = self.0.take()
+            && let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(future)))
+        {
+            discard_payload(payload);
         }
     }
 }
 
 /// The composite records only the byte length of each returned shutdown error.
-/// Panic payloads are dropped entirely.
 fn shutdown_failure_note(
     id: &str,
-    outcome: Result<Result<(), ShutdownError>, Box<dyn std::any::Any + Send + 'static>>,
+    outcome: Result<Result<(), ShutdownError>, ChildPanic>,
 ) -> Option<String> {
     match outcome {
         Ok(Ok(())) => None,
@@ -195,7 +215,7 @@ fn shutdown_failure_note(
             "{id} shutdown failed ({} bytes of detail redacted)",
             err.0.len()
         )),
-        Err(_payload) => Some(format!("{id} shutdown panicked")),
+        Err(ChildPanic) => Some(format!("{id} shutdown panicked")),
     }
 }
 
@@ -314,13 +334,13 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
         };
         let primary = catch_child_panic(|| self.primary.health())
             .await
-            .unwrap_or_else(|_payload| panicked(&self.primary_id));
+            .unwrap_or_else(|ChildPanic| panicked(&self.primary_id));
         let secondary = catch_child_panic(|| self.secondary.health())
             .await
-            .unwrap_or_else(|_payload| panicked(&self.secondary_id));
+            .unwrap_or_else(|ChildPanic| panicked(&self.secondary_id));
         let tertiary = catch_child_panic(|| self.tertiary.health())
             .await
-            .unwrap_or_else(|_payload| panicked(&self.tertiary_id));
+            .unwrap_or_else(|ChildPanic| panicked(&self.tertiary_id));
         // `Ok < Degraded < Failing`; equal severities use catalog order: primary, secondary, then tertiary.
         // child.
         let component_status = |report: &HealthReport| match report.status {
@@ -589,8 +609,18 @@ mod tests {
         let tertiary = Fake::new("tertiary");
         let composite = StaticComposite::new(primary, secondary, tertiary).expect("distinct ids");
 
-        let outcome = catch_child_panic(|| composite.shutdown()).await;
-        let payload = outcome.expect_err("one child panic surfaces after all drains");
+        // The composite's own failure-list panic is caught here so its message can be inspected.
+        let mut shutdown = Box::pin(composite.shutdown());
+        let payload = std::future::poll_fn(|cx| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                shutdown.as_mut().poll(cx)
+            })) {
+                Ok(poll) => poll.map(Ok),
+                Err(payload) => std::task::Poll::Ready(Err(payload)),
+            }
+        })
+        .await
+        .expect_err("one child panic surfaces after all drains");
         let message = payload
             .downcast_ref::<String>()
             .cloned()
@@ -624,13 +654,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_drop_panic_after_completion_is_returned_as_the_payload() {
+    async fn a_drop_panic_after_completion_is_reported_as_a_child_panic() {
         let outcome = catch_child_panic(|| ReadyButPanicsOnDrop(PanicsOnDrop)).await;
-        let payload = outcome.expect_err("the drop panic is the child's fault");
-        assert_eq!(
-            payload.downcast_ref::<&str>().copied(),
-            Some("child drop panicked")
-        );
+        assert_eq!(outcome, Err(ChildPanic));
+    }
+
+    #[tokio::test]
+    async fn a_payload_that_panics_on_drop_stays_inside_the_boundary() {
+        let outcome = catch_child_panic(|| async {
+            std::panic::panic_any(PanicsOnDrop);
+        })
+        .await;
+        assert_eq!(outcome, Err(ChildPanic));
+
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            catch_child_panic(|| async {
+                struct PanicsWithHostilePayloadOnDrop;
+                impl Drop for PanicsWithHostilePayloadOnDrop {
+                    fn drop(&mut self) {
+                        std::panic::panic_any(PanicsOnDrop);
+                    }
+                }
+                let _state = PanicsWithHostilePayloadOnDrop;
+                std::future::pending::<()>().await;
+            }),
+        )
+        .await;
+        assert!(cancelled.is_err(), "only the timeout can complete");
     }
 
     #[tokio::test]

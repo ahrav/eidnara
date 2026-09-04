@@ -38,7 +38,10 @@ pub fn install() {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             if callback_is_polling() {
-                eprintln!("{REDACTED_DIAGNOSTIC}");
+                // `eprintln!` panics when stderr is closed, and a panic inside the hook aborts
+                // the process, so the write failure is ignored instead.
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "{REDACTED_DIAGNOSTIC}");
             } else {
                 previous(info);
             }
