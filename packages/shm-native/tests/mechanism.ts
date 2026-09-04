@@ -216,7 +216,7 @@ describe("raw N-API descriptor boundary", () => {
         let callbacks = 0;
         let complete!: () => void;
         const completed = new Promise<void>((resolve) => (complete = resolve));
-        const publish = (value: number): void => {
+        const publishTo = (channel: number, value: number): void => {
             const header = new Uint8Array(21);
             const view = new DataView(header.buffer);
             view.setUint32(0, 1, true);
@@ -226,7 +226,7 @@ describe("raw N-API descriptor boundary", () => {
             view.setUint32(9, 1, true);
             view.setBigUint64(13, BigInt(value), true);
             addon.produce(
-                pair.first,
+                channel,
                 header,
                 1,
                 0,
@@ -237,11 +237,29 @@ describe("raw N-API descriptor boundary", () => {
                 () => {},
             );
         };
+        const publish = (value: number): void => publishTo(pair.first, value);
         let closed = false;
+        let later: { first: number; second: number } | null = null;
+        let trailingWake: (() => void) | undefined;
+        let laterDelivered: (() => void) | undefined;
         const onReady = (): void => {
             // A peer's exit wakes its consumer, so the reactor may deliver one
-            // more readiness callback after both ends have been closed.
-            if (closed) return;
+            // more readiness callback after both ends have been closed. Acknowledge
+            // it, or the process-wide reactor stays parked on this callback.
+            if (closed) {
+                // The closed pair's own trailing wake and any later channel's wake
+                // both land here. Drain the later channel so its frame proves the
+                // reactor was released by the acknowledgement below.
+                trailingWake?.();
+                if (later !== null) {
+                    addon.poll(later.second, (token) => {
+                        addon.release(later.second, token);
+                        laterDelivered?.();
+                    });
+                }
+                addon.readinessHandled();
+                return;
+            }
             try {
                 callbacks += 1;
                 addon.poll(pair.second, (token, _header, segments) => {
@@ -280,6 +298,37 @@ describe("raw N-API descriptor boundary", () => {
         }
         expect(received).toEqual([1, 2]);
         expect(callbacks).toBe(2);
+
+        // Wait for the closed pair's trailing wake before opening another channel,
+        // so the later channel's frame can only be drained by a second wake.
+        await new Promise<void>((resolve) => {
+            trailingWake = resolve;
+            setTimeout(resolve, 200);
+        });
+
+        // The reactor is shared by every channel in the process and keeps the first
+        // registered callback, so a later channel's publish must still reach it.
+        later = addon.createTestPair();
+        const laterPair = later;
+        const delivered = new Promise<void>((resolve) => (laterDelivered = resolve));
+        addon.watch(laterPair.second, () => {});
+        let laterTimeout: ReturnType<typeof setTimeout>;
+        try {
+            publishTo(laterPair.first, 7);
+            await Promise.race([
+                delivered,
+                new Promise<never>((_, reject) => {
+                    laterTimeout = setTimeout(
+                        () => reject(new Error("reactor stayed parked after the closed pair")),
+                        5_000,
+                    );
+                }),
+            ]);
+        } finally {
+            clearTimeout(laterTimeout!);
+            addon.close(laterPair.first);
+            addon.close(laterPair.second);
+        }
     });
 
     test("releasing a lease returns its slot; an unreleased ring fills", () => {
