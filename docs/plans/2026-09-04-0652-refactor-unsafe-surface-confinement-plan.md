@@ -303,7 +303,7 @@ U1 (lint gates on safe crates) and U2 (`sys` module) are independent. U3 (typed 
 | Miri | `cargo +nightly miri test -p shm-transport --lib -- lease:: backend::ring::miri` | U5 | pass, no unsupported-operation error |
 | valgrind | `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="valgrind --tool=memcheck --leak-check=full --errors-for-leak-kinds=definite --trace-children=yes --error-exitcode=1" SHM_TRANSPORT_SKIP_TWO_PROCESS=1 cargo +1.98 test -p shm-transport --test ring` | U7 | exit 0 |
 | Fuzz workspace | `cargo +1.98 check --manifest-path crates/shm-transport/fuzz/Cargo.toml --locked --bins` | U2, U4 | exit 0 |
-| Unsafe count | `awk '/^#\[cfg\(test\)\]$/{exit} /\bunsafe\b/{n++} END{print n}' crates/shm-transport/src/backend/ring.rs` (counts only lines before the top-level test module) | U3 | below 40 |
+| Unsafe count | `awk '/^mod tests \{$/{exit} /\yunsafe\y/{n++} END{print n+0}' crates/shm-transport/src/backend/ring.rs` (gawk word boundary; counts only lines before the top-level test module) | U3 | below 40 |
 
 ---
 
