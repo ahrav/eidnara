@@ -58,8 +58,9 @@ pub const CLIENT_STREAM_QUEUE_ITEMS: usize = 16;
 pub const CLIENT_DATA_QUEUE_FRAMES: usize = 256;
 /// `CLIENT_CONTROL_QUEUE_FRAMES` reserves slots for pure-header Pong, Cancel, and Goodbye frames.
 pub const CLIENT_CONTROL_QUEUE_FRAMES: usize = 32;
+/// `CLIENT_QUEUED_BYTES` is the one queued-byte ceiling shared by data and reserved-control frames (§11).
 ///
-/// Reserved control frames use `CLIENT_CONTROL_QUEUED_BYTES` so ordinary traffic cannot starve them.
+/// `CLIENT_CONTROL_QUEUED_BYTES` of it is partitioned for reserved control frames so ordinary traffic cannot starve them; data frames draw from the remainder, `CLIENT_DATA_QUEUED_BYTES`.
 /// A failed control-byte charge retires the generation.
 /// A failed data-byte charge returns a local error to that caller.
 pub const CLIENT_QUEUED_BYTES: usize = MAX_BODY_LEN as usize + 1_048_576;
@@ -67,6 +68,9 @@ pub const CLIENT_QUEUED_BYTES: usize = MAX_BODY_LEN as usize + 1_048_576;
 /// `CLIENT_CONTROL_QUEUED_BYTES` covers exactly `CLIENT_CONTROL_QUEUE_FRAMES` header-only control frames.
 /// A control-byte charge can fail only when the control channel is full; that condition retires the generation.
 pub const CLIENT_CONTROL_QUEUED_BYTES: usize = CLIENT_CONTROL_QUEUE_FRAMES * HEADER_LEN;
+/// The data partition of `CLIENT_QUEUED_BYTES`; it still admits one maximum-sized request frame.
+pub const CLIENT_DATA_QUEUED_BYTES: usize = CLIENT_QUEUED_BYTES - CLIENT_CONTROL_QUEUED_BYTES;
+const _: () = assert!(CLIENT_DATA_QUEUED_BYTES >= MAX_BODY_LEN as usize + HEADER_LEN);
 /// `CLIENT_INBOUND_FRAME_BYTES` reserves space for the body the reader is decoding.
 ///
 /// An admitted connection must accept every otherwise-valid frame, so this reservation covers the framing maximum separately from `CLIENT_RETAINED_RESPONSE_BYTES`.
@@ -384,7 +388,7 @@ impl Client {
             pending: Mutex::new(HashMap::new()),
             streams: Mutex::new(0),
             routes: Mutex::new(HashSet::new()),
-            queue_budget: Arc::new(ByteCounter::new(CLIENT_QUEUED_BYTES)),
+            queue_budget: Arc::new(ByteCounter::new(CLIENT_DATA_QUEUED_BYTES)),
             control_budget: Arc::new(ByteCounter::new(CLIENT_CONTROL_QUEUED_BYTES)),
             _read_budget: read_budget,
             retained_budget: Arc::new(ByteCounter::new(CLIENT_RETAINED_RESPONSE_BYTES)),
@@ -1448,12 +1452,18 @@ impl Inner {
                                         },
                                         _charge: retained,
                                     }),
-                                    None => Err(CallError::local(
-                                        // The host completed the request; only the local copy is lost.
-                                        SendOutcome::OutcomeUnknown,
-                                        "response_retention_exhausted",
-                                        "retained response capacity exhausted",
-                                    )),
+                                    None => {
+                                        // The body is discarded, so a route the host bound for this caller can only be released here.
+                                        if header.channel == 0 {
+                                            self.release_stranded_route(&body);
+                                        }
+                                        Err(CallError::local(
+                                            // The reader observed the host's terminal; only the local copy is lost, so a retry would duplicate a completed operation.
+                                            SendOutcome::Terminal,
+                                            "response_retention_exhausted",
+                                            "retained response capacity exhausted",
+                                        ))
+                                    }
                                 }
                             }
                             FrameType::Error => Err(host_error.expect("validated above")),
@@ -4721,7 +4731,11 @@ mod tests {
             .expect("settled")
             .expect_err("retention is exhausted");
         assert_eq!(error.code(), "response_retention_exhausted");
-        assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
+        assert_eq!(
+            error.outcome(),
+            SendOutcome::Terminal,
+            "the reader observed the host terminal"
+        );
         assert!(
             !inner.retired.load(Ordering::Acquire),
             "only the saturating request fails"
@@ -4733,6 +4747,80 @@ mod tests {
         drop(retained);
         assert_eq!(inner.retained_budget.used(), 0);
         inner.retire("test_done");
+    }
+
+    #[tokio::test]
+    async fn a_bind_that_cannot_be_retained_is_released() {
+        let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let deliver = |key: PendingKey, body: Vec<u8>| {
+            inner.dispatch(
+                EnvelopeHeader {
+                    len: u32::try_from(body.len()).expect("fits"),
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType::Response,
+                    flags: response_flags(false, false),
+                    channel: key.channel,
+                    epoch: key.epoch,
+                    corr: key.corr,
+                },
+                body,
+                ByteCharge::none(),
+            );
+        };
+        // One unpolled maximum-sized response fills retention.
+        let (kind, _filler_rx) = unary_sender();
+        let (filler, publish) = inner
+            .admit(route(1), Vec::new(), false, kind, deadline)
+            .expect("admitted");
+        assert!(claim_for_write(&publish));
+        drop(data_rx.recv().await);
+        deliver(filler, vec![0u8; CLIENT_RETAINED_RESPONSE_BYTES]);
+        assert_eq!(inner.retained_budget.used(), CLIENT_RETAINED_RESPONSE_BYTES);
+
+        let control = RouteHandle {
+            channel: 0,
+            epoch: 0,
+        };
+        let (kind, rx) = unary_sender();
+        let (key, publish) = inner
+            .admit(control, Vec::new(), false, kind, deadline)
+            .expect("control request admitted");
+        assert!(claim_for_write(&publish));
+        drop(data_rx.recv().await);
+        let bound = RouteHandle {
+            channel: 9,
+            epoch: 3,
+        };
+        let body = serde_json::to_vec(&serde_json::json!({
+            "op": "route.open",
+            "route_channel": bound.channel,
+            "route_epoch": bound.epoch,
+        }))
+        .expect("body encodes");
+        deliver(key, body);
+
+        let error = rx
+            .await
+            .expect("settled")
+            .expect_err("retention is exhausted");
+        assert_eq!(error.code(), "response_retention_exhausted");
+        assert_eq!(error.outcome(), SendOutcome::Terminal);
+        let goodbye = control_rx
+            .try_recv()
+            .expect("the bind nobody can receive is released");
+        assert_eq!(goodbye.header.ty, FrameType::Goodbye);
+        assert_eq!(goodbye.header.channel, bound.channel);
+        assert_eq!(goodbye.header.epoch, bound.epoch);
+        inner.retire("test_done");
+    }
+
+    #[test]
+    fn data_and_control_queues_share_one_queued_byte_ceiling() {
+        assert_eq!(
+            CLIENT_DATA_QUEUED_BYTES + CLIENT_CONTROL_QUEUED_BYTES,
+            CLIENT_QUEUED_BYTES
+        );
     }
 
     #[test]
