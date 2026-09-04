@@ -144,14 +144,20 @@ impl PeerReport {
         spin_until(&self.start, 1, Instant::now() + PEER_DEADLINE)
     }
 
-    /// Producer side: waits for the peer's baselines, then opens the window.
-    fn open_window(&self) -> Result<Instant, &'static str> {
+    /// Producer side: waits for the peer's baselines. The wait may yield, so the producer
+    /// samples its own baselines after this returns.
+    fn await_ready(&self) -> Result<(), &'static str> {
         if await_line(&self.ready, 1, Instant::now() + PEER_DEADLINE).is_none() {
             return Err("peer never became ready");
         }
+        Ok(())
+    }
+
+    /// Producer side: opens the window.
+    fn start_window(&self) -> Instant {
         let start = Instant::now();
         self.start.store(1, Ordering::Release);
-        Ok(start)
+        start
     }
 
     fn publish(
@@ -556,9 +562,10 @@ fn run_h0(iterations: u64) -> Result<ArmRun, &'static str> {
         );
         0
     })?;
+    shared.report.await_ready()?;
     let switches_before = voluntary_switches();
     let mut yields = 0u64;
-    let start = shared.report.open_window()?;
+    let start = shared.report.start_window();
     let mut stalled = false;
     for sequence in 0..iterations {
         let request = sequence * 2 + 1;
@@ -625,9 +632,10 @@ fn run_ring(
         ring_consumer(&consumer, iterations, copied_receiver, report)
     })?;
 
+    report.await_ready()?;
     let switches_before = voluntary_switches();
     let syscalls_before = ring.syscall_counters();
-    let start = report.open_window()?;
+    let start = report.start_window();
     let produced = produce(&ring, &body, header, iterations, copied_producer);
     // The receiver's last copies, checksums, and releases end the window, so the producer
     // spins for `work_done` without yielding rather than adding its own syscalls to the path.
