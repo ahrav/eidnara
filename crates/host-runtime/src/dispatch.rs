@@ -1089,14 +1089,13 @@ pub async fn open_route<H: HostHandler>(
     });
     let outcome = match shared.lifecycle_join("bind", bind_task).await {
         Ok(Some(outcome)) => outcome,
-        Ok(None) | Err(crate::runtime::LifecycleFailure { stopped: true }) => {
+        Ok(None) | Err(crate::runtime::LifecycleFailure { .. }) => {
             shared.registry.take_rejected_bind(handle);
             if run_route_gone(&shared, handle).await {
                 shared.registry.finalize_close(handle);
             }
             return;
         }
-        Err(crate::runtime::LifecycleFailure { stopped: false }) => return,
     };
 
     match outcome {

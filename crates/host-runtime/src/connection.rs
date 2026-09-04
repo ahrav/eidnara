@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::wire::{FrameType, HEADER_LEN};
 use tokio::net::UnixStream;
@@ -35,9 +36,9 @@ const MAX_INFLIGHT_BUSY_REJECTS: usize = 32;
 /// The writer sets `written_at` immediately after `write_all` returns.
 ///
 /// The reader accepts a Pong observed at or after `written_at` even if it locks `pings` before the writer.
-/// The reader discards a Pong observed before `written_at` because the Ping write had not completed.
 ///
-/// Comparing against write start would admit pre-answers; requiring a mutex transition before the Pong would drop legitimate answers.
+/// A Pong received before `complete_write` can have an `answered_at` before `completed_at`.
+/// The peer can read the ring before the writer records `completed_at`, so timestamps cannot distinguish a guessed correlation from a real Pong.
 /// A peer can answer after receiving the bytes without reading them; no observer can distinguish that answer from a real answer.
 /// The writer's per-frame stall deadline catches a peer that stops draining its socket.
 pub struct PingProbe {
@@ -45,6 +46,26 @@ pub struct PingProbe {
     pub sent: Instant,
     pub written_at: Option<Instant>,
     pub answered_at: Option<Instant>,
+}
+
+impl PingProbe {
+    /// Returns `true` when an already-recorded Pong settles the probe, so the caller removes it.
+    /// Otherwise the probe becomes answerable and its Pong deadline starts at `completed_at`.
+    pub fn complete_write(&mut self, completed_at: Instant, pong_deadline: Duration) -> bool {
+        match self.answered_at {
+            Some(answered_at)
+                if answered_at.saturating_duration_since(completed_at) < pong_deadline =>
+            {
+                true
+            }
+            _ => {
+                self.answered_at = None;
+                self.sent = completed_at;
+                self.written_at = Some(completed_at);
+                false
+            }
+        }
+    }
 }
 
 pub struct PendingEntry {
@@ -115,15 +136,12 @@ pub async fn run_connection<H: HostHandler>(
     let frame_deadline = shared.timing.frame_deadline;
     let mut prepared =
         tokio::task::spawn_blocking(move || ring.prepare(ingress, queue_frames, frame_deadline));
+    // One deadline caps total setup time.
+    let setup_deadline = Instant::now() + shared.timing.transport_setup_deadline;
     // A timed-out `prepare` continues because `spawn_blocking` cannot abort it.
     // A dropped `CancellationToken` does not cancel `root`; late completion
     // discards `sender` and cancels `root`.
-    let prepared = match timeout_at(
-        Instant::now() + shared.timing.transport_setup_deadline,
-        &mut prepared,
-    )
-    .await
-    {
+    let prepared = match timeout_at(setup_deadline, &mut prepared).await {
         Ok(joined) => joined,
         Err(_) => {
             shared.spawn_tracked(async move {
@@ -159,7 +177,7 @@ pub async fn run_connection<H: HostHandler>(
         crate::wire::PROTOCOL_VERSION,
         shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
         token.as_str(),
-        shared.timing.transport_setup_deadline,
+        setup_deadline,
     )
     .await
     .is_err()
@@ -460,7 +478,6 @@ async fn read_loop<H: HostHandler>(
                                     // A Ping queued behind large frames can receive a Pong before it is written.
                                     // A Pong received before write completion must not be rejected as late.
                                     // The write-completion hook evaluates stored Pongs against the completion instant.
-                                    // completion instant.
                                     None => probe.answered_at = Some(now),
                                 }
                             }
@@ -803,20 +820,10 @@ async fn liveness_loop(
         let pong_deadline = policy.pong_deadline;
         let written_hook = Box::new(move |completed_at: Instant| {
             let mut pings = gen_probe.pings.lock().expect("pings lock");
-            if let Some(probe) = pings.get_mut(&corr) {
-                match probe.answered_at {
-                    Some(answered_at)
-                        if answered_at >= completed_at
-                            && answered_at.duration_since(completed_at) < pong_deadline =>
-                    {
-                        pings.remove(&corr);
-                    }
-                    _ => {
-                        probe.answered_at = None;
-                        probe.sent = completed_at;
-                        probe.written_at = Some(completed_at);
-                    }
-                }
+            if let Some(probe) = pings.get_mut(&corr)
+                && probe.complete_write(completed_at, pong_deadline)
+            {
+                pings.remove(&corr);
             }
             let _ = written_tx.send(());
         });
@@ -851,7 +858,54 @@ async fn liveness_loop(
 mod tests {
     use super::*;
     use crate::frame_channel::frame_sender;
-    use std::time::Duration;
+
+    fn unwritten_probe(sent: Instant) -> PingProbe {
+        PingProbe {
+            flags: 0,
+            sent,
+            written_at: None,
+            answered_at: None,
+        }
+    }
+
+    /// The reader can record the Pong between ring publication and the writer's timestamp.
+    #[test]
+    fn a_pong_recorded_before_the_completion_instant_settles_the_probe() {
+        let sent = Instant::now();
+        let mut probe = unwritten_probe(sent);
+        probe.answered_at = Some(sent + Duration::from_millis(1));
+        let completed_at = sent + Duration::from_millis(5);
+
+        assert!(probe.complete_write(completed_at, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_pong_recorded_after_the_completion_instant_settles_the_probe_within_the_deadline() {
+        let sent = Instant::now();
+        let mut probe = unwritten_probe(sent);
+        let completed_at = sent + Duration::from_millis(5);
+        probe.answered_at = Some(completed_at + Duration::from_millis(500));
+
+        assert!(probe.complete_write(completed_at, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_late_or_missing_pong_arms_the_deadline_from_the_completion_instant() {
+        let sent = Instant::now();
+        let completed_at = sent + Duration::from_millis(5);
+
+        let mut unanswered = unwritten_probe(sent);
+        assert!(!unanswered.complete_write(completed_at, Duration::from_secs(1)));
+        assert_eq!(unanswered.sent, completed_at);
+        assert_eq!(unanswered.written_at, Some(completed_at));
+        assert_eq!(unanswered.answered_at, None);
+
+        let mut late = unwritten_probe(sent);
+        late.answered_at = Some(completed_at + Duration::from_secs(2));
+        assert!(!late.complete_write(completed_at, Duration::from_secs(1)));
+        assert_eq!(late.answered_at, None);
+        assert_eq!(late.written_at, Some(completed_at));
+    }
 
     #[test]
     fn activation_entropy_failure_is_redacted_without_panicking() {

@@ -158,80 +158,15 @@ impl RawFrame {
     }
 }
 
-/// Contents of a published connection file, parsed independently.
+/// Contents of a published connection file.
 pub type Discovered = host_runtime::ConnectionInfo;
 
-/// Validates and reads a publication the way a conforming client must
-/// (protocol §4.1): bounded snapshot, schema 2, exactly 32 key bytes, exactly
-/// 16 daemon-ID bytes, numeric loopback host, nonzero port.
+/// Reads a publication through the crate's descriptor-anchored client reader (protocol
+/// §4.1): the bytes that supply the key and setup socket come from the same validated
+/// inode, never from a pathname reopened after the check. Framing and proofs stay
+/// independent; the reader's own adversarial coverage is `instance_security.rs`.
 pub fn discover(path: &Path) -> Result<Discovered, String> {
-    let meta = std::fs::symlink_metadata(path).map_err(|err| err.to_string())?;
-    if !meta.file_type().is_file() {
-        return Err("publication is not a regular file".to_owned());
-    }
-    if meta.len() > 65_536 {
-        return Err("publication exceeds the 64 KiB snapshot cap".to_owned());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(format!("insecure publication mode {mode:#o}"));
-        }
-    }
-
-    let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
-    let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
-
-    let schema = json["schema"].as_u64().ok_or("missing schema")?;
-    if schema != 2 {
-        return Err(format!("unsupported schema {schema}"));
-    }
-    let wire_version = json
-        .get("wire_version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or("missing or invalid wire_version")?;
-    if wire_version != u64::from(WIRE_VERSION) {
-        return Err(format!("wire version {wire_version} is not 2"));
-    }
-
-    let setup_socket = json["setup_socket"]
-        .as_str()
-        .ok_or("missing setup_socket")?
-        .to_owned();
-    if setup_socket.is_empty() {
-        return Err("empty setup_socket".to_owned());
-    }
-    let key = byte_array(&json["key"]).ok_or("missing key")?;
-    if key.len() != 32 {
-        return Err(format!("key is {} bytes, expected 32", key.len()));
-    }
-    let daemon_id = byte_array(&json["daemon_id"]).ok_or("missing daemon_id")?;
-    if daemon_id.len() != 16 {
-        return Err(format!(
-            "daemon_id is {} bytes, expected 16",
-            daemon_id.len()
-        ));
-    }
-    let daemon_ver = json["daemon_ver"]
-        .as_str()
-        .ok_or("missing daemon_ver")?
-        .to_owned();
-    if daemon_ver.is_empty() {
-        return Err("empty daemon_ver".to_owned());
-    }
-
-    Ok(Discovered {
-        setup_socket,
-        key,
-        daemon_id: daemon_id.try_into().expect("length checked"),
-        pid: u32::try_from(json["pid"].as_u64().ok_or("missing pid")?)
-            .map_err(|_| "pid out of range")?,
-        daemon_ver,
-        schema: u32::try_from(schema).expect("schema is two"),
-        wire_version: u8::try_from(wire_version).expect("wire version is two"),
-    })
+    host_runtime::read_connection_file(path).map_err(|err| err.to_string())
 }
 
 fn byte_array(value: &serde_json::Value) -> Option<Vec<u8>> {

@@ -232,6 +232,9 @@ pub async fn receive_grant(
 }
 
 /// Performs current-format activation and commit on the control-only socket.
+///
+/// `deadline` is the caller's absolute setup deadline; grant, activation read, and commit
+/// use it rather than fresh time windows.
 pub async fn activate_server(
     stream: &mut UnixStream,
     descriptors: &[OwnedFd; RING_DESCRIPTOR_COUNT],
@@ -239,11 +242,8 @@ pub async fn activate_server(
     wire_version: u8,
     descriptor_schema: u16,
     activation_token: &str,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<(), SetupError> {
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or(SetupError::Timeout)?;
     send_grant(
         stream,
         &GrantMessage {
@@ -572,7 +572,7 @@ mod tests {
                 2,
                 shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
-                Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(1),
             )
             .await
         });
@@ -603,7 +603,7 @@ mod tests {
                 2,
                 shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
-                Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(1),
             )
             .await?;
             Ok::<_, SetupError>(observe_peer(&mut server).await)
@@ -669,7 +669,7 @@ mod tests {
                 2,
                 shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
-                Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(1),
             )
             .await
         });
@@ -735,7 +735,7 @@ mod tests {
                     crate::wire::PROTOCOL_VERSION,
                     shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                     "token",
-                    Duration::from_secs(1),
+                    Instant::now() + Duration::from_secs(1),
                 )
                 .await
             });

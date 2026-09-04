@@ -141,26 +141,28 @@ struct ConnResult {
     inflight_full: u64,
 }
 
+/// Returns the routed stream and the first unused correlation after `route_open`.
 async fn open_route(
     info: &raw_client::Discovered,
     session: &str,
-) -> (tokio::net::UnixStream, u16, u32) {
+) -> (tokio::net::UnixStream, u16, u32, u64) {
     let mut client = RawClient::connect(info).await.expect("auth");
     let (channel, epoch) = client
         .route_open(MODULE_ID, "/perf", "perf", session)
         .await
         .expect("route");
-    (client.into_stream(), channel, epoch)
+    let first_free_corr = client.next_corr();
+    (client.into_stream(), channel, epoch, first_free_corr)
 }
 
 async fn run_conn(
-    conn: (tokio::net::UnixStream, u16, u32),
+    conn: (tokio::net::UnixStream, u16, u32, u64),
     idx: usize,
     opts: Opts,
     start: Instant,
     warmup: Duration,
 ) -> ConnResult {
-    let (stream, channel, epoch) = conn;
+    let (stream, channel, epoch, first_free_corr) = conn;
     let (read_half, mut write_half) = stream.into_split();
     let body = Arc::new(body_bytes(&opts));
     let expect_fixture = opts.workload == Workload::Json;
@@ -196,7 +198,8 @@ async fn run_conn(
         let body = Arc::clone(&body);
         let conns = opts.conns as u64;
         tokio::spawn(async move {
-            let mut corr: u64 = 1_000_000;
+            // Pre-incremented before each send, so the first request uses `first_free_corr`.
+            let mut corr: u64 = first_free_corr - 1;
             let mut k: u64 = 0;
             let mut inflight_full = 0u64;
             // Connection `idx` owns every `conns`-th global arrival slot, preserving the aggregate offered rate even when `rate` does not divide 1e9.
@@ -565,10 +568,10 @@ async fn run_conn(
 }
 
 async fn run_stall(info: raw_client::Discovered, opts: Opts) {
-    let (stream, channel, epoch) = open_route(&info, "stall").await;
+    let (stream, channel, epoch, first_free_corr) = open_route(&info, "stall").await;
     let (_read_half, mut write_half) = stream.into_split();
     let body = vec![0u8; opts.payload.max(5)];
-    for corr in 1..=opts.stall_big as u64 {
+    for corr in first_free_corr..first_free_corr + opts.stall_big as u64 {
         let header = raw_client::header(
             body.len() as u32,
             TY_REQUEST,

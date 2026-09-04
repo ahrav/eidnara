@@ -712,6 +712,52 @@ async fn a_panicking_bind_is_cleaned_before_fatal_shutdown() {
     );
 }
 
+/// A bind that never resolves expires its lifecycle deadline; the host is fatal and the
+/// handler still receives route-gone for the handle it observed.
+#[tokio::test]
+async fn a_hung_bind_is_cleaned_before_fatal_shutdown() {
+    let host = TestHost::start_with(|config| {
+        config.timing.lifecycle_callback_deadline = Duration::from_millis(300);
+    })
+    .await;
+    host.handler.set_bind_policy(BindPolicy::Hang);
+    let mut client = host.client().await;
+    let _ = client
+        .control(&serde_json::json!({
+            "op": "route.open",
+            "target": {"kind": "tool_provider", "module_id": LINKED_MODULE_ID},
+            "identity": {"project_root": ROOT, "harness": "opencode", "session": "hung-bind"}
+        }))
+        .await
+        .expect("route open");
+
+    let handler = host.handler.clone();
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while handler.binds().is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "bind never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while handler.route_gones().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the expired bind must still produce route-gone"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let result = host.shutdown().await;
+    assert!(
+        matches!(result, Err(host_runtime::HostError::LifecycleFatal(_))),
+        "expected lifecycle fatal, got {result:?}"
+    );
+    assert_eq!(handler.binds().len(), 1);
+    assert_eq!(
+        handler.route_gones(),
+        handler.binds(),
+        "a bind that observed its handle is still owed route-gone"
+    );
+}
+
 #[tokio::test]
 async fn a_hung_route_gone_callback_is_fatal_rather_than_falsely_graceful() {
     let host = TestHost::start_with(|config| {
@@ -1210,6 +1256,42 @@ async fn shutdown_during_initialization_runs_the_shutdown_callback_before_lock_r
     assert!(
         matches!(result, Err(HostError::InitFailed(_))),
         "shutdown during initialization fails startup, got {result:?}"
+    );
+
+    let successor =
+        assert_lock_released_only_after_shutdown_callback(&handler, data_root.path()).await;
+    assert!(
+        !handler.events().contains(&Event::Initialized),
+        "the aborted initialize must not complete detached"
+    );
+    successor.shutdown_gracefully().await;
+}
+
+/// Dropping the `run` future must not release the instance lock while initialization may still run.
+#[tokio::test]
+async fn an_abandoned_run_future_during_initialization_runs_the_shutdown_callback_before_lock_release()
+ {
+    let data_root = tempfile::tempdir().expect("temp root");
+    let handler = TestHandler::new();
+    handler.block_init();
+    handler.block_shutdown();
+    let config = host_runtime::HostConfig {
+        data_dir: Some(data_root.path().to_path_buf()),
+        ..Default::default()
+    };
+    let run_handler = handler.clone();
+    let task = tokio::spawn(async move {
+        host_runtime::run(run_handler, config, host_runtime::CancellationToken::new()).await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !task.is_finished(),
+        "host exited before initialization blocked"
+    );
+    task.abort();
+    assert!(
+        task.await.is_err(),
+        "the aborted run future cannot complete"
     );
 
     let successor =

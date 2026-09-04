@@ -274,33 +274,6 @@ fn retain_lock_until_drained<H: HostHandler>(shared: Arc<HostShared<H>>, guard: 
     }
 }
 
-/// The cleanup task keeps the instance lock held until the aborted initialization task stops.
-/// The cleanup task runs the handler shutdown callback after the aborted initialization task stops without blocking `run`'s return.
-/// Releasing `guard` before the callback stops permits concurrent initialization.
-/// A successor observes `AlreadyRunning` while the callback runs.
-///
-/// `shutdown` must tolerate interrupted initialization.
-/// `retain_lock_until_stopped` must not time-limit either await: releasing `guard` before handler code stops permits concurrent initialization.
-/// Dropping `guard` while handler code runs releases the single-instance fence.
-fn retain_lock_until_stopped<H: HostHandler, T: Send + 'static>(
-    mut guard: InstanceGuard,
-    handler: Arc<H>,
-    task: tokio_util::task::AbortOnDropHandle<T>,
-) {
-    // `retain_lock_until_stopped` demotes the phase before draining so probes report `stopping` instead of `starting`.
-    // `guard.begin_stopping()` keeps probes in `stopping` throughout the unbounded drain.
-    guard.begin_stopping();
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        runtime.spawn(async move {
-            let _ = task.await;
-            let callback = crate::panic_boundary::redact_sync(|| handler.shutdown());
-            crate::panic_boundary::redact(callback).await;
-            drop(handler);
-            drop(guard);
-        });
-    }
-}
-
 /// `stopped` reports whether the callback has stopped running.
 pub struct LifecycleFailure {
     /// `false` means the callback still executes because its deadline expired inside a non-yielding poll that `abort` cannot interrupt.
@@ -315,13 +288,13 @@ fn spawn_handler_shutdown<H: HostHandler>(handler: Arc<H>) -> JoinHandle<()> {
     })
 }
 
-/// `PrePublicationCleanup` owns the `InstanceGuard` and handler shutdown before `HostShared` exists.
-/// Running shutdown in its own task lets a cancelled waiter transfer cleanup and the guard to a reaper without invoking `shutdown` twice.
-/// Successful publication disarms the owner without spawning cleanup.
-/// spawning cleanup.
+type InitTask = tokio_util::task::AbortOnDropHandle<Result<(), crate::handler::InitError>>;
+
+/// Releasing the guard while this handler's code still runs would let a successor initialize against the same data directory.
 struct PrePublicationCleanup<H: HostHandler> {
     guard: Option<InstanceGuard>,
     handler: Option<Arc<H>>,
+    init: Option<InitTask>,
     shutdown: Option<JoinHandle<()>>,
 }
 
@@ -330,6 +303,7 @@ impl<H: HostHandler> PrePublicationCleanup<H> {
         Self {
             guard: Some(guard),
             handler: Some(handler),
+            init: None,
             shutdown: None,
         }
     }
@@ -338,7 +312,28 @@ impl<H: HostHandler> PrePublicationCleanup<H> {
         self.guard.as_mut().expect("armed startup cleanup")
     }
 
+    fn handler(&self) -> &Arc<H> {
+        self.handler.as_ref().expect("armed startup cleanup")
+    }
+
+    fn start_initialization(&mut self, init: crate::config::HostInit) -> &mut InitTask {
+        let handler = Arc::clone(self.handler());
+        self.init
+            .insert(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                async move {
+                    let callback = crate::panic_boundary::redact_sync(|| handler.initialize(init));
+                    crate::panic_boundary::redact(callback).await
+                },
+            )))
+    }
+
+    /// `Drop` aborts the in-flight initialization and defers guard release to the reaper.
+    fn abandon_initialization(self) {
+        drop(self);
+    }
+
     async fn finish(mut self) {
+        drop(self.init.take());
         if let Some(guard) = self.guard.as_mut() {
             guard.begin_stopping();
         }
@@ -365,14 +360,25 @@ impl<H: HostHandler> Drop for PrePublicationCleanup<H> {
             return;
         };
         // Unwinding demotes the phase before draining shutdown.
-        // `finish`.
         guard.begin_stopping();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let shutdown = self.shutdown.take().unwrap_or_else(|| {
-                spawn_handler_shutdown(self.handler.take().expect("armed startup cleanup"))
-            });
+            let init = self.init.take();
+            let shutdown = self.shutdown.take();
+            let handler = self.handler.take();
             runtime.spawn(async move {
-                let _ = shutdown.await;
+                if let Some(init) = init {
+                    init.abort();
+                    let _ = init.await;
+                }
+                match shutdown {
+                    Some(shutdown) => {
+                        let _ = shutdown.await;
+                    }
+                    None => {
+                        let _ =
+                            spawn_handler_shutdown(handler.expect("armed startup cleanup")).await;
+                    }
+                }
                 drop(guard);
             });
         }
@@ -667,27 +673,21 @@ pub async fn run_with_publish_hook<H: HostHandler>(
     }
 
     // Initialization failure or deadline expiration prevents publication.
-    // `init_task` is abort-on-drop so dropping `run` cancels initialization before a successor acquires the instance lock.
+    // `cleanup` owns `guard`, `handler`, and the initialization task; dropping `run` transfers them to a reaper instead of synchronously releasing `guard`.
+    let mut cleanup = PrePublicationCleanup::new(guard, Arc::clone(&handler));
     {
-        let init_handler = Arc::clone(&handler);
         // Move `config.init` rather than cloning it so no second descriptor copy remains outside the byte budgets.
         let init = std::mem::take(&mut config.init);
-        let mut init_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            let callback = crate::panic_boundary::redact_sync(|| init_handler.initialize(init));
-            crate::panic_boundary::redact(callback).await
-        }));
+        let init_task = cleanup.start_initialization(init);
         let joined = tokio::select! {
             biased;
-            // A shutdown request aborts `init_task`; the reaper retains `guard` until cleanup stops the handler.
             () = shutdown.cancelled() => None,
-            joined = timeout(config.timing.lifecycle_callback_deadline, &mut init_task) => {
+            joined = timeout(config.timing.lifecycle_callback_deadline, init_task) => {
                 Some(joined)
             }
         };
         let Some(joined) = joined else {
-            // A detached reaper retains the guard until initialization ends, then shuts down the handler before dropping the guard to prevent concurrent initialization against the same data directory.
-            init_task.abort();
-            retain_lock_until_stopped(guard, Arc::clone(&handler), init_task);
+            cleanup.abandon_initialization();
             return Err(HostError::InitFailed(
                 "shutdown requested during initialization".to_owned(),
             ));
@@ -696,7 +696,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(err))) => {
                 // `PrePublicationCleanup::finish` keeps `guard` held until shutdown stops work that failed initialization may have started.
-                PrePublicationCleanup::new(guard, handler).finish().await;
+                cleanup.finish().await;
 
                 // Initialization errors report only the handler message length because the message may contain storage credentials or endpoints.
                 return Err(HostError::InitFailed(format!(
@@ -706,8 +706,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
             }
             Ok(Err(join_err)) => {
                 // A panic after initialization starts handler-owned work requires the same shutdown cleanup as an initialization error.
-                // initialization error.
-                PrePublicationCleanup::new(guard, handler).finish().await;
+                cleanup.finish().await;
                 let kind = if join_err.is_panic() {
                     "panic"
                 } else {
@@ -716,8 +715,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
                 return Err(HostError::InitFailed(format!("initialize {kind}")));
             }
             Err(_) => {
-                init_task.abort();
-                retain_lock_until_stopped(guard, Arc::clone(&handler), init_task);
+                cleanup.abandon_initialization();
                 return Err(HostError::InitFailed(
                     "initialize deadline expired".to_owned(),
                 ));
@@ -726,7 +724,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
     }
 
     // After initialization runs, `PrePublicationCleanup` keeps `guard` until shutdown drains handler-owned work on every early return.
-    let mut cleanup = PrePublicationCleanup::new(guard, handler);
+    drop(handler);
     let setup = async {
         // If shutdown occurs before publication, cleanup drains the initialized handler and the host exits successfully.
         if shutdown.is_cancelled() {
