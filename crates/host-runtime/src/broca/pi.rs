@@ -18,7 +18,7 @@ use super::backend::{
 };
 use super::subprocess::group_registry::StateRoot;
 use super::subprocess::{
-    self, EnvSnapshot, HarnessName, PrivateDir, ProbeSignal, SubprocessLimits, SubprocessSpec,
+    self, EnvSnapshot, PrivateDir, ProbeSignal, SubprocessLimits, SubprocessSpec,
 };
 use crate::harness_closure::ValidatedHarnessClosure;
 
@@ -95,7 +95,6 @@ impl LlmExecutionBackend for PiBackend {
     ) -> BackendFuture {
         // A run bound to another harness must fail, not silently execute
         // PiBackend must not execute a non-Pi request with Pi provider aliases or credentials.
-        // credentials.
         if request.harness != Harness::Pi {
             let terminal = backend::harness_mismatch(Harness::Pi, request.harness);
             return Box::pin(async move { terminal });
@@ -232,7 +231,7 @@ async fn run_pi(
     let mut child_env = match env.provider_row("pi", &request.provider) {
         Ok(row) => row,
         Err(error) => {
-            return subprocess::credential_failure(HarnessName::Pi, error);
+            return subprocess::credential_failure(Harness::Pi, error);
         }
     };
     // Closure resolution precedes the private directory so an unavailable harness never writes the caller-private system prompt to disk.
@@ -242,7 +241,7 @@ async fn run_pi(
     {
         Ok(path) => path,
         Err(_) => {
-            return subprocess::harness_unavailable_failure(HarnessName::Pi, "closure_incomplete");
+            return subprocess::harness_unavailable_failure(Harness::Pi, "closure_incomplete");
         }
     };
     let entrypoint = match descriptor
@@ -251,7 +250,7 @@ async fn run_pi(
     {
         Ok(path) => path,
         Err(_) => {
-            return subprocess::harness_unavailable_failure(HarnessName::Pi, "closure_incomplete");
+            return subprocess::harness_unavailable_failure(Harness::Pi, "closure_incomplete");
         }
     };
     let mut resolved_extensions = Vec::with_capacity(descriptor.provider_extension_nodes.len());
@@ -259,24 +258,21 @@ async fn run_pi(
         match descriptor.closure.resolve_node_descriptor(extension_node) {
             Ok(extension) => resolved_extensions.push(extension),
             Err(_) => {
-                return subprocess::harness_unavailable_failure(
-                    HarnessName::Pi,
-                    "closure_incomplete",
-                );
+                return subprocess::harness_unavailable_failure(Harness::Pi, "closure_incomplete");
             }
         }
     }
 
     let dir = match PrivateDir::create_async(state_root.clone(), "broca-pi").await {
         Ok(dir) => dir,
-        Err(err) => return subprocess::spawn_failure(HarnessName::Pi, &err),
+        Err(err) => return subprocess::spawn_failure(Harness::Pi, &err),
     };
     // `run_pi` writes the compiled-in hook bytes to a 0600 file in the per-run 0700 directory so no installed hook path can be swapped under the daemon.
     let hook_path = match dir.write_private(PI_BROCA_EXTENSION_FILE, PI_BROCA_EXTENSION_BYTES) {
         Ok(path) => path,
         Err(err) => {
             return subprocess::merge_cleanup(
-                subprocess::spawn_failure(HarnessName::Pi, &err),
+                subprocess::spawn_failure(Harness::Pi, &err),
                 dir.cleanup_async().await,
             );
         }
@@ -288,7 +284,7 @@ async fn run_pi(
             Ok(path) => Some(path),
             Err(err) => {
                 return subprocess::merge_cleanup(
-                    subprocess::spawn_failure(HarnessName::Pi, &err),
+                    subprocess::spawn_failure(Harness::Pi, &err),
                     dir.cleanup_async().await,
                 );
             }
@@ -365,7 +361,7 @@ async fn run_pi(
         Ok(result) => result,
         Err(err) => {
             return subprocess::merge_cleanup(
-                subprocess::spawn_failure(HarnessName::Pi, &err),
+                subprocess::spawn_failure(Harness::Pi, &err),
                 dir.cleanup_async().await,
             );
         }
@@ -373,7 +369,7 @@ async fn run_pi(
 
     let parsed = subprocess::parse_clean_transcript(&result, &events, parse_pi_transcript);
     let cleanup = dir.cleanup_async().await;
-    subprocess::finalize(HarnessName::Pi, &result, parsed, &limits, cleanup)
+    subprocess::finalize(Harness::Pi, &result, parsed, &limits, cleanup)
 }
 
 /// The probe starts the drain grace after a terminal stdout event.

@@ -51,15 +51,11 @@ impl CredentialVerifier {
         presented: &BTreeMap<String, String>,
     ) -> Result<(), &'static str> {
         let key = self.key.get().ok_or("credential_snapshot_mismatch")?;
-        let harness_name = match harness {
-            Harness::OpenCode => "opencode",
-            Harness::Pi => "pi",
-        };
-        let canonical = subprocess::canonical_provider(harness_name, provider)
+        let canonical = subprocess::canonical_provider(harness.as_str(), provider)
             .map_err(|error| error.subreason())?;
         let expected = self
             .env
-            .credential_fingerprint(key, harness_name, provider)
+            .credential_fingerprint(key, harness.as_str(), provider)
             .map_err(|error| error.subreason())?;
         let actual = presented
             .get(canonical)

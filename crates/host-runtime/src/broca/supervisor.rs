@@ -473,7 +473,6 @@ impl Supervisor {
 
     /// Cancels a live run, waits for its task, purges replay and charges, and installs a bounded tombstone.
     /// Delete installs a bounded tombstone; a second delete has no effect.
-    /// side-effect free.
     pub async fn delete(&self, key: &SessionKey) -> Result<(), RequestError> {
         let _command = self.command_permit()?;
         let run = {
@@ -503,6 +502,12 @@ impl Supervisor {
 
         let mut released = Released::default();
         let mut index = lock_index(&self.inner);
+        // Shutdown may have drained the index during the wait; never publish state into a closed index.
+        // `reserved_tombstone` releases its bytes on drop.
+        if index.closed {
+            drop(index);
+            return Err(closed_error());
+        }
         // Only the delete that still owns `run` purges it, preventing double release.
         let same_run = matches!(
             index.sessions.get(key),
@@ -537,7 +542,6 @@ impl Supervisor {
             // Use the reservation taken before the wait because the removed run's charges have already been released.
             // Install an uncharged tombstone if both charge attempts fail rather than omit the deletion guard.
             // Do not replace a different live run; it was installed after this run was removed.
-            // tombstone.
             let charge = reserved_tombstone
                 .or_else(|| self.inner.retained.try_charge(key.meta_bytes()))
                 .unwrap_or_else(ByteCharge::none);
@@ -592,7 +596,6 @@ impl Supervisor {
         let mut state = lock_run(&run);
         if state.subscriber_count >= self.inner.limits.max_subscribers_per_run {
             // The total permit drops after the guards, so rejecting a run cannot leak a total slot.
-            // The total permit drops after the guards, so rejecting a run cannot leak a total slot.
             return Err(app(
                 "queue_full",
                 "per-run subscriber capacity is exhausted",
@@ -612,12 +615,10 @@ impl Supervisor {
     /// Drains everything:
     /// Shutdown cancels queued and running backend work, waits for all run tasks, wakes every subscriber, and releases retained state.
     /// After shutdown, the metrics snapshot equals the construction baseline.
-    /// After shutdown, the metrics snapshot equals the construction baseline.
     ///
     /// Returns the number of runs with unproven process-group teardown in `work_unresolved`.
     /// Local state is released even when process-group teardown is unproven.
     /// A drained supervisor does not prove that harness process trees stopped.
-    /// The component must not report a clean shutdown while provider work may still be running.
     /// The component must not report a clean shutdown while provider work may still be running.
     pub async fn shutdown(&self) -> usize {
         let inner = &self.inner;

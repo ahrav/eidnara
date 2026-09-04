@@ -344,7 +344,7 @@ mod fixture {
             leader,
         )
         .expect("record leader group");
-        std::mem::forget(record);
+        drop(record);
         std::process::exit(0);
     }
 
@@ -3207,7 +3207,7 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
         "the sweep must not touch a live host's group"
     );
 
-    drop(survivor_record);
+    survivor_record.remove();
     let _ = survivor.kill();
     let _ = survivor.wait();
 

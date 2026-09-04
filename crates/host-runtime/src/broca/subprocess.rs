@@ -24,7 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 use super::backend::{
-    BackendError, BackendEvent, BackendTerminal, ErrorClass, EventSink, SinkStatus,
+    BackendError, BackendEvent, BackendTerminal, ErrorClass, EventSink, Harness, SinkStatus,
 };
 
 /// Every child environment excludes the host launch-identity variables.
@@ -324,7 +324,10 @@ pub async fn run(
         .process_group(0)
         // Ordinary paths reap explicitly; `Drop` is only a backstop.
         .kill_on_drop(true);
-    // On Linux, `pdeathsig` asks the kernel to SIGKILL the leader when its parent process dies.
+    // On Linux, `pdeathsig` (`PR_SET_PDEATHSIG`) asks the kernel to SIGKILL the leader when the
+    // *thread* that forked it exits, not merely the parent process. `command.spawn()` below must
+    // therefore run on a long-lived runtime worker thread; moving it onto `spawn_blocking` would
+    // SIGKILL live leaders when the blocking thread retires.
     // Drop cleanup does not run after SIGKILL.
     // `pdeathsig` applies only to the leader.
     // The startup sweep in [`group_registry`] handles descendants that survive the leader.
@@ -364,10 +367,6 @@ pub async fn run(
     // Dropping `command` and `env` releases their environment-sized allocations before concurrent runs continue.
     drop(command);
     drop(env);
-    drop(args);
-    drop(executable);
-    drop(working_dir);
-    drop(inherit_fds);
     // With process_group(0) the leader's pid IS the group id.
     let group = child
         .id()
@@ -551,16 +550,15 @@ pub async fn run(
             }
         }
     };
-    // The host retains the record while descendants may still be running.
+    // The record is removed only once the group is proven gone; otherwise the host retains it for a later sweep.
     let end = if group_gone {
+        if let Some(record) = group_record.take() {
+            record.remove();
+        }
         end
     } else {
-        if let Some(record) = group_record.take() {
-            record.retain();
-        }
         SubprocessEnd::TeardownUnconfirmed
     };
-    drop(group_record);
 
     // The timeout bounds the write when a surviving process retains stdin.
     // An incomplete write sets `prompt_delivered` to false.
@@ -908,7 +906,7 @@ impl std::fmt::Display for RegistrationTeardownUnproven {
 
 impl std::error::Error for RegistrationTeardownUnproven {}
 
-pub(crate) fn spawn_failure(harness: HarnessName, err: &io::Error) -> BackendTerminal {
+pub(crate) fn spawn_failure(harness: Harness, err: &io::Error) -> BackendTerminal {
     if err
         .get_ref()
         .is_some_and(|inner| inner.is::<RegistrationTeardownUnproven>())
@@ -918,7 +916,7 @@ pub(crate) fn spawn_failure(harness: HarnessName, err: &io::Error) -> BackendTer
             message: format!(
                 "{} backend crash-ownership registration failed; the \
                  process group could not be confirmed stopped",
-                harness.name()
+                harness.as_str()
             ),
             retry_after_secs: None,
             provider_code: None,
@@ -931,8 +929,8 @@ pub(crate) fn spawn_failure(harness: HarnessName, err: &io::Error) -> BackendTer
     BackendTerminal::Failed(BackendError {
         class,
         message: format!(
-            "{} backend executable could not be spawned ({})",
-            harness.name(),
+            "{} backend run could not start ({})",
+            harness.as_str(),
             err.kind()
         ),
         retry_after_secs: None,
@@ -940,50 +938,31 @@ pub(crate) fn spawn_failure(harness: HarnessName, err: &io::Error) -> BackendTer
     })
 }
 
-pub(crate) fn credential_failure(
-    harness: HarnessName,
-    error: CredentialRowError,
-) -> BackendTerminal {
+pub(crate) fn credential_failure(harness: Harness, error: CredentialRowError) -> BackendTerminal {
     harness_unavailable_failure(harness, error.subreason())
 }
 
 pub(crate) fn harness_unavailable_failure(
-    harness: HarnessName,
+    harness: Harness,
     reason: &'static str,
 ) -> BackendTerminal {
     BackendTerminal::Failed(BackendError {
         class: ErrorClass::Permanent,
-        message: format!("{} harness_unavailable: {}", harness.name(), reason),
+        message: format!("{} harness_unavailable: {}", harness.as_str(), reason),
         retry_after_secs: None,
         provider_code: None,
     })
 }
 
-/// A name carrier prevents shared diagnostics from formatting request content.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum HarnessName {
-    OpenCode,
-    Pi,
-}
-
-impl HarnessName {
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::OpenCode => "opencode",
-            Self::Pi => "pi",
-        }
-    }
-}
-
 /// The parser returns `None` for ends it should interpret from the transcript.
 /// Classification may use bounded stderr for the error class but never quote child output.
 pub(crate) fn abnormal_end_terminal(
-    harness: HarnessName,
+    harness: Harness,
     end: SubprocessEnd,
     stderr: &[u8],
     limits: &SubprocessLimits,
 ) -> Option<BackendTerminal> {
-    let name = harness.name();
+    let name = harness.as_str();
     let error = match end {
         SubprocessEnd::Exited(0) | SubprocessEnd::DrainKilled => return None,
         SubprocessEnd::Exited(code) => {
@@ -1045,10 +1024,10 @@ pub(crate) fn abnormal_end_terminal(
 }
 
 /// A bounded parse failure records structural position, never line content.
-pub(crate) fn parse_failure(harness: HarnessName, detail: &str) -> BackendTerminal {
+pub(crate) fn parse_failure(harness: Harness, detail: &str) -> BackendTerminal {
     BackendTerminal::Failed(BackendError {
         class: ErrorClass::Permanent,
-        message: format!("{} backend output rejected: {detail}", harness.name()),
+        message: format!("{} backend output rejected: {detail}", harness.as_str()),
         retry_after_secs: None,
         provider_code: None,
     })
@@ -1289,7 +1268,7 @@ pub(crate) fn parse_clean_transcript(
 /// Abnormal ends take precedence over parsed terminals and parse failures.
 /// `finalize` merges cleanup last so cleanup failures are observable on every path.
 pub(crate) fn finalize(
-    harness: HarnessName,
+    harness: Harness,
     result: &SubprocessResult,
     parsed: Result<BackendTerminal, String>,
     limits: &SubprocessLimits,
@@ -1340,7 +1319,10 @@ pub mod group_registry {
     fn proc_stat_fields(pid: i32) -> io::Result<Option<(char, u64)>> {
         let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
-            Err(err) if pid_vanished(&err) => return Ok(None),
+            Err(err) if pid_vanished(&err) || err.kind() == io::ErrorKind::PermissionDenied => {
+                // A recycled PID owned by another user is not this host's process; treat it as gone, as `scan_group_members` does.
+                return Ok(None);
+            }
             Err(err) => return Err(err),
         };
         let unreadable = || io::Error::other("unreadable /proc stat format");
@@ -1506,7 +1488,8 @@ pub mod group_registry {
         }
     }
 
-    /// Holding `GroupRecord` through spawning removes its file on `Drop` after in-process reaping, so the crash record cannot outlive the group.
+    /// The holder calls [`GroupRecord::remove`] once the group is proven gone; a record that is
+    /// merely dropped stays on disk so a later host sweep can still find surviving descendants.
     pub struct GroupRecord {
         path: PathBuf,
     }
@@ -1548,14 +1531,8 @@ pub mod group_registry {
     }
 
     impl GroupRecord {
-        /// The caller retains the record if it cannot prove the group has exited; a later host sweep removes it.
-        pub fn retain(self) {
-            std::mem::forget(self);
-        }
-    }
-
-    impl Drop for GroupRecord {
-        fn drop(&mut self) {
+        /// Remove the record after the group is proven to have exited.
+        pub fn remove(self) {
             let _ = fs::remove_file(&self.path);
         }
     }
