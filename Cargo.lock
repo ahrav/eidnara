@@ -729,6 +729,7 @@ dependencies = [
  "base64",
  "fancy-regex",
  "proptest",
+ "regex-syntax",
  "rustc-hash",
  "serde",
  "serde_json",
