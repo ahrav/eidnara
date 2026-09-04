@@ -12,11 +12,15 @@ description = "Claude byte-BPE token counting, matching ai-tokenizer's claude en
 # Exact pin: the golden test pins token ids that depend on `CoreBPE`'s merge loop, so a patch
 # release must not move under it. Bump deliberately and rerun `tests/token_golden.rs`.
 tiktoken-rs = "=0.11.0"
-fancy-regex = "0.17"
 base64 = "0.22"
 rustc-hash = "1.1"
 
 [dev-dependencies]
+# The reference pre-tokenizer (`src/reference_impl.rs`) and the pattern drift tests.
+fancy-regex = "0.17"
 serde = { workspace = true }
 serde_json = { workspace = true }
 proptest = "1.11"
+# Same crate the reference regex resolves; `unicode_tables_match_regex_syntax` pins the tables
+# to its Unicode version.
+regex-syntax = "0.8"
