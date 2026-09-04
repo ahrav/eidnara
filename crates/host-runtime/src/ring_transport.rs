@@ -912,9 +912,19 @@ impl RingClientEndpoint {
                 ProducerError::Deadline => SendFailure::Deadline,
                 _ => SendFailure::Unreserved,
             })?;
-        reservation.write(body).map_err(|_| SendFailure::Reserved)?;
+        // A failed `write` aborts the reservation, so nothing was published.
+        reservation
+            .write(body)
+            .map_err(|_| SendFailure::Unreserved)?;
         if StdInstant::now() >= frame_deadline {
             return Err(SendFailure::Deadline);
+        }
+        // `commit` aborts on a quarantined ring without publishing, but its error does not say
+        // whether the quarantine was seen before or after publication. Checking here first
+        // classifies the common pre-commit case as zero-byte; only a quarantine that lands
+        // between this check and `commit` stays ambiguous.
+        if self.to_host.is_quarantined() {
+            return Err(SendFailure::Unreserved);
         }
         reservation
             .commit(body.len())
@@ -979,9 +989,9 @@ pub struct RingClientError;
 pub enum SendFailure {
     /// The ring stayed full until the reservation deadline, or the frame deadline passed before commit; no bytes were published and a later attempt can succeed.
     Deadline,
-    /// `reserve_until` failed for a reason a retry cannot clear, such as a quarantined ring; no bytes reached the ring.
+    /// The frame was aborted before publication for a reason a retry cannot clear, such as a quarantined ring or a body that does not fit its reservation; no bytes were published.
     Unreserved,
-    /// A reservation existed when the write or commit failed.
+    /// `commit` failed and may have published the frame.
     Reserved,
 }
 

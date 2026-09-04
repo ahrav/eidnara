@@ -411,6 +411,7 @@ impl Client {
             pending: Mutex::new(HashMap::new()),
             streams: Mutex::new(0),
             routes: Mutex::new(HashSet::new()),
+            torn_down: Mutex::new(VecDeque::new()),
             queue_budget: Arc::new(ByteCounter::new(CLIENT_DATA_QUEUED_BYTES)),
             control_budget: Arc::new(ByteCounter::new(CLIENT_CONTROL_QUEUED_BYTES)),
             _read_budget: read_budget,
@@ -519,6 +520,16 @@ impl Client {
                                 SendOutcome::OutcomeUnknown,
                                 "client_closed",
                                 "client is closed",
+                            ));
+                        }
+                        // A route `Goodbye` that raced this insert already settled the route on the host.
+                        let mut torn_down = lock_unpoisoned(&self.inner.torn_down);
+                        if let Some(index) = torn_down.iter().position(|torn| *torn == handle) {
+                            torn_down.remove(index);
+                            return Err(CallError::local(
+                                SendOutcome::Terminal,
+                                "route_gone",
+                                "host closed the route before it was published",
                             ));
                         }
                         routes.insert(handle);
@@ -908,10 +919,17 @@ impl PendingKey {
     }
 }
 
+/// Publication states of one queued request.
+///
+/// `QUEUED` → `HANDED` when the writer takes the frame; `HANDED` → `WRITING` when the
+/// bridge thread starts the ring write. A frame in `HANDED` sits in the bridge's channel
+/// and has provably not reached the ring, so it classifies `NotSent` like `QUEUED`;
+/// only `WRITING` and `WRITTEN` are publication-ambiguous.
 const QUEUED: u8 = 0;
 const WRITING: u8 = 1;
 const WRITTEN: u8 = 2;
 const CANCELLED: u8 = 3;
+const HANDED: u8 = 4;
 
 /// Indicates whether `stop` removed the pending entry.
 ///
@@ -967,6 +985,12 @@ struct Inner {
     pending: Mutex<HashMap<PendingKey, PendingState>>,
     streams: Mutex<usize>,
     routes: Mutex<HashSet<RouteHandle>>,
+    /// Route `Goodbye`s that matched no cached handle. A `Goodbye` can arrive after
+    /// the bind response wakes `open_route` but before it inserts the handle; the
+    /// insert consults this under the `routes` lock and refuses a route the host
+    /// already closed. Bounded to `CLIENT_MAX_PENDING_REQUESTS`, the most opens
+    /// that can be awaiting insertion; older entries fall off.
+    torn_down: Mutex<VecDeque<RouteHandle>>,
     queue_budget: Arc<ByteCounter>,
     /// The client reserves queue capacity for header-only control frames so data traffic cannot starve Pong, Cancel, or Goodbye.
     control_budget: Arc<ByteCounter>,
@@ -1291,15 +1315,7 @@ impl Inner {
         let Some(state) = state else {
             return Ok(PendingRemoval::AlreadyTaken);
         };
-        let outcome = if state
-            .publish
-            .compare_exchange(QUEUED, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            SendOutcome::NotSent
-        } else {
-            SendOutcome::OutcomeUnknown
-        };
+        let outcome = cancel_classification(&state.publish);
         self.finish_pending(state, CallError::local(outcome, code, "request stopped"));
         if outcome == SendOutcome::OutcomeUnknown {
             // Control requests use identity 0/0, but §6.2 permits `Cancel` only for a pending nonzero correlation on a current nonzero route.
@@ -1416,7 +1432,7 @@ impl Inner {
                     channel: header.channel,
                     epoch: header.epoch,
                 };
-                self.settle_route(route);
+                self.settle_route_from_host(route);
             }
             FrameType::Push => {}
             FrameType::Response | FrameType::Error | FrameType::StreamEnd => {
@@ -1431,7 +1447,12 @@ impl Inner {
                                 epoch: header.epoch,
                                 corr: header.corr,
                             };
-                            if let Some(state) = lock_unpoisoned(&self.pending).remove(&key) {
+                            // The matching entry is taken first so `retire` cannot settle it
+                            // under a generic code, and `retire` runs before the caller wakes
+                            // so a woken task cannot admit new work after the violation.
+                            let state = lock_unpoisoned(&self.pending).remove(&key);
+                            self.retire("protocol_violation");
+                            if let Some(state) = state {
                                 self.finish_pending(
                                     state,
                                     CallError::local(
@@ -1441,7 +1462,6 @@ impl Inner {
                                     ),
                                 );
                             }
-                            self.retire("protocol_violation");
                             return;
                         }
                     }
@@ -1677,12 +1697,31 @@ impl Inner {
     /// `settle_all` also sends no `Cancel` frames.
     /// reason.
     fn settle_route(&self, route: RouteHandle) -> bool {
+        self.settle_route_inner(route, false)
+    }
+
+    /// A host route `Goodbye` for a handle not in the cache is remembered so a bind
+    /// response already delivered to `open_route` cannot publish the dead handle.
+    fn settle_route_from_host(&self, route: RouteHandle) {
+        self.settle_route_inner(route, true);
+    }
+
+    fn settle_route_inner(&self, route: RouteHandle, remember_unmatched: bool) -> bool {
         let pending = {
             let _admission = lock_unpoisoned(&self.admission);
             let mut pending = lock_unpoisoned(&self.pending);
-            if !lock_unpoisoned(&self.routes).remove(&route) {
+            let mut routes = lock_unpoisoned(&self.routes);
+            if !routes.remove(&route) {
+                if remember_unmatched {
+                    let mut torn_down = lock_unpoisoned(&self.torn_down);
+                    if torn_down.len() >= CLIENT_MAX_PENDING_REQUESTS {
+                        torn_down.pop_front();
+                    }
+                    torn_down.push_back(route);
+                }
                 return false;
             }
+            drop(routes);
             let keys: Vec<_> = pending
                 .keys()
                 .copied()
@@ -1978,15 +2017,26 @@ struct QueuedFrame {
     expires: Instant,
 }
 
+/// How the bridge disposed of one frame without a transport failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Publication {
+    Published,
+    /// The frame was cancelled or settled while it waited in the channel; nothing was written.
+    Skipped,
+    /// The operation deadline passed before commit; nothing was published and the generation stays live.
+    Expired,
+}
+
 struct RingWrite {
     header: EnvelopeHeader,
     body: Vec<u8>,
     /// `min(expires, deadline)`: the bridge neither waits for capacity nor commits past it.
     commit_by: StdInstant,
-    /// The bridge resets this to `QUEUED` before it reports a zero-byte failure, so a
-    /// cancellation that observes the failure never classifies the request `OutcomeUnknown`.
+    /// The bridge moves this `HANDED` → `WRITING` before the first ring attempt and back to
+    /// `QUEUED` before it reports a zero-byte failure, so a cancellation that observes either
+    /// classifies the request `NotSent`.
     publish: Option<Arc<AtomicU8>>,
-    completed: oneshot::Sender<Result<(), SendFailure>>,
+    completed: oneshot::Sender<Result<Publication, SendFailure>>,
     deadline: StdInstant,
 }
 
@@ -2106,7 +2156,17 @@ async fn start_ring_bridge(
                 let mut wrote = false;
                 if pending.is_none() {
                     match write_rx.try_recv() {
-                        Ok(write) => pending = Some(write),
+                        Ok(write) => {
+                            if write
+                                .publish
+                                .as_ref()
+                                .is_some_and(|state| !claim_for_publish(state))
+                            {
+                                let _ = write.completed.send(Ok(Publication::Skipped));
+                            } else {
+                                pending = Some(write);
+                            }
+                        }
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
                         Err(std::sync::mpsc::TryRecvError::Empty) => {}
                     }
@@ -2141,18 +2201,31 @@ async fn start_ring_bridge(
                         Some(result) => {
                             // An operation that expired before its connection-scoped frame
                             // deadline fails alone; the bridge keeps serving other frames.
-                            let per_call_expiry = matches!(result, Err(SendFailure::Deadline))
-                                && StdInstant::now() < write.deadline;
-                            let failed = result.is_err() && !per_call_expiry;
+                            let result = match result {
+                                Ok(()) => Ok(Publication::Published),
+                                Err(SendFailure::Deadline)
+                                    if StdInstant::now() < write.deadline =>
+                                {
+                                    Ok(Publication::Expired)
+                                }
+                                Err(failure) => Err(failure),
+                            };
                             if matches!(
                                 result,
-                                Err(SendFailure::Deadline | SendFailure::Unreserved)
+                                Ok(Publication::Expired)
+                                    | Err(SendFailure::Deadline | SendFailure::Unreserved)
                             ) && let Some(state) = &write.publish
                             {
                                 // Zero bytes were published; the state is restored before the
-                                // failure is observable so a concurrent stop classifies `NotSent`.
-                                state.store(QUEUED, Ordering::Release);
+                                // outcome is observable so a concurrent stop classifies `NotSent`.
+                                let _ = state.compare_exchange(
+                                    WRITING,
+                                    QUEUED,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                );
                             }
+                            let failed = result.is_err();
                             let _ = write.completed.send(result);
                             if failed {
                                 break;
@@ -2292,8 +2365,7 @@ struct InFlight {
     ack: Option<oneshot::Sender<()>>,
     charge: ByteCharge,
     deadline: Instant,
-    expires: Instant,
-    completed: oneshot::Receiver<Result<(), SendFailure>>,
+    completed: oneshot::Receiver<Result<Publication, SendFailure>>,
 }
 
 async fn writer_loop(
@@ -2303,19 +2375,17 @@ async fn writer_loop(
     mut control_rx: mpsc::Receiver<QueuedFrame>,
 ) {
     let mut window: VecDeque<InFlight> = VecDeque::with_capacity(WRITER_WINDOW);
-    // Frames behind a failed head never reached the bridge's `try_recv`; they return to `QUEUED`.
-    let fail =
-        |inner: &Inner, window: &mut VecDeque<InFlight>, head_not_sent: Option<&InFlight>| {
-            if let Some(state) = head_not_sent.and_then(|h| h.publish.as_ref()) {
-                state.store(QUEUED, Ordering::Release);
-            }
-            for rest in window.drain(..) {
-                if let Some(state) = &rest.publish {
-                    state.store(QUEUED, Ordering::Release);
-                }
-            }
-            inner.retire("write_failed");
-        };
+    // Frames behind a failed head are still `HANDED` in the bridge channel and classify
+    // `NotSent` on their own; only a head the bridge reported as zero-byte needs resetting.
+    let fail = |inner: &Inner,
+                window: &mut VecDeque<InFlight>,
+                head_not_sent: Option<&InFlight>| {
+        if let Some(state) = head_not_sent.and_then(|h| h.publish.as_ref()) {
+            let _ = state.compare_exchange(WRITING, QUEUED, Ordering::AcqRel, Ordering::Acquire);
+        }
+        window.clear();
+        inner.retire("write_failed");
+    };
     loop {
         let next = if window.len() < WRITER_WINDOW {
             if let Ok(frame) = control_rx.try_recv() {
@@ -2375,7 +2445,6 @@ async fn writer_loop(
                 ack: frame.ack,
                 charge: frame.charge,
                 deadline: frame.deadline,
-                expires: frame.expires,
                 completed: completed_rx,
             });
             continue;
@@ -2389,15 +2458,10 @@ async fn writer_loop(
             result = timeout_at(head.deadline, &mut head.completed) => result,
         };
         match written {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(SendFailure::Deadline)))
-                if Instant::now() >= head.expires && Instant::now() < head.deadline =>
-            {
-                // The operation expired before publication: this frame alone is a zero-byte
-                // failure. Its caller was already settled by its own deadline watcher.
-                if let Some(state) = &head.publish {
-                    state.store(QUEUED, Ordering::Release);
-                }
+            Ok(Ok(Ok(Publication::Published))) => {}
+            Ok(Ok(Ok(Publication::Skipped | Publication::Expired))) => {
+                // Nothing was published; the bridge already left the state `NotSent`-classified
+                // and the caller was settled by whoever cancelled it or by its deadline watcher.
                 drop(head.charge);
                 continue;
             }
@@ -2662,16 +2726,24 @@ fn parse_route_open(body: &[u8]) -> Result<RouteHandle, CallError> {
     Ok(RouteHandle { channel, epoch })
 }
 
+/// The writer takes a queued frame for the bridge.
 fn claim_for_write(state: &AtomicU8) -> bool {
     state
-        .compare_exchange(QUEUED, WRITING, Ordering::AcqRel, Ordering::Acquire)
+        .compare_exchange(QUEUED, HANDED, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+/// The bridge starts the ring write. A failure means the frame was cancelled or settled while
+/// it waited in the channel; the bridge then skips it without publishing.
+fn claim_for_publish(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(HANDED, WRITING, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
 }
 
 fn classify(state: &AtomicU8) -> SendOutcome {
     match state.load(Ordering::Acquire) {
-        QUEUED | CANCELLED => SendOutcome::NotSent,
-        WRITING | WRITTEN => SendOutcome::OutcomeUnknown,
+        QUEUED | HANDED | CANCELLED => SendOutcome::NotSent,
         _ => SendOutcome::OutcomeUnknown,
     }
 }
@@ -2680,6 +2752,9 @@ fn cancel_classification(state: &AtomicU8) -> SendOutcome {
     if state
         .compare_exchange(QUEUED, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
+        || state
+            .compare_exchange(HANDED, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     {
         SendOutcome::NotSent
     } else {
@@ -2748,6 +2823,7 @@ mod tests {
                 pending: Mutex::new(HashMap::new()),
                 streams: Mutex::new(0),
                 routes: Mutex::new(HashSet::from([route(1), route(2)])),
+                torn_down: Mutex::new(VecDeque::new()),
                 queue_budget: Arc::new(ByteCounter::new(queued_bytes)),
                 control_budget: Arc::new(ByteCounter::new(CLIENT_CONTROL_QUEUED_BYTES)),
                 _read_budget: Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
@@ -2778,6 +2854,11 @@ mod tests {
             },
             _charge: ByteCharge::none(),
         }
+    }
+
+    /// Simulates the writer handing a frame to the bridge and the bridge starting its write.
+    fn bridge_claims(state: &AtomicU8) -> bool {
+        claim_for_write(state) && claim_for_publish(state)
     }
 
     fn unary_sender() -> (PendingKind, oneshot::Receiver<UnaryTerminal>) {
@@ -2968,7 +3049,7 @@ mod tests {
         let error = rx.await.expect("settled").expect_err("cancelled");
         assert_eq!(error.outcome(), SendOutcome::NotSent);
         assert_eq!(publish.load(Ordering::Acquire), CANCELLED);
-        assert!(!claim_for_write(&publish));
+        assert!(!bridge_claims(&publish));
         assert!(control_rx.try_recv().is_err(), "not-sent needs no Cancel");
 
         let (write, writes) = fake_ring_writer();
@@ -2999,7 +3080,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(1),
             )
             .expect("admitted");
-        assert!(claim_for_write(&publish), "writer wins QUEUED CAS");
+        assert!(bridge_claims(&publish), "writer wins QUEUED CAS");
         inner.cancel_key(key, "cancelled").expect("cancel writing");
         let error = rx.await.expect("settled").expect_err("cancelled");
         assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
@@ -3012,7 +3093,7 @@ mod tests {
     }
 
     fn fake_ring_writer() -> (RingWriteSender, std::sync::mpsc::Receiver<RingWrite>) {
-        let (tx, writes) = std::sync::mpsc::sync_channel(1);
+        let (tx, writes) = std::sync::mpsc::sync_channel(WRITER_WINDOW);
         let wake = Arc::new(
             rustix::event::eventfd(
                 0,
@@ -3047,7 +3128,7 @@ mod tests {
         })
         .await
         .expect("bridge receive task");
-        assert_eq!(publish.load(Ordering::Acquire), WRITING);
+        assert!(claim_for_publish(&publish), "the bridge starts the write");
         ring_write
             .completed
             .send(Err(failure))
@@ -3079,10 +3160,17 @@ mod tests {
         .await
         .expect("bridge receive task");
         assert_eq!(ring_write.commit_by, expires.into_std());
+        assert!(claim_for_publish(&publish), "the bridge starts the write");
         tokio::time::sleep_until(expires + Duration::from_millis(5)).await;
+        // The bridge restores `QUEUED` before it reports the expiry.
+        assert!(
+            publish
+                .compare_exchange(WRITING, QUEUED, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        );
         ring_write
             .completed
-            .send(Err(SendFailure::Deadline))
+            .send(Ok(Publication::Expired))
             .expect("writer awaits completion");
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
@@ -3092,6 +3180,140 @@ mod tests {
         assert_eq!(publish.load(Ordering::Acquire), QUEUED);
         inner.cancel.cancel();
         writer.await.expect("writer exits on cancel");
+    }
+
+    #[tokio::test]
+    async fn retirement_settles_frames_waiting_behind_a_blocked_head_as_not_sent() {
+        // Frames the writer handed to the bridge but the bridge has not started are `HANDED`, which proves zero bytes reached the ring.
+        let (inner, data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut receivers = Vec::new();
+        let mut publishes = Vec::new();
+        for _ in 0..3 {
+            let (kind, rx) = unary_sender();
+            let (_key, publish) = inner
+                .admit(route(1), Vec::new(), false, kind, deadline)
+                .expect("admitted");
+            receivers.push(rx);
+            publishes.push(publish);
+        }
+        let (write, writes) = fake_ring_writer();
+        let writer_inner = Arc::clone(&inner);
+        let writer = tokio::spawn(async move {
+            writer_loop(writer_inner, write, data_rx, control_rx).await;
+        });
+        // The bridge takes the head and blocks on ring capacity; the rest wait in its channel.
+        let head = tokio::task::spawn_blocking(move || {
+            let head = writes
+                .recv_timeout(Duration::from_secs(2))
+                .expect("writer hands the head to the bridge");
+            (head, writes)
+        })
+        .await
+        .expect("bridge receive task");
+        let (head, writes) = head;
+        assert!(claim_for_publish(&publishes[0]));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(publishes[1].load(Ordering::Acquire), HANDED);
+        assert_eq!(publishes[2].load(Ordering::Acquire), HANDED);
+
+        inner.retire("connection_goodbye");
+        let mut outcomes = Vec::new();
+        for rx in receivers {
+            outcomes.push(rx.await.expect("settled").expect_err("retired").outcome());
+        }
+        assert_eq!(
+            outcomes[0],
+            SendOutcome::OutcomeUnknown,
+            "the head may have been written"
+        );
+        assert_eq!(outcomes[1], SendOutcome::NotSent);
+        assert_eq!(outcomes[2], SendOutcome::NotSent);
+        drop(head);
+        drop(writes);
+        writer.await.expect("writer exits on cancel");
+    }
+
+    #[tokio::test]
+    async fn a_frame_cancelled_while_handed_is_skipped_by_the_bridge() {
+        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let (kind, rx) = unary_sender();
+        let (key, publish) = inner
+            .admit(
+                route(1),
+                Vec::new(),
+                false,
+                kind,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("admitted");
+        assert!(claim_for_write(&publish), "the writer takes the frame");
+        inner.cancel_key(key, "cancelled").expect("cancel");
+        let error = rx.await.expect("settled").expect_err("cancelled");
+        assert_eq!(
+            error.outcome(),
+            SendOutcome::NotSent,
+            "a handed frame has not reached the ring"
+        );
+        assert!(
+            !claim_for_publish(&publish),
+            "the bridge must skip a cancelled frame"
+        );
+        inner.retire("test_done");
+    }
+
+    #[tokio::test]
+    async fn a_route_goodbye_that_races_the_bind_is_not_published() {
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let bound = RouteHandle {
+            channel: 9,
+            epoch: 3,
+        };
+        // The host closes the route while the bind response is in flight to `open_route`.
+        inner.settle_route_from_host(bound);
+        let responder_inner = Arc::clone(&inner);
+        let responder = tokio::spawn(async move {
+            let frame = data_rx.recv().await.expect("route.open request");
+            let body = serde_json::to_vec(&serde_json::json!({
+                "op": "route.open",
+                "route_channel": bound.channel,
+                "route_epoch": bound.epoch,
+            }))
+            .expect("body encodes");
+            responder_inner.dispatch(
+                EnvelopeHeader {
+                    len: u32::try_from(body.len()).expect("fits"),
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType::Response,
+                    flags: response_flags(false, false),
+                    channel: 0,
+                    epoch: 0,
+                    corr: frame.header.corr,
+                },
+                body,
+                ByteCharge::none(),
+            );
+        });
+        let client = Client {
+            inner: Arc::clone(&inner),
+        };
+        let target = RouteTarget {
+            kind: TargetKind::ToolProvider,
+            module_id: "context".to_owned(),
+        };
+        let error = client
+            .open_route(target, identity_fixture())
+            .await
+            .expect_err("a route the host already closed is not published");
+        assert_eq!(error.code(), "route_gone");
+        assert_eq!(error.outcome(), SendOutcome::Terminal);
+        assert!(!lock_unpoisoned(&inner.routes).contains(&bound));
+        assert!(
+            lock_unpoisoned(&inner.torn_down).is_empty(),
+            "the record is consumed"
+        );
+        responder.await.expect("responder");
+        drop(client);
     }
 
     #[tokio::test]
@@ -3145,7 +3367,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(1),
             )
             .expect("admitted");
-        assert!(claim_for_write(&publish), "writer claims the request");
+        assert!(bridge_claims(&publish), "writer claims the request");
         // Retiring without draining pending makes the best-effort `Cancel` enqueue fail with `NotSent`.
         inner.retired.store(true, Ordering::Release);
 
@@ -3238,7 +3460,7 @@ mod tests {
                 )
                 .expect("admitted");
             // Claiming a request classifies its settlement as possibly sent, which requires a `Cancel`.
-            assert!(claim_for_write(&publish));
+            assert!(bridge_claims(&publish));
             drop(data_rx.recv().await);
         }
 
@@ -3531,7 +3753,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(60),
             )
             .expect("admitted");
-        assert!(claim_for_write(&publish), "the writer claimed the request");
+        assert!(bridge_claims(&publish), "the writer claimed the request");
         drop(data_rx.recv().await);
 
         // A concurrent stop cannot enqueue `Cancel` after the terminal becomes observable.
@@ -3570,7 +3792,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(60),
             )
             .expect("admitted");
-        assert!(claim_for_write(&publish), "the writer claimed the request");
+        assert!(bridge_claims(&publish), "the writer claimed the request");
         drop(data_rx.recv().await);
 
         let state = lock_unpoisoned(&inner.pending)
@@ -3614,7 +3836,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(60),
             )
             .expect("admitted");
-        assert!(claim_for_write(&publish), "the writer claimed the request");
+        assert!(bridge_claims(&publish), "the writer claimed the request");
         drop(data_rx.recv().await);
         drop(
             lock_unpoisoned(&inner.pending)
@@ -3746,7 +3968,7 @@ mod tests {
         let frame = data_rx.recv().await.expect("request admitted");
         let publish = frame.publish.as_ref().expect("data publication state");
         assert!(
-            claim_for_write(publish),
+            bridge_claims(publish),
             "simulate stalled writer after claim"
         );
         request.abort();
@@ -4082,7 +4304,7 @@ mod tests {
         // The host streams items only after receiving the request.
         // The writer has claimed the request before the host streams items.
         // `OutcomeUnknown` emits the `Cancel` frame.
-        assert!(claim_for_write(&publish), "the writer claimed the request");
+        assert!(bridge_claims(&publish), "the writer claimed the request");
         drop(data_rx.recv().await);
 
         let mut stream = ResponseStream {
@@ -4161,7 +4383,7 @@ mod tests {
         // The host answers only a request it received, so the writer claimed it.
         // The writer's claim makes the abandonment `OutcomeUnknown`.
         // Identity 0/0 has no legal `Cancel`.
-        assert!(claim_for_write(&publish), "the writer claimed the request");
+        assert!(bridge_claims(&publish), "the writer claimed the request");
         drop(data_rx.recv().await);
 
         let removal = inner
@@ -4235,7 +4457,7 @@ mod tests {
             )
             .expect("control request admitted");
         let guard = UnaryAdmissionGuard::new(Arc::clone(&inner), key, rx);
-        assert!(claim_for_write(&publish));
+        assert!(bridge_claims(&publish));
         drop(data_rx.recv().await);
 
         let bound = RouteHandle {
@@ -4295,7 +4517,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(60),
             )
             .expect("control request admitted");
-        assert!(claim_for_write(&publish));
+        assert!(bridge_claims(&publish));
         drop(data_rx.recv().await);
         drop(rx);
 
@@ -4400,7 +4622,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(60),
             )
             .expect("stream admitted");
-        assert!(claim_for_write(&publish), "the writer claimed the request");
+        assert!(bridge_claims(&publish), "the writer claimed the request");
         drop(data_rx.recv().await);
         let mut stream = ResponseStream {
             inner: Arc::downgrade(&inner),
@@ -4480,7 +4702,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(60),
             )
             .expect("stream admitted");
-        assert!(claim_for_write(&publish), "the writer claimed the request");
+        assert!(bridge_claims(&publish), "the writer claimed the request");
         drop(data_rx.recv().await);
         let stream = ResponseStream {
             inner: Arc::downgrade(&inner),
@@ -4844,7 +5066,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(5),
             )
             .expect("admitted");
-        assert!(claim_for_write(&publish));
+        assert!(bridge_claims(&publish));
         drop(data_rx.recv().await);
         let body = b"{\"message\":\"no code\"}".to_vec();
         inner.dispatch(
@@ -4991,7 +5213,7 @@ mod tests {
         let (first, publish) = inner
             .admit(route(1), Vec::new(), false, kind, deadline)
             .expect("admitted");
-        assert!(claim_for_write(&publish));
+        assert!(bridge_claims(&publish));
         drop(data_rx.recv().await);
         deliver(first, vec![0u8; MAX_BODY_LEN as usize]);
         assert_eq!(inner.unary_budget.used(), MAX_BODY_LEN as usize);
@@ -5001,7 +5223,7 @@ mod tests {
         let (second, publish) = inner
             .admit(route(1), Vec::new(), false, kind, deadline)
             .expect("admitted");
-        assert!(claim_for_write(&publish));
+        assert!(bridge_claims(&publish));
         drop(data_rx.recv().await);
         deliver(second, vec![0u8; MAX_BODY_LEN as usize]);
         let error = second_rx
@@ -5051,7 +5273,7 @@ mod tests {
         let (filler, publish) = inner
             .admit(route(1), Vec::new(), false, kind, deadline)
             .expect("admitted");
-        assert!(claim_for_write(&publish));
+        assert!(bridge_claims(&publish));
         drop(data_rx.recv().await);
         deliver(filler, vec![0u8; CLIENT_RETAINED_RESPONSE_BYTES]);
         assert_eq!(inner.unary_budget.used(), CLIENT_RETAINED_RESPONSE_BYTES);
@@ -5064,7 +5286,7 @@ mod tests {
         let (key, publish) = inner
             .admit(control, Vec::new(), false, kind, deadline)
             .expect("control request admitted");
-        assert!(claim_for_write(&publish));
+        assert!(bridge_claims(&publish));
         drop(data_rx.recv().await);
         let bound = RouteHandle {
             channel: 9,
