@@ -305,6 +305,10 @@ pub(crate) async fn graceful_finish_drains_admitted_frames_before_close<F: Chann
             .expect("admits");
     }
     h.sender.finish();
+    assert!(
+        h.sender.send(outbound(4, b"late")).await.is_err(),
+        "finish closes admission before the drain, so a later send is refused rather than dropped"
+    );
     for corr in 1..=3u64 {
         let (header, _) = h.peer.recv_frame().await.expect("drained frame");
         assert_eq!(header.corr, corr);
@@ -578,5 +582,66 @@ mod lease_contract {
         );
         drop(queue.recv().await.expect("queued frame"));
         assert_eq!(budget.available(), baseline);
+    }
+}
+
+mod finish_contract {
+    use super::*;
+    use crate::frame_channel::frame_sender;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Every `send` that returns `Ok` is drained by the finishing endpoint, even when finish races concurrent senders.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn finish_drains_every_frame_that_send_admitted() {
+        for _ in 0..32 {
+            let (sender, mut queue) =
+                frame_sender(2, CancellationToken::new(), Duration::from_secs(5));
+            let admitted = Arc::new(AtomicUsize::new(0));
+            let producers: Vec<_> = (0..4)
+                .map(|_| {
+                    let sender = sender.clone();
+                    let admitted = Arc::clone(&admitted);
+                    tokio::spawn(async move {
+                        let mut corr = 1u64;
+                        while sender.send(outbound(corr, b"race")).await.is_ok() {
+                            admitted.fetch_add(1, Ordering::SeqCst);
+                            corr += 1;
+                        }
+                    })
+                })
+                .collect();
+            let mut drained = 0usize;
+            for _ in 0..8 {
+                queue.recv().await.expect("producers keep the queue fed");
+                drained += 1;
+            }
+            sender.finish();
+            while queue.drain_finished().is_some() {
+                drained += 1;
+            }
+            for producer in producers {
+                producer
+                    .await
+                    .expect("producer exits once admission closes");
+            }
+            assert_eq!(
+                drained,
+                admitted.load(Ordering::SeqCst),
+                "an admitted frame was dropped or an unadmitted one drained"
+            );
+            assert!(sender.is_retired());
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_closes_admission_immediately() {
+        let (sender, queue) = frame_sender(2, CancellationToken::new(), Duration::from_secs(5));
+        sender.discard();
+        assert!(
+            sender.send(outbound(1, b"late")).await.is_err(),
+            "discard refuses admission before the endpoint observes it"
+        );
+        assert!(sender.is_retired());
+        drop(queue);
     }
 }

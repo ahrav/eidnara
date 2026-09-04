@@ -318,7 +318,7 @@ impl RingTransport {
                 }
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     runtime.block_on(run_endpoint(
-                        rings,
+                        &rings,
                         queue,
                         inbound_tx,
                         ingress,
@@ -336,7 +336,15 @@ impl RingTransport {
                         .try_send(Err(ReadClose::Corrupt("shared-memory endpoint panicked")));
                 }
                 drop(panic_inbound);
-                admission.release();
+                // A quarantined ring may remain mapped by its peer, so its charges move to the quarantined bucket rather than being refunded.
+                let quarantined = rings.first.is_quarantined() || rings.second.is_quarantined();
+                drop(rings);
+                if quarantined {
+                    // A failed quarantine drops the consumed `Admission`, which refunds the charges.
+                    let _ = admission.quarantine();
+                } else {
+                    admission.release();
+                }
                 let _ = done_tx.send(());
             });
         if spawned.is_err() {
@@ -420,7 +428,7 @@ impl ShmReceiver {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_endpoint(
-    rings: DuplexRing,
+    rings: &DuplexRing,
     mut queue: SenderQueue,
     inbound: mpsc::Sender<Result<InboundEvent, ReadClose>>,
     ingress: ByteBudget,
@@ -470,11 +478,12 @@ async fn run_endpoint(
                 Ok(false)
             } else {
                 receive_one(
-                    &rings,
+                    rings,
                     &mut queue,
                     inbound_sender,
                     &ingress,
                     frame_deadline,
+                    &root,
                     &read_cancel,
                     publish_hook.as_ref(),
                 )
@@ -489,7 +498,7 @@ async fn run_endpoint(
                 }
                 Ok(false) => {
                     if cancelled && let Some(inbound) = inbound.take() {
-                        let _ = inbound.send(Err(ReadClose::Cancelled)).await;
+                        let _ = deliver(&inbound, &queue, &root, Err(ReadClose::Cancelled)).await;
                     }
                 }
                 Err(close) => {
@@ -507,9 +516,9 @@ async fn run_endpoint(
             // and close frames while host-to-peer capacity is free.
             queue.try_recv().ok()
         } else if finishing {
-            match queue.try_recv() {
-                Ok(frame) => Some(frame),
-                Err(_) => return,
+            match queue.drain_finished() {
+                Some(frame) => Some(frame),
+                None => return,
             }
         } else {
             let data_armed = if inbound.is_some() {
@@ -593,18 +602,35 @@ async fn fail(
     close: ReadClose,
 ) {
     if let Some(inbound) = inbound.take() {
-        let _ = inbound.send(Err(close)).await;
+        let _ = deliver(&inbound, queue, root, Err(close)).await;
     }
     queue.retired.cancel();
     root.cancel();
 }
 
+// Teardown must not depend on the receiver draining: a full channel under `discard` or `root` cancellation yields instead of blocking the endpoint. commentlint: allow(JUDGE)
+async fn deliver(
+    inbound: &mpsc::Sender<Result<InboundEvent, ReadClose>>,
+    queue: &SenderQueue,
+    root: &CancellationToken,
+    event: Result<InboundEvent, ReadClose>,
+) -> Result<(), ReadClose> {
+    tokio::select! {
+        biased;
+        sent = inbound.send(event) => sent.map_err(|_| ReadClose::Cancelled),
+        () = queue.discard.cancelled() => Err(ReadClose::Cancelled),
+        () = root.cancelled() => Err(ReadClose::Cancelled),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn receive_one(
     rings: &DuplexRing,
     queue: &mut SenderQueue,
     inbound: &mpsc::Sender<Result<InboundEvent, ReadClose>>,
     ingress: &ByteBudget,
     frame_deadline: Duration,
+    root: &CancellationToken,
     read_cancel: &CancellationToken,
     publish_hook: Option<&PublishHook>,
 ) -> Result<bool, ReadClose> {
@@ -622,12 +648,13 @@ async fn receive_one(
         lease
             .release()
             .map_err(|_| ReadClose::Corrupt("shared-memory completion failed"))?;
-        inbound
-            .send(Ok(InboundEvent::Rejected(RejectedFrame {
-                corr: header.corr,
-            })))
-            .await
-            .map_err(|_| ReadClose::Cancelled)?;
+        deliver(
+            inbound,
+            queue,
+            root,
+            Ok(InboundEvent::Rejected(RejectedFrame { corr: header.corr })),
+        )
+        .await?;
         return Ok(true);
     }
 
@@ -662,12 +689,15 @@ async fn receive_one(
     lease
         .release()
         .map_err(|_| ReadClose::Corrupt("shared-memory completion failed"))?;
-    inbound
-        .send(Ok(InboundEvent::Frame(InboundFrame::owned(
+    deliver(
+        inbound,
+        queue,
+        root,
+        Ok(InboundEvent::Frame(InboundFrame::owned(
             header, body, charge,
-        ))))
-        .await
-        .map_err(|_| ReadClose::Cancelled)?;
+        ))),
+    )
+    .await?;
     Ok(true)
 }
 
@@ -1139,6 +1169,7 @@ mod tests {
                 &ByteBudget::new(1024),
                 Duration::from_secs(1),
                 &CancellationToken::new(),
+                &CancellationToken::new(),
                 None,
             )
             .await
@@ -1175,6 +1206,7 @@ mod tests {
         let (inbound, _received) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let cancellation = cancel.clone();
+        let root = CancellationToken::new();
         let budget = ByteBudget::new(0);
         let receive = receive_one(
             &rings,
@@ -1182,6 +1214,7 @@ mod tests {
             &inbound,
             &budget,
             Duration::from_secs(1),
+            &root,
             &cancellation,
             None,
         );
@@ -1334,6 +1367,103 @@ mod tests {
         assert!(
             exited.is_ok(),
             "root cancellation must stop the endpoint while the peer keeps the ring full"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_cancellation_is_observed_while_the_inbound_queue_is_full() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender: _sender,
+            receiver,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 1, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        for corr in 1..=4u64 {
+            peer.send(
+                EnvelopeHeader {
+                    len: 1,
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType::Request,
+                    flags: Flags::new(false, Priority::Interactive, false),
+                    channel: 7,
+                    epoch: 1,
+                    corr,
+                },
+                &[1],
+                StdInstant::now() + Duration::from_secs(1),
+            )
+            .expect("peer fills the ring");
+        }
+        // Nothing drains `receiver`, so the endpoint parks on a full inbound queue.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        root.cancel();
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("root cancellation must stop an endpoint blocked on a full inbound queue")
+            .expect("endpoint task joins");
+        drop(receiver);
+        assert_eq!(
+            transport.accounting().unwrap().active,
+            ResourceCharges::ZERO,
+            "a cancelled endpoint over a healthy ring refunds its admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn quarantined_ring_moves_its_charges_to_the_quarantined_bucket() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        let charges = ring_profile().charges();
+        assert_eq!(transport.accounting().unwrap().active, charges);
+
+        peer.to_host.enter_quarantine();
+        assert!(
+            matches!(receiver.recv().await, Err(ReadClose::Corrupt(_))),
+            "a quarantined ring is a transport fault, not a clean close"
+        );
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits after quarantine")
+            .expect("endpoint task joins");
+        assert!(sender.is_retired());
+
+        let accounting = transport.accounting().unwrap();
+        assert_eq!(accounting.active, ResourceCharges::ZERO);
+        assert_eq!(
+            accounting.quarantined,
+            ResourceCharges {
+                workers: 0,
+                pinned_workers: 0,
+                ..charges
+            },
+            "a quarantined ring keeps its memory charges and refunds only its workers"
+        );
+        assert!(
+            transport
+                .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+                .is_err(),
+            "quarantined charges still count against the admission limit"
         );
     }
 }

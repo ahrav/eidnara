@@ -10,6 +10,7 @@
 use std::io;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use tokio::sync::mpsc;
 
@@ -208,6 +209,9 @@ pub struct OutboundFrame {
     pub written: Option<Box<dyn FnOnce(Instant) + Send>>,
 }
 
+/// Senders hold `admission` shared across the retired re-check and the queue push; the finishing endpoint takes it exclusively so its final empty `try_recv` proves no admitted frame is still landing. commentlint: allow(JUDGE)
+type AdmissionGate = Arc<RwLock<()>>;
+
 #[derive(Clone)]
 pub struct FrameSender {
     tx: mpsc::Sender<OutboundFrame>,
@@ -215,15 +219,20 @@ pub struct FrameSender {
     generation: CancellationToken,
     discard: CancellationToken,
     finish: CancellationToken,
+    admission: AdmissionGate,
     admission_timeout: Duration,
 }
 
 impl FrameSender {
+    /// Closes admission before the endpoint drains, so every frame `send` admitted is published and none admitted afterwards is silently dropped. commentlint: allow(JUDGE)
     pub fn finish(&self) {
+        self.retired.cancel();
         self.finish.cancel();
     }
 
+    /// Closes admission, then drops every queued frame.
     pub fn discard(&self) {
+        self.retired.cancel();
         self.discard.cancel();
     }
 
@@ -241,18 +250,28 @@ impl FrameSender {
         frame: OutboundFrame,
         deadline: Instant,
     ) -> Result<(), WriterGone> {
-        tokio::select! {
+        let permit = tokio::select! {
             biased;
-            () = self.retired.cancelled() => Err(WriterGone),
-            sent = timeout_at(deadline, self.tx.send(frame)) => match sent {
-                Ok(sent) => sent.map_err(|_| WriterGone),
+            () = self.retired.cancelled() => return Err(WriterGone),
+            reserved = timeout_at(deadline, self.tx.reserve()) => match reserved {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) => return Err(WriterGone),
                 Err(_) => {
                     self.retired.cancel();
                     self.generation.cancel();
-                    Err(WriterGone)
+                    return Err(WriterGone);
                 }
             },
+        };
+        let _admitted = self
+            .admission
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.retired.is_cancelled() {
+            return Err(WriterGone);
         }
+        permit.send(frame);
+        Ok(())
     }
 
     pub fn is_retired(&self) -> bool {
@@ -265,6 +284,7 @@ pub struct WriterGone;
 
 pub(crate) struct SenderQueue {
     rx: mpsc::Receiver<OutboundFrame>,
+    admission: AdmissionGate,
     pub retired: CancellationToken,
     pub discard: CancellationToken,
     pub finish: CancellationToken,
@@ -278,6 +298,18 @@ impl SenderQueue {
     pub(crate) fn try_recv(&mut self) -> Result<OutboundFrame, mpsc::error::TryRecvError> {
         self.rx.try_recv()
     }
+
+    /// Takes the next queued frame after `finish`. `None` is final: admission is closed and every push that passed its retired check has landed. commentlint: allow(JUDGE)
+    pub(crate) fn drain_finished(&mut self) -> Option<OutboundFrame> {
+        if let Ok(frame) = self.rx.try_recv() {
+            return Some(frame);
+        }
+        let _exclusive = self
+            .admission
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.rx.try_recv().ok()
+    }
 }
 
 pub(crate) fn frame_sender(
@@ -289,16 +321,19 @@ pub(crate) fn frame_sender(
     let retired = CancellationToken::new();
     let discard = CancellationToken::new();
     let finish = CancellationToken::new();
+    let admission: AdmissionGate = Arc::new(RwLock::new(()));
     let sender = FrameSender {
         tx,
         retired: retired.clone(),
         generation: generation.clone(),
         discard: discard.clone(),
         finish: finish.clone(),
+        admission: Arc::clone(&admission),
         admission_timeout,
     };
     let queue = SenderQueue {
         rx,
+        admission,
         retired,
         discard,
         finish,
