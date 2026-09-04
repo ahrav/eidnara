@@ -328,7 +328,6 @@ pub async fn activate_client(
     Ok((descriptor, descriptors))
 }
 
-#[allow(dead_code)] // U1: used by client (U2)
 pub(crate) fn encoded_goodbye() -> Result<Vec<u8>, SetupError> {
     encode_message(&ClientMessage::Goodbye)
 }
