@@ -23,9 +23,6 @@ pub const FIXTURE_BINARY: bool = false;
 /// A run requires at least 30,000 successful post-warmup observations before publishing p99.9.
 pub const TAIL_SAMPLE_FLOOR: u64 = 30_000;
 
-/// A published headline p99.9 row requires at least 100,000 successful post-warmup observations per repetition.
-pub const HEADLINE_TAIL_FLOOR: u64 = 100_000;
-
 /// `MAX_BODY_LEN` caps bodies at 1 MiB because valid fixture and error bodies are small, preventing untrusted `u32` lengths from causing multi-gigabyte allocations.
 pub const MAX_BODY_LEN: u32 = 1 << 20;
 

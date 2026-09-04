@@ -15,9 +15,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::config::{HostConfig, HostLimits, HostTiming, LivenessPolicy};
 use crate::connection::{GenerationCore, run_connection};
-use crate::dispatch::{
-    finish_route_close, force_close_all_routes, send_connection_goodbye, settle_route,
-};
+use crate::dispatch::{close_route_decision, force_close_all_routes, send_connection_goodbye};
 use crate::handler::{
     HealthReport, HealthStatus, HostHandler, ResourceDeclaration, RouteClass, TargetKind,
 };
@@ -135,8 +133,23 @@ impl<H: HostHandler> HostShared<H> {
         F::Output: Send + 'static,
     {
         let handle = self.tracker.spawn(future);
+        let abort = handle.abort_handle();
+        // The `is_finished` scan runs outside the lock; handles pushed by concurrent spawns in
+        // the meantime stay in the registry and the pruned batch is appended to them.
+        let batch = {
+            let mut registry = self.abort_handles.lock().expect("abort lock");
+            match registry.take_for_prune() {
+                Some(batch) => batch,
+                None => {
+                    registry.push(abort);
+                    return handle;
+                }
+            }
+        };
+        let pruned: Vec<AbortHandle> = batch.into_iter().filter(|h| !h.is_finished()).collect();
         let mut registry = self.abort_handles.lock().expect("abort lock");
-        registry.prune_and_push(handle.abort_handle());
+        registry.restore_pruned(pruned);
+        registry.push(abort);
         handle
     }
 
@@ -182,15 +195,7 @@ impl<H: HostHandler> HostShared<H> {
     }
 
     fn abort_all(&self) {
-        for handle in self
-            .abort_handles
-            .lock()
-            .expect("abort lock")
-            .handles
-            .iter()
-        {
-            handle.abort();
-        }
+        self.abort_handles.lock().expect("abort lock").abort_all();
     }
 }
 
@@ -199,6 +204,9 @@ impl<H: HostHandler> HostShared<H> {
 struct AbortRegistry {
     handles: Vec<AbortHandle>,
     prune_at: usize,
+    /// After `abort_all`, `push` and `restore_pruned` abort every arriving handle, so a batch
+    /// that was out for pruning at that moment is not missed.
+    aborted: bool,
 }
 
 const ABORT_PRUNE_FLOOR: usize = 64;
@@ -208,15 +216,40 @@ impl AbortRegistry {
         Self {
             handles: Vec::new(),
             prune_at: ABORT_PRUNE_FLOOR,
+            aborted: false,
         }
     }
 
-    fn prune_and_push(&mut self, handle: AbortHandle) {
-        if self.handles.len() >= self.prune_at {
-            self.handles.retain(|h| !h.is_finished());
-            self.prune_at = (self.handles.len() * 2).max(ABORT_PRUNE_FLOOR);
+    /// `prune_at` is unchanged until `restore_pruned`, so only one batch is out at a time.
+    fn take_for_prune(&mut self) -> Option<Vec<AbortHandle>> {
+        if self.handles.len() < self.prune_at {
+            return None;
+        }
+        Some(std::mem::take(&mut self.handles))
+    }
+
+    fn restore_pruned(&mut self, pruned: Vec<AbortHandle>) {
+        if self.aborted {
+            for handle in &pruned {
+                handle.abort();
+            }
+        }
+        self.handles.extend(pruned);
+        self.prune_at = (self.handles.len() * 2).max(ABORT_PRUNE_FLOOR);
+    }
+
+    fn push(&mut self, handle: AbortHandle) {
+        if self.aborted {
+            handle.abort();
         }
         self.handles.push(handle);
+    }
+
+    fn abort_all(&mut self) {
+        self.aborted = true;
+        for handle in &self.handles {
+            handle.abort();
+        }
     }
 }
 
@@ -709,10 +742,25 @@ pub async fn run_with_publish_hook<H: HostHandler>(
             .guard_mut()
             .publish(&setup_socket, &config.daemon_ver)
             .map_err(HostError::Instance)?;
-        // A failed lifecycle-phase rewrite does not tear down an already published transport.
-        let _ = cleanup
-            .guard_mut()
-            .write_lifecycle_record(crate::lifecycle::LifecyclePhase::Running);
+        let mut last_err = None;
+        for delay in RUNNING_RECORD_RETRY_DELAYS {
+            match cleanup
+                .guard_mut()
+                .write_lifecycle_record(crate::lifecycle::LifecyclePhase::Running)
+            {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+        if let Some(err) = last_err {
+            return Err(HostError::Instance(err));
+        }
         Ok(Some((listener, setup_socket)))
     }
     .await;
@@ -824,6 +872,14 @@ pub async fn run_with_publish_hook<H: HostHandler>(
 
 /// The accept loop delays retries after failed `accept()` calls to avoid a tight loop while persistent resource exhaustion keeps the listener ready.
 const ACCEPT_ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Retry delays keep a transient `running`-record write failure from leaving an expired
+/// `starting` record that `lifecycle::classify` reports as `wedged`.
+const RUNNING_RECORD_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(10),
+    Duration::from_millis(50),
+    Duration::from_millis(200),
+];
 
 /// Startup tracks the handler's post-publication activation without awaiting it because transport is already published.
 /// The accept loop starts regardless of activation progress; an activation `Err`, panic, or task loss trips the fatal latch.
@@ -1003,12 +1059,18 @@ async fn shutdown_sequence<H: HostHandler>(
     // `shutdown` settles each route's admitted work, emitting its terminals, before running each route's `route-gone` callback.
     // `shutdown` runs each route's `route-gone` before it fences read loops so `route-gone` can reject work admitted before admission froze.
     // `shutdown` fences and joins read-side producers only after every route drain reaches a terminal state.
+    // Routes close concurrently, as in `close_generation`, so the drain is bounded by the slowest
+    // route's settle plus `route-gone` rather than by their sum across every live route.
     let drain = async {
+        let mut closes = tokio::task::JoinSet::new();
         for handle in shared.registry.all_routes() {
-            if settle_route(shared, handle).await {
-                finish_route_close(shared, handle).await;
-            }
+            let shared = Arc::clone(shared);
+            closes.spawn(async move {
+                let decision = shared.registry.begin_close(handle);
+                close_route_decision(&shared, handle, decision).await;
+            });
         }
+        while closes.join_next().await.is_some() {}
 
         let generations: Vec<Arc<GenerationCore>> = shared
             .connections

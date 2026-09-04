@@ -156,11 +156,6 @@ impl RawFrame {
             .expect("error body has a code")
             .to_owned()
     }
-
-    /// An error terminal may carry a server retry hint.
-    pub fn error_retry_after_ms(&self) -> Option<u64> {
-        self.json()["retry_after_ms"].as_u64()
-    }
 }
 
 /// Contents of a published connection file, parsed independently.
@@ -432,11 +427,6 @@ impl RawClient {
             .await
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "ring bridge closed"))?
             .map_err(std::io::Error::other)
-    }
-
-    /// Half-closes the write side, causing the peer to observe EOF after buffered bytes.
-    pub async fn shutdown_write(&mut self) -> std::io::Result<()> {
-        self.stream.shutdown().await
     }
 
     pub async fn send_frame(

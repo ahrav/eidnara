@@ -692,12 +692,6 @@ impl TestHost {
             .expect("negotiated connection")
     }
 
-    pub async fn setup_client(&self) -> raw_client::RawClient {
-        raw_client::RawClient::connect_setup_only(&self.info)
-            .await
-            .expect("setup-only connection")
-    }
-
     pub async fn shutdown(mut self) -> Result<(), HostError> {
         self.shutdown.cancel();
         let join = self.join.take().expect("host runs once");

@@ -229,9 +229,12 @@ pub async fn emit_frame(
     id: FrameId,
     body: Vec<u8>,
 ) -> Result<(), ()> {
-    emit_frame_with_written(budget, generation, ty, flags, id, body, None).await
+    let deadline = generation.writer.admission_deadline();
+    emit_frame_with_written(budget, generation, ty, flags, id, body, None, deadline).await
 }
 
+/// `deadline` bounds charging, enqueueing, and write completion in one admission window.
+#[allow(clippy::too_many_arguments)]
 async fn emit_frame_with_written(
     budget: &crate::wire::ByteBudget,
     generation: &GenerationCore,
@@ -240,6 +243,7 @@ async fn emit_frame_with_written(
     id: FrameId,
     body: Vec<u8>,
     written: Option<Box<dyn FnOnce(Instant) + Send>>,
+    deadline: Instant,
 ) -> Result<(), ()> {
     if body.len() > crate::wire::MAX_BODY_LEN as usize
         || generation.writer.is_retired()
@@ -247,7 +251,6 @@ async fn emit_frame_with_written(
     {
         return Err(());
     }
-    let deadline = generation.writer.admission_deadline();
     let charge = if body.is_empty() {
         crate::wire::ByteCharge::none()
     } else {
@@ -628,6 +631,7 @@ pub async fn handle_host_shutdown<H: HostHandler>(
                 // A prior attempt already linearized the stop; this request
                 // still settles with its own correlated success.
                 let (written, completed) = oneshot::channel();
+                let deadline = generation.writer.admission_deadline();
                 let settled = if emit_frame_with_written(
                     &shared.egress_budget,
                     generation,
@@ -638,15 +642,17 @@ pub async fn handle_host_shutdown<H: HostHandler>(
                     Some(Box::new(move |_| {
                         let _ = written.send(());
                     })),
+                    deadline,
                 )
                 .await
                 .is_err()
                 {
                     false
                 } else {
-                    tokio::time::timeout_at(generation.writer.admission_deadline(), completed)
-                        .await
-                        .is_ok()
+                    matches!(
+                        tokio::time::timeout_at(deadline, completed).await,
+                        Ok(Ok(()))
+                    )
                 };
                 if !settled {
                     generation.token.cancel();
@@ -1179,14 +1185,6 @@ async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: Rou
     }
 }
 
-pub async fn settle_route<H: HostHandler>(
-    shared: &Arc<HostShared<H>>,
-    handle: RouteHandle,
-) -> bool {
-    settle_route_work(shared, handle, shared.registry.begin_close(handle)).await
-}
-
-/// stall them.
 pub(crate) async fn close_route_decision<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     handle: RouteHandle,
