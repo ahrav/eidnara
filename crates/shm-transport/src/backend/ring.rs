@@ -470,29 +470,39 @@ impl Drop for Mapping {
     }
 }
 
-/// Doorbell operations this process has issued on a ring.
+/// Syscalls this process has issued through a ring handle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DoorbellCounters {
+pub struct SyscallCounters {
     /// `send`, `recv`, and `poll` calls on either doorbell.
-    pub syscalls: u64,
-    /// `poll` calls that blocked on a doorbell; each is one park/wake transition.
+    pub doorbell: u64,
+    /// Blocking doorbell `poll` calls issued after a zero-timeout probe found nothing ready;
+    /// each is one park/wake transition.
     pub parks: u64,
+    /// `madvise(MADV_REMOVE)` calls that punched dead arena pages.
+    pub page_removals: u64,
 }
 
-impl DoorbellCounters {
+impl SyscallCounters {
+    /// Every counted syscall; `parks` is a subset of `doorbell`.
+    pub const fn total(self) -> u64 {
+        self.doorbell.wrapping_add(self.page_removals)
+    }
+
     /// Field-wise sum.
     pub const fn add(self, other: Self) -> Self {
         Self {
-            syscalls: self.syscalls.wrapping_add(other.syscalls),
+            doorbell: self.doorbell.wrapping_add(other.doorbell),
             parks: self.parks.wrapping_add(other.parks),
+            page_removals: self.page_removals.wrapping_add(other.page_removals),
         }
     }
 
     /// Field-wise difference, saturating at zero.
     pub const fn since(self, earlier: Self) -> Self {
         Self {
-            syscalls: self.syscalls.saturating_sub(earlier.syscalls),
+            doorbell: self.doorbell.saturating_sub(earlier.doorbell),
             parks: self.parks.saturating_sub(earlier.parks),
+            page_removals: self.page_removals.saturating_sub(earlier.page_removals),
         }
     }
 }
@@ -506,7 +516,7 @@ struct Doorbell {
     /// The peer's end. `attachment` moves it out, so after the handoff only the peer holds
     /// that end and its exit is visible here as EOF or `EPIPE`.
     remote: Cell<Option<OwnedFd>>,
-    counters: Cell<DoorbellCounters>,
+    counters: Cell<SyscallCounters>,
 }
 
 /// Each `drain` call consumes at most this many bytes; remaining bytes only cause a spurious
@@ -534,7 +544,7 @@ impl Doorbell {
         Ok(Self {
             local,
             remote: Cell::new(Some(remote)),
-            counters: Cell::new(DoorbellCounters::default()),
+            counters: Cell::new(SyscallCounters::default()),
         })
     }
 
@@ -555,17 +565,17 @@ impl Doorbell {
         Ok(Self {
             local: fd,
             remote: Cell::new(None),
-            counters: Cell::new(DoorbellCounters::default()),
+            counters: Cell::new(SyscallCounters::default()),
         })
     }
 
-    fn counters(&self) -> DoorbellCounters {
+    fn counters(&self) -> SyscallCounters {
         self.counters.get()
     }
 
     fn record(&self, parked: bool) {
         let mut counters = self.counters.get();
-        counters.syscalls = counters.syscalls.wrapping_add(1);
+        counters.doorbell = counters.doorbell.wrapping_add(1);
         if parked {
             counters.parks = counters.parks.wrapping_add(1);
         }
@@ -651,6 +661,13 @@ impl Doorbell {
             events: libc::POLLIN,
             revents: 0,
         };
+        // A signal that landed between the caller's last recheck and this call makes the
+        // blocking poll return at once; the probe keeps such a call out of `parks`.
+        self.record(false);
+        // SAFETY: poll receives one initialized pollfd.
+        if unsafe { libc::poll(&mut descriptor, 1, 0) } > 0 {
+            return Ok(true);
+        }
         self.record(true);
         // SAFETY: poll receives one initialized pollfd.
         let result = unsafe { libc::poll(&mut descriptor, 1, timeout) };
@@ -869,6 +886,8 @@ pub struct Ring {
     reserved_end: Cell<Option<u64>>,
     /// Logical arena position below which every reclaimed page has been removed.
     punched: Cell<u64>,
+    /// `madvise(MADV_REMOVE)` calls this handle has issued.
+    page_removals: Cell<u64>,
     /// Set once this handle has reserved. Only the producer knows its live reservation, so
     /// page removal is refused on any other handle.
     producer: Cell<bool>,
@@ -926,6 +945,7 @@ impl Ring {
             quarantined: Cell::new(false),
             reserved_end: Cell::new(None),
             punched: Cell::new(0),
+            page_removals: Cell::new(0),
             producer: Cell::new(false),
             published_allocations: allocation_shadow(profile.descriptor_depth()),
             producer_cursors: Cell::new(ProducerCursors {
@@ -988,6 +1008,7 @@ impl Ring {
             quarantined: Cell::new(false),
             reserved_end: Cell::new(None),
             punched: Cell::new(0),
+            page_removals: Cell::new(0),
             producer: Cell::new(false),
             published_allocations: allocation_shadow(depth),
             producer_cursors: Cell::new(producer_cursors),
@@ -1022,12 +1043,16 @@ impl Ring {
         self.data_ready.duplicate()
     }
 
-    /// Both doorbells summed. The counts never reset, so a window is the difference of two
-    /// samples.
-    pub fn doorbell_counters(&self) -> DoorbellCounters {
+    /// Both doorbells plus page removals. The counts never reset, so a window is the
+    /// difference of two samples.
+    pub fn syscall_counters(&self) -> SyscallCounters {
         self.data_ready
             .counters()
             .add(self.capacity_ready.counters())
+            .add(SyscallCounters {
+                page_removals: self.page_removals.get(),
+                ..SyscallCounters::default()
+            })
     }
 
     /// Prepares to block on the data doorbell. Records the wake generation, re-checks for
@@ -2176,6 +2201,8 @@ impl Ring {
             return Err(RingError::InvalidSharedState);
         }
         let remove = |offset, len| {
+            self.page_removals
+                .set(self.page_removals.get().wrapping_add(1));
             if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
                 return Err(RingError::PageRemovalFailed);
             }
@@ -2284,6 +2311,8 @@ impl Ring {
         .into_iter()
         .filter(|(_, len)| *len != 0)
         {
+            self.page_removals
+                .set(self.page_removals.get().wrapping_add(1));
             if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
                 return Err(RingError::PageRemovalFailed);
             }
@@ -2923,8 +2952,8 @@ mod tests {
     use crate::profile::{ProfileConfig, TargetProfile, WorkerTopology, ring_profile};
 
     use super::{
-        Doorbell, DoorbellCounters, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError,
-        RingGrant, removal_ranges, residency_vector_len, wire_v2_header,
+        Doorbell, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError, RingGrant,
+        SyscallCounters, removal_ranges, residency_vector_len, wire_v2_header,
     };
 
     fn ring() -> Ring {
@@ -2941,33 +2970,39 @@ mod tests {
     }
 
     #[test]
-    fn doorbell_counters_track_only_actual_doorbell_operations() {
+    fn syscall_counters_track_only_actual_ring_syscalls() {
         let ring = ring();
-        let before = ring.doorbell_counters();
-        assert_eq!(before, DoorbellCounters::default());
+        let before = ring.syscall_counters();
+        assert_eq!(before, SyscallCounters::default());
 
-        // No peer is parked, so publishing rings no doorbell.
+        // No peer is parked and no page is dead, so publishing issues no syscall.
         publish(&ring, b"quiet");
-        assert_eq!(ring.doorbell_counters(), DoorbellCounters::default());
+        assert_eq!(ring.syscall_counters(), SyscallCounters::default());
 
         // A wait on a ring with data returns before touching the doorbell.
         assert!(ring.wait_for_data(Instant::now()).unwrap());
-        assert_eq!(ring.doorbell_counters(), DoorbellCounters::default());
+        assert_eq!(ring.syscall_counters(), SyscallCounters::default());
         ring.try_receive().unwrap().unwrap().release().unwrap();
 
-        // An empty ring parks once: one drain `recv` while arming, one blocking `poll`.
+        // An empty ring parks once: one drain `recv` while arming, one probe `poll`, one
+        // blocking `poll`.
         assert!(
             !ring
                 .wait_for_data(Instant::now() + Duration::from_millis(5))
                 .unwrap()
         );
         assert_eq!(
-            ring.doorbell_counters().since(before),
-            DoorbellCounters {
-                syscalls: 2,
+            ring.syscall_counters().since(before),
+            SyscallCounters {
+                doorbell: 3,
                 parks: 1,
+                page_removals: 0,
             }
         );
+
+        // The released frame's page is dead; `trim` punches it with one `madvise`.
+        ring.trim().unwrap();
+        assert_eq!(ring.syscall_counters().since(before).page_removals, 1);
     }
 
     fn clear_nonblock(fd: &OwnedFd) {

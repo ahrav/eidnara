@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use shm_transport::backend::ring::{DoorbellCounters, ProducerError, Ring, wire_v2_header};
+use shm_transport::backend::ring::{ProducerError, Ring, wire_v2_header};
 use shm_transport::descriptor::HardwareProfileId;
 use shm_transport::evidence::OperationCounters;
 use shm_transport::profile::{TargetProfile, ring_profile as library_ring_profile};
@@ -81,9 +81,11 @@ struct ArmRun {
 }
 
 /// `PeerReport` carries the peer's final timed-operation counters; the producer reads them
-/// only after observing `done`.
+/// only after observing `done`. The peer samples its counter baselines only after observing
+/// `start`, which the producer sets when its timed window opens.
 #[repr(C)]
 struct PeerReport {
+    start: AtomicU64,
     done: AtomicU64,
     checksum: AtomicU64,
     scheduler_handoffs: AtomicU64,
@@ -94,12 +96,17 @@ struct PeerReport {
 impl PeerReport {
     const fn new() -> Self {
         Self {
+            start: AtomicU64::new(0),
             done: AtomicU64::new(0),
             checksum: AtomicU64::new(0),
             scheduler_handoffs: AtomicU64::new(0),
             syscalls: AtomicU64::new(0),
             park_wakes: AtomicU64::new(0),
         }
+    }
+
+    fn await_start(&self) -> bool {
+        await_line(&self.start, 1, Instant::now() + PEER_DEADLINE).is_some()
     }
 
     fn publish(&self, checksum: u64, scheduler_handoffs: u64, syscalls: u64, park_wakes: u64) {
@@ -223,8 +230,8 @@ fn main() {
         "counter_scopes": {
             "body_copies": "producer body clones plus receiver to_vec copies, counted by the bench",
             "native_allocations": "one per counted copy",
-            "syscalls": "ring doorbell read, write, and poll calls in both processes; h0 sched_yield calls in both processes",
-            "park_wakes": "blocking doorbell polls in both processes",
+            "syscalls": "ring doorbell send, recv, and poll calls plus madvise page removals in both processes, and the producer's tail-wait sched_yield calls; h0 sched_yield calls in both processes",
+            "park_wakes": "blocking doorbell polls in both processes, after a zero-timeout probe found nothing ready",
             "generic_queue_hops": "structurally zero: the ring is the only hand-off",
             "scheduler_handoffs": "voluntary context switches (ru_nvcsw) of both processes over the timed window",
         },
@@ -428,6 +435,9 @@ fn run_h0(iterations: u64) -> Result<ArmRun, &'static str> {
         report: PeerReport::new(),
     });
     let peer = Peer::spawn(|| {
+        if !shared.report.await_start() {
+            return 7;
+        }
         let switches_before = voluntary_switches();
         let mut yields = 0u64;
         for sequence in 0..iterations {
@@ -451,6 +461,7 @@ fn run_h0(iterations: u64) -> Result<ArmRun, &'static str> {
     let switches_before = voluntary_switches();
     let mut yields = 0u64;
     let start = Instant::now();
+    shared.report.start.store(1, Ordering::Release);
     let mut stalled = false;
     for sequence in 0..iterations {
         let request = sequence * 2 + 1;
@@ -514,19 +525,24 @@ fn run_ring(
     })?;
 
     let switches_before = voluntary_switches();
-    let doorbells_before = ring.doorbell_counters();
+    let syscalls_before = ring.syscall_counters();
     let start = Instant::now();
+    report.start.store(1, Ordering::Release);
     let produced = produce(&ring, &body, header, iterations, copied_producer);
-    let peer_finished =
-        produced.is_ok() && await_line(&report.done, 1, Instant::now() + PEER_DEADLINE).is_some();
+    // The tail wait spins and yields inside the window; its yields are timed-path syscalls.
+    let tail_yields = if produced.is_ok() {
+        await_line(&report.done, 1, Instant::now() + PEER_DEADLINE)
+    } else {
+        None
+    };
     let elapsed = start.elapsed();
     let scheduler_handoffs = voluntary_switches().saturating_sub(switches_before);
-    let doorbells = ring.doorbell_counters().since(doorbells_before);
+    let syscalls = ring.syscall_counters().since(syscalls_before);
 
     let (copies, allocations) = produced?;
-    if !peer_finished {
+    let Some(tail_yields) = tail_yields else {
         return Err("ring peer stalled");
-    }
+    };
     if peer.wait()? != 0 {
         return Err("ring peer failed");
     }
@@ -537,17 +553,14 @@ fn run_ring(
     if checksum != expected_checksum {
         return Err("ring peer observed a different payload than the producer published");
     }
-    let peer_doorbells = DoorbellCounters {
-        syscalls: report.syscalls.load(Ordering::Relaxed),
-        parks: report.park_wakes.load(Ordering::Relaxed),
-    };
-    let doorbells = doorbells.add(peer_doorbells);
+    let peer_syscalls = report.syscalls.load(Ordering::Relaxed);
+    let peer_parks = report.park_wakes.load(Ordering::Relaxed);
     Ok(ArmRun {
         elapsed,
         body_copies: copies + if copied_receiver { iterations } else { 0 },
         native_allocations: allocations + if copied_receiver { iterations } else { 0 },
-        syscalls: Some(doorbells.syscalls),
-        park_wakes: doorbells.parks,
+        syscalls: Some(syscalls.total() + tail_yields + peer_syscalls),
+        park_wakes: syscalls.parks + peer_parks,
         scheduler_handoffs: scheduler_handoffs + report.scheduler_handoffs.load(Ordering::Relaxed),
         checksum,
     })
@@ -594,8 +607,11 @@ fn produce(
 }
 
 fn ring_consumer(ring: &Ring, iterations: u64, copied_receiver: bool, report: &PeerReport) -> i32 {
+    if !report.await_start() {
+        return 7;
+    }
     let switches_before = voluntary_switches();
-    let doorbells_before = ring.doorbell_counters();
+    let syscalls_before = ring.syscall_counters();
     let mut checksum = 0u64;
     for _ in 0..iterations {
         let deadline = Instant::now() + PEER_DEADLINE;
@@ -629,12 +645,12 @@ fn ring_consumer(ring: &Ring, iterations: u64, copied_receiver: bool, report: &P
             return 5;
         }
     }
-    let doorbells = ring.doorbell_counters().since(doorbells_before);
+    let syscalls = ring.syscall_counters().since(syscalls_before);
     report.publish(
         checksum,
         voluntary_switches().saturating_sub(switches_before),
-        doorbells.syscalls,
-        doorbells.parks,
+        syscalls.total(),
+        syscalls.parks,
     );
     0
 }
