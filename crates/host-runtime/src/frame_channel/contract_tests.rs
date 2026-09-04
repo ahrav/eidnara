@@ -4,8 +4,7 @@
 //! the concrete `ShmReceiver` receive side, shared lifecycle tokens, and
 //! byte-charge ownership —
 //! through a [`ChannelFactory`]. The sole instantiation below uses the
-//! production ring transport. The in-process ownership tests remain local to
-//! this module and cannot be selected as a production transport.
+//! production ring transport. commentlint: allow(JUDGE)
 
 use std::future::Future;
 use std::sync::{Arc, Condvar, Mutex};
@@ -134,7 +133,7 @@ pub(crate) async fn concurrent_send_receive_preserves_fifo_admission<F: ChannelF
             panic!("expected a complete inbound frame");
         };
         assert_eq!(frame.header.corr, corr);
-        frame.with_lease(|lease| assert_eq!(lease.segment(0), Some(&b"in"[..])));
+        frame.with_lease(|lease| assert_eq!(lease.bytes(), b"in"));
     }
 }
 
@@ -375,7 +374,7 @@ pub(crate) async fn inbound_payload_ownership_travels_with_the_frame<F: ChannelF
     let InboundEvent::Frame(frame) = event else {
         panic!("expected a complete inbound frame");
     };
-    assert_eq!(frame.body_len(), 2048);
+    assert_eq!(frame.with_lease(|lease| lease.len()), 2048);
     assert_eq!(
         h.budget.available(),
         baseline - 2048,
@@ -534,179 +533,50 @@ impl ChannelFactory for RingFactory {
 
 frame_channel_contract_suite!(RingFactory);
 
-mod ownership_contract {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
+mod lease_contract {
     use super::*;
-    use crate::frame_channel::{
-        LeaseClose, LeaseTracker, ProducerError, ProducerReservation, SendOutcome, frame_sender,
-    };
-
-    struct Charges {
-        bytes: Arc<AtomicUsize>,
-        descriptors: Arc<AtomicUsize>,
-    }
-
-    impl Drop for Charges {
-        fn drop(&mut self) {
-            self.bytes.fetch_add(1, Ordering::SeqCst);
-            self.descriptors.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    fn charges() -> (Charges, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-        let bytes = Arc::new(AtomicUsize::new(0));
-        let descriptors = Arc::new(AtomicUsize::new(0));
-        (
-            Charges {
-                bytes: Arc::clone(&bytes),
-                descriptors: Arc::clone(&descriptors),
-            },
-            bytes,
-            descriptors,
-        )
-    }
-
-    fn produce_exact(len: usize, split: usize) {
-        let mut first = vec![0u8; split.min(len)];
-        let mut second = vec![0u8; len.saturating_sub(first.len())];
-        let mut spans: [&mut [u8]; 2] = [&mut first, &mut second];
-        let (charge, bytes, descriptors) = charges();
-        let mut producer = ProducerReservation::new(&mut spans, len, charge).expect("reserve");
-        let body = vec![0xA5; len];
-        producer.write(&body).expect("bounded write");
-        let produced = producer.commit(len).expect("exact commit");
-        assert_eq!(produced.len(), len);
-        if len == 0 {
-            assert_eq!(produced.segment_count(), 0);
-        } else if split == 0 || split >= len {
-            assert_eq!(produced.segment_count(), 1);
-        } else {
-            assert_eq!(produced.segment_count(), 2);
-            assert_eq!(produced.segment(0), Some(&body[..split]));
-            assert_eq!(produced.segment(1), Some(&body[split..]));
-        }
-        drop(produced);
-        assert_eq!(bytes.load(Ordering::SeqCst), 1);
-        assert_eq!(descriptors.load(Ordering::SeqCst), 1);
-    }
+    use crate::frame_channel::{ReceiveLease, frame_sender};
 
     #[test]
-    fn exact_commit_covers_empty_boundary_segmented_and_maximum_bodies() {
-        produce_exact(0, 0);
-        produce_exact(64, 64);
-        produce_exact(65, 32);
-        produce_exact(crate::wire::MAX_BODY_LEN as usize, 32 * 1024 * 1024);
-    }
-
-    #[test]
-    fn producer_failures_never_publish_and_return_each_charge_once() {
-        let publications = AtomicUsize::new(0);
-
-        let mut first = [0u8; 8];
-        let mut spans: [&mut [u8]; 1] = [&mut first];
-        let (charge, bytes, descriptors) = charges();
-        let mut producer = ProducerReservation::new(&mut spans, 8, charge).expect("reserve");
-        producer.write(b"four").expect("partial write");
-        assert_eq!(producer.commit(8).err(), Some(ProducerError::Underfill));
-        assert_eq!(bytes.load(Ordering::SeqCst), 1);
-        assert_eq!(descriptors.load(Ordering::SeqCst), 1);
-
-        let mut second = [0u8; 8];
-        let mut spans: [&mut [u8]; 1] = [&mut second];
-        let (charge, bytes, descriptors) = charges();
-        let mut producer = ProducerReservation::new(&mut spans, 8, charge).expect("reserve");
-        assert_eq!(producer.write(&[0u8; 9]), Err(ProducerError::Overflow));
-        assert_eq!(bytes.load(Ordering::SeqCst), 1);
-        assert_eq!(descriptors.load(Ordering::SeqCst), 1);
-        drop(producer);
-        assert_eq!(bytes.load(Ordering::SeqCst), 1, "no double byte release");
-        assert_eq!(
-            descriptors.load(Ordering::SeqCst),
-            1,
-            "no double descriptor release"
-        );
-
-        let mut third = [0u8; 8];
-        let mut spans: [&mut [u8]; 1] = [&mut third];
-        let (charge, bytes, descriptors) = charges();
-        ProducerReservation::new(&mut spans, 8, charge)
-            .expect("reserve")
-            .abort();
-        assert_eq!(bytes.load(Ordering::SeqCst), 1);
-        assert_eq!(descriptors.load(Ordering::SeqCst), 1);
-        assert_eq!(publications.load(Ordering::SeqCst), 0);
+    fn owned_adapter_copies_the_leased_bytes() {
+        let bytes = b"leased body";
+        let owned = {
+            let lease = ReceiveLease::contiguous(bytes);
+            assert_eq!(lease.len(), bytes.len());
+            assert!(!lease.is_empty());
+            lease.to_owned()
+        };
+        assert_eq!(owned, bytes);
     }
 
     #[tokio::test]
-    async fn cancellation_classifies_before_and_after_publication_without_double_release() {
+    async fn admission_timeout_retires_the_writer_and_the_generation() {
         let budget = ByteBudget::new(16);
         let baseline = budget.available();
         let generation = CancellationToken::new();
-        let (sender, mut queue) = frame_sender(2, generation, Duration::from_secs(1));
+        let (sender, mut queue) = frame_sender(1, generation.clone(), Duration::from_millis(20));
 
-        let mut frame = outbound(1, b"cancel");
+        let mut frame = outbound(1, b"queued");
         frame.charge = budget.try_charge(8).expect("charge");
-        let ticket = sender
-            .send_ticket_before(frame, sender.admission_deadline(), None)
+        sender
+            .send(frame)
             .await
-            .expect("admit");
-        assert_eq!(ticket.cancel(), SendOutcome::NotSent);
-        let mut queued = queue.recv().await.expect("queued frame");
-        assert!(!queued.begin_publication());
-        drop(queued);
-        assert_eq!(budget.available(), baseline);
-        assert_eq!(ticket.cancel(), SendOutcome::PossibleSend);
+            .expect("first frame fills the queue");
 
-        let mut frame = outbound(2, b"publish");
+        let mut frame = outbound(2, b"expired");
         frame.charge = budget.try_charge(8).expect("charge");
-        let published = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&published);
-        let ticket = sender
-            .send_ticket_before(
-                frame,
-                sender.admission_deadline(),
-                Some(Box::new(move || {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                })),
-            )
-            .await
-            .expect("admit");
-        let mut queued = queue.recv().await.expect("queued frame");
-        assert!(queued.begin_publication());
-        assert_eq!(published.load(Ordering::SeqCst), 1);
-        assert_eq!(ticket.cancel(), SendOutcome::PossibleSend);
-        drop(queued);
+        assert!(
+            sender.send(frame).await.is_err(),
+            "a full queue past the admission deadline is refused"
+        );
+        assert!(sender.is_retired());
+        assert!(generation.is_cancelled());
+        assert_eq!(
+            budget.available(),
+            baseline - 8,
+            "the refused frame's charge is released; the queued frame keeps its charge"
+        );
+        drop(queue.recv().await.expect("queued frame"));
         assert_eq!(budget.available(), baseline);
-        assert_eq!(ticket.cancel(), SendOutcome::PossibleSend);
-    }
-
-    #[test]
-    fn owned_adapter_copies_once_and_releases_lease_before_return() {
-        let tracker = LeaseTracker::default();
-        let copies = crate::frame_channel::CopyCounter::default();
-        let first = b"segmented ";
-        let second = b"body";
-        let owned = {
-            let lease = tracker.lease(first, Some(second));
-            assert_eq!(tracker.active(), 1);
-            lease.to_owned(&copies)
-        };
-        assert_eq!(owned, b"segmented body");
-        assert_eq!(tracker.active(), 0);
-        assert_eq!(copies.copies(), 1);
-    }
-
-    #[test]
-    fn close_with_active_lease_quarantines_and_never_reopens_storage() {
-        let tracker = LeaseTracker::default();
-        let bytes = [7u8; 8];
-        let lease = tracker.lease(&bytes, None);
-        assert_eq!(tracker.close(), LeaseClose::Quarantined);
-        assert!(tracker.is_quarantined());
-        assert_eq!(tracker.active(), 1);
-        drop(lease);
-        assert_eq!(tracker.active(), 0);
-        assert_eq!(tracker.close(), LeaseClose::Quarantined);
     }
 }

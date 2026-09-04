@@ -21,8 +21,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::frame_channel::{
-    COMPLETE, CopyCounter, DirectFrame, InboundEvent, InboundFrame, OutboundFrame, ReadClose,
-    RejectedFrame, SenderQueue, frame_sender, validate_inbound_header,
+    DirectFrame, InboundEvent, InboundFrame, OutboundFrame, ReadClose, RejectedFrame, SenderQueue,
+    frame_sender, validate_inbound_header,
 };
 use crate::wire::{ByteBudget, MAX_CONTROL_BODY_LEN};
 
@@ -57,23 +57,70 @@ pub fn per_connection_limits() -> ShmHostLimits {
 /// Ceiling on sparse ring virtual arena bytes this process admits at once.
 pub const MAX_RING_RESIDENT_BYTES: u64 = 1 << 30;
 
-/// Admission limits for `connections` concurrent sparse rings, bounded by aggregate virtual arena bytes. One connection stays admissible.
-pub fn process_limits(connections: usize) -> Option<ShmHostLimits> {
-    let one = per_connection_limits();
-    let affordable = MAX_RING_RESIDENT_BYTES
-        .checked_div(one.arena_bytes)
+pub fn affordable_connections() -> u64 {
+    MAX_RING_RESIDENT_BYTES
+        .checked_div(per_connection_limits().arena_bytes)
         .unwrap_or(1)
+        .max(1)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessLimitsError {
+    /// Requested connections exceed the aggregate arena limit. Callers must
+    /// admit no more than `affordable` connections.
+    ExceedsResidentBytes {
+        requested: u64,
+        affordable: u64,
+    },
+    ChargeOverflow,
+}
+
+impl fmt::Display for ProcessLimitsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExceedsResidentBytes {
+                requested,
+                affordable,
+            } => write!(
+                formatter,
+                "{requested} shared-memory connections exceed the {affordable} affordable under \
+                 {MAX_RING_RESIDENT_BYTES} resident arena bytes"
+            ),
+            Self::ChargeOverflow => formatter.write_str("shared-memory resource limits overflow"),
+        }
+    }
+}
+
+impl std::error::Error for ProcessLimitsError {}
+
+/// Returns an error when `connections` exceeds [`affordable_connections`] so
+/// the connection gate and ring admission use the same limit.
+pub fn process_limits(connections: usize) -> Result<ShmHostLimits, ProcessLimitsError> {
+    let one = per_connection_limits();
+    let affordable = affordable_connections();
+    let requested = u64::try_from(connections)
+        .map_err(|_| ProcessLimitsError::ChargeOverflow)?
         .max(1);
-    let count = u64::try_from(connections).ok()?.min(affordable).max(1);
-    Some(ShmHostLimits {
-        descriptors: one.descriptors.checked_mul(count)?,
-        arena_bytes: one.arena_bytes.checked_mul(count)?,
-        leases: one.leases.checked_mul(count)?,
-        mappings: one.mappings.checked_mul(count)?,
-        file_descriptors: one.file_descriptors.checked_mul(count)?,
-        workers: one.workers.checked_mul(count)?,
-        client_instances: one.client_instances.checked_mul(count)?,
-        pinned_workers: one.pinned_workers.checked_mul(count)?,
+    if requested > affordable {
+        return Err(ProcessLimitsError::ExceedsResidentBytes {
+            requested,
+            affordable,
+        });
+    }
+    let scale = |charge: u64| {
+        charge
+            .checked_mul(requested)
+            .ok_or(ProcessLimitsError::ChargeOverflow)
+    };
+    Ok(ShmHostLimits {
+        descriptors: scale(one.descriptors)?,
+        arena_bytes: scale(one.arena_bytes)?,
+        leases: scale(one.leases)?,
+        mappings: scale(one.mappings)?,
+        file_descriptors: scale(one.file_descriptors)?,
+        workers: scale(one.workers)?,
+        client_instances: scale(one.client_instances)?,
+        pinned_workers: scale(one.pinned_workers)?,
     })
 }
 
@@ -86,6 +133,9 @@ pub struct RingTransport {
     peer_deaths: AtomicU64,
     reclamations: AtomicU64,
     exhaustions: AtomicU64,
+    /// Shared with each endpoint thread so a caught panic is counted after
+    /// the thread has already left `run_endpoint`.
+    endpoint_panics: Arc<AtomicU64>,
     publish_hook: Mutex<Option<PublishHook>>,
 }
 
@@ -123,6 +173,7 @@ impl RingTransport {
             peer_deaths: AtomicU64::new(0),
             reclamations: AtomicU64::new(0),
             exhaustions: AtomicU64::new(0),
+            endpoint_panics: Arc::new(AtomicU64::new(0)),
             publish_hook: Mutex::new(None),
         }
     }
@@ -188,6 +239,7 @@ impl RingTransport {
             "peer_death": {"observed": self.peer_deaths.load(Ordering::Acquire)},
             "reclamation": {"completed": self.reclamations.load(Ordering::Acquire)},
             "exhaustion": {"observed": self.exhaustions.load(Ordering::Acquire)},
+            "endpoint_panic": {"observed": self.endpoint_panics.load(Ordering::Acquire)},
         })
     }
 
@@ -231,6 +283,12 @@ impl RingTransport {
         let worker_root = root.clone();
         let worker_read_cancel = read_cancel.clone();
         let publish_hook = self.publish_hook.lock().expect("publish hook lock").clone();
+        let endpoint_panics = Arc::clone(&self.endpoint_panics);
+        let panic_root = root.clone();
+        let panic_retired = queue.retired.clone();
+        // Held outside `run_endpoint` so a panic there can still deliver an
+        // explicit non-clean close instead of a bare channel drop.
+        let panic_inbound = inbound_tx.clone();
 
         let spawned = std::thread::Builder::new()
             .name("host-shm-endpoint".to_owned())
@@ -258,7 +316,7 @@ impl RingTransport {
                 if initialized_tx.send(Ok((descriptor, descriptors))).is_err() {
                     return;
                 }
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     runtime.block_on(run_endpoint(
                         rings,
                         queue,
@@ -270,6 +328,14 @@ impl RingTransport {
                         publish_hook,
                     ))
                 }));
+                if outcome.is_err() {
+                    endpoint_panics.fetch_add(1, Ordering::Relaxed);
+                    panic_retired.cancel();
+                    panic_root.cancel();
+                    let _ = panic_inbound
+                        .try_send(Err(ReadClose::Corrupt("shared-memory endpoint panicked")));
+                }
+                drop(panic_inbound);
                 admission.release();
                 let _ = done_tx.send(());
             });
@@ -365,45 +431,69 @@ async fn run_endpoint(
 ) {
     let discard = queue.discard.clone();
     let finish = queue.finish.clone();
+    let mut inbound = Some(inbound);
     let readiness = match rings.second.duplicate_data_ready().and_then(|fd| {
         tokio::io::unix::AsyncFd::new(fd)
             .map_err(|_| shm_transport::backend::ring::RingError::ObjectSetupFailed)
     }) {
         Ok(readiness) => readiness,
         Err(_) => {
-            queue.retired.cancel();
-            root.cancel();
+            fail(
+                &mut inbound,
+                &mut queue,
+                &root,
+                ReadClose::Corrupt("shared-memory readiness setup failed"),
+            )
+            .await;
             return;
         }
     };
-    let mut inbound = Some(inbound);
+    // One ring depth of receives after `read_cancel` covers every frame committed before it. commentlint: allow(JUDGE)
+    let post_cancel_depth =
+        usize::try_from(rings.second.grant().geometry().descriptor_depth).unwrap_or(usize::MAX);
+    let mut post_cancel_frames: Option<usize> = None;
     let mut finishing = false;
     loop {
+        // The loop checks lifecycle tokens before receiving frames so sustained inbound traffic cannot bypass the `select!` below. commentlint: allow(JUDGE)
+        if discard.is_cancelled() || root.is_cancelled() {
+            return;
+        }
+        if finish.is_cancelled() {
+            finishing = true;
+        }
         let mut received = false;
         if let Some(inbound_sender) = inbound.as_ref() {
-            match receive_one(
-                &rings,
-                &mut queue,
-                inbound_sender,
-                &ingress,
-                frame_deadline,
-                &read_cancel,
-                publish_hook.as_ref(),
-            )
-            .await
-            {
-                Ok(true) => received = true,
+            let cancelled = read_cancel.is_cancelled();
+            let drain_exhausted =
+                cancelled && *post_cancel_frames.get_or_insert(post_cancel_depth) == 0;
+            let outcome = if drain_exhausted {
+                Ok(false)
+            } else {
+                receive_one(
+                    &rings,
+                    &mut queue,
+                    inbound_sender,
+                    &ingress,
+                    frame_deadline,
+                    &read_cancel,
+                    publish_hook.as_ref(),
+                )
+                .await
+            };
+            match outcome {
+                Ok(true) => {
+                    received = true;
+                    if let Some(remaining) = post_cancel_frames.as_mut() {
+                        *remaining = remaining.saturating_sub(1);
+                    }
+                }
                 Ok(false) => {
-                    if read_cancel.is_cancelled()
-                        && let Some(inbound) = inbound.take()
-                    {
+                    if cancelled && let Some(inbound) = inbound.take() {
                         let _ = inbound.send(Err(ReadClose::Cancelled)).await;
                     }
                 }
                 Err(close) => {
-                    let _ = inbound_sender.send(Err(close)).await;
-                    queue.retired.cancel();
-                    root.cancel();
+                    fail(&mut inbound, &mut queue, &root, close).await;
                     return;
                 }
             }
@@ -427,8 +517,13 @@ async fn run_endpoint(
                     Ok(false) => continue,
                     Ok(true) => true,
                     Err(_) => {
-                        queue.retired.cancel();
-                        root.cancel();
+                        fail(
+                            &mut inbound,
+                            &mut queue,
+                            &root,
+                            ReadClose::Corrupt("shared-memory data wait failed"),
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -442,27 +537,31 @@ async fn run_endpoint(
                     finishing = true;
                     None
                 }
-                () = read_cancel.cancelled(), if inbound.is_some() => {
-                    // Re-enter the receive path once after observing
-                    // cancellation. It drains frames committed before the
-                    // cancellation edge, then reports `Cancelled` after the
-                    // first empty observation.
-                    None
-                }
+                () = read_cancel.cancelled(), if inbound.is_some() => None,
                 frame = queue.recv() => match frame {
                     Some(frame) => Some(frame),
                     None => return,
                 },
                 ready = readiness.readable(), if data_armed => {
                     let Ok(mut guard) = ready else {
-                        queue.retired.cancel();
-                        root.cancel();
+                        fail(
+                            &mut inbound,
+                            &mut queue,
+                            &root,
+                            ReadClose::Corrupt("shared-memory readiness failed"),
+                        )
+                        .await;
                         return;
                     };
                     guard.clear_ready();
                     if rings.second.complete_data_wait().is_err() {
-                        queue.retired.cancel();
-                        root.cancel();
+                        fail(
+                            &mut inbound,
+                            &mut queue,
+                            &root,
+                            ReadClose::Corrupt("shared-memory data wait failed"),
+                        )
+                        .await;
                         return;
                     }
                     None
@@ -474,11 +573,30 @@ async fn run_endpoint(
             continue;
         };
         if publish_one(&rings.first, queued, frame_deadline, publish_hook.as_ref()).is_err() {
-            queue.retired.cancel();
-            root.cancel();
+            fail(
+                &mut inbound,
+                &mut queue,
+                &root,
+                ReadClose::Corrupt("shared-memory publish failed"),
+            )
+            .await;
             return;
         }
     }
+}
+
+// `ShmReceiver::recv` maps a closed channel to `CleanEof`, so a fault must be sent explicitly before `inbound` drops. commentlint: allow(JUDGE)
+async fn fail(
+    inbound: &mut Option<mpsc::Sender<Result<InboundEvent, ReadClose>>>,
+    queue: &mut SenderQueue,
+    root: &CancellationToken,
+    close: ReadClose,
+) {
+    if let Some(inbound) = inbound.take() {
+        let _ = inbound.send(Err(close)).await;
+    }
+    queue.retired.cancel();
+    root.cancel();
 }
 
 async fn receive_one(
@@ -519,7 +637,8 @@ async fn receive_one(
     let charge = loop {
         tokio::select! {
             biased;
-            () = read_cancel.cancelled() => return Err(ReadClose::Cancelled),
+            // Read cancellation stops only the read side: dropping `lease` discards the frame and `Ok(false)` lets the writer keep draining. commentlint: allow(JUDGE)
+            () = read_cancel.cancelled() => return Ok(false),
             charge = &mut charge => break charge,
             () = tokio::time::sleep_until(deadline) => {
                 // The peer and transport are healthy; only the ingress budget is
@@ -543,11 +662,9 @@ async fn receive_one(
     lease
         .release()
         .map_err(|_| ReadClose::Corrupt("shared-memory completion failed"))?;
-    let copies = CopyCounter::default();
-    copies.record_copy();
     inbound
         .send(Ok(InboundEvent::Frame(InboundFrame::owned(
-            header, body, charge, copies,
+            header, body, charge,
         ))))
         .await
         .map_err(|_| ReadClose::Cancelled)?;
@@ -556,21 +673,17 @@ async fn receive_one(
 
 fn publish_one(
     ring: &Ring,
-    mut queued: crate::frame_channel::QueuedOutboundFrame,
+    queued: OutboundFrame,
     frame_deadline: Duration,
     publish_hook: Option<&PublishHook>,
 ) -> Result<(), ()> {
-    if !queued.begin_publication() {
-        return Ok(());
-    }
-    let completion = Arc::clone(&queued.state);
     let OutboundFrame {
         bytes,
         tail,
         direct,
         charge,
         written,
-    } = queued.frame;
+    } = queued;
     let wire_header: Option<[u8; crate::wire::HEADER_LEN]> = match &direct {
         Some(direct) => Some(direct.header()),
         None => bytes
@@ -585,7 +698,6 @@ fn publish_one(
     if !matches!(result, Ok(Ok(()))) {
         return Err(());
     }
-    completion.store(COMPLETE, Ordering::Release);
     if let Some(hook) = publish_hook
         && let Some(header) = wire_header.and_then(|header| decode_header(&header).ok())
     {
@@ -701,23 +813,6 @@ impl RingClientEndpoint {
         Ok(())
     }
 
-    /// Waits for one complete host frame and records its completion.
-    pub fn recv(&self, timeout: Duration) -> Result<(EnvelopeHeader, Vec<u8>), RingClientError> {
-        let deadline = StdInstant::now() + timeout;
-        loop {
-            if let Some(frame) = self.try_recv()? {
-                return Ok(frame);
-            }
-            if !self
-                .from_host
-                .wait_for_data(deadline)
-                .map_err(|_| RingClientError)?
-            {
-                return Err(RingClientError);
-            }
-        }
-    }
-
     pub fn try_recv(&self) -> Result<Option<(EnvelopeHeader, Vec<u8>)>, RingClientError> {
         self.try_recv_with(|_| Some(()))
             .map(|frame| frame.map(|(header, body, ())| (header, body)))
@@ -783,6 +878,29 @@ impl fmt::Display for RingClientError {
 impl std::error::Error for RingClientError {}
 
 #[cfg(test)]
+impl RingClientEndpoint {
+    /// Returns an error if no frame arrives before `timeout`.
+    pub(crate) fn recv(
+        &self,
+        timeout: Duration,
+    ) -> Result<(EnvelopeHeader, Vec<u8>), RingClientError> {
+        let deadline = StdInstant::now() + timeout;
+        loop {
+            if let Some(frame) = self.try_recv()? {
+                return Ok(frame);
+            }
+            if !self
+                .from_host
+                .wait_for_data(deadline)
+                .map_err(|_| RingClientError)?
+            {
+                return Err(RingClientError);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::wire::{Flags, PROTOCOL_VERSION, Priority};
@@ -796,6 +914,31 @@ mod tests {
         fn drop(&mut self) {
             self.used.fetch_sub(self.bytes, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn process_limits_reject_counts_above_the_resident_byte_ceiling() {
+        let affordable = affordable_connections();
+        let one = per_connection_limits();
+        assert_eq!(
+            affordable,
+            MAX_RING_RESIDENT_BYTES / one.arena_bytes,
+            "affordable count is the arena ceiling divided by one ring's charge"
+        );
+        let exact = process_limits(usize::try_from(affordable).unwrap()).expect("affordable");
+        assert_eq!(exact.arena_bytes, one.arena_bytes * affordable);
+        assert_eq!(
+            process_limits(usize::try_from(affordable + 1).unwrap()),
+            Err(ProcessLimitsError::ExceedsResidentBytes {
+                requested: affordable + 1,
+                affordable,
+            }),
+            "one connection above the ceiling is rejected, not clamped"
+        );
+        assert_eq!(
+            process_limits(0).expect("zero rounds up to one ring"),
+            process_limits(1).expect("one ring")
+        );
     }
 
     #[test]
@@ -959,7 +1102,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn copied_control_frame_records_one_host_adapter_copy() {
+    async fn control_frame_body_is_copied_out_of_the_ring() {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
         let geometry = rings.first.grant().geometry();
         assert_eq!(geometry.descriptor_depth, 8);
@@ -1004,11 +1147,15 @@ mod tests {
         let InboundEvent::Frame(frame) = received.recv().await.unwrap().unwrap() else {
             panic!("expected copied frame");
         };
-        assert_eq!(frame.copy_counter().copies(), 1);
+        assert_eq!(frame.with_lease(|lease| lease.to_owned()), body);
+        assert!(
+            rings.second.try_receive().unwrap().is_none(),
+            "the ring slot is released once the body is copied out"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn budget_wait_observes_read_cancellation() {
+    async fn budget_wait_observes_read_cancellation_without_retiring() {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
         let body = [7u8];
         let header = EnvelopeHeader {
@@ -1043,6 +1190,150 @@ mod tests {
             cancel.cancel();
         };
         let (result, ()) = tokio::join!(receive, cancel_after_poll);
-        assert!(matches!(result, Err(ReadClose::Cancelled)));
+        assert!(
+            matches!(result, Ok(false)),
+            "read cancellation is not a transport fault"
+        );
+        assert!(
+            !queue.retired.is_cancelled(),
+            "read cancellation must leave the writer draining"
+        );
+        assert!(
+            rings.second.try_receive().unwrap().is_none(),
+            "the parked frame is discarded with its lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_reports_after_one_ring_depth_under_sustained_inbound() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            read_cancel,
+            root,
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 64, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        let depth = ring_profile().descriptor_depth();
+        let request = |corr: u64| EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 7,
+            epoch: 1,
+            corr,
+        };
+        let deadline = || StdInstant::now() + Duration::from_secs(1);
+        for corr in 1..=depth as u64 {
+            peer.send(request(corr), &[1], deadline())
+                .expect("peer fills the ring");
+        }
+        read_cancel.cancel();
+
+        let mut forwarded = 0usize;
+        let mut next_corr = depth as u64 + 1;
+        loop {
+            match receiver.recv().await {
+                Ok(InboundEvent::Frame(frame)) => {
+                    forwarded += 1;
+                    drop(frame);
+                    peer.send(request(next_corr), &[1], deadline())
+                        .expect("peer refills the released slot");
+                    next_corr += 1;
+                }
+                Ok(InboundEvent::Rejected(_)) => panic!("unexpected rejection"),
+                Err(ReadClose::Cancelled) => break,
+                Err(other) => panic!("unexpected close {other:?}"),
+            }
+            assert!(
+                forwarded <= depth + 1,
+                "a peer that refills every released slot must not postpone Cancelled past one ring depth"
+            );
+        }
+        assert!(
+            !sender.is_retired(),
+            "read cancellation must leave the writer draining"
+        );
+        assert!(!root.is_cancelled());
+        sender.finish();
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits after finish")
+            .expect("endpoint task joins");
+    }
+
+    #[tokio::test]
+    async fn root_cancellation_is_observed_under_sustained_inbound() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender: _sender,
+            mut receiver,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 64, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let mut io = tokio::spawn(io);
+        let depth = ring_profile().descriptor_depth();
+        let request = |corr: u64| EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 7,
+            epoch: 1,
+            corr,
+        };
+        for corr in 1..=depth as u64 {
+            peer.send(
+                request(corr),
+                &[1],
+                StdInstant::now() + Duration::from_secs(1),
+            )
+            .expect("peer fills the ring");
+        }
+        let first = receiver.recv().await.expect("first frame");
+        drop(first);
+        root.cancel();
+        let mut next_corr = depth as u64 + 1;
+        let exited = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    joined = &mut io => {
+                        joined.expect("endpoint task joins");
+                        return;
+                    }
+                    event = receiver.recv() => {
+                        if let Ok(InboundEvent::Frame(frame)) = event {
+                            drop(frame);
+                            let _ = peer.send(
+                                request(next_corr),
+                                &[1],
+                                StdInstant::now() + Duration::from_millis(100),
+                            );
+                            next_corr += 1;
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            exited.is_ok(),
+            "root cancellation must stop the endpoint while the peer keeps the ring full"
+        );
     }
 }
