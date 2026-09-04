@@ -141,15 +141,21 @@ pub struct Attempt {
 
 impl Attempt {
     /// Attempt creation refuses a preexisting directory without modifying it.
+    /// `create_dir` on the leaf makes the check and the creation one step, so two
+    /// collectors racing on the same name cannot both claim it.
     pub fn begin(run_dir: &Path, attempt_name: &str, manifest: Manifest) -> Result<Self, String> {
         let dir = run_dir.join(attempt_name);
-        if dir.exists() {
-            return Err(format!(
-                "attempt directory {} already exists; refusing to append",
-                dir.display()
-            ));
-        }
-        std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+        std::fs::create_dir_all(run_dir).map_err(|err| format!("{}: {err}", run_dir.display()))?;
+        std::fs::create_dir(&dir).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "attempt directory {} already exists; refusing to append",
+                    dir.display()
+                )
+            } else {
+                format!("{}: {err}", dir.display())
+            }
+        })?;
         let attempt = Self { dir, manifest };
         attempt.write_manifest(RUNNING_MANIFEST)?;
         Ok(attempt)

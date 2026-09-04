@@ -19,7 +19,11 @@ use super::perf_measurement::{
 };
 
 const MODULE_ID: &str = "perf-echo";
-const DRAIN_BUDGET: Duration = Duration::from_secs(5);
+const REQUEST_BUDGET: Duration = Duration::from_secs(5);
+/// The drain outlives the request budget, so a request issued at the window's
+/// edge reports its own terminal before the drain deadline expires instead of
+/// being counted as unresolved.
+const DRAIN_BUDGET: Duration = Duration::from_secs(6);
 const SETUP_BUDGET: Duration = Duration::from_secs(30);
 
 type CallResult = Result<host_runtime::Response, host_runtime::CallError>;
@@ -71,7 +75,7 @@ async fn request(
             route,
             FIXTURE_BODY.to_vec(),
             host_runtime::RequestOptions {
-                timeout: DRAIN_BUDGET,
+                timeout: REQUEST_BUDGET,
                 cancellation: None,
                 binary: false,
             },
@@ -497,10 +501,15 @@ async fn run_throughput_inner(
         let remaining = drain_deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, requests.join_next()).await {
             Ok(Some(Ok(result))) if classify(&result) == Outcome::Success => drained += 1,
-            Ok(Some(Ok(_))) | Err(_) => {
+            Ok(Some(Ok(result))) => {
+                let outcome = classify(&result);
+                requests.abort_all();
+                return Err(format!("post-window drain failed validation ({outcome:?})"));
+            }
+            Err(_) => {
                 requests.abort_all();
                 return Err(format!(
-                    "connection failed with {} in-flight response(s) undrained",
+                    "post-window drain exceeded its budget with {} response(s) undrained",
                     requests.len()
                 ));
             }
