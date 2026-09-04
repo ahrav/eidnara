@@ -55,8 +55,7 @@ use tiktoken_rs::byte_pair_split;
 /// Vocabulary as `<base64 token> <rank>` lines, embedded so counting needs no file or network.
 const CLAUDE_TIKTOKEN: &str = include_str!("../assets/claude.tiktoken");
 
-/// Upstream `pat_str`, written by `gen/gen-claude-vocab.ts`. Only the unit test reads it; the
-/// runtime pattern is [`CLAUDE_PAT_STR`].
+/// The unit tests derive [`CLAUDE_PAT_STR`] from this upstream pattern.
 #[cfg(test)]
 const UPSTREAM_PAT_STR: &str = include_str!("../assets/claude.pat");
 
@@ -70,9 +69,9 @@ macro_rules! ecmascript_whitespace {
 }
 
 /// Pre-tokenizer pattern that [`scan`] implements by hand; text is split on these boundaries
-/// before BPE merges run within each piece. Upstream `pat_str` with `\s` and `\S` replaced by
-/// the ECMAScript whitespace class. Tests check the scanner against this pattern compiled with
-/// `fancy-regex`.
+/// and BPE merges run separately within each piece. The pattern substitutes the ECMAScript
+/// whitespace class for upstream `\s` and `\S`. A unit test asserts equality with
+/// `reference_impl::CLAUDE_PAT_STR`, the oracle the scanner is tested against.
 #[cfg(test)]
 const CLAUDE_PAT_STR: &str = concat!(
     r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^",
@@ -197,6 +196,13 @@ mod tests {
         assert_eq!(derived, CLAUDE_PAT_STR);
         assert!(!CLAUDE_PAT_STR.contains(r"\s"), "unexpanded \\s in pattern");
         assert!(!CLAUDE_PAT_STR.contains(r"\S"), "unexpanded \\S in pattern");
+    }
+
+    /// The scanner tests use `reference_impl`, not `CLAUDE_PAT_STR`, as their oracle; this
+    /// equality is what lets the upstream check above reach the scanner.
+    #[test]
+    fn reference_pattern_equals_upstream_derived_pattern() {
+        assert_eq!(reference_impl::CLAUDE_PAT_STR, CLAUDE_PAT_STR);
     }
 
     #[test]
