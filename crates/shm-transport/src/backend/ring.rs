@@ -58,28 +58,37 @@ const SLOT_RECEIVER_HELD: u8 = 3;
 const SLOT_RECEIVER_LEASED: u8 = 4;
 const SLOT_RELEASE_PENDING: u8 = 5;
 
+/// Explicit padding lets `Mapping::shared_page` hand out `&Page` over peer-writable memory: a
+/// shared reference permits foreign mutation only of bytes inside an atomic or an `UnsafeCell`,
+/// and implicit padding is neither.
+const CONTROL_PAGE_PADDING: usize = CACHELINE - 2 * size_of::<AtomicU64>();
+
 #[repr(C, align(128))]
 struct ProducerPage {
     published: AtomicU64,
     arena_write: AtomicU64,
+    _padding: UnsafeCell<[u8; CONTROL_PAGE_PADDING]>,
 }
 
 #[repr(C, align(128))]
 struct ConsumerPage {
     consumed: AtomicU64,
     active_leases: AtomicU64,
+    _padding: UnsafeCell<[u8; CONTROL_PAGE_PADDING]>,
 }
 
 #[repr(C, align(128))]
 struct ReclaimPage {
     completed: AtomicU64,
     arena_reclaimed: AtomicU64,
+    _padding: UnsafeCell<[u8; CONTROL_PAGE_PADDING]>,
 }
 
 #[repr(C, align(128))]
 struct WakeEpoch {
     generation: AtomicU64,
     parked: AtomicU64,
+    _padding: UnsafeCell<[u8; CONTROL_PAGE_PADDING]>,
 }
 
 #[repr(C)]
@@ -137,13 +146,16 @@ impl SharedDescriptor {
 #[repr(C, align(128))]
 struct DescriptorSlot {
     state: AtomicU8,
+    _state_padding: UnsafeCell<[u8; 7]>,
     completion_sequence: AtomicU64,
     reservation_len: AtomicU64,
     descriptor: UnsafeCell<SharedDescriptor>,
+    _padding: UnsafeCell<[u8; 112]>,
 }
 
 // `DescriptorSlot` tail padding can hide `SharedDescriptor` layout changes from a slot-size
-// assertion; these assertions reject them at compile time.
+// assertion; these assertions reject them at compile time. The padding-field checks keep every
+// byte of a page inside an atomic or an `UnsafeCell`.
 const _: () = {
     use std::mem::offset_of;
     assert!(size_of::<SharedDescriptor>() == 120);
@@ -160,13 +172,19 @@ const _: () = {
     assert!(offset_of!(SharedDescriptor, span_lengths) == 104);
     assert!(size_of::<DescriptorSlot>() == 256);
     assert!(offset_of!(DescriptorSlot, state) == 0);
+    assert!(offset_of!(DescriptorSlot, _state_padding) == 1);
     assert!(offset_of!(DescriptorSlot, completion_sequence) == 8);
     assert!(offset_of!(DescriptorSlot, reservation_len) == 16);
     assert!(offset_of!(DescriptorSlot, descriptor) == 24);
+    assert!(offset_of!(DescriptorSlot, _padding) == 144);
     assert!(size_of::<ProducerPage>() == CACHELINE);
+    assert!(offset_of!(ProducerPage, _padding) == 16);
     assert!(size_of::<ConsumerPage>() == CACHELINE);
+    assert!(offset_of!(ConsumerPage, _padding) == 16);
     assert!(size_of::<ReclaimPage>() == CACHELINE);
+    assert!(offset_of!(ReclaimPage, _padding) == 16);
     assert!(size_of::<WakeEpoch>() == CACHELINE);
+    assert!(offset_of!(WakeEpoch, _padding) == 16);
     assert!(size_of::<LifecyclePage>() == CACHELINE);
 };
 
@@ -481,47 +499,53 @@ impl Mapping {
 
     /// # Safety
     ///
-    /// Every field of `T` must be an atomic or an `UnsafeCell`, so that concurrent peer writes
-    /// through the mapping are permitted behind `&T`. Peer stores are assumed atomic-width;
-    /// a peer that tears a store violates the protocol.
+    /// Every byte of `T`, padding included, must lie inside an atomic or an `UnsafeCell`, so
+    /// that concurrent peer writes anywhere in the page are permitted behind `&T`. Peer stores
+    /// are assumed atomic-width; a peer that tears a store violates the protocol.
     unsafe fn shared_page<T>(&self, offset: usize) -> Result<&T, RingError> {
         let ptr = self.ptr_at::<T>(offset)?;
         // SAFETY: bounds: `ptr_at` checked `offset + size_of::<T>()` against `self.len`.
         // Lifetime: the mapping is unmapped only in `Drop`, after `&self` ends.
         // Alignment: `Layout::new` places every page on a `CACHELINE` boundary.
-        // Validity: atomics accept every bit pattern. Aliasing: the caller's contract above.
+        // Validity: atomics and `UnsafeCell<[u8; N]>` accept every bit pattern.
+        // Aliasing: the caller ensures every byte of `T` is atomic or inside an `UnsafeCell`.
         Ok(unsafe { &*ptr })
     }
 
     fn producer(&self, layout: Layout) -> Result<&ProducerPage, RingError> {
-        // SAFETY: `ProducerPage` is two `AtomicU64`s.
+        // SAFETY: `ProducerPage` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
         unsafe { self.shared_page(layout.producer) }
     }
 
     fn consumer(&self, layout: Layout) -> Result<&ConsumerPage, RingError> {
-        // SAFETY: `ConsumerPage` is two `AtomicU64`s.
+        // SAFETY: `ConsumerPage` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
         unsafe { self.shared_page(layout.consumer) }
     }
 
     fn reclaim(&self, layout: Layout) -> Result<&ReclaimPage, RingError> {
-        // SAFETY: `ReclaimPage` is two `AtomicU64`s.
+        // SAFETY: `ReclaimPage` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
         unsafe { self.shared_page(layout.reclaim) }
     }
 
     fn data_wake(&self, layout: Layout) -> Result<&WakeEpoch, RingError> {
-        // SAFETY: `WakeEpoch` is two `AtomicU64`s.
+        // SAFETY: `WakeEpoch` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
         unsafe { self.shared_page(layout.data_wake) }
     }
 
     fn capacity_wake(&self, layout: Layout) -> Result<&WakeEpoch, RingError> {
-        // SAFETY: `WakeEpoch` is two `AtomicU64`s.
+        // SAFETY: `WakeEpoch` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
         unsafe { self.shared_page(layout.capacity_wake) }
     }
 
     /// Slot at ring index `index` (not sequence); the caller reduces modulo depth.
     fn slot(&self, layout: Layout, index: usize) -> Result<&DescriptorSlot, RingError> {
-        // SAFETY: `DescriptorSlot` is an `AtomicU8`, two `AtomicU64`s, and an
-        // `UnsafeCell<SharedDescriptor>` that is only ever accessed volatilely.
+        // SAFETY: `DescriptorSlot` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
         unsafe { self.shared_page(layout.slot_offset(index)?) }
     }
 
@@ -2728,6 +2752,7 @@ fn initialize_mapping(
         ProducerPage {
             published: AtomicU64::new(0),
             arena_write: AtomicU64::new(0),
+            _padding: UnsafeCell::new([0; CONTROL_PAGE_PADDING]),
         },
     )?;
     mapping.initialize_page(
@@ -2735,6 +2760,7 @@ fn initialize_mapping(
         ConsumerPage {
             consumed: AtomicU64::new(0),
             active_leases: AtomicU64::new(0),
+            _padding: UnsafeCell::new([0; CONTROL_PAGE_PADDING]),
         },
     )?;
     mapping.initialize_page(
@@ -2742,6 +2768,7 @@ fn initialize_mapping(
         ReclaimPage {
             completed: AtomicU64::new(0),
             arena_reclaimed: AtomicU64::new(0),
+            _padding: UnsafeCell::new([0; CONTROL_PAGE_PADDING]),
         },
     )?;
     for offset in [layout.data_wake, layout.capacity_wake] {
@@ -2750,6 +2777,7 @@ fn initialize_mapping(
             WakeEpoch {
                 generation: AtomicU64::new(0),
                 parked: AtomicU64::new(0),
+                _padding: UnsafeCell::new([0; CONTROL_PAGE_PADDING]),
             },
         )?;
     }
@@ -2759,9 +2787,11 @@ fn initialize_mapping(
             layout.slot_offset(index)?,
             DescriptorSlot {
                 state: AtomicU8::new(SLOT_FREE),
+                _state_padding: UnsafeCell::new([0; 7]),
                 completion_sequence: AtomicU64::new(0),
                 reservation_len: AtomicU64::new(0),
                 descriptor: UnsafeCell::new(SharedDescriptor::ZERO),
+                _padding: UnsafeCell::new([0; 112]),
             },
         )?;
     }

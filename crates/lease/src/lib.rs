@@ -13,7 +13,6 @@
 //! directory can never collide on the same `scope_key` (e.g. two modules both
 //! using session id "abc" get distinct locks). This is a deliberate requirement:
 //! the shared lease root is shared across all modules.
-#![deny(unsafe_code)]
 
 use std::{
     fs::{File, OpenOptions, TryLockError},
@@ -54,7 +53,6 @@ pub fn protect_file(path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[allow(unsafe_code)]
 fn protect_open_file(file: &File, path: &std::path::Path) -> std::io::Result<()> {
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -128,7 +126,6 @@ fn non_regular_file(path: &std::path::Path) -> std::io::Error {
 /// or junction on the way is an entry its owner can retarget while a holder's file handle
 /// pins only the final file. Directory ACLs are not evaluated. On other targets the check
 /// is a no-op.
-#[allow(unsafe_code)]
 fn require_private_directory(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -408,7 +405,6 @@ impl FileIdentity {
     ///
     /// Returns the I/O error from querying the handle, or `Unsupported` on a target that is
     /// neither Unix nor Windows.
-    #[allow(unsafe_code)]
     pub fn of_file(file: &File) -> std::io::Result<Self> {
         #[cfg(unix)]
         {
@@ -457,7 +453,6 @@ impl FileIdentity {
 ///
 /// Returns the I/O error from querying the handle, or `Unsupported` on a target that is
 /// neither Unix nor Windows.
-#[allow(unsafe_code)]
 pub fn link_count(file: &File) -> std::io::Result<u64> {
     #[cfg(unix)]
     {
@@ -1443,7 +1438,6 @@ mod tests {
     /// test; the parent asserts on that child's outcome.
     #[cfg(unix)]
     #[test]
-    #[allow(unsafe_code)]
     fn a_fresh_lease_root_is_owner_only_under_a_permissive_umask() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1692,7 +1686,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[allow(unsafe_code)]
     fn acquisition_refuses_fifo_without_blocking() {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
 

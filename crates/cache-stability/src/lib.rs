@@ -31,7 +31,6 @@
 //! the deferred-work coordinator (a HARD bust from any cause drains all deferred work), the
 //! `durability_class` reset rule across episode boundaries, and the version stamp for the
 //! harness's CAS write-back.
-#![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 

@@ -1,15 +1,16 @@
 use std::fmt;
 use std::marker::PhantomData;
+use std::mem::size_of;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::descriptor::ReleaseIdentity;
 
 /// Raw view of one arena span, readable for `'lease`. The peer can still write the mapping,
 /// so there is no `&[u8]` accessor: reads go through `read_byte`, `copy_to`, or `checksum`,
-/// each of which loads every byte atomically so a concurrent peer store is a stale value, not
-/// a data race.
+/// each of which loads through relaxed atomics whose width `AccessShape` fixes per byte, so a
+/// concurrent store of the same shape is a stale value, not a data race.
 #[derive(Clone, Copy)]
 pub struct LeaseSpan<'lease> {
     base: NonNull<u8>,
@@ -22,10 +23,13 @@ impl<'lease> LeaseSpan<'lease> {
     /// Wraps `len` bytes at `base`. Fails only on a null `base`.
     ///
     /// # Safety
-    /// `base..base.add(len)` must remain mapped and readable for `'lease`, and this process
-    /// must not form a `&[u8]` or `&mut [u8]` over any of those bytes while the span exists.
-    /// Every access through the span is an atomic byte load; a foreign process writing the
-    /// same bytes must use whole-byte stores, which every store instruction does.
+    /// `base..base.add(len)` must remain mapped and valid for reads and writes for `'lease`
+    /// (`AtomicU8::from_ptr` and `AtomicU64::from_ptr` require write validity even for a
+    /// load), and this process must not form a `&[u8]` or `&mut [u8]` over any of those bytes
+    /// while the span exists. Every access through the span is a relaxed atomic load of the
+    /// width `AccessShape` assigns to that byte's absolute address; a party storing into the
+    /// same bytes while the span reads them must use the same shape (`copy_in` does), since a
+    /// racing access of another width is a mixed-size data race.
     pub(crate) unsafe fn new(base: *mut u8, len: usize) -> Result<Self, LeaseError> {
         let base = NonNull::new(base).ok_or(LeaseError::InvalidSpan)?;
         Ok(Self {
@@ -52,14 +56,26 @@ impl<'lease> LeaseSpan<'lease> {
         self.len == 0
     }
 
-    /// One atomic byte read, or `None` past `len`.
+    /// Reads the byte at `index` atomically, or `None` when `index >= len`.
     pub fn read_byte(self, index: usize) -> Option<u8> {
         if index >= self.len {
             return None;
         }
-        // SAFETY: `index < self.len`, and the constructor's contract keeps `len` bytes mapped
-        // for `'lease` with no Rust reference formed over them; `AtomicU8` has alignment 1.
-        Some(unsafe { AtomicU8::from_ptr(self.base.as_ptr().add(index)) }.load(Ordering::Relaxed))
+        let shape = AccessShape::of(self.base.as_ptr(), self.len);
+        // SAFETY: `index < self.len`; the constructor's contract keeps `len` bytes valid for
+        // reads and writes throughout `'lease`, and no Rust reference is formed over them. A
+        // word returned by `word_containing` starts at an 8-aligned address and lies entirely
+        // within the span, so the `AtomicU64` view is aligned and in bounds.
+        Some(unsafe {
+            match shape.word_containing(index) {
+                Some(word_start) => {
+                    let word = AtomicU64::from_ptr(self.base.as_ptr().add(word_start).cast())
+                        .load(Ordering::Relaxed);
+                    word.to_ne_bytes()[index - word_start]
+                }
+                None => AtomicU8::from_ptr(self.base.as_ptr().add(index)).load(Ordering::Relaxed),
+            }
+        })
     }
 
     /// Copies every byte into `destination`, which must be exactly `len` long.
@@ -67,9 +83,8 @@ impl<'lease> LeaseSpan<'lease> {
         if destination.len() != self.len {
             return Err(LeaseError::LengthMismatch);
         }
-        // SAFETY: the constructor's contract keeps `len` source bytes readable for `'lease`
-        // with no Rust reference over them, and `destination` is a live exclusive slice of the
-        // same length that cannot overlap the mapping.
+        // SAFETY: the constructor's contract keeps `len` source bytes valid for reads and
+        // writes throughout `'lease` with no Rust reference over them.
         unsafe { copy_out(self.base.as_ptr(), destination) };
         Ok(())
     }
@@ -77,12 +92,31 @@ impl<'lease> LeaseSpan<'lease> {
     /// Wrapping sum of all bytes. Tests compare it before and after a lease to detect mutation.
     pub fn checksum(self) -> u64 {
         // The peer may write these bytes at any time, so no `&[u8]` is ever formed over them.
-        (0..self.len).fold(0u64, |sum, index| {
-            // SAFETY: `index < self.len`; same contract as `read_byte`.
-            let byte = unsafe { AtomicU8::from_ptr(self.base.as_ptr().add(index)) }
-                .load(Ordering::Relaxed);
-            sum.wrapping_add(u64::from(byte))
-        })
+        let shape = AccessShape::of(self.base.as_ptr(), self.len);
+        let mut sum = 0u64;
+        // SAFETY: `shape` partitions exactly `[0, self.len)`, which the constructor's contract
+        // keeps valid for reads and writes throughout `'lease` with no Rust reference over it;
+        // each word starts at an 8-aligned address and lies entirely within the span.
+        unsafe {
+            for offset in 0..shape.head {
+                let byte =
+                    AtomicU8::from_ptr(self.base.as_ptr().add(offset)).load(Ordering::Relaxed);
+                sum = sum.wrapping_add(u64::from(byte));
+            }
+            for word_start in shape.word_starts() {
+                let word = AtomicU64::from_ptr(self.base.as_ptr().add(word_start).cast())
+                    .load(Ordering::Relaxed);
+                for byte in word.to_ne_bytes() {
+                    sum = sum.wrapping_add(u64::from(byte));
+                }
+            }
+            for offset in shape.tail_range() {
+                let byte =
+                    AtomicU8::from_ptr(self.base.as_ptr().add(offset)).load(Ordering::Relaxed);
+                sum = sum.wrapping_add(u64::from(byte));
+            }
+        }
+        sum
     }
 }
 
@@ -92,38 +126,108 @@ impl fmt::Debug for LeaseSpan<'_> {
     }
 }
 
-/// Copies `destination.len()` bytes out of shared memory at `source`, one relaxed atomic load
-/// per byte, so a peer store during the copy yields a stale byte rather than a data race. The
-/// destination is ordinary Rust memory and takes plain stores.
+const WORD: usize = size_of::<u64>();
+
+/// Per-byte atomic access width for a shared-memory range.
 ///
-/// # Safety
-/// `source..source.add(destination.len())` must be readable for the duration of the call and
-/// must not overlap `destination`, and no Rust reference may cover that source range while the
-/// call runs.
-pub(crate) unsafe fn copy_out(source: *const u8, destination: &mut [u8]) {
-    for (offset, slot) in destination.iter_mut().enumerate() {
-        // SAFETY: `offset < destination.len()`, so the pointer stays inside the caller's range;
-        // `AtomicU8` has alignment 1. The caller vouches that the range is shared memory with no
-        // Rust reference over it, which is what `from_ptr` requires.
-        *slot =
-            unsafe { AtomicU8::from_ptr(source.add(offset).cast_mut()) }.load(Ordering::Relaxed);
+/// `AccessShape` depends on the absolute address and length alone, so two parties touching the
+/// same range agree on the width of every byte. Racing relaxed atomics of equal width read
+/// stale data; unequal widths are a mixed-size data race.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AccessShape {
+    head: usize,
+    words: usize,
+    len: usize,
+}
+
+impl AccessShape {
+    fn of(base: *const u8, len: usize) -> Self {
+        let misalignment = base.addr() % WORD;
+        let head = if misalignment == 0 {
+            0
+        } else {
+            (WORD - misalignment).min(len)
+        };
+        let words = (len - head) / WORD;
+        Self { head, words, len }
+    }
+
+    fn word_starts(self) -> impl Iterator<Item = usize> {
+        (0..self.words).map(move |word| self.head + word * WORD)
+    }
+
+    fn tail_range(self) -> std::ops::Range<usize> {
+        self.head + self.words * WORD..self.len
+    }
+
+    /// Start offset of the aligned word containing `index`, or `None` when `index` is outside
+    /// the word region.
+    fn word_containing(self, index: usize) -> Option<usize> {
+        if index < self.head || index >= self.head + self.words * WORD {
+            return None;
+        }
+        Some(self.head + (index - self.head) / WORD * WORD)
     }
 }
 
-/// Copies `source` into shared memory at `destination`, one relaxed atomic store per byte, so a
-/// peer reading during the copy observes whole bytes. The source is ordinary Rust memory and
-/// takes plain loads.
+/// Copies `destination.len()` bytes out of shared memory at `source` through relaxed atomic
+/// loads of the width `AccessShape` assigns to each byte, so a same-shape store during the copy
+/// yields stale bytes rather than a data race. The destination is ordinary Rust memory and
+/// takes plain stores.
 ///
 /// # Safety
-/// `destination..destination.add(source.len())` must be writable for the duration of the call
-/// and must not overlap `source`, and no Rust reference may cover that destination range while
-/// the call runs.
+/// `source..source.add(destination.len())` must be valid for reads and writes for the duration
+/// of the call (`AtomicU8::from_ptr` and `AtomicU64::from_ptr` require both) and must not
+/// overlap `destination`, and no Rust reference may cover that source range while the call
+/// runs.
+pub(crate) unsafe fn copy_out(source: *mut u8, destination: &mut [u8]) {
+    let shape = AccessShape::of(source, destination.len());
+    let (head, rest) = destination.split_at_mut(shape.head);
+    let (words, tail) = rest.split_at_mut(shape.words * WORD);
+    // SAFETY: `shape` partitions exactly `[0, destination.len())`, which the caller keeps
+    // valid for reads and writes with no Rust reference over it; each word starts at an
+    // 8-aligned address and lies entirely within the range, so every `from_ptr` is aligned and
+    // in bounds.
+    unsafe {
+        for (offset, byte) in head.iter_mut().enumerate() {
+            *byte = AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed);
+        }
+        for (word_start, chunk) in shape.word_starts().zip(words.as_chunks_mut::<WORD>().0) {
+            let word = AtomicU64::from_ptr(source.add(word_start).cast()).load(Ordering::Relaxed);
+            *chunk = word.to_ne_bytes();
+        }
+        for (offset, byte) in shape.tail_range().zip(tail.iter_mut()) {
+            *byte = AtomicU8::from_ptr(source.add(offset)).load(Ordering::Relaxed);
+        }
+    }
+}
+
+/// Copies `source` into shared memory at `destination` through relaxed atomic stores of the
+/// width `AccessShape` assigns to each byte, so a same-shape load during the copy observes
+/// whole bytes. The source is ordinary Rust memory and takes plain loads.
+///
+/// # Safety
+/// `destination..destination.add(source.len())` must be valid for reads and writes for the
+/// duration of the call and must not overlap `source`, and no Rust reference may cover that
+/// destination range while the call runs.
 pub(crate) unsafe fn copy_in(source: &[u8], destination: *mut u8) {
-    for (offset, byte) in source.iter().enumerate() {
-        // SAFETY: `offset < source.len()`, so the pointer stays inside the caller's range;
-        // `AtomicU8` has alignment 1. The caller vouches that the range is shared memory with no
-        // Rust reference over it, which is what `from_ptr` requires.
-        unsafe { AtomicU8::from_ptr(destination.add(offset)) }.store(*byte, Ordering::Relaxed);
+    let shape = AccessShape::of(destination, source.len());
+    let (head, rest) = source.split_at(shape.head);
+    let (words, tail) = rest.split_at(shape.words * WORD);
+    // SAFETY: `shape` partitions exactly `[0, source.len())`, which the caller keeps valid for
+    // reads and writes with no Rust reference over it; each word starts at an 8-aligned address
+    // and lies entirely within the range, so every `from_ptr` is aligned and in bounds.
+    unsafe {
+        for (offset, byte) in head.iter().enumerate() {
+            AtomicU8::from_ptr(destination.add(offset)).store(*byte, Ordering::Relaxed);
+        }
+        for (word_start, chunk) in shape.word_starts().zip(words.as_chunks::<WORD>().0) {
+            AtomicU64::from_ptr(destination.add(word_start).cast())
+                .store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
+        }
+        for (offset, byte) in shape.tail_range().zip(tail.iter()) {
+            AtomicU8::from_ptr(destination.add(offset)).store(*byte, Ordering::Relaxed);
+        }
     }
 }
 
@@ -300,7 +404,9 @@ impl fmt::Debug for LeaseError {
 mod tests {
     use std::cell::Cell;
 
-    use super::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, copy_in, copy_out};
+    use super::{
+        AccessShape, LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, WORD, copy_in, copy_out,
+    };
     use crate::descriptor::{Incarnation, ReleaseIdentity};
 
     struct CallLog {
@@ -392,37 +498,100 @@ mod tests {
     }
 
     #[test]
+    fn access_shape_partitions_the_range_on_aligned_words() {
+        let buffer = [0u64; 8];
+        let base = buffer.as_ptr().cast::<u8>();
+        for shift in 0..8 {
+            for len in 0..48 {
+                let range = base.wrapping_add(shift);
+                let shape = AccessShape::of(range, len);
+                assert_eq!(
+                    shape.head + shape.words * WORD + shape.tail_range().len(),
+                    len,
+                    "shift {shift} len {len}"
+                );
+                assert!(shape.head <= len && shape.head < WORD);
+                for word_start in shape.word_starts() {
+                    assert_eq!(range.wrapping_add(word_start).addr() % WORD, 0);
+                    assert!(word_start + WORD <= len);
+                }
+                for index in 0..len {
+                    let word = shape.word_containing(index);
+                    let in_words = index >= shape.head && index < shape.head + shape.words * WORD;
+                    assert_eq!(
+                        word.is_some(),
+                        in_words,
+                        "shift {shift} len {len} index {index}"
+                    );
+                    if let Some(word_start) = word {
+                        assert!(word_start <= index && index < word_start + WORD);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_byte_agrees_with_copy_to_at_every_alignment() {
+        use std::sync::atomic::AtomicU64;
+        let shared: [AtomicU64; 8] = std::array::from_fn(|_| AtomicU64::new(0));
+        let base = shared.as_ptr().cast_mut().cast::<u8>();
+        let pattern: Vec<u8> = (0..64u8).map(|byte| byte.wrapping_mul(37)).collect();
+        for shift in 0..8 {
+            let len = 64 - shift;
+            // SAFETY: `shared` is live for both calls and no `&[u8]` or `&mut [u8]` is formed
+            // over it; the atomics are the only accesses.
+            unsafe {
+                copy_in(&pattern[..len], base.add(shift));
+                let span = LeaseSpan::new(base.add(shift), len).unwrap();
+                let mut copied = vec![0u8; len];
+                span.copy_to(&mut copied).unwrap();
+                assert_eq!(copied, pattern[..len]);
+                for (index, expected) in pattern[..len].iter().enumerate() {
+                    assert_eq!(span.read_byte(index), Some(*expected), "shift {shift}");
+                }
+                assert_eq!(
+                    span.checksum(),
+                    pattern[..len]
+                        .iter()
+                        .map(|byte| u64::from(*byte))
+                        .sum::<u64>()
+                );
+                assert_eq!(span.read_byte(len), None);
+            }
+        }
+    }
+
+    #[test]
     fn span_null_base_is_refused() {
         // SAFETY: a null pointer with zero length names no memory.
         let refused = unsafe { LeaseSpan::new(std::ptr::null_mut(), 0) };
         assert_eq!(refused.err(), Some(LeaseError::InvalidSpan));
     }
 
-    /// A peer may store into the bytes a span is reading at any time. The span's reads are
-    /// atomic, so under Miri this is a race-free program and every observed byte is one the
-    /// writer stored.
     #[test]
     fn span_reads_tolerate_a_concurrent_writer() {
-        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-        const LEN: usize = 64;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        const SHIFT: usize = 3;
+        const LEN: usize = 62;
         let rounds = if cfg!(miri) { 4 } else { 64 };
-        let shared: [AtomicU8; LEN] = std::array::from_fn(|_| AtomicU8::new(0x11));
+        let shared: [AtomicU64; 9] = std::array::from_fn(|_| AtomicU64::new(0x1111_1111_1111_1111));
         let stop = AtomicBool::new(false);
         std::thread::scope(|scope| {
             scope.spawn(|| {
+                let base = shared.as_ptr().cast_mut().cast::<u8>();
                 let mut value = 0x11u8;
                 while !stop.load(Ordering::Relaxed) {
                     value = if value == 0x11 { 0x22 } else { 0x11 };
-                    for cell in shared.iter() {
-                        cell.store(value, Ordering::Relaxed);
-                    }
+                    // SAFETY: `shared` is live for both calls and no `&[u8]` or `&mut [u8]` is
+                    // formed over it; the atomics are the only accesses.
+                    unsafe { copy_in(&[value; LEN], base.add(SHIFT)) };
                 }
             });
-            // SAFETY: `shared` outlives the scope, so the bytes stay mapped for the span's
-            // lifetime, and the only accesses are the writer's atomic stores and the span's
-            // atomic loads.
-            let span =
-                unsafe { LeaseSpan::new(shared.as_ptr().cast_mut().cast::<u8>(), LEN) }.unwrap();
+            let base = shared.as_ptr().cast_mut().cast::<u8>();
+            // SAFETY: `shared` is live for both calls and no `&[u8]` or `&mut [u8]` is formed
+            // over it; the atomics are the only accesses.
+            let span = unsafe { LeaseSpan::new(base.add(SHIFT), LEN) }.unwrap();
             let mut copy = [0u8; LEN];
             for _ in 0..rounds {
                 for index in 0..LEN {
