@@ -12,6 +12,7 @@ description = "Directly linked host for the context, Synapse, and Broca componen
 serde = { workspace = true }
 subtle = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 rustix = { workspace = true, features = ["event", "fs", "net", "process", "thread"] }
@@ -21,7 +22,6 @@ shm-transport = { workspace = true }
 [dev-dependencies]
 hmac = { workspace = true }
 libc = { workspace = true }
-sha2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "signal"] }
 rustix = { workspace = true, features = ["stdio"] }
