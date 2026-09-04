@@ -360,18 +360,16 @@ fn exactly_one_unsafe_escape_hatch_exists_in_the_crate() {
         }
     }
 
-    // U1: Broca (the one blessed site) lands in U4; until then the crate has zero sites.
-    assert!(
-        sites.len() <= 1,
-        "at most one allow(unsafe_code) may exist; found {:?}",
+    assert_eq!(
+        sites.len(),
+        1,
+        "exactly one allow(unsafe_code) may exist; found {:?}",
         sites
             .iter()
             .map(|(file, line, _)| format!("{file}:{line}"))
             .collect::<Vec<_>>()
     );
-    let Some((file, _, text)) = sites.first() else {
-        return;
-    };
+    let (file, _, text) = &sites[0];
     assert_eq!(
         file, BLESSED,
         "the only allow(unsafe_code) must stay in {BLESSED}"

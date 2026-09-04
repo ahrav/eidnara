@@ -33,6 +33,10 @@ rustix = { workspace = true, features = ["stdio"] }
 criterion = "=0.8.2"
 hdrhistogram = "=7.6.0"
 
+[[test]]
+name = "broca_subprocess"
+harness = false
+
 [[bench]]
 name = "ipc_budget"
 harness = false
