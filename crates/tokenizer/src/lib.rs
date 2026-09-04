@@ -34,6 +34,7 @@
 //! `O(len * MAX_PIECE_BYTES)`. Ids for such pieces can differ from the reference by a few
 //! seam tokens; every piece at or below the cap is encoded exactly as the reference does.
 #![warn(missing_docs)]
+#![forbid(unsafe_code)]
 
 mod bpe;
 #[cfg(test)]

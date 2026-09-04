@@ -1,5 +1,6 @@
 //! Replays the checked-in fuzz corpus seeds through each strict decoder, so the decoders
 //! keep accepting the valid seed and rejecting the malformed ones without a fuzzer run.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use std::fs;
 use std::path::Path;
