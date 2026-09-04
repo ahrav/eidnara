@@ -104,9 +104,15 @@ impl SyscallSplit {
     }
 }
 
+/// Handshake: the peer samples its baselines, stores `ready`, and spins for `start`; the
+/// producer waits for `ready`, opens its window, and stores `start`. After its last timed
+/// operation the peer stores `work_done`, which closes the window, then samples its counters
+/// and stores `done`.
 #[repr(C)]
 struct PeerReport {
+    ready: AtomicU64,
     start: AtomicU64,
+    work_done: AtomicU64,
     done: AtomicU64,
     checksum: AtomicU64,
     scheduler_handoffs: AtomicU64,
@@ -119,7 +125,9 @@ struct PeerReport {
 impl PeerReport {
     const fn new() -> Self {
         Self {
+            ready: AtomicU64::new(0),
             start: AtomicU64::new(0),
+            work_done: AtomicU64::new(0),
             done: AtomicU64::new(0),
             checksum: AtomicU64::new(0),
             scheduler_handoffs: AtomicU64::new(0),
@@ -130,8 +138,20 @@ impl PeerReport {
         }
     }
 
+    /// Peer side: signals readiness, then spins without syscalls until the window opens.
     fn await_start(&self) -> bool {
-        await_line(&self.start, 1, Instant::now() + PEER_DEADLINE).is_some()
+        self.ready.store(1, Ordering::Release);
+        spin_until(&self.start, 1, Instant::now() + PEER_DEADLINE)
+    }
+
+    /// Producer side: waits for the peer's baselines, then opens the window.
+    fn open_window(&self) -> Result<Instant, &'static str> {
+        if await_line(&self.ready, 1, Instant::now() + PEER_DEADLINE).is_none() {
+            return Err("peer never became ready");
+        }
+        let start = Instant::now();
+        self.start.store(1, Ordering::Release);
+        Ok(start)
     }
 
     fn publish(
@@ -349,7 +369,7 @@ fn measure(arm: &str, iterations: u64, payload: usize) -> Measurement {
                 syscalls: syscalls.map(SyscallSplit::total),
                 doorbell_syscalls: counters.doorbell_syscalls,
                 other_syscalls: counters.other_syscalls,
-                page_removal_syscalls: split.page_removals,
+                page_removal_syscalls: syscalls.unwrap_or_default().page_removals,
                 park_wakes: counters.park_wakes,
                 generic_queue_hops: counters.generic_queue_hops,
                 scheduler_handoffs: counters.scheduler_handoffs,
@@ -509,10 +529,10 @@ fn run_h0(iterations: u64) -> Result<ArmRun, &'static str> {
         report: PeerReport::new(),
     });
     let peer = Peer::spawn(|| {
+        let switches_before = voluntary_switches();
         if !shared.report.await_start() {
             return 7;
         }
-        let switches_before = voluntary_switches();
         let mut yields = 0u64;
         for sequence in 0..iterations {
             let request = sequence * 2 + 1;
@@ -538,8 +558,7 @@ fn run_h0(iterations: u64) -> Result<ArmRun, &'static str> {
     })?;
     let switches_before = voluntary_switches();
     let mut yields = 0u64;
-    let start = Instant::now();
-    shared.report.start.store(1, Ordering::Release);
+    let start = shared.report.open_window()?;
     let mut stalled = false;
     for sequence in 0..iterations {
         let request = sequence * 2 + 1;
@@ -608,13 +627,12 @@ fn run_ring(
 
     let switches_before = voluntary_switches();
     let syscalls_before = ring.syscall_counters();
-    let start = Instant::now();
-    report.start.store(1, Ordering::Release);
+    let start = report.open_window()?;
     let produced = produce(&ring, &body, header, iterations, copied_producer);
     // The receiver's last copies, checksums, and releases end the window, so the producer
-    // spins for `done` without yielding rather than adding its own syscalls to the path.
+    // spins for `work_done` without yielding rather than adding its own syscalls to the path.
     let peer_finished =
-        produced.is_ok() && spin_until(&report.done, 1, Instant::now() + PEER_DEADLINE);
+        produced.is_ok() && spin_until(&report.work_done, 1, Instant::now() + PEER_DEADLINE);
     let elapsed = start.elapsed();
     let scheduler_handoffs = voluntary_switches().saturating_sub(switches_before);
     let syscalls = ring.syscall_counters().since(syscalls_before);
@@ -622,6 +640,9 @@ fn run_ring(
     let copies = produced?;
     if !peer_finished {
         return Err("ring peer stalled");
+    }
+    if await_line(&report.done, 1, Instant::now() + PEER_DEADLINE).is_none() {
+        return Err("ring peer never reported");
     }
     if peer.wait()? != 0 {
         return Err("ring peer failed");
@@ -688,11 +709,11 @@ fn produce(
 }
 
 fn ring_consumer(ring: &Ring, iterations: u64, copied_receiver: bool, report: &PeerReport) -> i32 {
+    let switches_before = voluntary_switches();
+    let syscalls_before = ring.syscall_counters();
     if !report.await_start() {
         return 7;
     }
-    let switches_before = voluntary_switches();
-    let syscalls_before = ring.syscall_counters();
     let mut checksum = 0u64;
     for _ in 0..iterations {
         let deadline = Instant::now() + PEER_DEADLINE;
@@ -726,6 +747,7 @@ fn ring_consumer(ring: &Ring, iterations: u64, copied_receiver: bool, report: &P
             return 5;
         }
     }
+    report.work_done.store(1, Ordering::Release);
     let syscalls = ring.syscall_counters().since(syscalls_before);
     report.publish(
         checksum,
