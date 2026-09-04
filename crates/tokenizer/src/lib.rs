@@ -44,18 +44,17 @@ mod scan;
 #[cfg(test)]
 mod unicode_gen_tests;
 mod unicode_tables;
+#[cfg(test)]
+mod vocab_blob_tests;
 
 use std::sync::OnceLock;
-
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-use rustc_hash::FxHashMap;
 
 /// Token id type; `u32`, the same as `tiktoken_rs::Rank`.
 pub type Rank = u32;
 
-/// Vocabulary as `<base64 token> <rank>` lines, embedded so counting needs no file or network.
-const CLAUDE_TIKTOKEN: &str = include_str!("../assets/claude.tiktoken");
+/// Vocabulary decoded by `build.rs` from `assets/claude.tiktoken` (layout documented there),
+/// embedded so counting needs no file or network.
+const VOCAB_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vocab.bin"));
 
 /// The unit tests derive [`CLAUDE_PAT_STR`] from this upstream pattern.
 #[cfg(test)]
@@ -94,26 +93,7 @@ pub const MAX_PIECE_BYTES: usize = 4096;
 
 fn vocab() -> &'static bpe::Vocab {
     static VOCAB: OnceLock<bpe::Vocab> = OnceLock::new();
-    VOCAB.get_or_init(|| {
-        let mut encoder: FxHashMap<Vec<u8>, Rank> = FxHashMap::with_capacity_and_hasher(
-            CLAUDE_TIKTOKEN.lines().count(),
-            Default::default(),
-        );
-        for line in CLAUDE_TIKTOKEN.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let (raw, rank_str) = line
-                .split_once(' ')
-                .expect("vocab line missing token or rank field");
-            let bytes = STANDARD
-                .decode(raw)
-                .expect("vocab token is not valid base64");
-            let rank: Rank = rank_str.parse().expect("vocab rank is not a u32");
-            encoder.insert(bytes, rank);
-        }
-        bpe::Vocab::new(encoder)
-    })
+    VOCAB.get_or_init(|| bpe::Vocab::from_blob(VOCAB_BLOB))
 }
 
 /// Splits `piece` into chunks of at most `max_bytes` on `char` boundaries.
