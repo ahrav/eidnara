@@ -695,7 +695,12 @@ fn start_ring_stream_bridge(
                 let _ = reservation.commit(0);
             }
             send_setup_goodbye(&mut setup);
+            // Joined teardown (protocol §6): the host closes the setup socket only after its
+            // endpoint thread has exited, and a doorbell closed while the host still waits on
+            // it is a transport fault that quarantines the ring rather than a clean close.
+            wait_for_setup_close(&mut setup, &mut scratch, Duration::from_secs(2));
             let _ = setup.shutdown(std::net::Shutdown::Both);
+            drop(endpoint);
         })
         .map_err(|err| err.to_string())?;
     ready_rx
@@ -780,6 +785,20 @@ fn pump_host_output(
         }
     }
     Ok(())
+}
+
+fn wait_for_setup_close(setup: &mut StdUnixStream, scratch: &mut [u8], budget: Duration) {
+    let deadline = std::time::Instant::now() + budget;
+    while std::time::Instant::now() < deadline {
+        match setup.read(scratch) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_micros(50));
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 fn send_setup_goodbye(setup: &mut StdUnixStream) {
