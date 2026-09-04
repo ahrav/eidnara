@@ -56,7 +56,9 @@ enum OccState {
         close_requested: bool,
     },
     Live,
-    /// A close owner is settling work; nobody else may free or reuse.
+    /// A close owner is settling work. Forced shutdown may hand the same route to a second
+    /// owner because the first may have been aborted; `mark_gone_started` keeps route-gone
+    /// exactly once and the slot is never reused while admission is frozen.
     Closing,
 }
 

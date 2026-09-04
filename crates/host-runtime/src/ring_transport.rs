@@ -276,7 +276,16 @@ impl RingTransport {
         let root = CancellationToken::new();
         let read_cancel = root.child_token();
         let (sender, queue) = frame_sender(queue_frames, root.clone(), frame_deadline);
-        let (inbound_tx, inbound_rx) = mpsc::channel(queue_frames);
+        // One slot beyond `queue_frames` is reserved for the terminal event, so a fault or cancellation is reported even when the receiver has stopped draining. commentlint: allow(JUDGE)
+        let (inbound_tx, inbound_rx) = mpsc::channel(queue_frames + 1);
+        let terminal = inbound_tx
+            .clone()
+            .try_reserve_owned()
+            .expect("a fresh inbound channel has a free slot");
+        let inbound = Inbound {
+            sender: inbound_tx.clone(),
+            terminal,
+        };
         let (initialized_tx, initialized_rx) = std::sync::mpsc::sync_channel(1);
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let profile = Arc::clone(&self.profile);
@@ -288,7 +297,7 @@ impl RingTransport {
         let panic_retired = queue.retired.clone();
         // Held outside `run_endpoint` so a panic there can still deliver an
         // explicit non-clean close instead of a bare channel drop.
-        let panic_inbound = inbound_tx.clone();
+        let panic_inbound = inbound_tx;
 
         let spawned = std::thread::Builder::new()
             .name("host-shm-endpoint".to_owned())
@@ -320,7 +329,7 @@ impl RingTransport {
                     runtime.block_on(run_endpoint(
                         &rings,
                         queue,
-                        inbound_tx,
+                        inbound,
                         ingress,
                         frame_deadline,
                         worker_root,
@@ -417,6 +426,20 @@ pub(crate) struct ShmReceiver {
     inbound: mpsc::Receiver<Result<InboundEvent, ReadClose>>,
 }
 
+type InboundSender = mpsc::Sender<Result<InboundEvent, ReadClose>>;
+
+/// The endpoint's handle on the receiver: ordinary events wait for capacity, the terminal event never does.
+struct Inbound {
+    sender: InboundSender,
+    terminal: mpsc::OwnedPermit<Result<InboundEvent, ReadClose>>,
+}
+
+impl Inbound {
+    fn close(self, close: ReadClose) {
+        self.terminal.send(Err(close));
+    }
+}
+
 impl ShmReceiver {
     pub(crate) async fn recv(&mut self) -> Result<InboundEvent, ReadClose> {
         self.inbound
@@ -430,7 +453,7 @@ impl ShmReceiver {
 async fn run_endpoint(
     rings: &DuplexRing,
     mut queue: SenderQueue,
-    inbound: mpsc::Sender<Result<InboundEvent, ReadClose>>,
+    inbound: Inbound,
     ingress: ByteBudget,
     frame_deadline: Duration,
     root: CancellationToken,
@@ -451,8 +474,7 @@ async fn run_endpoint(
                 &mut queue,
                 &root,
                 ReadClose::Corrupt("shared-memory readiness setup failed"),
-            )
-            .await;
+            );
             return;
         }
     };
@@ -470,7 +492,7 @@ async fn run_endpoint(
             finishing = true;
         }
         let mut received = false;
-        if let Some(inbound_sender) = inbound.as_ref() {
+        if let Some(inbound_sender) = inbound.as_ref().map(|inbound| &inbound.sender) {
             let cancelled = read_cancel.is_cancelled();
             let drain_exhausted =
                 cancelled && *post_cancel_frames.get_or_insert(post_cancel_depth) == 0;
@@ -498,11 +520,11 @@ async fn run_endpoint(
                 }
                 Ok(false) => {
                     if cancelled && let Some(inbound) = inbound.take() {
-                        let _ = deliver(&inbound, &queue, &root, Err(ReadClose::Cancelled)).await;
+                        inbound.close(ReadClose::Cancelled);
                     }
                 }
                 Err(close) => {
-                    fail(&mut inbound, &mut queue, &root, close).await;
+                    fail(&mut inbound, &mut queue, &root, close);
                     return;
                 }
             }
@@ -531,8 +553,7 @@ async fn run_endpoint(
                             &mut queue,
                             &root,
                             ReadClose::Corrupt("shared-memory data wait failed"),
-                        )
-                        .await;
+                        );
                         return;
                     }
                 }
@@ -558,8 +579,7 @@ async fn run_endpoint(
                             &mut queue,
                             &root,
                             ReadClose::Corrupt("shared-memory readiness failed"),
-                        )
-                        .await;
+                        );
                         return;
                     };
                     guard.clear_ready();
@@ -569,8 +589,7 @@ async fn run_endpoint(
                             &mut queue,
                             &root,
                             ReadClose::Corrupt("shared-memory data wait failed"),
-                        )
-                        .await;
+                        );
                         return;
                     }
                     None
@@ -587,22 +606,21 @@ async fn run_endpoint(
                 &mut queue,
                 &root,
                 ReadClose::Corrupt("shared-memory publish failed"),
-            )
-            .await;
+            );
             return;
         }
     }
 }
 
 // `ShmReceiver::recv` maps a closed channel to `CleanEof`, so a fault must be sent explicitly before `inbound` drops. commentlint: allow(JUDGE)
-async fn fail(
-    inbound: &mut Option<mpsc::Sender<Result<InboundEvent, ReadClose>>>,
+fn fail(
+    inbound: &mut Option<Inbound>,
     queue: &mut SenderQueue,
     root: &CancellationToken,
     close: ReadClose,
 ) {
     if let Some(inbound) = inbound.take() {
-        let _ = deliver(&inbound, queue, root, Err(close)).await;
+        inbound.close(close);
     }
     queue.retired.cancel();
     root.cancel();
@@ -610,7 +628,7 @@ async fn fail(
 
 // Teardown must not depend on the receiver draining: a full channel under `discard` or `root` cancellation yields instead of blocking the endpoint. commentlint: allow(JUDGE)
 async fn deliver(
-    inbound: &mpsc::Sender<Result<InboundEvent, ReadClose>>,
+    inbound: &InboundSender,
     queue: &SenderQueue,
     root: &CancellationToken,
     event: Result<InboundEvent, ReadClose>,
@@ -627,7 +645,7 @@ async fn deliver(
 async fn receive_one(
     rings: &DuplexRing,
     queue: &mut SenderQueue,
-    inbound: &mpsc::Sender<Result<InboundEvent, ReadClose>>,
+    inbound: &InboundSender,
     ingress: &ByteBudget,
     frame_deadline: Duration,
     root: &CancellationToken,
@@ -1531,6 +1549,51 @@ mod tests {
             transport.accounting().unwrap().active,
             ResourceCharges::ZERO,
             "a cancelled endpoint over a healthy ring refunds its admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_fault_is_reported_while_the_inbound_queue_is_full() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 1, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        peer.send(
+            EnvelopeHeader {
+                len: 1,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Request,
+                flags: Flags::new(false, Priority::Interactive, false),
+                channel: 7,
+                epoch: 1,
+                corr: 1,
+            },
+            &[1],
+            StdInstant::now() + Duration::from_secs(1),
+        )
+        .expect("peer publishes one frame");
+        // Nothing drains `receiver`, so the one-frame queue is full when the fault lands.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        peer.to_host.enter_quarantine();
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("a fault must retire the endpoint without waiting for the receiver to drain")
+            .expect("endpoint task joins");
+        assert!(sender.is_retired());
+        assert!(matches!(receiver.recv().await, Ok(InboundEvent::Frame(_))));
+        assert!(
+            matches!(receiver.recv().await, Err(ReadClose::Corrupt(_))),
+            "the terminal event follows the queued frame instead of a bare channel drop"
         );
     }
 

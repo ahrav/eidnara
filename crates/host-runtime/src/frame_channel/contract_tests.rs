@@ -275,13 +275,14 @@ pub(crate) async fn failure_after_publication_begins_retires_without_replay<F: C
         })
         .await;
     let baseline = h.budget.available();
+    // The fill only needs to land; the short write deadline is for the publication that must fail.
+    let fill_deadline = Instant::now() + Duration::from_secs(5);
     for corr in 1..=8 {
         h.sender
-            .send(outbound(corr, b"fill"))
+            .send_before(outbound(corr, b"fill"), fill_deadline)
             .await
             .expect("ring slot admits");
     }
-    tokio::time::sleep(Duration::from_millis(20)).await;
     let charge = h.budget.try_charge(4096).expect("charge");
     let mut frame = outbound(9, &vec![0u8; 4096]);
     frame.charge = charge;
