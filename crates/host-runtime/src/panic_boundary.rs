@@ -76,7 +76,21 @@ struct RedactedOnDrop<F>(Option<std::pin::Pin<Box<F>>>);
 impl<F> Drop for RedactedOnDrop<F> {
     fn drop(&mut self) {
         let _guard = CallbackPollGuard::enter();
-        drop(self.0.take());
+        let future = self.0.take();
+        if !std::thread::panicking() {
+            drop(future);
+            return;
+        }
+        // This frame is unwinding from a poll-time panic, so a destructor panic here would be a
+        // second panic and abort the process. It is caught and discarded; the first panic
+        // already carries the callback failure to the host.
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            drop(future);
+        })) && let Err(second) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(payload)))
+        {
+            std::mem::forget(second);
+        }
     }
 }
 
@@ -116,6 +130,50 @@ mod tests {
             !callback_is_polling(),
             "the guard is released after the drop"
         );
+    }
+
+    /// `PanicsOnPollAndDrop` models a callback future that fails while polled and again in its
+    /// destructor. Locals inside an `async` block are dropped by the block's own unwinding
+    /// `poll`, where a second panic is an abort no boundary can prevent, so the future itself
+    /// carries the destructor here.
+    struct PanicsOnPollAndDrop;
+
+    impl Future for PanicsOnPollAndDrop {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            panic!("callback poll panicked");
+        }
+    }
+
+    impl Drop for PanicsOnPollAndDrop {
+        fn drop(&mut self) {
+            panic!("callback future drop panicked");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_destructor_panic_during_a_poll_panic_unwind_does_not_abort() {
+        let mut redacted = Box::pin(redact(PanicsOnPollAndDrop));
+        let payload = std::future::poll_fn(|cx| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                redacted.as_mut().poll(cx)
+            })) {
+                Ok(poll) => poll.map(Ok),
+                Err(payload) => std::task::Poll::Ready(Err(payload)),
+            }
+        })
+        .await
+        .expect_err("the poll panic surfaces");
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("callback poll panicked"),
+            "the first panic wins; the destructor panic is discarded"
+        );
+        assert!(!callback_is_polling());
     }
 
     #[tokio::test]
