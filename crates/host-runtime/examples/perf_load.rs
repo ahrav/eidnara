@@ -163,7 +163,9 @@ async fn run_conn(
     warmup: Duration,
 ) -> ConnResult {
     let (stream, channel, epoch, first_free_corr) = conn;
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, write_half) = stream.into_split();
+    // The sender and the reader's Pong echo share the socket; each holds the lock for one whole frame so frames never interleave.
+    let write_half = Arc::new(tokio::sync::Mutex::new(write_half));
     let body = Arc::new(body_bytes(&opts));
     let expect_fixture = opts.workload == Workload::Json;
     // The response-length cap permits raw workload requests with multi-megabyte echoed bodies.
@@ -196,6 +198,7 @@ async fn run_conn(
         let measured_sent = Arc::clone(&measured_sent);
         let sender_done = Arc::clone(&sender_done);
         let body = Arc::clone(&body);
+        let write_half = Arc::clone(&write_half);
         let conns = opts.conns as u64;
         tokio::spawn(async move {
             // Pre-incremented before each send, so the first request uses `first_free_corr`.
@@ -272,7 +275,7 @@ async fn run_conn(
                     corr,
                 );
                 frame.extend_from_slice(&body);
-                if write_half.write_all(&frame).await.is_err() {
+                if write_half.lock().await.write_all(&frame).await.is_err() {
                     // The sender marks the request terminal so the reader records `WriteFailure` instead of `UnresolvedAtDrain`.
                     if window_ns >= warmup_ns {
                         measured_sent.fetch_add(1, Ordering::Release);
@@ -286,7 +289,7 @@ async fn run_conn(
                 }
             }
             sender_done.notify_one();
-            (inflight_full, write_half)
+            inflight_full
         })
     };
 
@@ -450,6 +453,15 @@ async fn run_conn(
                     result.closed_early = true;
                     break;
                 }
+                // A host with liveness enabled retires a generation whose Pings go unanswered.
+                if frame.ty == raw_client::TY_PING {
+                    let pong =
+                        raw_client::header(0, raw_client::TY_PONG, frame.flags, 0, 0, frame.corr);
+                    if write_half.lock().await.write_all(&pong).await.is_err() {
+                        result.closed_early = true;
+                        break;
+                    }
+                }
                 // GOODBYE for `(channel, epoch)` or `(0, 0)` closes the connection.
                 if frame.ty == raw_client::TY_GOODBYE
                     && ((frame.channel, frame.epoch) == (channel, epoch)
@@ -542,7 +554,7 @@ async fn run_conn(
     // A bounded sender join prevents write_all from wedging the run after the peer stops reading.
     let mut sender = sender;
     result.inflight_full = match tokio::time::timeout(DRAIN_BUDGET, &mut sender).await {
-        Ok(Ok((count, _write_half))) => count,
+        Ok(Ok(count)) => count,
         Ok(Err(_)) => 0,
         Err(_) => {
             sender.abort();

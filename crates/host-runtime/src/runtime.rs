@@ -169,7 +169,7 @@ impl<H: HostHandler> HostShared<H> {
         &self,
         what: &'static str,
         mut task: JoinHandle<T>,
-    ) -> Result<T, LifecycleFailure> {
+    ) -> Result<T, LifecycleFailure<T>> {
         match timeout(self.timing.lifecycle_callback_deadline, &mut task).await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(join_err)) => {
@@ -180,16 +180,17 @@ impl<H: HostHandler> HostShared<H> {
                 };
                 self.fatal
                     .trip(&self.shutdown, format!("{what} callback {kind}"));
-                Err(LifecycleFailure { stopped: true })
+                Err(LifecycleFailure { running: None })
             }
             Err(_) => {
                 // `timeout` cannot expire while a future fails to yield.
                 // `shared.tracker.wait()` reaps the detached task.
-                // itself bounded.
                 task.abort();
                 self.fatal
                     .trip(&self.shutdown, format!("{what} callback deadline expired"));
-                Err(LifecycleFailure { stopped: false })
+                Err(LifecycleFailure {
+                    running: Some(task),
+                })
             }
         }
     }
@@ -263,6 +264,9 @@ fn retain_lock_until_drained<H: HostHandler>(shared: Arc<HostShared<H>>, guard: 
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(async move {
             shared.tracker.wait().await;
+            // A dispatch task that outlived the forced-close deadline left its route without
+            // route-gone; every task has stopped now, so the sweep completes those routes.
+            force_close_all_routes(&shared).await;
             run_handler_shutdown(&shared).await;
             if let Some(message) = shared.fatal.take() {
                 eprintln!("eidnara-host: deferred handler shutdown failed: {message}");
@@ -274,11 +278,12 @@ fn retain_lock_until_drained<H: HostHandler>(shared: Arc<HostShared<H>>, guard: 
     }
 }
 
-/// `stopped` reports whether the callback has stopped running.
-pub struct LifecycleFailure {
-    /// `false` means the callback still executes because its deadline expired inside a non-yielding poll that `abort` cannot interrupt.
-    /// Callers must not advance cleanup until `stopped` is `true`.
-    pub stopped: bool,
+/// A lifecycle callback that produced no value.
+pub struct LifecycleFailure<T> {
+    /// `Some` holds the aborted task whose deadline expired; the callback may still execute inside a non-yielding poll that `abort` cannot interrupt.
+    /// Awaiting the handle resolves once the callback has stopped.
+    /// `None` means the callback has already stopped.
+    pub running: Option<JoinHandle<T>>,
 }
 
 fn spawn_handler_shutdown<H: HostHandler>(handler: Arc<H>) -> JoinHandle<()> {
@@ -1123,6 +1128,8 @@ async fn shutdown_sequence<H: HostHandler>(
             );
             return false;
         }
+        // Routes whose dispatch tasks stopped only during this wait still owe route-gone.
+        force_close_all_routes(shared).await;
         run_handler_shutdown(shared).await;
         return false;
     }

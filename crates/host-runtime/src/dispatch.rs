@@ -1089,11 +1089,17 @@ pub async fn open_route<H: HostHandler>(
     });
     let outcome = match shared.lifecycle_join("bind", bind_task).await {
         Ok(Some(outcome)) => outcome,
-        Ok(None) | Err(crate::runtime::LifecycleFailure { .. }) => {
-            shared.registry.take_rejected_bind(handle);
-            if run_route_gone(&shared, handle).await {
-                shared.registry.finalize_close(handle);
-            }
+        Ok(None) | Err(crate::runtime::LifecycleFailure { running: None }) => {
+            close_unpublished_bind(&shared, handle).await;
+            return;
+        }
+        Err(crate::runtime::LifecycleFailure {
+            running: Some(aborted),
+        }) => {
+            // Route-gone runs only after the callback has stopped; the handler must not see
+            // both `bind` and `route_gone` executing for one handle.
+            let _ = aborted.await;
+            close_unpublished_bind(&shared, handle).await;
             return;
         }
     };
@@ -1134,11 +1140,7 @@ pub async fn open_route<H: HostHandler>(
                 } else {
                     (code, message)
                 };
-            shared.registry.take_rejected_bind(handle);
-            let stopped = run_route_gone(&shared, handle).await;
-            if stopped {
-                shared.registry.finalize_close(handle);
-            }
+            close_unpublished_bind(&shared, handle).await;
             let code = if code.is_empty() {
                 "bind_rejected".to_owned()
             } else {
@@ -1180,7 +1182,15 @@ async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: Rou
     });
     match shared.lifecycle_join("route_gone", task).await {
         Ok(()) => true,
-        Err(failure) => failure.stopped,
+        Err(failure) => failure.running.is_none(),
+    }
+}
+
+/// A bind that observed its handle without publishing the route still owes route-gone before the handle closes.
+async fn close_unpublished_bind<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: RouteHandle) {
+    shared.registry.take_rejected_bind(handle);
+    if run_route_gone(shared, handle).await {
+        shared.registry.finalize_close(handle);
     }
 }
 
