@@ -44,8 +44,9 @@ pub struct Scratch {
 
 /// Vocabulary views the merge loop needs.
 pub struct Vocab {
-    /// Byte string -> rank for every token.
-    pub ranks: FxHashMap<Vec<u8>, Rank>,
+    /// Byte string -> rank for every token. Keys borrow the embedded blob: a 16-byte fat
+    /// pointer per bucket instead of a 24-byte `Vec` header plus a heap allocation.
+    pub ranks: FxHashMap<&'static [u8], Rank>,
     /// Rank of the 2-byte token `[a, b]` at `a * 256 + b`, or `NO_RANK`.
     pub pair: Box<[Rank; 65536]>,
     /// Rank of the single byte `b` at `b`.
@@ -53,11 +54,27 @@ pub struct Vocab {
 }
 
 impl Vocab {
-    pub fn new(ranks: FxHashMap<Vec<u8>, Rank>) -> Self {
+    /// Parses the `build.rs` blob (`u32 count`, `count` x (`u16 len`, `u32 rank`), bytes).
+    pub fn from_blob(blob: &'static [u8]) -> Self {
+        let count = u32::from_le_bytes(blob[..4].try_into().unwrap()) as usize;
+        let (header, mut bytes) = blob[4..].split_at(count * 6);
+        let mut ranks = FxHashMap::with_capacity_and_hasher(count, Default::default());
+        for rec in header.as_chunks::<6>().0 {
+            let len = u16::from_le_bytes([rec[0], rec[1]]) as usize;
+            let rank = Rank::from_le_bytes([rec[2], rec[3], rec[4], rec[5]]);
+            let (token, rest) = bytes.split_at(len);
+            bytes = rest;
+            ranks.insert(token, rank);
+        }
+        assert!(bytes.is_empty(), "vocab blob has trailing bytes");
+        Self::new(ranks)
+    }
+
+    pub fn new(ranks: FxHashMap<&'static [u8], Rank>) -> Self {
         let mut pair: Box<[Rank; 65536]> = vec![NO_RANK; 65536].try_into().unwrap();
         let mut byte = [NO_RANK; 256];
         for (k, &r) in &ranks {
-            match k.as_slice() {
+            match *k {
                 [a] => byte[*a as usize] = r,
                 [a, b] => pair[*a as usize * 256 + *b as usize] = r,
                 _ => {}
