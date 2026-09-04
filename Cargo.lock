@@ -604,6 +604,7 @@ name = "tokenizer"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "fancy-regex",
  "rustc-hash",
  "serde",
  "serde_json",

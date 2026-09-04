@@ -2231,5 +2231,184 @@
       19,
       2270
     ]
+  },
+  {
+    "label": "nel-after-space",
+    "text": "wait  what mojibake a b",
+    "ids": [
+      2716,
+      2455,
+      232,
+      1204,
+      131,
+      232,
+      1048,
+      78,
+      606,
+      1047,
+      269,
+      2455,
+      232,
+      70
+    ]
+  },
+  {
+    "label": "nel-runs",
+    "text": "a b\nc",
+    "ids": [
+      69,
+      131,
+      232,
+      131,
+      232,
+      301,
+      131,
+      232,
+      203,
+      71
+    ]
+  },
+  {
+    "label": "bom-leading",
+    "text": "﻿const x = 1;",
+    "ids": [
+      57538,
+      2666,
+      679,
+      284,
+      355,
+      31
+    ]
+  },
+  {
+    "label": "bom-between-punct",
+    "text": "x.﻿.y ﻿z",
+    "ids": [
+      92,
+      18,
+      57538,
+      18,
+      93,
+      225,
+      57538,
+      94
+    ]
+  },
+  {
+    "label": "ideographic-space",
+    "text": "全角　スペース　test",
+    "ids": [
+      20167,
+      36967,
+      3479,
+      227,
+      15838,
+      2633,
+      253,
+      9780,
+      15838,
+      3479,
+      227,
+      765
+    ]
+  },
+  {
+    "label": "nbsp-and-narrow-nbsp",
+    "text": "a b c d e f",
+    "ids": [
+      69,
+      131,
+      259,
+      70,
+      477,
+      112,
+      71,
+      4513,
+      258,
+      72,
+      477,
+      106,
+      73,
+      477,
+      107,
+      74
+    ]
+  },
+  {
+    "label": "proto-member-names",
+    "text": "obj.valueOf(); o.hasOwnProperty(k); a.isPrototypeOf(b); s.toLocaleString(); p.propertyIsEnumerable(q)",
+    "ids": [
+      1716,
+      18,
+      929,
+      3645,
+      4370,
+      291,
+      18,
+      2533,
+      37876,
+      3845,
+      12,
+      79,
+      1480,
+      269,
+      18,
+      299,
+      64375,
+      3645,
+      12,
+      70,
+      1480,
+      292,
+      18,
+      535,
+      33180,
+      2146,
+      4370,
+      289,
+      18,
+      2664,
+      2803,
+      7181,
+      23628,
+      12,
+      85,
+      13
+    ]
+  },
+  {
+    "label": "proto-member-own-keys",
+    "text": "x.constructor; y.toString(); z.__proto__",
+    "ids": [
+      92,
+      18,
+      16585,
+      31,
+      416,
+      18,
+      26492,
+      4370,
+      1188,
+      1170,
+      4897,
+      415
+    ]
+  },
+  {
+    "label": "dunder-proto-short",
+    "text": "__proto__",
+    "ids": [
+      415,
+      4897,
+      415
+    ]
+  },
+  {
+    "label": "valueof-short",
+    "text": "valueOf",
+    "ids": [
+      929,
+      3645
+    ]
   }
 ]

@@ -3,6 +3,15 @@
  * independent oracle the Rust port is checked against.
  *
  *   bun crates/tokenizer/gen/gen-token-golden.ts
+ *
+ * The tokenizer receives a null-prototype copy of `stringEncoder`. `ai-tokenizer` indexes the
+ * encoder with plain property access, so with the stock object a pre-token such as `valueOf`
+ * or `hasOwnProperty` resolves to an `Object.prototype` function instead of `undefined` and is
+ * emitted as a non-numeric "token". The copy makes those lookups miss, as they should.
+ *
+ * Every id is checked to be a non-negative integer before the fixture is written, so a
+ * defective oracle fails here with the case label instead of producing JSON that
+ * `tests/token_golden.rs` cannot deserialize.
  */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,10 +29,14 @@ interface GoldenCase {
 }
 
 async function main(): Promise<void> {
-    const enc = await import(claudeEntry);
+    const enc = (await import(claudeEntry)) as { stringEncoder: Record<string, number> };
     const { default: Tokenizer } = await import(tokenizerEntry);
-    const tk = new Tokenizer(enc);
-    const encode = (text: string): number[] => Array.from(tk.encode(text, "all"));
+    const ownKeyEncoding = {
+        ...enc,
+        stringEncoder: Object.assign(Object.create(null) as Record<string, number>, enc.stringEncoder),
+    };
+    const tk = new Tokenizer(ownKeyEncoding);
+    const encode = (text: string): unknown[] => Array.from(tk.encode(text, "all") as unknown[]);
 
     const corpus: Array<[string, string]> = [
         ["empty", ""],
@@ -81,13 +94,35 @@ async function main(): Promise<void> {
                 `Line ${i}: the quick brown fox (café ${i * 3.14}) 你好 🚀 {"k":${i}} https://x.io/${i}`,
             ).join("\n"),
         ],
+        // ECMAScript `\s` excludes U+0085 (NEL) and includes U+FEFF; the Rust pattern spells
+        // that class out so these split the same way on both sides.
+        ["nel-after-space", "wait \u0085 what\u0085 mojibake a \u0085b"],
+        ["nel-runs", "a\u0085\u0085 b\u0085\nc"],
+        ["bom-leading", "\ufeffconst x = 1;"],
+        ["bom-between-punct", "x.\ufeff.y \ufeffz"],
+        ["ideographic-space", "全角\u3000スペース\u3000test"],
+        ["nbsp-and-narrow-nbsp", "a\u00a0b\u202fc\u205fd\u2028e\u2029f"],
+        // Pre-tokens equal to Object.prototype member names that are not vocabulary entries.
+        // With a plain-object encoder these come back as functions from the reference.
+        [
+            "proto-member-names",
+            "obj.valueOf(); o.hasOwnProperty(k); a.isPrototypeOf(b); s.toLocaleString(); p.propertyIsEnumerable(q)",
+        ],
+        ["proto-member-own-keys", "x.constructor; y.toString(); z.__proto__"],
+        ["dunder-proto-short", "__proto__"],
+        ["valueof-short", "valueOf"],
     ];
 
-    const cases: GoldenCase[] = corpus.map(([label, text]) => ({
-        label,
-        text,
-        ids: encode(text),
-    }));
+    const cases: GoldenCase[] = corpus.map(([label, text]) => {
+        const raw = encode(text);
+        const bad = raw.findIndex((id) => typeof id !== "number" || !Number.isInteger(id) || id < 0);
+        if (bad !== -1) {
+            throw new Error(
+                `case '${label}': ids[${bad}] is not a non-negative integer (${String(raw[bad])})`,
+            );
+        }
+        return { label, text, ids: raw as number[] };
+    });
 
     const outPath = join(import.meta.dir, "..", "testdata", "token-golden.json");
     writeFileSync(outPath, `${JSON.stringify(cases, null, 2)}\n`, "utf8");

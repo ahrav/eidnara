@@ -10,6 +10,7 @@ description = "Claude byte-BPE token counting, matching ai-tokenizer's claude en
 
 [dependencies]
 tiktoken-rs = "=0.11.0"
+fancy-regex = "0.17"
 base64 = "0.22"
 rustc-hash = "1.1"
 

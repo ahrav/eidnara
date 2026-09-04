@@ -3,9 +3,10 @@
 //! that is wrong but happens to produce the same number of tokens still fails.
 
 use serde::Deserialize;
-use tokenizer::{encode_ordinary, estimate_tokens};
+use tokenizer::{MAX_PIECE_BYTES, encode_ordinary, estimate_tokens};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GoldenCase {
     label: String,
     text: String,
@@ -23,6 +24,9 @@ fn encode_ordinary_matches_ai_tokenizer_ids() {
     assert!(!cases.is_empty(), "golden corpus is empty");
     let mut failures = Vec::new();
     for c in &cases {
+        if !c.text.is_empty() {
+            assert!(!c.ids.is_empty(), "case '{}' has text but no ids", c.label);
+        }
         let got = encode_ordinary(&c.text);
         if got != c.ids {
             failures.push(format!(
@@ -62,4 +66,70 @@ fn deterministic_across_calls() {
     for _ in 0..1000 {
         assert_eq!(estimate_tokens(text), first);
     }
+}
+
+/// Known divergence from `ai-tokenizer@1.0.6`, which drops the BOM here because its rank
+/// lookup decodes byte slices with a BOM-stripping `TextDecoder` and scores `EF BB BF 0A` as
+/// `"\n"`, yielding `[92, 203]`. The correct encoding keeps the BOM as its own token.
+#[test]
+fn bom_before_newline_is_preserved() {
+    let bom = encode_ordinary("\u{feff}");
+    let newline = encode_ordinary("\n");
+    let x = encode_ordinary("x");
+    assert_eq!(bom.len(), 1);
+    assert_eq!(newline.len(), 1);
+    assert_eq!(x.len(), 1);
+    let got = encode_ordinary("x\u{feff}\n");
+    assert_eq!(got, [x[0], bom[0], newline[0]]);
+}
+
+/// A letter run longer than the cap is chunked; the result must be consistent with counting
+/// and equal to the concatenation of the chunk encodings. The over-long piece is ` ?\p{L}+`,
+/// so it starts with the space before the run.
+#[test]
+fn over_long_piece_is_chunked_and_bounded() {
+    let piece = format!(" {}", "a".repeat(MAX_PIECE_BYTES * 3 + 17));
+    let text = format!("prefix{piece} suffix");
+    let ids = encode_ordinary(&text);
+    assert_eq!(ids.len(), estimate_tokens(&text));
+    let mut expected = encode_ordinary("prefix");
+    let mut start = 0;
+    while start < piece.len() {
+        let end = (start + MAX_PIECE_BYTES).min(piece.len());
+        expected.extend(encode_ordinary(&piece[start..end]));
+        start = end;
+    }
+    expected.extend(encode_ordinary(" suffix"));
+    assert_eq!(ids, expected);
+}
+
+/// Multi-byte characters never get split mid-codepoint when a CJK run exceeds the cap.
+#[test]
+fn over_long_cjk_piece_keeps_char_boundaries() {
+    let run = "你好世界".repeat(MAX_PIECE_BYTES / 4);
+    let ids = encode_ordinary(&run);
+    assert_eq!(ids.len(), estimate_tokens(&run));
+    assert!(
+        ids.len() >= run.chars().count() / 2,
+        "implausibly few tokens: {}",
+        ids.len()
+    );
+}
+
+/// Text at or below the cap takes the unchunked path. A long document with no over-long piece
+/// must encode identically whether or not the bounded path scans it. The sentence starts with
+/// its space and ends at punctuation so its pieces are the same whether it is encoded alone or
+/// inside the repeated text.
+#[test]
+fn long_text_without_over_long_piece_is_unaffected_by_bound() {
+    let sentence = " The quick brown fox jumps over the lazy dog.";
+    let repeats = MAX_PIECE_BYTES / sentence.len() * 4;
+    let text = sentence.repeat(repeats);
+    assert!(text.len() > MAX_PIECE_BYTES);
+    let whole = encode_ordinary(&text);
+    let mut concatenated = Vec::new();
+    for _ in 0..repeats {
+        concatenated.extend(encode_ordinary(sentence));
+    }
+    assert_eq!(whole, concatenated);
 }
