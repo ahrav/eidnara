@@ -25,13 +25,17 @@ use tokio::time::{Instant, timeout_at};
 pub const MAX_SETUP_MESSAGE_LEN: usize = 16 * 1024;
 pub const RING_DESCRIPTOR_COUNT: usize = shm_transport::descriptor::SETUP_DESCRIPTOR_COUNT;
 
+/// Binds the setup socket at `path` with mode `0600`, replacing a stale socket left by an earlier incarnation.
+///
+/// The occupant's mode is not consulted: `set_permissions` runs after `UnixListener::bind`,
+/// and a crash between the two leaves an owner-owned socket at a looser mode.
+/// The stale socket is unlinked without connecting, so its mode does not affect the trust decision.
 pub(crate) fn bind_owner_only(path: &Path) -> io::Result<tokio::net::UnixListener> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
-            let secure_stale_socket = metadata.file_type().is_socket()
-                && metadata.uid() == rustix::process::geteuid().as_raw()
-                && metadata.mode() & 0o777 == 0o600;
-            if !secure_stale_socket {
+            let own_stale_socket = metadata.file_type().is_socket()
+                && metadata.uid() == rustix::process::geteuid().as_raw();
+            if !own_stale_socket {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "refusing insecure setup socket occupant",
@@ -533,6 +537,30 @@ mod tests {
         let error = bind_owner_only(&path).expect_err("regular file must fail closed");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(std::fs::read(path).unwrap(), b"not a socket");
+    }
+
+    /// A crash between `bind` and `set_permissions` leaves an owner-owned socket at the umask default mode; the next start must replace it rather than refuse until an operator deletes it.
+    #[tokio::test]
+    async fn own_stale_socket_with_loose_mode_is_replaced() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("setup.sock");
+        drop(bind_owner_only(&path).expect("first bind"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("simulate a crash before the mode tightened");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+
+        let _listener = bind_owner_only(&path).expect("stale owner socket must be replaced");
+        let mode = std::fs::symlink_metadata(&path)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[tokio::test]

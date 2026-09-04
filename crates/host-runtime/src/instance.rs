@@ -306,7 +306,24 @@ impl InstanceGuard {
     /// (protocol §4.1, §4.2). The owner-only `O_EXCL` temp file and the rename
     /// over the canonical name both stay relative to the pinned directory
     /// descriptor, so the swap cannot cross filesystems or follow links.
+    ///
+    /// The publication is refused when `ConnectionInfo::validate` would reject
+    /// it on the client side: a relative or non-UTF-8 `setup_socket`, or an
+    /// empty `daemon_ver`. Installing such a file would report success while
+    /// every conforming client failed discovery.
     pub fn publish(&mut self, setup_socket: &Path, daemon_ver: &str) -> Result<(), InstanceError> {
+        if !setup_socket.is_absolute() {
+            return Err(InstanceError::Insecure {
+                what: "relative setup socket path",
+                path: setup_socket.to_path_buf(),
+            });
+        }
+        if daemon_ver.is_empty() {
+            return Err(InstanceError::Insecure {
+                what: "empty daemon version",
+                path: self.dir_path.join(CONNECTION_FILE_NAME),
+            });
+        }
         let info = ConnectionInfo {
             schema: SCHEMA_VERSION,
             wire_version: crate::wire::PROTOCOL_VERSION,
@@ -322,6 +339,10 @@ impl InstanceGuard {
             pid: std::process::id(),
             daemon_ver: daemon_ver.to_owned(),
         };
+        debug_assert!(
+            info.validate().is_ok(),
+            "publish must refuse every publication ConnectionInfo::validate rejects"
+        );
         let json =
             serde_json::to_vec_pretty(&info).expect("connection info serialization cannot fail");
 
@@ -347,10 +368,12 @@ impl InstanceGuard {
         // Transient failures must retain `identity` so `Drop` can retry.
         // Drop retries after connection descriptors close.
         // Only successful unlink or a definitive identity mismatch clears `self.publication`.
+        // `O_NONBLOCK` prevents a FIFO at `CONNECTION_FILE_NAME` from blocking `openat`
+        // until a writer arrives; `fstat` then rejects the FIFO as a non-regular file.
         let Ok(fd) = openat(
             &self.dir,
             CONNECTION_FILE_NAME,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         ) else {
             self.publication = Some(identity);
@@ -524,6 +547,16 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
                         .map_err(|e| io_err("fchmod_component", &walked, e))?;
                 }
                 fd
+            }
+            // A crash between `mkdirat` and `chmodat` can leave an owner-owned directory without owner permissions.
+            Err(rustix::io::Errno::ACCESS) => {
+                if !repair_owner_access(&current, name, S_IFDIR, 0o700)
+                    .map_err(|e| io_err("repair_component", &walked, e))?
+                {
+                    return Err(io_err("open_component", &walked, rustix::io::Errno::ACCESS));
+                }
+                openat(&current, name, flags, Mode::empty())
+                    .map_err(|e| io_err("open_component", &walked, e))?
             }
             // A symlink or non-directory at a managed name is a hostile shape, not an I/O fault.
             Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
@@ -784,6 +817,35 @@ pub(crate) fn is_owner_only_dir(stat: &rustix::fs::Stat) -> bool {
         && mode & 0o077 == 0
 }
 
+/// Repairs owner-owned entries left without owner permissions when creation stops before `chmod`.
+///
+/// `mkdirat` and `openat(O_CREAT)` apply the umask before the separate `chmod`.
+/// A crash after creation but before `chmod` can leave an owner-owned entry without owner permissions.
+/// A later open that needs owner permission fails with `EACCES` until the mode is repaired.
+/// The umask only removes bits from an owner-only request, so an entry with group or other
+/// bits was not left behind by that crash and is never chmodded.
+///
+/// `Ok(true)` means the mode was restored to `mode` and the caller may reopen.
+pub(crate) fn repair_owner_access(
+    dir: &OwnedFd,
+    name: &std::ffi::OsStr,
+    kind: u32,
+    mode: u32,
+) -> Result<bool, rustix::io::Errno> {
+    let stat = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    let current = mode_bits(&stat);
+    let owner_ok = stat.st_uid == rustix::process::geteuid().as_raw();
+    let shape_ok = (current & S_IFMT) == kind
+        && owner_ok
+        && current & 0o077 == 0
+        && (kind != S_IFREG || stat.st_nlink == 1);
+    if !shape_ok {
+        return Ok(false);
+    }
+    rustix::fs::chmodat(dir, name, Mode::from_raw_mode(mode), AtFlags::empty())?;
+    Ok(true)
+}
+
 /// `ATOMIC_WRITE_NAMES` lists the names accepted by `write_atomic_owner_only`.
 /// The writer asserts membership, so every newly atomically written file is sweepable.
 pub(crate) const ATOMIC_WRITE_NAMES: [&str; 2] = [
@@ -964,6 +1026,36 @@ mod tests {
         assert!(!published(&guard).exists());
     }
 
+    /// `ConnectionInfo::validate` rejects relative socket paths and empty daemon versions, so `publish` must refuse both before installing a file no client accepts.
+    #[test]
+    fn publication_rejects_what_clients_would_refuse() {
+        let root = temp_root();
+        let mut guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+
+        assert!(matches!(
+            guard.publish(Path::new("relative/setup.sock"), "eidnara-host/test"),
+            Err(InstanceError::Insecure {
+                what: "relative setup socket path",
+                ..
+            })
+        ));
+        assert!(matches!(
+            guard.publish(&guard.dir_path().join("setup.sock"), ""),
+            Err(InstanceError::Insecure {
+                what: "empty daemon version",
+                ..
+            })
+        ));
+        assert!(!published(&guard).exists());
+        assert!(
+            std::fs::read_dir(guard.dir_path())
+                .expect("list run dir")
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
+            "a refused publication must leave no temp file"
+        );
+    }
+
     #[test]
     fn world_writable_intermediate_is_rejected() {
         let root = temp_root();
@@ -995,6 +1087,53 @@ mod tests {
 
         let guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
         assert_eq!(mode_of(guard.dir_path()), 0o700);
+    }
+
+    /// A crash between `mkdirat` and `chmodat` under a restrictive umask leaves an owner-owned component at mode `0000`; the next start must repair it rather than fail on `EACCES` forever.
+    #[test]
+    fn partially_created_components_are_repaired_on_restart() {
+        for stranded in ["eidnara", "run"] {
+            let root = temp_root();
+            let dir = runtime_dir_path(Some(root.path())).expect("resolve");
+            std::fs::create_dir_all(&dir).expect("create dirs");
+            let victim = if stranded == "run" {
+                dir.clone()
+            } else {
+                dir.parent().expect("managed dir").to_path_buf()
+            };
+            std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o000))
+                .expect("strand component");
+
+            let guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST)
+                .unwrap_or_else(|e| panic!("a stranded {stranded} must be repaired: {e}"));
+            assert_eq!(mode_of(&victim), 0o700, "stranded {stranded}");
+            assert_eq!(mode_of(guard.dir_path()), 0o700);
+        }
+    }
+
+    /// Repair applies only to the umask-stranded shape. A `mkdirat(0700)` filtered by any umask never carries group or other bits, so an unreadable directory that does was not stranded by this code and stays untouched.
+    #[test]
+    fn unreadable_dirs_with_group_or_other_bits_are_not_repaired() {
+        let root = temp_root();
+        let dir = runtime_dir_path(Some(root.path())).expect("resolve");
+        std::fs::create_dir_all(&dir).expect("create dirs");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o070)).expect("strand");
+
+        let err = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect_err("must refuse");
+        assert!(
+            matches!(
+                &err,
+                InstanceError::Io { op: "open_component", source, .. }
+                    if source.kind() == io::ErrorKind::PermissionDenied
+            ),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(
+            mode_of(&dir),
+            0o070,
+            "a foreign-mode directory must not be chmodded"
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("restore");
     }
 
     #[test]

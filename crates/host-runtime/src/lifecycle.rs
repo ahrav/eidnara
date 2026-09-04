@@ -16,8 +16,8 @@ use crate::connection_file::{ConnectionInfo, KEY_LEN};
 use crate::instance::{
     CONNECTION_FILE_NAME, InstanceError, InstanceGuard, S_IFMT, S_IFREG, data_dir_path,
     flock_bounded, flock_exclusive_bounded, hex, io_err, is_owner_only_dir, is_safe_ancestor,
-    is_secure_regular, mode_bits, open_secure_dir_existing, read_all_fd, runtime_dir_path,
-    secure_runtime_dir,
+    is_secure_regular, mode_bits, open_secure_dir_existing, read_all_fd, repair_owner_access,
+    runtime_dir_path, secure_runtime_dir,
 };
 
 /// `LIFECYCLE_RECORD_NAME` identifies the lifecycle record in the runtime directory.
@@ -93,18 +93,30 @@ fn create_validated_lock_file(
     name: &'static str,
 ) -> Result<OwnedFd, InstanceError> {
     let path = dir_path.join(name);
-    let fd = match openat(
-        dir,
-        name,
-        OFlags::CREATE | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::from_raw_mode(0o600),
-    ) {
+    let flags =
+        OFlags::CREATE | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let fd = match openat(dir, name, flags, Mode::from_raw_mode(0o600)) {
         Ok(fd) => fd,
         Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
             return Err(InstanceError::Insecure {
                 what: "coordination lock file",
                 path,
             });
+        }
+        // A crash between `O_CREAT` and the `fchmod` below under a restrictive umask leaves
+        // an owner-owned lock file without read permission.
+        Err(rustix::io::Errno::ACCESS) => {
+            if !repair_owner_access(dir, name.as_ref(), S_IFREG, 0o600)
+                .map_err(|e| io_err("repair_coordination_lock", &path, e))?
+            {
+                return Err(io_err(
+                    "open_coordination_lock",
+                    &path,
+                    rustix::io::Errno::ACCESS,
+                ));
+            }
+            openat(dir, name, flags, Mode::from_raw_mode(0o600))
+                .map_err(|e| io_err("open_coordination_lock", &path, e))?
         }
         Err(e) => return Err(io_err("open_coordination_lock", &path, e)),
     };
@@ -1829,10 +1841,8 @@ mod tests {
             .expect("the pre-poll notification must not be lost");
     }
 
-    ///
     /// A thread blocked in `openat` on a writer-less FIFO cannot be cancelled or joined.
-    /// A timeout must terminate the process because a blocked FIFO-open thread cannot be joined.
-    /// The timeout handler exits the process because a blocked FIFO-open thread cannot be joined.
+    /// Panicking on the test thread fails only this test; the blocked thread does not keep the process alive after the harness's main thread returns.
     #[cfg(target_os = "linux")]
     fn within<T: Send + 'static>(
         budget: Duration,
@@ -1845,14 +1855,10 @@ mod tests {
         });
         match rx.recv_timeout(budget) {
             Ok(value) => value,
-            Err(_) => {
-                eprintln!("FAILED: {diagnosis}");
-                eprintln!(
-                    "  a blocking open never returned within {budget:?}; \
-                     O_NONBLOCK is missing from the evidence opener"
-                );
-                std::process::exit(1);
-            }
+            Err(_) => panic!(
+                "{diagnosis}: a blocking open never returned within {budget:?}; \
+                 O_NONBLOCK is missing from the evidence opener"
+            ),
         }
     }
 
@@ -1914,6 +1920,77 @@ mod tests {
             move || guard.remove_lifecycle_record(),
         );
         assert!(path.exists(), "a foreign shape must survive fenced removal");
+    }
+
+    /// `remove_publication` opens the canonical name from `Drop` too, so a FIFO planted there after publication must be rejected without blocking.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fifo_at_the_publication_name_cannot_hang_fenced_removal() {
+        let root = temp_root();
+        let mut guard = acquire(root.path());
+        guard
+            .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
+            .expect("publish");
+        let path = guard.dir_path().join(CONNECTION_FILE_NAME);
+        std::fs::remove_file(&path).expect("displace publication");
+        rustix::fs::mkfifoat(rustix::fs::CWD, path.as_path(), Mode::from_raw_mode(0o600))
+            .expect("plant fifo");
+
+        within(
+            Duration::from_secs(5),
+            "remove_publication blocked on a fifo, retaining the instance lock",
+            move || guard.remove_publication(),
+        );
+        assert!(path.exists(), "a foreign shape must survive fenced removal");
+    }
+
+    /// A crash between `O_CREAT` and `fchmod` under a restrictive umask leaves an owner-owned lock file at mode `0000`; the next start must repair it rather than fail on `EACCES` forever.
+    #[test]
+    fn partially_created_lock_files_are_repaired_on_restart() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for name in [TRANSACTION_LOCK_NAME, LIFETIME_LOCK_NAME] {
+            let root = temp_root();
+            let coordination = coordination_dir_path(Some(root.path())).expect("path");
+            std::fs::create_dir_all(&coordination).expect("coordination root");
+            let stranded = coordination.join(name);
+            std::fs::write(&stranded, b"").expect("plant lock file");
+            std::fs::set_permissions(&stranded, std::fs::Permissions::from_mode(0o000))
+                .expect("strand lock file");
+
+            let guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST)
+                .unwrap_or_else(|e| panic!("a stranded {name} must be repaired: {e}"));
+            let mode = std::fs::metadata(&stranded)
+                .expect("stat lock")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(mode, 0o600, "stranded {name}");
+            drop(guard);
+        }
+
+        // An owner-only `O_CREAT` filtered by any umask never carries group or other bits, so an unreadable lock file that does was not stranded by this code and must not be chmodded.
+        let root = temp_root();
+        let coordination = coordination_dir_path(Some(root.path())).expect("path");
+        std::fs::create_dir_all(&coordination).expect("coordination root");
+        let decoy = coordination.join(LIFETIME_LOCK_NAME);
+        std::fs::write(&decoy, b"").expect("plant lock file");
+        std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o040)).expect("strand");
+        let err = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect_err("must refuse");
+        assert!(
+            matches!(
+                &err,
+                InstanceError::Io { op: "open_coordination_lock", source, .. }
+                    if source.kind() == std::io::ErrorKind::PermissionDenied
+            ),
+            "unexpected error: {err:?}"
+        );
+        let mode = std::fs::metadata(&decoy)
+            .expect("stat decoy")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o040, "a foreign-mode lock file must not be chmodded");
     }
 
     /// A symlink is a hostile shape; mapping its `ELOOP` to `Absent` would downgrade a `wedged` verdict to `stopping`.
@@ -2197,7 +2274,9 @@ mod tests {
     #[test]
     fn lifetime_and_runtime_lock_disagreement_is_wedged() {
         let root = temp_root();
-        {
+        // Dropping `guard` removes both files and releases both fences, so the canonical
+        // record and publication are captured first and replanted before the probe.
+        let (record_file, record_bytes, publication_file, publication_bytes) = {
             let mut guard = acquire(root.path());
             guard
                 .write_lifecycle_record(LifecyclePhase::Running)
@@ -2205,8 +2284,25 @@ mod tests {
             guard
                 .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
                 .expect("publish");
+            let record_file = record_path(&guard);
+            let publication_file = guard.dir_path().join(CONNECTION_FILE_NAME);
+            let record_bytes = std::fs::read(&record_file).expect("read record");
+            let publication_bytes = std::fs::read(&publication_file).expect("read publication");
+            (
+                record_file,
+                record_bytes,
+                publication_file,
+                publication_bytes,
+            )
+        };
+        for (path, bytes) in [
+            (&record_file, &record_bytes),
+            (&publication_file, &publication_bytes),
+        ] {
+            std::fs::write(path, bytes).expect("replant");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("mode");
         }
-        // release would.
+
         let dir_path = runtime_dir_path(Some(root.path())).expect("path");
         let dir = openat(
             rustix::fs::CWD,
@@ -2222,6 +2318,10 @@ mod tests {
         assert_eq!(observed.reason, "lifetime and runtime locks disagree");
         assert!(!observed.instance_lock_free);
         assert!(observed.lifetime_lock_free);
+        let record = observed
+            .record
+            .expect("the canonical-digest record must be read, not classified as absent");
+        assert_eq!(record.payload_manifest_digest, TEST_DIGEST);
     }
 
     /// The probe classifies a held runtime lock with a schema-1 empty-digest record and no lifetime fence as `Wedged`.
