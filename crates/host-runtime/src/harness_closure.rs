@@ -23,15 +23,17 @@ use crate::instance::{
 };
 use crate::lifecycle::is_canonical_payload_digest;
 use crate::store_fs::{
-    HARDENED_DIR_FLAGS, create_owned_dir, exchange_dirs, hash_copy, is_stale_mtime,
-    open_created_dir, open_dir_for_removal, open_rel_nofollow, read_dir_names, remove_tree,
-    rename_no_replace, write_new_file,
+    HARDENED_DIR_FLAGS, create_owned_dir, exchange_dirs, hash_copy, is_stale_mtime, is_temp_name,
+    open_created_dir, open_dir_for_removal, open_rel_nofollow, read_dir_names,
+    read_dir_names_partitioned, remove_tree, rename_no_replace, write_new_file,
 };
 
 const MANIFEST_NAME: &str = "manifest.json";
 const FILES_NAME: &str = "files";
 const CLOSURE_SCHEMA: &str = "eidnara.host-harness-closure/v1";
 const TEMP_PREFIX: &str = ".tmp-";
+/// `create_temp` draws 12 random bytes, so a temp name carries 24 hex digits.
+const TEMP_HEX_LEN: usize = 24;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NODES: usize = 65_536;
 const MAX_PATH_BYTES: usize = 4096;
@@ -614,17 +616,20 @@ impl HarnessClosureStore {
     }
 
     /// `prune` preserves staging temps younger than [`STALE_TEMP_AFTER`] because an
-    /// in-flight `materialize` may still own them.
+    /// in-flight `materialize` may still own them. Only exact temp names and canonical digests
+    /// are ever removed; a foreign or non-UTF-8 name is left alone.
     ///
     /// One unremovable entry does not stop the sweep: every reclaimable entry is removed
     /// first, then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<(), HarnessClosureError> {
         let mut first_error = None;
-        for name in list_names(&self.root_fd)? {
+        let (names, _) = read_dir_names_partitioned(&self.root_fd)
+            .map_err(|_| invalid("closure directory read failed"))?;
+        for name in names {
             if protected.contains(&name) {
                 continue;
             }
-            if name.starts_with(TEMP_PREFIX) {
+            if is_temp_name(&name, TEMP_PREFIX, TEMP_HEX_LEN) {
                 if !is_stale_temp(&self.root_fd, &name) {
                     continue;
                 }

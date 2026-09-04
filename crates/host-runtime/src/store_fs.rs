@@ -3,7 +3,9 @@
 //! Every helper returns a raw `rustix`/`std::io` error so each store can map it onto its own
 //! closed error type.
 
+use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::unix::ffi::OsStringExt;
 use std::time::{Duration, SystemTime};
 
 use rustix::fd::OwnedFd;
@@ -123,8 +125,11 @@ pub(crate) fn create_owned_dir(parent: &OwnedFd, name: &str) -> rustix::io::Resu
 
 /// Removal accepts directories owned by `owner_uid()` regardless of their mode bits, so a
 /// stale entry with a foreign mode can still be reclaimed. A foreign owner fails with `EPERM`.
-pub(crate) fn open_dir_for_removal(parent: &OwnedFd, name: &str) -> rustix::io::Result<OwnedFd> {
-    let fd = openat(parent, name, HARDENED_DIR_FLAGS, Mode::empty())?;
+pub(crate) fn open_dir_for_removal<N: AsRef<OsStr> + ?Sized>(
+    parent: &OwnedFd,
+    name: &N,
+) -> rustix::io::Result<OwnedFd> {
+    let fd = openat(parent, name.as_ref(), HARDENED_DIR_FLAGS, Mode::empty())?;
     let stat = rustix::fs::fstat(&fd)?;
     if mode_bits(&stat) & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() {
         return Err(rustix::io::Errno::PERM);
@@ -132,42 +137,90 @@ pub(crate) fn open_dir_for_removal(parent: &OwnedFd, name: &str) -> rustix::io::
     Ok(fd)
 }
 
-/// Removes `name` under `parent`, recursing through owned directories. A missing entry is `Ok`.
+/// Removes `name` under `parent`, recursing through owned directories. A missing entry is `Ok`
+/// and a directory with a foreign owner fails with `EPERM`.
 ///
-/// A directory that cannot be opened for traversal (mode `000` left by a crash between `mkdirat`
-/// and `chmodat`) is still removed if it is empty: `rmdir` needs only write access to `parent`.
-pub(crate) fn remove_tree(parent: &OwnedFd, name: &str) -> rustix::io::Result<()> {
+/// Ownership is checked on the entry itself before any open, because `rmdir` is authorized by
+/// the writable parent alone and would otherwise remove an empty foreign directory. A directory
+/// that passes that check but cannot be opened for traversal (mode `000` left by a crash between
+/// `mkdirat` and `chmodat`) is still removed when it is empty.
+pub(crate) fn remove_tree<N: AsRef<OsStr> + ?Sized>(
+    parent: &OwnedFd,
+    name: &N,
+) -> rustix::io::Result<()> {
+    let name = name.as_ref();
     match unlinkat(parent, name, AtFlags::empty()) {
         Ok(()) | Err(rustix::io::Errno::NOENT) => return Ok(()),
         // Linux reports EPERM for unlink-on-directory on some filesystems.
         Err(rustix::io::Errno::ISDIR) | Err(rustix::io::Errno::PERM) => {}
         Err(e) => return Err(e),
     }
+    let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if mode_bits(&stat) & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() {
+        return Err(rustix::io::Errno::PERM);
+    }
     let dir = match open_dir_for_removal(parent, name) {
         Ok(dir) => dir,
+        // The opened inode had a foreign owner; the pathname check above was raced.
+        Err(rustix::io::Errno::PERM) => return Err(rustix::io::Errno::PERM),
         Err(open_error) => {
             return unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|_| open_error);
         }
     };
-    for child in read_dir_names(&dir)? {
+    for child in read_dir_entries(&dir)? {
         remove_tree(&dir, &child)?;
     }
     unlinkat(parent, name, AtFlags::REMOVEDIR)
 }
 
-/// `read_dir_names` enumerates the already-open directory, so a pathname swap cannot change
-/// the listing, and excludes `.` and `..` so callers cannot delete the directory or its parent.
-/// A non-UTF-8 name fails with `EILSEQ`.
-pub(crate) fn read_dir_names(dir: &OwnedFd) -> rustix::io::Result<Vec<String>> {
+/// Enumerates the already-open directory, so a pathname swap cannot change the listing, and
+/// excludes `.` and `..` so callers cannot delete the directory or its parent.
+pub(crate) fn read_dir_entries(dir: &OwnedFd) -> rustix::io::Result<Vec<OsString>> {
     let mut names = Vec::new();
     for entry in rustix::fs::Dir::read_from(dir)? {
         let raw = entry?.file_name().to_bytes().to_owned();
         if raw == b"." || raw == b".." {
             continue;
         }
-        names.push(String::from_utf8(raw).map_err(|_| rustix::io::Errno::ILSEQ)?);
+        names.push(OsString::from_vec(raw));
     }
     Ok(names)
+}
+
+/// UTF-8 names only; a non-UTF-8 entry fails with `EILSEQ`. Validators use this form because
+/// any entry they cannot name is an entry they cannot match against a manifest.
+pub(crate) fn read_dir_names(dir: &OwnedFd) -> rustix::io::Result<Vec<String>> {
+    read_dir_entries(dir)?
+        .into_iter()
+        .map(|name| name.into_string().map_err(|_| rustix::io::Errno::ILSEQ))
+        .collect()
+}
+
+/// UTF-8 names plus the count of entries whose names are not UTF-8. Sweeps use this form so one
+/// foreign entry cannot abort reclamation of everything else.
+pub(crate) fn read_dir_names_partitioned(
+    dir: &OwnedFd,
+) -> rustix::io::Result<(Vec<String>, usize)> {
+    let mut names = Vec::new();
+    let mut unnamed = 0;
+    for name in read_dir_entries(dir)? {
+        match name.into_string() {
+            Ok(name) => names.push(name),
+            Err(_) => unnamed += 1,
+        }
+    }
+    Ok((names, unnamed))
+}
+
+/// `true` when `name` is `prefix` followed by exactly `hex_len` lowercase hex digits, the only
+/// shape the stores' own temp creators produce. Sweeps must not reclaim a merely similar name.
+pub(crate) fn is_temp_name(name: &str, prefix: &str, hex_len: usize) -> bool {
+    name.strip_prefix(prefix).is_some_and(|suffix| {
+        suffix.len() == hex_len
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 /// Creates `name` exclusively, writes `bytes`, fsyncs, and returns the still-open descriptor so

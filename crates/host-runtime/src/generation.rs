@@ -28,12 +28,12 @@ use crate::file_mode::raw_mode;
 use crate::instance::{
     InstanceError, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, hex, io_err, is_safe_ancestor,
     is_secure_regular, mode_bits, open_secure_dir_existing, owner_uid, read_all_fd,
-    secure_runtime_dir,
+    repair_owner_access, secure_runtime_dir,
 };
 use crate::lifecycle::{is_canonical_payload_digest, lifecycle_dir_path};
 use crate::store_fs::{
-    HARDENED_DIR_FLAGS, hash_copy, is_stale_mtime, open_created_dir, open_rel_nofollow,
-    read_dir_names, rename_no_replace,
+    HARDENED_DIR_FLAGS, hash_copy, is_stale_mtime, is_temp_name, open_created_dir,
+    open_rel_nofollow, read_dir_names, read_dir_names_partitioned, rename_no_replace,
 };
 
 pub const GENERATIONS_DIR_NAME: &str = "generations";
@@ -43,14 +43,27 @@ pub const CURRENT_PROFILE_NAME: &str = "current-profile.json";
 /// The `files` array excludes `manifest.json` because its bytes produce the generation digest.
 pub const GENERATION_MANIFEST_NAME: &str = "manifest.json";
 
-/// Pruning removes incomplete staging directories whose names begin `tmp-`.
+/// Staging temps are `tmp-` followed by exactly 16 lowercase hex digits; `prune` removes only
+/// that exact shape, so a foreign name that merely starts with `tmp-` survives.
 pub const STAGING_TEMP_PREFIX: &str = "tmp-";
+
+/// `create_staging_temp` draws 8 random bytes, so the name carries 16 hex digits.
+const STAGING_TEMP_HEX_LEN: usize = 16;
 
 /// `prune` reclaims a leftover profile temp only once it is older than this.
 pub const STALE_PROFILE_TEMP_AFTER: Duration = crate::store_fs::STALE_TEMP_AFTER;
 
 const PROFILE_TEMP_PREFIX: &str = ".current-profile.json.";
 const PROFILE_TEMP_SUFFIX: &str = ".tmp";
+
+fn is_staging_temp_name(name: &str) -> bool {
+    is_temp_name(name, STAGING_TEMP_PREFIX, STAGING_TEMP_HEX_LEN)
+}
+
+fn is_profile_temp_name(name: &str) -> bool {
+    name.strip_suffix(PROFILE_TEMP_SUFFIX)
+        .is_some_and(|stem| is_temp_name(stem, PROFILE_TEMP_PREFIX, STAGING_TEMP_HEX_LEN))
+}
 
 /// Manifest and lifecycle-evidence readers each cap input at 1 MiB.
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
@@ -361,9 +374,27 @@ impl GenerationStore {
         if created {
             open_created_dir(&root_fd, GENERATIONS_DIR_NAME)
                 .map_err(|e| io_err("chmod_generations", &root, e))?;
+            // The parent's fsync makes the new entry durable; later store fsyncs cover only its contents.
+            fsync(&root_fd).map_err(|e| io_err("fsync_lifecycle_root", &root, e))?;
         }
-        let generations_fd = open_child_dir(&root_fd, GENERATIONS_DIR_NAME)
-            .ok_or_else(|| invalid("generations directory failed security checks"))?;
+        let generations_fd = match open_child_dir(&root_fd, GENERATIONS_DIR_NAME) {
+            Some(fd) => fd,
+            // A crash between `mkdirat` and `chmodat` under a restrictive umask can leave an owner-owned directory inaccessible to its owner.
+            // `repair_owner_access` widens only an owner-only directory of the expected type, so a wider mode is still refused.
+            None => {
+                let repaired = repair_owner_access(
+                    &root_fd,
+                    std::ffi::OsStr::new(GENERATIONS_DIR_NAME),
+                    S_IFDIR,
+                    0o700,
+                )
+                .map_err(|e| io_err("repair_generations", &root, e))?;
+                repaired
+                    .then(|| open_child_dir(&root_fd, GENERATIONS_DIR_NAME))
+                    .flatten()
+                    .ok_or_else(|| invalid("generations directory failed security checks"))?
+            }
+        };
         Ok(Self {
             root,
             root_fd,
@@ -718,10 +749,11 @@ impl GenerationStore {
 
     fn sweep_stale_profile_temps(&self) -> Result<usize, GenerationError> {
         let mut removed = 0;
-        for name in
-            read_dir_names(&self.root_fd).map_err(|_| invalid("directory listing failed"))?
-        {
-            if !name.starts_with(PROFILE_TEMP_PREFIX) || !name.ends_with(PROFILE_TEMP_SUFFIX) {
+        // Non-UTF-8 names cannot be a profile temp; skipping them keeps the sweep going.
+        let (names, _) = read_dir_names_partitioned(&self.root_fd)
+            .map_err(|_| invalid("directory listing failed"))?;
+        for name in names {
+            if !is_profile_temp_name(&name) {
                 continue;
             }
             let Ok(stat) =
@@ -785,10 +817,12 @@ impl GenerationStore {
         let mut first_error = None;
         // `prune` enumerates `generations_fd` instead of its pathname so a replacement directory cannot select retained-store deletions.
         // `prune` removes through `generations_fd` so a replaced pathname cannot redirect deletions.
-        let entries = read_dir_names(&self.generations_fd)
+        // A non-UTF-8 name is neither a temp nor a digest; it is preserved like any foreign name.
+        let (entries, unnamed) = read_dir_names_partitioned(&self.generations_fd)
             .map_err(|_| invalid("directory listing failed"))?;
+        report.quarantined += unnamed;
         for name in entries {
-            if name.starts_with(STAGING_TEMP_PREFIX) {
+            if is_staging_temp_name(&name) {
                 match remove_tree(&self.generations_fd, &name) {
                     Ok(()) => report.removed_temps += 1,
                     Err(err) => {
@@ -1365,6 +1399,98 @@ mod tests {
                 .len(),
             oversized.len()
         );
+    }
+
+    /// Only the exact `tmp-<16 hex>` shape is a staging temp, and a name that is not UTF-8 is
+    /// neither a temp nor a digest. Both are preserved as foreign entries and neither aborts
+    /// the sweep.
+    #[test]
+    fn prune_preserves_lookalike_temps_and_non_utf8_names() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let obsolete = stage_default(&store, src.path());
+        store
+            .stage_and_promote(
+                &[SourceSpec {
+                    rel_path: "bin/eidnara-host".to_owned(),
+                    source: write_source(src.path(), "launcher-new", b"#successor-binary"),
+                    executable: true,
+                    expected_size: None,
+                    expected_sha256: None,
+                }],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .expect("stage successor");
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        let lookalike = generations.join("tmp-backup");
+        std::fs::create_dir(&lookalike).expect("lookalike temp");
+        std::fs::write(lookalike.join("keep"), b"operator state").expect("lookalike content");
+        let uppercase = generations.join("tmp-DEADBEEF00000000");
+        std::fs::create_dir(&uppercase).expect("uppercase lookalike");
+        let unnamed = generations.join(std::ffi::OsStr::from_bytes(b"\xff\xfe-not-utf8"));
+        std::fs::create_dir(&unnamed).expect("non-utf8 entry");
+
+        let report = store
+            .prune(&BTreeSet::new())
+            .expect("prune sweeps past foreign names");
+        assert_eq!(report.removed_temps, 0);
+        assert_eq!(report.removed_generations, 1);
+        assert_eq!(report.quarantined, 3);
+        assert!(
+            lookalike.join("keep").is_file(),
+            "a tmp- lookalike is preserved"
+        );
+        assert!(
+            uppercase.is_dir(),
+            "uppercase hex is not a store-created temp"
+        );
+        assert!(unnamed.is_dir(), "a non-UTF-8 name is preserved");
+        assert!(!generations.join(&obsolete).exists());
+    }
+
+    /// A crash between `mkdirat` and `chmodat` under a restrictive umask can leave the
+    /// `generations` directory itself without owner access; `open` must repair it rather than
+    /// fail on every restart, while a wider mode is still refused.
+    #[test]
+    fn a_crash_left_generations_directory_is_repaired_on_reopen() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        drop(store);
+
+        std::fs::set_permissions(&generations, std::fs::Permissions::from_mode(0o000))
+            .expect("mode 000");
+        let reopened = GenerationStore::open(Some(root.path())).expect("reopen repairs mode 000");
+        assert_eq!(
+            std::fs::metadata(&generations)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        reopened
+            .validate(&digest)
+            .expect("generation still validates");
+        drop(reopened);
+
+        std::fs::set_permissions(&generations, std::fs::Permissions::from_mode(0o755))
+            .expect("mode 755");
+        assert!(
+            matches!(
+                GenerationStore::open(Some(root.path())),
+                Err(GenerationError::NativePayloadInvalid { .. })
+            ),
+            "a group- or world-accessible generations directory is refused, not repaired"
+        );
+        std::fs::set_permissions(&generations, std::fs::Permissions::from_mode(0o700))
+            .expect("restore");
     }
 
     /// A crash between `mkdirat` and `chmodat` under a restrictive umask leaves an empty

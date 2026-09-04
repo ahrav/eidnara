@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -585,13 +586,20 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
     let digest = closure.digest().to_owned();
 
     // A stale temp inherits the ambient umask; `prune` must not require mode `0o700`.
-    let stale = store_root.join(".tmp-deadbeefdeadbeef");
+    let stale = store_root.join(".tmp-deadbeefdeadbeefdeadbeef");
     std::fs::create_dir(&stale).expect("stale temp");
     std::fs::write(stale.join("partial"), b"torn").expect("partial file");
     age_past_stale_threshold(&stale);
-    let live = store_root.join(".tmp-0123456789abcdef");
+    let live = store_root.join(".tmp-0123456789abcdef01234567");
     std::fs::create_dir(&live).expect("live temp");
     std::fs::create_dir(store_root.join("foreign-entry")).expect("foreign entry");
+    // Only the exact `.tmp-<24 hex>` shape is a store temp; a stale lookalike and a non-UTF-8
+    // name are foreign entries that must neither be removed nor abort the sweep.
+    let lookalike = store_root.join(".tmp-backup");
+    std::fs::create_dir(&lookalike).expect("lookalike temp");
+    age_past_stale_threshold(&lookalike);
+    let unnamed = store_root.join(std::ffi::OsStr::from_bytes(b"\xff\xfe-not-utf8"));
+    std::fs::create_dir(&unnamed).expect("non-utf8 entry");
 
     let protected = std::collections::BTreeSet::from([digest.clone()]);
     store.prune(&protected).expect("prune with protection");
@@ -608,6 +616,11 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
         store_root.join("foreign-entry").is_dir(),
         "entries the store did not create are left untouched"
     );
+    assert!(
+        lookalike.is_dir(),
+        "a stale .tmp- lookalike is not a store temp"
+    );
+    assert!(unnamed.is_dir(), "a non-UTF-8 name is preserved");
     store
         .validate(&digest)
         .expect("protected closure still validates");
@@ -654,7 +667,7 @@ fn prune_continues_past_an_unremovable_entry() {
         .to_owned();
 
     // The `.tmp-*` entry sorts before the digest. Mode `0o000` prevents listing its child, so removal fails; `prune` must still reclaim the later digest.
-    let blocked = store_root.join(".tmp-00000000000000000000");
+    let blocked = store_root.join(".tmp-000000000000000000000000");
     std::fs::create_dir(&blocked).expect("blocked temp");
     std::fs::write(blocked.join("child"), b"x").expect("child");
     age_past_stale_threshold(&blocked);
