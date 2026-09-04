@@ -12,7 +12,7 @@ use std::{fmt, io};
 use crate::setup_socket::RING_DESCRIPTOR_COUNT;
 use crate::wire::{EnvelopeHeader, FrameType, decode_header};
 use shm_transport::backend::ring::RingGrant;
-use shm_transport::backend::ring::{DuplexRing, ProducerReservation, Ring};
+use shm_transport::backend::ring::{DuplexRing, ProducerError, ProducerReservation, Ring};
 use shm_transport::profile::{
     AdmissionController, HostLimits as ShmHostLimits, ResourceCharges, TargetProfile,
 };
@@ -891,7 +891,10 @@ impl RingClientEndpoint {
         let mut reservation = self
             .to_host
             .reserve_until(body.len(), header.encode(), deadline)
-            .map_err(|_| SendFailure::Unreserved)?;
+            .map_err(|error| match error {
+                ProducerError::Deadline => SendFailure::Deadline,
+                _ => SendFailure::Unreserved,
+            })?;
         reservation.write(body).map_err(|_| SendFailure::Reserved)?;
         reservation
             .commit(body.len())
@@ -954,7 +957,9 @@ pub struct RingClientError;
 /// A frame that never obtained a reservation wrote zero bytes; after reservation, the host's view is unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendFailure {
-    /// `reserve_until` failed; no bytes reached the ring.
+    /// The ring stayed full until `deadline`; no bytes reached the ring and a later attempt can succeed.
+    Deadline,
+    /// `reserve_until` failed for a reason a retry cannot clear, such as a quarantined ring; no bytes reached the ring.
     Unreserved,
     /// A reservation existed when the write or commit failed.
     Reserved,

@@ -981,9 +981,8 @@ impl Inner {
             ));
         }
         let (tx, rx) = oneshot::channel();
-        let mut rx = rx;
         let (key, publish) = self.admit(route, body, binary, PendingKind::Unary(tx), deadline)?;
-        let mut guard = UnaryAdmissionGuard::new(Arc::clone(self), key);
+        let mut guard = UnaryAdmissionGuard::new(Arc::clone(self), key, rx);
         let cancelled = cancellation.unwrap_or_default();
         // The stop branches borrow `rx` after `select!` because `dispatch` removes the pending entry before sending a terminal; a stop in that window must await the authoritative result.
         enum Stopped {
@@ -993,7 +992,7 @@ impl Inner {
         }
         let stopped = tokio::select! {
             biased;
-            result = &mut rx => Stopped::Terminal(
+            result = &mut guard.rx => Stopped::Terminal(
                 result.unwrap_or_else(|_| Err(retired_error(classify(&publish)))),
             ),
             () = cancelled.cancelled() => Stopped::Cancelled,
@@ -1004,7 +1003,7 @@ impl Inner {
             Stopped::Cancelled => {
                 self.stop_or_take_terminal(
                     key,
-                    &mut rx,
+                    &mut guard.rx,
                     &publish,
                     "cancelled",
                     "request was cancelled",
@@ -1014,7 +1013,7 @@ impl Inner {
             Stopped::DeadlineExpired => {
                 self.stop_or_take_terminal(
                     key,
-                    &mut rx,
+                    &mut guard.rx,
                     &publish,
                     "deadline_expired",
                     "request deadline expired",
@@ -1664,17 +1663,24 @@ impl Inner {
     }
 }
 
+/// Owns the terminal receiver so a caller dropped after delivery still releases what it never claimed.
 struct UnaryAdmissionGuard {
     inner: Arc<Inner>,
     key: PendingKey,
+    rx: oneshot::Receiver<Result<Response, CallError>>,
     armed: bool,
 }
 
 impl UnaryAdmissionGuard {
-    const fn new(inner: Arc<Inner>, key: PendingKey) -> Self {
+    const fn new(
+        inner: Arc<Inner>,
+        key: PendingKey,
+        rx: oneshot::Receiver<Result<Response, CallError>>,
+    ) -> Self {
         Self {
             inner,
             key,
+            rx,
             armed: true,
         }
     }
@@ -1686,8 +1692,18 @@ impl UnaryAdmissionGuard {
 
 impl Drop for UnaryAdmissionGuard {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = self.inner.cancel_key(self.key, "caller_dropped");
+        if !self.armed {
+            return;
+        }
+        // `AlreadyTaken` means `dispatch` delivered a terminal this caller never polled.
+        // A channel-0 success sitting in `rx` is a route bind nobody owns, so it is released like an unmatched one.
+        if matches!(
+            self.inner.cancel_key(self.key, "caller_dropped"),
+            Ok(PendingRemoval::AlreadyTaken)
+        ) && self.key.channel == 0
+            && let Ok(Ok(response)) = self.rx.try_recv()
+        {
+            self.inner.release_stranded_route(&response.body);
         }
     }
 }
@@ -1960,7 +1976,7 @@ async fn start_ring_bridge(
                                 &write.body,
                                 write.deadline.min(slice),
                             ) {
-                                Err(SendFailure::Unreserved)
+                                Err(SendFailure::Deadline)
                                     if StdInstant::now() < write.deadline
                                         && !cancel.is_cancelled() => {}
                                 result => break result,
@@ -2147,7 +2163,7 @@ async fn writer_loop(
         };
         match written {
             Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(SendFailure::Unreserved))) => {
+            Ok(Ok(Err(SendFailure::Deadline | SendFailure::Unreserved))) => {
                 // Zero bytes reached the ring, so the frame returns to `QUEUED` and retirement classifies it `NotSent`.
                 if let Some(state) = &frame.publish {
                     state.store(QUEUED, Ordering::Release);
@@ -2785,9 +2801,11 @@ mod tests {
     async fn a_frame_that_never_reserved_ring_space_settles_not_sent() {
         // `reserve_until` expiry proves zero bytes reached the host, so the
         // caller may retry on a fresh generation.
-        let error = settle_one_write_with(SendFailure::Unreserved).await;
+        let error = settle_one_write_with(SendFailure::Deadline).await;
         assert_eq!(error.outcome(), SendOutcome::NotSent);
         assert_eq!(error.code(), "write_failed");
+        let error = settle_one_write_with(SendFailure::Unreserved).await;
+        assert_eq!(error.outcome(), SendOutcome::NotSent);
     }
 
     #[tokio::test]
@@ -3904,6 +3922,67 @@ mod tests {
             !lock_unpoisoned(&inner.routes).contains(&bound),
             "a late bind never enters the client cache"
         );
+        inner.retire("test_done");
+    }
+
+    #[tokio::test]
+    async fn a_bind_delivered_to_a_caller_dropped_before_polling_is_released() {
+        // `tx.send` succeeds while the receiver is alive; the caller can still be dropped before it polls the value.
+        let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let control = RouteHandle {
+            channel: 0,
+            epoch: 0,
+        };
+        let (tx, rx) = oneshot::channel();
+        let (key, publish) = inner
+            .admit(
+                control,
+                Vec::new(),
+                false,
+                PendingKind::Unary(tx),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .expect("control request admitted");
+        let guard = UnaryAdmissionGuard::new(Arc::clone(&inner), key, rx);
+        assert!(claim_for_write(&publish));
+        drop(data_rx.recv().await);
+
+        let bound = RouteHandle {
+            channel: 9,
+            epoch: 3,
+        };
+        let body = serde_json::to_vec(&serde_json::json!({
+            "op": "route.open",
+            "route_channel": bound.channel,
+            "route_epoch": bound.epoch,
+        }))
+        .expect("body encodes");
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits a frame length"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: control.channel,
+                epoch: control.epoch,
+                corr: key.corr,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(
+            control_rx.try_recv().is_err(),
+            "a delivered bind is not released while its receiver is alive"
+        );
+
+        drop(guard);
+        let goodbye = control_rx
+            .try_recv()
+            .expect("the dropped caller releases the bind it never claimed");
+        assert_eq!(goodbye.header.ty, FrameType::Goodbye);
+        assert_eq!(goodbye.header.channel, bound.channel);
+        assert_eq!(goodbye.header.epoch, bound.epoch);
+        assert!(!inner.retired.load(Ordering::Acquire));
         inner.retire("test_done");
     }
 
