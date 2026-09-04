@@ -37,7 +37,7 @@ use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor, Incarnation,
     MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES, WIRE_V2_VERSION, check_wire_header,
 };
-use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, volatile_copy};
+use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, volatile_copy};
 use crate::profile::TargetProfile;
 
 const MAPPING_MAGIC: u64 = 0x4d43_5348_4d52_3031;
@@ -1288,18 +1288,14 @@ impl Ring {
         self.consumer.set(true);
         let body_len =
             usize::try_from(validated.body_len()).map_err(|_| RingError::InvalidLayout)?;
-        // SAFETY: lease borrows self, spans stay mapped, callback context cannot outlive self.
-        let lease = unsafe {
-            ReceiveLease::new(
-                [Some(first), second],
-                validated.span_count(),
-                body_len,
-                validated.wire_header(),
-                validated.identity(),
-                (self as *const Self).cast(),
-                ring_release_callback,
-            )
-        }
+        let lease = ReceiveLease::new(
+            [Some(first), second],
+            validated.span_count(),
+            body_len,
+            validated.wire_header(),
+            validated.identity(),
+            self,
+        )
         .map_err(RingError::Lease)?;
         Ok(Some(lease))
     }
@@ -2350,13 +2346,10 @@ struct PreparedCommit {
     next_write: u64,
 }
 
-unsafe fn ring_release_callback(
-    context: *const (),
-    identity: ReleaseIdentity,
-) -> Result<(), LeaseError> {
-    // SAFETY: ReceiveLease ties context to live borrowed Ring.
-    let ring = unsafe { &*context.cast::<Ring>() };
-    ring.release(identity)
+impl ReleaseSink for Ring {
+    fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError> {
+        Ring::release(self, identity)
+    }
 }
 
 /// A reserved slot and arena range the producer fills then commits. Dropping without

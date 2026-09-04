@@ -114,7 +114,12 @@ pub(crate) unsafe fn volatile_copy(source: *const u8, destination: *mut u8, len:
     }
 }
 
-pub(crate) type ReleaseFn = unsafe fn(*const (), ReleaseIdentity) -> Result<(), LeaseError>;
+/// Receives a frame release from a `ReceiveLease`. The ring that issued the lease implements
+/// it; the lease borrows the sink for `'lease`, so a lease cannot outlive its ring.
+pub(crate) trait ReleaseSink {
+    /// Returns the frame named by `identity` to the producer.
+    fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError>;
+}
 
 /// A published frame the receiver holds. The body is visible through `segment` as one or two
 /// raw spans; `to_vec` copies it out. Dropping the lease releases the frame to the producer.
@@ -126,27 +131,21 @@ pub struct ReceiveLease<'lease> {
     body_len: usize,
     wire_header: [u8; crate::descriptor::WIRE_V2_HEADER_BYTES],
     identity: ReleaseIdentity,
-    release_context: *const (),
-    release_fn: ReleaseFn,
+    sink: &'lease dyn ReleaseSink,
     released: bool,
-    _owner: PhantomData<&'lease ()>,
     _not_send: PhantomData<Rc<()>>,
 }
 
 impl<'lease> ReceiveLease<'lease> {
-    /// Checks that `span_count` agrees with which spans are present.
-    ///
-    /// # Safety
-    /// Spans and `release_context` must remain valid for `'lease`, and `release_fn` must
-    /// accept `identity` exactly once.
-    pub(crate) unsafe fn new(
+    /// Checks that `span_count` agrees with which spans are present. `sink` receives exactly
+    /// one `release` for `identity`, on explicit release or on drop.
+    pub(crate) fn new(
         spans: [Option<LeaseSpan<'lease>>; 2],
         span_count: u8,
         body_len: usize,
         wire_header: [u8; crate::descriptor::WIRE_V2_HEADER_BYTES],
         identity: ReleaseIdentity,
-        release_context: *const (),
-        release_fn: ReleaseFn,
+        sink: &'lease dyn ReleaseSink,
     ) -> Result<Self, LeaseError> {
         if !(1..=2).contains(&span_count)
             || spans[0].is_none()
@@ -161,10 +160,8 @@ impl<'lease> ReceiveLease<'lease> {
             body_len,
             wire_header,
             identity,
-            release_context,
-            release_fn,
+            sink,
             released: false,
-            _owner: PhantomData,
             _not_send: PhantomData,
         })
     }
@@ -234,10 +231,9 @@ impl<'lease> ReceiveLease<'lease> {
         if self.released {
             return Err(LeaseError::DuplicateRelease);
         }
-        // `released` is set before `release_fn` so `Drop` cannot retry a failed release.
+        // `released` is set before the sink call so `Drop` cannot retry a failed release.
         self.released = true;
-        // SAFETY: constructor requires a live callback context for lease lifetime.
-        unsafe { (self.release_fn)(self.release_context, self.identity) }
+        self.sink.release(self.identity)
     }
 }
 
@@ -291,7 +287,7 @@ impl fmt::Debug for LeaseError {
 mod tests {
     use std::cell::Cell;
 
-    use super::{LeaseError, LeaseSpan, ReceiveLease, volatile_copy};
+    use super::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, volatile_copy};
     use crate::descriptor::{Incarnation, ReleaseIdentity};
 
     struct CallLog {
@@ -299,29 +295,25 @@ mod tests {
         verdict: Result<(), LeaseError>,
     }
 
-    unsafe fn logging_release(context: *const (), _: ReleaseIdentity) -> Result<(), LeaseError> {
-        // SAFETY: tests keep the `CallLog` alive for the lease lifetime.
-        let log = unsafe { &*context.cast::<CallLog>() };
-        log.calls.set(log.calls.get() + 1);
-        log.verdict
+    impl ReleaseSink for CallLog {
+        fn release(&self, _: ReleaseIdentity) -> Result<(), LeaseError> {
+            self.calls.set(self.calls.get() + 1);
+            self.verdict
+        }
     }
 
     fn lease<'a>(bytes: &'a mut [u8], log: &'a CallLog) -> ReceiveLease<'a> {
-        // SAFETY: `bytes` and `log` outlive the returned lease.
+        // SAFETY: `bytes` outlives the returned lease.
         let span = unsafe { LeaseSpan::new(bytes.as_mut_ptr(), bytes.len()) }.unwrap();
         let identity = ReleaseIdentity::new(Incarnation::from_bytes([7; 16]), 0, 1);
-        // SAFETY: span, context, and callback stay valid for the lease lifetime.
-        unsafe {
-            ReceiveLease::new(
-                [Some(span), None],
-                1,
-                bytes.len(),
-                [0; crate::descriptor::WIRE_V2_HEADER_BYTES],
-                identity,
-                (log as *const CallLog).cast(),
-                logging_release,
-            )
-        }
+        ReceiveLease::new(
+            [Some(span), None],
+            1,
+            bytes.len(),
+            [0; crate::descriptor::WIRE_V2_HEADER_BYTES],
+            identity,
+            log,
+        )
         .unwrap()
     }
 
