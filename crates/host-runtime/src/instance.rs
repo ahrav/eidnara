@@ -407,7 +407,6 @@ impl Drop for InstanceGuard {
 /// Observational callers must distinguish absent components from insecure or unreadable components.
 /// Mapping an insecure component to absence would report hostile persisted state as "nothing installed yet".
 /// Resolving each component through the previous pinned descriptor prevents intermediate symlinks from redirecting traversal.
-#[allow(dead_code)] // U1: used by generation (U2)
 pub(crate) fn open_secure_dir_existing(dir_path: &Path) -> Result<Option<OwnedFd>, InstanceError> {
     let mut current = open_safe_anchor(dir_path)
         .map_err(|e| io_err("open_anchor", dir_path, e))?
@@ -678,10 +677,8 @@ pub(crate) const S_IFMT: u32 = 0o170000;
 const S_ISVTX: u32 = 0o1000;
 pub(crate) const S_IFDIR: u32 = 0o040000;
 pub(crate) const S_IFREG: u32 = 0o100000;
-#[allow(dead_code)] // U1: used by harness_closure (U2)
 pub(crate) const S_IFLNK: u32 = 0o120000;
 
-#[allow(dead_code)] // U1: used by harness_closure (U2)
 pub(crate) fn owner_uid() -> u32 {
     rustix::process::geteuid().as_raw()
 }

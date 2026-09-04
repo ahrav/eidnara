@@ -9,7 +9,9 @@ pub mod client;
 pub mod composite;
 pub mod config;
 pub mod connection_file;
+pub mod generation;
 pub mod handler;
+pub mod harness_closure;
 pub mod lifecycle;
 #[doc(hidden)]
 pub mod ring_transport;
@@ -17,6 +19,7 @@ pub mod ring_transport;
 mod connection;
 mod control;
 mod dispatch;
+mod file_mode;
 #[doc(hidden)]
 pub mod frame_channel;
 mod instance;
