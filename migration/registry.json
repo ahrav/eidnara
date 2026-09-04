@@ -75,10 +75,11 @@
       "kind": "identity",
       "value": "eidnara",
       "class": "frozen-durable",
-      "rationale": "Directory under the data home that holds every module store (`<data_home>/eidnara/<module_id>/store.db`).",
+      "rationale": "Managed subtree under the data home: `<data_home>/eidnara/` holds the runtime directory, the lifecycle namespace, and every module store.",
       "evidence": [
         "crates/storage-types/src/lib.rs",
-        "crates/storage-types/tests/golden/storage_vectors.json"
+        "crates/storage-types/tests/golden/storage_vectors.json",
+        "crates/host-runtime/src/instance.rs"
       ]
     },
     {
@@ -311,16 +312,17 @@
       "kind": "family",
       "name": "host-locks",
       "class": "retained-coordination-state",
-      "rationale": "Lifetime fence and transaction lock for the host process.",
+      "rationale": "Lifetime fence and transaction lock for the host process. They live beside the managed subtree so replacing `<data-root>/eidnara` cannot admit an overlapping incarnation.",
       "literals": [
         "lifetime.lock",
         "transaction.lock"
       ],
       "paths": [
-        "$XDG_DATA_HOME/eidnara/lifetime.lock",
-        "$XDG_DATA_HOME/eidnara/transaction.lock"
+        "$XDG_DATA_HOME/.eidnara-coordination/lifetime.lock",
+        "$XDG_DATA_HOME/.eidnara-coordination/transaction.lock"
       ],
-      "mismatch_behavior": "recreate"
+      "mismatch_behavior": "recreate",
+      "probe": "non-mutating flock probe through `probe_lifecycle`"
     },
     {
       "kind": "family",
@@ -683,6 +685,149 @@
         "crates/shm-transport/src/backend/ring.rs",
         "crates/shm-transport/tests/ring.rs"
       ]
+    },
+    {
+      "kind": "identity",
+      "value": ".eidnara-coordination",
+      "class": "frozen-durable",
+      "rationale": "Directory beside the managed subtree that holds the lifetime and transaction locks. It sits outside `<data-root>/eidnara` so the lifetime fence survives replacement of the managed subtree; it carries the product name so no other tool's coordination directory can alias it.",
+      "evidence": [
+        "crates/host-runtime/src/lifecycle.rs",
+        "docs/host-wire-protocol.md"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "run",
+      "class": "frozen-durable",
+      "rationale": "Runtime directory under the managed subtree holding the connection file, instance lock, and lifecycle record.",
+      "evidence": [
+        "crates/host-runtime/src/instance.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "lifecycle",
+      "class": "frozen-durable",
+      "rationale": "Lifecycle namespace under the managed subtree; replaceable, holds no locks.",
+      "evidence": [
+        "crates/host-runtime/src/lifecycle.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "connection.json",
+      "class": "frozen-durable",
+      "rationale": "Connection file the host publishes under the runtime directory; clients read the setup-socket path and key from it.",
+      "evidence": [
+        "crates/host-runtime/src/instance.rs",
+        "crates/host-runtime/src/connection_file.rs",
+        "docs/host-wire-protocol.md"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "host-lifecycle.json",
+      "class": "frozen-durable",
+      "rationale": "Owner-only lifecycle record under the runtime directory; the probe reads it to report the phase.",
+      "evidence": [
+        "crates/host-runtime/src/lifecycle.rs",
+        "docs/host-wire-protocol.md"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "eidnara.host-harness-closure/v1",
+      "class": "external-protocol",
+      "rationale": "Schema id of a harness closure manifest; the canonical manifest digest covers it.",
+      "evidence": [
+        "crates/host-runtime/src/harness_closure.rs",
+        "crates/host-runtime/tests/fixtures/harness-closures/pi-valid.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "eidnara-broca-credential-v1",
+      "class": "external-protocol",
+      "rationale": "HMAC domain separator that derives the credential-row fingerprint key from the connection key.",
+      "evidence": [
+        "crates/host-runtime/src/broca/subprocess.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "harness-provider-name-length-value/1",
+      "class": "external-protocol",
+      "rationale": "Canonicalization id fixing the credential-fingerprint pre-image layout.",
+      "evidence": [
+        "crates/host-runtime/src/broca/subprocess.rs"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "eidnara-synapse-fingerprint-v1",
+      "class": "external-protocol",
+      "rationale": "First line of the Synapse bundle fingerprint pre-image; the host recomputes it and refuses a bundle whose manifest disagrees.",
+      "evidence": [
+        "crates/host-runtime/src/synapse/bundle.rs",
+        "crates/host-runtime/tests/fixtures/generate-synapse-tiny.py"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "EIDNARA_MODULE_ID",
+      "class": "external-protocol",
+      "rationale": "Environment variable naming the module id injected at spawn.",
+      "evidence": [
+        "crates/host-runtime/src/wire.rs",
+        "docs/host-wire-protocol.md"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "EIDNARA_LAUNCH_NONCE",
+      "class": "external-protocol",
+      "rationale": "Environment variable carrying the launch nonce injected at spawn.",
+      "evidence": [
+        "crates/host-runtime/src/wire.rs",
+        "docs/host-wire-protocol.md"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "host_ops",
+      "class": "external-protocol",
+      "rationale": "Catalog response field listing the four host-level control operations.",
+      "evidence": [
+        "crates/host-runtime/src/control.rs",
+        "docs/host-wire-protocol.md"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "context",
+      "class": "external-protocol",
+      "rationale": "Module id of the linked product component in the static three-module composite (roles: tool_provider); `synapse` and `broca` are the other two.",
+      "evidence": [
+        "crates/host-runtime/src/control.rs",
+        "docs/host-wire-protocol.md"
+      ]
+    },
+    {
+      "kind": "family",
+      "name": "host-connection-file",
+      "class": "retained-coordination-state",
+      "rationale": "Connection file and lifecycle record the running host publishes; both are recreated by every incarnation and never read across a schema change.",
+      "literals": [
+        "connection.json",
+        "host-lifecycle.json"
+      ],
+      "paths": [
+        "$XDG_DATA_HOME/eidnara/run/connection.json",
+        "$XDG_DATA_HOME/eidnara/run/host-lifecycle.json"
+      ],
+      "mismatch_behavior": "recreate",
+      "probe": "non-mutating `probe_lifecycle` read; an unknown record schema blocks startup instead of being overwritten"
     }
   ]
 }
