@@ -679,12 +679,7 @@ impl Client {
                 ClientError::new("shutdown_timeout", "client shutdown timed out")
             })?;
         let mut guard = CloseGuard::new(&self.inner);
-        // `open_route` checks `closed` and inserts its handle under `routes`.
-        // Swapping `closed` under the `routes` lock prevents `open_route` from inserting a handle after checking `closed`.
-        let already_closed = {
-            let _routes = lock_unpoisoned(&self.inner.routes);
-            self.inner.closed.swap(true, Ordering::AcqRel)
-        };
+        let already_closed = self.inner.mark_closed(|_| ());
         let mut result = Ok(());
         if !already_closed {
             self.inner.settle_all("owner_close");
@@ -1661,15 +1656,30 @@ impl Inner {
         }
     }
 
+    /// Flips `closed` inside the admission and route critical sections and runs
+    /// `transition` there. `admit` checks `closed` under `admission` before it
+    /// enqueues, and `open_route` checks it under `routes` before it inserts, so
+    /// no request is queued and no handle is published after this returns.
+    /// Returns the previous `closed` value.
+    fn mark_closed(&self, transition: impl FnOnce(&mut HashSet<RouteHandle>)) -> bool {
+        let _admission = lock_unpoisoned(&self.admission);
+        let mut routes = lock_unpoisoned(&self.routes);
+        let already = self.closed.swap(true, Ordering::AcqRel);
+        transition(&mut routes);
+        already
+    }
+
     fn retire(&self, code: &'static str) {
-        if self.retired.swap(true, Ordering::AcqRel) {
+        // The retirement latch and the route cache clear share the closed transition.
+        let mut first = false;
+        self.mark_closed(|routes| {
+            first = !self.retired.swap(true, Ordering::AcqRel);
+            if first {
+                routes.clear();
+            }
+        });
+        if !first {
             return;
-        }
-        // `open_route` checks `closed` and inserts under `routes`; storing `closed` and clearing the cache under the same lock keeps a retired generation from publishing a handle.
-        {
-            let mut routes = lock_unpoisoned(&self.routes);
-            self.closed.store(true, Ordering::Release);
-            routes.clear();
         }
         self.settle_all(code);
         self.cancel.cancel();
@@ -2199,6 +2209,10 @@ async fn writer_loop(
             })
             .is_err()
         {
+            // The bridge never received the frame, so nothing reached the ring.
+            if let Some(state) = &frame.publish {
+                state.store(QUEUED, Ordering::Release);
+            }
             inner.retire("write_failed");
             break;
         }
@@ -2503,16 +2517,20 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// A code is kept verbatim only when every character is in the allowed set and
+/// it fits `MAX_ERROR_CODE_BYTES`. Filtering characters out could alias a
+/// nonconforming value onto a reserved code (`unknown_module!` → `unknown_module`)
+/// and trigger that code's recovery rule, so the whole value falls back instead.
 fn bounded_code(code: &str) -> String {
-    let code = code
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
-        .take(MAX_ERROR_CODE_BYTES)
-        .collect::<String>();
-    if code.is_empty() {
-        "remote_error".to_owned()
+    let conforming = !code.is_empty()
+        && code.len() <= MAX_ERROR_CODE_BYTES
+        && code
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
+    if conforming {
+        code.to_owned()
     } else {
-        code
+        "remote_error".to_owned()
     }
 }
 
@@ -4490,6 +4508,80 @@ mod tests {
         assert_eq!(error.outcome(), SendOutcome::Terminal);
         assert_eq!(error.code(), "stable_code");
         assert!(!rendered.contains(sentinel));
+    }
+
+    #[test]
+    fn a_nonconforming_remote_code_never_aliases_a_reserved_one() {
+        assert_eq!(bounded_code("unknown_module"), "unknown_module");
+        assert_eq!(bounded_code("a.b-c_1"), "a.b-c_1");
+        assert_eq!(bounded_code("unknown_module!"), "remote_error");
+        assert_eq!(bounded_code("unknown module"), "remote_error");
+        assert_eq!(bounded_code(""), "remote_error");
+        assert_eq!(
+            bounded_code(&"x".repeat(MAX_ERROR_CODE_BYTES + 1)),
+            "remote_error"
+        );
+        assert_eq!(
+            bounded_code(&"x".repeat(MAX_ERROR_CODE_BYTES)).len(),
+            MAX_ERROR_CODE_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_bridge_handoff_settles_not_sent() {
+        // The bridge receiver is gone before the writer hands over a claimed frame, so nothing reached the ring.
+        let (inner, data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let (kind, rx) = unary_sender();
+        inner
+            .admit(
+                route(1),
+                b"never-handed-over".to_vec(),
+                false,
+                kind,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("admitted");
+        let (write, writes) = fake_ring_writer();
+        drop(writes);
+        let writer_inner = Arc::clone(&inner);
+        tokio::spawn(async move {
+            writer_loop(writer_inner, write, data_rx, control_rx).await;
+        })
+        .await
+        .expect("writer exits after retiring");
+        let error = rx.await.expect("settled").expect_err("retired");
+        assert_eq!(error.outcome(), SendOutcome::NotSent);
+        assert_eq!(error.code(), "write_failed");
+    }
+
+    #[tokio::test]
+    async fn closing_under_admission_blocks_a_late_enqueue() {
+        // `admit` checks `closed` while holding `admission`; `mark_closed` takes the same lock, so no frame is queued after `closed` flips.
+        let (inner, data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let admission = lock_unpoisoned(&inner.admission);
+        let closer = std::thread::spawn({
+            let inner = Arc::clone(&inner);
+            move || inner.mark_closed(|_| ())
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !inner.closed.load(Ordering::Acquire),
+            "closed waits for admission"
+        );
+        drop(admission);
+        assert!(!closer.join().expect("closer completes"), "first close");
+        let (kind, _rx) = unary_sender();
+        let error = inner
+            .admit(
+                route(1),
+                Vec::new(),
+                false,
+                kind,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect_err("closed generation admits nothing");
+        assert_eq!(error.code(), "connection_retired");
+        assert_eq!(data_rx.len(), 0);
     }
 
     #[test]
