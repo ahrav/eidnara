@@ -1,0 +1,905 @@
+//! These tests validate bundle handling and certified-inference conformance for the synapse-tiny fixture.
+//! synapse-tiny fixture.
+//!
+//! Native-inference tests require an ONNX Runtime shared library at `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY`.
+//! Set `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY` to the ONNX Runtime shared-library path.
+//! Without `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY`, native-inference tests skip while pre-ORT rejection tests run.
+
+mod support;
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use host_runtime::synapse::inference::InferenceError;
+use host_runtime::synapse::{SynapseComponent, SynapseConfig, SynapseLimits, SynapseStatus};
+use host_runtime::{CompositeComponent, HostError, SecondaryComponent, StaticComposite};
+use sha2::{Digest, Sha256};
+
+use support::synapse::{DeterministicEngine, EchoPrimary, test_lane};
+
+fn fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synapse-tiny")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn ort_library() -> Option<(PathBuf, String)> {
+    let path = match std::env::var_os("EIDNARA_SYNAPSE_TEST_ORT_LIBRARY") {
+        Some(path) => PathBuf::from(path),
+        None => {
+            eprintln!(
+                "skipping: EIDNARA_SYNAPSE_TEST_ORT_LIBRARY is unset, no native ONNX Runtime available"
+            );
+            return None;
+        }
+    };
+    let bytes = std::fs::read(&path).expect("ORT library is readable");
+    let hash = sha256_hex(&bytes);
+    Some((path, hash))
+}
+
+#[tokio::test]
+async fn host_only_platform_reports_exact_synapse_unsupported_state() {
+    let component = SynapseComponent::unsupported("synapse_unsupported");
+    SecondaryComponent::initialize(&component)
+        .await
+        .expect("unsupported lane initializes");
+    assert!(matches!(
+        component.status(),
+        SynapseStatus::Disabled { reason } if reason == "synapse_unsupported"
+    ));
+    let health = CompositeComponent::health(&component).await;
+    assert_eq!(
+        health.metrics.expect("metrics")["synapse_state"],
+        "unsupported"
+    );
+}
+
+fn copy_fixture_to(dir: &Path) {
+    for entry in std::fs::read_dir(fixture_dir()).expect("fixture dir") {
+        let entry = entry.expect("fixture entry");
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).expect("copy fixture file");
+    }
+}
+
+fn config_for(dir: &Path, ort: &(PathBuf, String)) -> SynapseConfig {
+    SynapseConfig {
+        bundle_dir: dir.to_path_buf(),
+        bundle_manifest_sha256: None,
+        ort_library: ort.0.clone(),
+        ort_library_sha256: ort.1.clone(),
+        limits: SynapseLimits::default(),
+    }
+}
+
+/// Pre-ORT rejection tests use a syntactically valid ORT identity and never load the library.
+fn pre_ort_identity() -> (PathBuf, String) {
+    (
+        PathBuf::from("/nonexistent/libonnxruntime.so"),
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_owned(),
+    )
+}
+
+async fn initialize(config: SynapseConfig) -> SynapseComponent {
+    let component = SynapseComponent::new(Some(config));
+    component
+        .initialize()
+        .await
+        .expect("expected artifact faults never fail initialization");
+    SecondaryComponent::activate(&component)
+        .await
+        .expect("expected artifact faults never fail activation");
+    component
+}
+
+fn disabled_reason(component: &SynapseComponent) -> String {
+    match component.status() {
+        SynapseStatus::Disabled { reason } => reason,
+        other => panic!("expected a disabled lane, got {other:?}"),
+    }
+}
+
+async fn expect_disabled_with(mutate: impl FnOnce(&Path), expected_fragment: &str) {
+    let dir = tempfile::tempdir().expect("temp bundle dir");
+    copy_fixture_to(dir.path());
+    mutate(dir.path());
+    let component = initialize(config_for(dir.path(), &pre_ort_identity())).await;
+    let reason = disabled_reason(&component);
+    assert!(
+        reason.contains(expected_fragment),
+        "reason {reason:?} does not mention {expected_fragment:?}"
+    );
+}
+
+/// Infeasible limits fail host startup instead of disabling Synapse while the host remains healthy.
+/// Infeasible limits fail host startup instead of disabling Synapse while the host remains healthy.
+///
+/// An `Err` from `activate` fails host startup.
+/// An `Err` from `activate` fails host startup.
+async fn expect_limits_fail_startup(
+    mutate: impl FnOnce(&mut SynapseLimits),
+    expected_fragment: &str,
+) {
+    let dir = tempfile::tempdir().expect("temp bundle dir");
+    copy_fixture_to(dir.path());
+    let mut config = config_for(dir.path(), &pre_ort_identity());
+    mutate(&mut config.limits);
+    let component = SynapseComponent::new(Some(config));
+    component
+        .initialize()
+        .await
+        .expect("bootstrap defers bundle work and cannot fail on limits");
+    assert!(
+        matches!(component.status(), SynapseStatus::Starting),
+        "bootstrap must leave the lane starting, not decided"
+    );
+    let error = component
+        .activate()
+        .await
+        .expect_err("infeasible limits must fail activation");
+    let reason = error.to_string();
+    assert!(
+        reason.contains(expected_fragment),
+        "error {reason:?} does not mention {expected_fragment:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn waiting_query_memory_bound_rejects_both_construction_paths() {
+    // At default limits, K=4 is the largest feasible waiter count.
+    // Available scratch after retained metadata is 182,519,040 bytes.
+    // Each waiter slot consumes 2 * max_text_bytes + 256 = 2,097,408 bytes.
+    // Queued text consumes max_queued_request_bytes = 67,108,864 bytes.
+    // Queued metadata consumes 64 jobs * (2*64 + 64 * 960) = 3,940,352 bytes.
+    // Worst-case parsing consumes 3 * 32 MiB + 64 * 640 + 4096 = 100,708,352 bytes.
+    // K = 4 consumes 182,244,608 bytes, within the 182,519,040-byte scratch bound.
+    // K = 5 consumes 184,342,016 bytes, exceeding the 182,519,040-byte scratch bound.
+    const BOUNDARY: usize = 4;
+
+    // K=4, the largest feasible value, constructs on both paths.
+    let accepted = SynapseLimits {
+        max_waiting_queries: BOUNDARY,
+        ..SynapseLimits::default()
+    };
+    host_runtime::synapse::bundle::load_bundle(&fixture_dir(), &accepted, None)
+        .expect("the boundary configuration loads through the bundle path");
+    SynapseComponent::ready_with_engine(test_lane(), DeterministicEngine::new(), accepted)
+        .expect("the boundary configuration constructs through the engine path");
+
+    // Five waiter slots exceed the scratch bound on both construction paths.
+    expect_limits_fail_startup(
+        |limits| limits.max_waiting_queries = BOUNDARY + 1,
+        "query admission capacity requires",
+    )
+    .await;
+
+    let limits = SynapseLimits {
+        max_waiting_queries: BOUNDARY + 1,
+        ..SynapseLimits::default()
+    };
+    let error = match SynapseComponent::ready_with_engine(
+        test_lane(),
+        DeterministicEngine::new(),
+        limits,
+    ) {
+        Ok(_) => panic!("the ready-engine seam must apply serving-limit validation"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("query admission capacity requires")
+    );
+}
+
+fn edit_manifest(dir: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("manifest")).expect("manifest json");
+    edit(&mut manifest);
+    std::fs::write(&path, serde_json::to_vec(&manifest).expect("serialize")).expect("write");
+}
+
+fn edit_certified_manifest(dir: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    edit_manifest(dir, |value| {
+        edit(value);
+        let manifest: host_runtime::synapse::bundle::BundleManifest =
+            serde_json::from_value(value.clone()).expect("edited manifest");
+        value["fingerprint"] =
+            host_runtime::synapse::bundle::canonical_fingerprint(&manifest).into();
+    });
+}
+
+fn corpus() -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(fixture_dir().join("corpus.json")).expect("corpus"))
+        .expect("corpus json")
+}
+
+// ---------------------------------------------------------------------------
+// Pre-ORT rejection paths disable Synapse before native model construction and do not require an ONNX Runtime library.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unconfigured_component_is_disabled_not_fatal() {
+    let component = SynapseComponent::new(None);
+    component.initialize().await.expect("initialize");
+    assert!(disabled_reason(&component).contains("no bundle configured"));
+
+    let outcome = component
+        .bind(
+            host_runtime::RouteHandle {
+                channel: 1,
+                epoch: 1,
+            },
+            identity(),
+        )
+        .await;
+    match outcome {
+        host_runtime::BindOutcome::Reject { code, .. } => assert_eq!(code, "artifact_invalid"),
+        host_runtime::BindOutcome::Accept => panic!("a disabled lane must not accept binds"),
+    }
+    assert_eq!(
+        component.health().await.status,
+        host_runtime::HealthStatus::Degraded
+    );
+    // A lane that rejects every bind does not consume a general handler-task slot during query admission; a host reserving all but one slot still starts.
+    assert_eq!(
+        component.resources().general_task_hold_bound,
+        0,
+        "a disabled lane must declare no parked general handler tasks"
+    );
+    // A serving lane must fit the running query and every allowed waiter within the host's general handler-task limit.
+    let ready = SynapseComponent::ready_with_engine(
+        test_lane(),
+        DeterministicEngine::new(),
+        SynapseLimits {
+            max_waiting_queries: 2,
+            max_queued_request_bytes: 8 * 1024 * 1024,
+            ..SynapseLimits::default()
+        },
+    )
+    .expect("two waiters fit the default scratch pool");
+    assert_eq!(ready.resources().general_task_hold_bound, 3);
+}
+
+fn identity() -> host_runtime::RouteIdentity {
+    host_runtime::RouteIdentity {
+        project_root: PathBuf::from("/workspace/project"),
+        harness: "opencode".to_owned(),
+        session: "s1".to_owned(),
+        consumer_module_id: None,
+        consumer_launch_nonce: None,
+        consumer_capabilities: Vec::new(),
+        admission_facts: None,
+        credential_fingerprints: std::collections::BTreeMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn one_bit_changes_to_each_artifact_disable_the_lane() {
+    for name in [
+        "model.onnx",
+        "embedding.bin",
+        "tokenizer.json",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer_config.json",
+        "corpus.json",
+    ] {
+        expect_disabled_with(
+            move |dir| {
+                let path = dir.join(name);
+                let mut bytes = std::fs::read(&path).expect("artifact");
+                let last = bytes.len() - 1;
+                bytes[last] ^= 0x01;
+                std::fs::write(&path, bytes).expect("write");
+            },
+            "hash mismatch",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn missing_artifact_disables_the_lane() {
+    expect_disabled_with(
+        |dir| std::fs::remove_file(dir.join("embedding.bin")).expect("remove"),
+        "missing",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn unlisted_extra_file_disables_the_lane() {
+    expect_disabled_with(
+        |dir| std::fs::write(dir.join("extra-initializer.bin"), b"x").expect("write"),
+        "unlisted",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn symlinked_artifact_disables_the_lane() {
+    // The listed entry set makes this test reach symlink rejection before unlisted-entry rejection.
+    // validator uses symlink_metadata, so the target never has to exist.
+    expect_disabled_with(
+        |dir| {
+            let real = dir.join("model.onnx");
+            std::fs::remove_file(&real).expect("remove");
+            std::os::unix::fs::symlink("/nonexistent/elsewhere", &real).expect("symlink");
+        },
+        "not a regular file",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn duplicate_manifest_key_disables_the_lane() {
+    expect_disabled_with(
+        |dir| {
+            let path = dir.join("manifest.json");
+            let text = std::fs::read_to_string(&path).expect("manifest");
+            let duplicated = text.replacen(
+                "\"schema_version\":",
+                "\"table_epoch\": 9, \"schema_version\":",
+                1,
+            );
+            std::fs::write(&path, duplicated).expect("write");
+        },
+        "strict JSON",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_stale_fingerprint_disables_the_lane() {
+    // Keeping `fingerprint` unchanged after an embedding-space edit serves a different embedding space under the same lane identity.
+    // The digest stays well-formed: only its binding to the contents breaks.
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["fingerprint"] = "a1".repeat(32).into()),
+        "canonical embedding-space fingerprint",
+    )
+    .await;
+    // Changing `table_epoch` without updating `fingerprint` also invalidates the canonical fingerprint.
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["table_epoch"] = 9.into()),
+        "canonical embedding-space fingerprint",
+    )
+    .await;
+}
+
+#[test]
+fn the_committed_fixture_carries_its_canonical_fingerprint() {
+    // `the_committed_fixture_carries_its_canonical_fingerprint` detects fixture fingerprint drift when ONNX Runtime is unavailable.
+    let limits = SynapseLimits {
+        max_text_bytes: 123_456,
+        ..SynapseLimits::default()
+    };
+    let bundle = host_runtime::synapse::bundle::load_bundle(&fixture_dir(), &limits, None)
+        .expect("the committed fixture bundle loads");
+    assert_eq!(bundle.max_text_bytes, limits.max_text_bytes);
+    assert_eq!(
+        bundle.manifest.fingerprint,
+        host_runtime::synapse::bundle::canonical_fingerprint(&bundle.manifest),
+        "regenerate the fixture with generate-synapse-tiny.py"
+    );
+}
+
+/// The generation manifest hashes the bundle manifest, which hashes every artifact.
+/// The loader rejects a bundle whose manifest digest differs from the generation's committed digest.
+/// A bundle swapped after generation validation can change embedding bytes while the selection remains valid.
+#[test]
+fn a_bundle_manifest_outside_the_committed_digest_does_not_load() {
+    let limits = SynapseLimits::default();
+    let manifest_bytes =
+        std::fs::read(fixture_dir().join("manifest.json")).expect("fixture manifest");
+    let committed = sha256_hex(&manifest_bytes);
+
+    host_runtime::synapse::bundle::load_bundle(&fixture_dir(), &limits, Some(&committed))
+        .expect("the digest the generation committed admits the bundle it names");
+
+    let other = sha256_hex(b"a manifest this generation never staged");
+    let Err(error) =
+        host_runtime::synapse::bundle::load_bundle(&fixture_dir(), &limits, Some(&other))
+    else {
+        panic!("a manifest outside the committed digest must not load");
+    };
+    assert!(
+        error
+            .0
+            .contains("does not match the digest its generation committed"),
+        "unexpected rejection: {}",
+        error.0
+    );
+}
+
+#[tokio::test]
+async fn a_recommended_batch_above_the_admission_cap_disables_the_lane() {
+    // `recommended_page_size` must not exceed `max_batch_items` because clients receive the recommendation verbatim while admission rejects larger batches.
+    let dir = tempfile::tempdir().expect("temp bundle dir");
+    copy_fixture_to(dir.path());
+    let ort = pre_ort_identity();
+    let mut config = config_for(dir.path(), &ort);
+    config.limits.max_batch_items = 8;
+    let component = initialize(config).await;
+    let reason = disabled_reason(&component);
+    assert!(
+        reason.contains("recommended batch rows") && reason.contains("max batch items"),
+        "reason {reason:?} does not name the admission mismatch"
+    );
+}
+
+#[tokio::test]
+async fn retained_result_cap_below_the_manifest_batch_bound_disables_before_ort() {
+    let dir = tempfile::tempdir().expect("temp bundle dir");
+    copy_fixture_to(dir.path());
+    let mut config = config_for(dir.path(), &pre_ort_identity());
+    config.limits.max_retained_result_bytes = 1;
+
+    let component = initialize(config).await;
+    let reason = disabled_reason(&component);
+    assert!(
+        reason.contains("maximum batch result") && reason.contains("retained-result limit"),
+        "reason {reason:?} does not name the composed result bound"
+    );
+}
+
+#[tokio::test]
+async fn incoherent_host_serving_limits_fail_startup_before_ort() {
+    expect_limits_fail_startup(|limits| limits.max_text_bytes = 3, "UTF-8 code point").await;
+    expect_limits_fail_startup(|limits| limits.max_batch_items = 0, "max batch items").await;
+    expect_limits_fail_startup(|limits| limits.max_retained_jobs = 0, "retained job count").await;
+    expect_limits_fail_startup(
+        |limits| limits.max_queued_request_bytes = limits.max_batch_text_bytes as u64 - 1,
+        "queued request bytes",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn manifest_field_bounds_disable_the_lane() {
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["schema_version"] = 2.into()),
+        "schema version",
+    )
+    .await;
+    // `table_epoch` must not exceed 9_007_199_254_740_991 because JSON clients represent it as a number.
+    // constraint mismatch.
+    expect_disabled_with(
+        |dir| {
+            edit_manifest(dir, |m| {
+                m["table_epoch"] = serde_json::Value::from(9_007_199_254_740_992u64)
+            })
+        },
+        "table_epoch out of bounds",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["model_file"]["name"] = "/etc/passwd".into()),
+        "path separator",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["model_file"]["name"] = "..".into()),
+        "reserved",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["model_file"]["sha256"] = "0".repeat(64).into()),
+        "placeholder",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["model_file"]["sha256"] = "abc123".into()),
+        "64 lowercase hex",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["pooling"] = "max".into()),
+        "pooling",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["quantization"] = "int4".into()),
+        "quantization",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["output"] = serde_json::json!({"name": "logits"})),
+        "allowlisted",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["output"] = serde_json::json!({"index": 8})),
+        "bound",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| {
+            edit_manifest(dir, |m| {
+                m["output"] = serde_json::json!({"name": "last_hidden_state", "index": 0})
+            })
+        },
+        "exactly one",
+    )
+    .await;
+    expect_disabled_with(|dir| edit_manifest(dir, |m| m["dims"] = 0.into()), "dims").await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["max_tokens"] = 16.into()),
+        "model_max_length",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| edit_manifest(dir, |m| m["unexpected_field"] = 1.into()),
+        "schema invalid",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn missing_pad_token_disables_the_lane() {
+    expect_disabled_with(
+        |dir| {
+            let path = dir.join("tokenizer_config.json");
+            let contents = br#"{"model_max_length": 8}"#;
+            std::fs::write(&path, contents).expect("write");
+            edit_manifest(dir, |m| {
+                m["tokenizer"]["tokenizer_config"]["sha256"] = sha256_hex(contents).into();
+            });
+        },
+        "pad_token",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn missing_bundle_directory_disables_the_lane() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let gone = dir.path().join("never-created");
+    let component = initialize(config_for(&gone, &pre_ort_identity())).await;
+    assert!(disabled_reason(&component).contains("missing"));
+}
+
+// ---------------------------------------------------------------------------
+// Tests exercise native paths only when a certified ONNX Runtime library is available to this process.
+// Native inference must be repeatable within tolerance, not bit-exact.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn certified_bundle_loads_and_serves_expected_vectors() {
+    let Some(ort) = ort_library() else { return };
+    let dir = tempfile::tempdir().expect("temp bundle dir");
+    copy_fixture_to(dir.path());
+    let component = initialize(config_for(dir.path(), &ort)).await;
+    let lane = match component.status() {
+        SynapseStatus::Ready(lane) => lane,
+        other => panic!("expected a ready lane, got {other:?}"),
+    };
+    assert_eq!(lane.model, "tiny-test-model");
+    assert_eq!(lane.dims, 8);
+    assert_eq!(lane.table_epoch, 1);
+    assert_eq!(lane.recommended_rows, 16);
+
+    let corpus = corpus();
+    let tolerance = corpus["tolerance"].as_f64().expect("tolerance") as f32;
+    for item in corpus["items"].as_array().expect("items") {
+        let text = item["text"].as_str().expect("text");
+        let expected: Vec<f32> = item["expected"]
+            .as_array()
+            .expect("expected")
+            .iter()
+            .map(|v| v.as_f64().expect("component") as f32)
+            .collect();
+        let got = component.embed_blocking(&[text]).expect("embed");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].len(), expected.len(), "dims for {text}");
+        for (g, e) in got[0].iter().zip(&expected) {
+            assert!(
+                (g - e).abs() <= tolerance,
+                "component drift beyond tolerance for {text}"
+            );
+        }
+    }
+
+    let first = component
+        .embed_blocking(&["alpha beta gamma"])
+        .expect("embed");
+    let second = component
+        .embed_blocking(&["alpha beta gamma"])
+        .expect("embed");
+    for (a, b) in first[0].iter().zip(&second[0]) {
+        assert!((a - b).abs() <= tolerance);
+    }
+
+    // The tokenizer truncates at `max_tokens`, so later tokens cannot change the vector.
+    let truncated = component
+        .embed_blocking(&["alpha beta gamma delta epsilon zeta eta theta"])
+        .expect("embed");
+    let overflowing = component
+        .embed_blocking(&["alpha beta gamma delta epsilon zeta eta theta iota kappa"])
+        .expect("embed");
+    for (a, b) in truncated[0].iter().zip(&overflowing[0]) {
+        assert!((a - b).abs() <= tolerance);
+    }
+
+    // Zero-token inputs are refused before native inference.
+    for text in ["", "   "] {
+        match component.embed_blocking(&[text]) {
+            Err(InferenceError::Input(_)) => {}
+            other => panic!("expected an input rejection for {text:?}, got {other:?}"),
+        }
+    }
+    assert!(matches!(component.status(), SynapseStatus::Ready(_)));
+}
+
+#[tokio::test]
+async fn production_bundle_from_environment_certifies_offline() {
+    let Some(bundle_dir) = std::env::var_os("EIDNARA_SYNAPSE_PRODUCTION_BUNDLE").map(PathBuf::from)
+    else {
+        eprintln!("skipping: EIDNARA_SYNAPSE_PRODUCTION_BUNDLE is unset");
+        return;
+    };
+    let Some(ort) = ort_library() else { return };
+    let component = initialize(config_for(&bundle_dir, &ort)).await;
+    let lane = match component.status() {
+        SynapseStatus::Ready(lane) => lane,
+        other => panic!("production bundle did not certify: {other:?}"),
+    };
+    assert_eq!(lane.model, "gte-modernbert-base-f16");
+    assert_eq!(lane.dims, 768);
+    assert_eq!(lane.table_epoch, 1);
+
+    let corpus: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(bundle_dir.join("corpus.json")).expect("production corpus"),
+    )
+    .expect("production corpus json");
+    let tolerance = corpus["tolerance"].as_f64().expect("tolerance") as f32;
+    let mut captured = Vec::new();
+    for item in corpus["items"].as_array().expect("items") {
+        let text = item["text"].as_str().expect("text");
+        let expected: Vec<f32> = item["expected"]
+            .as_array()
+            .expect("expected")
+            .iter()
+            .map(|value| value.as_f64().expect("component") as f32)
+            .collect();
+        let vectors = component.embed_blocking(&[text]).expect("embed");
+        captured.push(serde_json::json!({"text": text, "expected": vectors[0]}));
+        for (got, expected) in vectors[0].iter().zip(expected) {
+            assert!((got - expected).abs() <= tolerance);
+        }
+    }
+    if let Some(path) = std::env::var_os("EIDNARA_SYNAPSE_CAPTURE_CORPUS") {
+        let output = serde_json::json!({"tolerance": 0.0001, "items": captured});
+        std::fs::write(
+            path,
+            serde_json::to_vec(&output).expect("serialize captured corpus"),
+        )
+        .expect("write captured corpus");
+    }
+}
+
+#[tokio::test]
+async fn wrong_but_dimension_compatible_output_fails_certification() {
+    let Some(ort) = ort_library() else { return };
+    let dir = tempfile::tempdir().expect("temp bundle dir");
+    copy_fixture_to(dir.path());
+    edit_certified_manifest(dir.path(), |m| {
+        m["output"] = serde_json::json!({"name": "token_embeddings"});
+    });
+    let component = initialize(config_for(dir.path(), &ort)).await;
+    assert!(disabled_reason(&component).contains("semantic certification"));
+}
+
+#[tokio::test]
+async fn wrong_pooling_fails_certification() {
+    let Some(ort) = ort_library() else { return };
+    let dir = tempfile::tempdir().expect("temp bundle dir");
+    copy_fixture_to(dir.path());
+    edit_certified_manifest(dir.path(), |m| m["pooling"] = "cls".into());
+    let component = initialize(config_for(dir.path(), &ort)).await;
+    assert!(disabled_reason(&component).contains("semantic certification"));
+}
+
+#[tokio::test]
+async fn wrong_ort_identity_disables_the_lane() {
+    let Some(ort) = ort_library() else { return };
+    let dir = tempfile::tempdir().expect("temp bundle dir");
+    copy_fixture_to(dir.path());
+
+    let mut wrong_hash = config_for(dir.path(), &ort);
+    wrong_hash.ort_library_sha256 =
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_owned();
+    let component = initialize(wrong_hash).await;
+    assert!(disabled_reason(&component).contains("hash mismatch"));
+
+    let mut missing = config_for(dir.path(), &ort);
+    missing.ort_library = dir.path().join("libnothere.so");
+    let component = initialize(missing).await;
+    assert!(disabled_reason(&component).contains("missing"));
+
+    let mut placeholder = config_for(dir.path(), &ort);
+    placeholder.ort_library_sha256 = "0".repeat(64);
+    let component = initialize(placeholder).await;
+    assert!(disabled_reason(&component).contains("not a real digest"));
+}
+
+// ---------------------------------------------------------------------------
+// The component's incarnation tracker owns the blocking load.
+// The blocking load cannot outlive the component's shutdown drain or instance lock.
+// ---------------------------------------------------------------------------
+
+/// One gate closure queues later `spawn_blocking` calls because the runtime has one blocking thread.
+fn single_blocking_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("test runtime")
+}
+
+/// The gate occupies the runtime's only blocking thread until its sender drops.
+/// The component's bundle-load `spawn_blocking` call stays queued behind the gate.
+/// The queued load lets callers drop `initialize` before the load runs.
+/// The blocking work does not run before `initialize` is dropped.
+fn blocking_pool_gate() -> (std::sync::mpsc::Sender<()>, tokio::task::JoinHandle<()>) {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let gate = tokio::task::spawn_blocking(move || {
+        let _ = rx.recv();
+    });
+    (tx, gate)
+}
+
+#[test]
+fn a_dropped_activate_keeps_shutdown_waiting_for_the_blocking_load() {
+    single_blocking_thread_runtime().block_on(async {
+        let dir = tempfile::tempdir().expect("temp bundle dir");
+        copy_fixture_to(dir.path());
+        let component = SynapseComponent::new(Some(config_for(dir.path(), &pre_ort_identity())));
+        component.initialize().await.expect("initialize");
+        let (gate_tx, gate) = blocking_pool_gate();
+
+        // One poll spawns the queued blocking load and the tracked wrapper that owns its completion; dropping `activate` then abandons `activate`.
+        // The drop abandons `activate` while it awaits the tracked wrapper.
+        let mut activate = Box::pin(SecondaryComponent::activate(&component));
+        tokio::select! {
+            biased;
+            _ = activate.as_mut() => {
+                panic!("activate cannot complete while the blocking thread is occupied")
+            }
+            () = tokio::task::yield_now() => {}
+        }
+        drop(activate);
+
+        // The load has not run, so the incarnation tracker still owns it; shutdown's drain must wait.
+        let waited = tokio::time::timeout(Duration::from_millis(200), component.shutdown()).await;
+        assert!(
+            waited.is_err(),
+            "shutdown must wait for the abandoned blocking load"
+        );
+
+        drop(gate_tx);
+        gate.await.expect("gate closure joins");
+        tokio::time::timeout(Duration::from_secs(10), component.shutdown())
+            .await
+            .expect("shutdown completes once the blocking load stopped")
+            .expect("synapse shutdown returns cleanly");
+
+        // The dropped `activate` never installs a lane because the tracked wrapper discards the load result.
+        assert!(matches!(component.status(), SynapseStatus::Starting));
+    });
+}
+
+fn host_config(data_root: &Path) -> host_runtime::HostConfig {
+    host_runtime::HostConfig {
+        data_dir: Some(data_root.to_path_buf()),
+        daemon_ver: "eidnara-host/test".to_owned(),
+        limits: host_runtime::HostLimits {
+            max_resident_bytes: host_runtime::config::MIN_RESIDENT_BYTES * 2,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn probe_composite() -> StaticComposite<EchoPrimary, SynapseComponent, support::StubComponent> {
+    StaticComposite::new(
+        EchoPrimary,
+        SynapseComponent::new(None),
+        support::StubComponent::new("broca", "management_surface"),
+    )
+    .expect("distinct component ids")
+}
+
+#[test]
+fn an_abandoned_activation_holds_the_instance_lock_until_the_blocking_load_stops() {
+    single_blocking_thread_runtime().block_on(async {
+        let bundle_dir = tempfile::tempdir().expect("temp bundle dir");
+        copy_fixture_to(bundle_dir.path());
+        let data_root = tempfile::tempdir().expect("temp data root");
+        let (gate_tx, gate) = blocking_pool_gate();
+
+        let synapse =
+            SynapseComponent::new(Some(config_for(bundle_dir.path(), &pre_ort_identity())));
+        let composite = StaticComposite::new(
+            EchoPrimary,
+            synapse,
+            support::StubComponent::new("broca", "management_surface"),
+        )
+        .expect("distinct component ids");
+        let shutdown = host_runtime::CancellationToken::new();
+        let run_shutdown = shutdown.clone();
+        let mut config = host_config(data_root.path());
+        config.timing.shutdown_deadline = Duration::from_secs(20);
+        let publication = host_runtime::runtime_dir_path(Some(data_root.path()))
+            .expect("runtime dir")
+            .join(host_runtime::CONNECTION_FILE_NAME);
+        let host = tokio::spawn(async move { host_runtime::run(composite, config, run_shutdown).await });
+
+        // Transport publishes while the gated blocking load remains queued.
+        // activation never delays publication.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::read(&publication).is_err() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "host must publish while activation is still blocked"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Shutdown abandons the activation future.
+        // The lock refuses a successor until the queued load stops.
+        shutdown.cancel();
+        let refused = host_runtime::run(
+            probe_composite(),
+            host_config(data_root.path()),
+            host_runtime::CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(HostError::Instance(_))),
+            "the lock must stay held while the blocking load is owned, got {refused:?}"
+        );
+
+        // Shutdown drains and the guard drops after the load completes.
+        drop(gate_tx);
+        gate.await.expect("gate closure joins");
+        let result = host.await.expect("run task joins");
+        assert!(
+            result.is_ok(),
+            "shutdown after publication drains gracefully, got {result:?}"
+        );
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            // With a pre-cancelled token, `run` acquires the lock, observes shutdown before initialization, and hands its guard to a reaper that releases it before listener startup or publication.
+            // The reaper starts no listener and publishes nothing.
+            let probe_shutdown = host_runtime::CancellationToken::new();
+            probe_shutdown.cancel();
+            let outcome = host_runtime::run(
+                probe_composite(),
+                host_config(data_root.path()),
+                probe_shutdown,
+            )
+            .await;
+            match outcome {
+                Err(HostError::Instance(_)) => {}
+                other => {
+                    assert!(
+                        matches!(other, Err(HostError::InitFailed(_))),
+                        "a pre-cancelled probe reports its own aborted initialization, got {other:?}"
+                    );
+                    break;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the lock must release once the blocking load stopped"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+}
