@@ -1,0 +1,1189 @@
+//!
+//! Byte limits are enforced before handler callbacks, route reservation, and filesystem work.
+//! The bearer key, not metadata, grants authority.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use crate::handler::{ManifestSnapshot, RouteClass, RouteIdentity, RouteTarget, TargetKind};
+
+pub const CODE_INVALID_CONTROL_REQUEST: &str = "invalid_control_request";
+pub const CODE_UNSUPPORTED_OPERATION: &str = "unsupported_operation";
+pub const CODE_UNKNOWN_MODULE: &str = "unknown_module";
+pub const CODE_TARGET_UNAVAILABLE: &str = "target_unavailable";
+pub const CODE_UNKNOWN_CHANNEL: &str = "unknown_channel";
+pub const CODE_SERVER_BUSY: &str = "server_busy";
+pub const CODE_CANCELLED: &str = "cancelled";
+pub const CODE_INTERNAL_ERROR: &str = "internal_error";
+
+pub const OP_ROUTE_OPEN: &str = "route.open";
+pub const OP_CATALOG_LIST: &str = "catalog.list";
+pub const OP_HOST_SHUTDOWN: &str = "host.shutdown";
+pub const OP_HOST_STATUS: &str = "host.status";
+
+/// `TargetIndex` restricts `route.open` targets to listed `(module, kind)`
+/// pairs.
+pub struct TargetIndex {
+    entries: Vec<(Box<str>, Vec<TargetKind>, RouteClass)>,
+}
+
+impl TargetIndex {
+    pub(crate) fn new(entries: Vec<(Box<str>, Vec<TargetKind>, RouteClass)>) -> Self {
+        Self { entries }
+    }
+
+    fn kinds_of(&self, module_id: &str) -> Option<&[TargetKind]> {
+        self.entries
+            .iter()
+            .find(|(id, _, _)| id.as_ref() == module_id)
+            .map(|(_, kinds, _)| kinds.as_slice())
+    }
+
+    pub(crate) fn class_of(&self, module_id: &str) -> Option<RouteClass> {
+        self.entries
+            .iter()
+            .find(|(id, _, _)| id.as_ref() == module_id)
+            .map(|(_, _, class)| *class)
+    }
+}
+
+const MAX_OP_LEN: usize = 64;
+const MAX_MODULE_ID_LEN: usize = 128;
+const MAX_PROJECT_ROOT_LEN: usize = 4096;
+const MAX_HARNESS_LEN: usize = 128;
+const MAX_SESSION_LEN: usize = 256;
+const MAX_LAUNCH_NONCE_LEN: usize = 256;
+const MAX_CAPABILITY_LEN: usize = 64;
+const MAX_CAPABILITIES: usize = 32;
+const MAX_CREDENTIAL_FINGERPRINTS: usize = 3;
+const MAX_ADMISSION_FACTS_BYTES: usize = 8192;
+const MAX_ADMISSION_FACTS_DEPTH: usize = 32;
+/// Whole-request nesting bound: the root object plus a maximal
+/// `admission_facts` subtree. Unknown fields count toward nesting limits
+/// (protocol §7.1), so the bound applies to the complete control object
+const MAX_CONTROL_DEPTH: usize = MAX_ADMISSION_FACTS_DEPTH + 1;
+
+/// The direct-linked profile cannot change catalog content at runtime, so the generation is always 1.
+pub const CATALOG_GENERATION: u64 = 1;
+
+#[derive(Debug, PartialEq)]
+pub enum ControlAction {
+    CatalogList {
+        module_id_filter: Option<String>,
+    },
+    RouteOpen {
+        target: RouteTarget,
+        identity: RouteIdentity,
+    },
+    HostShutdown,
+    HostStatus,
+    /// Semantic rejection with a trustworthy correlation; one terminal.
+    Reject {
+        code: &'static str,
+        message: String,
+    },
+}
+
+fn invalid(message: &str) -> ControlAction {
+    ControlAction::Reject {
+        code: CODE_INVALID_CONTROL_REQUEST,
+        message: message.to_owned(),
+    }
+}
+
+/// Validates and classifies one complete channel-0 `Request` body.
+///
+/// `binary` is the frame's encoding bit: channel 0 accepts JSON only.
+pub fn parse_control(body: &[u8], binary: bool, targets: &TargetIndex) -> ControlAction {
+    if binary {
+        return invalid("control channel accepts JSON only");
+    }
+    let root = match strict_json::parse(body) {
+        Ok(value) => value,
+        Err(err) => return invalid(err.as_str()),
+    };
+    let serde_json::Value::Object(fields) = root else {
+        return invalid("control request must be a JSON object");
+    };
+    if fields
+        .values()
+        .map(value_depth)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+        > MAX_CONTROL_DEPTH
+    {
+        return invalid("control request too deeply nested");
+    }
+
+    let Some(op) = fields.get("op") else {
+        return invalid("missing op");
+    };
+    let Some(op) = op.as_str() else {
+        return invalid("op must be a string");
+    };
+    if let Err(err) = check_string("op", op, MAX_OP_LEN, true) {
+        return invalid(&err);
+    }
+
+    match op {
+        OP_CATALOG_LIST => parse_catalog_list(&fields),
+        OP_ROUTE_OPEN => parse_route_open(&fields, targets),
+        OP_HOST_SHUTDOWN => ControlAction::HostShutdown,
+        OP_HOST_STATUS => ControlAction::HostStatus,
+        _ => ControlAction::Reject {
+            code: CODE_UNSUPPORTED_OPERATION,
+            message: "operation is not supported by this host".to_owned(),
+        },
+    }
+}
+
+fn parse_catalog_list(fields: &serde_json::Map<String, serde_json::Value>) -> ControlAction {
+    let filter = match fields.get("module_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) => {
+            if let Err(err) = check_string("module_id", id, MAX_MODULE_ID_LEN, true) {
+                return invalid(&err);
+            }
+            Some(id.clone())
+        }
+        Some(_) => return invalid("module_id must be a string"),
+    };
+    ControlAction::CatalogList {
+        module_id_filter: filter,
+    }
+}
+
+fn parse_route_open(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    targets: &TargetIndex,
+) -> ControlAction {
+    let Some(serde_json::Value::Object(target)) = fields.get("target") else {
+        return invalid("target must be an object");
+    };
+    let Some(serde_json::Value::String(kind)) = target.get("kind") else {
+        return invalid("target.kind must be a string");
+    };
+    let Some(serde_json::Value::String(module_id)) = target.get("module_id") else {
+        return invalid("target.module_id must be a string");
+    };
+    if let Err(err) = check_string("target.module_id", module_id, MAX_MODULE_ID_LEN, true) {
+        return invalid(&err);
+    }
+
+    let Some(serde_json::Value::Object(identity)) = fields.get("identity") else {
+        return invalid("identity must be an object");
+    };
+    let Some(serde_json::Value::String(project_root)) = identity.get("project_root") else {
+        return invalid("identity.project_root must be a string");
+    };
+    if let Err(err) = check_string("project_root", project_root, MAX_PROJECT_ROOT_LEN, true) {
+        return invalid(&err);
+    }
+    if !project_root.starts_with('/') {
+        return invalid("project_root must be an absolute path");
+    }
+    let Some(serde_json::Value::String(harness)) = identity.get("harness") else {
+        return invalid("identity.harness must be a string");
+    };
+    if let Err(err) = check_string("harness", harness, MAX_HARNESS_LEN, true) {
+        return invalid(&err);
+    }
+    let Some(serde_json::Value::String(session)) = identity.get("session") else {
+        return invalid("identity.session must be a string");
+    };
+    if let Err(err) = check_string("session", session, MAX_SESSION_LEN, true) {
+        return invalid(&err);
+    }
+
+    let (consumer_module_id, consumer_launch_nonce) = match fields.get("consumer_identity") {
+        None | Some(serde_json::Value::Null) => (None, None),
+        Some(serde_json::Value::Object(ci)) => {
+            let Some(serde_json::Value::String(module)) = ci.get("module_id") else {
+                return invalid("consumer_identity.module_id must be a string");
+            };
+            if let Err(err) = check_string(
+                "consumer_identity.module_id",
+                module,
+                MAX_MODULE_ID_LEN,
+                false,
+            ) {
+                return invalid(&err);
+            }
+            let Some(serde_json::Value::String(nonce)) = ci.get("launch_nonce") else {
+                return invalid("consumer_identity.launch_nonce must be a string");
+            };
+            if let Err(err) = check_string(
+                "consumer_identity.launch_nonce",
+                nonce,
+                MAX_LAUNCH_NONCE_LEN,
+                false,
+            ) {
+                return invalid(&err);
+            }
+            (Some(module.clone()), Some(nonce.clone()))
+        }
+        Some(_) => return invalid("consumer_identity must be an object"),
+    };
+
+    let consumer_capabilities = match fields.get("consumer_capabilities") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(entries)) => {
+            if entries.len() > MAX_CAPABILITIES {
+                return invalid("too many consumer capabilities");
+            }
+            let mut out = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let Some(capability) = entry.as_str() else {
+                    return invalid("consumer capability must be a string");
+                };
+                if let Err(err) =
+                    check_string("consumer capability", capability, MAX_CAPABILITY_LEN, false)
+                {
+                    return invalid(&err);
+                }
+                out.push(capability.to_owned());
+            }
+            out
+        }
+        Some(_) => return invalid("consumer_capabilities must be an array"),
+    };
+
+    let admission_facts = match fields.get("admission_facts") {
+        None => None,
+        Some(facts) => {
+            let compact = serde_json::to_vec(facts).expect("Value serialization cannot fail");
+            if compact.len() > MAX_ADMISSION_FACTS_BYTES {
+                return invalid("admission_facts too large");
+            }
+            if value_depth(facts) > MAX_ADMISSION_FACTS_DEPTH {
+                return invalid("admission_facts too deeply nested");
+            }
+            Some(facts.clone())
+        }
+    };
+
+    let credential_fingerprints = match identity.get("credential_fingerprints") {
+        None | Some(serde_json::Value::Null) => BTreeMap::new(),
+        Some(serde_json::Value::Object(entries)) => {
+            if entries.len() > MAX_CREDENTIAL_FINGERPRINTS {
+                return invalid("too many credential fingerprints");
+            }
+            let mut out = BTreeMap::new();
+            for (provider, value) in entries {
+                if !matches!(provider.as_str(), "anthropic" | "google" | "openai") {
+                    return invalid("credential fingerprint provider is unsupported");
+                }
+                let Some(fingerprint) = value.as_str() else {
+                    return invalid("credential fingerprint must be a string");
+                };
+                if fingerprint.len() != 64
+                    || !fingerprint
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return invalid("credential fingerprint must be 64 lowercase hex");
+                }
+                out.insert(provider.clone(), fingerprint.to_owned());
+            }
+            out
+        }
+        Some(_) => return invalid("credential_fingerprints must be an object"),
+    };
+
+    let Some(parsed_kind) = TargetKind::parse(kind) else {
+        return ControlAction::Reject {
+            code: CODE_TARGET_UNAVAILABLE,
+            message: "target kind is not routable on this host".to_owned(),
+        };
+    };
+    let Some(kinds) = targets.kinds_of(module_id) else {
+        return ControlAction::Reject {
+            code: CODE_UNKNOWN_MODULE,
+            message: format!("module {module_id} is unavailable"),
+        };
+    };
+    if !kinds.contains(&parsed_kind) {
+        return ControlAction::Reject {
+            code: CODE_TARGET_UNAVAILABLE,
+            message: format!("module {module_id} does not serve this target kind"),
+        };
+    }
+
+    ControlAction::RouteOpen {
+        target: RouteTarget {
+            module_id: module_id.clone(),
+            kind: parsed_kind,
+        },
+        identity: RouteIdentity {
+            project_root: PathBuf::from(project_root),
+            harness: harness.clone(),
+            session: session.clone(),
+            consumer_module_id,
+            consumer_launch_nonce,
+            consumer_capabilities,
+            admission_facts,
+            credential_fingerprints,
+        },
+    }
+}
+
+/// Startup validation applies the `route.open` `target.module_id` constraints to manifest module IDs.
+/// Startup rejects a manifest that advertises a module ID no conforming `route.open` request can bind.
+pub(crate) fn validate_manifest_module_id(module_id: &str) -> Result<(), String> {
+    check_string("manifest module_id", module_id, MAX_MODULE_ID_LEN, true)
+}
+
+pub(crate) fn check_string(
+    field: &str,
+    value: &str,
+    max_bytes: usize,
+    require_nonempty: bool,
+) -> Result<(), String> {
+    if require_nonempty && value.is_empty() {
+        return Err(format!("{field} must be nonempty"));
+    }
+    if value.len() > max_bytes {
+        return Err(format!("{field} exceeds {max_bytes} bytes"));
+    }
+    if value.contains('\0') {
+        return Err(format!("{field} contains NUL"));
+    }
+    Ok(())
+}
+
+/// `value_depth` is shared with negotiation decoding to enforce one depth-counting rule.
+/// Each object or array adds 1 to the maximum child depth; scalars contribute 0.
+pub(crate) fn value_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(items) => 1 + items.iter().map(value_depth).max().unwrap_or(0),
+        serde_json::Value::Object(map) => 1 + map.values().map(value_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+///
+/// An absent filter returns `full`; an unmatched filter returns `empty`.
+pub struct CatalogCache {
+    full: Box<[u8]>,
+    per_module: Vec<(Box<str>, Box<[u8]>)>,
+    empty: Box<[u8]>,
+}
+
+impl CatalogCache {
+    /// The capped writer rejects a catalog that exceeds `limit` before a full body is materialized.
+    pub fn new_bounded(manifests: &[ManifestSnapshot], limit: usize) -> Result<Self, ()> {
+        let mut per_module = Vec::with_capacity(manifests.len());
+        for manifest in manifests {
+            per_module.push((
+                manifest.module_id.clone().into_boxed_str(),
+                serialize_catalog_response(std::slice::from_ref(manifest), limit)?,
+            ));
+        }
+        Ok(Self {
+            full: serialize_catalog_response(manifests, limit)?,
+            per_module,
+            empty: serialize_catalog_response(&[], limit)?,
+        })
+    }
+
+    pub fn body(&self, module_id_filter: Option<&str>) -> &[u8] {
+        let Some(filter) = module_id_filter else {
+            return &self.full;
+        };
+        self.per_module
+            .iter()
+            .find(|(id, _)| id.as_ref() == filter)
+            .map(|(_, body)| body.as_ref())
+            .unwrap_or(&self.empty)
+    }
+
+    pub fn resident_len(&self) -> usize {
+        self.full.len()
+            + self.empty.len()
+            + self
+                .per_module
+                .iter()
+                .map(|(id, body)| id.len() + body.len())
+                .sum::<usize>()
+    }
+}
+
+struct CappedWriter {
+    buf: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for CappedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len() + bytes.len() > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "catalog exceeds limit",
+            ));
+        }
+        self.buf.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialize_catalog_response(
+    manifests: &[ManifestSnapshot],
+    limit: usize,
+) -> Result<Box<[u8]>, ()> {
+    #[derive(serde::Serialize)]
+    struct CatalogModule<'a> {
+        module_id: &'a str,
+        module_version: &'a str,
+        roles: &'a [serde_json::Value],
+        control_ops: &'a [String],
+    }
+
+    #[derive(serde::Serialize)]
+    struct CatalogResponse<'a> {
+        op: &'static str,
+        generation: u64,
+        modules: &'a [CatalogModule<'a>],
+        host_ops: [&'static str; 4],
+    }
+
+    let modules: Vec<CatalogModule<'_>> = manifests
+        .iter()
+        .map(|manifest| CatalogModule {
+            module_id: &manifest.module_id,
+            module_version: &manifest.module_version,
+            roles: &manifest.provides,
+            control_ops: &manifest.control_ops,
+        })
+        .collect();
+    let mut writer = CappedWriter {
+        buf: Vec::new(),
+        limit,
+    };
+    serde_json::to_writer(
+        &mut writer,
+        &CatalogResponse {
+            op: OP_CATALOG_LIST,
+            generation: CATALOG_GENERATION,
+            modules: &modules,
+            host_ops: [
+                OP_ROUTE_OPEN,
+                OP_CATALOG_LIST,
+                OP_HOST_SHUTDOWN,
+                OP_HOST_STATUS,
+            ],
+        },
+    )
+    .map_err(|_| ())?;
+    Ok(writer.buf.into_boxed_slice())
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "op")]
+enum ClientControlResponse {
+    #[serde(rename = "route.open")]
+    RouteOpen {
+        route_channel: u16,
+        route_epoch: u32,
+    },
+}
+
+pub fn route_open_response_json(channel: u16, epoch: u32) -> Vec<u8> {
+    serde_json::to_vec(&ClientControlResponse::RouteOpen {
+        route_channel: channel,
+        route_epoch: epoch,
+    })
+    .expect("route response serialization cannot fail")
+}
+
+pub fn host_shutdown_response_json() -> Vec<u8> {
+    br#"{"op":"host.shutdown"}"#.to_vec()
+}
+
+pub fn host_status_response_json(
+    report: &crate::handler::HealthReport,
+    shared_memory: serde_json::Value,
+) -> Vec<u8> {
+    let health = match report.status {
+        crate::handler::HealthStatus::Ok => "ok",
+        crate::handler::HealthStatus::Degraded => "degraded",
+        crate::handler::HealthStatus::Failing => "failing",
+    };
+    let mut components = serde_json::Map::new();
+    let raw_components = report
+        .metrics
+        .as_ref()
+        .and_then(|metrics| metrics.get("components"))
+        .and_then(serde_json::Value::as_object);
+    for (module, state_key, allowed) in [
+        (
+            "context",
+            "storage_state",
+            &["ready", "starting", "unavailable"][..],
+        ),
+        (
+            "synapse",
+            "synapse_state",
+            &["ready", "starting", "degraded", "unsupported"][..],
+        ),
+        ("broca", "broca_state", &["ready", "unavailable"][..]),
+    ] {
+        let Some(component) = raw_components.and_then(|all| all.get(module)) else {
+            continue;
+        };
+        let Some(status) = component.get("status").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !matches!(status, "ok" | "degraded" | "failing") {
+            continue;
+        }
+        let Some(state) = component
+            .get("metrics")
+            .and_then(|metrics| metrics.get(state_key))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        if !allowed.contains(&state) {
+            continue;
+        }
+        let mut sanitized_metrics = serde_json::Map::new();
+        sanitized_metrics.insert(
+            state_key.to_owned(),
+            serde_json::Value::String(state.to_owned()),
+        );
+        if module == "context" {
+            let epoch_names = [
+                "memory_render_epoch",
+                "compartment_render_epoch",
+                "profile_epoch",
+                "tagger_epoch",
+                "state_sync_epoch",
+            ];
+            if let Some(raw_epochs) = component
+                .get("metrics")
+                .and_then(|metrics| metrics.get("epochs"))
+                .and_then(serde_json::Value::as_object)
+            {
+                let keys_valid = raw_epochs.len() == epoch_names.len()
+                    && raw_epochs
+                        .keys()
+                        .all(|key| epoch_names.contains(&key.as_str()));
+                let values = epoch_names
+                    .iter()
+                    .map(|name| {
+                        raw_epochs
+                            .get(*name)
+                            .and_then(serde_json::Value::as_u64)
+                            .filter(|value| *value <= u32::MAX as u64)
+                            .map(|value| ((*name).to_owned(), serde_json::Value::from(value)))
+                    })
+                    .collect::<Option<serde_json::Map<String, serde_json::Value>>>();
+                if keys_valid && let Some(values) = values {
+                    sanitized_metrics
+                        .insert("epochs".to_owned(), serde_json::Value::Object(values));
+                }
+            }
+        }
+        components.insert(
+            module.to_owned(),
+            serde_json::json!({
+                "status": status,
+                "metrics": sanitized_metrics,
+            }),
+        );
+    }
+    serde_json::to_vec(&serde_json::json!({
+        "op": OP_HOST_STATUS,
+        "health": health,
+        "metrics": {"components": components},
+        "shared_memory": shared_memory,
+    }))
+    .expect("host status serialization cannot fail")
+}
+
+/// `serde_json` accepts only UTF-8; reject duplicate keys to prevent order-dependent field handling.
+pub(crate) mod strict_json {
+    use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+    use serde_json::Value;
+    use std::fmt;
+
+    pub fn parse(bytes: &[u8]) -> Result<Value, ParseError> {
+        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+        let value = StrictValue
+            .deserialize(&mut deserializer)
+            .map_err(|_| ParseError)?;
+        deserializer.end().map_err(|_| ParseError)?;
+        Ok(value)
+    }
+
+    pub struct ParseError;
+
+    impl ParseError {
+        pub fn as_str(&self) -> &'static str {
+            "malformed control JSON"
+        }
+    }
+
+    struct StrictValue;
+
+    impl<'de> DeserializeSeed<'de> for StrictValue {
+        type Value = Value;
+
+        fn deserialize<D>(self, deserializer: D) -> Result<Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_any(StrictVisitor)
+        }
+    }
+
+    struct StrictVisitor;
+
+    impl<'de> Visitor<'de> for StrictVisitor {
+        type Value = Value;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a JSON value without duplicate object keys")
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
+            Ok(Value::Bool(v))
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
+            Ok(Value::from(v))
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
+            Ok(Value::from(v))
+        }
+
+        fn visit_f64<E>(self, v: f64) -> Result<Value, E> {
+            Ok(Value::from(v))
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Value, E> {
+            Ok(Value::String(v.to_owned()))
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<Value, E> {
+            Ok(Value::String(v))
+        }
+
+        fn visit_unit<E>(self) -> Result<Value, E> {
+            Ok(Value::Null)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut items = Vec::new();
+            while let Some(item) = seq.next_element_seed(StrictValue)? {
+                items.push(item);
+            }
+            Ok(Value::Array(items))
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut object = serde_json::Map::new();
+            while let Some(key) = map.next_key::<String>()? {
+                let value = map.next_value_seed(StrictValue)?;
+                if object.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate object key"));
+                }
+            }
+            Ok(Value::Object(object))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LINKED: &str = "context";
+    const SYNAPSE: &str = "synapse";
+    const BROCA: &str = "broca";
+
+    fn two_target_index() -> TargetIndex {
+        TargetIndex::new(vec![
+            (
+                LINKED.into(),
+                vec![TargetKind::ToolProvider],
+                RouteClass::General,
+            ),
+            (
+                SYNAPSE.into(),
+                vec![TargetKind::ManagementSurface],
+                RouteClass::General,
+            ),
+            (
+                BROCA.into(),
+                vec![TargetKind::ManagementSurface],
+                RouteClass::Reserved,
+            ),
+        ])
+    }
+
+    fn reject_code(action: ControlAction) -> &'static str {
+        match action {
+            ControlAction::Reject { code, .. } => code,
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    fn minimal_route_open() -> serde_json::Value {
+        serde_json::json!({
+            "op": "route.open",
+            "target": {"kind": "tool_provider", "module_id": LINKED},
+            "identity": {
+                "project_root": "/workspace/project",
+                "harness": "opencode",
+                "session": "session-1"
+            }
+        })
+    }
+
+    fn parse(value: &serde_json::Value) -> ControlAction {
+        parse_control(
+            &serde_json::to_vec(value).unwrap(),
+            false,
+            &two_target_index(),
+        )
+    }
+
+    #[test]
+    fn canonical_route_open_parses() {
+        let ControlAction::RouteOpen { target, identity } = parse(&minimal_route_open()) else {
+            panic!("expected route open");
+        };
+        assert_eq!(target.module_id, LINKED);
+        assert_eq!(target.kind, TargetKind::ToolProvider);
+        assert_eq!(identity.project_root, PathBuf::from("/workspace/project"));
+        assert_eq!(identity.harness, "opencode");
+        assert_eq!(identity.session, "session-1");
+        assert!(identity.consumer_capabilities.is_empty());
+        assert!(identity.admission_facts.is_none());
+        assert!(identity.credential_fingerprints.is_empty());
+    }
+
+    #[test]
+    fn credential_fingerprints_are_closed_and_bounded() {
+        let mut request = minimal_route_open();
+        request["identity"]["credential_fingerprints"] = serde_json::json!({
+            "anthropic": "a".repeat(64),
+            "openai": "b".repeat(64),
+        });
+        let ControlAction::RouteOpen { identity, .. } = parse(&request) else {
+            panic!("expected credential-bound route open");
+        };
+        assert_eq!(
+            identity.credential_fingerprints["anthropic"],
+            "a".repeat(64)
+        );
+
+        for invalid in [
+            serde_json::json!({"custom": "a".repeat(64)}),
+            serde_json::json!({"anthropic": "A".repeat(64)}),
+            serde_json::json!({"anthropic": "a".repeat(63)}),
+            serde_json::json!({
+                "anthropic": "a".repeat(64),
+                "google": "b".repeat(64),
+                "openai": "c".repeat(64),
+                "extra": "d".repeat(64),
+            }),
+        ] {
+            let mut request = minimal_route_open();
+            request["identity"]["credential_fingerprints"] = invalid;
+            assert_eq!(reject_code(parse(&request)), CODE_INVALID_CONTROL_REQUEST);
+        }
+    }
+
+    #[test]
+    fn synapse_management_surface_parses() {
+        let mut request = minimal_route_open();
+        request["target"]["kind"] = serde_json::Value::String("management_surface".to_owned());
+        request["target"]["module_id"] = serde_json::Value::String(SYNAPSE.to_owned());
+        let ControlAction::RouteOpen { target, .. } = parse(&request) else {
+            panic!("expected route open");
+        };
+        assert_eq!(target.module_id, SYNAPSE);
+        assert_eq!(target.kind, TargetKind::ManagementSurface);
+    }
+
+    #[test]
+    fn binary_flag_on_control_is_semantic_rejection() {
+        let action = parse_control(b"{}", true, &two_target_index());
+        assert_eq!(reject_code(action), CODE_INVALID_CONTROL_REQUEST);
+    }
+
+    #[test]
+    fn malformed_json_and_non_object_roots_are_rejected() {
+        for body in [&b"{"[..], b"[1,2]", b"\xff\xfe", b"null", b"{} trailing"] {
+            let action = parse_control(body, false, &two_target_index());
+            assert_eq!(reject_code(action), CODE_INVALID_CONTROL_REQUEST);
+        }
+    }
+
+    #[test]
+    fn duplicate_recognized_field_is_rejected_before_classification() {
+        let body = br#"{"op":"route.open","op":"catalog.list","target":{},"identity":{}}"#;
+        let action = parse_control(body, false, &two_target_index());
+        assert_eq!(reject_code(action), CODE_INVALID_CONTROL_REQUEST);
+    }
+
+    #[test]
+    fn unknown_op_is_unsupported_operation_not_invalid() {
+        let action = parse(&serde_json::json!({"op": "server.describe"}));
+        assert_eq!(reject_code(action), CODE_UNSUPPORTED_OPERATION);
+    }
+
+    #[test]
+    fn op_bounds_are_structural() {
+        let long_op = "x".repeat(MAX_OP_LEN + 1);
+        for op in [String::new(), long_op, "bad\0op".to_owned()] {
+            let action = parse(&serde_json::json!({"op": op}));
+            assert_eq!(reject_code(action), CODE_INVALID_CONTROL_REQUEST);
+        }
+        let action = parse(&serde_json::json!({"op": "y".repeat(MAX_OP_LEN)}));
+        assert_eq!(reject_code(action), CODE_UNSUPPORTED_OPERATION);
+    }
+
+    #[test]
+    fn string_bounds_accept_max_and_reject_max_plus_one() {
+        let mut request = minimal_route_open();
+        request["identity"]["session"] = serde_json::Value::String("s".repeat(MAX_SESSION_LEN));
+        assert!(matches!(parse(&request), ControlAction::RouteOpen { .. }));
+
+        request["identity"]["session"] = serde_json::Value::String("s".repeat(MAX_SESSION_LEN + 1));
+        assert_eq!(reject_code(parse(&request)), CODE_INVALID_CONTROL_REQUEST);
+
+        request["identity"]["session"] = serde_json::Value::String("se\0ssion".to_owned());
+        assert_eq!(reject_code(parse(&request)), CODE_INVALID_CONTROL_REQUEST);
+    }
+
+    #[test]
+    fn relative_project_root_is_rejected() {
+        let mut request = minimal_route_open();
+        request["identity"]["project_root"] = serde_json::Value::String("relative/path".to_owned());
+        assert_eq!(reject_code(parse(&request)), CODE_INVALID_CONTROL_REQUEST);
+    }
+
+    #[test]
+    fn capability_bounds_are_exact() {
+        let mut request = minimal_route_open();
+        request["consumer_capabilities"] = serde_json::Value::Array(vec![
+            serde_json::Value::String(
+                "c".repeat(MAX_CAPABILITY_LEN)
+            );
+            MAX_CAPABILITIES
+        ]);
+        assert!(matches!(parse(&request), ControlAction::RouteOpen { .. }));
+
+        request["consumer_capabilities"] =
+            serde_json::Value::Array(vec![
+                serde_json::Value::String("c".to_owned());
+                MAX_CAPABILITIES + 1
+            ]);
+        assert_eq!(reject_code(parse(&request)), CODE_INVALID_CONTROL_REQUEST);
+
+        request["consumer_capabilities"] =
+            serde_json::Value::Array(vec![serde_json::Value::String(
+                "c".repeat(MAX_CAPABILITY_LEN + 1),
+            )]);
+        assert_eq!(reject_code(parse(&request)), CODE_INVALID_CONTROL_REQUEST);
+    }
+
+    #[test]
+    fn admission_facts_bounds_are_exact() {
+        fn nested(depth: usize) -> serde_json::Value {
+            let mut value = serde_json::json!(1);
+            for _ in 0..depth {
+                value = serde_json::json!([value]);
+            }
+            value
+        }
+        let mut request = minimal_route_open();
+
+        request["admission_facts"] = nested(MAX_ADMISSION_FACTS_DEPTH);
+        assert!(matches!(parse(&request), ControlAction::RouteOpen { .. }));
+
+        request["admission_facts"] = nested(MAX_ADMISSION_FACTS_DEPTH + 1);
+        assert_eq!(reject_code(parse(&request)), CODE_INVALID_CONTROL_REQUEST);
+
+        request["admission_facts"] =
+            serde_json::Value::String("f".repeat(MAX_ADMISSION_FACTS_BYTES - 2));
+        assert!(matches!(parse(&request), ControlAction::RouteOpen { .. }));
+
+        request["admission_facts"] =
+            serde_json::Value::String("f".repeat(MAX_ADMISSION_FACTS_BYTES - 1));
+        assert_eq!(reject_code(parse(&request)), CODE_INVALID_CONTROL_REQUEST);
+    }
+
+    #[test]
+    fn ignored_field_nesting_is_bounded() {
+        fn nested(depth: usize) -> serde_json::Value {
+            let mut value = serde_json::json!(1);
+            for _ in 0..depth {
+                value = serde_json::json!([value]);
+            }
+            value
+        }
+
+        // rejected.
+        let mut request = minimal_route_open();
+        request["forward_compat"] = nested(MAX_ADMISSION_FACTS_DEPTH);
+        assert!(matches!(parse(&request), ControlAction::RouteOpen { .. }));
+
+        request["forward_compat"] = nested(MAX_ADMISSION_FACTS_DEPTH + 1);
+        assert_eq!(reject_code(parse(&request)), CODE_INVALID_CONTROL_REQUEST);
+
+        let mut catalog = serde_json::json!({ "op": OP_CATALOG_LIST });
+        catalog["ignored"] = nested(MAX_ADMISSION_FACTS_DEPTH + 1);
+        assert_eq!(reject_code(parse(&catalog)), CODE_INVALID_CONTROL_REQUEST);
+    }
+
+    #[test]
+    fn wrong_role_for_known_module_is_target_unavailable() {
+        for (module, kind) in [
+            (LINKED, "management_surface"),
+            (SYNAPSE, "tool_provider"),
+            (BROCA, "tool_provider"),
+        ] {
+            let mut request = minimal_route_open();
+            request["target"]["module_id"] = serde_json::Value::String(module.to_owned());
+            request["target"]["kind"] = serde_json::Value::String(kind.to_owned());
+            assert_eq!(reject_code(parse(&request)), CODE_TARGET_UNAVAILABLE);
+        }
+    }
+
+    #[test]
+    fn unsupported_target_kind_is_target_unavailable() {
+        for kind in ["internal_service", "mystery_kind"] {
+            let mut request = minimal_route_open();
+            request["target"]["kind"] = serde_json::Value::String(kind.to_owned());
+            if kind == "internal_service" {
+                request["target"]["service_id"] = serde_json::Value::String("svc".to_owned());
+            }
+            assert_eq!(reject_code(parse(&request)), CODE_TARGET_UNAVAILABLE);
+        }
+    }
+
+    #[test]
+    fn broca_management_surface_parses_with_its_declared_class() {
+        let mut request = minimal_route_open();
+        request["target"]["kind"] = serde_json::Value::String("management_surface".to_owned());
+        request["target"]["module_id"] = serde_json::Value::String(BROCA.to_owned());
+        let ControlAction::RouteOpen { target, .. } = parse(&request) else {
+            panic!("expected route open");
+        };
+        assert_eq!(target.module_id, BROCA);
+        assert_eq!(target.kind, TargetKind::ManagementSurface);
+        assert_eq!(
+            two_target_index().class_of(BROCA),
+            Some(RouteClass::Reserved)
+        );
+        assert_eq!(
+            two_target_index().class_of(LINKED),
+            Some(RouteClass::General)
+        );
+    }
+
+    #[test]
+    fn unknown_module_id_is_unknown_module() {
+        for kind in ["tool_provider", "management_surface"] {
+            let mut request = minimal_route_open();
+            request["target"]["kind"] = serde_json::Value::String(kind.to_owned());
+            request["target"]["module_id"] = serde_json::Value::String("thalamus".to_owned());
+            assert_eq!(reject_code(parse(&request)), CODE_UNKNOWN_MODULE);
+        }
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let mut request = minimal_route_open();
+        request["future_extension"] = serde_json::json!({"a": 1});
+        assert!(matches!(parse(&request), ControlAction::RouteOpen { .. }));
+    }
+
+    #[test]
+    fn host_shutdown_parses_and_binary_is_rejected() {
+        assert_eq!(
+            parse(&serde_json::json!({"op": "host.shutdown"})),
+            ControlAction::HostShutdown
+        );
+        assert_eq!(
+            parse(&serde_json::json!({"op": "host.shutdown", "future": {"a": 1}})),
+            ControlAction::HostShutdown
+        );
+        let action = parse_control(br#"{"op":"host.shutdown"}"#, true, &two_target_index());
+        assert_eq!(reject_code(action), CODE_INVALID_CONTROL_REQUEST);
+        let duplicate = br#"{"op":"host.shutdown","op":"host.shutdown"}"#;
+        let action = parse_control(duplicate, false, &two_target_index());
+        assert_eq!(reject_code(action), CODE_INVALID_CONTROL_REQUEST);
+    }
+
+    #[test]
+    fn host_status_is_an_authenticated_control_operation() {
+        assert_eq!(
+            parse(&serde_json::json!({"op": "host.status"})),
+            ControlAction::HostStatus
+        );
+        let report = crate::handler::HealthReport {
+            status: crate::handler::HealthStatus::Degraded,
+            detail: Some("secret detail".to_owned()),
+            metrics: Some(serde_json::json!({
+                "components": {
+                    "context": {
+                        "status": "degraded",
+                        "metrics": {
+                            "storage_state": "starting",
+                            "epochs": {
+                                "memory_render_epoch": 2,
+                                "compartment_render_epoch": 2,
+                                "profile_epoch": 2,
+                                "tagger_epoch": 3,
+                                "state_sync_epoch": 1
+                            }
+                        }
+                    }
+                }
+            })),
+        };
+        let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
+            &report,
+            serde_json::json!({"state": "healthy"}),
+        ))
+        .expect("status JSON");
+        assert_eq!(response["op"], "host.status");
+        assert_eq!(response["health"], "degraded");
+        assert_eq!(
+            response["metrics"]["components"]["context"]["metrics"]["storage_state"],
+            "starting"
+        );
+        assert_eq!(
+            response["metrics"]["components"]["context"]["metrics"]["epochs"],
+            serde_json::json!({
+                "memory_render_epoch": 2,
+                "compartment_render_epoch": 2,
+                "profile_epoch": 2,
+                "tagger_epoch": 3,
+                "state_sync_epoch": 1,
+            })
+        );
+        assert!(
+            !String::from_utf8(host_status_response_json(
+                &report,
+                serde_json::json!({"state": "healthy"}),
+            ))
+            .expect("UTF-8")
+            .contains("secret detail"),
+            "handler detail is tainted and never exposed"
+        );
+    }
+
+    #[test]
+    fn catalog_filters() {
+        assert_eq!(
+            parse(&serde_json::json!({"op": "catalog.list"})),
+            ControlAction::CatalogList {
+                module_id_filter: None
+            }
+        );
+        assert_eq!(
+            parse(&serde_json::json!({"op": "catalog.list", "module_id": "not-linked"})),
+            ControlAction::CatalogList {
+                module_id_filter: Some("not-linked".to_owned())
+            }
+        );
+        let action = parse(&serde_json::json!({"op": "catalog.list", "module_id": 7}));
+        assert_eq!(reject_code(action), CODE_INVALID_CONTROL_REQUEST);
+    }
+
+    #[test]
+    fn route_open_response_keeps_its_tag() {
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&route_open_response_json(7, 77)).unwrap();
+        assert_eq!(decoded["op"], "route.open");
+        assert_eq!(decoded["route_channel"], 7);
+        assert_eq!(decoded["route_epoch"], 77);
+    }
+
+    #[test]
+    fn catalog_response_is_lossless_and_truthful() {
+        let role = serde_json::json!({
+            "role": "tool_provider",
+            "tools": [{"name": "ctx_reduce", "schema": {"type": "object"}}]
+        });
+        let synapse_role = serde_json::json!({"role": "management_surface"});
+        let manifests = [
+            ManifestSnapshot {
+                module_id: LINKED.to_owned(),
+                module_version: "9.9.9".to_owned(),
+                provides: vec![role.clone()],
+                control_ops: vec!["context.reload".to_owned()],
+            },
+            ManifestSnapshot {
+                module_id: SYNAPSE.to_owned(),
+                module_version: "0.1.0".to_owned(),
+                provides: vec![synapse_role.clone()],
+                control_ops: Vec::new(),
+            },
+        ];
+        let catalog = CatalogCache::new_bounded(&manifests, crate::wire::MAX_BODY_LEN as usize)
+            .expect("test manifests fit the frame limit");
+        let unfiltered_body = catalog.body(None);
+        assert!(
+            std::ptr::eq(unfiltered_body, catalog.body(None)),
+            "repeated catalog requests must reuse startup serialization"
+        );
+        let unfiltered: serde_json::Value = serde_json::from_slice(unfiltered_body).unwrap();
+        assert_eq!(unfiltered["op"], "catalog.list");
+        assert_eq!(unfiltered["generation"], CATALOG_GENERATION);
+        assert_eq!(unfiltered["modules"].as_array().unwrap().len(), 2);
+        assert_eq!(unfiltered["modules"][0]["module_id"], LINKED);
+        assert_eq!(unfiltered["modules"][0]["module_version"], "9.9.9");
+        assert_eq!(unfiltered["modules"][0]["roles"], serde_json::json!([role]));
+        assert_eq!(
+            unfiltered["modules"][0]["control_ops"],
+            serde_json::json!(["context.reload"])
+        );
+        assert_eq!(unfiltered["modules"][1]["module_id"], SYNAPSE);
+        assert_eq!(
+            unfiltered["modules"][1]["roles"],
+            serde_json::json!([synapse_role])
+        );
+        assert_eq!(
+            unfiltered["host_ops"],
+            serde_json::json!(["route.open", "catalog.list", "host.shutdown", "host.status"])
+        );
+        // wake.create must stay absent until implemented (protocol AE10).
+        assert!(!unfiltered.to_string().contains("wake.create"));
+
+        for (module, version) in [(LINKED, "9.9.9"), (SYNAPSE, "0.1.0")] {
+            let filtered: serde_json::Value =
+                serde_json::from_slice(catalog.body(Some(module))).unwrap();
+            let modules = filtered["modules"].as_array().unwrap();
+            assert_eq!(modules.len(), 1);
+            assert_eq!(modules[0]["module_id"], module);
+            assert_eq!(modules[0]["module_version"], version);
+        }
+
+        let unknown_body = catalog.body(Some("nope"));
+        assert!(
+            std::ptr::eq(unknown_body, catalog.body(Some("also-nope"))),
+            "all unknown filters must reuse one empty catalog serialization"
+        );
+        let unknown: serde_json::Value = serde_json::from_slice(unknown_body).unwrap();
+        assert_eq!(unknown["modules"].as_array().unwrap().len(), 0);
+    }
+}
