@@ -50,9 +50,7 @@ pub struct Vocab {
     pub ranks: FxHashMap<&'static [u8], Rank>,
     /// Tokens of 3..=7 bytes as `(packed key, rank)` with the key inline in the bucket: one
     /// cache line per probe and a single-register compare, where the byte-slice map costs a
-    /// bucket line, a pointer chase to the key bytes, and a `memcmp` call (iteration 9 profile:
-    /// 19-28% of ASCII-arm time). hashbrown's SIMD group probe keeps misses to one control-byte
-    /// compare, which the hand-rolled linear-probing table of iteration 8 lacked.
+    /// bucket line, a pointer chase to the key bytes, and a `memcmp` call.
     pub short: HashTable<(u64, Rank)>,
     /// Tokens of 8..=15 bytes, same idea with a 128-bit inline key; CJK merges look up 9- and
     /// 12-byte spans constantly and paid the byte-slice map's pointer chase and `memcmp`.
@@ -103,7 +101,7 @@ fn mid_hash(key: u128) -> u64 {
 
 /// One multiply then fold the high half down: hashbrown takes the bucket index from the low
 /// bits and the tag from the top 7, and the low bits of a bare product depend only on the low
-/// bits of the key (iteration 6's failure mode).
+/// bits of the key, so keys differing only in their upper bytes would collide.
 #[inline]
 fn short_hash(key: u64) -> u64 {
     let h = key.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -118,16 +116,17 @@ impl Vocab {
         let (header, mut bytes) = blob[4..].split_at(count * 6);
         let records = header.as_chunks::<6>().0;
         let len_of = |rec: &[u8; 6]| u16::from_le_bytes([rec[0], rec[1]]);
-        let n_short = records
-            .iter()
-            .filter(|rec| (3..=7).contains(&len_of(rec)))
-            .count();
-        let n_mid = records
-            .iter()
-            .filter(|rec| (8..=15).contains(&len_of(rec)))
-            .count();
+        let (mut n_short, mut n_mid, mut n_long) = (0usize, 0usize, 0usize);
+        for rec in records {
+            match len_of(rec) {
+                3..=7 => n_short += 1,
+                8..=15 => n_mid += 1,
+                16.. => n_long += 1,
+                _ => {}
+            }
+        }
         let mut v = Vocab {
-            ranks: FxHashMap::with_capacity_and_hasher(count - n_short - n_mid, Default::default()),
+            ranks: FxHashMap::with_capacity_and_hasher(n_long, Default::default()),
             short: HashTable::with_capacity(n_short),
             mid: HashTable::with_capacity(n_mid),
             pair: vec![NO_RANK; 65536].try_into().unwrap(),
@@ -228,7 +227,9 @@ impl Vocab {
         }
     }
 
-    /// `parts[i]` is `(start offset in text, rank of the pair starting there)`.
+    /// `parts[i]` is `(piece-relative start offset, rank of the pair starting there)`. A
+    /// piece-relative offset stays below `MAX_PIECE_BYTES`, so `u32` holds it wherever the piece
+    /// sits in `text`; lookups add `start` to recover the absolute position.
     fn merge_scan(
         &self,
         text: &[u8],
@@ -249,19 +250,19 @@ impl Vocab {
                 min_rank = r;
                 min_idx = i;
             }
-            parts.push(((start + i) as u32, r));
+            parts.push((i as u32, r));
         }
-        parts.push(((end - 1) as u32, NO_RANK));
-        parts.push((end as u32, NO_RANK));
+        parts.push(((n - 1) as u32, NO_RANK));
+        parts.push((n as u32, NO_RANK));
 
         while min_rank != NO_RANK {
             let i = min_idx;
             // Merge parts[i] with parts[i+1]: the span of the new part i runs to parts[i+2].
             // Recompute the pair rank ending at i and the one starting at i before removing.
             if i > 0 {
-                parts[i - 1].1 = self.span_rank(text, parts, i - 1, i + 2);
+                parts[i - 1].1 = self.span_rank(text, start, parts, i - 1, i + 2);
             }
-            parts[i].1 = self.span_rank(text, parts, i, i + 3);
+            parts[i].1 = self.span_rank(text, start, parts, i, i + 3);
             parts.remove(i + 1);
 
             min_rank = NO_RANK;
@@ -273,7 +274,7 @@ impl Vocab {
             }
         }
         for w in parts.windows(2) {
-            out.push(self.rank_of(text, w[0].0 as usize, w[1].0 as usize));
+            out.push(self.rank_of(text, start + w[0].0 as usize, start + w[1].0 as usize));
         }
     }
 
@@ -346,9 +347,20 @@ impl Vocab {
     /// Rank of the span `parts[i].0 .. parts[end].0`, or `NO_RANK` if `end` is past the last
     /// real part (the pair would run off the piece).
     #[inline]
-    fn span_rank(&self, text: &[u8], parts: &[(u32, Rank)], i: usize, end: usize) -> Rank {
+    fn span_rank(
+        &self,
+        text: &[u8],
+        start: usize,
+        parts: &[(u32, Rank)],
+        i: usize,
+        end: usize,
+    ) -> Rank {
         if end < parts.len() {
-            self.rank_of(text, parts[i].0 as usize, parts[end].0 as usize)
+            self.rank_of(
+                text,
+                start + parts[i].0 as usize,
+                start + parts[end].0 as usize,
+            )
         } else {
             NO_RANK
         }
