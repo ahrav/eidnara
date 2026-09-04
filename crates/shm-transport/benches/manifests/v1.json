@@ -71,7 +71,7 @@
     "mixed_size_full_duplex",
     "oldest_lease_retention"
   ],
-  "fixed_profile": "eventfd_sparse_ring",
+  "fixed_profile": "socketpair_sparse_ring",
   "connection_counts": [1, 8, 64],
   "callback_budget": "UNSET_REQUIRES_REACTOR_SWEEP",
   "supported_tmpfs_cgroup_envelope": "UNSET_REQUIRES_DESIGNATED_HOST",

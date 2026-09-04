@@ -10,7 +10,7 @@ use shm_transport::descriptor::HardwareProfileId;
 use shm_transport::evidence::OperationCounters;
 use shm_transport::profile::{TargetProfile, ring_profile as library_ring_profile};
 
-const PROFILE: &str = "eventfd_sparse_ring";
+const PROFILE: &str = "socketpair_sparse_ring";
 
 /// Each ring producer/consumer wait and each h0 handshake step fails after this long.
 const PEER_DEADLINE: Duration = Duration::from_secs(2);
@@ -34,9 +34,9 @@ const ARMS: &[&str] = &[
     "ring",
 ];
 
-/// Only eventfd-doorbell arms may have nonzero wake counters; h0 spins and yields, and
-/// `injected_avoidable_operations` has no eventfd doorbell.
-const EVENTFD_ARMS: &[&str] = &[
+/// Only arms that wake through the ring's socketpair doorbells may have nonzero wake
+/// counters; h0 spins and yields, and `injected_avoidable_operations` has no doorbell.
+const DOORBELL_ARMS: &[&str] = &[
     "copied_producer_copied_receiver",
     "copied_producer_leased_receiver",
     "direct_producer_copied_receiver",
@@ -217,7 +217,7 @@ fn main() {
         "manifest_scheduled": false,
         "period_unit": "fresh_arm_process",
         "paired_process_arms": ["h0_metadata_cacheline_ping_pong", "copied_producer_copied_receiver", "copied_producer_leased_receiver", "direct_producer_copied_receiver", "direct_producer_leased_receiver", "ring"],
-        "eventfd_qualified_arms": EVENTFD_ARMS,
+        "doorbell_qualified_arms": DOORBELL_ARMS,
         "gate_control_arms": ["injected_avoidable_operations"],
         "unimplemented_arms": UNIMPLEMENTED_ARMS,
         "failed_implemented_arms": failed_arms,
@@ -277,7 +277,7 @@ fn measure(arm: &str, iterations: u64, payload: usize) -> Measurement {
                 counters.generic_queue_hops = 1;
                 counters.scheduler_handoffs = 1;
             }
-            let disqualifications = counters.disqualifications(EVENTFD_ARMS.contains(&arm));
+            let disqualifications = counters.disqualifications(DOORBELL_ARMS.contains(&arm));
             let reason = if disqualifications.is_empty() {
                 "smoke evidence is never designated-host qualification".to_owned()
             } else {
