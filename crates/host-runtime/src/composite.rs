@@ -241,6 +241,8 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
             };
         };
         // The map records the target child before `bind` so `route_gone` can dispatch if the route closes while `bind` is pending.
+        // The entry remains after a rejected bind because the host invokes `route_gone` for
+        // rejected handles (`docs/host-wire-protocol.md`), and that call must reach the rejecting child.
         self.routes
             .lock()
             .expect("composite route map")
@@ -280,12 +282,14 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
     }
 
     async fn health(&self) -> HealthReport {
-        let primary = self.primary.health().await;
         let panicked = |id: &str| HealthReport {
             status: HealthStatus::Failing,
             detail: Some(format!("{id} health check panicked")),
             metrics: None,
         };
+        let primary = catch_child_panic(self.primary.health())
+            .await
+            .unwrap_or_else(|_payload| panicked(&self.primary_id));
         let secondary = catch_child_panic(self.secondary.health())
             .await
             .unwrap_or_else(|_payload| panicked(&self.secondary_id));
@@ -346,5 +350,169 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
         if !failures.is_empty() {
             panic!("{}", failures.join("; "));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// `Fake` is a deterministic child whose `bind` and `health` behavior is fixed at construction.
+    struct Fake {
+        id: &'static str,
+        reject_bind: bool,
+        panic_in_health: AtomicBool,
+    }
+
+    impl Fake {
+        fn new(id: &'static str) -> Self {
+            Self {
+                id,
+                reject_bind: false,
+                panic_in_health: AtomicBool::new(false),
+            }
+        }
+
+        fn rejecting(id: &'static str) -> Self {
+            Self {
+                reject_bind: true,
+                ..Self::new(id)
+            }
+        }
+
+        fn panicking_health(id: &'static str) -> Self {
+            Self {
+                panic_in_health: AtomicBool::new(true),
+                ..Self::new(id)
+            }
+        }
+    }
+
+    impl CompositeComponent for Fake {
+        fn manifest(&self) -> ManifestSnapshot {
+            ManifestSnapshot {
+                module_id: self.id.to_owned(),
+                module_version: "0".to_owned(),
+                provides: Vec::new(),
+                control_ops: Vec::new(),
+            }
+        }
+
+        async fn bind(&self, _route: RouteHandle, _identity: RouteIdentity) -> BindOutcome {
+            if self.reject_bind {
+                BindOutcome::Reject {
+                    code: "rejected".to_owned(),
+                    message: "fake rejects every bind".to_owned(),
+                }
+            } else {
+                BindOutcome::Accept
+            }
+        }
+
+        async fn handle(&self, _ctx: RequestCtx) -> RequestOutcome {
+            RequestOutcome::error("unused", "fake never handles requests")
+        }
+
+        async fn route_gone(&self, _route: RouteHandle) {}
+
+        async fn health(&self) -> HealthReport {
+            if self.panic_in_health.load(Ordering::Relaxed) {
+                panic!("{} health panicked", self.id);
+            }
+            HealthReport {
+                status: HealthStatus::Ok,
+                detail: None,
+                metrics: None,
+            }
+        }
+
+        async fn shutdown(&self) -> Result<(), ShutdownError> {
+            Ok(())
+        }
+    }
+
+    impl PrimaryComponent for Fake {
+        async fn initialize(&self, _init: HostInit) -> Result<(), InitError> {
+            Ok(())
+        }
+    }
+
+    impl SecondaryComponent for Fake {
+        async fn initialize(&self) -> Result<(), InitError> {
+            Ok(())
+        }
+    }
+
+    fn identity() -> RouteIdentity {
+        RouteIdentity {
+            project_root: std::path::PathBuf::from("/"),
+            harness: "test".to_owned(),
+            session: "s".to_owned(),
+            consumer_module_id: None,
+            consumer_launch_nonce: None,
+            consumer_capabilities: Vec::new(),
+            admission_facts: None,
+            credential_fingerprints: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn target(module_id: &str) -> RouteTarget {
+        RouteTarget {
+            module_id: module_id.to_owned(),
+            kind: crate::handler::TargetKind::ManagementSurface,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_bind_keeps_its_route_until_the_host_sends_route_gone() {
+        let composite = StaticComposite::new(
+            Fake::new("primary"),
+            Fake::rejecting("secondary"),
+            Fake::new("tertiary"),
+        )
+        .expect("distinct ids");
+        let rejected = RouteHandle {
+            channel: 1,
+            epoch: 1,
+        };
+
+        let outcome = composite
+            .bind(rejected, target("secondary"), identity())
+            .await;
+        assert!(matches!(outcome, BindOutcome::Reject { .. }));
+        // The host still owes the rejecting child one `route_gone`, which needs the mapping.
+        assert_eq!(composite.child_of_route(rejected), Some(Child::Secondary));
+        composite.route_gone(rejected).await;
+        assert_eq!(composite.child_of_route(rejected), None);
+
+        let unknown = RouteHandle {
+            channel: 2,
+            epoch: 1,
+        };
+        let outcome = composite.bind(unknown, target("nobody"), identity()).await;
+        assert!(matches!(outcome, BindOutcome::Reject { .. }));
+        assert_eq!(composite.child_of_route(unknown), None);
+    }
+
+    #[tokio::test]
+    async fn a_primary_health_panic_is_reported_like_any_other_child_panic() {
+        let composite = StaticComposite::new(
+            Fake::panicking_health("primary"),
+            Fake::new("secondary"),
+            Fake::new("tertiary"),
+        )
+        .expect("distinct ids");
+
+        let report = composite.health().await;
+        assert_eq!(report.status, HealthStatus::Failing);
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("primary health check panicked")
+        );
+        let components = &report.metrics.expect("aggregate metrics")["components"];
+        assert_eq!(components["primary"]["status"], "failing");
+        assert_eq!(components["secondary"]["status"], "ok");
+        assert_eq!(components["tertiary"]["status"], "ok");
     }
 }

@@ -392,12 +392,18 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("owner-only fifo");
 
+        // Parent validation must succeed on its own before the FIFO is probed. Both the parent
+        // and the file checks report `Insecure`, so otherwise `read_for_client` could reject an
+        // insecure parent before it ever checks that `path` is a FIFO.
+        let (_parent, name) = open_parent(&path).expect("owner-only scratch dir passes validation");
+        assert_eq!(name, "connection.json");
+
         // No writer is ever opened, so a blocking open can never complete.
         // A worker thread lets the test fail on a blocking FIFO open without wedging the suite.
         let (tx, rx) = std::sync::mpsc::channel();
         let probe = path.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(read_for_client(&probe).map_err(|error| format!("{error:?}")));
+            let _ = tx.send(read_for_client(&probe));
         });
         let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
 
@@ -406,10 +412,10 @@ mod tests {
 
         let outcome = outcome.expect("the open must not block on a writer that never arrives");
         let error = outcome.expect_err("a FIFO is not a connection file");
-        assert!(
-            error.contains("Insecure"),
-            "expected an insecure-type rejection, got {error}"
-        );
+        match error {
+            ConnectionFileError::Insecure { path: rejected } => assert_eq!(rejected, path),
+            other => panic!("expected an insecure-type rejection of the FIFO, got {other:?}"),
+        }
     }
 
     #[test]
