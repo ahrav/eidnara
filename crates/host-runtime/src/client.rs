@@ -356,6 +356,7 @@ impl Client {
             setup_stream,
             cancel.clone(),
             Arc::clone(&read_budget),
+            deadline,
         )?;
         let (data_tx, data_rx) = mpsc::channel(CLIENT_DATA_QUEUE_FRAMES);
         let (control_tx, control_rx) = mpsc::channel(CLIENT_CONTROL_QUEUE_FRAMES);
@@ -533,14 +534,22 @@ impl Client {
     }
 
     /// Idempotently closes one exact route generation.
+    ///
+    /// `settle_route` removes `route` before `send_control_wait`; later calls return `Ok(())` without sending `Goodbye`.
+    /// Retiring the generation on a failed wait makes setup-socket teardown release the host-side route.
     pub async fn close_route(&self, route: RouteHandle) -> Result<(), ClientError> {
         if !self.inner.settle_route(route) {
             return Ok(());
         }
         let deadline = Instant::now() + CLIENT_SHUTDOWN_TIMEOUT;
-        self.inner
+        let result = self
+            .inner
             .send_control_wait(FrameType::Goodbye, FrameId::routed(route, 0), deadline)
-            .await
+            .await;
+        if result.is_err() {
+            self.inner.retire("route_close_timeout");
+        }
+        result
     }
 
     /// `Ok` means the complete `host.shutdown` response frame reached the socket; the connection remains open.
@@ -653,7 +662,12 @@ impl Client {
                 ClientError::new("shutdown_timeout", "client shutdown timed out")
             })?;
         let mut guard = CloseGuard::new(&self.inner);
-        let already_closed = self.inner.closed.swap(true, Ordering::AcqRel);
+        // `open_route` checks `closed` and inserts its handle under `routes`.
+        // Swapping `closed` under the `routes` lock prevents `open_route` from inserting a handle after checking `closed`.
+        let already_closed = {
+            let _routes = lock_unpoisoned(&self.inner.routes);
+            self.inner.closed.swap(true, Ordering::AcqRel)
+        };
         let mut result = Ok(());
         if !already_closed {
             self.inner.settle_all("owner_close");
@@ -1130,13 +1144,19 @@ impl Inner {
             ));
         }
         let mut correlations = lock_unpoisoned(&self.correlations);
-        let corr = correlations.allocate().ok_or_else(|| {
-            CallError::local(
+        let Some(corr) = correlations.allocate() else {
+            // §8.3: after `u64::MAX` the sender MUST retire the generation and reconnect before another request.
+            // `retire` re-enters `admission`, so the guards are released before the call.
+            drop(correlations);
+            drop(pending);
+            drop(_admission);
+            self.retire("correlations_exhausted");
+            return Err(CallError::local(
                 SendOutcome::NotSent,
                 "correlations_exhausted",
                 "correlation space exhausted after u64::MAX",
-            )
-        })?;
+            ));
+        };
         let key = PendingKey::new(route, corr);
         let publish = Arc::new(AtomicU8::new(QUEUED));
         let frame =
@@ -1243,10 +1263,7 @@ impl Inner {
         Ok(PendingRemoval::Cancelled)
     }
 
-    ///
     /// `flags` is explicit because `Pong` must echo `Ping` flags exactly, while §6.1 permits any valid priority.
-    /// `Pong` must echo `Ping` flags exactly (V35), while §6.1 permits any valid priority.
-    /// `Pong` must echo `Ping` flags exactly.
     fn send_control(
         &self,
         ty: FrameType,
@@ -1342,8 +1359,6 @@ impl Inner {
                 let state = lock_unpoisoned(&self.pending).remove(&key);
                 let Some(state) = state else {
                     // A `Response` on identity 0/0 can carry a route bound for an `open_route` caller that dropped or timed out.
-                    // A `Response` on identity 0/0 can carry a route bound for an `open_route` caller that dropped or timed out.
-                    // A `Response` on identity 0/0 can carry a route bound for an `open_route` caller that dropped or timed out.
                     // An abandoned `open_route` on identity 0/0 cannot withdraw its bind because §6.2 permits no `Cancel`.
                     if header.ty == FrameType::Response && header.channel == 0 {
                         self.release_stranded_route(&body);
@@ -1366,7 +1381,12 @@ impl Inner {
                             )),
                             _ => unreachable!(),
                         };
-                        let _ = tx.send(result);
+                        // A receiver dropped between `pending.remove(&key)` and `tx.send(result)` strands a successful bind exactly like an absent pending entry.
+                        if let Err(Ok(response)) = tx.send(result)
+                            && header.channel == 0
+                        {
+                            self.release_stranded_route(&response.body);
+                        }
                     }
                     PendingKind::Stream { terminal, .. } => {
                         // Direct settlement retires the deadline watcher without calling `finish_pending`.
@@ -1825,6 +1845,7 @@ fn start_ring_bridge(
     mut setup: StdUnixStream,
     cancel: CancellationToken,
     read_budget: Arc<ByteCounter>,
+    ready_deadline: Instant,
 ) -> Result<(RingWriteSender, RingFrameReceiver), ClientError> {
     let (write_tx, write_rx) = std::sync::mpsc::sync_channel::<RingWrite>(CLIENT_DATA_QUEUE_FRAMES);
     let wake_fd = Arc::new(
@@ -1979,9 +2000,20 @@ fn start_ring_bridge(
             let _ = setup.shutdown(std::net::Shutdown::Both);
         })
         .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
+    // The attachment wait expires at the handshake deadline.
+    // A bridge thread stalled in descriptor validation would otherwise block this async worker without bound.
+    // A thread that reports readiness after the timeout sees a dropped receiver and returns without joining.
+    let remaining = ready_deadline.saturating_duration_since(Instant::now());
     ready_rx
-        .recv()
-        .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?
+        .recv_timeout(remaining)
+        .map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                ClientError::new("handshake_timeout", "client handshake timed out")
+            }
+            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                ClientError::new("setup_failed", "shared-memory setup failed")
+            }
+        })?
         .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
     Ok((
         RingWriteSender {
@@ -2005,13 +2037,15 @@ async fn writer_loop(
             tokio::select! {
                 biased;
                 () = inner.cancel.cancelled() => break,
+                // `Inner` holds `control_tx` and `data_tx`, so a closed channel is unreachable while `inner` is held. commentlint: allow(JUDGE)
+                // Break on channel closure so every wait remains inside the cancellation `select!`.
                 frame = control_rx.recv() => match frame {
                     Some(frame) => frame,
-                    None => match data_rx.recv().await { Some(frame) => frame, None => break },
+                    None => break,
                 },
                 frame = data_rx.recv() => match frame {
                     Some(frame) => frame,
-                    None => match control_rx.recv().await { Some(frame) => frame, None => break },
+                    None => break,
                 },
             }
         };
@@ -2205,18 +2239,34 @@ fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec
         "consumer_capabilities": identity.consumer_capabilities
     });
     // A present JSON `null` makes `bind` observe `Some(..)`, unlike an absent member.
-    // never supplied.
     if let Some(facts) = identity.admission_facts.as_ref() {
         request["admission_facts"] = facts.clone();
     }
-    if let (Some(module_id), Some(launch_nonce)) = (
+    // `bind` decodes an absent `credential_fingerprints` member as an empty map.
+    if !identity.credential_fingerprints.is_empty() {
+        request["identity"]["credential_fingerprints"] =
+            serde_json::json!(identity.credential_fingerprints);
+    }
+    // `bind` requires both members when `consumer_identity` is present, so a
+    // half-specified consumer identity is rejected before sending.
+    match (
         identity.consumer_module_id.as_ref(),
         identity.consumer_launch_nonce.as_ref(),
     ) {
-        request["consumer_identity"] = serde_json::json!({
-            "module_id": module_id,
-            "launch_nonce": launch_nonce
-        });
+        (Some(module_id), Some(launch_nonce)) => {
+            request["consumer_identity"] = serde_json::json!({
+                "module_id": module_id,
+                "launch_nonce": launch_nonce
+            });
+        }
+        (None, None) => {}
+        _ => {
+            return Err(CallError::local(
+                SendOutcome::NotSent,
+                "invalid_identity",
+                "consumer identity requires both module_id and launch_nonce",
+            ));
+        }
     }
     serde_json::to_vec(&request).map_err(|_| {
         CallError::local(
@@ -2418,8 +2468,15 @@ mod tests {
         assert_eq!(error.code(), "correlations_exhausted");
         assert_eq!(data_rx.len(), 1);
         assert_eq!(inner.queue_budget.used(), charged);
+        assert!(
+            inner.retired.load(Ordering::Acquire),
+            "§8.3: a generation past u64::MAX must retire before another request"
+        );
+        assert!(
+            inner.cancel.is_cancelled(),
+            "retirement stops the writer and reader tasks"
+        );
 
-        inner.retire("test_done");
         drop(data_rx);
         assert_eq!(inner.queue_budget.used(), 0);
     }
@@ -3124,6 +3181,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn credential_fingerprints_ride_inside_identity_only_when_present() {
+        // `bind` reads `identity.credential_fingerprints`.
+        let target = RouteTarget {
+            kind: TargetKind::ToolProvider,
+            module_id: "context".to_owned(),
+        };
+        let mut identity = identity_fixture();
+        let body = route_open_body(&target, &identity).expect("body encodes");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert!(
+            value["identity"].get("credential_fingerprints").is_none(),
+            "an empty map is omitted rather than sent as {{}}"
+        );
+
+        let fingerprint = "a".repeat(64);
+        identity
+            .credential_fingerprints
+            .insert("anthropic".to_owned(), fingerprint.clone());
+        let body = route_open_body(&target, &identity).expect("body encodes");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(
+            value["identity"]["credential_fingerprints"],
+            serde_json::json!({"anthropic": fingerprint}),
+            "fingerprints are nested under identity where bind reads them"
+        );
+    }
+
+    #[test]
+    fn a_half_specified_consumer_identity_is_rejected_before_sending() {
+        // `bind` requires both members of a present `consumer_identity`.
+        let target = RouteTarget {
+            kind: TargetKind::ToolProvider,
+            module_id: "context".to_owned(),
+        };
+        let mut identity = identity_fixture();
+        identity.consumer_module_id = Some("synapse".to_owned());
+        let error = route_open_body(&target, &identity).expect_err("nonce is missing");
+        assert_eq!(error.outcome(), SendOutcome::NotSent);
+        assert_eq!(error.code(), "invalid_identity");
+
+        identity.consumer_module_id = None;
+        identity.consumer_launch_nonce = Some("nonce".to_owned());
+        let error = route_open_body(&target, &identity).expect_err("module id is missing");
+        assert_eq!(error.code(), "invalid_identity");
+
+        identity.consumer_module_id = Some("synapse".to_owned());
+        let body = route_open_body(&target, &identity).expect("both members encode");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(
+            value["consumer_identity"],
+            serde_json::json!({"module_id": "synapse", "launch_nonce": "nonce"})
+        );
+    }
+
     fn identity_fixture() -> RouteIdentity {
         RouteIdentity {
             project_root: std::path::PathBuf::from("/tmp/project"),
@@ -3618,6 +3730,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bind_answered_to_a_dropped_receiver_is_released() {
+        // `dispatch` removes the pending entry before it sends the terminal, so a receiver dropped in that window bypasses the absent-entry path.
+        let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let control = RouteHandle {
+            channel: 0,
+            epoch: 0,
+        };
+        let (tx, rx) = oneshot::channel();
+        let (key, publish) = inner
+            .admit(
+                control,
+                Vec::new(),
+                PendingKind::Unary(tx),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .expect("control request admitted");
+        assert!(claim_for_write(&publish));
+        drop(data_rx.recv().await);
+        drop(rx);
+
+        let bound = RouteHandle {
+            channel: 9,
+            epoch: 3,
+        };
+        let body = serde_json::to_vec(&serde_json::json!({
+            "op": "route.open",
+            "route_channel": bound.channel,
+            "route_epoch": bound.epoch,
+        }))
+        .expect("body encodes");
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits a frame length"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: control.channel,
+                epoch: control.epoch,
+                corr: key.corr,
+            },
+            body,
+            ByteCharge::none(),
+        );
+
+        let goodbye = control_rx
+            .try_recv()
+            .expect("a bind nobody can receive is released with a route Goodbye");
+        assert_eq!(goodbye.header.ty, FrameType::Goodbye);
+        assert_eq!(goodbye.header.channel, bound.channel);
+        assert_eq!(goodbye.header.epoch, bound.epoch);
+        assert!(
+            lock_unpoisoned(&inner.pending).is_empty(),
+            "the pending entry was consumed by the terminal"
+        );
+        assert!(!inner.retired.load(Ordering::Acquire));
+        inner.retire("test_done");
+    }
+
+    #[tokio::test]
     async fn a_duplicate_bind_terminal_never_closes_an_owned_route() {
         // An unmatched control `Response` can represent a stranded route binding.
         // Only an unmatched route-bind response can indicate a stranded binding; duplicate terminals for delivered routes must not trigger cleanup.
@@ -4031,6 +4202,7 @@ mod tests {
             client_end,
             CancellationToken::new(),
             Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
+            Instant::now() + CLIENT_HANDSHAKE_TIMEOUT,
         )
         .expect("bridge");
 
@@ -4106,6 +4278,7 @@ mod tests {
             client_end,
             CancellationToken::new(),
             Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
+            Instant::now() + CLIENT_HANDSHAKE_TIMEOUT,
         )
         .expect("bridge");
         drop(host_end);

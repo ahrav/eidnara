@@ -437,13 +437,27 @@ async fn run_throughput_inner(
             _ => break,
         }
     }
-    while let Some(joined) = requests.join_next().await {
-        let result = joined.map_err(|err| format!("request task failed: {err}"))?;
-        if classify(&result) != Outcome::Success {
-            return Err(format!(
-                "warmup drain failed validation ({:?})",
-                classify(&result)
-            ));
+    let warmup_drain_deadline = Instant::now() + DRAIN_BUDGET;
+    while !requests.is_empty() {
+        let remaining = warmup_drain_deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, requests.join_next()).await {
+            Ok(Some(Ok(result))) if classify(&result) == Outcome::Success => {}
+            Ok(Some(Ok(result))) => {
+                requests.abort_all();
+                return Err(format!(
+                    "warmup drain failed validation ({:?})",
+                    classify(&result)
+                ));
+            }
+            Ok(Some(Err(err))) => return Err(format!("request task failed: {err}")),
+            Ok(None) => break,
+            Err(_) => {
+                requests.abort_all();
+                return Err(format!(
+                    "warmup drain exceeded its budget with {} request(s) in flight",
+                    requests.len()
+                ));
+            }
         }
     }
 
@@ -507,10 +521,12 @@ async fn run_throughput_inner(
     })
 }
 
+/// Fields drop in declaration order: the client retires before the runtime
+/// that hosted its tasks shuts down.
 pub struct SerialProbe {
-    runtime: tokio::runtime::Runtime,
     client: Arc<host_runtime::Client>,
     route: host_runtime::RouteHandle,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl SerialProbe {
@@ -521,9 +537,9 @@ impl SerialProbe {
             .map_err(|err| err.to_string())?;
         let (client, route) = runtime.block_on(open_route(publication, "budget-criterion"))?;
         Ok(Self {
-            runtime,
             client,
             route,
+            runtime,
         })
     }
 
