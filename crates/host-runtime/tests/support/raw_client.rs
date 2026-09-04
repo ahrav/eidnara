@@ -252,13 +252,23 @@ impl RawClient {
             client_nonce,
             next_corr,
         } = client;
+        // One absolute deadline spans grant, attach, and commit (protocol §11).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let (descriptor, descriptors) =
-            host_runtime::setup_socket::activate_client(&mut stream, Duration::from_secs(2))
+            host_runtime::setup_socket::activate_client(&mut stream, deadline)
                 .await
                 .map_err(|err| err.to_string())?;
+        // Attach before committing so a grant the client cannot map never becomes an activated connection on the host (protocol §6).
+        let (stream_rx, raw_tx, setup_tx) = start_ring_stream_bridge(descriptor, descriptors)?;
+        host_runtime::setup_socket::commit_activation(&mut stream, deadline)
+            .await
+            .map_err(|err| err.to_string())?;
         let setup = stream.into_std().map_err(|err| err.to_string())?;
         setup.set_nonblocking(true).map_err(|err| err.to_string())?;
-        let (stream, raw_tx) = start_ring_stream_bridge(descriptor, descriptors, setup)?;
+        setup_tx.send(setup).map_err(|_| {
+            "ring bridge stopped before the setup socket was handed over".to_owned()
+        })?;
+        let stream = UnixStream::from_std(stream_rx).map_err(|err| err.to_string())?;
         Ok(Self {
             stream,
             raw_tx: Some(raw_tx),
@@ -314,6 +324,9 @@ impl RawClient {
         }
         if daemon_id.as_slice() != info.daemon_id {
             return Err("daemon id mismatch".to_owned());
+        }
+        if daemon_ver != info.daemon_ver {
+            return Err("daemon version mismatch".to_owned());
         }
 
         let client_auth = proof(
@@ -538,11 +551,20 @@ impl RawClient {
     }
 }
 
+/// Attaches the granted ring on a bridge thread and returns once attachment succeeded. The
+/// caller commits activation, then hands the setup socket over through the returned sender;
+/// the bridge starts pumping frames only after that handoff.
 fn start_ring_stream_bridge(
     descriptor: serde_json::Value,
     descriptors: [rustix::fd::OwnedFd; host_runtime::setup_socket::RING_DESCRIPTOR_COUNT],
-    mut setup: StdUnixStream,
-) -> Result<(UnixStream, RawWriteSender), String> {
+) -> Result<
+    (
+        StdUnixStream,
+        RawWriteSender,
+        std::sync::mpsc::SyncSender<StdUnixStream>,
+    ),
+    String,
+> {
     let (client_stream, mut bridge_stream) =
         StdUnixStream::pair().map_err(|err| err.to_string())?;
     client_stream
@@ -556,6 +578,7 @@ fn start_ring_stream_bridge(
         tokio::sync::oneshot::Sender<Result<(), String>>,
     )>(64);
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (setup_tx, setup_rx) = std::sync::mpsc::sync_channel::<StdUnixStream>(1);
     std::thread::Builder::new()
         .name("host-raw-ring-client".to_owned())
         .spawn(move || {
@@ -571,6 +594,9 @@ fn start_ring_stream_bridge(
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
+            let Ok(mut setup) = setup_rx.recv() else {
+                return;
+            };
 
             let mut inbound = Vec::new();
             let mut outbound = Vec::new();
@@ -676,8 +702,7 @@ fn start_ring_stream_bridge(
         .recv()
         .map_err(|_| "ring bridge stopped before startup".to_owned())?
         .map_err(|_| "ring bridge could not attach".to_owned())?;
-    let stream = UnixStream::from_std(client_stream).map_err(|err| err.to_string())?;
-    Ok((stream, raw_tx))
+    Ok((client_stream, raw_tx, setup_tx))
 }
 
 fn publish_raw(

@@ -128,14 +128,14 @@ pub async fn run_connection<H: HostHandler>(
     drop(handshake_permit);
     let _connection_permit = connection_permit;
 
+    // One deadline caps total setup time, anchored before preparation starts.
+    let setup_deadline = Instant::now() + shared.timing.transport_setup_deadline;
     let ring = Arc::clone(&shared.ring);
     let ingress = shared.ingress_budget.clone();
     let queue_frames = shared.limits.writer_queue_frames;
     let frame_deadline = shared.timing.frame_deadline;
     let mut prepared =
         tokio::task::spawn_blocking(move || ring.prepare(ingress, queue_frames, frame_deadline));
-    // One deadline caps total setup time.
-    let setup_deadline = Instant::now() + shared.timing.transport_setup_deadline;
     // A timed-out `prepare` continues because `spawn_blocking` cannot abort it.
     // A dropped `CancellationToken` does not cancel `root`; late completion
     // discards `sender` and cancels `root`.

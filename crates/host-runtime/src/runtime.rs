@@ -632,7 +632,9 @@ pub async fn run_with_publish_hook<H: HostHandler>(
         .map_err(HostError::Instance)?;
 
     let handler = Arc::new(handler);
-    handler.install_connection_key(*guard.key().bytes());
+    // The callback receives the bearer key; a panic inside it must not print its payload.
+    let key = *guard.key().bytes();
+    crate::panic_boundary::redact_sync(|| handler.install_connection_key(key));
     let manifests = crate::panic_boundary::redact_sync(|| handler.manifests());
     let declarations = crate::panic_boundary::redact_sync(|| handler.resource_declarations());
     let (targets, reservations) = build_target_index(&manifests, &declarations)?;
