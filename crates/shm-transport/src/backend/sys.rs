@@ -154,7 +154,7 @@ pub(crate) fn residency_vector_len(mapping_len: usize, page_size: usize) -> usiz
     mapping_len.div_ceil(page_size.max(1))
 }
 
-/// Fills `residency` with one byte per page of `base + offset .. + len`.
+/// Fills `residency` with one byte per page in `base + offset .. base + offset + len`.
 ///
 /// # Safety
 ///
@@ -163,10 +163,9 @@ pub(crate) unsafe fn mincore(
     base: NonNull<u8>,
     offset: usize,
     len: usize,
-    page_size: usize,
     residency: &mut [u8],
 ) -> io::Result<()> {
-    if residency.len() < residency_vector_len(len, page_size) {
+    if residency.len() < residency_vector_len(len, page_size()) {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
     // SAFETY: the caller guarantees the range is inside a live mapping, so the pointer

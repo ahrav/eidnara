@@ -587,11 +587,10 @@ impl Mapping {
         if end > self.len {
             return Err(RingError::InvalidLayout);
         }
-        let page_size = system_page_size();
-        let mut residency = vec![0u8; sys::residency_vector_len(len, page_size)];
+        let mut residency = vec![0u8; sys::residency_vector_len(len, system_page_size())];
         // SAFETY: `offset + len <= self.len` was checked above, and the mapping lives as long
         // as `&self`.
-        unsafe { sys::mincore(self.base, offset, len, page_size, &mut residency) }
+        unsafe { sys::mincore(self.base, offset, len, &mut residency) }
             .map_err(|_| RingError::ObjectValidationFailed)?;
         Ok(residency.into_iter().filter(|entry| entry & 1 == 1).count())
     }

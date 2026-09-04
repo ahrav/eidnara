@@ -26,10 +26,11 @@ impl<'lease> LeaseSpan<'lease> {
     /// `base..base.add(len)` must remain mapped and valid for reads and writes for `'lease`
     /// (`AtomicU8::from_ptr` and `AtomicU64::from_ptr` require write validity even for a
     /// load), and this process must not form a `&[u8]` or `&mut [u8]` over any of those bytes
-    /// while the span exists. Every access through the span is a relaxed atomic load of the
-    /// width `AccessShape` assigns to that byte's absolute address; a party storing into the
-    /// same bytes while the span reads them must use the same shape (`copy_in` does), since a
-    /// racing access of another width is a mixed-size data race.
+    /// while the span exists. Every access through the span is a relaxed atomic load. A
+    /// concurrent writer must use the span's exact base and length, as `copy_in` does,
+    /// because `AccessShape` derives access widths from range boundaries: a shifted
+    /// overlapping range assigns another width to shared bytes, a mixed-size data race.
+    /// Concurrent accesses must be disjoint or share identical boundaries.
     pub(crate) unsafe fn new(base: *mut u8, len: usize) -> Result<Self, LeaseError> {
         let base = NonNull::new(base).ok_or(LeaseError::InvalidSpan)?;
         Ok(Self {
@@ -45,8 +46,10 @@ impl<'lease> LeaseSpan<'lease> {
         self.len
     }
 
-    /// Base pointer, for callers that write into a producer span in place. Do not form a
-    /// long-lived slice from it; the peer may write the same bytes.
+    /// The returned pointer supports in-place writes to a producer span; non-atomic stores
+    /// require exclusive ownership before `commit`, since a store racing an atomic lease
+    /// load is a data race, and a shared span takes `AccessShape` atomics only. Do not form
+    /// a long-lived slice from it; the peer may write the same bytes.
     pub const fn as_mut_ptr(self) -> *mut u8 {
         self.base.as_ptr()
     }
@@ -421,9 +424,12 @@ mod tests {
         }
     }
 
-    fn lease<'a>(bytes: &'a mut [u8], log: &'a CallLog) -> ReceiveLease<'a> {
-        // SAFETY: `bytes` outlives the returned lease.
-        let span = unsafe { LeaseSpan::new(bytes.as_mut_ptr(), bytes.len()) }.unwrap();
+    fn lease<'a>(bytes: &'a [std::sync::atomic::AtomicU8], log: &'a CallLog) -> ReceiveLease<'a> {
+        // SAFETY: `bytes` outlives the returned lease, and the only other view of these
+        // bytes is the `&[AtomicU8]`, so no `&[u8]` or `&mut [u8]` covers them while the
+        // span exists.
+        let span =
+            unsafe { LeaseSpan::new(bytes.as_ptr().cast_mut().cast::<u8>(), bytes.len()) }.unwrap();
         let identity = ReleaseIdentity::new(Incarnation::from_bytes([7; 16]), 0, 1);
         ReceiveLease::new(
             [Some(span), None],
@@ -438,12 +444,13 @@ mod tests {
 
     #[test]
     fn failed_explicit_release_is_not_retried_by_drop() {
-        let mut bytes = [1u8; 4];
+        let bytes: [std::sync::atomic::AtomicU8; 4] =
+            std::array::from_fn(|_| std::sync::atomic::AtomicU8::new(1));
         let log = CallLog {
             calls: Cell::new(0),
             verdict: Err(LeaseError::Quarantined),
         };
-        let held = lease(&mut bytes, &log);
+        let held = lease(&bytes, &log);
         assert_eq!(held.release(), Err(LeaseError::Quarantined));
         assert_eq!(
             log.calls.get(),
@@ -454,12 +461,13 @@ mod tests {
 
     #[test]
     fn drop_releases_exactly_once() {
-        let mut bytes = [1u8; 4];
+        let bytes: [std::sync::atomic::AtomicU8; 4] =
+            std::array::from_fn(|_| std::sync::atomic::AtomicU8::new(1));
         let log = CallLog {
             calls: Cell::new(0),
             verdict: Ok(()),
         };
-        drop(lease(&mut bytes, &log));
+        drop(lease(&bytes, &log));
         assert_eq!(log.calls.get(), 1);
     }
 
