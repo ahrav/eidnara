@@ -35,6 +35,7 @@
 //! seam tokens; every piece at or below the cap is encoded exactly as the reference does.
 #![warn(missing_docs)]
 
+mod bpe;
 #[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
@@ -49,8 +50,9 @@ use std::sync::OnceLock;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use rustc_hash::FxHashMap;
-pub use tiktoken_rs::Rank;
-use tiktoken_rs::byte_pair_split;
+
+/// Token id type; `u32`, the same as `tiktoken_rs::Rank`.
+pub type Rank = u32;
 
 /// Vocabulary as `<base64 token> <rank>` lines, embedded so counting needs no file or network.
 const CLAUDE_TIKTOKEN: &str = include_str!("../assets/claude.tiktoken");
@@ -91,9 +93,9 @@ const CLAUDE_PAT_STR: &str = concat!(
 /// parity with the reference holds in practice while worst-case latency stays linear.
 pub const MAX_PIECE_BYTES: usize = 4096;
 
-fn encoder() -> &'static FxHashMap<Vec<u8>, Rank> {
-    static ENCODER: OnceLock<FxHashMap<Vec<u8>, Rank>> = OnceLock::new();
-    ENCODER.get_or_init(|| {
+fn vocab() -> &'static bpe::Vocab {
+    static VOCAB: OnceLock<bpe::Vocab> = OnceLock::new();
+    VOCAB.get_or_init(|| {
         let mut encoder: FxHashMap<Vec<u8>, Rank> = FxHashMap::with_capacity_and_hasher(
             CLAUDE_TIKTOKEN.lines().count(),
             Default::default(),
@@ -111,7 +113,7 @@ fn encoder() -> &'static FxHashMap<Vec<u8>, Rank> {
             let rank: Rank = rank_str.parse().expect("vocab rank is not a u32");
             encoder.insert(bytes, rank);
         }
-        encoder
+        bpe::Vocab::new(encoder)
     })
 }
 
@@ -132,31 +134,18 @@ fn char_chunks(piece: &str, max_bytes: usize) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Appends the ids of one pre-token piece (or chunk) of at most [`MAX_PIECE_BYTES`] bytes.
-fn encode_piece(enc: &FxHashMap<Vec<u8>, Rank>, piece: &[u8], out: &mut Vec<Rank>) {
-    if let Some(&rank) = enc.get(piece) {
-        out.push(rank);
-        return;
-    }
-    // Every single byte is a vocabulary entry, so a miss means `piece.len() > 1`.
-    out.extend(
-        byte_pair_split(piece, enc)
-            .into_iter()
-            .map(|part| enc[part]),
-    );
-}
-
 /// Encodes `text`, chunking any pre-token piece longer than [`MAX_PIECE_BYTES`].
 fn encode_bounded(text: &str) -> Vec<Rank> {
-    let enc = encoder();
+    let vocab = vocab();
     let mut out = Vec::new();
+    let mut scratch = bpe::Scratch::default();
     for (start, end) in scan::pieces(text) {
         let piece = &text[start..end];
         if piece.len() <= MAX_PIECE_BYTES {
-            encode_piece(enc, piece.as_bytes(), &mut out);
+            vocab.encode_piece(piece.as_bytes(), &mut scratch, &mut out);
         } else {
             for chunk in char_chunks(piece, MAX_PIECE_BYTES) {
-                encode_piece(enc, chunk.as_bytes(), &mut out);
+                vocab.encode_piece(chunk.as_bytes(), &mut scratch, &mut out);
             }
         }
     }
