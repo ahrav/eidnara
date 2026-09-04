@@ -1598,6 +1598,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn endpoint_panic_is_reported_while_the_inbound_queue_is_full() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        transport.set_publish_hook(Arc::new(|_, _| panic!("completion hook panics")));
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 1, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        peer.send(
+            EnvelopeHeader {
+                len: 1,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Request,
+                flags: Flags::new(false, Priority::Interactive, false),
+                channel: 7,
+                epoch: 1,
+                corr: 1,
+            },
+            &[1],
+            StdInstant::now() + Duration::from_secs(1),
+        )
+        .expect("peer publishes one frame");
+        // Nothing drains `receiver`, so the one-frame queue is full when the hook panics.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let goodbye = OutboundFrame {
+            bytes: crate::wire::encode_frame(
+                FrameType::Goodbye,
+                crate::wire::pure_header_flags(),
+                crate::wire::FrameId::control(0),
+                &[],
+            )
+            .expect("header-only frame encodes"),
+            tail: Vec::new(),
+            direct: None,
+            charge: crate::wire::ByteCharge::none(),
+            written: None,
+        };
+        sender.send(goodbye).await.expect("frame admits");
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("a panicking endpoint exits without the receiver draining")
+            .expect("endpoint task joins");
+        assert!(sender.is_retired());
+        assert!(root.is_cancelled());
+        assert_eq!(transport.diagnostics()["endpoint_panic"]["observed"], 1);
+        assert!(matches!(receiver.recv().await, Ok(InboundEvent::Frame(_))));
+        assert!(
+            matches!(
+                receiver.recv().await,
+                Err(ReadClose::Corrupt("shared-memory endpoint panicked"))
+            ),
+            "the panic reason follows the queued frame instead of a bare channel drop"
+        );
+    }
+
+    #[tokio::test]
     async fn quarantined_ring_moves_its_charges_to_the_quarantined_bucket() {
         let transport = RingTransport::for_ring_profile(per_connection_limits());
         let PreparedRing {
