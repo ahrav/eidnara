@@ -1957,6 +1957,9 @@ struct QueuedFrame {
 struct RingWrite {
     header: EnvelopeHeader,
     body: Vec<u8>,
+    /// The bridge resets this to `QUEUED` before it reports a zero-byte failure, so a
+    /// cancellation that observes the failure never classifies the request `OutcomeUnknown`.
+    publish: Option<Arc<AtomicU8>>,
     completed: oneshot::Sender<Result<(), SendFailure>>,
     deadline: StdInstant,
 }
@@ -2075,21 +2078,35 @@ async fn start_ring_bridge(
                 match write_rx.try_recv() {
                     Ok(write) => {
                         // `reserve_until` parks on the peer's capacity doorbell, which
-                        // cancellation cannot ring, so the wait is taken in slices.
+                        // cancellation cannot ring, so the wait is taken in slices. A dead
+                        // host never frees capacity, so the setup socket is probed between slices.
                         let result = loop {
                             let slice = StdInstant::now() + BRIDGE_RESERVE_SLICE;
-                            match endpoint.send(
+                            match endpoint.send_bounded(
                                 write.header,
                                 &write.body,
                                 write.deadline.min(slice),
+                                write.deadline,
                             ) {
                                 Err(SendFailure::Deadline)
                                     if StdInstant::now() < write.deadline
-                                        && !cancel.is_cancelled() => {}
+                                        && !cancel.is_cancelled() =>
+                                {
+                                    if setup_peer_closed(&setup) {
+                                        break Err(SendFailure::Unreserved);
+                                    }
+                                }
                                 result => break result,
                             }
                         };
                         let failed = result.is_err();
+                        if matches!(result, Err(SendFailure::Deadline | SendFailure::Unreserved))
+                            && let Some(state) = &write.publish
+                        {
+                            // Zero bytes were published; the state is restored before the
+                            // failure is observable so a concurrent stop classifies `NotSent`.
+                            state.store(QUEUED, Ordering::Release);
+                        }
                         let _ = write.completed.send(result);
                         if failed {
                             break;
@@ -2289,6 +2306,7 @@ async fn writer_loop(
                 .try_send(RingWrite {
                     header: frame.header,
                     body: frame.body,
+                    publish: frame.publish.clone(),
                     completed: completed_tx,
                     deadline: frame.deadline.into_std(),
                 })
@@ -4966,6 +4984,7 @@ mod tests {
                 .try_send(RingWrite {
                     header: outbound,
                     body: Vec::new(),
+                    publish: None,
                     completed,
                     deadline: StdInstant::now() + Duration::from_secs(1),
                 })
