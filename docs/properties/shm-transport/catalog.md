@@ -8,7 +8,7 @@ only observable through the host. The original scope line named
 deleted.
 
 Provenance: source catalogs at `host@39e823037`; see [../README.md](../README.md).
-System `the `host` source checkout at `9c1eb4d1`, 2026-08-29.
+System `the`host` source checkout at `9c1eb4d1`, 2026-08-29.
 
 ## Eventfd reconciliation pass, 2026-08-31
 
@@ -371,8 +371,7 @@ and stranded aliases are all empty (`packages/shm-native/src/lib.rs:1326-1329`,
 `:1350-1352`), so the claim is pinned indefinitely only when a detach has already
 stranded an alias. An earlier draft of this record overstated that as "for the
 process lifetime".
-Open questions: None. The question that opened this record — whether
-`validate_lifecycle` reads the flag — is resolved by direct read.
+Open questions: None.
 
 ---
 
@@ -392,7 +391,6 @@ Reachability: default-production — the ring transport is built unconditionally
 duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
-Reaches production: no
 Status: active
 Exercised: not yet — needs `quarantined` pre-seeded near `u64::MAX` so the
 `checked_add` fails.
@@ -440,7 +438,6 @@ Reachability: default-production — the ring transport is built unconditionally
 duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
-Reaches production: yes
 Status: active
 Exercised: not yet — needs a poisoned accounting mutex and an inconsistent
 `active` value.
@@ -478,7 +475,6 @@ which shipped empty, so only tests drove custody. Invalidated rather than live:
 the phase machine, the backend, and provider incarnations are all deleted, and
 `crates/host-runtime/src/ring_transport.rs:291` now releases charges
 unconditionally.
-Reaches production: no
 Status: invalidated
 Exercised: not yet — needs a release carrying a superseded provider incarnation.
 Guarantee: Each candidate's charges are released or quarantined exactly once,
@@ -855,9 +851,7 @@ does not state. The value of the record is that three `Result` paths exist for
 conditions that cannot arise, and nothing marks them as such. A future change to
 `validate` silently converts them from dead code into the wedge described above,
 with no test covering the transition.
-Open questions: None. The reachability question that opened this record is
-resolved: all three branches are unreachable, which is why the semantics
-changed.
+Open questions: None.
 
 ### release-failure-is-observable
 
@@ -867,7 +861,6 @@ unconditionally (`crates/host-runtime/src/runtime.rs:741`) and prepared per
 connection (`crates/host-runtime/src/connection.rs:117`), so the `Reaches
 production: no` line above, set when only the host driver was gone, no longer
 describes this path.
-Reaches production: no
 Status: active
 Exercised: not yet — needs an injected release failure on an otherwise clean
 path.
@@ -915,9 +908,7 @@ resets or reconciles them, so a crash is not a clean slate.
 
 ### attach-reconciles-or-refuses-stale-shared-cursors
 
-Type: safety — revised from liveness after review. The check is evaluated at
-attach time, and attach ignores the stale cursors immediately rather than failing
-to converge later. The wedge that follows is the consequence, not the property.
+Type: safety
 Reachability: default-production — the ring transport is built unconditionally
 (`crates/host-runtime/src/runtime.rs:741`) and every accepted connection prepares a
 duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on the
@@ -967,8 +958,8 @@ Exercised: not yet — needs a producer killed between reserve and commit.
 Guarantee: A producer crash inside a reservation does not permanently prevent
 any later producer from publishing.
 Check: `always` — crash between `try_reserve` and `commit`, then assert a
-replacement producer can eventually publish, or that the failure is reported as
-a distinguishable fault rather than as backpressure.
+replacement producer publishes or reports a distinguishable fault within
+`frame_deadline`, rather than returning backpressure.
 Fault/timing angle: the next sequence is derived from `published + 1`, so a
 replacement producer re-derives the same sequence, and its
 `FREE → PRODUCER_RESERVED` CAS fails against the stranded
@@ -1357,7 +1348,6 @@ path: `OperationCounters` is referenced only by
 is the intended release gate, but `benches/manifests/v1.json:4` still reads
 `designation_status: UNSET_REQUIRES_DESIGNATED_HOST`, so it has gated no
 shipped decision yet.
-Reaches production: evidence path
 Status: active
 Exercised: not yet — needs negative controls that remove a real operation and
 assert the counter drops.
@@ -1416,7 +1406,6 @@ Reachability: test-only — the subject is the benchmark's own reporting
 addon path executes. It feeds the release gate, but
 `benches/manifests/v1.json:4` still reads `designation_status:
 UNSET_REQUIRES_DESIGNATED_HOST`, so no shipped decision has rested on it.
-Reaches production: evidence path
 Status: active
 Exercised: not yet — needs a corruption injection that the checksum must catch.
 Guarantee: Every arm's reported checksum is a function of the bytes actually
@@ -1447,7 +1436,6 @@ Reachability: test-only — the subject is the audit artifact
 nothing in `crates/host-runtime` or `packages` reads it at run time. It is the audit
 trail for a release gate whose `designation_status` is still
 `UNSET_REQUIRES_DESIGNATED_HOST` (`benches/manifests/v1.json:4`).
-Reaches production: evidence path
 Status: active
 Exercised: yes — checked mechanically at `9c1eb4d1` and re-run independently.
 Of 51 citation instances, 29 are distinct and contain a fragment; 18 resolve and
@@ -1483,9 +1471,7 @@ Existing check: none. Nothing validates the traceability record against the tree
 Impact: two requirement citations, one of them load-bearing for three rows,
 point at tests that do not exist under those names. This is the audit trail for a
 release gate, and it has no validator.
-Open questions: None. The classification question that opened this record is
-resolved; the correct check normalizes per artifact class rather than doing a
-literal substring match.
+Open questions: None.
 
 ### negative-tests-fail-for-their-stated-reason
 
@@ -1494,7 +1480,6 @@ Reachability: test-only — the subject is the negative test cases themselves,
 including `crates/shm-transport/tests/fuzz_corpus.rs`, and the addon
 mechanism tests. No runtime path evaluates them, and this record makes no claim
 that gates a shipped decision.
-Reaches production: evidence path
 Status: active
 Exercised: not yet — needs each negative case asserted against its specific
 rejection reason.
@@ -1667,7 +1652,6 @@ surface, and that addon is the default client channel
 (`packages/plugin/src/shared/host-client/connection.ts:396`), loaded from
 `@eidnara/shm-native` (`packages/plugin/package.json:58`). The exports
 carry no `cfg` gate, so they ship.
-Reaches production: yes
 Status: active
 Exercised: not yet — needs an export inventory of the built artifact.
 Guarantee: Fault injectors, probes, and test constructors are absent from the
@@ -1932,7 +1916,6 @@ Reachability: test-only — the subject is the fuzz harness
 `crates/shm-transport/src/lib.rs:16`), which only `tests/contract.rs` and
 `tests/fuzz_corpus.rs` drive. The production descriptor it tracks is
 default-production; the harness is not.
-Reaches production: evidence path
 Status: active
 Exercised: not yet — needs a static width assertion, a per-byte influence
 assertion, and a decoupled `expected` identity.
@@ -2000,7 +1983,7 @@ Reachability: default-production — label retained from the pre-#131 catalog
 and no longer supported at HEAD; the class is unresolved pending the Darwin
 question below. The evidence the label rested on is gone: PR #131 (merge
 `5d638e3e8`) deleted the Darwin npm packages (`packages/host-darwin-*`,
-removed in `55f47ac64`) and left `the source repository `ci.yml` workflow` with only
+removed in `55f47ac64`) and left `the source repository`ci.yml`workflow` with only
 `ubuntu-latest` jobs. What remains at HEAD is weaker than a coverage gap:
 `create_macos_shm` (`crates/shm-transport/src/backend/ring.rs:2176`) still
 exists under `cfg(target_os = "macos")`, but `Mapping::create`
@@ -2073,7 +2056,7 @@ Reachability: default-production — label retained from the pre-#131 catalog
 and no longer supported at HEAD; the class is unresolved pending the Darwin
 question below. PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages
 (`packages/host-darwin-*`, removed in `55f47ac64`), left
-`the source repository `ci.yml` workflow` with only `ubuntu-latest` jobs, and added
+`the source repository`ci.yml`workflow` with only `ubuntu-latest` jobs, and added
 `compile_error!` at `crates/shm-transport/src/backend/ring.rs:1-2` for any
 non-Linux target, so no macOS binary of this crate can exist at HEAD. The
 platform-conditional validation text is still in the tree
@@ -2152,7 +2135,7 @@ Reachability: default-production — label retained from the pre-#131 catalog
 and no longer supported at HEAD; the class is unresolved pending the Darwin
 question below. PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages
 (`packages/host-darwin-*`, removed in `55f47ac64`) and left
-`the source repository `ci.yml` workflow` with only `ubuntu-latest` jobs. At HEAD
+`the source repository`ci.yml`workflow` with only `ubuntu-latest` jobs. At HEAD
 `create_macos_shm` (`crates/shm-transport/src/backend/ring.rs:2176`) has no
 caller — `Mapping::create` (`ring.rs:311-312`) calls `create_linux_memfd`
 unconditionally — and `ring.rs:1-2` compile-errors on any non-Linux target, so
@@ -2269,7 +2252,7 @@ transport and every accepted connection prepares a duplex ring:
 the pair via `DuplexRing::create` (`crates/host-runtime/src/ring_transport.rs:248`).
 The former support this preamble cited — a Darwin distribution package in tree —
 is gone: PR #131 (merge `5d638e3e8`) deleted `packages/host-darwin-*`
-(`55f47ac64`) and left `the source repository `ci.yml` workflow` with only `ubuntu-latest`
+(`55f47ac64`) and left `the source repository`ci.yml`workflow` with only `ubuntu-latest`
 jobs. The gap this record names is coverage, not reachability.
 Status: active
 Exercised: not yet — the only page-size assertion in the tree is a pure-function
@@ -2291,7 +2274,7 @@ The `a5568707` diff touched only `verify_prefaulted`, adding `system_page_size`
 and `residency_vector_len`, and left `Layout::new` plus both prefault walks on
 4096 — including `arena.rs:229`, a bare literal that does not reference the
 constant. CI was read directly at the time; re-read at HEAD `bdf72f46a` after
-PR #131 (merge `5d638e3e8`), `the source repository `ci.yml` workflow` has only
+PR #131 (merge `5d638e3e8`), `the source repository`ci.yml`workflow` has only
 `ubuntu-latest` jobs — the macOS leg that ran
 `--test contract --test fuzz_corpus` is gone, so nothing in CI runs any of this
 crate off Linux. The `mincore` mismatch the fix repaired reproduces exactly in
@@ -2703,7 +2686,6 @@ Reachability: default-production — the ring transport is built unconditionally
 duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
-Reaches production: yes
 Status: active
 Exercised: partial — the pre-#131 `crates/host-runtime/tests/shm_failure_modes.rs:195`
 published one
@@ -2764,7 +2746,6 @@ Reachability: default-production — the ring transport is built unconditionally
 duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
-Reaches production: yes
 Status: active
 Exercised: not yet — needs the per-frame equality assertion at admission. The
 transport's two checks are exercised only in isolation, never against a host that
@@ -2814,7 +2795,6 @@ Reachability: default-production — the ring transport is built unconditionally
 duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
-Reaches production: yes
 Status: active
 Exercised: partial — the host arm is exercised end to end for one illegal type.
 The peer arm has no test, and the oracle it needs does not exist: today the frame
@@ -3139,7 +3119,7 @@ simultaneous load in both directions each direction keeps making progress, and
 once the offered load stops both directions drain. The draining precondition is
 load-bearing, not decorative: without it the inbound lane has no stall bound at
 all (see Fault/timing angle).
-Check: `always`, in two arms. Ratio: while both directions are offered
+Check: `always` - two arms. Ratio: while both directions are offered
 continuously, neither may complete fewer than one frame per K completions of the
 other, with K pinned by the test from its own configuration and recorded in the
 test. The only per-lane stall bound the code enforces is `frame_deadline` on the
@@ -3243,8 +3223,7 @@ Impact: capacity would return one sequence per producer attempt while accounting
 stays self-consistent. Convergence still happens under `reserve_until`, so only
 the size class breaks: a large-frame request is refused while the arena is mostly
 reclaimable, reporting `Deadline` on a healthy channel.
-Open questions: None. The question that opened this record, whether one call
-drains the whole prefix, is resolved by direct read of the loop's exits.
+Open questions: None.
 
 ### lease-saturation-is-reached-then-drains
 

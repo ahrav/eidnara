@@ -131,14 +131,14 @@ the kill, because the client endpoint's `recv` releases inside itself at
 required that receives without releasing — K frames, ideally `K == max_leases` — and
 emits a barrier record before parking. The oracle after the attach: either the attach
 fails, or `active_leases == 0` and no slot remains in `RECEIVER_LEASED`. Add the
-stronger liveness arm too: after the attach, a bounded poll must eventually deliver a
-newly published frame, since `Ok(None)` forever is the actual failure and an
+stronger liveness arm too: after the attach, a newly published frame must arrive
+within `frame_deadline`, since `Ok(None)` forever is the actual failure and an
 `active_leases` assertion alone would not catch a partial reconciliation. Coverage
 check to emit: `shm_kill_with_leases_held`.
 
 ## Investigation log
 
-### Q: Is a peer crash meant to be recoverable at all? If yes, something must reset the cursors or force quarantine; today it does neither.
+### Q: Is a peer crash meant to be recoverable at all? If yes, something must reset the cursors or force quarantine; today it does neither
 
 - Sources examined: `ring.rs:783-798`, `:2067-2098`, `:127-137`, `:43-58`,
   `:119-124`, `:1373-1392`, `:1063-1067`, `:926-928`, `:989`, `:1470-1566`, `:1834-1843`;

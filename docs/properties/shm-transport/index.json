@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shm-transport",
   "source": "catalog.md",
-  "source_sha256": "a9c18bddc4859dea6d69840ae7d0284f8b259c7cf043057ef5f5a2b3ae8058a9",
+  "source_sha256": "ae0fb7248df4704f63ca8be4ea845fb73a2c514d5d0e4ff1465ff27cde90df5d",
   "records": [
     {
       "slug": "quarantine-authority-survives-peer-writes",
@@ -83,9 +83,7 @@
       },
       "existing_check": "per-operation `is_quarantined()` guards only.",
       "impact": "a caller receives a channel id and a usable-looking channel that fails at first reserve or receive. The grant claim is held until the registry entry is removed; `close` and `force_close` do remove it once producers, active leases, and stranded aliases are all empty (`packages/shm-native/src/lib.rs:1326-1329`, `:1350-1352`), so the claim is pinned indefinitely only when a detach has already stranded an alias. An earlier draft of this record overstated that as \"for the process lifetime\".",
-      "open_questions": [
-        "None. The question that opened this record — whether `validate_lifecycle` reads the flag — is resolved by direct read."
-      ],
+      "open_questions": [],
       "extra": {
         "Raised from medium after direct verification": "`validate_lifecycle` (`ring.rs:2067-2098`) reads exactly eight fields at `:2074-2085` — magic, layout version, depth, arena, leases, total, incarnation, and lane — and compares them at `:2086-2096`. It never reads `quarantined`. The per-operation gates are the only readers of that flag."
       }
@@ -114,9 +112,7 @@
       "existing_check": "`crates/shm-transport/tests/contract.rs:349` `host_admission_retains_quarantined_commitments` — asserts the success path only. Status unaudited.",
       "impact": "charges vanish from both counters, so the operator-visible snapshot under-reports and the admission budget silently over-admits later. Directly contradicts \"quarantine retains the exact charges\" and \"charges stay visible\" (`docs/shm-transport.md:79`, `:90`, `:112`).",
       "open_questions": [],
-      "extra": {
-        "Reaches production": "no"
-      }
+      "extra": {}
     },
     {
       "slug": "charge-release-never-silently-strands",
@@ -143,7 +139,6 @@
       "impact": "`active` diverges permanently from the live set, so admission refuses candidates the host can afford, or accepts ones it cannot.",
       "open_questions": [],
       "extra": {
-        "Reaches production": "yes",
         "Reported basis": "`profile.rs:511-521` returns early on a poisoned lock and performs the subtraction inside `if let Some(active) = ...checked_sub(charges)`, so both failures are silent, while `Drop` still marks the state `Released` (`profile.rs:581-588`). I verified the analogous pattern in `quarantine()` by direct read, but not the `release()` body itself."
       }
     },
@@ -171,9 +166,7 @@
       "existing_check": "none. The covering test was `custody_releases_exactly_once_and_rejects_stale_releases` at the former `crates/host-runtime/src/provider_recovery.rs:811`, deleted with its module.",
       "impact": "`ed487e11` deleted `provider_recovery.rs` and with it `CandidateCustody`, its `Active`/`Released`/`Quarantined` phase machine, and every caller, so no construct now owns the exactly-once terminal-transition obligation; the surviving host path holds one `Admission` and calls the infallible `Admission::release` once on the endpoint thread (`crates/host-runtime/src/ring_transport.rs:291`), which removes the race rather than arbitrating it. The documentation half of the finding still stands and is now strictly a doc defect: `docs/shm-transport.md:79` describes an incarnation-bearing release protocol that never existed and whose surrounding machinery has since been removed.",
       "open_questions": [],
-      "extra": {
-        "Reaches production": "no"
-      },
+      "extra": {},
       "unreachability_evidence": "when live, `CandidateCustody` and `ShmRecoveryBackend` sat behind the negotiated-transport provider registry, which shipped empty, so only tests drove custody. Invalidated rather than live: the phase machine, the backend, and provider incarnations are all deleted, and `crates/host-runtime/src/ring_transport.rs:291` now releases charges unconditionally."
     },
     {
@@ -358,9 +351,7 @@
       },
       "existing_check": "none.",
       "impact": "as written, none in production — this is a correctness argument the code does not state. The value of the record is that three `Result` paths exist for conditions that cannot arise, and nothing marks them as such. A future change to `validate` silently converts them from dead code into the wedge described above, with no test covering the transition.",
-      "open_questions": [
-        "None. The reachability question that opened this record is resolved: all three branches are unreachable, which is why the semantics changed."
-      ],
+      "open_questions": [],
       "extra": {
         "Verified by inspection": "`enter_quarantine` is called exactly once inside `try_receive`, at `ring.rs:1098`, on the validation path only. Two independent analyses then agreed that an accepted descriptor guarantees the span count and bounds that both constructors check, so all three branches are dead given `validate` on a 64-bit target."
       }
@@ -389,9 +380,7 @@
       "existing_check": "none. `recovery.report_suspect(custody)` was deleted with `provider_recovery.rs`.",
       "impact": "a stranded charge or an unreclaimed frame with no counter, no log, and no suspect record. The operator learns nothing, and the arena bytes stay unreclaimable.",
       "open_questions": [],
-      "extra": {
-        "Reaches production": "no"
-      }
+      "extra": {}
     },
     {
       "slug": "attach-reconciles-or-refuses-stale-shared-cursors",
@@ -432,7 +421,7 @@
       "guarantee": "A producer crash inside a reservation does not permanently prevent any later producer from publishing.",
       "check": {
         "semantics": "always",
-        "condition": "crash between `try_reserve` and `commit`, then assert a replacement producer can eventually publish, or that the failure is reported as a distinguishable fault rather than as backpressure."
+        "condition": "crash between `try_reserve` and `commit`, then assert a replacement producer publishes or reports a distinguishable fault within `frame_deadline`, rather than returning backpressure."
       },
       "fault_timing": "the next sequence is derived from `published + 1`, so a replacement producer re-derives the same sequence, and its `FREE → PRODUCER_RESERVED` CAS fails against the stranded `PRODUCER_RESERVED` slot forever. The symptom is `ProducerError::Exhausted` followed by `Deadline` — both backpressure codes.",
       "required_faults": "termination during an open reservation.",
@@ -681,9 +670,7 @@
       "existing_check": "`purity_gate_rejects_injected_copy_allocation_queue_and_wake` (`tests/contract.rs:462`), which tests the gate's arithmetic over values it supplies itself. Status unaudited, and circular as an oracle. The second anchor is gone: the manifest key `injected_gate_control_must_be_disqualified`, formerly `benches/manifests/v1.json:155` at `9c1eb4d1`, no longer appears anywhere in the tree at `e447c927`. The manifest now names the injected arm only as a `gate_controls` entry (`benches/manifests/v1.json:89-91`) with no disqualification rule stated beside it, so the manifest half of this check was removed rather than moved.",
       "impact": "the zero-copy selection gate cannot detect a copy. A body copy added to a nominally zero-copy arm would report `body_copies == 0` and pass. This is the gate that decides whether a shared-memory provider may ship.",
       "open_questions": [],
-      "extra": {
-        "Reaches production": "evidence path"
-      }
+      "extra": {}
     },
     {
       "slug": "measured-transfer-is-witnessed-by-the-data",
@@ -709,9 +696,7 @@
       "existing_check": "none.",
       "impact": "a fully corrupted ring transfer yields a bit-identical checksum, so the benchmark cannot distinguish a working transport from a broken one.",
       "open_questions": [],
-      "extra": {
-        "Reaches production": "evidence path"
-      }
+      "extra": {}
     },
     {
       "slug": "traceability-pointers-resolve",
@@ -736,12 +721,8 @@
       },
       "existing_check": "none. Nothing validates the traceability record against the tree.",
       "impact": "two requirement citations, one of them load-bearing for three rows, point at tests that do not exist under those names. This is the audit trail for a release gate, and it has no validator.",
-      "open_questions": [
-        "None. The classification question that opened this record is resolved; the correct check normalizes per artifact class rather than doing a literal substring match."
-      ],
-      "extra": {
-        "Reaches production": "evidence path"
-      }
+      "open_questions": [],
+      "extra": {}
     },
     {
       "slug": "negative-tests-fail-for-their-stated-reason",
@@ -767,9 +748,7 @@
       "existing_check": "partial — one message-specific case in the addon mechanism tests, and panic-freedom plus one positive in the corpus replays. Status unaudited.",
       "impact": "a whole class of negative tests can silently stop testing what they name. This already happened once for over a day.",
       "open_questions": [],
-      "extra": {
-        "Reaches production": "evidence path"
-      }
+      "extra": {}
     },
     {
       "slug": "documented-close-order-has-a-production-driver",
@@ -874,9 +853,7 @@
       "existing_check": "none.",
       "impact": "the external-view failpoint can drive both directions into quarantine from JavaScript, the cleanup probe is an arbitrary-path file write at teardown, and the buffer detach operates on buffers the addon never created. The addon is also shipped from a debug build, so release behaviour is never exercised.",
       "open_questions": [],
-      "extra": {
-        "Reaches production": "yes"
-      }
+      "extra": {}
     },
     {
       "slug": "decoder-totality-over-arbitrary-bytes",
@@ -1007,7 +984,6 @@
       "impact": "the offsets are independent literals, so a reordering preserving the total keeps the length gate satisfied and the bit count at 864. And two of the five identity conditions in the load-bearing `validate` function are covered only by tabled unit cases, never by fuzzing.",
       "open_questions": [],
       "extra": {
-        "Reaches production": "evidence path",
         "Measured": "`FRAME_DESCRIPTOR_BYTES` is 108 (`harness.rs:16-17`) while `size_of::<SharedDescriptor>()` is 120 with 12 bytes of padding; every field from `lane` onward sits at a different offset, and the span region is interleaved in the harness but grouped in the struct. That is not a defect, because production reads typed fields via `snapshot()` and never sees bytes. The 108-byte map is exactly a bijection: ten field widths total 864 bits, and 108 bytes is 864 bits. The 120-byte figure was confirmed twice: by a layout program, and through the corpus, since the `provider_grant/valid` seed's `total_bytes` of 67,125,248 is reproduced by `Layout::new(32, 64 MiB)` only if `DescriptorSlot` is 256 bytes, which requires the 120-byte descriptor, and that seed is accepted by a passing test."
       }
     },
@@ -1015,7 +991,7 @@
       "slug": "macos-object-creation-outcome-is-attributed",
       "type": "reachability",
       "reachability": "default-production",
-      "reachability_note": "label retained from the pre-#131 catalog and no longer supported at HEAD; the class is unresolved pending the Darwin question below. The evidence the label rested on is gone: PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages (`packages/host-darwin-*`, removed in `55f47ac64`) and left `the source repository `ci.yml` workflow` with only `ubuntu-latest` jobs. What remains at HEAD is weaker than a coverage gap: `create_macos_shm` (`crates/shm-transport/src/backend/ring.rs:2176`) still exists under `cfg(target_os = \"macos\")`, but `Mapping::create` (`ring.rs:311-312`) calls `create_linux_memfd` unconditionally, so the function has no caller, and `ring.rs:1-2` raises `compile_error!(\"shm-transport ring backend supports Linux only\")` on any non-Linux target, so the crate cannot compile where the cfg matches.",
+      "reachability_note": "label retained from the pre-#131 catalog and no longer supported at HEAD; the class is unresolved pending the Darwin question below. The evidence the label rested on is gone: PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages (`packages/host-darwin-*`, removed in `55f47ac64`) and left `the source repository`ci.yml`workflow` with only `ubuntu-latest` jobs. What remains at HEAD is weaker than a coverage gap: `create_macos_shm` (`crates/shm-transport/src/backend/ring.rs:2176`) still exists under `cfg(target_os = \"macos\")`, but `Mapping::create` (`ring.rs:311-312`) calls `create_linux_memfd` unconditionally, so the function has no caller, and `ring.rs:1-2` raises `compile_error!(\"shm-transport ring backend supports Linux only\")` on any non-Linux target, so the crate cannot compile where the cfg matches.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -1041,7 +1017,7 @@
       "slug": "attach-validation-is-not-platform-weakened",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "label retained from the pre-#131 catalog and no longer supported at HEAD; the class is unresolved pending the Darwin question below. PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages (`packages/host-darwin-*`, removed in `55f47ac64`), left `the source repository `ci.yml` workflow` with only `ubuntu-latest` jobs, and added `compile_error!` at `crates/shm-transport/src/backend/ring.rs:1-2` for any non-Linux target, so no macOS binary of this crate can exist at HEAD. The platform-conditional validation text is still in the tree (`ring.rs:2109-2115`), which is what keeps this record active.",
+      "reachability_note": "label retained from the pre-#131 catalog and no longer supported at HEAD; the class is unresolved pending the Darwin question below. PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages (`packages/host-darwin-*`, removed in `55f47ac64`), left `the source repository`ci.yml`workflow` with only `ubuntu-latest` jobs, and added `compile_error!` at `crates/shm-transport/src/backend/ring.rs:1-2` for any non-Linux target, so no macOS binary of this crate can exist at HEAD. The platform-conditional validation text is still in the tree (`ring.rs:2109-2115`), which is what keeps this record active.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -1069,7 +1045,7 @@
       "slug": "macos-object-creation-leaks-no-shm-name",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "label retained from the pre-#131 catalog and no longer supported at HEAD; the class is unresolved pending the Darwin question below. PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages (`packages/host-darwin-*`, removed in `55f47ac64`) and left `the source repository `ci.yml` workflow` with only `ubuntu-latest` jobs. At HEAD `create_macos_shm` (`crates/shm-transport/src/backend/ring.rs:2176`) has no caller — `Mapping::create` (`ring.rs:311-312`) calls `create_linux_memfd` unconditionally — and `ring.rs:1-2` compile-errors on any non-Linux target, so the leak path is dead text unless a Darwin surface returns.",
+      "reachability_note": "label retained from the pre-#131 catalog and no longer supported at HEAD; the class is unresolved pending the Darwin question below. PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages (`packages/host-darwin-*`, removed in `55f47ac64`) and left `the source repository`ci.yml`workflow` with only `ubuntu-latest` jobs. At HEAD `create_macos_shm` (`crates/shm-transport/src/backend/ring.rs:2176`) has no caller — `Mapping::create` (`ring.rs:311-312`) calls `create_linux_memfd` unconditionally — and `ring.rs:1-2` compile-errors on any non-Linux target, so the leak path is dead text unless a Darwin surface returns.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -1121,7 +1097,7 @@
       "slug": "page-size-dependent-setup-runs-on-a-non-4096-page-host",
       "type": "reachability",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is the only application transport and every accepted connection prepares a duplex ring: `crates/host-runtime/src/connection.rs:117` calls `ring.prepare`, which constructs the pair via `DuplexRing::create` (`crates/host-runtime/src/ring_transport.rs:248`). The former support this preamble cited — a Darwin distribution package in tree — is gone: PR #131 (merge `5d638e3e8`) deleted `packages/host-darwin-*` (`55f47ac64`) and left `the source repository `ci.yml` workflow` with only `ubuntu-latest` jobs. The gap this record names is coverage, not reachability.",
+      "reachability_note": "the ring transport is the only application transport and every accepted connection prepares a duplex ring: `crates/host-runtime/src/connection.rs:117` calls `ring.prepare`, which constructs the pair via `DuplexRing::create` (`crates/host-runtime/src/ring_transport.rs:248`). The former support this preamble cited — a Darwin distribution package in tree — is gone: PR #131 (merge `5d638e3e8`) deleted `packages/host-darwin-*` (`55f47ac64`) and left `the source repository`ci.yml`workflow` with only `ubuntu-latest` jobs. The gap this record names is coverage, not reachability.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -1136,7 +1112,7 @@
       "required_faults": "a runner whose page size is not 4096 — an aarch64 Linux kernel with 16 KiB or 64 KiB pages — or an injectable page size.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/page-size-dependent-setup-runs-on-a-non-4096-page-host.md). The `a5568707` diff touched only `verify_prefaulted`, adding `system_page_size` and `residency_vector_len`, and left `Layout::new` plus both prefault walks on 4096 — including `arena.rs:229`, a bare literal that does not reference the constant. CI was read directly at the time; re-read at HEAD `bdf72f46a` after PR #131 (merge `5d638e3e8`), `the source repository `ci.yml` workflow` has only `ubuntu-latest` jobs — the macOS leg that ran `--test contract --test fuzz_corpus` is gone, so nothing in CI runs any of this crate off Linux. The `mincore` mismatch the fix repaired reproduces exactly in arithmetic: 16386 entries sized against 4097 written, leaving 12289 zero."
+        "evidence": "[evidence](evidence/page-size-dependent-setup-runs-on-a-non-4096-page-host.md). The `a5568707` diff touched only `verify_prefaulted`, adding `system_page_size` and `residency_vector_len`, and left `Layout::new` plus both prefault walks on 4096 — including `arena.rs:229`, a bare literal that does not reference the constant. CI was read directly at the time; re-read at HEAD `bdf72f46a` after PR #131 (merge `5d638e3e8`), `the source repository`ci.yml`workflow` has only `ubuntu-latest` jobs — the macOS leg that ran `--test contract --test fuzz_corpus` is gone, so nothing in CI runs any of this crate off Linux. The `mincore` mismatch the fix repaired reproduces exactly in arithmetic: 16386 entries sized against 4097 written, leaving 12289 zero."
       },
       "existing_check": "`residency_vector_tracks_runtime_page_size` (`ring.rs:1785-1795`), a pure-function assertion with no mapping. The macOS CI leg that excluded it via `--test` selection was removed with PR #131; no macOS job remains.",
       "impact": "the configuration in which the previous defect lived has never been executed end to end, so the residual defects in `layout-region-offsets-are-real-page-aligned` are invisible to CI, as is any future change reintroducing a 4096 assumption into the residency path. PR #131 removed the macOS job, so CI provisions no 16 KiB host at all; closing the gap now requires an aarch64 Linux large-page job or an injectable page size rather than a returning macOS runner.",
@@ -1306,7 +1282,6 @@
       "impact": "this is the ordering the trust boundary rests on, and it is correct at HEAD. Cataloged because nothing fails if it stops being correct. Moving the charge or the copy above `ring_transport.rs:503` lets a peer hold up to 64 MiB of ingress budget for a frame deadline on a frame already known illegal, and the transport cannot compensate, because `host-runtime` depends on `shm-transport` and so `FrameType`, `Flags`, and the protocol version are unreachable from the validating crate.",
       "open_questions": [],
       "extra": {
-        "Reaches production": "yes",
         "Missing": "any assertion that no ingress permit was taken and no inbound event emitted."
       }
     },
@@ -1334,9 +1309,7 @@
       "existing_check": "none for the composition. The transport's two checks are covered alone at `tests/contract.rs:173`, `:636`, and `:645`; the wire-header setter has no test at all. Status unaudited.",
       "impact": "`descriptor.rs:271` is the only thing making the host's ingress accounting mean anything. Relax it, weaken it to a bound, or feature-gate it, and a peer sets host admission accounting from a field unrelated to the bytes moved. The balanced-but-wrong case, charge 64 MiB and copy 64 bytes, is a cheap budget-exhaustion primitive, because the ingress wait loop is what other receives block on and the resulting overload close is classified clean.",
       "open_questions": [],
-      "extra": {
-        "Reaches production": "yes"
-      }
+      "extra": {}
     },
     {
       "slug": "every-shm-header-consumer-applies-its-role-gate",
@@ -1362,9 +1335,7 @@
       "existing_check": "host arm only, one type. Nothing on the peer arm. Status unaudited.",
       "impact": "over TCP a role-invalid frame retires the generation with an explicit reason; over shared memory the identical frame is released and the generation stays open, with no diagnostic, counter, or close reason, which is the implicit profile extension the wire document forbids. The record straddles the part boundary, since the peer consumer lives in `packages/plugin`, assigned to Part 5.",
       "open_questions": [],
-      "extra": {
-        "Reaches production": "yes"
-      }
+      "extra": {}
     },
     {
       "slug": "header-rejection-effect-does-not-depend-on-the-catching-layer",
@@ -1483,7 +1454,7 @@
       "guarantee": "Given an application that drains the inbound channel, then under simultaneous load in both directions each direction keeps making progress, and once the offered load stops both directions drain. The draining precondition is load-bearing, not decorative: without it the inbound lane has no stall bound at all (see Fault/timing angle).",
       "check": {
         "semantics": "always",
-        "condition": ", in two arms. Ratio: while both directions are offered continuously, neither may complete fewer than one frame per K completions of the other, with K pinned by the test from its own configuration and recorded in the test. The only per-lane stall bound the code enforces is `frame_deadline` on the **outbound** lane: the `reserve_until` deadline (`ring_transport.rs:583`, `ring.rs:980`). The inbound lane has no equivalent bound — see the Fault/timing angle — so the ratio arm holds only while the application drains inbound. The former `frame_deadline / POLL_INTERVAL` derivation is void: waits park on eventfd doorbells with no retry quantum, and `POLL_INTERVAL` survives only in `crates/host-runtime/tests/support/process_resources.rs`. Bounded drain: stop offering both ways, poll until stable within an explicit bound, then require both queues empty, all descriptors free on both rings, and no close reported, strictly inside the bound. The outbound stall below is bounded rather than a deadlock, so an unbounded formulation of that lane would be both weaker and unrefutable; the inbound stall is bounded only by the draining precondition."
+        "condition": "two arms. Ratio: while both directions are offered continuously, neither may complete fewer than one frame per K completions of the other, with K pinned by the test from its own configuration and recorded in the test. The only per-lane stall bound the code enforces is `frame_deadline` on the **outbound** lane: the `reserve_until` deadline (`ring_transport.rs:583`, `ring.rs:980`). The inbound lane has no equivalent bound — see the Fault/timing angle — so the ratio arm holds only while the application drains inbound. The former `frame_deadline / POLL_INTERVAL` derivation is void: waits park on eventfd doorbells with no retry quantum, and `POLL_INTERVAL` survives only in `crates/host-runtime/tests/support/process_resources.rs`. Bounded drain: stop offering both ways, poll until stable within an explicit bound, then require both queues empty, all descriptors free on both rings, and no close reported, strictly inside the bound. The outbound stall below is bounded rather than a deadlock, so an unbounded formulation of that lane would be both weaker and unrefutable; the inbound stall is bounded only by the draining precondition."
       },
       "fault_timing": "two asymmetric mechanisms, both on one task on one dedicated thread with its own current-thread runtime. Outbound blocks inbound: `publish_one` (`ring_transport.rs:560`, called at `:479` and `:535`) is synchronous and parks inside `Ring::reserve_until` on the `capacity_ready` doorbell (`ring.rs:1035`) with no await point, for up to `frame_deadline`, during which no receive runs. Inbound blocks outbound: the inbound send is awaited with no timeout and no enclosing select (`ring_transport.rs:551-556`), so it parks until the application drains. **These are not symmetric in boundedness.** The outbound stall ends in an unclean close at its deadline. The inbound stall has no bound at all: the timeout at `frame_channel.rs:640-652` governs *callers submitting outbound frames* into the channel (`timeout_at(deadline, self.tx.send(queued))`), not this inbound send, and cancelling its tokens does not interrupt it. Nor can channel closure release it — `serve_generation` moves the receiver into `read_loop` (`connection.rs:239`, `:250`) and awaits it at `:274`, so the receiver stays alive inside the very loop that is parked. An application that stops draining inbound therefore hangs this lane past `frame_deadline` indefinitely.",
       "required_faults": "genuine overlap, plus capacity pressure on one lane. The peer harness cannot produce overlap today: `RingClientEndpoint::send` blocks in `reserve_until` (`ring_transport.rs:692`) and `recv` blocks in `wait_for_data` (`:710`); `try_recv` (`:718`) is non-blocking, but nothing drives send and receive concurrently. Coverage marker `shm_both_directions_in_flight`, recorded as `duplex-overlap-is-reached`.",
@@ -1519,9 +1490,7 @@
       },
       "existing_check": "`retained_oldest_lease_enforces_fifo_reclamation_and_release_validation` (`tests/ring.rs:138-209`). The blocking half is good. The recovery half releases the retained lease and asserts a one-byte reserve succeeds; with a 64 MiB arena fully charged, a reclaimer advancing only the first sequence leaves 40 MiB, where one byte fits just as well. Status unaudited.",
       "impact": "capacity would return one sequence per producer attempt while accounting stays self-consistent. Convergence still happens under `reserve_until`, so only the size class breaks: a large-frame request is refused while the arena is mostly reclaimable, reporting `Deadline` on a healthy channel.",
-      "open_questions": [
-        "None. The question that opened this record, whether one call drains the whole prefix, is resolved by direct read of the loop's exits."
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {

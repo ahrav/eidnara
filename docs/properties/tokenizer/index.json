@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "tokenizer",
   "source": "catalog.md",
-  "source_sha256": "6ec54244728482c349ad7c4c15cea0be673288546673f9e96f0cb01e55161df0",
+  "source_sha256": "e766a860fcbe684789c4434058c8095381de44590ab0be6fb0a8d2f9d86744fc",
   "records": [
     {
       "slug": "tokenizer-encoding-matches-the-independent-oracle",
@@ -49,7 +49,7 @@
       "required_faults": "None; static asset check.",
       "confidence": {
         "level": "medium",
-        "evidence": "`gen/gen-claude-vocab.ts` enforces both conditions when it writes the asset; the Rust side trusts the asset."
+        "evidence": "[evidence](evidence/tokenizer-vocabulary-is-embedded-and-complete.md). `gen/gen-claude-vocab.ts` enforces both conditions when it writes the asset; the Rust side trusts the asset."
       },
       "existing_check": "The generator's checks; no Rust check; unaudited.",
       "impact": "Encoding panics or silently drops bytes.",

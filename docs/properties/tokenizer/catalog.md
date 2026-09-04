@@ -35,7 +35,7 @@ Guarantee: The embedded `claude.tiktoken` asset has unique ranks and covers ever
 Check: `always` - ranks are unique and 256 single-byte tokens exist in the asset.
 Fault/timing angle: A truncated or duplicated asset makes some bytes unencodable.
 Required faults and enabling state: None; static asset check.
-Confidence: medium - `gen/gen-claude-vocab.ts` enforces both conditions when it writes the asset; the Rust side trusts the asset.
+Confidence: medium - [evidence](evidence/tokenizer-vocabulary-is-embedded-and-complete.md). `gen/gen-claude-vocab.ts` enforces both conditions when it writes the asset; the Rust side trusts the asset.
 Existing check: The generator's checks; no Rust check; unaudited.
 Impact: Encoding panics or silently drops bytes.
 Open questions: None.
