@@ -362,9 +362,16 @@ impl Client {
                     ClientError::new("authentication_failed", "daemon authentication failed")
                 })?;
         let setup_failed = || ClientError::new("setup_failed", "shared-memory setup failed");
+        // The single handshake deadline (§11.2) is reported as `handshake_timeout` from every substage.
+        let setup_error = |error: crate::setup_socket::SetupError| match error {
+            crate::setup_socket::SetupError::Timeout => {
+                ClientError::new("handshake_timeout", "client handshake timed out")
+            }
+            _ => setup_failed(),
+        };
         let (descriptor, descriptors) = crate::setup_socket::activate_client(&mut stream, deadline)
             .await
-            .map_err(|_| setup_failed())?;
+            .map_err(setup_error)?;
         let cancel = CancellationToken::new();
         let read_budget = Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES));
         // §11.2: the client attaches both directions, then commits activation.
@@ -384,7 +391,7 @@ impl Client {
         .await?;
         crate::setup_socket::commit_activation(&mut stream, deadline)
             .await
-            .map_err(|_| setup_failed())?;
+            .map_err(setup_error)?;
         let setup_stream = stream.into_std().map_err(|_| setup_failed())?;
         setup_stream
             .set_nonblocking(false)
@@ -1212,6 +1219,7 @@ impl Inner {
             corr,
             body,
             binary,
+            deadline,
             Arc::clone(&publish),
             &self.queue_budget,
         ) {
@@ -1363,6 +1371,7 @@ impl Inner {
             publish: None,
             ack,
             deadline: Instant::now() + CLIENT_FRAME_TIMEOUT,
+            expires: Instant::now() + CLIENT_FRAME_TIMEOUT,
         };
         if self.control_tx.try_send(frame).is_err() {
             return Err(exhausted());
@@ -1962,11 +1971,18 @@ struct QueuedFrame {
     /// in-flight request; the request's own deadline watcher settles that
     /// single caller.
     deadline: Instant,
+    /// The operation's own absolute deadline. Publication is refused once it
+    /// passes so a request cannot execute after its caller was told it expired;
+    /// that refusal is a zero-byte failure for this frame alone and never
+    /// retires the generation. Control frames use `deadline`.
+    expires: Instant,
 }
 
 struct RingWrite {
     header: EnvelopeHeader,
     body: Vec<u8>,
+    /// `min(expires, deadline)`: the bridge neither waits for capacity nor commits past it.
+    commit_by: StdInstant,
     /// The bridge resets this to `QUEUED` before it reports a zero-byte failure, so a
     /// cancellation that observes the failure never classifies the request `OutcomeUnknown`.
     publish: Option<Arc<AtomicU8>>,
@@ -2106,11 +2122,11 @@ async fn start_ring_bridge(
                     let result = match endpoint.send_bounded(
                         write.header,
                         &write.body,
-                        write.deadline.min(slice),
-                        write.deadline,
+                        write.commit_by.min(slice),
+                        write.commit_by,
                     ) {
                         Err(SendFailure::Deadline)
-                            if StdInstant::now() < write.deadline && !cancel.is_cancelled() =>
+                            if StdInstant::now() < write.commit_by && !cancel.is_cancelled() =>
                         {
                             if setup_peer_closed(&setup) {
                                 Some(Err(SendFailure::Unreserved))
@@ -2123,7 +2139,11 @@ async fn start_ring_bridge(
                     match result {
                         None => pending = Some(write),
                         Some(result) => {
-                            let failed = result.is_err();
+                            // An operation that expired before its connection-scoped frame
+                            // deadline fails alone; the bridge keeps serving other frames.
+                            let per_call_expiry = matches!(result, Err(SendFailure::Deadline))
+                                && StdInstant::now() < write.deadline;
+                            let failed = result.is_err() && !per_call_expiry;
                             if matches!(
                                 result,
                                 Err(SendFailure::Deadline | SendFailure::Unreserved)
@@ -2272,6 +2292,7 @@ struct InFlight {
     ack: Option<oneshot::Sender<()>>,
     charge: ByteCharge,
     deadline: Instant,
+    expires: Instant,
     completed: oneshot::Receiver<Result<(), SendFailure>>,
 }
 
@@ -2335,6 +2356,7 @@ async fn writer_loop(
                 .try_send(RingWrite {
                     header: frame.header,
                     body: frame.body,
+                    commit_by: frame.deadline.min(frame.expires).into_std(),
                     publish: frame.publish.clone(),
                     completed: completed_tx,
                     deadline: frame.deadline.into_std(),
@@ -2353,6 +2375,7 @@ async fn writer_loop(
                 ack: frame.ack,
                 charge: frame.charge,
                 deadline: frame.deadline,
+                expires: frame.expires,
                 completed: completed_rx,
             });
             continue;
@@ -2367,6 +2390,17 @@ async fn writer_loop(
         };
         match written {
             Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(SendFailure::Deadline)))
+                if Instant::now() >= head.expires && Instant::now() < head.deadline =>
+            {
+                // The operation expired before publication: this frame alone is a zero-byte
+                // failure. Its caller was already settled by its own deadline watcher.
+                if let Some(state) = &head.publish {
+                    state.store(QUEUED, Ordering::Release);
+                }
+                drop(head.charge);
+                continue;
+            }
             Ok(Ok(Err(SendFailure::Deadline | SendFailure::Unreserved))) => {
                 // Zero bytes reached the ring, so the frame returns to `QUEUED` and retirement classifies it `NotSent`.
                 fail(&inner, &mut window, Some(&head));
@@ -2483,6 +2517,7 @@ fn encode_data_frame(
     corr: u64,
     body: Vec<u8>,
     binary: bool,
+    expires: Instant,
     publish: Arc<AtomicU8>,
     budget: &Arc<ByteCounter>,
 ) -> Result<QueuedFrame, CallError> {
@@ -2513,6 +2548,7 @@ fn encode_data_frame(
         publish: Some(publish),
         ack: None,
         deadline: Instant::now() + CLIENT_FRAME_TIMEOUT,
+        expires,
     })
 }
 
@@ -3019,6 +3055,43 @@ mod tests {
         writer.await.expect("writer exits after retiring");
         assert!(inner.retired.load(Ordering::Acquire));
         rx.await.expect("settled").expect_err("retired")
+    }
+
+    #[tokio::test]
+    async fn an_operation_that_expires_before_publication_fails_alone() {
+        // The bridge refuses to commit past the operation deadline; the writer treats that as a per-frame zero-byte failure and keeps the generation.
+        let (inner, data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let (kind, _rx) = unary_sender();
+        let expires = Instant::now() + Duration::from_millis(20);
+        let (_key, publish) = inner
+            .admit(route(1), b"late".to_vec(), false, kind, expires)
+            .expect("admitted");
+        let (write, writes) = fake_ring_writer();
+        let writer_inner = Arc::clone(&inner);
+        let writer = tokio::spawn(async move {
+            writer_loop(writer_inner, write, data_rx, control_rx).await;
+        });
+        let ring_write = tokio::task::spawn_blocking(move || {
+            writes
+                .recv_timeout(Duration::from_secs(2))
+                .expect("writer hands the frame to the bridge")
+        })
+        .await
+        .expect("bridge receive task");
+        assert_eq!(ring_write.commit_by, expires.into_std());
+        tokio::time::sleep_until(expires + Duration::from_millis(5)).await;
+        ring_write
+            .completed
+            .send(Err(SendFailure::Deadline))
+            .expect("writer awaits completion");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !inner.retired.load(Ordering::Acquire),
+            "an expired operation must not retire the generation"
+        );
+        assert_eq!(publish.load(Ordering::Acquire), QUEUED);
+        inner.cancel.cancel();
+        writer.await.expect("writer exits on cancel");
     }
 
     #[tokio::test]
@@ -5100,6 +5173,7 @@ mod tests {
                 .try_send(RingWrite {
                     header: outbound,
                     body: Vec::new(),
+                    commit_by: StdInstant::now() + Duration::from_secs(1),
                     publish: None,
                     completed,
                     deadline: StdInstant::now() + Duration::from_secs(1),
