@@ -113,10 +113,17 @@ fn char_chunks(piece: &str, max_bytes: usize) -> impl Iterator<Item = &str> {
     })
 }
 
+/// Highly compressible input can use one id per KiB (a run of spaces does), so the byte-based
+/// preallocation in `encode_bounded` is capped at 16 MiB; beyond it the `Vec` doubles,
+/// amortized linear.
+const MAX_PRESIZE_IDS: usize = 1 << 22;
+
 /// Encodes `text`, chunking any pre-token piece longer than [`MAX_PIECE_BYTES`].
 fn encode_bounded(text: &str) -> Vec<Rank> {
     let vocab = vocab();
-    let mut out = Vec::new();
+    // Real text yields 3.5-4.5 bytes per token; sizing for 3 makes a second growth rare while
+    // over-reserving at most ~25%.
+    let mut out = Vec::with_capacity((text.len() / 3 + 1).min(MAX_PRESIZE_IDS));
     let mut scratch = bpe::Scratch::default();
     let bytes = text.as_bytes();
     for (start, end) in scan::pieces(text) {

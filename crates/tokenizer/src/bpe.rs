@@ -40,7 +40,9 @@ pub struct Scratch {
     next: Vec<u32>,
     prev: Vec<u32>,
     rank: Vec<Rank>,
-    heap: BinaryHeap<Reverse<(Rank, u32)>>,
+    /// `(rank << 32) | position`, packed so the heap compares one `u64`. Lowest rank pops first;
+    /// ties go to the leftmost position.
+    heap: BinaryHeap<Reverse<u64>>,
 }
 
 /// Vocabulary views the merge loop needs.
@@ -302,13 +304,13 @@ impl Vocab {
             let r = self.pair[piece[i] as usize * 256 + piece[i + 1] as usize];
             s.rank.push(r);
             if r != NO_RANK {
-                s.heap.push(Reverse((r, i as u32)));
+                s.heap.push(Reverse(((r as u64) << 32) | i as u64));
             }
         }
         s.rank.push(NO_RANK);
 
-        while let Some(Reverse((r, i))) = s.heap.pop() {
-            let i = i as usize;
+        while let Some(Reverse(key)) = s.heap.pop() {
+            let (r, i) = ((key >> 32) as Rank, key as u32 as usize);
             if s.rank[i] != r {
                 continue;
             }
@@ -321,7 +323,7 @@ impl Vocab {
                 let r = self.rank_of(text, start + i, start + s.next[after as usize] as usize);
                 s.rank[i] = r;
                 if r != NO_RANK {
-                    s.heap.push(Reverse((r, i as u32)));
+                    s.heap.push(Reverse(((r as u64) << 32) | i as u64));
                 }
             } else {
                 s.rank[i] = NO_RANK;
@@ -332,7 +334,7 @@ impl Vocab {
                 let r = self.rank_of(text, start + p, start + after as usize);
                 s.rank[p] = r;
                 if r != NO_RANK {
-                    s.heap.push(Reverse((r, p as u32)));
+                    s.heap.push(Reverse(((r as u64) << 32) | p as u64));
                 }
             }
         }
