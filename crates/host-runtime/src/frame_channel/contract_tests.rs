@@ -144,9 +144,13 @@ pub(crate) async fn saturation_holds_at_frame_bound_and_spares_control_capacity<
 >(
     factory: &F,
 ) {
+    let (published_tx, mut published) = tokio::sync::watch::channel(0usize);
     let h = factory
         .connect(ContractConfig {
             queue_frames: 1,
+            publish_hook: Some(Arc::new(move |_, _| {
+                published_tx.send_modify(|count| *count += 1);
+            })),
             ..ContractConfig::default()
         })
         .await;
@@ -171,12 +175,16 @@ pub(crate) async fn saturation_holds_at_frame_bound_and_spares_control_capacity<
             .await
             .expect("ring slot admits with the byte pool exhausted");
     }
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    published
+        .wait_for(|count| *count >= 8)
+        .await
+        .expect("publication observer outlives the drain");
+    // The peer never reads, so the ring is full: the endpoint takes this frame and parks in publication.
     h.sender
         .send(control())
         .await
         .expect("writer blocks at ring bound");
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // A one-frame queue admits this only after the endpoint has taken the parked frame, so no sleep is needed to establish saturation.
     h.sender.send(control()).await.expect("one frame queues");
     let deadline = Instant::now() + Duration::from_millis(50);
     assert!(

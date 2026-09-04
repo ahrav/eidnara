@@ -659,14 +659,18 @@ async fn receive_one(
     }
 
     let deadline = Instant::now() + frame_deadline;
+    let discard = queue.discard.clone();
     let charge = ingress.charge(header.len);
     tokio::pin!(charge);
     let charge = loop {
         tokio::select! {
             biased;
+            // An available budget charges before the lifecycle arms are polled, so a frame committed before read cancellation still drains; only a frame that must wait for budget yields to cancellation. commentlint: allow(JUDGE)
+            charge = &mut charge => break charge,
             // Read cancellation stops only the read side: dropping `lease` discards the frame and `Ok(false)` lets the writer keep draining. commentlint: allow(JUDGE)
             () = read_cancel.cancelled() => return Ok(false),
-            charge = &mut charge => break charge,
+            // The endpoint loop observes `discard` and exits; the dropped lease discards the frame. commentlint: allow(JUDGE)
+            () = discard.cancelled() => return Ok(false),
             () = tokio::time::sleep_until(deadline) => {
                 // The peer and transport are healthy; only the ingress budget is
                 // saturated. Overloaded retires the generation without branding
@@ -1235,6 +1239,118 @@ mod tests {
             rings.second.try_receive().unwrap().is_none(),
             "the parked frame is discarded with its lease"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_wait_observes_discard_without_retiring() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let header = EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 0,
+            epoch: 0,
+            corr: 1,
+        };
+        let mut reservation = rings.second.try_reserve(1, header.encode()).unwrap();
+        reservation.write(&[7]).unwrap();
+        reservation.commit(1).unwrap();
+        let (_sender, mut queue) =
+            frame_sender(1, CancellationToken::new(), Duration::from_secs(1));
+        let discard = queue.discard.clone();
+        let (inbound, _received) = mpsc::channel(1);
+        let budget = ByteBudget::new(0);
+        let root = CancellationToken::new();
+        let read_cancel = CancellationToken::new();
+        let receive = receive_one(
+            &rings,
+            &mut queue,
+            &inbound,
+            &budget,
+            Duration::from_secs(1),
+            &root,
+            &read_cancel,
+            None,
+        );
+        let discard_after_poll = async move {
+            tokio::task::yield_now().await;
+            discard.cancel();
+        };
+        let started = Instant::now();
+        let (result, ()) = tokio::join!(receive, discard_after_poll);
+        assert!(
+            matches!(result, Ok(false)),
+            "discard ends the budget wait without a transport fault"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "discard must not wait for the frame deadline"
+        );
+        assert!(!queue.retired.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn read_cancellation_drains_frames_committed_before_it() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            read_cancel,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 1, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        let depth = ring_profile().descriptor_depth();
+        for corr in 1..=depth as u64 {
+            peer.send(
+                EnvelopeHeader {
+                    len: 1,
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType::Request,
+                    flags: Flags::new(false, Priority::Interactive, false),
+                    channel: 7,
+                    epoch: 1,
+                    corr,
+                },
+                &[1],
+                StdInstant::now() + Duration::from_secs(1),
+            )
+            .expect("peer fills the ring");
+        }
+        // With a one-frame inbound queue, most of the ring is still uncommitted to the receiver when the read side is cancelled.
+        let first = receiver.recv().await.expect("first frame");
+        drop(first);
+        read_cancel.cancel();
+
+        let mut forwarded = 1usize;
+        loop {
+            match receiver.recv().await {
+                Ok(InboundEvent::Frame(frame)) => {
+                    assert_eq!(frame.header.corr, forwarded as u64 + 1);
+                    forwarded += 1;
+                }
+                Ok(InboundEvent::Rejected(_)) => panic!("unexpected rejection"),
+                Err(ReadClose::Cancelled) => break,
+                Err(other) => panic!("unexpected close {other:?}"),
+            }
+        }
+        assert_eq!(
+            forwarded, depth,
+            "every frame the peer committed before read cancellation is delivered before Cancelled"
+        );
+        assert!(!sender.is_retired());
+        sender.finish();
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits after finish")
+            .expect("endpoint task joins");
     }
 
     #[tokio::test]

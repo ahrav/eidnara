@@ -61,7 +61,7 @@ enum OccState {
 }
 
 pub enum CloseDecision {
-    /// The close owner aborts tasks, waits on `tracker`, runs route-gone, and calls `RouteRegistry::finalize_close`.
+    /// The close owner aborts tasks, waits on the already-closed `tracker`, runs route-gone, and calls
     /// [`RouteRegistry::finalize_close`].
     Owner {
         generation: Arc<GenerationCore>,
@@ -418,9 +418,11 @@ impl RouteRegistry {
 }
 
 impl Occupant {
+    // `register_dispatch` and `route_tracker` refuse a route once it leaves `Live`, so closing the tracker here lets the owner's `wait` settle without a separate `close` call. commentlint: allow(JUDGE)
     fn take_close_ownership(&mut self) -> (Vec<tokio::task::AbortHandle>, TaskTracker) {
         self.state = OccState::Closing;
         self.cancel.cancel();
+        self.tracker.close();
         (std::mem::take(&mut self.aborts), self.tracker.clone())
     }
 }
@@ -541,6 +543,38 @@ mod tests {
 
         owner_aborts(registry.begin_close(handle));
         assert!(registry.route_tracker(handle, generation.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn close_ownership_hands_out_a_closed_tracker() {
+        let registry = RouteRegistry::new(16);
+        let generation = generation_core(1);
+        let handle = registry
+            .reserve(&generation, RouteClass::General)
+            .expect("reserve");
+        registry.install_bound(handle);
+        let (live_tracker, _) = registry
+            .route_tracker(handle, generation.id)
+            .expect("live route");
+        assert!(!live_tracker.is_closed());
+
+        let CloseDecision::Owner { tracker, .. } = registry.begin_close(handle) else {
+            panic!("expected close ownership");
+        };
+        assert!(
+            tracker.is_closed(),
+            "the owner can wait without closing first"
+        );
+        tokio::time::timeout(std::time::Duration::from_millis(100), tracker.wait())
+            .await
+            .expect("an idle closed tracker settles immediately");
+
+        let forced = registry
+            .reserve(&generation, RouteClass::General)
+            .expect("reserve");
+        registry.install_bound(forced);
+        let drained = registry.force_drain();
+        assert!(drained.iter().all(|(_, _, tracker)| tracker.is_closed()));
     }
 
     #[tokio::test]
