@@ -29,6 +29,19 @@ pub struct ServerProof {
     pub server_proof: [u8; PROOF_LEN],
 }
 
+/// `server_proof_message_bytes` sizes the `ServerProof` frame that carries `daemon_ver` with every
+/// byte array at its widest JSON encoding, so the result is an upper bound for any real proof.
+pub(crate) fn server_proof_message_bytes(daemon_ver: &str) -> usize {
+    serde_json::to_vec(&ServerProof {
+        daemon_id: [u8::MAX; DAEMON_ID_LEN],
+        server_nonce: [u8::MAX; NONCE_LEN],
+        daemon_ver: daemon_ver.to_owned(),
+        server_proof: [u8::MAX; PROOF_LEN],
+    })
+    .expect("fixed auth shape serializes")
+    .len()
+}
+
 // A derived `Debug` exposes the HMAC in error and panic output.
 // while debugging.
 impl fmt::Debug for ServerProof {

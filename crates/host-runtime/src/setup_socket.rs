@@ -24,13 +24,17 @@ use tokio::time::{Instant, timeout_at};
 pub const MAX_SETUP_MESSAGE_LEN: usize = 16 * 1024;
 pub const RING_DESCRIPTOR_COUNT: usize = shm_transport::descriptor::SETUP_DESCRIPTOR_COUNT;
 
+/// Binds the setup socket at `path` with mode `0600`, replacing a stale socket left by an earlier incarnation.
+///
+/// The occupant's mode is not consulted: `set_permissions` runs after `UnixListener::bind`,
+/// and a crash between the two leaves an owner-owned socket at a looser mode.
+/// The stale socket is unlinked without connecting, so its mode does not affect the trust decision.
 pub(crate) fn bind_owner_only(path: &Path) -> io::Result<tokio::net::UnixListener> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
-            let secure_stale_socket = metadata.file_type().is_socket()
-                && metadata.uid() == rustix::process::geteuid().as_raw()
-                && metadata.mode() & 0o777 == 0o600;
-            if !secure_stale_socket {
+            let own_stale_socket = metadata.file_type().is_socket()
+                && metadata.uid() == rustix::process::geteuid().as_raw();
+            if !own_stale_socket {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "refusing insecure setup socket occupant",
@@ -49,7 +53,9 @@ pub(crate) fn bind_owner_only(path: &Path) -> io::Result<tokio::net::UnixListene
     Ok(listener)
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+pub const GRANT_MESSAGE_TYPE: &str = "grant";
+
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename = "grant")]
 pub struct GrantMessage {
     pub wire_version: u8,
@@ -58,7 +64,19 @@ pub struct GrantMessage {
     pub descriptor: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+/// The activation token is a credential; diagnostics never render it.
+impl std::fmt::Debug for GrantMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrantMessage")
+            .field("wire_version", &self.wire_version)
+            .field("descriptor_schema", &self.descriptor_schema)
+            .field("activation_token", &REDACTED)
+            .field("descriptor", &self.descriptor)
+            .finish()
+    }
+}
+
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum ClientMessage {
     Activate {
@@ -69,6 +87,28 @@ enum ClientMessage {
     Commit,
     Goodbye,
 }
+
+/// `Activate` carries the activation token; diagnostics never render it.
+impl std::fmt::Debug for ClientMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Activate {
+                wire_version,
+                descriptor_schema,
+                ..
+            } => f
+                .debug_struct("Activate")
+                .field("wire_version", wire_version)
+                .field("descriptor_schema", descriptor_schema)
+                .field("activation_token", &REDACTED)
+                .finish(),
+            Self::Commit => f.write_str("Commit"),
+            Self::Goodbye => f.write_str("Goodbye"),
+        }
+    }
+}
+
+const REDACTED: &str = "<redacted>";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -290,6 +330,12 @@ pub async fn activate_client(
     deadline: Instant,
 ) -> Result<(serde_json::Value, [OwnedFd; RING_DESCRIPTOR_COUNT]), SetupError> {
     let (value, descriptors) = receive_grant(stream, deadline).await?;
+    // Serde does not validate the `type` tag while deserializing `GrantMessage`,
+    // so any object carrying the four grant fields would otherwise decode as a
+    // grant regardless of its declared `type`.
+    if value.get("type").and_then(serde_json::Value::as_str) != Some(GRANT_MESSAGE_TYPE) {
+        return Err(SetupError::InvalidMessage);
+    }
     let GrantMessage {
         wire_version,
         descriptor_schema,
@@ -499,6 +545,30 @@ mod tests {
         let error = bind_owner_only(&path).expect_err("regular file must fail closed");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(std::fs::read(path).unwrap(), b"not a socket");
+    }
+
+    /// A crash between `bind` and `set_permissions` leaves an owner-owned socket at the umask default mode; the next start must replace it rather than refuse until an operator deletes it.
+    #[tokio::test]
+    async fn own_stale_socket_with_loose_mode_is_replaced() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("setup.sock");
+        drop(bind_owner_only(&path).expect("first bind"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("simulate a crash before the mode tightened");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+
+        let _listener = bind_owner_only(&path).expect("stale owner socket must be replaced");
+        let mode = std::fs::symlink_metadata(&path)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[tokio::test]
@@ -809,6 +879,101 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    /// Serde emits but does not check the struct-level `type` tag, so the client
+    /// must reject a grant-shaped payload whose declared type is wrong or absent.
+    #[tokio::test]
+    async fn client_rejects_grant_shaped_payload_with_wrong_or_missing_type() {
+        let mut wrong_type = serde_json::json!({
+            "type": "request",
+            "wire_version": crate::wire::PROTOCOL_VERSION,
+            "descriptor_schema": shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
+            "activation_token": "token",
+            "descriptor": {"ring": "v1"},
+        });
+        let mut missing_type = wrong_type.clone();
+        missing_type.as_object_mut().expect("object").remove("type");
+        let mut accepted = wrong_type.clone();
+        accepted["type"] = GRANT_MESSAGE_TYPE.into();
+        wrong_type["type"] = "request".into();
+
+        for (label, payload, expect_grant) in [
+            ("wrong type", wrong_type, false),
+            ("missing type", missing_type, false),
+            ("correct type", accepted, true),
+        ] {
+            let (server, mut client) = UnixStream::pair().expect("socket pair");
+            let descriptors = descriptors();
+            let borrowed: [BorrowedFd<'_>; RING_DESCRIPTOR_COUNT] =
+                std::array::from_fn(|index| descriptors[index].as_fd());
+            let bytes = encode_message(&payload).unwrap();
+            server.writable().await.unwrap();
+            let mut space =
+                [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(RING_DESCRIPTOR_COUNT))];
+            let mut ancillary = SendAncillaryBuffer::new(&mut space);
+            assert!(ancillary.push(SendAncillaryMessage::ScmRights(&borrowed)));
+            sendmsg(
+                server.as_fd(),
+                &[IoSlice::new(&bytes)],
+                &mut ancillary,
+                SendFlags::empty(),
+            )
+            .unwrap();
+
+            let deadline = Instant::now() + Duration::from_secs(1);
+            // Only the correctly typed payload reaches the activate write; the
+            // server side is never driven, so that path times out on the read.
+            let outcome =
+                activate_client(&mut client, Instant::now() + Duration::from_millis(200)).await;
+            if expect_grant {
+                assert!(
+                    matches!(outcome, Err(SetupError::Timeout)),
+                    "{label}: a well-typed grant must proceed to activation: {outcome:?}"
+                );
+                let mut server = server;
+                let activate: ClientMessage = read_message(&mut server, deadline)
+                    .await
+                    .expect("client wrote activate");
+                assert!(matches!(activate, ClientMessage::Activate { .. }));
+            } else {
+                assert!(
+                    matches!(outcome, Err(SetupError::InvalidMessage)),
+                    "{label}: must be rejected as an invalid message: {outcome:?}"
+                );
+                let mut server = server;
+                let mut byte = [0u8; 1];
+                let read =
+                    tokio::time::timeout(Duration::from_millis(100), server.read(&mut byte)).await;
+                assert!(
+                    read.is_err(),
+                    "{label}: the client must not write activate for a mistyped grant"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn debug_output_never_renders_the_activation_token() {
+        let token = "5a5a5a5a-secret-activation-token";
+        let grant = GrantMessage {
+            wire_version: crate::wire::PROTOCOL_VERSION,
+            descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
+            activation_token: token.to_owned(),
+            descriptor: serde_json::json!({"ring": "v1"}),
+        };
+        let activate = ClientMessage::Activate {
+            wire_version: crate::wire::PROTOCOL_VERSION,
+            descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
+            activation_token: token.to_owned(),
+        };
+        for rendered in [format!("{grant:?}"), format!("{activate:?}")] {
+            assert!(!rendered.contains(token), "{rendered}");
+            assert!(rendered.contains(REDACTED), "{rendered}");
+        }
+        let wire = serde_json::to_string(&grant).expect("serialize");
+        assert!(wire.contains(token));
+        assert!(wire.contains(r#""type":"grant""#));
     }
 
     #[tokio::test]

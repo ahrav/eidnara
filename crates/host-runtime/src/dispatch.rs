@@ -138,8 +138,9 @@ async fn charge_frame_or_cancel(
         () = request_cancelled => None,
         () = generation.token.cancelled() => None,
         charge = timeout_at(deadline, budget.charge(bytes)) => match charge {
-            Ok(charge) => Some(charge),
-            Err(_) => {
+            Ok(Some(charge)) => Some(charge),
+            // `None` means the frame exceeds the budget's capacity and no release can ever admit it.
+            Ok(None) | Err(_) => {
                 generation.token.cancel();
                 None
             }

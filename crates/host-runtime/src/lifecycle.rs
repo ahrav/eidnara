@@ -14,9 +14,10 @@ use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags, flock, openat, unlinkat}
 use crate::connection_file::{ConnectionInfo, KEY_LEN};
 
 use crate::instance::{
-    CONNECTION_FILE_NAME, InstanceError, InstanceGuard, S_IFDIR, S_IFMT, S_IFREG, data_dir_path,
-    flock_bounded, flock_exclusive_bounded, hex, io_err, is_safe_ancestor, is_secure_regular,
-    mode_bits, read_all_fd, runtime_dir_path, secure_runtime_dir,
+    CONNECTION_FILE_NAME, InstanceError, InstanceGuard, S_IFMT, S_IFREG, data_dir_path,
+    flock_bounded, flock_exclusive_bounded, hex, io_err, is_owner_only_dir, is_safe_ancestor,
+    is_secure_regular, mode_bits, open_secure_dir_existing, read_all_fd, repair_owner_access,
+    runtime_dir_path, secure_runtime_dir, stat_identity,
 };
 
 /// `LIFECYCLE_RECORD_NAME` identifies the lifecycle record in the runtime directory.
@@ -92,18 +93,30 @@ fn create_validated_lock_file(
     name: &'static str,
 ) -> Result<OwnedFd, InstanceError> {
     let path = dir_path.join(name);
-    let fd = match openat(
-        dir,
-        name,
-        OFlags::CREATE | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::from_raw_mode(0o600),
-    ) {
+    let flags =
+        OFlags::CREATE | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let fd = match openat(dir, name, flags, Mode::from_raw_mode(0o600)) {
         Ok(fd) => fd,
         Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
             return Err(InstanceError::Insecure {
                 what: "coordination lock file",
                 path,
             });
+        }
+        // A crash between `O_CREAT` and the `fchmod` below under a restrictive umask leaves
+        // an owner-owned lock file without read permission.
+        Err(rustix::io::Errno::ACCESS) => {
+            if !repair_owner_access(dir, name.as_ref(), S_IFREG, 0o600)
+                .map_err(|e| io_err("repair_coordination_lock", &path, e))?
+            {
+                return Err(io_err(
+                    "open_coordination_lock",
+                    &path,
+                    rustix::io::Errno::ACCESS,
+                ));
+            }
+            openat(dir, name, flags, Mode::from_raw_mode(0o600))
+                .map_err(|e| io_err("open_coordination_lock", &path, e))?
         }
         Err(e) => return Err(io_err("open_coordination_lock", &path, e)),
     };
@@ -129,7 +142,8 @@ fn open_coordination_lock_probe(
     name: &'static str,
 ) -> Result<Option<(OwnedFd, PathBuf)>, InstanceError> {
     let dir_path = coordination_dir_path(data_dir_override)?;
-    let Some(dir) = open_validated_dir(&dir_path, "coordination directory")? else {
+    let Some(dir) = open_validated_dir(&dir_path, "coordination directory", LeafPolicy::OwnerOnly)?
+    else {
         return Ok(None);
     };
     let path = dir_path.join(name);
@@ -392,7 +406,11 @@ impl InstanceGuard {
     /// `O_NOFOLLOW` rejects symlinks but not FIFOs.
     /// Opening a FIFO for reading blocks until a writer arrives.
     /// `is_secure_regular` rejects FIFOs after `openat` succeeds.
-    pub fn remove_lifecycle_record(&self) {
+    ///
+    /// POSIX unlinks by name; a record installed after the identity check can be removed.
+    /// `&mut self` prevents concurrent `write_lifecycle_record` calls on the same guard.
+    /// The runtime lock excludes every other writer.
+    pub fn remove_lifecycle_record(&mut self) {
         let Ok(fd) = openat(
             self.dir(),
             LIFECYCLE_RECORD_NAME,
@@ -506,6 +524,8 @@ struct AnchorEntry {
     _fd: OwnedFd,
     dev: u64,
     ino: u64,
+    /// `verify` re-opens the entry under the same leaf policy `capture` used.
+    leaf: LeafPolicy,
 }
 
 impl std::fmt::Debug for NamespaceAnchor {
@@ -523,13 +543,6 @@ impl std::fmt::Debug for NamespaceAnchor {
     }
 }
 
-// `Stat::st_dev` is `i32` on macOS, so `stat_identity` casts it to `u64`.
-// The cast is required on platforms where `st_dev` is not `u64`.
-#[allow(clippy::unnecessary_cast)]
-fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64) {
-    (stat.st_dev as u64, stat.st_ino as u64)
-}
-
 impl NamespaceAnchor {
     /// `NamespaceAnchor::capture` uses validated no-follow descriptors and records each directory's identity.
     /// `NamespaceAnchor::capture` does not capture absent entries.
@@ -537,8 +550,14 @@ impl NamespaceAnchor {
     pub fn capture(data_dir_override: Option<&Path>) -> Result<Self, InstanceError> {
         let base = crate::instance::managed_dir_path(data_dir_override)?;
         let mut entries = Vec::new();
-        for path in [base.clone(), base.join("lifecycle"), base.join("run")] {
-            let Some(fd) = open_validated_dir(&path, "managed namespace directory")? else {
+        // `InstanceGuard::acquire` validates `eidnara` only as an ancestor of `run`
+        // and tightens `run` itself, so the anchor applies the same two policies.
+        for (path, leaf) in [
+            (base.clone(), LeafPolicy::SafeAncestor),
+            (base.join("lifecycle"), LeafPolicy::OwnerOnly),
+            (base.join("run"), LeafPolicy::OwnerOnly),
+        ] {
+            let Some(fd) = open_validated_dir(&path, "managed namespace directory", leaf)? else {
                 continue;
             };
             let stat = rustix::fs::fstat(&fd).map_err(|e| io_err("fstat_namespace", &path, e))?;
@@ -548,6 +567,7 @@ impl NamespaceAnchor {
                 _fd: fd,
                 dev,
                 ino,
+                leaf,
             });
         }
         Ok(Self { entries })
@@ -559,7 +579,9 @@ impl NamespaceAnchor {
             let drift = || InstanceError::NamespaceDrift {
                 path: entry.path.clone(),
             };
-            let Some(fd) = open_validated_dir(&entry.path, "managed namespace directory")? else {
+            let Some(fd) =
+                open_validated_dir(&entry.path, "managed namespace directory", entry.leaf)?
+            else {
                 return Err(drift());
             };
             let stat =
@@ -572,74 +594,40 @@ impl NamespaceAnchor {
     }
 }
 
+/// The leaf check an observer applies to the last component of a managed path.
+///
+/// A leaf check stricter than the mutator's would refuse a tree the mutator accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeafPolicy {
+    /// For directories a mutator creates and tightens through `secure_runtime_dir`.
+    OwnerOnly,
+    /// For directories a mutator only traverses as an ancestor.
+    SafeAncestor,
+}
+
 /// `open_validated_dir` does not follow intermediate or final symlinks.
 /// `open_validated_dir` neither creates nor changes permissions on filesystem entries.
 /// `None` indicates that at least one path component does not exist.
 fn open_validated_dir(
     dir_path: &Path,
     what: &'static str,
+    leaf: LeafPolicy,
 ) -> Result<Option<OwnedFd>, InstanceError> {
-    let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC;
-    let insecure = || InstanceError::Insecure {
-        what,
-        path: dir_path.to_path_buf(),
+    let Some(fd) = open_secure_dir_existing(dir_path)? else {
+        return Ok(None);
     };
-    let mut current = match openat(
-        rustix::fs::CWD,
-        if dir_path.is_absolute() { "/" } else { "." },
-        flags,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(e) => return Err(io_err("open_anchor", dir_path, e)),
+    let stat = rustix::fs::fstat(&fd).map_err(|e| io_err("fstat_component", dir_path, e))?;
+    let accepted = match leaf {
+        LeafPolicy::OwnerOnly => is_owner_only_dir(&stat),
+        LeafPolicy::SafeAncestor => is_safe_ancestor(&stat),
     };
-    let anchor_stat =
-        rustix::fs::fstat(&current).map_err(|e| io_err("fstat_anchor", dir_path, e))?;
-    if !is_safe_ancestor(&anchor_stat) {
-        return Err(insecure());
+    if !accepted {
+        return Err(InstanceError::Insecure {
+            what,
+            path: dir_path.to_path_buf(),
+        });
     }
-    let mut names = Vec::new();
-    for component in dir_path.components() {
-        match component {
-            std::path::Component::RootDir | std::path::Component::CurDir => continue,
-            std::path::Component::Normal(name) => names.push(name),
-            std::path::Component::ParentDir | std::path::Component::Prefix(_) => {
-                return Err(insecure());
-            }
-        }
-    }
-    if names.is_empty() {
-        return Err(insecure());
-    }
-    let last = names.len() - 1;
-    for (index, name) in names.into_iter().enumerate() {
-        let next = match openat(&current, name, flags, Mode::empty()) {
-            Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Ok(None),
-            // Opening a symlink component with `O_NOFOLLOW` fails with `ELOOP`.
-            // Opening a non-directory component fails with `ENOTDIR`.
-            // `ELOOP` and `ENOTDIR` are hostile shapes, not absence.
-            Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
-                return Err(insecure());
-            }
-            Err(e) => return Err(io_err("open_component", dir_path, e)),
-        };
-        let stat = rustix::fs::fstat(&next).map_err(|e| io_err("fstat_component", dir_path, e))?;
-        if index != last {
-            if !is_safe_ancestor(&stat) {
-                return Err(insecure());
-            }
-        } else {
-            let mode = mode_bits(&stat);
-            let is_dir = (mode & S_IFMT) == S_IFDIR;
-            let owner_ok = stat.st_uid == rustix::process::geteuid().as_raw();
-            if !is_dir || !owner_ok || mode & 0o077 != 0 {
-                return Err(insecure());
-            }
-        }
-        current = next;
-    }
-    Ok(Some(current))
+    Ok(Some(fd))
 }
 
 /// `LifecycleState::Wedged` records an observation; this crate neither kills processes nor breaks locks.
@@ -822,20 +810,30 @@ pub fn probe_lifecycle(
     const GRACE_DELAY: Duration = Duration::from_millis(25);
 
     let dir_path = runtime_dir_path(data_dir_override)?;
-    // A missing runtime directory means `stopped` only if the stable lifetime fence is free.
-    // A held lifetime fence can identify a live incarnation whose namespace was replaced.
-    // A held lifetime fence can also identify an incarnation still creating its runtime directory.
-    // The probe re-samples `LOCK_DISAGREEMENT_GRACE` times while a live incarnation creates its runtime directory.
-    // A free runtime lock does not prove that the lifetime-fence holder ended.
-    let mut runtime_dir = None;
-    for attempt in 0..=LOCK_DISAGREEMENT_GRACE {
-        match open_validated_dir(&dir_path, "lifecycle evidence directory")? {
-            Some(dir) => {
-                runtime_dir = Some(dir);
-                break;
-            }
-            None => {
-                if lifetime_lock_free(data_dir_override)? {
+
+    let mut torn_rereads = 0;
+    let mut grace_rereads = 0;
+    let mut disagreement_rereads = 0;
+    let mut absent_dir_rereads = 0;
+    loop {
+        // A shared transaction lock excludes in-flight mutators for each sample.
+        // If the transaction lock is absent or exclusively held, the probe uses evidence-only sampling.
+        // The bounded reread loop keeps evidence-only samples coherent.
+        // A transaction that replaces `eidnara/run` between two samples is observed by the next sample instead of pinning the displaced directory for the rest of the probe.
+        let sample = {
+            let _root = LifecycleTransactionLock::acquire_shared(data_dir_override)?;
+            // A missing runtime directory means `stopped` only if the stable lifetime fence is free.
+            // A held lifetime fence can identify a live incarnation whose namespace was replaced.
+            // A held lifetime fence can also identify an incarnation still creating its runtime directory.
+            // The probe re-samples `LOCK_DISAGREEMENT_GRACE` times while a live incarnation creates its runtime directory.
+            // A free runtime lock does not prove that the lifetime-fence holder ended.
+            let dir = match open_validated_dir(
+                &dir_path,
+                "lifecycle evidence directory",
+                LeafPolicy::OwnerOnly,
+            )? {
+                Some(dir) => Some(dir),
+                None if lifetime_lock_free(data_dir_override)? => {
                     return Ok(LifecycleProbe {
                         state: LifecycleState::Stopped,
                         reason: "no runtime directory",
@@ -845,40 +843,38 @@ pub fn probe_lifecycle(
                         lifetime_lock_free: true,
                     });
                 }
-                if attempt < LOCK_DISAGREEMENT_GRACE {
-                    std::thread::sleep(GRACE_DELAY);
+                None if absent_dir_rereads < LOCK_DISAGREEMENT_GRACE => {
+                    absent_dir_rereads += 1;
+                    None
+                }
+                None => {
+                    return Ok(LifecycleProbe {
+                        state: LifecycleState::Wedged,
+                        reason: "lifetime fence held without a runtime directory",
+                        record: None,
+                        publication: None,
+                        instance_lock_free: true,
+                        lifetime_lock_free: false,
+                    });
+                }
+            };
+            match dir {
+                None => None,
+                Some(dir) => {
+                    let lifetime_before = lifetime_lock_free(data_dir_override)?;
+                    let before = sample_evidence(&dir);
+                    let lock_free = instance_lock_free(&dir, &dir_path)?;
+                    let after = sample_evidence(&dir);
+                    let lifetime_free = lifetime_lock_free(data_dir_override)?;
+                    Some((lifetime_before, before, lock_free, after, lifetime_free))
                 }
             }
-        }
-    }
-    let Some(dir) = runtime_dir else {
-        return Ok(LifecycleProbe {
-            state: LifecycleState::Wedged,
-            reason: "lifetime fence held without a runtime directory",
-            record: None,
-            publication: None,
-            instance_lock_free: true,
-            lifetime_lock_free: false,
-        });
-    };
-
-    let mut torn_rereads = 0;
-    let mut grace_rereads = 0;
-    let mut disagreement_rereads = 0;
-    loop {
-        // A shared transaction lock excludes in-flight mutators for each sample.
-        // If the transaction lock is absent or exclusively held, the probe uses evidence-only sampling.
-        // The bounded reread loop keeps evidence-only samples coherent.
-        let sample = {
-            let _root = LifecycleTransactionLock::acquire_shared(data_dir_override)?;
-            let lifetime_before = lifetime_lock_free(data_dir_override)?;
-            let before = sample_evidence(&dir);
-            let lock_free = instance_lock_free(&dir, &dir_path)?;
-            let after = sample_evidence(&dir);
-            let lifetime_free = lifetime_lock_free(data_dir_override)?;
-            (lifetime_before, before, lock_free, after, lifetime_free)
         };
-        let (lifetime_before, before, lock_free, after, lifetime_free) = sample;
+        let Some((lifetime_before, before, lock_free, after, lifetime_free)) = sample else {
+            // The sleep runs outside the shared lock so a mutator creating the directory is not held up.
+            std::thread::sleep(GRACE_DELAY);
+            continue;
+        };
         if (before != after || lifetime_before != lifetime_free) && torn_rereads + 1 < MAX_REREADS {
             torn_rereads += 1;
             continue;
@@ -1158,7 +1154,7 @@ mod tests {
     #[test]
     fn record_round_trips_and_removes_fenced() {
         let root = temp_root();
-        let guard = acquire(root.path());
+        let mut guard = acquire(root.path());
         guard
             .write_lifecycle_record(LifecyclePhase::Starting)
             .expect("write starting");
@@ -1184,7 +1180,7 @@ mod tests {
     fn record_removal_spares_a_successor() {
         for field in ["launch_id", "daemon_id"] {
             let root = temp_root();
-            let guard = acquire(root.path());
+            let mut guard = acquire(root.path());
             guard
                 .write_lifecycle_record(LifecyclePhase::Running)
                 .expect("write running");
@@ -1581,6 +1577,65 @@ mod tests {
         }
     }
 
+    /// The anchor and probe accept a 0755 `eidnara` ancestor that `InstanceGuard::acquire`
+    /// permits, while a loose `run` leaf still fails closed.
+    #[test]
+    fn observers_accept_the_ancestor_policy_acquire_applies_to_eidnara() {
+        let root = temp_root();
+        let eidnara = root.path().join("eidnara");
+        std::fs::create_dir(&eidnara).expect("eidnara");
+        std::fs::set_permissions(&eidnara, std::fs::Permissions::from_mode(0o755))
+            .expect("loose managed root");
+        std::fs::create_dir(eidnara.join("lifecycle")).expect("lifecycle");
+        std::fs::set_permissions(
+            eidnara.join("lifecycle"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .expect("owner-only lifecycle");
+
+        let mut guard = acquire(root.path());
+        guard
+            .write_lifecycle_record(LifecyclePhase::Running)
+            .expect("running");
+        guard
+            .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
+            .expect("publish");
+        assert_eq!(
+            std::fs::metadata(&eidnara)
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755,
+            "acquire must not have tightened the ancestor"
+        );
+
+        let anchor = NamespaceAnchor::capture(Some(root.path()))
+            .expect("the anchor accepts the tree the daemon is running on");
+        anchor.verify().expect("identity holds");
+        assert_eq!(probe(root.path()).state, LifecycleState::Running);
+
+        std::fs::set_permissions(guard.dir_path(), std::fs::Permissions::from_mode(0o755))
+            .expect("loosen run");
+        assert!(
+            matches!(
+                NamespaceAnchor::capture(Some(root.path())),
+                Err(InstanceError::Insecure {
+                    what: "managed namespace directory",
+                    ..
+                })
+            ),
+            "a loose run leaf must fail closed"
+        );
+        assert!(matches!(
+            probe_lifecycle(Some(root.path()), &ProbeFreshness::default()),
+            Err(InstanceError::Insecure {
+                what: "lifecycle evidence directory",
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn shared_probe_lock_never_creates_and_yields_none_under_a_mutator() {
         let root = temp_root();
@@ -1620,8 +1675,14 @@ mod tests {
         let elsewhere = temp_root();
         let path = coordination_dir_path(Some(root.path())).expect("path");
         std::os::unix::fs::symlink(elsewhere.path(), &path).expect("symlink");
-        assert!(LifecycleTransactionLock::acquire_shared(Some(root.path())).is_err());
-        assert!(LifecycleTransactionLock::acquire_exclusive(Some(root.path())).is_err());
+        assert!(matches!(
+            LifecycleTransactionLock::acquire_shared(Some(root.path())),
+            Err(InstanceError::Insecure { .. })
+        ));
+        assert!(matches!(
+            LifecycleTransactionLock::acquire_exclusive(Some(root.path())),
+            Err(InstanceError::Insecure { .. })
+        ));
         assert!(
             std::fs::read_dir(elsewhere.path())
                 .expect("read target")
@@ -1781,10 +1842,8 @@ mod tests {
             .expect("the pre-poll notification must not be lost");
     }
 
-    ///
     /// A thread blocked in `openat` on a writer-less FIFO cannot be cancelled or joined.
-    /// A timeout must terminate the process because a blocked FIFO-open thread cannot be joined.
-    /// The timeout handler exits the process because a blocked FIFO-open thread cannot be joined.
+    /// Panicking on the test thread fails only this test; the blocked thread does not keep the process alive after the harness's main thread returns.
     #[cfg(target_os = "linux")]
     fn within<T: Send + 'static>(
         budget: Duration,
@@ -1797,14 +1856,10 @@ mod tests {
         });
         match rx.recv_timeout(budget) {
             Ok(value) => value,
-            Err(_) => {
-                eprintln!("FAILED: {diagnosis}");
-                eprintln!(
-                    "  a blocking open never returned within {budget:?}; \
-                     O_NONBLOCK is missing from the evidence opener"
-                );
-                std::process::exit(1);
-            }
+            Err(_) => panic!(
+                "{diagnosis}: a blocking open never returned within {budget:?}; \
+                 O_NONBLOCK is missing from the evidence opener"
+            ),
         }
     }
 
@@ -1855,7 +1910,7 @@ mod tests {
     #[test]
     fn a_fifo_at_the_record_name_cannot_hang_fenced_removal() {
         let root = temp_root();
-        let guard = acquire(root.path());
+        let mut guard = acquire(root.path());
         let path = record_path(&guard);
         rustix::fs::mkfifoat(rustix::fs::CWD, path.as_path(), Mode::from_raw_mode(0o600))
             .expect("plant fifo");
@@ -1866,6 +1921,77 @@ mod tests {
             move || guard.remove_lifecycle_record(),
         );
         assert!(path.exists(), "a foreign shape must survive fenced removal");
+    }
+
+    /// `remove_publication` opens the canonical name from `Drop` too, so a FIFO planted there after publication must be rejected without blocking.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fifo_at_the_publication_name_cannot_hang_fenced_removal() {
+        let root = temp_root();
+        let mut guard = acquire(root.path());
+        guard
+            .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
+            .expect("publish");
+        let path = guard.dir_path().join(CONNECTION_FILE_NAME);
+        std::fs::remove_file(&path).expect("displace publication");
+        rustix::fs::mkfifoat(rustix::fs::CWD, path.as_path(), Mode::from_raw_mode(0o600))
+            .expect("plant fifo");
+
+        within(
+            Duration::from_secs(5),
+            "remove_publication blocked on a fifo, retaining the instance lock",
+            move || guard.remove_publication(),
+        );
+        assert!(path.exists(), "a foreign shape must survive fenced removal");
+    }
+
+    /// A crash between `O_CREAT` and `fchmod` under a restrictive umask leaves an owner-owned lock file at mode `0000`; the next start must repair it rather than fail on `EACCES` forever.
+    #[test]
+    fn partially_created_lock_files_are_repaired_on_restart() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for name in [TRANSACTION_LOCK_NAME, LIFETIME_LOCK_NAME] {
+            let root = temp_root();
+            let coordination = coordination_dir_path(Some(root.path())).expect("path");
+            std::fs::create_dir_all(&coordination).expect("coordination root");
+            let stranded = coordination.join(name);
+            std::fs::write(&stranded, b"").expect("plant lock file");
+            std::fs::set_permissions(&stranded, std::fs::Permissions::from_mode(0o000))
+                .expect("strand lock file");
+
+            let guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST)
+                .unwrap_or_else(|e| panic!("a stranded {name} must be repaired: {e}"));
+            let mode = std::fs::metadata(&stranded)
+                .expect("stat lock")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(mode, 0o600, "stranded {name}");
+            drop(guard);
+        }
+
+        // An owner-only `O_CREAT` filtered by any umask never carries group or other bits, so an unreadable lock file that does was not stranded by this code and must not be chmodded.
+        let root = temp_root();
+        let coordination = coordination_dir_path(Some(root.path())).expect("path");
+        std::fs::create_dir_all(&coordination).expect("coordination root");
+        let decoy = coordination.join(LIFETIME_LOCK_NAME);
+        std::fs::write(&decoy, b"").expect("plant lock file");
+        std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o040)).expect("strand");
+        let err = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect_err("must refuse");
+        assert!(
+            matches!(
+                &err,
+                InstanceError::Io { op: "open_coordination_lock", source, .. }
+                    if source.kind() == std::io::ErrorKind::PermissionDenied
+            ),
+            "unexpected error: {err:?}"
+        );
+        let mode = std::fs::metadata(&decoy)
+            .expect("stat decoy")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o040, "a foreign-mode lock file must not be chmodded");
     }
 
     /// A symlink is a hostile shape; mapping its `ELOOP` to `Absent` would downgrade a `wedged` verdict to `stopping`.
@@ -2149,7 +2275,9 @@ mod tests {
     #[test]
     fn lifetime_and_runtime_lock_disagreement_is_wedged() {
         let root = temp_root();
-        {
+        // Dropping `guard` removes both files and releases both fences, so the canonical
+        // record and publication are captured first and replanted before the probe.
+        let (record_file, record_bytes, publication_file, publication_bytes) = {
             let mut guard = acquire(root.path());
             guard
                 .write_lifecycle_record(LifecyclePhase::Running)
@@ -2157,8 +2285,25 @@ mod tests {
             guard
                 .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
                 .expect("publish");
+            let record_file = record_path(&guard);
+            let publication_file = guard.dir_path().join(CONNECTION_FILE_NAME);
+            let record_bytes = std::fs::read(&record_file).expect("read record");
+            let publication_bytes = std::fs::read(&publication_file).expect("read publication");
+            (
+                record_file,
+                record_bytes,
+                publication_file,
+                publication_bytes,
+            )
+        };
+        for (path, bytes) in [
+            (&record_file, &record_bytes),
+            (&publication_file, &publication_bytes),
+        ] {
+            std::fs::write(path, bytes).expect("replant");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("mode");
         }
-        // release would.
+
         let dir_path = runtime_dir_path(Some(root.path())).expect("path");
         let dir = openat(
             rustix::fs::CWD,
@@ -2174,6 +2319,10 @@ mod tests {
         assert_eq!(observed.reason, "lifetime and runtime locks disagree");
         assert!(!observed.instance_lock_free);
         assert!(observed.lifetime_lock_free);
+        let record = observed
+            .record
+            .expect("the canonical-digest record must be read, not classified as absent");
+        assert_eq!(record.payload_manifest_digest, TEST_DIGEST);
     }
 
     /// The probe classifies a held runtime lock with a schema-1 empty-digest record and no lifetime fence as `Wedged`.

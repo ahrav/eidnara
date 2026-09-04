@@ -746,7 +746,7 @@
     {
       "source": null,
       "destination": "Cargo.lock",
-      "destination_sha256": "50437ef51985534036643d777a9a53633819001899c810b84b1a518bb6ef7173",
+      "destination_sha256": "ac46396b782ca05155cfe595f12d67a74837159ad3d0997892378c47d27e5d35",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -778,7 +778,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "dd5939dd0fd668cf423e881a407f7ce602877358c462b3fcda3f427a87bb1504",
+      "destination_sha256": "c9b2548b6b9af4de09ad50170b7dc6991257d93ef0d33df381f36723a21ef344",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

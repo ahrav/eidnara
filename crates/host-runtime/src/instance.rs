@@ -13,7 +13,9 @@ use rustix::fs::{
     AtFlags, CWD, FlockOperation, Mode, OFlags, flock, fsync, mkdirat, openat, renameat, unlinkat,
 };
 
-use crate::connection_file::{ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, SCHEMA_VERSION};
+use crate::connection_file::{
+    ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN, SCHEMA_VERSION,
+};
 
 /// `CONNECTION_FILE_NAME` names the canonical publication file inside the runtime directory.
 pub const CONNECTION_FILE_NAME: &str = "connection.json";
@@ -200,7 +202,7 @@ pub struct InstanceGuard {
     launch_id: [u8; 16],
     payload_manifest_digest: String,
     publication: Option<PublicationIdentity>,
-    setup_socket: Option<PathBuf>,
+    setup_socket: Option<SetupSocketIdentity>,
     /// The stable incarnation fence, declared after `dir` so the runtime
     /// lock releases first and the lifetime fence outlives every
     /// descriptor-relative cleanup step.
@@ -209,6 +211,13 @@ pub struct InstanceGuard {
 
 /// Cleanup checks that the canonical file still names this publication before unlinking it.
 struct PublicationIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+/// Cleanup unlinks the setup socket through the runtime-directory descriptor and only while the name still resolves to the registered inode.
+struct SetupSocketIdentity {
+    name: std::ffi::OsString,
     dev: u64,
     ino: u64,
 }
@@ -298,15 +307,68 @@ impl InstanceGuard {
         &self.dir_path
     }
 
-    pub(crate) fn register_setup_socket(&mut self, path: PathBuf) {
-        self.setup_socket = Some(path);
+    /// Registers the bound setup socket for fenced removal on drop.
+    ///
+    /// `path` must name an entry directly inside the runtime directory.
+    /// A renamed or replaced `run` directory cannot redirect the descriptor-relative unlink,
+    /// and a replacement occupying the name fails the identity check and is left alone.
+    pub(crate) fn register_setup_socket(&mut self, path: &Path) -> Result<(), InstanceError> {
+        let name = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) if parent == self.dir_path => name.to_os_string(),
+            _ => {
+                return Err(InstanceError::Insecure {
+                    what: "setup socket outside the runtime directory",
+                    path: path.to_path_buf(),
+                });
+            }
+        };
+        let stat = rustix::fs::statat(&self.dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|e| io_err("stat_setup_socket", path, e))?;
+        if !is_own_socket(&stat) {
+            return Err(InstanceError::Insecure {
+                what: "setup socket",
+                path: path.to_path_buf(),
+            });
+        }
+        let (dev, ino) = stat_identity(&stat);
+        self.setup_socket = Some(SetupSocketIdentity { name, dev, ino });
+        Ok(())
+    }
+
+    /// Checks that the registered name resolves to the registered inode before unlinking.
+    /// Removal cannot exclude replacement between the identity check and the unlink.
+    fn remove_setup_socket(&mut self) {
+        let Some(socket) = self.setup_socket.take() else {
+            return;
+        };
+        let Ok(stat) = rustix::fs::statat(
+            &self.dir,
+            socket.name.as_os_str(),
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) else {
+            return;
+        };
+        if !is_own_socket(&stat) || stat_identity(&stat) != (socket.dev, socket.ino) {
+            return;
+        }
+        let _ = unlinkat(&self.dir, socket.name.as_os_str(), AtFlags::empty());
     }
 
     /// Atomically publishes the schema-1 connection file for this incarnation
     /// (protocol §4.1, §4.2). The owner-only `O_EXCL` temp file and the rename
     /// over the canonical name both stay relative to the pinned directory
     /// descriptor, so the swap cannot cross filesystems or follow links.
+    ///
+    /// The publication is refused when `ConnectionInfo::validate` or the client reader rejects it:
+    /// a relative or non-UTF-8 `setup_socket`, a `daemon_ver` that is empty, lacks the published prefix, or cannot fit the authentication frame, or a serialized file over `MAX_CONNECTION_FILE_LEN`.
+    /// A file rejected by a conforming client must not be installed because publication would succeed but discovery would fail.
     pub fn publish(&mut self, setup_socket: &Path, daemon_ver: &str) -> Result<(), InstanceError> {
+        if !setup_socket.is_absolute() {
+            return Err(InstanceError::Insecure {
+                what: "relative setup socket path",
+                path: setup_socket.to_path_buf(),
+            });
+        }
         let info = ConnectionInfo {
             schema: SCHEMA_VERSION,
             wire_version: crate::wire::PROTOCOL_VERSION,
@@ -322,16 +384,29 @@ impl InstanceGuard {
             pid: std::process::id(),
             daemon_ver: daemon_ver.to_owned(),
         };
+        // The client reader applies `validate` to every publication, so a file it would refuse is never installed.
+        if let Err(error) = info.validate() {
+            let what = match error {
+                crate::connection_file::ConnectionFileError::Invalid(what) => what,
+                _ => "publication fails client validation",
+            };
+            return Err(InstanceError::Insecure {
+                what,
+                path: self.dir_path.join(CONNECTION_FILE_NAME),
+            });
+        }
         let json =
             serde_json::to_vec_pretty(&info).expect("connection info serialization cannot fail");
+        if json.len() > MAX_CONNECTION_FILE_LEN {
+            return Err(InstanceError::Insecure {
+                what: "connection file exceeds the discovery cap",
+                path: self.dir_path.join(CONNECTION_FILE_NAME),
+            });
+        }
 
         let stat = write_atomic_owner_only(&self.dir, &self.dir_path, CONNECTION_FILE_NAME, &json)?;
-        // `Stat` field types vary by platform; macOS defines `st_dev` as `i32`, so the casts are required there and are no-ops on Linux.
-        #[allow(clippy::unnecessary_cast)]
-        let identity = PublicationIdentity {
-            dev: stat.st_dev as u64,
-            ino: stat.st_ino as u64,
-        };
+        let (dev, ino) = stat_identity(&stat);
+        let identity = PublicationIdentity { dev, ino };
         self.publication = Some(identity);
         Ok(())
     }
@@ -347,10 +422,12 @@ impl InstanceGuard {
         // Transient failures must retain `identity` so `Drop` can retry.
         // Drop retries after connection descriptors close.
         // Only successful unlink or a definitive identity mismatch clears `self.publication`.
+        // `O_NONBLOCK` prevents a FIFO at `CONNECTION_FILE_NAME` from blocking `openat`
+        // until a writer arrives; `fstat` then rejects the FIFO as a non-regular file.
         let Ok(fd) = openat(
             &self.dir,
             CONNECTION_FILE_NAME,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         ) else {
             self.publication = Some(identity);
@@ -361,11 +438,12 @@ impl InstanceGuard {
             return;
         };
         if !is_secure_regular(&stat) {
+            // An extra link or loosened mode is not an identity mismatch.
+            // Either can be reverted before `Drop` runs, so the identity is retained.
+            self.publication = Some(identity);
             return;
         }
-        // `Stat` field types vary by platform; macOS defines `st_dev` as `i32`.
-        #[allow(clippy::unnecessary_cast)]
-        if stat.st_dev as u64 != identity.dev || stat.st_ino as u64 != identity.ino {
+        if stat_identity(&stat) != (identity.dev, identity.ino) {
             return;
         }
         let Ok(bytes) = read_all_fd(&fd, 65_536) else {
@@ -374,6 +452,9 @@ impl InstanceGuard {
             return;
         };
         let Ok(info) = serde_json::from_slice::<ConnectionInfo>(&bytes) else {
+            // The inode already matched, so unparseable bytes are not evidence
+            // that another incarnation owns the name.
+            self.publication = Some(identity);
             return;
         };
         if info.daemon_id != self.daemon_id {
@@ -389,13 +470,13 @@ impl InstanceGuard {
 
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
-        if let Some(path) = self.setup_socket.take() {
-            let _ = std::fs::remove_file(path);
-        }
         // Idempotent: the graceful path already removed the publication and
         // took the retained identity, making this a no-op. The same
         // best-effort identity checks run before unlink on the drop path.
+        // The publication is withdrawn before the endpoint it advertises is unlinked,
+        // so a client that reads the publication is not directed at a socket that no longer exists.
         self.remove_publication();
+        self.remove_setup_socket();
         self.remove_lifecycle_record();
     }
 }
@@ -407,7 +488,6 @@ impl Drop for InstanceGuard {
 /// Observational callers must distinguish absent components from insecure or unreadable components.
 /// Mapping an insecure component to absence would report hostile persisted state as "nothing installed yet".
 /// Resolving each component through the previous pinned descriptor prevents intermediate symlinks from redirecting traversal.
-#[allow(dead_code)] // U1: used by generation (U2)
 pub(crate) fn open_secure_dir_existing(dir_path: &Path) -> Result<Option<OwnedFd>, InstanceError> {
     let mut current = open_safe_anchor(dir_path)
         .map_err(|e| io_err("open_anchor", dir_path, e))?
@@ -436,6 +516,14 @@ pub(crate) fn open_secure_dir_existing(dir_path: &Path) -> Result<Option<OwnedFd
         let next = match openat(&current, name, HARDENED_DIR_FLAGS, Mode::empty()) {
             Ok(fd) => fd,
             Err(rustix::io::Errno::NOENT) => return Ok(None),
+            // `O_NOFOLLOW` fails a symlink component with `ELOOP`; a non-directory
+            // component fails with `ENOTDIR`. Both are hostile shapes, not absence.
+            Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
+                return Err(InstanceError::Insecure {
+                    what: "managed directory component",
+                    path: walked.clone(),
+                });
+            }
             Err(e) => return Err(io_err("open_component", &walked, e)),
         };
         // Traversal must not resolve later components through a replaceable pathname.
@@ -511,6 +599,23 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
                         .map_err(|e| io_err("fchmod_component", &walked, e))?;
                 }
                 fd
+            }
+            // A crash between `mkdirat` and `chmodat` can leave an owner-owned directory without owner permissions.
+            Err(rustix::io::Errno::ACCESS) => {
+                if !repair_owner_access(&current, name, S_IFDIR, 0o700)
+                    .map_err(|e| io_err("repair_component", &walked, e))?
+                {
+                    return Err(io_err("open_component", &walked, rustix::io::Errno::ACCESS));
+                }
+                openat(&current, name, flags, Mode::empty())
+                    .map_err(|e| io_err("open_component", &walked, e))?
+            }
+            // A symlink or non-directory at a managed name is a hostile shape, not an I/O fault.
+            Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
+                return Err(InstanceError::Insecure {
+                    what: "runtime directory component",
+                    path: walked.clone(),
+                });
             }
             Err(e) => return Err(io_err("open_component", &walked, e)),
         };
@@ -680,6 +785,14 @@ pub(crate) const S_IFDIR: u32 = 0o040000;
 pub(crate) const S_IFREG: u32 = 0o100000;
 #[allow(dead_code)] // U1: used by harness_closure (U2)
 pub(crate) const S_IFLNK: u32 = 0o120000;
+const S_IFSOCK: u32 = 0o140000;
+
+// `Stat::st_dev` is `i32` on macOS, so `stat_identity` casts it to `u64`.
+// The cast is required on platforms where `st_dev` is not `u64`.
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64) {
+    (stat.st_dev as u64, stat.st_ino as u64)
+}
 
 #[allow(dead_code)] // U1: used by harness_closure (U2)
 pub(crate) fn owner_uid() -> u32 {
@@ -755,6 +868,46 @@ pub(crate) fn is_secure_regular(stat: &rustix::fs::Stat) -> bool {
         && stat.st_nlink == 1
         && stat.st_uid == rustix::process::geteuid().as_raw()
         && mode & 0o077 == 0
+}
+
+pub(crate) fn is_owner_only_dir(stat: &rustix::fs::Stat) -> bool {
+    let mode = mode_bits(stat);
+    (mode & S_IFMT) == S_IFDIR
+        && stat.st_uid == rustix::process::geteuid().as_raw()
+        && mode & 0o077 == 0
+}
+
+fn is_own_socket(stat: &rustix::fs::Stat) -> bool {
+    (mode_bits(stat) & S_IFMT) == S_IFSOCK && stat.st_uid == rustix::process::geteuid().as_raw()
+}
+
+/// Repairs owner-owned entries left without owner permissions when creation stops before `chmod`.
+///
+/// `mkdirat` and `openat(O_CREAT)` apply the umask before the separate `chmod`.
+/// A crash after creation but before `chmod` can leave an owner-owned entry without owner permissions.
+/// A later open that needs owner permission fails with `EACCES` until the mode is repaired.
+/// The umask only removes bits from an owner-only request, so an entry with group or other
+/// bits was not left behind by that crash and is never chmodded.
+///
+/// `Ok(true)` means the mode was restored to `mode` and the caller may reopen.
+pub(crate) fn repair_owner_access(
+    dir: &OwnedFd,
+    name: &std::ffi::OsStr,
+    kind: u32,
+    mode: u32,
+) -> Result<bool, rustix::io::Errno> {
+    let stat = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    let current = mode_bits(&stat);
+    let owner_ok = stat.st_uid == rustix::process::geteuid().as_raw();
+    let shape_ok = (current & S_IFMT) == kind
+        && owner_ok
+        && current & 0o077 == 0
+        && (kind != S_IFREG || stat.st_nlink == 1);
+    if !shape_ok {
+        return Ok(false);
+    }
+    rustix::fs::chmodat(dir, name, Mode::from_raw_mode(mode), AtFlags::empty())?;
+    Ok(true)
 }
 
 /// `ATOMIC_WRITE_NAMES` lists the names accepted by `write_atomic_owner_only`.
@@ -937,6 +1090,55 @@ mod tests {
         assert!(!published(&guard).exists());
     }
 
+    /// `ConnectionInfo::validate` rejects relative socket paths and empty daemon versions, and `read_for_client` rejects files over `MAX_CONNECTION_FILE_LEN`, so `publish` must refuse all three before installing a file no client accepts.
+    #[test]
+    fn publication_rejects_what_clients_would_refuse() {
+        let root = temp_root();
+        let mut guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+
+        assert!(matches!(
+            guard.publish(Path::new("relative/setup.sock"), "eidnara-host/test"),
+            Err(InstanceError::Insecure {
+                what: "relative setup socket path",
+                ..
+            })
+        ));
+        assert!(matches!(
+            guard.publish(&guard.dir_path().join("setup.sock"), ""),
+            Err(InstanceError::Insecure {
+                what: "empty daemon version",
+                ..
+            })
+        ));
+        assert!(matches!(
+            guard.publish(&guard.dir_path().join("setup.sock"), "test"),
+            Err(InstanceError::Insecure {
+                what: "daemon version lacks the published prefix",
+                ..
+            })
+        ));
+        let oversized = format!(
+            "{}{}",
+            crate::config::DAEMON_VER_PREFIX,
+            "v".repeat(MAX_CONNECTION_FILE_LEN)
+        );
+        assert!(matches!(
+            guard.publish(&guard.dir_path().join("setup.sock"), &oversized),
+            Err(InstanceError::Insecure {
+                what: "daemon version cannot fit the authentication frame",
+                ..
+            })
+        ));
+        assert!(!published(&guard).exists());
+        assert!(
+            std::fs::read_dir(guard.dir_path())
+                .expect("list run dir")
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
+            "a refused publication must leave no temp file"
+        );
+    }
+
     #[test]
     fn world_writable_intermediate_is_rejected() {
         let root = temp_root();
@@ -968,6 +1170,53 @@ mod tests {
 
         let guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
         assert_eq!(mode_of(guard.dir_path()), 0o700);
+    }
+
+    /// A crash between `mkdirat` and `chmodat` under a restrictive umask leaves an owner-owned component at mode `0000`; the next start must repair it rather than fail on `EACCES` forever.
+    #[test]
+    fn partially_created_components_are_repaired_on_restart() {
+        for stranded in ["eidnara", "run"] {
+            let root = temp_root();
+            let dir = runtime_dir_path(Some(root.path())).expect("resolve");
+            std::fs::create_dir_all(&dir).expect("create dirs");
+            let victim = if stranded == "run" {
+                dir.clone()
+            } else {
+                dir.parent().expect("managed dir").to_path_buf()
+            };
+            std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o000))
+                .expect("strand component");
+
+            let guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST)
+                .unwrap_or_else(|e| panic!("a stranded {stranded} must be repaired: {e}"));
+            assert_eq!(mode_of(&victim), 0o700, "stranded {stranded}");
+            assert_eq!(mode_of(guard.dir_path()), 0o700);
+        }
+    }
+
+    /// Repair applies only to the umask-stranded shape. A `mkdirat(0700)` filtered by any umask never carries group or other bits, so an unreadable directory that does was not stranded by this code and stays untouched.
+    #[test]
+    fn unreadable_dirs_with_group_or_other_bits_are_not_repaired() {
+        let root = temp_root();
+        let dir = runtime_dir_path(Some(root.path())).expect("resolve");
+        std::fs::create_dir_all(&dir).expect("create dirs");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o070)).expect("strand");
+
+        let err = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect_err("must refuse");
+        assert!(
+            matches!(
+                &err,
+                InstanceError::Io { op: "open_component", source, .. }
+                    if source.kind() == io::ErrorKind::PermissionDenied
+            ),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(
+            mode_of(&dir),
+            0o070,
+            "a foreign-mode directory must not be chmodded"
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("restore");
     }
 
     #[test]
@@ -1156,6 +1405,86 @@ mod tests {
         assert!(!file.exists(), "our own publication must be removed");
     }
 
+    /// The setup socket is unlinked through the runtime-directory descriptor and only while the name still resolves to the registered inode, matching the publication fence.
+    #[test]
+    fn setup_socket_cleanup_is_fenced_to_the_registered_inode() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::net::UnixListener;
+
+        // Registration refuses a path outside the runtime directory and a non-socket.
+        {
+            let root = temp_root();
+            let mut guard =
+                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+            assert!(matches!(
+                guard.register_setup_socket(&root.path().join("setup.sock")),
+                Err(InstanceError::Insecure {
+                    what: "setup socket outside the runtime directory",
+                    ..
+                })
+            ));
+            let plain = guard.dir_path().join("setup.sock");
+            std::fs::write(&plain, b"not a socket").expect("plant file");
+            assert!(matches!(
+                guard.register_setup_socket(&plain),
+                Err(InstanceError::Insecure {
+                    what: "setup socket",
+                    ..
+                })
+            ));
+            drop(guard);
+            assert!(plain.exists(), "an unregistered entry must survive drop");
+        }
+
+        {
+            let root = temp_root();
+            let mut guard =
+                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+            let socket = guard.dir_path().join("setup.sock");
+            let _listener = UnixListener::bind(&socket).expect("bind");
+            guard.register_setup_socket(&socket).expect("register");
+            drop(guard);
+            assert!(!socket.exists(), "our own socket must be removed on drop");
+        }
+
+        // A replacement occupying the name is not ours and survives drop.
+        {
+            let root = temp_root();
+            let mut guard =
+                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+            let socket = guard.dir_path().join("setup.sock");
+            let _ours = UnixListener::bind(&socket).expect("bind");
+            guard.register_setup_socket(&socket).expect("register");
+            std::fs::remove_file(&socket).expect("displace");
+            let _replacement = UnixListener::bind(&socket).expect("rebind");
+            drop(guard);
+            assert!(
+                std::fs::symlink_metadata(&socket)
+                    .expect("stat replacement")
+                    .file_type()
+                    .is_socket(),
+                "a replacement socket at the name must be left alone"
+            );
+        }
+
+        // Renaming the runtime directory does not strand the socket: the unlink follows the descriptor, not the path.
+        {
+            let root = temp_root();
+            let mut guard =
+                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+            let socket = guard.dir_path().join("setup.sock");
+            let _listener = UnixListener::bind(&socket).expect("bind");
+            guard.register_setup_socket(&socket).expect("register");
+            let moved = root.path().join("eidnara").join("run-moved");
+            std::fs::rename(guard.dir_path(), &moved).expect("rename runtime dir");
+            drop(guard);
+            assert!(
+                !moved.join("setup.sock").exists(),
+                "the socket in the displaced directory must be removed"
+            );
+        }
+    }
+
     #[test]
     fn replaced_inode_prevents_unlink() {
         let root = temp_root();
@@ -1211,6 +1540,46 @@ mod tests {
         assert!(
             file.exists(),
             "an unexpected second link means the file is not solely ours"
+        );
+
+        // `Drop` retries the deferred cleanup after the extra link is removed.
+        std::fs::remove_file(guard.dir_path().join("extra-link")).expect("drop extra link");
+        drop(guard);
+        assert!(
+            !file.exists(),
+            "a reverted link count must not leave the key-bearing publication behind"
+        );
+    }
+
+    /// A decode failure on the inode this guard published is not proof that a
+    /// successor owns the name, so `Drop` must still retry once the bytes are sane.
+    #[test]
+    fn unparseable_bytes_on_our_own_inode_defer_rather_than_abandon_cleanup() {
+        let root = temp_root();
+        let mut guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+        guard
+            .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
+            .expect("publish");
+        let file = published(&guard);
+        let original = std::fs::read(&file).expect("read");
+
+        // Truncating the file preserves its inode while making its contents unparseable.
+        let fd = openat(CWD, &file, OFlags::WRONLY | OFlags::TRUNC, Mode::empty())
+            .expect("reopen in place");
+        write_all_fd(&fd, b"{\"schema\":").expect("corrupt");
+        drop(fd);
+        guard.remove_publication();
+        assert!(file.exists(), "corrupt bytes must not be unlinked blindly");
+
+        // Restoring the bytes in place leaves the inode unchanged and still ours.
+        let fd = openat(CWD, &file, OFlags::WRONLY | OFlags::TRUNC, Mode::empty())
+            .expect("reopen in place");
+        write_all_fd(&fd, &original).expect("restore");
+        drop(fd);
+        drop(guard);
+        assert!(
+            !file.exists(),
+            "cleanup must retry after a transient decode failure on our own inode"
         );
     }
 

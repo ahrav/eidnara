@@ -742,7 +742,8 @@ pub async fn run_with_publish_hook<H: HostHandler>(
             crate::setup_socket::bind_owner_only(&setup_socket).map_err(HostError::Io)?;
         cleanup
             .guard_mut()
-            .register_setup_socket(setup_socket.clone());
+            .register_setup_socket(&setup_socket)
+            .map_err(HostError::Instance)?;
         cleanup
             .guard_mut()
             .publish(&setup_socket, &config.daemon_ver)

@@ -687,8 +687,8 @@ async fn reserve_catalog_frame(
         biased;
         () = generation.token.cancelled() => return Err(()),
         charge = timeout_at(deadline, budget.charge(charged_bytes)) => match charge {
-            Ok(charge) => charge,
-            Err(_) => {
+            Ok(Some(charge)) => charge,
+            Ok(None) | Err(_) => {
                 generation.token.cancel();
                 return Err(());
             }
