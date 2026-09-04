@@ -411,7 +411,7 @@ impl Client {
             pending: Mutex::new(HashMap::new()),
             streams: Mutex::new(0),
             routes: Mutex::new(HashSet::new()),
-            torn_down: Mutex::new(VecDeque::new()),
+            binds: Mutex::new(BindTracking::default()),
             queue_budget: Arc::new(ByteCounter::new(CLIENT_DATA_QUEUED_BYTES)),
             control_budget: Arc::new(ByteCounter::new(CLIENT_CONTROL_QUEUED_BYTES)),
             _read_budget: read_budget,
@@ -523,19 +523,19 @@ impl Client {
                             ));
                         }
                         // A route `Goodbye` that raced this insert already settled the route on the host.
-                        let mut torn_down = lock_unpoisoned(&self.inner.torn_down);
-                        if let Some(index) = torn_down.iter().position(|torn| *torn == handle) {
-                            torn_down.remove(index);
+                        let mut binds = lock_unpoisoned(&self.inner.binds);
+                        binds.publishing.remove(&handle);
+                        if binds.torn_down.remove(&handle) {
                             return Err(CallError::local(
                                 SendOutcome::Terminal,
                                 "route_gone",
                                 "host closed the route before it was published",
                             ));
                         }
+                        drop(binds);
                         // Live routes have distinct channels; a handle already cached is a host
                         // protocol violation, and sharing it would let one caller's close break the other.
                         if !routes.insert(handle) {
-                            drop(torn_down);
                             drop(routes);
                             self.inner.retire("invalid_route_response");
                             return Err(CallError::local(
@@ -959,6 +959,17 @@ struct PendingState {
     kind: PendingKind,
 }
 
+/// A route `Goodbye` can arrive after the bind response has woken `open_route`
+/// but before it inserts the handle. `publishing` holds handles in that window,
+/// and `torn_down` the subset the host has closed, so the insert can refuse a
+/// dead route while an unknown or duplicate `Goodbye` stays the idempotent
+/// no-op §6.2 defines. Both sets are bounded by the pending-request cap.
+#[derive(Default)]
+struct BindTracking {
+    publishing: HashSet<RouteHandle>,
+    torn_down: HashSet<RouteHandle>,
+}
+
 /// A unary response held for its caller. `_charge` returns the body's bytes to
 /// `retained_budget` when the caller consumes or abandons the response.
 struct RetainedResponse {
@@ -996,12 +1007,9 @@ struct Inner {
     pending: Mutex<HashMap<PendingKey, PendingState>>,
     streams: Mutex<usize>,
     routes: Mutex<HashSet<RouteHandle>>,
-    /// Route `Goodbye`s that matched no cached handle. A `Goodbye` can arrive after
-    /// the bind response wakes `open_route` but before it inserts the handle; the
-    /// insert consults this under the `routes` lock and refuses a route the host
-    /// already closed. Bounded to `CLIENT_MAX_PENDING_REQUESTS`, the most opens
-    /// that can be awaiting insertion; older entries fall off.
-    torn_down: Mutex<VecDeque<RouteHandle>>,
+    /// Binds delivered to an `open_route` caller but not yet inserted into `routes`,
+    /// and among those the ones the host has since closed. Locked after `routes`.
+    binds: Mutex<BindTracking>,
     queue_budget: Arc<ByteCounter>,
     /// The client reserves queue capacity for header-only control frames so data traffic cannot starve Pong, Cancel, or Goodbye.
     control_budget: Arc<ByteCounter>,
@@ -1507,13 +1515,22 @@ impl Inner {
                                 // move from the read reservation to the retained budget; a caller that
                                 // never polls cannot hold more than `CLIENT_RETAINED_RESPONSE_BYTES`.
                                 match self.unary_budget.charge(body.len()) {
-                                    Some(retained) => Ok(RetainedResponse {
-                                        response: Response {
-                                            body,
-                                            binary: header.flags.is_binary(),
-                                        },
-                                        _charge: retained,
-                                    }),
+                                    Some(retained) => {
+                                        // The bind is now in flight to its caller; a route `Goodbye`
+                                        // that lands before the insert must be remembered.
+                                        if header.channel == 0
+                                            && let Ok(handle) = parse_route_open(&body)
+                                        {
+                                            lock_unpoisoned(&self.binds).publishing.insert(handle);
+                                        }
+                                        Ok(RetainedResponse {
+                                            response: Response {
+                                                body,
+                                                binary: header.flags.is_binary(),
+                                            },
+                                            _charge: retained,
+                                        })
+                                    }
                                     None => {
                                         // The body is discarded, so a route the host bound for this caller can only be released here.
                                         if header.channel == 0 {
@@ -1679,6 +1696,12 @@ impl Inner {
         if lock_unpoisoned(&self.routes).contains(&route) {
             return;
         }
+        // No caller will publish this bind, so its tracking ends here.
+        {
+            let mut binds = lock_unpoisoned(&self.binds);
+            binds.publishing.remove(&route);
+            binds.torn_down.remove(&route);
+        }
         if self
             .send_control(
                 FrameType::Goodbye,
@@ -1719,8 +1742,9 @@ impl Inner {
         self.settle_route_inner(route, false)
     }
 
-    /// A host route `Goodbye` for a handle not in the cache is remembered so a bind
-    /// response already delivered to `open_route` cannot publish the dead handle.
+    /// A host route `Goodbye` for a bind that was delivered but not yet published is
+    /// remembered so `open_route` cannot publish the dead handle; any other unmatched
+    /// `Goodbye` is the idempotent no-op §6.2 defines.
     fn settle_route_from_host(&self, route: RouteHandle) {
         self.settle_route_inner(route, true);
     }
@@ -1732,11 +1756,10 @@ impl Inner {
             let mut routes = lock_unpoisoned(&self.routes);
             if !routes.remove(&route) {
                 if remember_unmatched {
-                    let mut torn_down = lock_unpoisoned(&self.torn_down);
-                    if torn_down.len() >= CLIENT_MAX_PENDING_REQUESTS {
-                        torn_down.pop_front();
+                    let mut binds = lock_unpoisoned(&self.binds);
+                    if binds.publishing.remove(&route) {
+                        binds.torn_down.insert(route);
                     }
-                    torn_down.push_back(route);
                 }
                 return false;
             }
@@ -1784,6 +1807,9 @@ impl Inner {
         let mut routes = lock_unpoisoned(&self.routes);
         let already = self.closed.swap(true, Ordering::AcqRel);
         transition(&mut routes);
+        if !already {
+            *lock_unpoisoned(&self.binds) = BindTracking::default();
+        }
         already
     }
 
@@ -2426,20 +2452,25 @@ async fn writer_loop(
     mut data_rx: mpsc::Receiver<QueuedFrame>,
     mut control_rx: mpsc::Receiver<QueuedFrame>,
 ) {
-    let mut window: VecDeque<InFlight> = VecDeque::with_capacity(WRITER_WINDOW);
+    // One window per bridge lane. Each lane is FIFO on its own channel, so awaiting a
+    // lane's head is exact, and a control that finishes while the data head waits for
+    // capacity is reaped at once: its acknowledgement and control-budget charge never
+    // wait behind a blocked data write.
+    let mut data_window: VecDeque<InFlight> = VecDeque::with_capacity(WRITER_WINDOW);
+    let mut control_window: VecDeque<InFlight> = VecDeque::with_capacity(WRITER_WINDOW);
     // Frames behind a failed head are still `HANDED` in the bridge channel and classify
     // `NotSent` on their own; only a head the bridge reported as zero-byte needs resetting.
-    let fail = |inner: &Inner,
-                window: &mut VecDeque<InFlight>,
-                head_not_sent: Option<&InFlight>| {
+    let fail = |inner: &Inner, head_not_sent: Option<&InFlight>| {
         if let Some(state) = head_not_sent.and_then(|h| h.publish.as_ref()) {
             let _ = state.compare_exchange(WRITING, QUEUED, Ordering::AcqRel, Ordering::Acquire);
         }
-        window.clear();
         inner.retire("write_failed");
     };
-    // Hands one frame to the bridge. `Err(())` means the bridge is gone.
-    let hand = |write: &RingWriteSender, window: &mut VecDeque<InFlight>, frame: QueuedFrame| {
+    // Hands one frame to its lane. `Err(())` means the bridge is gone.
+    let hand = |write: &RingWriteSender,
+                data_window: &mut VecDeque<InFlight>,
+                control_window: &mut VecDeque<InFlight>,
+                frame: QueuedFrame| {
         if frame
             .publish
             .as_ref()
@@ -2469,24 +2500,51 @@ async fn writer_loop(
             }
             return Err(());
         }
-        window.push_back(InFlight {
+        let in_flight = InFlight {
             publish: frame.publish,
             ack: frame.ack,
             charge: frame.charge,
             deadline: frame.deadline,
             completed: completed_rx,
-        });
+        };
+        if is_control {
+            control_window.push_back(in_flight);
+        } else {
+            data_window.push_back(in_flight);
+        }
         Ok(())
     };
+    enum Step {
+        Data(Completion),
+        Control(Completion),
+        Intake(Option<QueuedFrame>),
+    }
+    type Completion = Result<
+        Result<Result<Publication, SendFailure>, oneshot::error::RecvError>,
+        tokio::time::error::Elapsed,
+    >;
+    /// Awaits a lane head under its deadline; an empty lane never completes.
+    async fn await_head(
+        head: Option<(
+            Instant,
+            &mut oneshot::Receiver<Result<Publication, SendFailure>>,
+        )>,
+    ) -> Completion {
+        match head {
+            Some((deadline, completed)) => timeout_at(deadline, completed).await,
+            None => std::future::pending().await,
+        }
+    }
     loop {
+        let in_flight = data_window.len() + control_window.len();
         // One window slot is reserved for controls so a `Pong` is never stuck behind a full data backlog.
-        let room_for_control = window.len() < WRITER_WINDOW;
-        let room_for_data = window.len() + 1 < WRITER_WINDOW;
+        let room_for_control = in_flight < WRITER_WINDOW;
+        let room_for_data = in_flight + 1 < WRITER_WINDOW;
         let next = if room_for_control && let Ok(frame) = control_rx.try_recv() {
             Some(frame)
         } else if room_for_data && let Ok(frame) = data_rx.try_recv() {
             Some(frame)
-        } else if window.is_empty() {
+        } else if in_flight == 0 {
             tokio::select! {
                 biased;
                 () = inner.cancel.cancelled() => break,
@@ -2505,43 +2563,48 @@ async fn writer_loop(
             None
         };
         if let Some(frame) = next {
-            if hand(&write, &mut window, frame).is_err() {
-                fail(&inner, &mut window, None);
+            if hand(&write, &mut data_window, &mut control_window, frame).is_err() {
+                fail(&inner, None);
                 break;
             }
             continue;
         }
-        enum Step {
-            Completed(
-                Result<
-                    Result<Result<Publication, SendFailure>, oneshot::error::RecvError>,
-                    tokio::time::error::Elapsed,
-                >,
-            ),
-            Control(Option<QueuedFrame>),
-        }
         let step = {
-            let head = window.front_mut().expect("window is non-empty");
+            let data_head = data_window
+                .front_mut()
+                .map(|head| (head.deadline, &mut head.completed));
+            let control_head = control_window
+                .front_mut()
+                .map(|head| (head.deadline, &mut head.completed));
             tokio::select! {
                 biased;
                 () = inner.cancel.cancelled() => break,
-                result = timeout_at(head.deadline, &mut head.completed) => Step::Completed(result),
-                // A control arriving while the head is blocked still gets its reserved slot.
-                frame = control_rx.recv(), if room_for_control => Step::Control(frame),
+                result = await_head(control_head) => Step::Control(result),
+                result = await_head(data_head) => Step::Data(result),
+                // A control arriving while both heads are blocked still gets its reserved slot.
+                frame = control_rx.recv(), if room_for_control => Step::Intake(frame),
             }
         };
-        let written = match step {
-            Step::Control(Some(frame)) => {
-                if hand(&write, &mut window, frame).is_err() {
-                    fail(&inner, &mut window, None);
+        let (head, written) = match step {
+            Step::Intake(Some(frame)) => {
+                if hand(&write, &mut data_window, &mut control_window, frame).is_err() {
+                    fail(&inner, None);
                     break;
                 }
                 continue;
             }
-            Step::Control(None) => break,
-            Step::Completed(result) => result,
+            Step::Intake(None) => break,
+            Step::Data(result) => (
+                data_window.pop_front().expect("data window is non-empty"),
+                result,
+            ),
+            Step::Control(result) => (
+                control_window
+                    .pop_front()
+                    .expect("control window is non-empty"),
+                result,
+            ),
         };
-        let head = window.pop_front().expect("window is non-empty");
         match written {
             Ok(Ok(Ok(Publication::Published))) => {}
             Ok(Ok(Ok(Publication::Skipped | Publication::Expired))) => {
@@ -2552,11 +2615,11 @@ async fn writer_loop(
             }
             Ok(Ok(Err(SendFailure::Deadline | SendFailure::Unreserved))) => {
                 // Zero bytes reached the ring, so the frame returns to `QUEUED` and retirement classifies it `NotSent`.
-                fail(&inner, &mut window, Some(&head));
+                fail(&inner, Some(&head));
                 break;
             }
             _ => {
-                fail(&inner, &mut window, None);
+                fail(&inner, None);
                 break;
             }
         }
@@ -2914,7 +2977,7 @@ mod tests {
                 pending: Mutex::new(HashMap::new()),
                 streams: Mutex::new(0),
                 routes: Mutex::new(HashSet::from([route(1), route(2)])),
-                torn_down: Mutex::new(VecDeque::new()),
+                binds: Mutex::new(BindTracking::default()),
                 queue_budget: Arc::new(ByteCounter::new(queued_bytes)),
                 control_budget: Arc::new(ByteCounter::new(CLIENT_CONTROL_QUEUED_BYTES)),
                 _read_budget: Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
@@ -3374,8 +3437,9 @@ mod tests {
             channel: 9,
             epoch: 3,
         };
-        // The host closes the route while the bind response is in flight to `open_route`.
+        // An unknown route `Goodbye` is an idempotent no-op and leaves no record.
         inner.settle_route_from_host(bound);
+        assert!(lock_unpoisoned(&inner.binds).torn_down.is_empty());
         let responder_inner = Arc::clone(&inner);
         let responder = tokio::spawn(async move {
             let frame = data_rx.recv().await.expect("route.open request");
@@ -3398,6 +3462,16 @@ mod tests {
                 body,
                 ByteCharge::none(),
             );
+            // The bind is delivered but `open_route` has not run yet; the host closes the route now.
+            assert!(
+                responder_inner
+                    .binds
+                    .lock()
+                    .expect("binds lock")
+                    .publishing
+                    .contains(&bound)
+            );
+            responder_inner.settle_route_from_host(bound);
         });
         let client = Client {
             inner: Arc::clone(&inner),
@@ -3413,10 +3487,11 @@ mod tests {
         assert_eq!(error.code(), "route_gone");
         assert_eq!(error.outcome(), SendOutcome::Terminal);
         assert!(!lock_unpoisoned(&inner.routes).contains(&bound));
-        assert!(
-            lock_unpoisoned(&inner.torn_down).is_empty(),
-            "the record is consumed"
-        );
+        {
+            let binds = lock_unpoisoned(&inner.binds);
+            assert!(binds.torn_down.is_empty(), "the record is consumed");
+            assert!(binds.publishing.is_empty());
+        }
         responder.await.expect("responder");
         drop(client);
     }
@@ -3468,9 +3543,24 @@ mod tests {
         .await
         .expect("control receive task");
         assert_eq!(pong.header.ty, FrameType::Pong);
+        // The control's completion is reaped while the data head is still blocked.
+        let charged = inner.control_budget.used();
+        assert!(
+            charged > 0,
+            "the Pong holds a control charge until it completes"
+        );
+        pong.completed
+            .send(Ok(Publication::Published))
+            .expect("writer awaits the control completion");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while inner.control_budget.used() == charged {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a completed control releases its charge behind a blocked data head");
         inner.retire("test_done");
         drop(held);
-        drop(pong);
         writer.await.expect("writer exits on cancel");
     }
 
