@@ -698,6 +698,7 @@ dependencies = [
  "shm-transport",
  "subtle",
  "tempfile",
+ "tokenizers",
  "tokio",
  "tokio-util",
 ]

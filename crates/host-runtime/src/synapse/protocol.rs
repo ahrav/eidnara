@@ -71,14 +71,115 @@ pub enum Request {
 // Typed deserialization avoids materializing a `serde_json::Value` tree.
 // ---------------------------------------------------------------------------
 
-/// `params` is skipped because its schema depends on `method`; `IgnoredAny` avoids materializing it.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MethodEnvelope<'a> {
-    #[serde(borrow)]
-    pub(crate) method: Cow<'a, str>,
-    #[serde(default, rename = "params")]
-    _params: serde::de::IgnoredAny,
+/// `DecodedEnvelope` carries `params` decoded in the same pass that read `method`.
+enum DecodedEnvelope<'de> {
+    ModelsList,
+    Query(QueryParams<'de>),
+    Batch(BatchParams<'de>),
+    Result(ResultParams<'de>),
+    /// `params` preceded `method`, so its type was unknown when it was skipped.
+    Deferred(Cow<'de, str>),
+}
+
+/// `EnvelopeSeed` reads the `{method, params}` envelope once, dispatching `params` on the already-read `method`.
+/// The envelope accepts only objects, rejects unknown and duplicate fields, and requires `method`.
+/// The item bound is runtime configuration, so the batch branch needs a seed rather than a derived `Deserialize`.
+struct EnvelopeSeed {
+    max_items: usize,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for EnvelopeSeed {
+    type Value = DecodedEnvelope<'de>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        struct EnvelopeVisitor {
+            max_items: usize,
+        }
+
+        impl<'de> serde::de::Visitor<'de> for EnvelopeVisitor {
+            type Value = DecodedEnvelope<'de>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let mut method: Option<Cow<'de, str>> = None;
+                let mut saw_params = false;
+                let mut deferred = false;
+                let mut decoded: Option<DecodedEnvelope<'de>> = None;
+                while let Some(key) = map.next_key::<BorrowedCow<'de>>()? {
+                    match key.0.as_ref() {
+                        "method" => {
+                            if method.is_some() {
+                                return Err(A::Error::duplicate_field("method"));
+                            }
+                            method = Some(map.next_value::<BorrowedCow<'de>>()?.0);
+                        }
+                        "params" => {
+                            if saw_params {
+                                return Err(A::Error::duplicate_field("params"));
+                            }
+                            saw_params = true;
+                            match method.as_deref() {
+                                None => {
+                                    map.next_value::<serde::de::IgnoredAny>()?;
+                                    deferred = true;
+                                }
+                                Some("models.list") => {
+                                    map.next_value::<MapOnly<NoParams>>()?;
+                                    decoded = Some(DecodedEnvelope::ModelsList);
+                                }
+                                Some("embed.query") => {
+                                    decoded = Some(DecodedEnvelope::Query(
+                                        map.next_value::<MapOnly<QueryParams<'de>>>()?.0,
+                                    ));
+                                }
+                                Some("embed.batch") => {
+                                    decoded = Some(DecodedEnvelope::Batch(map.next_value_seed(
+                                        BatchParamsSeed {
+                                            max_items: self.max_items,
+                                        },
+                                    )?));
+                                }
+                                Some("embed.result") => {
+                                    decoded = Some(DecodedEnvelope::Result(
+                                        map.next_value::<MapOnly<ResultParams<'de>>>()?.0,
+                                    ));
+                                }
+                                Some(_) => {
+                                    return Err(A::Error::custom("unsupported synapse method"));
+                                }
+                            }
+                        }
+                        other => return Err(A::Error::unknown_field(other, &["method", "params"])),
+                    }
+                }
+                let method = method.ok_or_else(|| A::Error::missing_field("method"))?;
+                if deferred {
+                    return Ok(DecodedEnvelope::Deferred(method));
+                }
+                match method.as_ref() {
+                    "models.list" => Ok(DecodedEnvelope::ModelsList),
+                    "embed.query" | "embed.batch" | "embed.result" => {
+                        decoded.ok_or_else(|| A::Error::missing_field("params"))
+                    }
+                    _ => Err(A::Error::custom("unsupported synapse method")),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(EnvelopeVisitor {
+            max_items: self.max_items,
+        })
+    }
 }
 
 /// A derived `Deserialize` accepts JSON sequences and fills fields positionally.
@@ -568,8 +669,30 @@ pub(crate) fn decode_request(
     lane: &LaneInfo,
     limits: &SynapseLimits,
 ) -> Result<Request, RequestError> {
-    let envelope: MapOnly<MethodEnvelope> = decode(body)?;
-    match envelope.0.method.as_ref() {
+    use serde::de::DeserializeSeed;
+    let max_items = body_item_bound(body.len(), limits.max_batch_items);
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    let envelope = EnvelopeSeed { max_items }
+        .deserialize(&mut deserializer)
+        .map_err(|err| schema(err.to_string()))?;
+    deserializer.end().map_err(|err| schema(err.to_string()))?;
+    match envelope {
+        DecodedEnvelope::ModelsList => Ok(Request::ModelsList),
+        DecodedEnvelope::Query(params) => parse_query(params, lane, limits),
+        DecodedEnvelope::Batch(params) => parse_batch(params, lane, limits),
+        DecodedEnvelope::Result(params) => parse_result(params, lane),
+        DecodedEnvelope::Deferred(method) => decode_typed(body, &method, lane, limits),
+    }
+}
+
+/// `decode_typed` re-reads `body` with the method-specific envelope type once `method` is known.
+fn decode_typed(
+    body: &[u8],
+    method: &str,
+    lane: &LaneInfo,
+    limits: &SynapseLimits,
+) -> Result<Request, RequestError> {
+    match method {
         "models.list" => {
             let _: MapOnly<OptionalParams<NoParams>> = decode(body)?;
             Ok(Request::ModelsList)
@@ -1258,6 +1381,107 @@ mod tests {
 
     // -----------------------------------------------------------------
     // -----------------------------------------------------------------
+
+    #[test]
+    fn a_worst_case_component_page_fits_its_output_reservation() {
+        // Every component after the first takes the longest finite `f32` encoding; the
+        // first component restores the unit norm so the vector passes engine validation.
+        for dims in [8usize, 192, 256, 384, 768, 1024, 16_384] {
+            let mut vector = vec![-1.000_000_1e-6_f32; dims];
+            vector[0] = 1.0;
+            let hash = sha256_hex(b"worst");
+            let views = [VectorItemView {
+                id: "worst-case",
+                content_sha256: &hash,
+                vector: &vector,
+            }];
+            let mut lane = lane();
+            lane.dims = dims;
+            let cursor = "0123456789abcdef-18446744073709551615:18446744073709551615";
+            let reservation = vector_body_reservation(&lane, &views, Some(cursor));
+            let mut body = Vec::new();
+            write_vector_body(&mut body, &lane, &views, false, Some(cursor)).expect("serializes");
+            assert!(
+                body.len() <= reservation,
+                "dims {dims}: body {} bytes exceeds reservation {reservation}",
+                body.len()
+            );
+        }
+    }
+
+    #[test]
+    fn params_before_method_decodes_like_method_before_params() {
+        let limits = SynapseLimits::default();
+        let lane = lane();
+        let items = [item("a", "one"), item("b", "two")];
+        let key = canonical_request_key(&lane, &items);
+        let query_params = serde_json::json!({
+            "model": lane.model, "required_fingerprint": lane.fingerprint,
+            "required_epoch": lane.table_epoch, "allow_equivalent": false,
+            "accept_declared": false, "text": "hello", "deadline_ms": 250,
+        });
+        let batch_params = serde_json::json!({
+            "model": lane.model, "required_fingerprint": lane.fingerprint,
+            "required_epoch": lane.table_epoch, "allow_equivalent": false,
+            "accept_declared": false, "request_key": key,
+            "items": items.iter().map(|item| serde_json::json!({
+                "id": item.id, "text": item.text, "content_sha256": item.content_sha256,
+            })).collect::<Vec<_>>(),
+        });
+        let result_params = serde_json::json!({
+            "model": lane.model, "required_fingerprint": lane.fingerprint,
+            "required_epoch": lane.table_epoch, "allow_equivalent": false,
+            "accept_declared": false, "job_id": "0123456789abcdef-7",
+            "request_key": key, "cursor": "0123456789abcdef-7:2",
+        });
+        for (method, params) in [
+            ("models.list", serde_json::json!({})),
+            ("embed.query", query_params),
+            ("embed.batch", batch_params),
+            ("embed.result", result_params),
+        ] {
+            let method_first =
+                format!("{{\"method\":{},\"params\":{params}}}", json_string(method)).into_bytes();
+            let params_first =
+                format!("{{\"params\":{params},\"method\":{}}}", json_string(method)).into_bytes();
+            let fast = parse_request_unreserved(&method_first, false, &lane, &limits)
+                .unwrap_or_else(|e| panic!("{method} method-first: {}", e.message));
+            let deferred = parse_request_unreserved(&params_first, false, &lane, &limits)
+                .unwrap_or_else(|e| panic!("{method} params-first: {}", e.message));
+            assert_eq!(fast, deferred, "{method}");
+        }
+        for (case, body) in [
+            (
+                "unsupported method-first",
+                br#"{"method":"nope","params":{}}"#.to_vec(),
+            ),
+            (
+                "unsupported params-first",
+                br#"{"params":{},"method":"nope"}"#.to_vec(),
+            ),
+            (
+                "unknown field after params",
+                br#"{"method":"models.list","params":{},"x":1}"#.to_vec(),
+            ),
+            (
+                "duplicate params",
+                br#"{"method":"models.list","params":{},"params":{}}"#.to_vec(),
+            ),
+            (
+                "duplicate method",
+                br#"{"method":"models.list","method":"models.list"}"#.to_vec(),
+            ),
+            ("missing method", br#"{"params":{}}"#.to_vec()),
+            (
+                "query without params",
+                br#"{"method":"embed.query"}"#.to_vec(),
+            ),
+            ("array envelope", br#"["models.list"]"#.to_vec()),
+        ] {
+            let error = parse_request_unreserved(&body, false, &lane, &limits).expect_err(case);
+            assert_eq!(error.code, "schema_violation", "{case}: {}", error.message);
+        }
+    }
 
     #[test]
     fn the_maximum_reservation_fits_the_scratch_pool_at_every_legal_config() {

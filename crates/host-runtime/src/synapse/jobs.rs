@@ -558,8 +558,12 @@ impl JobTable {
         boundaries.contains(&offset).then_some(offset)
     }
 
-    /// Reserve worst-case JSON bytes for one `f32` component: sign, up to nine significant digits, exponent, and separator.
-    const ENCODED_BYTES_PER_COMPONENT: usize = 16;
+    /// `MAX_F32_JSON_BYTES` is the longest `serde_json` encoding of a finite `f32`, e.g. `-0.0000010000001`.
+    /// `f32_json_encoding_fits_the_component_budget` pins `MAX_F32_JSON_BYTES` against `serde_json`.
+    // commentlint: allow(JUDGE)
+    pub(crate) const MAX_F32_JSON_BYTES: usize = 16;
+    /// Reserve worst-case JSON bytes for one `f32` component plus its `,` separator.
+    const ENCODED_BYTES_PER_COMPONENT: usize = Self::MAX_F32_JSON_BYTES + 1;
     /// Charge the fixed JSON envelope for each vector item.
     /// quotes, separators).
     const ENCODED_ITEM_OVERHEAD: usize = 64;
@@ -998,6 +1002,38 @@ mod tests {
         jobs.clear();
         assert_eq!(first.vectors[0].2.len(), 256 * 1024);
         assert_eq!(second.vectors[0].2[0], 0.5);
+    }
+
+    #[test]
+    fn f32_json_encoding_fits_the_component_budget() {
+        // Exponent and fixed-point boundary values for the linked serializer.
+        let boundary_values = [
+            -1.000_000_1e-6_f32,
+            -1.000_000_1e-5,
+            -0.000_100_000_01,
+            -1.175_494_4e-38,
+            -3.402_823_5e38,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::MAX,
+            f32::MIN,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+        ];
+        for value in boundary_values {
+            let encoded = serde_json::to_string(&value).expect("f32 serializes");
+            assert!(
+                encoded.len() <= JobTable::MAX_F32_JSON_BYTES,
+                "{value:?} encodes as {encoded} ({} bytes), above MAX_F32_JSON_BYTES",
+                encoded.len()
+            );
+        }
+        let longest = serde_json::to_string(&-1.000_000_1e-6_f32).expect("f32 serializes");
+        assert_eq!(
+            longest.len(),
+            JobTable::MAX_F32_JSON_BYTES,
+            "the budget must be tight: {longest}"
+        );
     }
 
     #[test]

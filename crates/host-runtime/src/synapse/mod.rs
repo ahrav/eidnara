@@ -243,6 +243,7 @@ impl SynapseComponent {
 
     pub fn unsupported(reason: &'static str) -> Self {
         let limits = SynapseLimits::default();
+        let query_admission_permits = limits.query_admission_permits().unwrap_or(1);
         Self {
             inner: Arc::new(SynapseInner {
                 config: None,
@@ -253,7 +254,7 @@ impl SynapseComponent {
                     reason: reason.to_owned(),
                 }),
                 cpu: Arc::new(tokio::sync::Semaphore::new(1)),
-                query_admission: Arc::new(tokio::sync::Semaphore::new(1)),
+                query_admission: Arc::new(tokio::sync::Semaphore::new(query_admission_permits)),
                 tracker: TaskTracker::new(),
                 closing: CancellationToken::new(),
             }),
@@ -318,15 +319,19 @@ impl SynapseComponent {
     }
 
     /// `Invariant` errors mark the lane failing before returning, so later callers cannot obtain vectors from a suspect backend.
-    /// backend.
+    /// The lane is read under one lock acquisition so a concurrent `activate` cannot change the state between the readiness check and the reason lookup.
     pub fn embed_blocking(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
-        let Some(lane) = self.ready_lane() else {
-            let reason = match self.status() {
-                SynapseStatus::Disabled { reason } | SynapseStatus::Failing { reason } => reason,
-                SynapseStatus::Starting => STARTING_REASON.to_owned(),
-                SynapseStatus::Ready(_) => unreachable!("ready lanes embed"),
-            };
-            return Err(InferenceError::Artifact(reason));
+        let lane = {
+            let state = self.inner.state.lock().expect("synapse state lock");
+            match &*state {
+                LaneState::Ready(lane) => Arc::clone(lane),
+                LaneState::Starting => {
+                    return Err(InferenceError::Artifact(STARTING_REASON.to_owned()));
+                }
+                LaneState::Disabled { reason } | LaneState::Failing { reason } => {
+                    return Err(InferenceError::Artifact(reason.clone()));
+                }
+            }
         };
         embed_via(&self.inner, &lane, texts)
     }
@@ -839,12 +844,12 @@ impl CompositeComponent for SynapseComponent {
     }
 
     fn resources(&self) -> crate::handler::ResourceDeclaration {
-        //
         if self.inner.config.is_none() && self.ready_lane().is_none() {
             return crate::handler::ResourceDeclaration::default();
         }
         crate::handler::ResourceDeclaration {
-            general_task_hold_bound: self.inner.limits.max_waiting_queries.saturating_add(1),
+            // The declared hold bound is the permit count so the startup starvation guard sees exactly the queries that can park.
+            general_task_hold_bound: self.inner.limits.query_admission_permits().unwrap_or(1),
             ..Default::default()
         }
     }
@@ -1059,6 +1064,70 @@ impl SecondaryComponent for SynapseComponent {
             Err(join_error) => Err(InitError(format!(
                 "synapse activation task failed: {join_error}"
             ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopEngine;
+
+    impl EmbeddingEngine for NoopEngine {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+            Ok(texts.iter().map(|_| vec![1.0]).collect())
+        }
+    }
+
+    fn lane() -> LaneInfo {
+        LaneInfo {
+            model: "m".to_owned(),
+            fingerprint: "f".to_owned(),
+            table_epoch: 1,
+            dims: 1,
+            execution_provider: "cpu",
+            max_tokens: 8,
+            max_text_bytes: 16,
+            provenance: serde_json::Value::Null,
+            recommended_rows: 1,
+            recommended_token_budget: 8,
+        }
+    }
+
+    #[test]
+    fn the_declared_hold_bound_is_the_query_permit_count() {
+        for max_waiting_queries in [0usize, 1, 2, 5] {
+            let limits = SynapseLimits {
+                max_waiting_queries,
+                max_queued_request_bytes: 8 * 1024 * 1024,
+                ..SynapseLimits::default()
+            };
+            let expected = limits
+                .query_admission_permits()
+                .expect("default-shaped limits have a permit count");
+            let component =
+                SynapseComponent::ready_with_engine(lane(), Arc::new(NoopEngine), limits)
+                    .expect("limits validate");
+            assert_eq!(
+                component.resources().general_task_hold_bound,
+                expected,
+                "max_waiting_queries {max_waiting_queries}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unready_lane_reports_its_reason_without_panicking() {
+        let component = SynapseComponent::unsupported("synapse_unsupported");
+        match component.embed_blocking(&["x"]) {
+            Err(InferenceError::Artifact(reason)) => assert_eq!(reason, "synapse_unsupported"),
+            other => panic!("expected an artifact error, got {other:?}"),
+        }
+        let component = SynapseComponent::new(None);
+        match component.embed_blocking(&["x"]) {
+            Err(InferenceError::Artifact(reason)) => assert_eq!(reason, "not initialized"),
+            other => panic!("expected an artifact error, got {other:?}"),
         }
     }
 }

@@ -65,6 +65,31 @@ impl VerifiedOrtLibrary {
 
         PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
     }
+
+    /// `ort::init_from` loads a library at most once per process and reports success even when an earlier load won, so the memfd mapping is the evidence that the certified bytes are the ones executing.
+    fn is_mapped(&self) -> Result<bool, InferenceError> {
+        use std::os::unix::fs::MetadataExt;
+
+        let inode = self
+            .file
+            .metadata()
+            .map_err(|_| InferenceError::Artifact("ONNX Runtime memfd stat failed".to_owned()))?
+            .ino();
+        let maps = std::fs::read_to_string("/proc/self/maps")
+            .map_err(|_| InferenceError::Artifact("process memory map is unreadable".to_owned()))?;
+        Ok(memfd_inode_is_mapped(&maps, inode))
+    }
+}
+
+/// `/proc/self/maps` lines begin with `address perms offset dev inode`; a pathname, when present, follows.
+#[cfg(target_os = "linux")]
+fn memfd_inode_is_mapped(maps: &str, inode: u64) -> bool {
+    maps.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let mapped_inode = fields.nth(4).and_then(|field| field.parse::<u64>().ok());
+        let pathname = fields.next();
+        mapped_inode == Some(inode) && pathname.is_some_and(|path| path.starts_with("/memfd:"))
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -82,8 +107,17 @@ fn ensure_ort(identity: &OrtIdentity) -> Result<(), InferenceError> {
             "a different ONNX Runtime identity is already committed".to_owned(),
         ));
     }
+    // `encode_batch` defaults to a process-wide rayon pool; the `cpu` semaphore in `super` admits one native call at a time, so tokenization stays on the calling thread.
+    // commentlint: allow(JUDGE)
+    tokenizers::utils::parallelism::set_parallelism(false);
     let builder = ort::init_from(verified.load_path())
         .map_err(|_| InferenceError::Artifact("ONNX Runtime library failed to load".to_owned()))?;
+    // A library loaded before this call (for example from `ORT_DYLIB_PATH`) wins the loader's first-load slot; `init_from` does not report that, so the memfd mapping is checked directly.
+    if !verified.is_mapped()? {
+        return Err(InferenceError::Artifact(
+            "an uncertified ONNX Runtime library was already loaded".to_owned(),
+        ));
+    }
     if !builder.commit() {
         // `ort` was initialized before the certified library could be selected.
         return Err(InferenceError::Artifact(
@@ -142,10 +176,13 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
             Err(error)
         }
     });
-    let mut file =
-        std::fs::File::from(fd.map_err(|_| {
-            InferenceError::Artifact("ONNX Runtime memfd creation failed".to_owned())
-        })?);
+    // The errno separates a host policy denial (`EACCES` under `vm.memfd_noexec=2`) from descriptor exhaustion.
+    let mut file = std::fs::File::from(fd.map_err(|errno| {
+        InferenceError::Artifact(format!(
+            "ONNX Runtime memfd creation failed: {errno} ({})",
+            errno.raw_os_error()
+        ))
+    })?);
     file.write_all(&bytes)
         .map_err(|_| InferenceError::Artifact("ONNX Runtime memfd write failed".to_owned()))?;
     drop(bytes);
@@ -164,6 +201,8 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
 pub struct Backend {
     model: Mutex<TextEmbedding>,
     dims: usize,
+    /// When the tokenizer's post-processor adds special tokens, every encoding is non-empty and the per-text zero-token pass is skipped.
+    zero_token_inputs_possible: bool,
 }
 
 impl Backend {
@@ -232,9 +271,20 @@ impl Backend {
         let embedder = TextEmbedding::try_new_from_user_defined(model, options)
             .map_err(|e| InferenceError::Artifact(format!("model construction failed: {e}")))?;
 
+        // The post-processor adds its special tokens independent of the content, so the empty probe is the minimum encoding length for any text. commentlint: allow(JUDGE)
+        let zero_token_inputs_possible = embedder
+            .tokenizer
+            .encode("", true)
+            .map_err(|_| {
+                InferenceError::Artifact("tokenizer failed to encode the empty probe".to_owned())
+            })?
+            .get_ids()
+            .is_empty();
+
         let backend = Self {
             model: Mutex::new(embedder),
             dims: manifest.dims as usize,
+            zero_token_inputs_possible,
         };
         backend.structural_probe()?;
         backend.certify(&corpus)?;
@@ -254,6 +304,9 @@ impl Backend {
         for text in texts {
             if text.is_empty() {
                 return Err(InferenceError::Input("text is empty".to_owned()));
+            }
+            if !self.zero_token_inputs_possible {
+                continue;
             }
             let encoding = model
                 .tokenizer
@@ -337,6 +390,42 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_memfd_mapping_is_recognized_only_by_inode_and_memfd_path() {
+        let maps = "\
+7f0000000000-7f0000001000 r--p 00000000 00:1d 4242 /memfd:host-onnxruntime (deleted)
+7f0000001000-7f0000002000 r-xp 00001000 fd:01 4242 /usr/lib/libonnxruntime.so
+7f0000002000-7f0000003000 rw-p 00000000 00:00 0
+7f0000003000-7f0000004000 r--p 00000000 00:1d 99 /memfd:other (deleted)
+";
+        assert!(memfd_inode_is_mapped(maps, 4242));
+        assert!(memfd_inode_is_mapped(maps, 99));
+        // A regular-file mapping with the same inode number does not count.
+        assert!(!memfd_inode_is_mapped(
+            "7f0000001000-7f0000002000 r-xp 00001000 fd:01 4242 /usr/lib/libonnxruntime.so\n",
+            4242
+        ));
+        assert!(!memfd_inode_is_mapped(maps, 4243));
+        assert!(!memfd_inode_is_mapped(maps, 0));
+        assert!(!memfd_inode_is_mapped("", 4242));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unloaded_verified_library_is_not_mapped() {
+        let source_dir = tempfile::tempdir().expect("source directory");
+        let source = source_dir.path().join("libonnxruntime.so");
+        let bytes = b"certified but never dlopened";
+        std::fs::write(&source, bytes).expect("write source");
+        let identity = OrtIdentity {
+            library: source,
+            sha256: super::super::protocol::sha256_hex(bytes),
+        };
+        let verified = verify_ort_library(&identity).expect("verified staging");
+        assert!(!verified.is_mapped().expect("maps readable"));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
