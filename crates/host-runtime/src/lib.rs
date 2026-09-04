@@ -15,6 +15,7 @@ pub mod harness_closure;
 pub mod lifecycle;
 #[doc(hidden)]
 pub mod ring_transport;
+pub mod synapse;
 
 mod connection;
 mod control;

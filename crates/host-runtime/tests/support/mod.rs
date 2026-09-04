@@ -5,6 +5,7 @@
 pub mod echo_host;
 pub mod process_resources;
 pub mod raw_client;
+pub mod synapse;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -13,8 +14,8 @@ use std::time::Duration;
 
 use host_runtime::{
     BindOutcome, CancellationToken, CompositeComponent, HealthReport, HealthStatus, HostConfig,
-    HostError, HostHandler, HostInit, HostLimits, InitError, ManifestSnapshot, PrimaryComponent,
-    RequestCtx, RequestOutcome, ResourceDeclaration, RouteHandle, RouteIdentity, RouteTarget,
+    HostError, HostHandler, HostLimits, InitError, ManifestSnapshot, PrimaryComponent, RequestCtx,
+    RequestOutcome, ResourceDeclaration, RouteHandle, RouteIdentity, RouteTarget,
     SecondaryComponent, ShutdownError,
 };
 
@@ -939,52 +940,5 @@ pub fn assert_control_ops(modules: &serde_json::Value, expected: &[&str]) {
             "{} control_ops must list implemented operations only",
             module["module_id"]
         );
-    }
-}
-
-// U1: `EchoPrimary` lives here until `tests/support/synapse.rs` lands (U3).
-/// The primary accepts every request so the composite can start.
-pub struct EchoPrimary;
-
-impl CompositeComponent for EchoPrimary {
-    fn manifest(&self) -> ManifestSnapshot {
-        ManifestSnapshot {
-            module_id: "context".to_owned(),
-            module_version: "0.0.1".to_owned(),
-            provides: vec![serde_json::json!({"role": "tool_provider"})],
-            control_ops: Vec::new(),
-        }
-    }
-
-    async fn bind(&self, _route: RouteHandle, _identity: RouteIdentity) -> BindOutcome {
-        BindOutcome::Accept
-    }
-
-    async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
-        let Ok(mut body) = ctx.reserve_output(ctx.body.len()).await else {
-            return RequestOutcome::error("internal_error", "reservation failed");
-        };
-        body.extend_from_slice(&ctx.body)
-            .expect("reservation matches body");
-        RequestOutcome::Response {
-            body,
-            binary: ctx.binary,
-        }
-    }
-
-    async fn route_gone(&self, _route: RouteHandle) {}
-
-    async fn health(&self) -> HealthReport {
-        HealthReport::ok()
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        Ok(())
-    }
-}
-
-impl PrimaryComponent for EchoPrimary {
-    async fn initialize(&self, _init: HostInit) -> Result<(), InitError> {
-        Ok(())
     }
 }
