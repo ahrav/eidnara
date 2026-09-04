@@ -40,7 +40,7 @@ fn main() {
     }
     blob.extend_from_slice(&bytes);
     std::fs::File::create(out.join("vocab.bin"))
-        .expect("create vocab.bin")
+        .expect("create the vocabulary blob in OUT_DIR")
         .write_all(&blob)
-        .expect("write vocab.bin");
+        .expect("write the vocabulary blob");
 }
