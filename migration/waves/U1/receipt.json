@@ -34,7 +34,7 @@
     {
       "source": null,
       "destination": "package.json",
-      "destination_sha256": "0c1040255629c9873a262cd9bd93ff5e3662dc20df02e57d1407fdc5350ec36b",
+      "destination_sha256": "5777b58feffa44eb9322f5ebe96f7139ab8e60088fccdd15b3d8f3050998776b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -122,7 +122,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "63621b14abc89b63e31eb289c4a70e2633baf3f09a53af7a701aeafb3dbb3883",
+      "destination_sha256": "38a5480b8dbffe1cf28198098e738d124654dedeba4ffed39195e2bb5331a5ba",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -300,7 +300,7 @@
     {
       "source": null,
       "destination": "bun.lock",
-      "destination_sha256": "eff76983847b253df6156ba9c0d35a6927a75450e21a09fffee4174b11299903",
+      "destination_sha256": "4b4a80766026ac6c1943ff94f04b8fb5e4a045991af4ff55c24aa9855d38cb76",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
