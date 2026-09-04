@@ -1,19 +1,11 @@
-// This crate root must declare `file_mode` and `store_fs` because `harness_closure.rs` uses them through `crate::`.
-#[path = "../src/file_mode.rs"]
-mod file_mode;
-#[path = "../src/harness_closure.rs"]
-mod harness_closure;
-#[path = "../src/store_fs.rs"]
-mod store_fs;
-
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use harness_closure::{
+use host_runtime::harness_closure::{
     ClosureCandidate, ClosureDependency, ClosureManifest, ClosureNode, DependencyKind,
-    HarnessClosureStore, NodeKind, manifest_digest, validate_manifest,
+    HarnessClosureStore, NodeKind, STALE_TEMP_AFTER, manifest_digest, validate_manifest,
 };
 use sha2::{Digest, Sha256};
 
@@ -166,7 +158,6 @@ fn resolved_descriptor_is_rewound_after_verification() {
         .resolve_node_descriptor("node_modules/pi/dist/helper.js")
         .expect("resolve node");
 
-    // A macOS child opening `/dev/fd/N` receives a duplicate descriptor with the original offset, so the handed-out descriptor must start at offset 0.
     // A macOS child opening `/dev/fd/N` receives a duplicate descriptor with the original offset, so the handed-out descriptor must start at offset 0.
     // SAFETY: `node` owns this descriptor for the duration of the borrow.
     let inherited = unsafe { std::os::fd::BorrowedFd::borrow_raw(node.inherited_fd()) };
@@ -549,7 +540,7 @@ fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
 
 /// The helper sets the entry's mtime to twice `STALE_TEMP_AFTER` ago so `prune` treats it as abandoned.
 fn age_past_stale_threshold(path: &Path) {
-    let old = std::time::SystemTime::now() - harness_closure::STALE_TEMP_AFTER * 2;
+    let old = std::time::SystemTime::now() - STALE_TEMP_AFTER * 2;
     let secs = old
         .duration_since(std::time::UNIX_EPOCH)
         .expect("epoch")
@@ -663,6 +654,45 @@ fn prune_continues_past_an_unremovable_entry() {
     );
 }
 
+/// A crash between `rename_no_replace` and the store fsync can leave a promoted digest
+/// missing nested entries. Under `transaction.lock` nothing else owns it, so `materialize`
+/// removes the torn occupant and restages instead of wedging the digest.
+#[test]
+fn a_torn_digest_directory_is_repaired_by_materialize() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let digest = manifest_digest(&candidate.manifest).expect("digest");
+
+    let torn = store_root.join(&digest);
+    std::fs::create_dir_all(torn.join("files/bin")).expect("torn layout without bin/node");
+    std::fs::write(
+        torn.join("manifest.json"),
+        serde_json::to_vec_pretty(&serde_json::to_value(&candidate.manifest).expect("value"))
+            .expect("manifest bytes"),
+    )
+    .expect("valid manifest");
+    for path in [torn.clone(), torn.join("files"), torn.join("files/bin")] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    }
+    std::fs::set_permissions(
+        torn.join("manifest.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("mode");
+    assert_eq!(
+        store.validate(&digest).expect_err("torn").detail(),
+        "closure is missing a manifest-listed node"
+    );
+
+    let closure = store
+        .materialize(&candidate)
+        .expect("materialize repairs the torn digest");
+    assert_eq!(closure.digest(), digest);
+    store.validate(&digest).expect("repaired closure validates");
+    assert!(torn.join("files/bin/node").is_file());
+}
+
 /// The child must see the node at the exact descriptor number `module_path` names, and only
 /// after `inherit_in_child` clears close-on-exec in the forked child.
 #[cfg(target_os = "linux")]
@@ -744,10 +774,7 @@ fn native_edges_and_native_addons_must_correspond_exactly() {
 }
 
 /// Lexicographic path order can place `bin/node.dat` between `bin/node` and `bin/node/main.js`.
-/// Lexicographic path order can place `bin/node.dat` between `bin/node` and `bin/node/main.js`.
-/// Validation must reject a regular file that prefixes another manifest path.
 /// Validation must compare every path with its ancestor paths, not only the immediately preceding sorted entry.
-/// Validation rejects a regular file that prefixes another manifest path.
 /// Validation rejects a regular file that prefixes another manifest path.
 #[test]
 fn a_parent_file_collision_is_caught_across_an_intervening_sibling() {
@@ -798,9 +825,6 @@ fn a_parent_file_collision_is_caught_across_an_intervening_sibling() {
 
 /// Validation rejects multiple dependencies that name the same target, regardless of `DependencyKind`.
 /// Dependencies with the same path but different kinds require explicit duplicate-path validation.
-/// Dependencies with the same path but different kinds require explicit duplicate-path validation.
-/// Duplicate dependency validation rejects dependencies with equal paths even when their `DependencyKind` values differ.
-/// Duplicate dependency validation rejects dependencies with equal paths even when their `DependencyKind` values differ.
 #[test]
 fn duplicate_dependency_targets_are_rejected_across_kinds() {
     let (_temp, _source, candidate) = setup();

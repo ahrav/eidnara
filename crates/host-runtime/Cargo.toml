@@ -8,9 +8,6 @@ repository.workspace = true
 publish.workspace = true
 description = "Directly linked host for the context, Synapse, and Broca components."
 
-[lints.clippy]
-duplicate_mod = "allow"
-
 [dependencies]
 serde = { workspace = true }
 hmac = { workspace = true }

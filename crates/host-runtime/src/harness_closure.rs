@@ -6,22 +6,27 @@
 //! Mutating entry points (`materialize`, `prune`) are not serialized by this module.
 //! Callers must hold `transaction.lock` across them; `prune` additionally reclaims
 //! staging temps only after [`STALE_TEMP_AFTER`] to avoid deleting an unlocked
-//! concurrent `materialize`.
+//! concurrent `materialize`, which touches its temp root after every copied node.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::CStr;
-use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rustix::fd::OwnedFd;
-use rustix::fs::{AtFlags, CWD, Dir, Mode, OFlags, fsync, mkdirat, openat, unlinkat};
+use rustix::fs::{AtFlags, CWD, Mode, OFlags, fsync, mkdirat, openat};
 use sha2::{Digest, Sha256};
 
 use crate::file_mode::raw_mode;
-use crate::store_fs::{dup_cloexec, rename_no_replace};
+use crate::instance::{
+    S_IFDIR, S_IFMT, S_IFREG, hex, mode_bits, owner_uid, read_all_fd, secure_runtime_dir,
+};
+use crate::lifecycle::is_canonical_payload_digest;
+use crate::store_fs::{
+    HARDENED_DIR_FLAGS, create_owned_dir, hash_copy, is_stale_mtime, open_created_dir,
+    open_dir_for_removal, open_rel_nofollow, read_dir_names, remove_tree, rename_no_replace,
+    write_new_file,
+};
 
 const MANIFEST_NAME: &str = "manifest.json";
 const FILES_NAME: &str = "files";
@@ -31,13 +36,9 @@ const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NODES: usize = 65_536;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_STRING_BYTES: usize = 1024;
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
-const S_ISVTX: u32 = 0o1000;
 
 /// `prune` treats a staging temp older than this as abandoned.
-pub const STALE_TEMP_AFTER: Duration = Duration::from_secs(600);
+pub const STALE_TEMP_AFTER: Duration = crate::store_fs::STALE_TEMP_AFTER;
 
 /// `ClosureManifest` accepts only schema-1 harness closures.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -175,7 +176,6 @@ impl ValidatedHarnessClosure {
 /// macOS `/dev/fd/N` neither opens the inode at offset 0 nor resolves to the object's real pathname.
 /// On macOS, the `/dev/fd/N` entry is not a symlink, so a loader cannot walk back to the containing directory.
 /// `/proc/self/fd/N` and `/dev/fd/N` both support exec.
-#[allow(dead_code)] // Path-included closure tests compile without Broca adapters.
 pub fn descriptor_path(fd: RawFd) -> PathBuf {
     let root = if cfg!(target_os = "macos") {
         "/dev/fd"
@@ -185,17 +185,14 @@ pub fn descriptor_path(fd: RawFd) -> PathBuf {
     PathBuf::from(root).join(fd.to_string())
 }
 
-#[allow(dead_code)] // Path-included closure tests compile without Broca adapters.
 pub const DESCRIPTOR_PATHS_ARE_FILE_LIKE: bool = !cfg!(target_os = "macos");
 
-#[allow(dead_code)] // Path-included closure tests compile without Broca adapters.
 pub struct ResolvedHarnessNode {
     descriptor_path: PathBuf,
     closure_path: PathBuf,
     fd: OwnedFd,
 }
 
-#[allow(dead_code)] // Path-included closure tests compile without Broca adapters.
 impl ResolvedHarnessNode {
     /// The exec target path is always descriptor-rooted.
     pub fn path(&self) -> &Path {
@@ -275,40 +272,26 @@ pub fn manifest_digest(manifest: &ClosureManifest) -> Result<String, HarnessClos
     Ok(hex(&Sha256::digest(bytes)))
 }
 
+/// The `to_value` hop sorts object keys: without `serde_json`'s `preserve_order` feature,
+/// `serde_json::Map` is a `BTreeMap`. That feature must stay off or digests change.
 fn canonical_manifest(manifest: &ClosureManifest) -> Result<Vec<u8>, HarnessClosureError> {
     let value =
         serde_json::to_value(manifest).map_err(|_| invalid("manifest serialization failed"))?;
-    serde_json::to_vec_pretty(&sort_json(value))
-        .map_err(|_| invalid("manifest serialization failed"))
-}
-
-fn sort_json(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(sort_json).collect())
-        }
-        serde_json::Value::Object(values) => {
-            let mut keys: Vec<String> = values.keys().cloned().collect();
-            keys.sort();
-            let mut sorted = serde_json::Map::new();
-            for key in keys {
-                sorted.insert(
-                    key.clone(),
-                    sort_json(
-                        values
-                            .get(&key)
-                            .expect("key was collected from this object")
-                            .clone(),
-                    ),
-                );
-            }
-            serde_json::Value::Object(sorted)
-        }
-        scalar => scalar,
-    }
+    serde_json::to_vec_pretty(&value).map_err(|_| invalid("manifest serialization failed"))
 }
 
 pub fn validate_manifest(manifest: &ClosureManifest) -> Result<(), HarnessClosureError> {
+    validate_header(manifest)?;
+    let mut by_path = BTreeMap::new();
+    let mut previous_path: Option<&str> = None;
+    for node in &manifest.nodes {
+        validate_node(node, manifest, &mut by_path, &mut previous_path)?;
+    }
+    let roots = collect_roots(manifest, &by_path)?;
+    validate_edges_and_reachability(manifest, &by_path, roots)
+}
+
+fn validate_header(manifest: &ClosureManifest) -> Result<(), HarnessClosureError> {
     if manifest.schema != CLOSURE_SCHEMA {
         return Err(invalid("unsupported manifest schema"));
     }
@@ -346,75 +329,85 @@ pub fn validate_manifest(manifest: &ClosureManifest) -> Result<(), HarnessClosur
             "manifest mixes executable and interpreted launch roots",
         ));
     }
+    Ok(())
+}
 
-    let mut by_path = BTreeMap::new();
-    let mut previous_path: Option<&str> = None;
-    for node in &manifest.nodes {
-        validate_relative_path(&node.path)?;
-        validate_relative_path(&node.source_path)?;
-        validate_identifier(&node.source_root)?;
-        if manifest
-            .source_roots
-            .binary_search(&node.source_root)
-            .is_err()
-        {
-            return Err(invalid("node source root is not declared"));
-        }
-        validate_hash(&node.sha256)?;
-        if node.mode != 0o600 && node.mode != 0o700 {
-            return Err(invalid("node mode is not owner-only"));
-        }
-        match node.kind {
-            NodeKind::Executable | NodeKind::Interpreter if node.mode != 0o700 => {
-                return Err(invalid("launch node is not executable"));
-            }
-            NodeKind::Module | NodeKind::NativeAddon | NodeKind::Extension | NodeKind::Data
-                if node.mode != 0o600 =>
-            {
-                return Err(invalid("non-launch node has executable mode"));
-            }
-            _ => {}
-        }
-        if previous_path.is_some_and(|previous| previous >= node.path.as_str()) {
-            return Err(invalid("manifest nodes are not uniquely sorted by path"));
-        }
-        // The validator checks every ancestor because path ordering can place sibling files between a parent and child.
-        let mut ancestor = node.path.as_str();
-        while let Some((parent, _)) = ancestor.rsplit_once('/') {
-            if by_path.contains_key(parent) {
-                return Err(invalid("manifest node path collides with a parent file"));
-            }
-            ancestor = parent;
-        }
-        previous_path = Some(&node.path);
-        if by_path.insert(node.path.as_str(), node).is_some() {
-            return Err(invalid("manifest contains a duplicate node path"));
-        }
-        let mut previous_dependency: Option<&str> = None;
-        for dependency in &node.dependencies {
-            validate_relative_path(&dependency.path)?;
-            // Dependency validation rejects duplicate `path` values regardless of `kind`.
-            if previous_dependency.is_some_and(|previous| previous >= dependency.path.as_str()) {
-                return Err(invalid(
-                    "node dependencies are not uniquely sorted by target path",
-                ));
-            }
-            previous_dependency = Some(&dependency.path);
-        }
+fn validate_node<'a>(
+    node: &'a ClosureNode,
+    manifest: &ClosureManifest,
+    by_path: &mut BTreeMap<&'a str, &'a ClosureNode>,
+    previous_path: &mut Option<&'a str>,
+) -> Result<(), HarnessClosureError> {
+    validate_relative_path(&node.path)?;
+    validate_relative_path(&node.source_path)?;
+    validate_identifier(&node.source_root)?;
+    if manifest
+        .source_roots
+        .binary_search(&node.source_root)
+        .is_err()
+    {
+        return Err(invalid("node source root is not declared"));
     }
+    validate_hash(&node.sha256)?;
+    if node.mode != 0o600 && node.mode != 0o700 {
+        return Err(invalid("node mode is not owner-only"));
+    }
+    match node.kind {
+        NodeKind::Executable | NodeKind::Interpreter if node.mode != 0o700 => {
+            return Err(invalid("launch node is not executable"));
+        }
+        NodeKind::Module | NodeKind::NativeAddon | NodeKind::Extension | NodeKind::Data
+            if node.mode != 0o600 =>
+        {
+            return Err(invalid("non-launch node has executable mode"));
+        }
+        _ => {}
+    }
+    if previous_path.is_some_and(|previous| previous >= node.path.as_str()) {
+        return Err(invalid("manifest nodes are not uniquely sorted by path"));
+    }
+    // The validator checks every ancestor because path ordering can place sibling files between a parent and child.
+    let mut ancestor = node.path.as_str();
+    while let Some((parent, _)) = ancestor.rsplit_once('/') {
+        if by_path.contains_key(parent) {
+            return Err(invalid("manifest node path collides with a parent file"));
+        }
+        ancestor = parent;
+    }
+    *previous_path = Some(&node.path);
+    if by_path.insert(node.path.as_str(), node).is_some() {
+        return Err(invalid("manifest contains a duplicate node path"));
+    }
+    let mut previous_dependency: Option<&str> = None;
+    for dependency in &node.dependencies {
+        validate_relative_path(&dependency.path)?;
+        // Dependency validation rejects duplicate `path` values regardless of `kind`.
+        if previous_dependency.is_some_and(|previous| previous >= dependency.path.as_str()) {
+            return Err(invalid(
+                "node dependencies are not uniquely sorted by target path",
+            ));
+        }
+        previous_dependency = Some(&dependency.path);
+    }
+    Ok(())
+}
 
+fn collect_roots<'a>(
+    manifest: &'a ClosureManifest,
+    by_path: &BTreeMap<&str, &ClosureNode>,
+) -> Result<Vec<&'a str>, HarnessClosureError> {
     let mut roots = Vec::new();
     for (path, expected_kind) in [
         (manifest.executable.as_deref(), NodeKind::Executable),
         (manifest.interpreter.as_deref(), NodeKind::Interpreter),
     ] {
         if let Some(path) = path {
-            require_root(&by_path, path, expected_kind)?;
+            require_root(by_path, path, expected_kind)?;
             roots.push(path);
         }
     }
     if let Some(path) = manifest.entrypoint.as_deref() {
-        let node = require_existing_node(&by_path, path)?;
+        let node = require_existing_node(by_path, path)?;
         if !matches!(node.kind, NodeKind::Module | NodeKind::Executable) {
             return Err(invalid("entrypoint has an invalid node kind"));
         }
@@ -426,15 +419,22 @@ pub fn validate_manifest(manifest: &ClosureManifest) -> Result<(), HarnessClosur
         if !seen_extensions.insert(path.as_str()) {
             return Err(invalid("manifest contains a duplicate extension"));
         }
-        require_root(&by_path, path, NodeKind::Extension)?;
+        require_root(by_path, path, NodeKind::Extension)?;
         roots.push(path);
     }
+    Ok(roots)
+}
 
+fn validate_edges_and_reachability(
+    manifest: &ClosureManifest,
+    by_path: &BTreeMap<&str, &ClosureNode>,
+    roots: Vec<&str>,
+) -> Result<(), HarnessClosureError> {
     // Each `native` edge must target a `native_addon`, and each `native_addon` must have a `native` edge.
     let mut native_targets = BTreeSet::new();
     for node in &manifest.nodes {
         for dependency in &node.dependencies {
-            let target = require_existing_node(&by_path, &dependency.path)?;
+            let target = require_existing_node(by_path, &dependency.path)?;
             if (dependency.kind == DependencyKind::Native) != (target.kind == NodeKind::NativeAddon)
             {
                 return Err(invalid(
@@ -526,11 +526,7 @@ fn validate_relative_path(path: &str) -> Result<(), HarnessClosureError> {
 }
 
 fn validate_hash(hash: &str) -> Result<(), HarnessClosureError> {
-    if hash.len() != 64
-        || !hash
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if !is_canonical_payload_digest(hash) {
         return Err(invalid("manifest hash is not canonical sha256"));
     }
     Ok(())
@@ -552,14 +548,23 @@ impl std::fmt::Debug for HarnessClosureStore {
 
 impl HarnessClosureStore {
     /// The operation opens or creates an owner-only store without following symlinks in any path component.
+    /// An existing owned root with a wider mode is repaired to `0o700` through its pinned descriptor.
     pub fn open(root: &Path) -> Result<Self, HarnessClosureError> {
-        let root_fd = open_or_create_store_path(root)?;
+        let root_fd =
+            secure_runtime_dir(root).map_err(|_| invalid("closure store path is insecure"))?;
+        verify_owned_directory(&root_fd)?;
         Ok(Self {
             root: root.to_path_buf(),
             root_fd,
         })
     }
 
+    /// An existing digest directory that fails validation is a torn closure (crash between
+    /// promotion and durability, or later corruption). Because the caller holds
+    /// `transaction.lock`, nothing else owns it, so `materialize` removes it and restages.
+    ///
+    /// A "closure store fsync failed" error after promotion means the digest may already be
+    /// named by the store but its durability is unproven; retrying revalidates it in place.
     pub fn materialize(
         &self,
         candidate: &ClosureCandidate,
@@ -571,7 +576,11 @@ impl HarnessClosureStore {
             return Ok(validated);
         }
         if child_exists(&self.root_fd, &digest)? {
-            return Err(invalid("digest target exists but is invalid"));
+            if open_dir_for_removal(&self.root_fd, &digest).is_err() {
+                return Err(invalid("digest target exists but is invalid"));
+            }
+            remove_tree(&self.root_fd, &digest)
+                .map_err(|_| invalid("torn closure removal failed"))?;
         }
 
         let (temp_name, temp_fd) = self.create_temp()?;
@@ -586,7 +595,8 @@ impl HarnessClosureStore {
             }
             Ok(false) => {
                 // Deleting `temp_name` before `validate` prevents validation errors from leaving the staging tree behind.
-                remove_tree(&self.root_fd, &temp_name)?;
+                remove_tree(&self.root_fd, &temp_name)
+                    .map_err(|_| invalid("temporary closure removal failed"))?;
                 return self.validate(&digest);
             }
             Err(_) => {
@@ -615,8 +625,8 @@ impl HarnessClosureStore {
             } else if validate_hash(&name).is_err() {
                 continue;
             }
-            if let Err(error) = remove_tree(&self.root_fd, &name) {
-                first_error.get_or_insert(error);
+            if remove_tree(&self.root_fd, &name).is_err() {
+                first_error.get_or_insert(invalid("closure entry removal failed"));
             }
         }
         fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))?;
@@ -628,7 +638,8 @@ impl HarnessClosureStore {
         let dir_fd = open_owned_dir(&self.root_fd, digest)?;
         let manifest_fd = open_direct_file(&dir_fd, MANIFEST_NAME)?;
         verify_secure_file(&manifest_fd, 0o600)?;
-        let bytes = read_bounded(&manifest_fd, MAX_MANIFEST_BYTES)?;
+        let bytes = read_all_fd(&manifest_fd, MAX_MANIFEST_BYTES)
+            .map_err(|_| invalid("closure manifest read failed"))?;
         if hex(&Sha256::digest(&bytes)) != digest {
             return Err(invalid("manifest bytes do not match the closure digest"));
         }
@@ -664,25 +675,22 @@ impl HarnessClosureStore {
     }
 
     fn create_temp(&self) -> Result<(String, OwnedFd), HarnessClosureError> {
-        for _ in 0..8 {
-            let mut random = [0u8; 12];
-            getrandom::getrandom(&mut random)
-                .map_err(|_| invalid("temporary name generation failed"))?;
-            let name = format!("{TEMP_PREFIX}{}", hex(&random));
-            match mkdirat(&self.root_fd, name.as_str(), Mode::from_raw_mode(0o700)) {
-                Ok(()) => {}
-                Err(rustix::io::Errno::EXIST) => continue,
-                Err(_) => return Err(invalid("temporary closure creation failed")),
+        let mut random = [0u8; 12];
+        getrandom::getrandom(&mut random)
+            .map_err(|_| invalid("temporary name generation failed"))?;
+        let name = format!("{TEMP_PREFIX}{}", hex(&random));
+        mkdirat(&self.root_fd, name.as_str(), Mode::from_raw_mode(0o700))
+            .map_err(|_| invalid("temporary closure creation failed"))?;
+        match open_created_dir(&self.root_fd, &name) {
+            Ok(fd) => {
+                verify_owned_directory(&fd)?;
+                Ok((name, fd))
             }
-            return match open_created_dir(&self.root_fd, &name) {
-                Ok(fd) => Ok((name, fd)),
-                Err(error) => {
-                    let _ = remove_tree(&self.root_fd, &name);
-                    Err(error)
-                }
-            };
+            Err(_) => {
+                let _ = remove_tree(&self.root_fd, &name);
+                Err(invalid("temporary closure open failed"))
+            }
         }
-        Err(invalid("temporary closure name collision"))
     }
 
     fn stage_candidate(
@@ -690,22 +698,53 @@ impl HarnessClosureStore {
         temp_fd: &OwnedFd,
         candidate: &ClosureCandidate,
     ) -> Result<(), HarnessClosureError> {
-        mkdirat(temp_fd, FILES_NAME, Mode::from_raw_mode(0o700))
+        let files_fd = create_owned_dir(temp_fd, FILES_NAME)
             .map_err(|_| invalid("closure files directory creation failed"))?;
-        let files_fd = open_created_dir(temp_fd, FILES_NAME)?;
         let source_fds = open_source_roots(&candidate.source_roots)?;
+        // Fsyncing a file does not persist its dirent, so every directory that received an entry is fsynced below.
+        let mut dirs: BTreeSet<&str> = BTreeSet::new();
         for node in &candidate.manifest.nodes {
             let source_root = source_fds
                 .get(&node.source_root)
                 .ok_or_else(|| invalid("node source root is missing"))?;
             copy_node(source_root, &files_fd, node)?;
+            let mut ancestor = node.path.as_str();
+            while let Some((parent, _)) = ancestor.rsplit_once('/') {
+                dirs.insert(parent);
+                ancestor = parent;
+            }
+            // The temp root's mtime is `prune`'s liveness signal; node writes land under `files/` and would not refresh it.
+            touch(temp_fd).map_err(|_| invalid("temporary closure touch failed"))?;
+        }
+        // Reverse lexicographic order visits every child before its parent, so each directory's
+        // entries are durable before its own dirent.
+        for rel in dirs.iter().rev() {
+            let dir = open_rel_nofollow(&files_fd, rel, true)
+                .map_err(|_| invalid("closure layout directory reopen failed"))?;
+            fsync(&dir).map_err(|_| invalid("closure layout directory fsync failed"))?;
         }
         fsync(&files_fd).map_err(|_| invalid("closure files fsync failed"))?;
         let bytes = canonical_manifest(&candidate.manifest)?;
-        write_new_file(temp_fd, MANIFEST_NAME, &bytes, 0o600)?;
+        let manifest_fd = write_new_file(temp_fd, MANIFEST_NAME, &bytes, 0o600)
+            .map_err(|_| invalid("closure metadata write failed"))?;
+        verify_secure_file(&manifest_fd, 0o600)?;
         fsync(temp_fd).map_err(|_| invalid("temporary closure fsync failed"))?;
         Ok(())
     }
+}
+
+fn touch(fd: &OwnedFd) -> rustix::io::Result<()> {
+    let now = rustix::fs::Timespec {
+        tv_sec: 0,
+        tv_nsec: rustix::fs::UTIME_NOW,
+    };
+    rustix::fs::futimens(
+        fd,
+        &rustix::fs::Timestamps {
+            last_access: now,
+            last_modification: now,
+        },
+    )
 }
 
 fn validate_source_root_set(candidate: &ClosureCandidate) -> Result<(), HarnessClosureError> {
@@ -730,13 +769,8 @@ fn open_source_roots(
     roots
         .iter()
         .map(|(name, path)| {
-            let fd = openat(
-                CWD,
-                path,
-                OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| invalid("source root open failed"))?;
+            let fd = openat(CWD, path, HARDENED_DIR_FLAGS, Mode::empty())
+                .map_err(|_| invalid("source root open failed"))?;
             let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("source root stat failed"))?;
             if mode_bits(&stat) & S_IFMT != S_IFDIR {
                 return Err(invalid("source root is not a directory"));
@@ -769,42 +803,17 @@ fn copy_node(
     rustix::fs::fchmod(&destination, Mode::from_raw_mode(raw_mode(node.mode)))
         .map_err(|_| invalid("closure node chmod failed"))?;
 
-    let mut reader = std::fs::File::from(
-        dup_cloexec(&source).map_err(|_| invalid("source node descriptor dup failed"))?,
-    );
-    let mut writer = std::fs::File::from(
-        dup_cloexec(&destination).map_err(|_| invalid("destination node descriptor dup failed"))?,
-    );
-    let mut hasher = Sha256::new();
-    let mut copied = 0u64;
-    let mut buffer = [0u8; 128 * 1024];
-    loop {
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|_| invalid("source node read failed"))?;
-        if count == 0 {
-            break;
-        }
-        copied = copied
-            .checked_add(count as u64)
-            .ok_or_else(|| invalid("source node size overflow"))?;
-        if copied > node.size_bytes {
-            return Err(invalid("source node grew during copy"));
-        }
-        hasher.update(&buffer[..count]);
-        writer
-            .write_all(&buffer[..count])
-            .map_err(|_| invalid("closure node write failed"))?;
-    }
-    writer
-        .flush()
-        .map_err(|_| invalid("closure node flush failed"))?;
+    let (copied, sha256) =
+        hash_copy(&source, Some(&destination), node.size_bytes).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                invalid("source node grew during copy")
+            } else {
+                invalid("closure node copy failed")
+            }
+        })?;
     fsync(&destination).map_err(|_| invalid("closure node fsync failed"))?;
     let after = rustix::fs::fstat(&source).map_err(|_| invalid("source node stat failed"))?;
-    if !same_file_snapshot(&before, &after)
-        || copied != node.size_bytes
-        || hex(&hasher.finalize()) != node.sha256
-    {
+    if !same_file_snapshot(&before, &after) || copied != node.size_bytes || sha256 != node.sha256 {
         return Err(invalid("source node bytes diverge from manifest"));
     }
     verify_secure_file(&destination, node.mode)?;
@@ -827,14 +836,19 @@ fn create_parent_dirs(
     relative: &str,
 ) -> Result<(OwnedFd, String), HarnessClosureError> {
     let mut parts = relative.split('/').peekable();
-    let mut current =
-        dup_cloexec(root).map_err(|_| invalid("closure files descriptor dup failed"))?;
+    let mut current = crate::store_fs::dup_cloexec(root)
+        .map_err(|_| invalid("closure files descriptor dup failed"))?;
     while let Some(part) = parts.next() {
         if parts.peek().is_none() {
             return Ok((current, part.to_owned()));
         }
         current = match mkdirat(&current, part, Mode::from_raw_mode(0o700)) {
-            Ok(()) => open_created_dir(&current, part)?,
+            Ok(()) => {
+                let fd = open_created_dir(&current, part)
+                    .map_err(|_| invalid("closure layout directory open failed"))?;
+                verify_owned_directory(&fd)?;
+                fd
+            }
             Err(rustix::io::Errno::EXIST) => open_owned_dir(&current, part)?,
             Err(_) => return Err(invalid("closure layout directory creation failed")),
         };
@@ -896,28 +910,14 @@ fn verify_node_file(fd: &OwnedFd, node: &ClosureNode) -> Result<(), HarnessClosu
     if stat.st_size as u64 != node.size_bytes {
         return Err(invalid("closure node size diverges from manifest"));
     }
-    let mut reader = std::fs::File::from(
-        dup_cloexec(fd).map_err(|_| invalid("closure node descriptor dup failed"))?,
-    );
-    let mut hasher = Sha256::new();
-    let mut total = 0u64;
-    let mut buffer = [0u8; 128 * 1024];
-    loop {
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|_| invalid("closure node read failed"))?;
-        if count == 0 {
-            break;
+    let (total, sha256) = hash_copy(fd, None, node.size_bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            invalid("closure node grew past its manifest size")
+        } else {
+            invalid("closure node read failed")
         }
-        total = total
-            .checked_add(count as u64)
-            .ok_or_else(|| invalid("closure node size overflow"))?;
-        if total > node.size_bytes {
-            return Err(invalid("closure node grew past its manifest size"));
-        }
-        hasher.update(&buffer[..count]);
-    }
-    if total != node.size_bytes || hex(&hasher.finalize()) != node.sha256 {
+    })?;
+    if total != node.size_bytes || sha256 != node.sha256 {
         return Err(invalid("closure node hash diverges from manifest"));
     }
     Ok(())
@@ -929,7 +929,7 @@ fn verify_secure_file(fd: &OwnedFd, expected_mode: u32) -> Result<(), HarnessClo
     if mode & S_IFMT != S_IFREG
         || stat.st_uid != owner_uid()
         || stat.st_nlink != 1
-        || mode & 0o777 != expected_mode
+        || mode & 0o7777 != expected_mode
     {
         return Err(invalid("closure file is not owner-only single-link"));
     }
@@ -938,26 +938,7 @@ fn verify_secure_file(fd: &OwnedFd, expected_mode: u32) -> Result<(), HarnessClo
 
 fn open_relative_file(root: &OwnedFd, relative: &str) -> Result<OwnedFd, HarnessClosureError> {
     validate_relative_path(relative)?;
-    let mut parts = relative.split('/').peekable();
-    let mut current = dup_cloexec(root).map_err(|_| invalid("directory descriptor dup failed"))?;
-    while let Some(part) = parts.next() {
-        let last = parts.peek().is_none();
-        let flags = if last {
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK
-        } else {
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC
-        };
-        current = openat(&current, part, flags, Mode::empty())
-            .map_err(|_| invalid("relative file traversal failed"))?;
-        if !last {
-            let stat = rustix::fs::fstat(&current)
-                .map_err(|_| invalid("relative directory stat failed"))?;
-            if mode_bits(&stat) & S_IFMT != S_IFDIR {
-                return Err(invalid("relative path component is not a directory"));
-            }
-        }
-    }
-    Ok(current)
+    open_rel_nofollow(root, relative, false).map_err(|_| invalid("relative file traversal failed"))
 }
 
 fn open_direct_file(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosureError> {
@@ -971,120 +952,27 @@ fn open_direct_file(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClos
 }
 
 fn open_owned_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosureError> {
-    let fd = open_dir_nofollow(parent, name)?;
+    let fd = openat(parent, name, HARDENED_DIR_FLAGS, Mode::empty())
+        .map_err(|_| invalid("closure directory open failed"))?;
     verify_owned_directory(&fd)?;
-    Ok(fd)
-}
-
-/// `mkdirat` applies the umask; `chmodat` restores mode `0o700`, which `verify_owned_directory` requires.
-/// The caller's own `mkdirat` of `name` must have succeeded.
-fn open_created_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosureError> {
-    rustix::fs::chmodat(parent, name, Mode::from_raw_mode(0o700), AtFlags::empty())
-        .map_err(|_| invalid("closure directory chmod failed"))?;
-    let fd = open_dir_nofollow(parent, name)?;
-    rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))
-        .map_err(|_| invalid("closure directory chmod failed"))?;
-    verify_owned_directory(&fd)?;
-    Ok(fd)
-}
-
-fn open_dir_nofollow(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosureError> {
-    openat(
-        parent,
-        name,
-        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| invalid("closure directory open failed"))
-}
-
-/// Removal accepts directories owned by `owner_uid()` regardless of their mode bits, so a
-/// stale entry with a foreign mode can still be reclaimed.
-fn open_dir_for_removal(parent: &OwnedFd, name: &str) -> Result<OwnedFd, HarnessClosureError> {
-    let fd = open_dir_nofollow(parent, name)?;
-    let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("closure directory stat failed"))?;
-    if mode_bits(&stat) & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() {
-        return Err(invalid("removal target is not an owned directory"));
-    }
     Ok(fd)
 }
 
 fn verify_owned_directory(fd: &OwnedFd) -> Result<(), HarnessClosureError> {
     let stat = rustix::fs::fstat(fd).map_err(|_| invalid("closure directory stat failed"))?;
     let mode = mode_bits(&stat);
-    if mode & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() || mode & 0o777 != 0o700 {
+    if mode & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() || mode & 0o7777 != 0o700 {
         return Err(invalid("closure directory is not owner-only"));
     }
     Ok(())
 }
 
 fn list_names(dir: &OwnedFd) -> Result<BTreeSet<String>, HarnessClosureError> {
-    let mut names = BTreeSet::new();
-    let mut entries = Dir::read_from(dir).map_err(|_| invalid("closure directory read failed"))?;
-    for entry in &mut entries {
-        let entry = entry.map_err(|_| invalid("closure directory read failed"))?;
-        let name = cstr_name(entry.file_name())?;
-        if name == "." || name == ".." {
-            continue;
-        }
-        if !names.insert(name) {
-            return Err(invalid("closure directory contains duplicate names"));
-        }
-    }
-    Ok(names)
-}
-
-fn cstr_name(name: &CStr) -> Result<String, HarnessClosureError> {
-    let bytes = name.to_bytes();
-    if bytes.is_empty() || bytes.len() > 255 {
+    let names = read_dir_names(dir).map_err(|_| invalid("closure directory read failed"))?;
+    if names.iter().any(|name| name.len() > 255) {
         return Err(invalid("closure entry name is invalid"));
     }
-    std::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .map_err(|_| invalid("closure entry name is not utf8"))
-}
-
-fn read_bounded(fd: &OwnedFd, cap: usize) -> Result<Vec<u8>, HarnessClosureError> {
-    let reader = std::fs::File::from(
-        dup_cloexec(fd).map_err(|_| invalid("closure file descriptor dup failed"))?,
-    );
-    let mut bytes = Vec::new();
-    reader
-        .take((cap + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| invalid("closure file read failed"))?;
-    if bytes.len() > cap {
-        return Err(invalid("closure file exceeds its size cap"));
-    }
-    Ok(bytes)
-}
-
-fn write_new_file(
-    parent: &OwnedFd,
-    name: &str,
-    bytes: &[u8],
-    mode: u32,
-) -> Result<(), HarnessClosureError> {
-    let fd = openat(
-        parent,
-        name,
-        OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_raw_mode(raw_mode(mode)),
-    )
-    .map_err(|_| invalid("closure metadata file creation failed"))?;
-    rustix::fs::fchmod(&fd, Mode::from_raw_mode(raw_mode(mode)))
-        .map_err(|_| invalid("closure metadata file chmod failed"))?;
-    let mut writer = std::fs::File::from(
-        dup_cloexec(&fd).map_err(|_| invalid("closure metadata descriptor dup failed"))?,
-    );
-    writer
-        .write_all(bytes)
-        .map_err(|_| invalid("closure metadata write failed"))?;
-    writer
-        .flush()
-        .map_err(|_| invalid("closure metadata flush failed"))?;
-    fsync(&fd).map_err(|_| invalid("closure metadata fsync failed"))?;
-    verify_secure_file(&fd, mode)
+    Ok(names.into_iter().collect())
 }
 
 fn child_exists(parent: &OwnedFd, name: &str) -> Result<bool, HarnessClosureError> {
@@ -1095,161 +983,7 @@ fn child_exists(parent: &OwnedFd, name: &str) -> Result<bool, HarnessClosureErro
     }
 }
 
-fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), HarnessClosureError> {
-    match unlinkat(parent, name, AtFlags::empty()) {
-        Ok(()) | Err(rustix::io::Errno::NOENT) => return Ok(()),
-        Err(rustix::io::Errno::ISDIR) | Err(rustix::io::Errno::PERM) => {}
-        Err(_) => return Err(invalid("temporary closure removal failed")),
-    }
-    let dir = open_dir_for_removal(parent, name)?;
-    for child in list_names(&dir)? {
-        remove_tree(&dir, &child)?;
-    }
-    unlinkat(parent, name, AtFlags::REMOVEDIR)
-        .map_err(|_| invalid("temporary closure directory removal failed"))
-}
-
-/// Unreadable or future mtimes count as live: only a provably old temp is reclaimable.
 fn is_stale_temp(parent: &OwnedFd, name: &str) -> bool {
-    let Ok(stat) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) else {
-        return false;
-    };
-    let Ok(secs) = u64::try_from(stat.st_mtime) else {
-        return false;
-    };
-    let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-    SystemTime::now()
-        .duration_since(modified)
-        .is_ok_and(|age| age >= STALE_TEMP_AFTER)
-}
-
-fn open_or_create_store_path(path: &Path) -> Result<OwnedFd, HarnessClosureError> {
-    let (anchor_name, components): (&str, Vec<_>) = if path.is_absolute() {
-        (
-            "/",
-            path.components()
-                .filter_map(|component| match component {
-                    Component::RootDir => None,
-                    Component::Normal(name) => Some(name),
-                    _ => Some(std::ffi::OsStr::new("")),
-                })
-                .collect(),
-        )
-    } else {
-        (
-            ".",
-            path.components()
-                .map(|component| match component {
-                    Component::CurDir => std::ffi::OsStr::new("."),
-                    Component::Normal(name) => name,
-                    _ => std::ffi::OsStr::new(""),
-                })
-                .collect(),
-        )
-    };
-    if components.iter().any(|component| component.is_empty()) {
-        return Err(invalid("closure store path is not normalized"));
-    }
-    let mut current = openat(
-        CWD,
-        anchor_name,
-        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| invalid("closure store anchor open failed"))?;
-    verify_safe_ancestor(&current)?;
-    for (index, component) in components.iter().enumerate() {
-        if *component == std::ffi::OsStr::new(".") {
-            continue;
-        }
-        let last = index + 1 == components.len();
-        let created = match openat(
-            &current,
-            component.as_bytes(),
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(next) => {
-                current = next;
-                false
-            }
-            Err(rustix::io::Errno::NOENT) => {
-                mkdirat(&current, component.as_bytes(), Mode::from_raw_mode(0o700))
-                    .map_err(|_| invalid("closure store directory creation failed"))?;
-                // `mkdirat` applies the umask; `chmodat` restores `0o700` before reopening the created entry.
-                rustix::fs::chmodat(
-                    &current,
-                    component.as_bytes(),
-                    Mode::from_raw_mode(0o700),
-                    AtFlags::empty(),
-                )
-                .map_err(|_| invalid("closure store directory chmod failed"))?;
-                current = openat(
-                    &current,
-                    component.as_bytes(),
-                    OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(|_| invalid("closure store directory open failed"))?;
-                true
-            }
-            Err(_) => return Err(invalid("closure store path traversal failed")),
-        };
-        if last {
-            // An owned store root with a wider mode is repaired to `0o700` through its pinned descriptor.
-            // The ownership check precedes the repair so `fchmod` never touches a directory this user does not own.
-            let stat = rustix::fs::fstat(&current)
-                .map_err(|_| invalid("closure store directory stat failed"))?;
-            if mode_bits(&stat) & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() {
-                return Err(invalid("closure directory is not owner-only"));
-            }
-            rustix::fs::fchmod(&current, Mode::from_raw_mode(0o700))
-                .map_err(|_| invalid("closure store directory chmod failed"))?;
-            verify_owned_directory(&current)?;
-        } else {
-            if created {
-                rustix::fs::fchmod(&current, Mode::from_raw_mode(0o700))
-                    .map_err(|_| invalid("closure store directory chmod failed"))?;
-            }
-            verify_safe_ancestor(&current)?;
-        }
-    }
-    verify_owned_directory(&current)?;
-    Ok(current)
-}
-
-fn verify_safe_ancestor(fd: &OwnedFd) -> Result<(), HarnessClosureError> {
-    let stat = rustix::fs::fstat(fd).map_err(|_| invalid("store ancestor stat failed"))?;
-    let mode = mode_bits(&stat);
-    if mode & S_IFMT != S_IFDIR
-        || (stat.st_uid != owner_uid() && stat.st_uid != 0)
-        || (mode & 0o022 != 0 && mode & S_ISVTX == 0)
-    {
-        return Err(invalid("closure store ancestor is insecure"));
-    }
-    Ok(())
-}
-
-fn owner_uid() -> u32 {
-    rustix::process::geteuid().as_raw()
-}
-
-#[cfg(target_os = "macos")]
-fn mode_bits(stat: &rustix::fs::Stat) -> u32 {
-    u32::from(stat.st_mode)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn mode_bits(stat: &rustix::fs::Stat) -> u32 {
-    stat.st_mode
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
+    rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|stat| is_stale_mtime(stat.st_mtime))
 }
