@@ -55,6 +55,30 @@ pub const FLAGS_PURE_HEADER_FORBIDDEN: u8 = 0b1111_1001;
 /// Goodbye frames require pure-header flags, zero correlation, and a route-shaped or connection-shaped identity.
 /// Push frames require a route-shaped identity, zero correlation, and clear reserved bits.
 /// Type-only acceptance can hide wire regressions when the test run otherwise succeeds.
+/// A terminal channel-0 `Response` must carry wire version 2, identity `0/0`, and the
+/// canonical text-terminal flags; anything else is a host envelope regression.
+pub fn control_response_violation(frame: &RawFrame) -> Option<String> {
+    if frame.ver != WIRE_VERSION {
+        return Some(format!(
+            "control response with unsupported wire version {}",
+            frame.ver
+        ));
+    }
+    if frame.channel != 0 || frame.epoch != 0 {
+        return Some(format!(
+            "control response on identity {}/{} instead of 0/0",
+            frame.channel, frame.epoch
+        ));
+    }
+    if frame.flags != FLAGS_RESPONSE_TEXT_LAST {
+        return Some(format!(
+            "control response flags {:#04x} are not the terminal text response flags {:#04x}",
+            frame.flags, FLAGS_RESPONSE_TEXT_LAST
+        ));
+    }
+    None
+}
+
 pub fn connection_frame_violation(frame: &RawFrame) -> Option<String> {
     if frame.ver != WIRE_VERSION {
         return Some(format!(
@@ -287,20 +311,29 @@ impl RawClient {
         info: &Discovered,
         role: &str,
     ) -> Result<Self, String> {
-        let mut stream = UnixStream::connect(&info.setup_socket)
+        // One absolute deadline spans connect and both authentication messages (protocol §11).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut stream = tokio::time::timeout_at(deadline, UnixStream::connect(&info.setup_socket))
             .await
+            .map_err(|_| "setup socket connect timed out".to_owned())?
             .map_err(|err| err.to_string())?;
 
         let client_nonce: Vec<u8> = (0u8..32)
             .map(|i| i.wrapping_mul(7).wrapping_add(3))
             .collect();
-        write_auth(
-            &mut stream,
-            &serde_json::json!({"client_nonce": client_nonce, "role": role}),
+        tokio::time::timeout_at(
+            deadline,
+            write_auth(
+                &mut stream,
+                &serde_json::json!({"client_nonce": client_nonce, "role": role}),
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| "client nonce write timed out".to_owned())??;
 
-        let server_message = read_auth(&mut stream).await?;
+        let server_message = tokio::time::timeout_at(deadline, read_auth(&mut stream))
+            .await
+            .map_err(|_| "server proof read timed out".to_owned())??;
         let server_nonce =
             byte_array(&server_message["server_nonce"]).ok_or("missing server_nonce")?;
         let daemon_id = byte_array(&server_message["daemon_id"]).ok_or("missing daemon_id")?;
@@ -337,11 +370,15 @@ impl RawClient {
             &daemon_ver,
             &daemon_id,
         );
-        write_auth(
-            &mut stream,
-            &serde_json::json!({"client_auth": client_auth}),
+        tokio::time::timeout_at(
+            deadline,
+            write_auth(
+                &mut stream,
+                &serde_json::json!({"client_auth": client_auth}),
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| "client auth write timed out".to_owned())??;
 
         Ok(Self {
             stream,
@@ -471,6 +508,9 @@ impl RawClient {
         }
         if frame.ty != TY_RESPONSE {
             return Err(format!("unexpected route response type {}", frame.ty));
+        }
+        if let Some(violation) = control_response_violation(&frame) {
+            return Err(violation);
         }
         let json = frame.json();
         if json["op"] != "route.open" {
@@ -765,15 +805,19 @@ fn pump_host_output(
     outbound: &mut Vec<u8>,
     host_goodbye: &mut bool,
 ) -> Result<(), String> {
-    match endpoint.try_recv() {
-        Ok(Some((header, body))) => {
-            *host_goodbye =
-                header.ty as u8 == TY_GOODBYE && header.channel == 0 && header.epoch == 0;
-            outbound.extend_from_slice(&header.encode());
-            outbound.extend_from_slice(&body);
+    // One frame is buffered at a time: a client that stops reading leaves the previous frame
+    // unflushed, and the ring stays full so the host's writer sees the stall instead of the bridge absorbing it.
+    if outbound.is_empty() {
+        match endpoint.try_recv() {
+            Ok(Some((header, body))) => {
+                *host_goodbye =
+                    header.ty as u8 == TY_GOODBYE && header.channel == 0 && header.epoch == 0;
+                outbound.extend_from_slice(&header.encode());
+                outbound.extend_from_slice(&body);
+            }
+            Ok(None) => {}
+            Err(error) => return Err(error.to_string()),
         }
-        Ok(None) => {}
-        Err(error) => return Err(error.to_string()),
     }
     if !outbound.is_empty() {
         match bridge_stream.write(outbound) {

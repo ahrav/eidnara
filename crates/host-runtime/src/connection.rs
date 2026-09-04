@@ -614,15 +614,17 @@ async fn handle_control<H: HostHandler>(
             let gen_task = Arc::clone(generation);
             shared.spawn_tracked(generation.read_tasks.track_future(async move {
                 let _pending_permit = pending_permit;
-                let report = shared_task
-                    .health_snapshot
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                let body = crate::control::host_status_response_json(
-                    &report,
-                    shared_task.ring.diagnostics(),
-                );
+                // Sanitizing from the borrowed snapshot avoids one unbudgeted deep clone of the raw metrics per request; the guard drops before the await.
+                let body = {
+                    let report = shared_task
+                        .health_snapshot
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    crate::control::host_status_response_json(
+                        &report,
+                        shared_task.ring.diagnostics(),
+                    )
+                };
                 if emit_catalog_response(
                     &shared_task.egress_budget,
                     &gen_task,
