@@ -499,11 +499,19 @@ fn run_ring(
 ) -> Result<ArmRun, &'static str> {
     let profile = ring_profile()?;
     let ring = Ring::create(&profile, 0).map_err(|_| "ring setup")?;
+    // The doorbells are socketpairs: the consumer must own the peer ends, so it attaches its
+    // own handle from the attachment instead of sharing the producer's `Ring`.
+    let attachment = ring.attachment().map_err(|_| "ring attachment")?;
     let header = wire_v2_header(payload_len).map_err(|_| "header")?;
     let body = vec![BODY_BYTE; payload_len];
     let page = SharedPage::map()?;
     let report = page.place(PeerReport::new());
-    let peer = Peer::spawn(|| ring_consumer(&ring, iterations, copied_receiver, report))?;
+    let peer = Peer::spawn(|| {
+        let Ok(consumer) = attachment.attach() else {
+            return 1;
+        };
+        ring_consumer(&consumer, iterations, copied_receiver, report)
+    })?;
 
     let switches_before = voluntary_switches();
     let doorbells_before = ring.doorbell_counters();
