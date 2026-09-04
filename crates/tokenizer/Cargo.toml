@@ -9,6 +9,9 @@ publish.workspace = true
 description = "Claude byte-BPE token counting, matching ai-tokenizer's claude encoding id for id."
 
 [dependencies]
+# `HashTable` with precomputed hashes for the inline-key short-token table; the same crate std's
+# HashMap is built on, already in the workspace lockfile.
+hashbrown = { version = "0.16", default-features = false }
 rustc-hash = "1.1"
 
 [build-dependencies]

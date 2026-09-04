@@ -119,13 +119,15 @@ fn encode_bounded(text: &str) -> Vec<Rank> {
     let vocab = vocab();
     let mut out = Vec::new();
     let mut scratch = bpe::Scratch::default();
+    let bytes = text.as_bytes();
     for (start, end) in scan::pieces(text) {
-        let piece = &text[start..end];
-        if piece.len() <= MAX_PIECE_BYTES {
-            vocab.encode_piece(piece.as_bytes(), &mut scratch, &mut out);
+        if end - start <= MAX_PIECE_BYTES {
+            vocab.encode_piece(bytes, start, end, &mut scratch, &mut out);
         } else {
-            for chunk in char_chunks(piece, MAX_PIECE_BYTES) {
-                vocab.encode_piece(chunk.as_bytes(), &mut scratch, &mut out);
+            let mut at = start;
+            for chunk in char_chunks(&text[start..end], MAX_PIECE_BYTES) {
+                vocab.encode_piece(bytes, at, at + chunk.len(), &mut scratch, &mut out);
+                at += chunk.len();
             }
         }
     }
