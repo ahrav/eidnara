@@ -371,10 +371,13 @@ impl OutputBuffer {
         match self.direct {
             Some(direct) => OutputParts::Direct(direct, self.charge),
             None => {
-                // Release the reserved capacity beyond the encoded frame before transferring ownership.
+                // Charge resident allocation bytes, not written length: a small body must not keep
+                // a large reservation's memory while its charge says otherwise.
+                let mut body = self.body;
                 let mut charge = self.charge;
-                charge.shrink_to(self.body.len() + crate::wire::HEADER_LEN);
-                OutputParts::Owned(self.body, charge)
+                body.shrink_to(body.len() + crate::wire::HEADER_LEN);
+                charge.shrink_to(body.capacity().max(body.len() + crate::wire::HEADER_LEN));
+                OutputParts::Owned(body, charge)
             }
         }
     }
@@ -621,5 +624,35 @@ mod tests {
         };
         assert_eq!(charge.bytes(), 10);
         assert_eq!(budget.available(), 1014);
+    }
+
+    #[test]
+    fn into_parts_does_not_leave_a_large_allocation_behind_a_small_charge() {
+        let budget = ByteBudget::new(1 << 20);
+        let max_len = 1 << 16;
+        let charge = budget.try_charge(max_len + HEADER_LEN).expect("fits");
+        let mut output = OutputBuffer {
+            body: Vec::with_capacity(max_len + HEADER_LEN),
+            direct: None,
+            charge,
+            max_len,
+        };
+        output.extend_from_slice(&[1]).expect("within max_len");
+
+        let OutputParts::Owned(body, charge) = output.into_parts() else {
+            panic!("owned output");
+        };
+        assert_eq!(body.len(), 1);
+        assert!(
+            body.capacity() <= charge.bytes(),
+            "resident capacity {} exceeds the {} bytes still charged",
+            body.capacity(),
+            charge.bytes()
+        );
+        assert!(
+            body.capacity() < max_len,
+            "the unused reservation's memory must be returned, not just its permits"
+        );
+        assert_eq!(budget.available(), (1 << 20) - charge.bytes());
     }
 }

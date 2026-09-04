@@ -87,6 +87,16 @@ impl ConnectionInfo {
                 "daemon version lacks the published prefix",
             ));
         }
+        // The client requires the authenticated version to equal this value, and the server
+        // cannot send a `ServerProof` above `MAX_AUTH_MESSAGE_LEN`, so such a file can never
+        // complete a handshake.
+        if crate::auth::server_proof_message_bytes(&self.daemon_ver)
+            > crate::auth::MAX_AUTH_MESSAGE_LEN as usize
+        {
+            return Err(ConnectionFileError::Invalid(
+                "daemon version cannot fit the authentication frame",
+            ));
+        }
         Ok(())
     }
 }
@@ -388,6 +398,33 @@ mod tests {
                 "daemon_ver {daemon_ver:?} must fail validation"
             );
         }
+    }
+
+    #[test]
+    fn daemon_version_must_fit_the_authentication_frame() {
+        let versioned = |len: usize| format!("{DAEMON_VER_PREFIX}{}", "v".repeat(len));
+        let cap = crate::auth::MAX_AUTH_MESSAGE_LEN as usize;
+        let first_rejected = (0..=cap)
+            .find(|&len| crate::auth::server_proof_message_bytes(&versioned(len)) > cap)
+            .expect("some prefixed version exceeds the auth frame");
+
+        let mut fits = info();
+        fits.daemon_ver = versioned(first_rejected - 1);
+        assert!(fits.validate().is_ok());
+
+        let mut oversized = info();
+        oversized.daemon_ver = versioned(first_rejected);
+        assert!(
+            serde_json::to_vec_pretty(&oversized)
+                .expect("serialize")
+                .len()
+                < MAX_CONNECTION_FILE_LEN,
+            "the file itself is under the file cap, so only the auth bound can reject it"
+        );
+        assert!(matches!(
+            oversized.validate(),
+            Err(ConnectionFileError::Invalid(_))
+        ));
     }
 
     /// A FIFO at the configured path must be rejected rather than waited on.

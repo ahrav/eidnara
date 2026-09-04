@@ -150,9 +150,14 @@ fn severity(status: HealthStatus) -> u8 {
 async fn catch_child_panic<F: Future>(
     callback: impl FnOnce() -> F,
 ) -> Result<F::Output, Box<dyn std::any::Any + Send + 'static>> {
-    let mut future =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Box::pin(callback())))?;
+    let mut guard = ChildFuture(Some(std::panic::catch_unwind(
+        std::panic::AssertUnwindSafe(|| Box::pin(callback())),
+    )?));
     let output = std::future::poll_fn(|cx| {
+        let future = guard
+            .0
+            .as_mut()
+            .expect("child future is present until completion");
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
             Ok(poll) => poll.map(Ok),
             Err(payload) => std::task::Poll::Ready(Err(payload)),
@@ -160,8 +165,22 @@ async fn catch_child_panic<F: Future>(
     })
     .await;
     // Dropping the future runs child `Drop` impls, which are child code too.
+    let future = guard.0.take();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(future)))?;
     output
+}
+
+/// `ChildFuture` owns a child future between polls so that dropping it while pending, as a
+/// cancelled `catch_child_panic` does, still runs the child's `Drop` inside `catch_unwind`.
+/// A panic there is swallowed: cancellation has no result to attach it to.
+struct ChildFuture<F>(Option<std::pin::Pin<Box<F>>>);
+
+impl<F> Drop for ChildFuture<F> {
+    fn drop(&mut self) {
+        if let Some(future) = self.0.take() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(future)));
+        }
+    }
 }
 
 /// The composite records only the byte length of each returned shutdown error.
@@ -580,5 +599,56 @@ mod tests {
         // Shutdown drains tertiary, secondary, then primary; the primary drain must still run.
         assert_eq!(composite.primary.shutdowns.load(Ordering::Relaxed), 1);
         assert_eq!(composite.tertiary.shutdowns.load(Ordering::Relaxed), 1);
+    }
+
+    /// `PanicsOnDrop` models child state whose destructor is itself faulty.
+    struct PanicsOnDrop;
+
+    impl Drop for PanicsOnDrop {
+        fn drop(&mut self) {
+            panic!("child drop panicked");
+        }
+    }
+
+    struct ReadyButPanicsOnDrop(PanicsOnDrop);
+
+    impl Future for ReadyButPanicsOnDrop {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            std::task::Poll::Ready(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_drop_panic_after_completion_is_returned_as_the_payload() {
+        let outcome = catch_child_panic(|| ReadyButPanicsOnDrop(PanicsOnDrop)).await;
+        let payload = outcome.expect_err("the drop panic is the child's fault");
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("child drop panicked")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_drop_panic_during_cancellation_does_not_escape() {
+        let child = || async {
+            let _state = PanicsOnDrop;
+            std::future::pending::<()>().await;
+        };
+        // Cancelling the boundary while the child is pending drops the child future from the
+        // timeout's teardown, not from `catch_child_panic`'s own code.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            catch_child_panic(child),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "the child never completes; only the timeout can"
+        );
     }
 }
