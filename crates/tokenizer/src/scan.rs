@@ -75,17 +75,14 @@ fn class_from_tables(c: u32) -> Class {
     }
 }
 
-/// Two bits per BMP code point (16 KiB), built on first use. `Class` discriminants are the
-/// stored values.
+/// Two bits per BMP code point (16 KiB), computed by `build.rs` from the same range tables.
+/// `Class` discriminants are the stored values; `tests::bmp_table_matches_range_tables` checks
+/// every code point against [`class_from_tables`].
+const BMP_TABLE: &[u8; 0x4000] = include_bytes!(concat!(env!("OUT_DIR"), "/bmp_class.bin"));
+
+#[inline]
 fn bmp_table() -> &'static [u8; 0x4000] {
-    static TABLE: std::sync::OnceLock<Box<[u8; 0x4000]>> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut t = Box::new([0u8; 0x4000]);
-        for c in 0..0x10000u32 {
-            t[(c >> 2) as usize] |= (class_from_tables(c) as u8) << ((c & 3) * 2);
-        }
-        t
-    })
+    BMP_TABLE
 }
 
 #[inline]

@@ -9,10 +9,13 @@ publish.workspace = true
 description = "Claude byte-BPE token counting, matching ai-tokenizer's claude encoding id for id."
 
 [dependencies]
-base64 = "0.22"
 rustc-hash = "1.1"
 
+[build-dependencies]
+base64 = "0.22"
+
 [dev-dependencies]
+base64 = "0.22"
 # The reference implementation (`src/reference_impl.rs`) and the pattern drift tests. The
 # exact tiktoken-rs pin keeps the oracle's merge loop fixed.
 fancy-regex = "0.17"
