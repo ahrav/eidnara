@@ -133,7 +133,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "dcba9d4fa3c60d14befd5c5819a61eaf18076a7e6875fb8fc27b957bb1511978",
+      "destination_sha256": "3ac4a44e788e8aa533cf5b3980added7a1184f50620ecb02caf9f0cf6fdc1fcc",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

@@ -45,23 +45,25 @@ const ASCII_CLASS: [Class; 128] = {
     t
 };
 
-fn in_ranges(table: &[(u32, u32)], c: u32) -> bool {
-    table
-        .binary_search_by(|&(lo, hi)| {
-            if c < lo {
-                std::cmp::Ordering::Greater
-            } else if c > hi {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
+/// Requires sorted, disjoint, inclusive ranges.
+const fn in_ranges(table: &[(u32, u32)], c: u32) -> bool {
+    let mut lo = 0;
+    let mut hi = table.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let (a, b) = table[mid];
+        if c < a {
+            hi = mid;
+        } else if c > b {
+            lo = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    false
 }
 
-/// Class of any scalar by the range tables: the slow path `bmp_table` is built from and the
-/// only path above the BMP.
-fn class_from_tables(c: u32) -> Class {
+const fn class_from_tables(c: u32) -> Class {
     if c < 0x80 {
         return ASCII_CLASS[c as usize];
     }
@@ -75,23 +77,25 @@ fn class_from_tables(c: u32) -> Class {
     }
 }
 
-/// Two bits per BMP code point (16 KiB), computed by `build.rs` from the same range tables.
-/// `Class` discriminants are the stored values; `tests::bmp_table_matches_range_tables` checks
-/// every code point against [`class_from_tables`].
-const BMP_TABLE: &[u8; 0x4000] = include_bytes!(concat!(env!("OUT_DIR"), "/bmp_class.bin"));
+/// Two bits per BMP code point (16 KiB). Evaluated at compile time so the hot path carries no
+/// first-use build and no lazy-init read. `Class` discriminants are the stored values.
+static BMP_CLASS: [u8; 0x4000] = {
+    let mut t = [0u8; 0x4000];
+    let mut c = 0u32;
+    while c < 0x10000 {
+        t[(c >> 2) as usize] |= (class_from_tables(c) as u8) << ((c & 3) * 2);
+        c += 1;
+    }
+    t
+};
 
 #[inline]
-fn bmp_table() -> &'static [u8; 0x4000] {
-    BMP_TABLE
-}
-
-#[inline]
-fn class_of_scalar(bmp: &[u8; 0x4000], c: u32) -> Class {
+fn class_of_scalar(c: u32) -> Class {
     if c < 0x80 {
         return ASCII_CLASS[c as usize];
     }
     if c < 0x10000 {
-        let v = (bmp[(c >> 2) as usize] >> ((c & 3) * 2)) & 3;
+        let v = (BMP_CLASS[(c >> 2) as usize] >> ((c & 3) * 2)) & 3;
         return match v {
             0 => Class::Letter,
             1 => Class::Number,
@@ -105,7 +109,7 @@ fn class_of_scalar(bmp: &[u8; 0x4000], c: u32) -> Class {
 /// Class and encoded length of the character starting at `i`. `bytes` is valid UTF-8 and `i`
 /// is a char boundary, so the lead byte fixes the length and no validation is needed.
 #[inline]
-fn class_at(bmp: &[u8; 0x4000], bytes: &[u8], i: usize) -> (Class, usize) {
+fn class_at(bytes: &[u8], i: usize) -> (Class, usize) {
     let b0 = bytes[i];
     if b0 < 0x80 {
         return (ASCII_CLASS[b0 as usize], 1);
@@ -128,7 +132,7 @@ fn class_at(bmp: &[u8; 0x4000], bytes: &[u8], i: usize) -> (Class, usize) {
             4,
         )
     };
-    (class_of_scalar(bmp, cp), len)
+    (class_of_scalar(cp), len)
 }
 
 const HI: u64 = 0x8080_8080_8080_8080;
@@ -170,7 +174,7 @@ fn ascii_class_mask(w: u64, class: Class) -> u64 {
 /// End of the maximal run of `class` starting at `i`. Eight ASCII bytes per step while the
 /// input stays ASCII, then one character at a time.
 #[inline]
-fn run_end(bmp: &[u8; 0x4000], bytes: &[u8], mut i: usize, class: Class) -> usize {
+fn run_end(bytes: &[u8], mut i: usize, class: Class) -> usize {
     while let Some(chunk) = bytes.get(i..i + 8) {
         let w = u64::from_le_bytes(chunk.try_into().unwrap());
         if w & HI != 0 {
@@ -184,7 +188,7 @@ fn run_end(bmp: &[u8; 0x4000], bytes: &[u8], mut i: usize, class: Class) -> usiz
         return i + ((!m & HI).trailing_zeros() / 8) as usize;
     }
     while i < bytes.len() {
-        let (c, len) = class_at(bmp, bytes, i);
+        let (c, len) = class_at(bytes, i);
         if c != class {
             break;
         }
@@ -194,9 +198,8 @@ fn run_end(bmp: &[u8; 0x4000], bytes: &[u8], mut i: usize, class: Class) -> usiz
 }
 
 /// End offset of the pre-token piece starting at `pos` (`pos < text.len()`, char boundary).
-/// `bmp` is [`bmp_table`], passed in so the `OnceLock` is read once per text, not per piece.
 #[inline]
-fn piece_end(bmp: &[u8; 0x4000], text: &str, pos: usize) -> usize {
+fn piece_end(text: &str, pos: usize) -> usize {
     let bytes = text.as_bytes();
     let n = bytes.len();
     let b0 = bytes[pos];
@@ -213,28 +216,28 @@ fn piece_end(bmp: &[u8; 0x4000], text: &str, pos: usize) -> usize {
         }
         let c0 = ASCII_CLASS[b0 as usize];
         if b0 == b' ' && pos + 1 < n {
-            let (c1, l1) = class_at(bmp, bytes, pos + 1);
+            let (c1, l1) = class_at(bytes, pos + 1);
             if c1 != Class::Space {
-                return run_end(bmp, bytes, pos + 1 + l1, c1);
+                return run_end(bytes, pos + 1 + l1, c1);
             }
         }
         if c0 != Class::Space {
-            return run_end(bmp, bytes, pos + 1, c0);
+            return run_end(bytes, pos + 1, c0);
         }
-        return whitespace_piece_end(bmp, bytes, pos, 1);
+        return whitespace_piece_end(bytes, pos, 1);
     }
-    let (c0, l0) = class_at(bmp, bytes, pos);
+    let (c0, l0) = class_at(bytes, pos);
     if c0 != Class::Space {
-        return run_end(bmp, bytes, pos + l0, c0);
+        return run_end(bytes, pos + l0, c0);
     }
-    whitespace_piece_end(bmp, bytes, pos, l0)
+    whitespace_piece_end(bytes, pos, l0)
 }
 
 /// Whitespace run starting at `pos` (first char `l0` bytes long): give back the last character
 /// when a non-whitespace character follows, unless the run is that single character.
 #[inline]
-fn whitespace_piece_end(bmp: &[u8; 0x4000], bytes: &[u8], pos: usize, l0: usize) -> usize {
-    let end = run_end(bmp, bytes, pos + l0, Class::Space);
+fn whitespace_piece_end(bytes: &[u8], pos: usize, l0: usize) -> usize {
+    let end = run_end(bytes, pos + l0, Class::Space);
     if end == bytes.len() || end == pos + l0 {
         return end;
     }
@@ -247,13 +250,12 @@ fn whitespace_piece_end(bmp: &[u8; 0x4000], bytes: &[u8], pos: usize, l0: usize)
 
 /// Byte ranges of the pre-token pieces of `text`, in order, covering it exactly.
 pub fn pieces(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
-    let bmp = bmp_table();
     let mut pos = 0;
     std::iter::from_fn(move || {
         if pos >= text.len() {
             return None;
         }
-        let end = piece_end(bmp, text, pos);
+        let end = piece_end(text, pos);
         let span = (pos, end);
         pos = end;
         Some(span)
@@ -266,9 +268,8 @@ mod tests {
 
     #[test]
     fn bmp_table_matches_range_tables() {
-        let bmp = bmp_table();
         for c in 0..0x10000u32 {
-            assert!(class_of_scalar(bmp, c) == class_from_tables(c), "{c:#x}");
+            assert!(class_of_scalar(c) == class_from_tables(c), "{c:#x}");
         }
     }
 
