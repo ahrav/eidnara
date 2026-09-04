@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "part": "tokenizer",
+  "source": "catalog.md",
+  "source_sha256": "6ec54244728482c349ad7c4c15cea0be673288546673f9e96f0cb01e55161df0",
+  "records": [
+    {
+      "slug": "tokenizer-encoding-matches-the-independent-oracle",
+      "type": "safety",
+      "reachability": "default-production",
+      "reachability_note": "every budget estimate encodes through this table.",
+      "status": "active",
+      "exercised": {
+        "state": "yes",
+        "note": "36 golden cases regenerated from the `ai-tokenizer` oracle pass, and a token-count estimate is checked against them."
+      },
+      "guarantee": "`encode_ordinary` produces the same token ids as `ai-tokenizer`'s claude encoding for every golden case, and `estimate_tokens` returns their count.",
+      "check": {
+        "semantics": "always",
+        "condition": "`encode_ordinary(text) == golden.ids` for every case; `estimate_tokens(text) == golden.ids.len()`."
+      },
+      "fault_timing": "A vocabulary or pre-tokenizer divergence that keeps counts equal but changes ids.",
+      "required_faults": "The golden corpus, produced by the oracle and not by the crate.",
+      "confidence": {
+        "level": "high",
+        "evidence": "[evidence](evidence/tokenizer-encoding-matches-the-independent-oracle.md). The corpus texts that named the predecessor were replaced at U3 and the golden regenerated once with `gen/gen-token-golden.ts` against the oracle."
+      },
+      "existing_check": "`encode_ordinary_matches_ai_tokenizer_ids`, `estimate_tokens_matches_golden_counts` (`crates/tokenizer/tests/token_golden.rs`); audited at U3.",
+      "impact": "Budget fitting over- or under-counts and a session overflows or truncates the context window.",
+      "open_questions": [],
+      "extra": {}
+    },
+    {
+      "slug": "tokenizer-vocabulary-is-embedded-and-complete",
+      "type": "safety",
+      "reachability": "default-production",
+      "reachability_note": "the vocabulary is read at build time.",
+      "status": "active",
+      "exercised": {
+        "state": "partial",
+        "note": "the generator rejects duplicate ranks and requires all 256 single bytes; no Rust test asserts the embedded asset's completeness."
+      },
+      "guarantee": "The embedded `claude.tiktoken` asset has unique ranks and covers every single byte, so every input encodes without a fallback.",
+      "check": {
+        "semantics": "always",
+        "condition": "ranks are unique and 256 single-byte tokens exist in the asset."
+      },
+      "fault_timing": "A truncated or duplicated asset makes some bytes unencodable.",
+      "required_faults": "None; static asset check.",
+      "confidence": {
+        "level": "medium",
+        "evidence": "`gen/gen-claude-vocab.ts` enforces both conditions when it writes the asset; the Rust side trusts the asset."
+      },
+      "existing_check": "The generator's checks; no Rust check; unaudited.",
+      "impact": "Encoding panics or silently drops bytes.",
+      "open_questions": [],
+      "extra": {}
+    }
+  ]
+}
