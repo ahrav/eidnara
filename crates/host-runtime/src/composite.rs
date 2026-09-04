@@ -143,19 +143,25 @@ fn severity(status: HealthStatus) -> u8 {
     }
 }
 
-/// `catch_child_panic` converts a panic while polling `future` into `Err(payload)`.
-/// A child callback panic is returned as `Err(payload)` instead of unwinding through `catch_child_panic`.
+/// `catch_child_panic` takes a thunk rather than a future so that a panic in the synchronous
+/// setup of a `fn -> impl Future` callback is caught as well as a panic while polling or
+/// dropping the future. Every panic during callback setup, polling, or future drop returns
+/// `Err(payload)`.
 async fn catch_child_panic<F: Future>(
-    future: F,
+    callback: impl FnOnce() -> F,
 ) -> Result<F::Output, Box<dyn std::any::Any + Send + 'static>> {
-    let mut future = std::pin::pin!(future);
-    std::future::poll_fn(move |cx| {
+    let mut future =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Box::pin(callback())))?;
+    let output = std::future::poll_fn(|cx| {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
             Ok(poll) => poll.map(Ok),
             Err(payload) => std::task::Poll::Ready(Err(payload)),
         }
     })
-    .await
+    .await;
+    // Dropping the future runs child `Drop` impls, which are child code too.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(future)))?;
+    output
 }
 
 /// The composite records only the byte length of each returned shutdown error.
@@ -287,13 +293,13 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
             detail: Some(format!("{id} health check panicked")),
             metrics: None,
         };
-        let primary = catch_child_panic(self.primary.health())
+        let primary = catch_child_panic(|| self.primary.health())
             .await
             .unwrap_or_else(|_payload| panicked(&self.primary_id));
-        let secondary = catch_child_panic(self.secondary.health())
+        let secondary = catch_child_panic(|| self.secondary.health())
             .await
             .unwrap_or_else(|_payload| panicked(&self.secondary_id));
-        let tertiary = catch_child_panic(self.tertiary.health())
+        let tertiary = catch_child_panic(|| self.tertiary.health())
             .await
             .unwrap_or_else(|_payload| panicked(&self.tertiary_id));
         // `Ok < Degraded < Failing`; equal severities use catalog order: primary, secondary, then tertiary.
@@ -335,15 +341,15 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
         let outcomes = [
             shutdown_failure_note(
                 &self.tertiary_id,
-                catch_child_panic(self.tertiary.shutdown()).await,
+                catch_child_panic(|| self.tertiary.shutdown()).await,
             ),
             shutdown_failure_note(
                 &self.secondary_id,
-                catch_child_panic(self.secondary.shutdown()).await,
+                catch_child_panic(|| self.secondary.shutdown()).await,
             ),
             shutdown_failure_note(
                 &self.primary_id,
-                catch_child_panic(self.primary.shutdown()).await,
+                catch_child_panic(|| self.primary.shutdown()).await,
             ),
         ];
         failures.extend(outcomes.into_iter().flatten());
@@ -356,13 +362,17 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    /// `Fake` is a deterministic child whose `bind` and `health` behavior is fixed at construction.
+    /// `Fake` is a deterministic child whose `bind`, `health`, and `shutdown` behavior is fixed at
+    /// construction. `panic_before_future` panics in the synchronous part of a callback, before
+    /// any future exists, which models a component written as `fn -> impl Future`.
     struct Fake {
         id: &'static str,
         reject_bind: bool,
         panic_in_health: AtomicBool,
+        panic_before_future: bool,
+        shutdowns: AtomicUsize,
     }
 
     impl Fake {
@@ -371,6 +381,15 @@ mod tests {
                 id,
                 reject_bind: false,
                 panic_in_health: AtomicBool::new(false),
+                panic_before_future: false,
+                shutdowns: AtomicUsize::new(0),
+            }
+        }
+
+        fn panicking_before_any_future(id: &'static str) -> Self {
+            Self {
+                panic_before_future: true,
+                ..Self::new(id)
             }
         }
 
@@ -416,19 +435,30 @@ mod tests {
 
         async fn route_gone(&self, _route: RouteHandle) {}
 
-        async fn health(&self) -> HealthReport {
-            if self.panic_in_health.load(Ordering::Relaxed) {
-                panic!("{} health panicked", self.id);
+        fn health(&self) -> impl Future<Output = HealthReport> + Send {
+            if self.panic_before_future {
+                panic!("{} health panicked before returning a future", self.id);
             }
-            HealthReport {
-                status: HealthStatus::Ok,
-                detail: None,
-                metrics: None,
+            let panic_while_polled = self.panic_in_health.load(Ordering::Relaxed);
+            let id = self.id;
+            async move {
+                if panic_while_polled {
+                    panic!("{id} health panicked");
+                }
+                HealthReport {
+                    status: HealthStatus::Ok,
+                    detail: None,
+                    metrics: None,
+                }
             }
         }
 
-        async fn shutdown(&self) -> Result<(), ShutdownError> {
-            Ok(())
+        fn shutdown(&self) -> impl Future<Output = Result<(), ShutdownError>> + Send {
+            self.shutdowns.fetch_add(1, Ordering::Relaxed);
+            if self.panic_before_future {
+                panic!("{} shutdown panicked before returning a future", self.id);
+            }
+            async { Ok(()) }
         }
     }
 
@@ -514,5 +544,41 @@ mod tests {
         assert_eq!(components["primary"]["status"], "failing");
         assert_eq!(components["secondary"]["status"], "ok");
         assert_eq!(components["tertiary"]["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn a_panic_before_the_health_future_exists_is_still_a_failing_report() {
+        let composite = StaticComposite::new(
+            Fake::panicking_before_any_future("primary"),
+            Fake::new("secondary"),
+            Fake::new("tertiary"),
+        )
+        .expect("distinct ids");
+
+        let report = composite.health().await;
+        assert_eq!(report.status, HealthStatus::Failing);
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("primary health check panicked")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panic_before_the_shutdown_future_exists_does_not_skip_later_drains() {
+        let primary = Fake::new("primary");
+        let secondary = Fake::panicking_before_any_future("secondary");
+        let tertiary = Fake::new("tertiary");
+        let composite = StaticComposite::new(primary, secondary, tertiary).expect("distinct ids");
+
+        let outcome = catch_child_panic(|| composite.shutdown()).await;
+        let payload = outcome.expect_err("one child panic surfaces after all drains");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("composite panics with a formatted failure list");
+        assert_eq!(message, "secondary shutdown panicked");
+        // Shutdown drains tertiary, secondary, then primary; the primary drain must still run.
+        assert_eq!(composite.primary.shutdowns.load(Ordering::Relaxed), 1);
+        assert_eq!(composite.tertiary.shutdowns.load(Ordering::Relaxed), 1);
     }
 }
