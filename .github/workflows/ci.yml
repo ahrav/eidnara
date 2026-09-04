@@ -113,6 +113,21 @@ jobs:
       - name: Rust tests (stable)
         run: cargo +stable test --workspace --all-targets --all-features --locked
 
+      - name: Rust unsafe boundary under Miri
+        run: |
+          rustup toolchain install nightly --profile minimal --component miri
+          cargo +nightly miri setup
+          cargo +nightly miri test -p shm-transport --lib --locked -- lease:: backend::ring::miri
+
+      - name: Rust ring under valgrind memcheck
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: valgrind --tool=memcheck --leak-check=full --errors-for-leak-kinds=definite --trace-children=yes --error-exitcode=1
+          EIDNARA_SHM_SKIP_TWO_PROCESS: "1"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          cargo +1.98 test -p shm-transport --test ring --locked
+
       - name: Feature configurations (1.98)
         run: |
           cargo +1.98 check --workspace --no-default-features --locked

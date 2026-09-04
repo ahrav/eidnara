@@ -487,6 +487,10 @@ fn make_inheritable(fd: &OwnedFd) {
 
 #[test]
 fn two_process_zero_copy_exchange_uses_authenticated_grant() {
+    if std::env::var_os("EIDNARA_SHM_SKIP_TWO_PROCESS").is_some() {
+        eprintln!("skipped: EIDNARA_SHM_SKIP_TWO_PROCESS is set");
+        return;
+    }
     let ring = Ring::create(&profile(), 23).unwrap();
     let (descriptors, grant) = ring.attachment().unwrap().into_parts();
     for descriptor in &descriptors {
