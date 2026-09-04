@@ -206,7 +206,7 @@ fn parse_route_open(
                 "consumer_identity.module_id",
                 module,
                 MAX_MODULE_ID_LEN,
-                false,
+                true,
             ) {
                 return invalid(&err);
             }
@@ -217,7 +217,7 @@ fn parse_route_open(
                 "consumer_identity.launch_nonce",
                 nonce,
                 MAX_LAUNCH_NONCE_LEN,
-                false,
+                true,
             ) {
                 return invalid(&err);
             }
@@ -238,7 +238,7 @@ fn parse_route_open(
                     return invalid("consumer capability must be a string");
                 };
                 if let Err(err) =
-                    check_string("consumer capability", capability, MAX_CAPABILITY_LEN, false)
+                    check_string("consumer capability", capability, MAX_CAPABILITY_LEN, true)
                 {
                     return invalid(&err);
                 }
@@ -250,7 +250,7 @@ fn parse_route_open(
     };
 
     let admission_facts = match fields.get("admission_facts") {
-        None => None,
+        None | Some(serde_json::Value::Null) => None,
         Some(facts) => {
             let compact = serde_json::to_vec(facts).expect("Value serialization cannot fail");
             if compact.len() > MAX_ADMISSION_FACTS_BYTES {
@@ -537,21 +537,19 @@ pub fn host_status_response_json(
         if crate::handler::HealthStatus::parse(status).is_none() {
             continue;
         }
-        let Some(state) = component
+        // A component whose health check panicked reports no metrics; its allowlisted status still names it in the response so a failing subsystem is never hidden. commentlint: allow(JUDGE)
+        let mut sanitized_metrics = serde_json::Map::new();
+        if let Some(state) = component
             .get("metrics")
             .and_then(|metrics| metrics.get(state_key))
             .and_then(serde_json::Value::as_str)
-        else {
-            continue;
-        };
-        if !allowed.contains(&state) {
-            continue;
+            .filter(|state| allowed.contains(state))
+        {
+            sanitized_metrics.insert(
+                state_key.to_owned(),
+                serde_json::Value::String(state.to_owned()),
+            );
         }
-        let mut sanitized_metrics = serde_json::Map::new();
-        sanitized_metrics.insert(
-            state_key.to_owned(),
-            serde_json::Value::String(state.to_owned()),
-        );
         if module == "context" {
             let epoch_names = [
                 "memory_render_epoch",
@@ -900,6 +898,49 @@ mod tests {
     }
 
     #[test]
+    fn consumer_identity_and_capability_strings_must_be_nonempty() {
+        let mut request = minimal_route_open();
+        request["consumer_identity"] = serde_json::json!({"module_id": "mod", "launch_nonce": "n"});
+        request["consumer_capabilities"] = serde_json::json!(["cap"]);
+        let ControlAction::RouteOpen { identity, .. } = parse(&request) else {
+            panic!("expected route open with consumer identity");
+        };
+        assert_eq!(identity.consumer_module_id.as_deref(), Some("mod"));
+        assert_eq!(identity.consumer_launch_nonce.as_deref(), Some("n"));
+        assert_eq!(identity.consumer_capabilities, ["cap"]);
+
+        for (path, value) in [
+            (
+                "consumer_identity",
+                serde_json::json!({"module_id": "", "launch_nonce": "n"}),
+            ),
+            (
+                "consumer_identity",
+                serde_json::json!({"module_id": "mod", "launch_nonce": ""}),
+            ),
+            ("consumer_capabilities", serde_json::json!([""])),
+        ] {
+            let mut request = minimal_route_open();
+            request[path] = value;
+            assert_eq!(
+                reject_code(parse(&request)),
+                CODE_INVALID_CONTROL_REQUEST,
+                "an empty {path} string is not an identifier"
+            );
+        }
+    }
+
+    #[test]
+    fn null_admission_facts_are_absent() {
+        let mut request = minimal_route_open();
+        request["admission_facts"] = serde_json::Value::Null;
+        let ControlAction::RouteOpen { identity, .. } = parse(&request) else {
+            panic!("expected route open");
+        };
+        assert!(identity.admission_facts.is_none());
+    }
+
+    #[test]
     fn admission_facts_bounds_are_exact() {
         fn nested(depth: usize) -> serde_json::Value {
             let mut value = serde_json::json!(1);
@@ -1084,6 +1125,39 @@ mod tests {
             .expect("UTF-8")
             .contains("secret detail"),
             "handler detail is tainted and never exposed"
+        );
+    }
+
+    #[test]
+    fn host_status_names_a_failing_component_without_metrics() {
+        let report = crate::handler::HealthReport {
+            status: crate::handler::HealthStatus::Failing,
+            detail: None,
+            metrics: Some(serde_json::json!({
+                "components": {
+                    "context": {"status": "ok", "metrics": {"storage_state": "ready"}},
+                    "synapse": {"status": "failing", "metrics": null},
+                    "broca": {"status": "degraded", "metrics": {"broca_state": "unexpected"}}
+                }
+            })),
+        };
+        let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
+            &report,
+            serde_json::json!({"state": "healthy"}),
+        ))
+        .expect("status JSON");
+        assert_eq!(response["health"], "failing");
+        let components = &response["metrics"]["components"];
+        assert_eq!(components["context"]["metrics"]["storage_state"], "ready");
+        assert_eq!(
+            components["synapse"],
+            serde_json::json!({"status": "failing", "metrics": {}}),
+            "a component whose health check produced no metrics keeps its status"
+        );
+        assert_eq!(
+            components["broca"],
+            serde_json::json!({"status": "degraded", "metrics": {}}),
+            "an unrecognized state is dropped without dropping the component"
         );
     }
 

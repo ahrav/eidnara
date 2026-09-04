@@ -9,13 +9,23 @@ publish.workspace = true
 description = "Claude byte-BPE token counting, matching ai-tokenizer's claude encoding id for id."
 
 [dependencies]
-# Exact pin: the golden test pins token ids that depend on `CoreBPE`'s merge loop, so a patch
-# release must not move under it. Bump deliberately and rerun `tests/token_golden.rs`.
-tiktoken-rs = "=0.11.0"
-fancy-regex = "0.17"
-base64 = "0.22"
+# `HashTable` with precomputed hashes for the inline-key short-token table; the same crate std's
+# HashMap is built on, already in the workspace lockfile.
+hashbrown = { version = "0.16", default-features = false }
 rustc-hash = "1.1"
 
+[build-dependencies]
+base64 = "0.22"
+
 [dev-dependencies]
+base64 = "0.22"
+# The reference implementation (`src/reference_impl.rs`) and the pattern drift tests. The
+# exact tiktoken-rs pin keeps the oracle's merge loop fixed.
+fancy-regex = "0.17"
+tiktoken-rs = "=0.11.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
+proptest = "1.11"
+# Same crate the reference regex resolves; `unicode_tables_match_regex_syntax` pins the tables
+# to its Unicode version.
+regex-syntax = "0.8"

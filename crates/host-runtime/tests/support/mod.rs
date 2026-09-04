@@ -98,6 +98,8 @@ pub enum BindPolicy {
     BlockUntilReleased,
     Panic,
     Hang,
+    /// `BlockThread` sleeps the worker thread inside one poll, so no timer can interrupt the callback until it returns.
+    BlockThread(Duration),
 }
 
 struct Inner {
@@ -107,6 +109,8 @@ struct Inner {
     output_reservations: AtomicUsize,
     bind_policy: Mutex<BindPolicy>,
     bind_gate: tokio::sync::Semaphore,
+    binds_in_flight: AtomicUsize,
+    route_gone_overlapped_bind: AtomicBool,
     completion_gate: tokio::sync::Semaphore,
     health: Mutex<HealthReport>,
     init_result: Mutex<Result<(), String>>,
@@ -148,6 +152,8 @@ impl TestHandler {
                 output_reservations: AtomicUsize::new(0),
                 bind_policy: Mutex::new(BindPolicy::AcceptAll),
                 bind_gate: tokio::sync::Semaphore::new(0),
+                binds_in_flight: AtomicUsize::new(0),
+                route_gone_overlapped_bind: AtomicBool::new(false),
                 completion_gate: tokio::sync::Semaphore::new(0),
                 health: Mutex::new(HealthReport::ok()),
                 init_result: Mutex::new(Ok(())),
@@ -266,6 +272,11 @@ impl TestHandler {
 
     pub fn hang_route_gone(&self) {
         *self.inner.hang_route_gone.lock().expect("hang lock") = true;
+    }
+
+    /// Reports whether any `route_gone` started while a `bind` was still executing.
+    pub fn route_gone_overlapped_bind(&self) -> bool {
+        self.inner.route_gone_overlapped_bind.load(Ordering::SeqCst)
     }
 
     pub fn block_route_gone(&self) {
@@ -402,6 +413,12 @@ impl HostHandler for TestHandler {
                 std::future::pending::<()>().await;
                 unreachable!("pending bind never resolves")
             }
+            BindPolicy::BlockThread(duration) => {
+                self.inner.binds_in_flight.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(duration);
+                self.inner.binds_in_flight.fetch_sub(1, Ordering::SeqCst);
+                BindOutcome::Accept
+            }
         }
     }
 
@@ -525,6 +542,11 @@ impl HostHandler for TestHandler {
     }
 
     async fn route_gone(&self, route: RouteHandle) {
+        if self.inner.binds_in_flight.load(Ordering::SeqCst) > 0 {
+            self.inner
+                .route_gone_overlapped_bind
+                .store(true, Ordering::SeqCst);
+        }
         if *self.inner.panic_route_gone.lock().expect("panic lock") {
             panic!("route_gone panic for {route:?}");
         }
@@ -690,12 +712,6 @@ impl TestHost {
         raw_client::RawClient::connect(&self.info)
             .await
             .expect("negotiated connection")
-    }
-
-    pub async fn setup_client(&self) -> raw_client::RawClient {
-        raw_client::RawClient::connect_setup_only(&self.info)
-            .await
-            .expect("setup-only connection")
     }
 
     pub async fn shutdown(mut self) -> Result<(), HostError> {

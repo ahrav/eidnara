@@ -35,33 +35,45 @@
 //! seam tokens; every piece at or below the cap is encoded exactly as the reference does.
 #![warn(missing_docs)]
 
+mod bpe;
+#[cfg(test)]
+mod parity_tests;
+#[cfg(test)]
+mod reference_impl;
+mod scan;
+#[cfg(test)]
+mod unicode_gen_tests;
+mod unicode_tables;
+#[cfg(test)]
+mod vocab_blob_tests;
+
 use std::sync::OnceLock;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-use fancy_regex::Regex;
-use rustc_hash::FxHashMap;
-use tiktoken_rs::CoreBPE;
-pub use tiktoken_rs::Rank;
+/// Token id type; `u32`, the same as `tiktoken_rs::Rank`.
+pub type Rank = u32;
 
-/// Vocabulary as `<base64 token> <rank>` lines, embedded so counting needs no file or network.
-const CLAUDE_TIKTOKEN: &str = include_str!("../assets/claude.tiktoken");
+/// Vocabulary decoded by `build.rs` from `assets/claude.tiktoken` (layout documented there),
+/// embedded so counting needs no file or network.
+const VOCAB_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vocab.bin"));
 
-/// Upstream `pat_str`, written by `gen/gen-claude-vocab.ts`. Only the unit test reads it; the
-/// runtime pattern is [`CLAUDE_PAT_STR`].
+/// The unit tests derive [`CLAUDE_PAT_STR`] from this upstream pattern.
 #[cfg(test)]
 const UPSTREAM_PAT_STR: &str = include_str!("../assets/claude.pat");
 
 /// Contents of the ECMAScript `\s` class (WhiteSpace + LineTerminator). Differs from the
 /// `regex` crate's `\s` by including U+FEFF and excluding U+0085.
+#[cfg(test)]
 macro_rules! ecmascript_whitespace {
     () => {
         r"\t\n\x0B\x0C\r \x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}"
     };
 }
 
-/// Pre-tokenizer regex; text is split on these boundaries before BPE merges run within each
-/// piece. Upstream `pat_str` with `\s` and `\S` replaced by the ECMAScript whitespace class.
+/// Pre-tokenizer pattern that [`scan`] implements by hand; text is split on these boundaries
+/// and BPE merges run separately within each piece. The pattern substitutes the ECMAScript
+/// whitespace class for upstream `\s` and `\S`. A unit test asserts equality with
+/// `reference_impl::CLAUDE_PAT_STR`, the oracle the scanner is tested against.
+#[cfg(test)]
 const CLAUDE_PAT_STR: &str = concat!(
     r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^",
     ecmascript_whitespace!(),
@@ -79,35 +91,9 @@ const CLAUDE_PAT_STR: &str = concat!(
 /// parity with the reference holds in practice while worst-case latency stays linear.
 pub const MAX_PIECE_BYTES: usize = 4096;
 
-fn tokenizer() -> &'static CoreBPE {
-    static TOKENIZER: OnceLock<CoreBPE> = OnceLock::new();
-    TOKENIZER.get_or_init(|| {
-        let mut encoder: FxHashMap<Vec<u8>, Rank> = FxHashMap::with_capacity_and_hasher(
-            CLAUDE_TIKTOKEN.lines().count(),
-            Default::default(),
-        );
-        for line in CLAUDE_TIKTOKEN.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let (raw, rank_str) = line
-                .split_once(' ')
-                .expect("vocab line missing token or rank field");
-            let bytes = STANDARD
-                .decode(raw)
-                .expect("vocab token is not valid base64");
-            let rank: Rank = rank_str.parse().expect("vocab rank is not a u32");
-            encoder.insert(bytes, rank);
-        }
-        CoreBPE::new(encoder, FxHashMap::default(), CLAUDE_PAT_STR)
-            .expect("claude BPE construction failed (bad vocab or pattern)")
-    })
-}
-
-/// The same pattern `CoreBPE` uses, compiled once so over-long pieces can be located.
-fn piece_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(CLAUDE_PAT_STR).expect("claude pattern failed to compile"))
+fn vocab() -> &'static bpe::Vocab {
+    static VOCAB: OnceLock<bpe::Vocab> = OnceLock::new();
+    VOCAB.get_or_init(|| bpe::Vocab::from_blob(VOCAB_BLOB))
 }
 
 /// Splits `piece` into chunks of at most `max_bytes` on `char` boundaries.
@@ -127,27 +113,30 @@ fn char_chunks(piece: &str, max_bytes: usize) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Encodes `text`, chunking any pre-token piece longer than [`MAX_PIECE_BYTES`]. Spans between
-/// over-long pieces are handed to `CoreBPE` whole: they start and end on piece boundaries, so
-/// re-running the pattern on a span yields the same pieces as running it on the full text.
-fn encode_bounded(bpe: &CoreBPE, text: &str) -> Vec<Rank> {
-    if text.len() <= MAX_PIECE_BYTES {
-        return bpe.encode_ordinary(text);
-    }
-    let mut out = Vec::new();
-    let mut span_start = 0;
-    for m in piece_regex().find_iter(text) {
-        let m = m.expect("claude pattern hit fancy-regex's backtrack limit");
-        if m.end() - m.start() <= MAX_PIECE_BYTES {
-            continue;
+/// Highly compressible input can use one id per KiB (a run of spaces does), so the byte-based
+/// preallocation in `encode_bounded` is capped at 16 MiB; beyond it the `Vec` doubles,
+/// amortized linear.
+const MAX_PRESIZE_IDS: usize = 1 << 22;
+
+/// Encodes `text`, chunking any pre-token piece longer than [`MAX_PIECE_BYTES`].
+fn encode_bounded(text: &str) -> Vec<Rank> {
+    let vocab = vocab();
+    // Real text yields 3.5-4.5 bytes per token; sizing for 3 makes a second growth rare while
+    // over-reserving at most ~25%.
+    let mut out = Vec::with_capacity((text.len() / 3 + 1).min(MAX_PRESIZE_IDS));
+    let mut scratch = bpe::Scratch::default();
+    let bytes = text.as_bytes();
+    for (start, end) in scan::pieces(text) {
+        if end - start <= MAX_PIECE_BYTES {
+            vocab.encode_piece(bytes, start, end, &mut scratch, &mut out);
+        } else {
+            let mut at = start;
+            for chunk in char_chunks(&text[start..end], MAX_PIECE_BYTES) {
+                vocab.encode_piece(bytes, at, at + chunk.len(), &mut scratch, &mut out);
+                at += chunk.len();
+            }
         }
-        out.extend(bpe.encode_ordinary(&text[span_start..m.start()]));
-        for chunk in char_chunks(m.as_str(), MAX_PIECE_BYTES) {
-            out.extend(bpe.encode_ordinary(chunk));
-        }
-        span_start = m.end();
     }
-    out.extend(bpe.encode_ordinary(&text[span_start..]));
     out
 }
 
@@ -156,20 +145,19 @@ fn encode_bounded(bpe: &CoreBPE, text: &str) -> Vec<Rank> {
 /// Equal to `encode_ordinary(text).len()`. Work is bounded per pre-token piece; see
 /// [`MAX_PIECE_BYTES`].
 pub fn estimate_tokens(text: &str) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-    encode_bounded(tokenizer(), text).len()
+    encode_bounded(text).len()
 }
 
 /// Token ids of `text`. Same ids `ai-tokenizer` produces except for the reference defects and
 /// over-long pieces described in the crate docs; used by the golden test.
 pub fn encode_ordinary(text: &str) -> Vec<Rank> {
-    encode_bounded(tokenizer(), text)
+    encode_bounded(text)
 }
 
 #[cfg(test)]
 mod tests {
+    use fancy_regex::Regex;
+
     use super::*;
 
     /// `CLAUDE_PAT_STR` must be exactly the upstream pattern with the ECMAScript whitespace
@@ -186,6 +174,13 @@ mod tests {
         assert_eq!(derived, CLAUDE_PAT_STR);
         assert!(!CLAUDE_PAT_STR.contains(r"\s"), "unexpanded \\s in pattern");
         assert!(!CLAUDE_PAT_STR.contains(r"\S"), "unexpanded \\S in pattern");
+    }
+
+    /// The scanner tests use `reference_impl`, not `CLAUDE_PAT_STR`, as their oracle; this
+    /// equality is what lets the upstream check above reach the scanner.
+    #[test]
+    fn reference_pattern_equals_upstream_derived_pattern() {
+        assert_eq!(reference_impl::CLAUDE_PAT_STR, CLAUDE_PAT_STR);
     }
 
     #[test]

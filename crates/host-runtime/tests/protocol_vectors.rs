@@ -72,6 +72,77 @@ fn committed_auth_proof_vectors_pin_the_construction() {
 }
 
 #[test]
+fn doc_committed_auth_vectors_match_the_pinned_arrays() {
+    let doc_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/host-wire-protocol.md");
+    let doc = std::fs::read_to_string(&doc_path).expect("read docs/host-wire-protocol.md");
+
+    let json_line = |field: &str| -> serde_json::Value {
+        let line = doc
+            .lines()
+            .find(|line| line.starts_with('{') && line.contains(&format!("\"{field}\":")))
+            .unwrap_or_else(|| panic!("doc has no JSON line carrying {field}"));
+        serde_json::from_str(line).unwrap_or_else(|err| panic!("doc {field} JSON: {err}"))
+    };
+    let bytes = |value: &serde_json::Value| -> Vec<u8> {
+        value
+            .as_array()
+            .expect("byte array")
+            .iter()
+            .map(|byte| u8::try_from(byte.as_u64().expect("byte")).expect("byte range"))
+            .collect()
+    };
+
+    let server = json_line("server_proof");
+    assert_eq!(
+        bytes(&server["server_proof"]),
+        [
+            89, 41, 95, 101, 15, 43, 108, 51, 132, 228, 206, 117, 229, 243, 55, 238, 35, 54, 116,
+            7, 168, 92, 82, 74, 242, 210, 114, 64, 98, 38, 64, 56
+        ],
+        "doc server_proof drifted from the committed vector"
+    );
+    assert_eq!(
+        server["daemon_ver"].as_str(),
+        Some(VECTOR_DAEMON_VER),
+        "doc ServerProof daemon_ver drifted from the vector inputs"
+    );
+    assert_eq!(
+        bytes(&server["server_nonce"]),
+        (0x40u8..=0x5f).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        bytes(&server["daemon_id"]),
+        (0x60u8..=0x6f).collect::<Vec<_>>()
+    );
+
+    let client = json_line("client_auth");
+    assert_eq!(
+        bytes(&client["client_auth"]),
+        [
+            140, 161, 69, 27, 18, 230, 236, 54, 6, 199, 49, 76, 154, 250, 81, 84, 78, 160, 182,
+            108, 253, 146, 214, 55, 25, 147, 137, 168, 222, 41, 215, 159
+        ],
+        "doc client_auth drifted from the committed vector"
+    );
+
+    let hello = json_line("client_nonce");
+    assert_eq!(
+        bytes(&hello["client_nonce"]),
+        (0x20u8..=0x3f).collect::<Vec<_>>()
+    );
+
+    let inputs_line = doc
+        .lines()
+        .find(|line| line.starts_with("Those proofs use key bytes"))
+        .expect("doc restates the proof inputs");
+    assert!(
+        inputs_line.contains(&format!("daemon version `{VECTOR_DAEMON_VER}`")),
+        "doc proof-input prose names a different daemon version: {inputs_line}"
+    );
+}
+
+#[test]
 fn proof_folds_every_input() {
     let (key, client_nonce, server_nonce, daemon_id) = vector_inputs();
     let baseline = raw_client::proof(

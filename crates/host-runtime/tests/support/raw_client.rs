@@ -55,6 +55,30 @@ pub const FLAGS_PURE_HEADER_FORBIDDEN: u8 = 0b1111_1001;
 /// Goodbye frames require pure-header flags, zero correlation, and a route-shaped or connection-shaped identity.
 /// Push frames require a route-shaped identity, zero correlation, and clear reserved bits.
 /// Type-only acceptance can hide wire regressions when the test run otherwise succeeds.
+/// A terminal channel-0 `Response` must carry wire version 2, identity `0/0`, and the
+/// canonical text-terminal flags; anything else is a host envelope regression.
+pub fn control_response_violation(frame: &RawFrame) -> Option<String> {
+    if frame.ver != WIRE_VERSION {
+        return Some(format!(
+            "control response with unsupported wire version {}",
+            frame.ver
+        ));
+    }
+    if frame.channel != 0 || frame.epoch != 0 {
+        return Some(format!(
+            "control response on identity {}/{} instead of 0/0",
+            frame.channel, frame.epoch
+        ));
+    }
+    if frame.flags != FLAGS_RESPONSE_TEXT_LAST {
+        return Some(format!(
+            "control response flags {:#04x} are not the terminal text response flags {:#04x}",
+            frame.flags, FLAGS_RESPONSE_TEXT_LAST
+        ));
+    }
+    None
+}
+
 pub fn connection_frame_violation(frame: &RawFrame) -> Option<String> {
     if frame.ver != WIRE_VERSION {
         return Some(format!(
@@ -156,87 +180,17 @@ impl RawFrame {
             .expect("error body has a code")
             .to_owned()
     }
-
-    /// An error terminal may carry a server retry hint.
-    pub fn error_retry_after_ms(&self) -> Option<u64> {
-        self.json()["retry_after_ms"].as_u64()
-    }
 }
 
-/// Contents of a published connection file, parsed independently.
+/// Contents of a published connection file.
 pub type Discovered = host_runtime::ConnectionInfo;
 
-/// Validates and reads a publication the way a conforming client must
-/// (protocol §4.1): bounded snapshot, schema 2, exactly 32 key bytes, exactly
-/// 16 daemon-ID bytes, numeric loopback host, nonzero port.
+/// Reads a publication through the crate's descriptor-anchored client reader (protocol
+/// §4.1): the bytes that supply the key and setup socket come from the same validated
+/// inode, never from a pathname reopened after the check. Framing and proofs stay
+/// independent; the reader's own adversarial coverage is `instance_security.rs`.
 pub fn discover(path: &Path) -> Result<Discovered, String> {
-    let meta = std::fs::symlink_metadata(path).map_err(|err| err.to_string())?;
-    if !meta.file_type().is_file() {
-        return Err("publication is not a regular file".to_owned());
-    }
-    if meta.len() > 65_536 {
-        return Err("publication exceeds the 64 KiB snapshot cap".to_owned());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(format!("insecure publication mode {mode:#o}"));
-        }
-    }
-
-    let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
-    let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
-
-    let schema = json["schema"].as_u64().ok_or("missing schema")?;
-    if schema != 2 {
-        return Err(format!("unsupported schema {schema}"));
-    }
-    let wire_version = json
-        .get("wire_version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or("missing or invalid wire_version")?;
-    if wire_version != u64::from(WIRE_VERSION) {
-        return Err(format!("wire version {wire_version} is not 2"));
-    }
-
-    let setup_socket = json["setup_socket"]
-        .as_str()
-        .ok_or("missing setup_socket")?
-        .to_owned();
-    if setup_socket.is_empty() {
-        return Err("empty setup_socket".to_owned());
-    }
-    let key = byte_array(&json["key"]).ok_or("missing key")?;
-    if key.len() != 32 {
-        return Err(format!("key is {} bytes, expected 32", key.len()));
-    }
-    let daemon_id = byte_array(&json["daemon_id"]).ok_or("missing daemon_id")?;
-    if daemon_id.len() != 16 {
-        return Err(format!(
-            "daemon_id is {} bytes, expected 16",
-            daemon_id.len()
-        ));
-    }
-    let daemon_ver = json["daemon_ver"]
-        .as_str()
-        .ok_or("missing daemon_ver")?
-        .to_owned();
-    if daemon_ver.is_empty() {
-        return Err("empty daemon_ver".to_owned());
-    }
-
-    Ok(Discovered {
-        setup_socket,
-        key,
-        daemon_id: daemon_id.try_into().expect("length checked"),
-        pid: u32::try_from(json["pid"].as_u64().ok_or("missing pid")?)
-            .map_err(|_| "pid out of range")?,
-        daemon_ver,
-        schema: u32::try_from(schema).expect("schema is two"),
-        wire_version: u8::try_from(wire_version).expect("wire version is two"),
-    })
+    host_runtime::read_connection_file(path).map_err(|err| err.to_string())
 }
 
 fn byte_array(value: &serde_json::Value) -> Option<Vec<u8>> {
@@ -322,13 +276,23 @@ impl RawClient {
             client_nonce,
             next_corr,
         } = client;
+        // One absolute deadline spans grant, attach, and commit (protocol §11).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let (descriptor, descriptors) =
-            host_runtime::setup_socket::activate_client(&mut stream, Duration::from_secs(2))
+            host_runtime::setup_socket::activate_client(&mut stream, deadline)
                 .await
                 .map_err(|err| err.to_string())?;
+        // Attach before committing so a grant the client cannot map never becomes an activated connection on the host (protocol §6).
+        let (stream_rx, raw_tx, setup_tx) = start_ring_stream_bridge(descriptor, descriptors)?;
+        host_runtime::setup_socket::commit_activation(&mut stream, deadline)
+            .await
+            .map_err(|err| err.to_string())?;
         let setup = stream.into_std().map_err(|err| err.to_string())?;
         setup.set_nonblocking(true).map_err(|err| err.to_string())?;
-        let (stream, raw_tx) = start_ring_stream_bridge(descriptor, descriptors, setup)?;
+        setup_tx.send(setup).map_err(|_| {
+            "ring bridge stopped before the setup socket was handed over".to_owned()
+        })?;
+        let stream = UnixStream::from_std(stream_rx).map_err(|err| err.to_string())?;
         Ok(Self {
             stream,
             raw_tx: Some(raw_tx),
@@ -347,20 +311,29 @@ impl RawClient {
         info: &Discovered,
         role: &str,
     ) -> Result<Self, String> {
-        let mut stream = UnixStream::connect(&info.setup_socket)
+        // One absolute deadline spans connect and both authentication messages (protocol §11).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut stream = tokio::time::timeout_at(deadline, UnixStream::connect(&info.setup_socket))
             .await
+            .map_err(|_| "setup socket connect timed out".to_owned())?
             .map_err(|err| err.to_string())?;
 
         let client_nonce: Vec<u8> = (0u8..32)
             .map(|i| i.wrapping_mul(7).wrapping_add(3))
             .collect();
-        write_auth(
-            &mut stream,
-            &serde_json::json!({"client_nonce": client_nonce, "role": role}),
+        tokio::time::timeout_at(
+            deadline,
+            write_auth(
+                &mut stream,
+                &serde_json::json!({"client_nonce": client_nonce, "role": role}),
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| "client nonce write timed out".to_owned())??;
 
-        let server_message = read_auth(&mut stream).await?;
+        let server_message = tokio::time::timeout_at(deadline, read_auth(&mut stream))
+            .await
+            .map_err(|_| "server proof read timed out".to_owned())??;
         let server_nonce =
             byte_array(&server_message["server_nonce"]).ok_or("missing server_nonce")?;
         let daemon_id = byte_array(&server_message["daemon_id"]).ok_or("missing daemon_id")?;
@@ -385,6 +358,9 @@ impl RawClient {
         if daemon_id.as_slice() != info.daemon_id {
             return Err("daemon id mismatch".to_owned());
         }
+        if daemon_ver != info.daemon_ver {
+            return Err("daemon version mismatch".to_owned());
+        }
 
         let client_auth = proof(
             &info.key,
@@ -394,11 +370,15 @@ impl RawClient {
             &daemon_ver,
             &daemon_id,
         );
-        write_auth(
-            &mut stream,
-            &serde_json::json!({"client_auth": client_auth}),
+        tokio::time::timeout_at(
+            deadline,
+            write_auth(
+                &mut stream,
+                &serde_json::json!({"client_auth": client_auth}),
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| "client auth write timed out".to_owned())??;
 
         Ok(Self {
             stream,
@@ -432,11 +412,6 @@ impl RawClient {
             .await
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "ring bridge closed"))?
             .map_err(std::io::Error::other)
-    }
-
-    /// Half-closes the write side, causing the peer to observe EOF after buffered bytes.
-    pub async fn shutdown_write(&mut self) -> std::io::Result<()> {
-        self.stream.shutdown().await
     }
 
     pub async fn send_frame(
@@ -534,6 +509,9 @@ impl RawClient {
         if frame.ty != TY_RESPONSE {
             return Err(format!("unexpected route response type {}", frame.ty));
         }
+        if let Some(violation) = control_response_violation(&frame) {
+            return Err(violation);
+        }
         let json = frame.json();
         if json["op"] != "route.open" {
             return Err(format!("response lost its tag: {json}"));
@@ -613,11 +591,20 @@ impl RawClient {
     }
 }
 
+/// Attaches the granted ring on a bridge thread and returns once attachment succeeded. The
+/// caller commits activation, then hands the setup socket over through the returned sender;
+/// the bridge starts pumping frames only after that handoff.
 fn start_ring_stream_bridge(
     descriptor: serde_json::Value,
     descriptors: [rustix::fd::OwnedFd; host_runtime::setup_socket::RING_DESCRIPTOR_COUNT],
-    mut setup: StdUnixStream,
-) -> Result<(UnixStream, RawWriteSender), String> {
+) -> Result<
+    (
+        StdUnixStream,
+        RawWriteSender,
+        std::sync::mpsc::SyncSender<StdUnixStream>,
+    ),
+    String,
+> {
     let (client_stream, mut bridge_stream) =
         StdUnixStream::pair().map_err(|err| err.to_string())?;
     client_stream
@@ -631,6 +618,7 @@ fn start_ring_stream_bridge(
         tokio::sync::oneshot::Sender<Result<(), String>>,
     )>(64);
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (setup_tx, setup_rx) = std::sync::mpsc::sync_channel::<StdUnixStream>(1);
     std::thread::Builder::new()
         .name("host-raw-ring-client".to_owned())
         .spawn(move || {
@@ -646,6 +634,9 @@ fn start_ring_stream_bridge(
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
+            let Ok(mut setup) = setup_rx.recv() else {
+                return;
+            };
 
             let mut inbound = Vec::new();
             let mut outbound = Vec::new();
@@ -744,15 +735,19 @@ fn start_ring_stream_bridge(
                 let _ = reservation.commit(0);
             }
             send_setup_goodbye(&mut setup);
+            // Joined teardown (protocol §6): the host closes the setup socket only after its
+            // endpoint thread has exited, and a doorbell closed while the host still waits on
+            // it is a transport fault that quarantines the ring rather than a clean close.
+            wait_for_setup_close(&mut setup, &mut scratch, Duration::from_secs(2));
             let _ = setup.shutdown(std::net::Shutdown::Both);
+            drop(endpoint);
         })
         .map_err(|err| err.to_string())?;
     ready_rx
         .recv()
         .map_err(|_| "ring bridge stopped before startup".to_owned())?
         .map_err(|_| "ring bridge could not attach".to_owned())?;
-    let stream = UnixStream::from_std(client_stream).map_err(|err| err.to_string())?;
-    Ok((stream, raw_tx))
+    Ok((client_stream, raw_tx, setup_tx))
 }
 
 fn publish_raw(
@@ -810,15 +805,19 @@ fn pump_host_output(
     outbound: &mut Vec<u8>,
     host_goodbye: &mut bool,
 ) -> Result<(), String> {
-    match endpoint.try_recv() {
-        Ok(Some((header, body))) => {
-            *host_goodbye =
-                header.ty as u8 == TY_GOODBYE && header.channel == 0 && header.epoch == 0;
-            outbound.extend_from_slice(&header.encode());
-            outbound.extend_from_slice(&body);
+    // One frame is buffered at a time: a client that stops reading leaves the previous frame
+    // unflushed, and the ring stays full so the host's writer sees the stall instead of the bridge absorbing it.
+    if outbound.is_empty() {
+        match endpoint.try_recv() {
+            Ok(Some((header, body))) => {
+                *host_goodbye =
+                    header.ty as u8 == TY_GOODBYE && header.channel == 0 && header.epoch == 0;
+                outbound.extend_from_slice(&header.encode());
+                outbound.extend_from_slice(&body);
+            }
+            Ok(None) => {}
+            Err(error) => return Err(error.to_string()),
         }
-        Ok(None) => {}
-        Err(error) => return Err(error.to_string()),
     }
     if !outbound.is_empty() {
         match bridge_stream.write(outbound) {
@@ -830,6 +829,20 @@ fn pump_host_output(
         }
     }
     Ok(())
+}
+
+fn wait_for_setup_close(setup: &mut StdUnixStream, scratch: &mut [u8], budget: Duration) {
+    let deadline = std::time::Instant::now() + budget;
+    while std::time::Instant::now() < deadline {
+        match setup.read(scratch) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_micros(50));
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 fn send_setup_goodbye(setup: &mut StdUnixStream) {

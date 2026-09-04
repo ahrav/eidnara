@@ -338,11 +338,12 @@ impl Client {
                 .map_err(|_| {
                     ClientError::new("authentication_failed", "daemon authentication failed")
                 })?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let (descriptor, descriptors) =
-            crate::setup_socket::activate_client(&mut stream, remaining)
-                .await
-                .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
+        let (descriptor, descriptors) = crate::setup_socket::activate_client(&mut stream, deadline)
+            .await
+            .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
+        crate::setup_socket::commit_activation(&mut stream, deadline)
+            .await
+            .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
         let setup_stream = stream
             .into_std()
             .map_err(|_| ClientError::new("setup_failed", "shared-memory setup failed"))?;
