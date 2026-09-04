@@ -1,0 +1,239 @@
+{
+  "schema_version": 1,
+  "wave": "U3",
+  "reports": [
+    {
+      "phase": "pre-port",
+      "iteration": 0,
+      "analyzed": {
+        "repo": "host",
+        "commit": "39e8230371b15966a5767771daf001e44d191aac",
+        "scope_hash": "546689b0bfec8de40744bc6a648394c874d849748edc9add1ca2f260130c3fe6"
+      },
+      "report_hash": "20a66eecdb85ee4cd29c8d62c027f76acc9b425331aa744beaeaedb1cba6b221",
+      "report_path": "/tmp/architecture-review-20260903T105300Z-U3-pre-port.html",
+      "skill_sha256": "5a2532a0c9ac5def4a7f453567aaecd4440b095782dfe9e3bda7f934ccdf2f0e",
+      "summary": "Interface versus implementation before porting: host-runtime 535/19402, shm-transport 152/1963, tokenizer 2/38, shm-native 29/1860 (pub items / non-blank non-comment implementation lines outside cfg(test)). host-runtime and shm-native are deep; shm-transport is deep; tokenizer is a two-function facade over the vocabulary table by design. The host runtime has no dependency on the product daemon (zero references), and shm-transport is its only transport adapter. No Strong candidate.",
+      "candidates": [
+        {
+          "title": "Remove the unused producer half of frame_channel",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime"
+          ],
+          "interface": "`#[doc(hidden)] pub mod frame_channel`: 47 public items, of which connection, dispatch, ring_transport, routing, and runtime use `FrameSender`, `frame_sender`, `InboundFrame`, `OwnedInboundFrame`, `InboundEvent`, `OutboundFrame`, `DirectFrame`, `DirectSerializer`, `QueuedOutboundFrame`, `SenderQueue`, `ReadClose`, `RejectedFrame`, `CopyCounter`",
+          "implementation": "the producer half of `frame_channel.rs`: `ProducerError`, `ProducerReservation`, `ProducedBody`, `LeaseTracker`, `LeaseClose`, `ReceiveLease::segmented`, and the matching `frame_channel/contract_tests.rs` cases (about 300 of the module's 616 implementation lines) have no caller outside the module's own contract tests",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the producer half makes the complexity vanish rather than move: no production or test caller outside `frame_channel` constructs a `ProducerReservation` or a `LeaseTracker`, and the mandatory-ring refactor that removed the TCP channel left them behind."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "ring_transport"
+          ],
+          "specialist_routes": [],
+          "rationale": "Not Strong: a deletion of dead surface, not a deepening, so the interface metric does not apply. Recorded rather than done in U3 because the wave's rule is no behavior change beyond renames, and the property catalog carries records (`ring-a-segmented-inbound-body-has-no-production-producer` and siblings) that describe this exact dead surface and must be re-dispositioned when it goes.",
+          "follow_up": "remove after U3 lands, together with the catalog records that describe the dead surface"
+        },
+        {
+          "title": "Inline the setup-proof wrappers onto the shared transcript",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime",
+            "packages/shm-native"
+          ],
+          "interface": "`host_runtime::auth::compute_proof` and the addon's `setup.rs` proof call, both forwarding every argument to `shm_transport::setup_auth::compute_proof`",
+          "implementation": "two nine-line forwarding wrappers plus the test-local `raw_client::proof` oracle, which must stay independent",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Re-exporting the shared function removes the wrappers without moving anything; the oracle in `tests/support/raw_client.rs` is deliberately a separate implementation and is not part of the candidate."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": false
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "shm_transport::setup_auth"
+          ],
+          "specialist_routes": [],
+          "rationale": "Not Strong: pure forwarding removal, no deepening. Recorded; landing it changes public paths the U3 catalogs cite.",
+          "follow_up": "re-export `shm_transport::setup_auth::compute_proof` from `host_runtime::auth` after U3"
+        },
+        {
+          "title": "Share the filesystem-policy helpers between harness_closure and instance",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime"
+          ],
+          "interface": "`instance::{is_safe_ancestor, owner_uid, mode_bits, hex}` (pub(crate)) and `harness_closure::{verify_safe_ancestor, owner_uid, mode_bits, hex, S_ISVTX}` (private)",
+          "implementation": "two copies of the sticky-bit, owner, and mode checks that decide whether a directory ancestor is trusted; the two had already drifted in how they read the mode",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the private copies and calling `instance`'s concentrates the policy in one module; `harness_closure` already depends on `crate::instance`."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": true,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "instance"
+          ],
+          "specialist_routes": [
+            "/code-quality:duplication-check"
+          ],
+          "rationale": "Not Strong on the metric: the shared helpers are a handful of lines, so the interface is not materially smaller than the implementation. Recorded; the two copies must be compared line by line before one is deleted because the drift may be intentional for closure roots.",
+          "follow_up": "compare the two ancestor policies, then delete the private copy or document why closure roots differ"
+        }
+      ]
+    },
+    {
+      "phase": "post-integration",
+      "iteration": 2,
+      "analyzed": {
+        "repo": "eidnara",
+        "commit": "a1dccd7264738990002348380815d7f8b03acc60",
+        "scope_hash": "87e35d19b514c0eea6c0494086e60b4219fbc6fed2ca3a1b3c0d5abea0198da4",
+        "modules": [
+          "crates/host-runtime",
+          "crates/shm-transport",
+          "crates/tokenizer",
+          "packages/shm-native"
+        ],
+        "modules_hash": "7ccc046c5175d2a83623a108869bc0d1fcc0029aa3e2f5702d1f8962e7bee1f5"
+      },
+      "report_hash": "7af72397113a4c591625297e6e42591b2668a94479e2d380a2e130fd445c3579",
+      "report_path": "/tmp/arch-u3-it2/architecture-review-U3-post-integration-iteration2c.html",
+      "skill_sha256": "a9fa1ddaa38635d4a8b212ede1cff682364a7c50cfa9995c51b093f1b50616c4",
+      "summary": "Iteration 1 (commit b6b75c7b9475c13f7c94b52f0a13f00d442e22da on wave/u3-controls, report 80eb963fd1af9114d3670c4ee8a32aa25ee9fa474065511a164e7bdde95d6c66) judged the pre-decomposition tree; it is superseded here because the checker verifies every post-integration report against HEAD. This is the second iteration-2 re-run after a test-only change: the only file that changed inside the analyzed modules since the previous iteration-2 report is packages/shm-native/tests/mechanism.ts (+2 lines: the raw-addon readiness test sets `later = null;`, with a comment, before closing its later pair so that pair's trailing wake finds nothing to poll), verified by diffing the two analyzed tips over the four module directories; no interface or implementation line changed, every cited line number was re-read against the recorded analyzed.commit and still holds, so no candidate strength moves. Interface versus implementation after integration, iteration 2: host-runtime 652/21361, shm-transport 216/4091, tokenizer 4/98, shm-native 36/2095 (pub items / non-blank non-comment implementation lines outside cfg(test), recomputed against the recorded analyzed.commit with the same counting rule; identical to the previous iteration-2 counts because tests/ is excluded). host-runtime, shm-transport, and shm-native are deep; tokenizer is a two-function facade over the vocabulary table by design. The three iteration-1 candidates are still present in the tree: the frame_channel producer half (ProducerReservation, ProducedBody, LeaseTracker, LeaseClose, ReceiveLease::segmented) has no caller outside frame_channel; host_runtime::auth::compute_proof (auth.rs:119) and shm-native setup::proof (setup.rs:248) still forward every argument to shm_transport::setup_auth::compute_proof, and the merged transport's verify_proof (setup_auth.rs:63) has zero production callers while both adapters still do their own ct_eq compare; harness_closure.rs:1112-1145 still keeps private verify_safe_ancestor/owner_uid/mode_bits/hex copies of instance.rs:676-824 helpers that generation.rs already imports. The loop-created Speculative candidate (duplicated unsafe &'static Ring borrow at lib.rs:964-968, 1185-1189, 1083-1086) is unchanged. No Strong candidate; no structural change accepted.",
+      "candidates": [
+        {
+          "title": "Remove the unused producer half of frame_channel",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime"
+          ],
+          "interface": "`#[doc(hidden)] pub mod frame_channel`: 25 top-level pub/pub(crate) items, of which connection, dispatch, handler, ring_transport, routing, and runtime use `FrameSender`, `frame_sender`, `InboundFrame`, `OwnedInboundFrame`, `InboundEvent`, `OutboundFrame`, `DirectFrame`, `DirectSerializer`, `QueuedOutboundFrame`, `SenderQueue`, `ReadClose`, `RejectedFrame`, `CopyCounter`, `COMPLETE`, `validate_inbound_header`",
+          "implementation": "the producer half of `frame_channel.rs` (lines 87-287, 300-318, 376-424): `ProducerError`, `ProducerReservation`, `ProducedBody`, `ReceiveLease::segmented`, `LeaseTracker`, `LeaseClose`, about 215 of the module's 553 implementation lines, plus contract_tests cases `exact_commit_covers_empty_boundary_segmented_and_maximum_bodies`, `producer_failures_never_publish_and_return_each_charge_once`, `close_with_active_lease_quarantines_and_never_reopens_storage`; grep for these names outside frame_channel in crates/host-runtime returns nothing; ring_transport.rs:15 uses shm_transport's ProducerReservation instead; `InboundFrame::with_lease` (frame_channel.rs:457) only builds `ReceiveLease::contiguous`",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the producer half makes the complexity vanish rather than move: no production or test caller outside `frame_channel` constructs a `ProducerReservation`, `ProducedBody`, or `LeaseTracker`, or calls `ReceiveLease::segmented`; `InboundFrame::with_lease` only builds `ReceiveLease::contiguous`."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "ring_transport"
+          ],
+          "specialist_routes": [],
+          "rationale": "Unchanged from iteration 1 and from both previous iteration-2 reports; the test-only mechanism.ts change does not touch this module and every cited line re-verifies. Not Strong: a deletion of dead surface, not a deepening, so the interface metric does not apply. Recorded because U3 permits no behavior change beyond renames and the catalog record `ring-a-segmented-inbound-body-has-no-production-producer` (docs/properties/host-runtime/catalog.md:3754) describes this exact surface.",
+          "follow_up": "remove after U3 lands, together with the catalog records that describe the dead surface"
+        },
+        {
+          "title": "Inline the setup-proof wrappers onto the shared transcript",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime",
+            "packages/shm-native"
+          ],
+          "interface": "`host_runtime::auth::compute_proof` (auth.rs:119-134, re-exported at lib.rs:41) and the addon's `setup::proof` (setup.rs:248-264), both now taking `daemon_id: &[u8; DAEMON_ID_LEN]` and forwarding every argument to `shm_transport::setup_auth::compute_proof`; plus `auth::constant_time_eq` (auth.rs:357) and `setup.rs:225 ct_eq`, which duplicate the merged tree's `setup_auth::verify_proof`",
+          "implementation": "two nine-line forwarding wrappers, two local constant-time compares, a duplicate `connection_file::DAEMON_ID_LEN` constant (connection_file.rs:28), and `setup_auth::verify_proof` (setup_auth.rs:63) with zero callers outside its own tests despite the module doc (setup_auth.rs:4) claiming neither peer compares proof bytes itself; the test-local `raw_client::proof` oracle (tests/support/raw_client.rs:251) must stay independent",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Re-exporting the shared function removes the wrappers without moving anything, and routing both compares through `verify_proof` gives the transcript module its second adapter; the oracle in `tests/support/raw_client.rs` is deliberately a separate implementation and is not part of the candidate."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": true,
+            "testability": false
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "host_runtime::auth",
+            "shm-native setup"
+          ],
+          "specialist_routes": [],
+          "rationale": "Strength unchanged, evidence strengthened by the merged tree: the daemon_id array signature makes a plain re-export signature-identical, and `verify_proof` now exists unused. The test-only mechanism.ts change does not touch setup.rs or auth.rs; all cited lines re-verify. Not Strong: pure forwarding removal, no deepening; interface metric fails because the wrapper interface equals its implementation. Recorded; landing it changes public paths and `auth.rs` line numbers the U3 catalogs cite.",
+          "follow_up": "re-export `shm_transport::setup_auth::compute_proof` from `host_runtime::auth`, delete the addon wrapper, route both proof compares through `setup_auth::verify_proof`, and drop the duplicate `connection_file::DAEMON_ID_LEN` after U3"
+        },
+        {
+          "title": "Share the filesystem-policy helpers between harness_closure and instance",
+          "strength": "Worth exploring",
+          "origin": "original-scope",
+          "decision": "recorded",
+          "modules": [
+            "crates/host-runtime"
+          ],
+          "interface": "`instance::{is_safe_ancestor, owner_uid, mode_bits, hex, S_IFMT, S_IFDIR}` (pub(crate), instance.rs:676-693, 737-747, 824) and `harness_closure::{verify_safe_ancestor, owner_uid, mode_bits, hex, S_IFMT, S_IFDIR, S_ISVTX}` (private, harness_closure.rs:29-32, 1112-1145)",
+          "implementation": "two copies of the sticky-bit, owner, and mode checks that decide whether a directory ancestor is trusted, plus duplicated `owner_uid`, `mode_bits` (macOS/Linux variants), `hex`, and the S_IF* constants; `generation.rs:28-32` already imports the `instance` versions, so `instance` is the established owner",
+          "deletion_test": {
+            "concentrates_complexity": true,
+            "rationale": "Deleting the private copies and calling `instance`'s concentrates the policy in one module with two existing consumers (`instance`, `generation`); `harness_closure` already depends on `crate::file_mode` and would gain one more crate-internal import."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": true,
+            "testability": true
+          },
+          "claims_flexibility": false,
+          "adapters": [
+            "instance"
+          ],
+          "specialist_routes": [
+            "/code-quality:duplication-check"
+          ],
+          "rationale": "Unchanged from iteration 1 and both previous iteration-2 reports; both copies still present at the cited lines. Not Strong on the metric: the shared helpers are a handful of lines, so the interface is not materially smaller than the implementation. The two ancestor checks encode the same rule (dir, owner or root, not group/other-writable unless sticky) in different shapes; the difference must be confirmed as pure restructuring before one is deleted.",
+          "follow_up": "compare the two ancestor policies, then delete the private copy or document why closure roots differ"
+        },
+        {
+          "title": "Concentrate the &'static Ring borrow behind one Channel accessor in shm-native",
+          "strength": "Speculative",
+          "origin": "loop-created",
+          "decision": "recorded",
+          "modules": [
+            "packages/shm-native"
+          ],
+          "interface": "one `Channel` method yielding the `'static` ring for a side, carrying the single field-order SAFETY argument",
+          "implementation": "three copies of `let ring_ptr: *const Ring = channel.<side>.as_ref(); let ring: &'static Ring = unsafe { &*ring_ptr };` with matching SAFETY comments at lib.rs:964-968 (reserve, to_host), lib.rs:1185-1189 (receive, from_host, added by the ActiveLease change), and lib.rs:1083-1086 (test); the invariant they rely on is the `Channel` field order at lib.rs:69-82",
+          "deletion_test": {
+            "concentrates_complexity": false,
+            "rationale": "Deleting the accessor returns the same three lines to each caller unchanged; it is a pass-through that centralises a comment, not policy."
+          },
+          "benefits": {
+            "locality": true,
+            "leverage": false,
+            "testability": false
+          },
+          "claims_flexibility": false,
+          "adapters": [],
+          "specialist_routes": [
+            "/low-level-systems:unsafe-review"
+          ],
+          "rationale": "Raised by the iteration-1 to iteration-2 change that made ActiveLease hold ReceiveLease<'static>: the ownership is correct (drop releases, Ring::release is crate-private) but the unsafe borrow pattern is now duplicated. The test-only mechanism.ts change is outside src/ and leaves all three sites unchanged; grep confirms exactly three `ring_ptr` sites. Fails both rubric tests; only one adapter needs a 'static ring (host_runtime borrows with lifetimes), so no seam. Recorded as Speculative for visibility only.",
+          "follow_up": "if a third 'static borrow site appears, fold the three into one accessor and one SAFETY comment"
+        }
+      ]
+    }
+  ]
+}
