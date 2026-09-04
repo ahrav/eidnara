@@ -48,16 +48,16 @@ impl TargetIndex {
 }
 
 const MAX_OP_LEN: usize = 64;
-const MAX_MODULE_ID_LEN: usize = 128;
-const MAX_PROJECT_ROOT_LEN: usize = 4096;
-const MAX_HARNESS_LEN: usize = 128;
-const MAX_SESSION_LEN: usize = 256;
-const MAX_LAUNCH_NONCE_LEN: usize = 256;
-const MAX_CAPABILITY_LEN: usize = 64;
-const MAX_CAPABILITIES: usize = 32;
-const MAX_CREDENTIAL_FINGERPRINTS: usize = 3;
-const MAX_ADMISSION_FACTS_BYTES: usize = 8192;
-const MAX_ADMISSION_FACTS_DEPTH: usize = 32;
+pub(crate) const MAX_MODULE_ID_LEN: usize = 128;
+pub(crate) const MAX_PROJECT_ROOT_LEN: usize = 4096;
+pub(crate) const MAX_HARNESS_LEN: usize = 128;
+pub(crate) const MAX_SESSION_LEN: usize = 256;
+pub(crate) const MAX_LAUNCH_NONCE_LEN: usize = 256;
+pub(crate) const MAX_CAPABILITY_LEN: usize = 64;
+pub(crate) const MAX_CAPABILITIES: usize = 32;
+pub(crate) const MAX_CREDENTIAL_FINGERPRINTS: usize = 3;
+pub(crate) const MAX_ADMISSION_FACTS_BYTES: usize = 8192;
+pub(crate) const MAX_ADMISSION_FACTS_DEPTH: usize = 32;
 /// Whole-request nesting bound: the root object plus a maximal
 /// `admission_facts` subtree. Unknown fields count toward nesting limits
 /// (protocol §7.1), so the bound applies to the complete control object

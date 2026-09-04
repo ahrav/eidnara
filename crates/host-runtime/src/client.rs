@@ -474,8 +474,10 @@ impl Client {
                 "client is closed",
             ));
         }
-        let body = route_open_body(&target, &identity)?;
+        // The clock starts before encoding: identity is caller-controlled input, and its
+        // clone and serialization spend the operation's budget like any other stage.
         let deadline = Instant::now() + CLIENT_ROUTE_OPEN_TIMEOUT;
+        let body = route_open_body(&target, &identity)?;
         let mut backoff = Duration::from_millis(25);
         loop {
             let response = self
@@ -1497,12 +1499,7 @@ impl Inner {
                     // A `Response` on identity 0/0 can carry a route bound for an `open_route` caller that dropped or timed out.
                     // An abandoned `open_route` on identity 0/0 cannot withdraw its bind because §6.2 permits no `Cancel`.
                     if header.ty == FrameType::Response && header.channel == 0 {
-                        // §7.1: every channel-0 body is a tagged JSON object, matched or not.
-                        if !is_tagged_control_body(&body) {
-                            drop(charge);
-                            self.retire("protocol_violation");
-                            return;
-                        }
+                        drop(charge);
                         self.release_stranded_route(&body);
                     }
                     return;
@@ -1682,6 +1679,12 @@ impl Inner {
     /// The handler does not treat a duplicate terminal for a cached bind as stranded.
     /// Sending `Goodbye` would close a route still in use.
     fn release_stranded_route(&self, body: &[u8]) {
+        // §7.1: every channel-0 body is a tagged JSON object; an untagged one is a
+        // protocol violation whether or not a caller was waiting for it.
+        if !is_tagged_control_body(body) {
+            self.retire("protocol_violation");
+            return;
+        }
         let route = match parse_route_open(body) {
             Ok(route) => route,
             Err(_) => {
@@ -2764,7 +2767,71 @@ fn encode_data_frame(
     })
 }
 
+/// Rejects an identity the host's `bind` would refuse, before any of it is cloned or
+/// serialized. The checks mirror `control.rs` so oversized caller input is refused by
+/// cheap length and depth inspection rather than by a full encoding.
+fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Result<(), CallError> {
+    use crate::control::{
+        MAX_ADMISSION_FACTS_DEPTH, MAX_CAPABILITIES, MAX_CAPABILITY_LEN,
+        MAX_CREDENTIAL_FINGERPRINTS, MAX_HARNESS_LEN, MAX_LAUNCH_NONCE_LEN, MAX_MODULE_ID_LEN,
+        MAX_PROJECT_ROOT_LEN, MAX_SESSION_LEN, check_string, value_depth,
+    };
+    let invalid = |_: String| {
+        CallError::local(
+            SendOutcome::NotSent,
+            "invalid_identity",
+            "route identity exceeds the protocol's bounds",
+        )
+    };
+    check_string("module_id", &target.module_id, MAX_MODULE_ID_LEN, true).map_err(invalid)?;
+    check_string(
+        "project_root",
+        &identity.project_root.to_string_lossy(),
+        MAX_PROJECT_ROOT_LEN,
+        true,
+    )
+    .map_err(invalid)?;
+    check_string("harness", &identity.harness, MAX_HARNESS_LEN, true).map_err(invalid)?;
+    check_string("session", &identity.session, MAX_SESSION_LEN, true).map_err(invalid)?;
+    if let Some(module) = &identity.consumer_module_id {
+        check_string(
+            "consumer_identity.module_id",
+            module,
+            MAX_MODULE_ID_LEN,
+            false,
+        )
+        .map_err(invalid)?;
+    }
+    if let Some(nonce) = &identity.consumer_launch_nonce {
+        check_string(
+            "consumer_identity.launch_nonce",
+            nonce,
+            MAX_LAUNCH_NONCE_LEN,
+            false,
+        )
+        .map_err(invalid)?;
+    }
+    if identity.consumer_capabilities.len() > MAX_CAPABILITIES
+        || identity.credential_fingerprints.len() > MAX_CREDENTIAL_FINGERPRINTS
+    {
+        return Err(invalid(String::new()));
+    }
+    for capability in &identity.consumer_capabilities {
+        check_string("consumer capability", capability, MAX_CAPABILITY_LEN, false)
+            .map_err(invalid)?;
+    }
+    if identity
+        .admission_facts
+        .as_ref()
+        .is_some_and(|facts| value_depth(facts) > MAX_ADMISSION_FACTS_DEPTH)
+    {
+        return Err(invalid(String::new()));
+    }
+    Ok(())
+}
+
 fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec<u8>, CallError> {
+    check_route_identity(target, identity)?;
     let project_root = identity.project_root.to_str().ok_or_else(|| {
         CallError::local(
             SendOutcome::NotSent,
@@ -2816,13 +2883,22 @@ fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec
             ));
         }
     }
-    serde_json::to_vec(&request).map_err(|_| {
+    let body = serde_json::to_vec(&request).map_err(|_| {
         CallError::local(
             SendOutcome::NotSent,
             "invalid_identity",
             "route-open request could not be encoded",
         )
-    })
+    })?;
+    // §7.1 caps channel-0 bodies; the host rejects a larger request before dispatch.
+    if body.len() > MAX_CONTROL_BODY_LEN as usize {
+        return Err(CallError::local(
+            SendOutcome::NotSent,
+            "invalid_identity",
+            "route-open request exceeds the control body limit",
+        ));
+    }
+    Ok(body)
 }
 
 fn names_route_open(body: &[u8]) -> bool {
@@ -4156,6 +4232,89 @@ mod tests {
             serde_json::json!({"anthropic": fingerprint}),
             "fingerprints are nested under identity where bind reads them"
         );
+    }
+
+    #[test]
+    fn an_identity_outside_the_protocol_bounds_is_rejected_before_encoding() {
+        let target = RouteTarget {
+            kind: TargetKind::ToolProvider,
+            module_id: "context".to_owned(),
+        };
+        let mut identity = identity_fixture();
+        identity.session = "s".repeat(crate::control::MAX_SESSION_LEN + 1);
+        let error = route_open_body(&target, &identity).expect_err("oversized session");
+        assert_eq!(error.code(), "invalid_identity");
+        assert_eq!(error.outcome(), SendOutcome::NotSent);
+
+        let mut identity = identity_fixture();
+        identity.consumer_capabilities = vec!["c".to_owned(); crate::control::MAX_CAPABILITIES + 1];
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("too many capabilities")
+                .code(),
+            "invalid_identity"
+        );
+
+        let mut identity = identity_fixture();
+        let mut deep = serde_json::json!(1);
+        for _ in 0..=crate::control::MAX_ADMISSION_FACTS_DEPTH {
+            deep = serde_json::json!([deep]);
+        }
+        identity.admission_facts = Some(deep);
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("too deep")
+                .code(),
+            "invalid_identity"
+        );
+
+        let mut identity = identity_fixture();
+        identity.admission_facts =
+            Some(serde_json::json!({"blob": "x".repeat(MAX_CONTROL_BODY_LEN as usize)}));
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("body over the control cap")
+                .code(),
+            "invalid_identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_untagged_response_to_a_dropped_control_caller_retires() {
+        // The send-failure path hands the body to `release_stranded_route`, which validates the §7.1 shape itself.
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let control = RouteHandle {
+            channel: 0,
+            epoch: 0,
+        };
+        let (tx, rx) = oneshot::channel();
+        let (key, publish) = inner
+            .admit(
+                control,
+                Vec::new(),
+                false,
+                PendingKind::Unary(tx),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .expect("control request admitted");
+        assert!(bridge_claims(&publish));
+        drop(data_rx.recv().await);
+        drop(rx);
+        let body = b"not json".to_vec();
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: control.channel,
+                epoch: control.epoch,
+                corr: key.corr,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(inner.retired.load(Ordering::Acquire));
     }
 
     #[test]
