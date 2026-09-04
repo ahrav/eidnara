@@ -25,11 +25,11 @@ use crate::Rank;
 /// Sentinel for "no vocabulary entry for this span".
 pub const NO_RANK: Rank = Rank::MAX;
 /// Marks a part that has been merged into its left neighbour (heap engine only).
-const DEAD: Rank = Rank::MAX - 1;
+pub(crate) const DEAD: Rank = Rank::MAX - 1;
 /// Pieces longer than this use the heap engine; measured crossover on this host is ~192 B for
 /// ASCII runs and ~32 B for CJK (`bpe::crossover::engine_crossover`, ignored test).
 pub const HEAP_THRESHOLD: usize = 192;
-/// Heap threshold for pieces whose first byte is non-ASCII.
+/// Heap threshold for pieces whose first byte after an optional leading space is non-ASCII.
 pub const HEAP_THRESHOLD_NON_ASCII: usize = 40;
 
 /// Per-thread scratch reused across pieces so the hot path never allocates.
@@ -44,8 +44,7 @@ pub struct Scratch {
 
 /// Vocabulary views the merge loop needs.
 pub struct Vocab {
-    /// Byte string -> rank for every token. Keys borrow the embedded blob: a 16-byte fat
-    /// pointer per bucket instead of a 24-byte `Vec` header plus a heap allocation.
+    /// Keys borrow the embedded blob, avoiding per-token key allocations.
     pub ranks: FxHashMap<&'static [u8], Rank>,
     /// Rank of the 2-byte token `[a, b]` at `a * 256 + b`, or `NO_RANK`.
     pub pair: Box<[Rank; 65536]>,
@@ -107,7 +106,11 @@ impl Vocab {
         // Multi-byte text merges many more times per byte (a CJK char is one 3-byte token and
         // pairs merge well), so the heap pays off from ~32 bytes there; ASCII runs of one
         // class merge little and the rescan wins to ~192 bytes (`crossover::engine_crossover`).
-        let threshold = if piece[0] < 0x80 {
+        // ` ?\p{L}+` prefixes a letter run with a space, so classify the piece by its following
+        // byte.
+        debug_assert!(piece.len() >= 2, "single bytes are vocabulary entries");
+        let lead = if piece[0] == b' ' { piece[1] } else { piece[0] };
+        let threshold = if lead < 0x80 {
             HEAP_THRESHOLD
         } else {
             HEAP_THRESHOLD_NON_ASCII
@@ -279,7 +282,8 @@ mod tests {
 mod crossover {
     use super::*;
 
-    /// Timing probe for `HEAP_THRESHOLD`; prints ns/byte per engine and piece length.
+    /// Timing probe for `HEAP_THRESHOLD`; prints ns/byte per engine and piece length. A unit
+    /// starting with a space contributes that space once, as ` ?\p{L}+` would.
     #[test]
     #[ignore = "timing probe"]
     fn engine_crossover() {
@@ -289,10 +293,19 @@ mod crossover {
             ("space", " "),
             ("a", "a"),
             ("cjk", "你"),
+            (" cjk", " 你"),
             ("mixed", "the fox "),
         ] {
             for len in [32usize, 64, 128, 192, 256, 512, 4096] {
-                let piece: Vec<u8> = unit.as_bytes().iter().cycle().take(len).copied().collect();
+                let (head, body) = match unit.strip_prefix(' ') {
+                    Some(rest) if !rest.is_empty() => (" ", rest),
+                    _ => ("", unit),
+                };
+                let piece: Vec<u8> = head
+                    .bytes()
+                    .chain(body.as_bytes().iter().copied().cycle())
+                    .take(len)
+                    .collect();
                 let iters = 200_000 / len + 1;
                 let mut out = Vec::new();
                 let t = std::time::Instant::now();
