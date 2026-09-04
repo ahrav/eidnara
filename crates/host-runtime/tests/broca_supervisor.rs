@@ -10,7 +10,7 @@ use std::time::Duration;
 use host_runtime::CompositeComponent;
 use host_runtime::broca::BrocaComponent;
 use host_runtime::broca::backend::{BackendError, BackendTerminal, ErrorClass, Harness};
-use host_runtime::broca::config::{BrocaLimits, TERMINAL_RETENTION};
+use host_runtime::broca::config::{self, BrocaLimits, TERMINAL_RETENTION};
 use host_runtime::broca::protocol::SendRequest;
 use host_runtime::broca::supervisor::{SessionKey, Subscription, Supervisor, SupervisorMetrics};
 
@@ -105,20 +105,41 @@ fn default_limits_and_resource_declaration_match_the_fixed_caps() {
     assert_eq!(limits.terminal_retention, Duration::from_secs(15 * 60));
     assert_eq!(host_runtime::broca::config::MAX_SEND_BODY_BYTES, 512 * 1024);
 
-    let component = BrocaComponent::new(ScriptedBackend::completing("out"));
+    let component = BrocaComponent::new(
+        ScriptedBackend::completing("out"),
+        support::broca::state_root(),
+    );
     let resources = component.resources();
     assert_eq!(resources.reserved_pending_requests, 96);
     assert_eq!(resources.reserved_handler_tasks, 96);
     // `Supervisor` charges its 64 MiB retention budget only for retained run data; route metadata, backend capture, tombstones, environment snapshots, and adapter-owned spawn variables are outside that budget.
+    // Each term reads its owner (`SubprocessLimits::default`, the identity bounds, the key overhead) so a change to any owner changes the expected value here.
+    let capture = host_runtime::broca::subprocess::SubprocessLimits::default();
+    let identity_bytes =
+        (config::MAX_ROUTE_PROJECT_ROOT_BYTES + config::MAX_ROUTE_SESSION_BYTES) as u64;
     assert_eq!(
         resources.retained_resident_bytes,
-        64 * 1024 * 1024
-            + 1024 * (4096 + 256 + 3 * (16 + 64) + 1024)
-            + 8 * ((4 * 1024 * 1024 + 64 * 1024) * 5 + 512 * 1024)
-            + 256 * ((4096 + 256) * 3 + 128)
-            + (1 + 3 * 8) * 1536 * 1024
-            + 3 * 8 * (96 * 1024 + 8 * 1024)
+        limits.max_retained_bytes
+            + config::MAX_BOUND_ROUTES as u64
+                * (identity_bytes
+                    + config::MAX_ROUTE_CREDENTIAL_FINGERPRINTS as u64 * (16 + 64)
+                    + 1024)
+            + limits.max_backend_processes as u64
+                * ((capture.max_stdout_bytes + capture.max_stderr_bytes) as u64 * 5
+                    + config::MAX_SEND_BODY_BYTES as u64)
+            + limits.max_terminal_sessions as u64
+                * (identity_bytes * config::SESSION_IDENTITY_COPIES as u64
+                    + config::KEY_META_OVERHEAD_BYTES as u64)
+            + (1 + 3 * limits.max_backend_processes as u64) * config::MAX_ENV_SNAPSHOT_BYTES as u64
+            + 3 * limits.max_backend_processes as u64
+                * (config::MAX_OPENCODE_CONFIG_BYTES as u64 + 8 * 1024)
     );
+    assert_eq!(capture.max_stdout_bytes, 4 * 1024 * 1024);
+    assert_eq!(capture.max_stderr_bytes, 64 * 1024);
+    assert_eq!(config::MAX_ROUTE_PROJECT_ROOT_BYTES, 4096);
+    assert_eq!(config::MAX_ROUTE_SESSION_BYTES, 256);
+    assert_eq!(config::MAX_ROUTE_CREDENTIAL_FINGERPRINTS, 3);
+    assert_eq!(resources.retained_resident_bytes, 292_700_160);
     assert_eq!(resources.route_class, host_runtime::RouteClass::Reserved);
 }
 
@@ -794,6 +815,56 @@ async fn shutdown_counts_runs_with_unproven_teardown() {
     );
 }
 
+/// The unproven-teardown verdict is counted when the backend returns, so evicting the run from the index later cannot make shutdown report a clean stop.
+#[tokio::test]
+async fn shutdown_counts_unproven_teardown_after_terminal_cap_eviction() {
+    let backend = ScriptedBackend::with_behavior(|request, _events, _cancel| {
+        Box::pin(async move {
+            if request.session == "s-unproven" {
+                return BackendTerminal::FailedUnresolved(BackendError {
+                    class: ErrorClass::Transient,
+                    message: "process group teardown was not confirmed".to_owned(),
+                    retry_after_secs: None,
+                    provider_code: None,
+                });
+            }
+            BackendTerminal::Completed {
+                finish_reason: host_runtime::broca::backend::FinishReason::Completed,
+            }
+        })
+    });
+    let limits = BrocaLimits {
+        max_terminal_sessions: 1,
+        ..BrocaLimits::default()
+    };
+    let supervisor = Supervisor::with_limits(backend as Arc<_>, limits);
+
+    let unproven = send(&supervisor, "s-unproven", "p1");
+    until(
+        || supervisor.status(&key("s-unproven"), &unproven) == Ok("failed"),
+        "the unproven run commits its terminal",
+    )
+    .await;
+    // A second terminal session exceeds the one-session cap and evicts the older unproven run.
+    let evictor = send(&supervisor, "s-evictor", "p2");
+    until(
+        || supervisor.status(&key("s-evictor"), &evictor) == Ok("completed"),
+        "the evicting run commits its terminal",
+    )
+    .await;
+    until(
+        || supervisor.status(&key("s-unproven"), &unproven) == Ok("missing"),
+        "the terminal cap evicts the unproven run",
+    )
+    .await;
+
+    assert_eq!(
+        supervisor.shutdown().await,
+        1,
+        "eviction must not erase the unproven-teardown verdict"
+    );
+}
+
 /// Terminal runs with unproven teardown remain indexed so later control operations observe the teardown verdict.
 #[tokio::test]
 async fn terminal_cap_never_evicts_a_run_awaiting_teardown() {
@@ -1098,7 +1169,8 @@ async fn shutdown_refuses_new_work_stops_backends_and_wakes_subscribers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transport_detach_paths_leave_the_run_untouched() {
     let (backend, gate) = ScriptedBackend::gated("survivor output");
-    let component = BrocaComponent::new(Arc::clone(&backend) as Arc<_>);
+    let component =
+        BrocaComponent::new(Arc::clone(&backend) as Arc<_>, support::broca::state_root());
     let supervisor = component.supervisor();
     let host = start_broca_host(component).await;
 
@@ -1245,7 +1317,8 @@ async fn transport_detach_paths_leave_the_run_untouched() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_shutdown_drains_the_supervisor_to_zero_state() {
     let (backend, _gate) = ScriptedBackend::gated("out");
-    let component = BrocaComponent::new(Arc::clone(&backend) as Arc<_>);
+    let component =
+        BrocaComponent::new(Arc::clone(&backend) as Arc<_>, support::broca::state_root());
     let supervisor = component.supervisor();
     let host = start_broca_host(component).await;
 

@@ -36,37 +36,62 @@ pub const MAX_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 /// Raising the host's `max_routes` cannot increase Broca's retained route identities beyond the declared reservation.
 pub const MAX_BOUND_ROUTES: usize = 1024;
 
+/// Deriving headroom from the `control` validation constants prevents a raised identity bound from under-declaring the reservation.
+pub const MAX_ROUTE_PROJECT_ROOT_BYTES: usize = crate::control::MAX_PROJECT_ROOT_LEN;
+pub const MAX_ROUTE_SESSION_BYTES: usize = crate::control::MAX_SESSION_LEN;
+pub const MAX_ROUTE_CREDENTIAL_FINGERPRINTS: usize = crate::control::MAX_CREDENTIAL_FINGERPRINTS;
+
+/// Each fingerprint entry stores a provider name of at most 16 bytes and a 64-byte hex digest.
+const FINGERPRINT_ENTRY_BYTES: u64 = 16 + 64;
+
 /// The route-identity map lives outside the supervisor budget.
 /// At most [`MAX_BOUND_ROUTES`] route identities exist outside the supervisor budget.
-/// Each route identity stores a project root of at most 4096 bytes and a session of at most 256 bytes.
-/// Each route identity stores three provider fingerprints plus map and key overhead.
 /// Each route stores provider fingerprints in a `BTreeMap`.
 /// Heap strings and the outer `HashMap` slot add per-route cost.
 /// The 1024-byte term covers `BTreeMap` and outer `HashMap` allocation overhead.
 /// The host reserves this headroom in addition to [`MAX_RETAINED_BYTES`].
-pub const ROUTE_IDENTITY_HEADROOM_BYTES: u64 =
-    (MAX_BOUND_ROUTES as u64) * (4096 + 256 + 3 * (16 + 64) + 1024);
+pub const ROUTE_IDENTITY_HEADROOM_BYTES: u64 = (MAX_BOUND_ROUTES as u64)
+    * (MAX_ROUTE_PROJECT_ROOT_BYTES as u64
+        + MAX_ROUTE_SESSION_BYTES as u64
+        + MAX_ROUTE_CREDENTIAL_FINGERPRINTS as u64 * FINGERPRINT_ENTRY_BYTES
+        + 1024);
 
-/// The live backend transcript headroom covers worst-case capture outside the supervisor budget.
-/// Each concurrent subprocess buffers captured stdout and stderr outside the supervisor budget.
-/// Each subprocess buffers at most 4 MiB of stdout and 64 KiB of stderr.
+/// Each concurrent subprocess buffers at most this much stdout before the runner stops it.
+/// `SubprocessLimits::default` and the capture headroom read this one value.
+pub const MAX_BACKEND_STDOUT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Each concurrent subprocess buffers at most this much stderr for diagnostics.
+pub const MAX_BACKEND_STDERR_BYTES: usize = 64 * 1024;
+
 /// Transcript parsing can retain four additional transcript-sized values simultaneously.
 /// The parser can retain an owned JSON value deserialized from a transcript line.
 /// The parser can retain the extracted message text separately from the JSON value.
 /// The failure classifier scans a lowercase copy of the message text.
-/// These five simultaneous transcript-sized allocations justify the factor of five.
+/// These five simultaneous transcript-sized allocations justify the factor.
+const CAPTURE_COPIES: u64 = 5;
+
+/// The live backend transcript headroom covers worst-case capture outside the supervisor budget.
 /// The host reserves this headroom in addition to the retained budget.
 pub const BACKEND_CAPTURE_HEADROOM_BYTES: u64 = (MAX_BACKEND_PROCESSES as u64)
-    * ((4 * 1024 * 1024 + 64 * 1024) * 5 + MAX_SEND_BODY_BYTES as u64);
+    * ((MAX_BACKEND_STDOUT_BYTES as u64 + MAX_BACKEND_STDERR_BYTES as u64) * CAPTURE_COPIES
+        + MAX_SEND_BODY_BYTES as u64);
+
+/// `SessionKey::meta_bytes` charges each identity string this many times because the session map, `Run`, and `BackendRequest` each retain a copy.
+pub const SESSION_IDENTITY_COPIES: usize = 3;
+
+/// `SessionKey::meta_bytes` adds this fixed overhead for map slots and key allocation.
+pub const KEY_META_OVERHEAD_BYTES: usize = 128;
 
 /// This headroom covers deletion tombstones that are installed without retained-budget charges.
 /// A delete/eviction race can install an uncharged tombstone after the retained budget is exhausted.
 /// At most [`MAX_TERMINAL_SESSIONS`] tombstone session keys can exist because each counts toward that cap.
-/// Each tombstone key can consume the `meta_bytes` worst case: three identity copies plus overhead.
+/// Each tombstone key can consume the `meta_bytes` worst case.
 /// Uncharged tombstone keys remain outside the retained budget until expiry or cap eviction.
 /// The host reserves this headroom in addition to the retained budget.
-pub const DELETION_TOMBSTONE_HEADROOM_BYTES: u64 =
-    (MAX_TERMINAL_SESSIONS as u64) * ((4096 + 256) * 3 + 128);
+pub const DELETION_TOMBSTONE_HEADROOM_BYTES: u64 = (MAX_TERMINAL_SESSIONS as u64)
+    * ((MAX_ROUTE_PROJECT_ROOT_BYTES as u64 + MAX_ROUTE_SESSION_BYTES as u64)
+        * SESSION_IDENTITY_COPIES as u64
+        + KEY_META_OVERHEAD_BYTES as u64);
 
 /// [`MAX_ENV_SNAPSHOT_BYTES`] caps the environment captured at daemon startup.
 ///

@@ -22,6 +22,7 @@ use subtle::ConstantTimeEq;
 use backend::{Harness, LlmExecutionBackend};
 use protocol::{Request, RequestError};
 use subprocess::EnvSnapshot;
+use subprocess::group_registry::StateRoot;
 use supervisor::{SessionKey, Supervisor};
 
 pub const BROCA_MODULE_ID: &str = "broca";
@@ -33,6 +34,8 @@ pub struct BrocaComponent {
     routes: Arc<Mutex<HashMap<RouteHandle, SessionKey>>>,
     route_fingerprints: Arc<Mutex<HashMap<RouteHandle, BTreeMap<String, String>>>>,
     credential_verifier: Option<Arc<CredentialVerifier>>,
+    /// The same root the backends write crash-ownership records to; `initialize` sweeps it.
+    state_root: StateRoot,
 }
 
 struct CredentialVerifier {
@@ -70,16 +73,21 @@ impl CredentialVerifier {
 }
 
 impl BrocaComponent {
-    pub fn new(backend: Arc<dyn LlmExecutionBackend>) -> Self {
+    pub fn new(backend: Arc<dyn LlmExecutionBackend>, state_root: StateRoot) -> Self {
         Self {
             supervisor: Arc::new(Supervisor::new(backend)),
             routes: Arc::new(Mutex::new(HashMap::new())),
             route_fingerprints: Arc::new(Mutex::new(HashMap::new())),
             credential_verifier: None,
+            state_root,
         }
     }
 
-    pub fn new_with_credentials(backend: Arc<dyn LlmExecutionBackend>, env: EnvSnapshot) -> Self {
+    pub fn new_with_credentials(
+        backend: Arc<dyn LlmExecutionBackend>,
+        env: EnvSnapshot,
+        state_root: StateRoot,
+    ) -> Self {
         Self {
             supervisor: Arc::new(Supervisor::new(backend)),
             routes: Arc::new(Mutex::new(HashMap::new())),
@@ -88,6 +96,7 @@ impl BrocaComponent {
                 env,
                 key: OnceLock::new(),
             })),
+            state_root,
         }
     }
 
@@ -295,6 +304,19 @@ impl CompositeComponent for BrocaComponent {
     }
 
     async fn health(&self) -> HealthReport {
+        // The wire contract admits `ready | unavailable`; `unavailable` means no supported harness can run.
+        let unavailable = [Harness::OpenCode, Harness::Pi].into_iter().all(|harness| {
+            self.supervisor
+                .harness_unavailable_reason(harness)
+                .is_some()
+        });
+        if unavailable {
+            return HealthReport {
+                status: HealthStatus::Degraded,
+                detail: None,
+                metrics: Some(serde_json::json!({"broca_state": "unavailable"})),
+            };
+        }
         HealthReport {
             status: HealthStatus::Ok,
             detail: None,
@@ -336,18 +358,27 @@ impl SecondaryComponent for BrocaComponent {
                     .to_owned(),
             ));
         }
-        //
-        //
-        subprocess::group_registry::sweep_orphaned_groups().map_err(|err| {
-            InitError(format!(
-                "broca could not sweep crash-orphaned process groups: {err}"
-            ))
-        })?;
-        subprocess::group_registry::sweep_orphaned_run_dirs().map_err(|err| {
-            InitError(format!(
-                "broca could not sweep crash-orphaned run directories: {err}"
-            ))
-        })?;
-        Ok(())
+        // Both sweeps walk `/proc` and may block for the member grace; the composite initializes siblings concurrently on one task, so the sweeps run on the blocking pool.
+        let state_root = self.state_root.clone();
+        let swept = tokio::task::spawn_blocking(move || {
+            subprocess::group_registry::sweep_orphaned_groups(&state_root).map_err(|err| {
+                InitError(format!(
+                    "broca could not sweep crash-orphaned process groups: {err}"
+                ))
+            })?;
+            subprocess::group_registry::sweep_orphaned_run_dirs(&state_root).map_err(|err| {
+                InitError(format!(
+                    "broca could not sweep crash-orphaned run directories: {err}"
+                ))
+            })?;
+            Ok(())
+        })
+        .await;
+        match swept {
+            Ok(result) => result,
+            Err(join) => Err(InitError(format!(
+                "broca crash-orphan sweep did not complete: {join}"
+            ))),
+        }
     }
 }

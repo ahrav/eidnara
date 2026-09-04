@@ -9,6 +9,7 @@
 //! Run state is process-local; after restart, every prior run ID resolves to `missing`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use sha2::{Digest, Sha256};
@@ -21,7 +22,9 @@ use super::backend::{
     BackendError, BackendEvent, BackendRequest, BackendTerminal, ErrorClass, EventSink, Harness,
     LlmExecutionBackend, SinkStatus,
 };
-use super::config::{BrocaLimits, TERMINAL_HEADROOM_BYTES};
+use super::config::{
+    BrocaLimits, KEY_META_OVERHEAD_BYTES, SESSION_IDENTITY_COPIES, TERMINAL_HEADROOM_BYTES,
+};
 use super::protocol::{self, RequestError, SendRequest};
 use crate::wire::{ByteBudget, ByteCharge};
 
@@ -44,14 +47,13 @@ impl std::fmt::Debug for SessionKey {
 }
 
 impl SessionKey {
-    /// `meta_bytes` charges each identity string three times because the session map, `Run`, and `BackendRequest` each retain a copy; tombstones remain overcharged to keep the budget a ceiling.
+    /// Tombstones remain overcharged to keep the budget a ceiling.
     fn meta_bytes(&self) -> usize {
-        const KEY_META_OVERHEAD_BYTES: usize = 128;
         self.project_root
             .as_os_str()
             .len()
             .saturating_add(self.session.len())
-            .saturating_mul(3)
+            .saturating_mul(SESSION_IDENTITY_COPIES)
             .saturating_add(KEY_META_OVERHEAD_BYTES)
     }
 }
@@ -212,6 +214,9 @@ struct Inner {
     retained: ByteBudget,
     tracker: TaskTracker,
     closing: CancellationToken,
+    /// Runs whose backend could not prove process-group teardown, counted once per run.
+    /// The count survives terminal-cap eviction and retention expiry so `shutdown` cannot lose a verdict the index no longer holds.
+    unresolved_runs: AtomicUsize,
 }
 
 /// Tests use this read-only capacity snapshot to prove every permit and byte charge returns exactly to baseline across all failure paths.
@@ -274,6 +279,7 @@ impl Supervisor {
                 retained: ByteBudget::new(limits.max_retained_bytes),
                 tracker: TaskTracker::new(),
                 closing: CancellationToken::new(),
+                unresolved_runs: AtomicUsize::new(0),
                 limits,
             }),
         }
@@ -627,11 +633,8 @@ impl Supervisor {
         inner.tracker.close();
         inner.tracker.wait().await;
         // Read after the tracker drain because every backend task has returned and each run's teardown verdict is final.
-        // Every backend task has returned, so each run's teardown verdict is final.
-        let unresolved = runs
-            .iter()
-            .filter(|run| lock_run(run).work_unresolved)
-            .count();
+        // The counter, not the index, is authoritative: a run evicted by the terminal cap or expired by retention keeps its verdict here.
+        let unresolved = inner.unresolved_runs.load(Ordering::Relaxed);
         let mut released = Released::default();
         let mut index = lock_index(inner);
         let sessions: Vec<SessionKey> = index.sessions.keys().cloned().collect();
@@ -768,7 +771,7 @@ impl Supervisor {
             // After another terminal commits, `finish` cannot record `FailedUnresolved`.
             // `wait_work_done` must observe `work_unresolved` after backend exit.
             if matches!(terminal, BackendTerminal::FailedUnresolved(_)) {
-                lock_run(&run).work_unresolved = true;
+                mark_unresolved(&inner, &mut lock_run(&run));
             }
             // Cancellation must produce a `Cancelled` terminal even if the backend returns another terminal.
             let outcome = if run.cancel.is_cancelled() {
@@ -781,6 +784,14 @@ impl Supervisor {
             finish(&inner, &run, outcome);
             // `_backend_permit` drops here: the permit is held through reap.
         });
+    }
+}
+
+/// Latches `work_unresolved` and counts the run once, so both the backend-return path and `finish` can report the same verdict without double counting.
+fn mark_unresolved(inner: &Inner, state: &mut RunState) {
+    if !state.work_unresolved {
+        state.work_unresolved = true;
+        inner.unresolved_runs.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -963,7 +974,7 @@ fn finish(inner: &Arc<Inner>, run: &Arc<Run>, outcome: TerminalOutcome) {
             }
             // `work_unresolved` prevents cancel and delete from reporting success while backend work may still run.
             TerminalOutcome::Backend(BackendTerminal::FailedUnresolved(error)) => {
-                state.work_unresolved = true;
+                mark_unresolved(inner, &mut state);
                 (protocol::error_unit(&run.run_id, error), Status::Failed)
             }
             TerminalOutcome::Cancelled { message } => (
@@ -1027,10 +1038,10 @@ fn enforce_terminal_cap(
                     if !state.terminal_appended {
                         continue;
                     }
-                    // A terminal run with unresolved backend work is not evictable.
-                    // Eviction would make later cancel and delete take the unknown-run success path without observing `work_unresolved`.
-                    // Eviction would also release charges for state still held by the backend task.
+                    // A terminal run whose task has not returned is not evictable.
+                    // Eviction would release charges for state still held by the backend task.
                     // Backend permits bound the number of transiently unevictable runs.
+                    // A returned run with `work_unresolved` is evictable; `Inner::unresolved_runs` keeps its verdict for `shutdown`.
                     (
                         state.completed_at,
                         state.work_done && state.subscriber_count == 0 && run.run_id != keep_run_id,

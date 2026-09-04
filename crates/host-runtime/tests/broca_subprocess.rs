@@ -32,6 +32,7 @@ use host_runtime::broca::pi::{
     pi_model_ref,
 };
 use host_runtime::broca::protocol::SendRequest;
+use host_runtime::broca::subprocess::group_registry::StateRoot;
 use host_runtime::broca::subprocess::{
     CleanupFailure, EnvSnapshot, PrivateDir, SubprocessLimits, merge_cleanup,
 };
@@ -53,6 +54,30 @@ const RETRY_ANNOUNCE_MS_ENV: &str = "EIDNARA_FIXTURE_RETRY_ANNOUNCE_MS";
 const SECRET_ENV: &str = "EIDNARA_FIXTURE_SECRET";
 const SABOTAGE_ENV: &str = "EIDNARA_FIXTURE_SABOTAGE_CLEANUP";
 const GROUP_PID_ENV: &str = "EIDNARA_FIXTURE_GROUP_PID";
+/// The re-executed `record_group` fixture must write into the same registry the test sweeps.
+const STATE_ROOT_ENV: &str = "EIDNARA_FIXTURE_STATE_ROOT";
+
+/// One data root per test process; the sweep leaves live-owner entries alone, so tests can share it.
+fn state_root() -> StateRoot {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    let data_dir = ROOT.get_or_init(|| {
+        std::env::var_os(STATE_ROOT_ENV).map_or_else(
+            || tempfile::tempdir().expect("broca state root").keep(),
+            PathBuf::from,
+        )
+    });
+    StateRoot::resolve(Some(data_dir)).expect("broca state root resolves")
+}
+
+fn state_root_data_dir() -> PathBuf {
+    let root = state_root();
+    // `<data_dir>/eidnara/broca` -> `<data_dir>`.
+    root.path()
+        .parent()
+        .and_then(Path::parent)
+        .expect("state root under a data dir")
+        .to_path_buf()
+}
 
 const PROMPT_SENTINEL: &str = "PROMPT-SENTINEL user text";
 const SYSTEM_SENTINEL: &str = "SYSTEM-SENTINEL system role";
@@ -215,6 +240,10 @@ fn main() {
             "group_registry_sweep_kills_only_dead_owner_groups",
             group_registry_sweep_kills_only_dead_owner_groups,
         ),
+        (
+            "incomplete_closure_reports_unavailable_without_run_state",
+            incomplete_closure_reports_unavailable_without_run_state,
+        ),
     ];
     // cargo-nextest requires each `--list --format terse` output line to end in `: test`.
     if args.iter().any(|arg| arg == "--list") {
@@ -310,8 +339,11 @@ mod fixture {
             .ok()
             .and_then(|pid| pid.parse().ok())
             .expect("fixture leader pid");
-        let record = host_runtime::broca::subprocess::group_registry::GroupRecord::record(leader)
-            .expect("record leader group");
+        let record = host_runtime::broca::subprocess::group_registry::GroupRecord::record(
+            &state_root(),
+            leader,
+        )
+        .expect("record leader group");
         std::mem::forget(record);
         std::process::exit(0);
     }
@@ -1013,6 +1045,7 @@ fn opencode_backend(setup: &RunSetup, extra: &[(&str, &str)]) -> OpenCodeBackend
             executable_node: "bin/runtime".to_owned(),
         },
         setup.snapshot(extra),
+        state_root(),
         quick_limits(),
     )
 }
@@ -1046,6 +1079,7 @@ fn pi_backend_with_limits(
                 .collect(),
         },
         setup.snapshot(extra),
+        state_root(),
         thinking.map(ToOwned::to_owned),
         limits,
     )
@@ -2700,7 +2734,7 @@ fn private_paths_forced_modes_under_umask() {
 }
 
 fn private_dir_contract() {
-    let dir = PrivateDir::create("broca-test").expect("create");
+    let dir = PrivateDir::create(&state_root(), "broca-test").expect("create");
     let dir_meta = fs::symlink_metadata(dir.path()).expect("dir meta");
     assert!(dir_meta.file_type().is_dir());
     assert!(!dir_meta.file_type().is_symlink());
@@ -3001,21 +3035,19 @@ fn pi_retry_announcement_without_a_new_terminal_fails_as_missing() {
 /// A crash bypasses `PrivateDir::cleanup` and `Drop`; startup removes only directories whose recorded owner is provably gone.
 /// host's.
 fn crash_orphaned_run_dirs_swept_only_for_dead_owners() {
-    use host_runtime::broca::subprocess::group_registry::{
-        private_run_root, sweep_orphaned_run_dirs,
-    };
+    use host_runtime::broca::subprocess::group_registry::sweep_orphaned_run_dirs;
 
     // The sweep must retain a directory owned by the running process.
-    let mine = PrivateDir::create("broca-test-live").expect("create live");
+    let mine = PrivateDir::create(&state_root(), "broca-test-live").expect("create live");
     let mine_path = mine.path().to_path_buf();
 
-    let root = private_run_root().expect("run root");
+    let root = state_root().run_root().expect("run root");
     let orphan = root.join("broca-test-orphan-ffffffffffffffff-2-1-000000000000dead");
     fs::create_dir(&orphan).expect("create orphan dir");
     fs::write(orphan.join("prompt.txt"), b"SENSITIVE-PROMPT").expect("seed orphan");
 
     assert!(
-        sweep_orphaned_run_dirs().expect("sweep completes") >= 1,
+        sweep_orphaned_run_dirs(&state_root()).expect("sweep completes") >= 1,
         "a dead owner's run directory must be removed"
     );
     assert!(!orphan.exists(), "the orphaned run directory must be gone");
@@ -3024,6 +3056,87 @@ fn crash_orphaned_run_dirs_swept_only_for_dead_owners() {
         "a live host's run directory must survive the sweep"
     );
     mine.cleanup().expect("cleanup");
+}
+
+/// An unresolvable closure node makes the harness unavailable before admission, and a run that reaches the adapter anyway fails with the same subreason without writing a private directory.
+fn incomplete_closure_reports_unavailable_without_run_state() {
+    let setup = RunSetup::new();
+    let opencode = OpenCodeBackend::with_limits(
+        OpenCodeRuntime {
+            closure: fixture_closure(&setup, "opencode", &[]),
+            executable_node: "bin/missing".to_owned(),
+        },
+        setup.snapshot(&[]),
+        state_root(),
+        quick_limits(),
+    );
+    assert_eq!(
+        opencode.unavailable_reason(Harness::OpenCode),
+        Some("closure_incomplete")
+    );
+    assert_eq!(opencode.unavailable_reason(Harness::Pi), None);
+
+    let pi = PiBackend::with_limits(
+        PiRuntimeDescriptor {
+            closure: fixture_closure(&setup, "pi", &[]),
+            interpreter_node: "bin/runtime".to_owned(),
+            entrypoint_node: "node_modules/pi/missing.mjs".to_owned(),
+            provider_extension_nodes: Vec::new(),
+        },
+        setup.snapshot(&[]),
+        state_root(),
+        None,
+        quick_limits(),
+    );
+    assert_eq!(
+        pi.unavailable_reason(Harness::Pi),
+        Some("closure_incomplete")
+    );
+    assert_eq!(pi.unavailable_reason(Harness::OpenCode), None);
+
+    let run_root = state_root().run_root().expect("run root");
+    let private_dirs = || {
+        fs::read_dir(&run_root)
+            .expect("run root listing")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("broca-pi-"))
+            .count()
+    };
+    let before = private_dirs();
+    let (terminal, events) = execute(
+        &pi,
+        request(
+            setup.project.path(),
+            Harness::Pi,
+            "anthropic/claude",
+            Some(SYSTEM_SENTINEL),
+        ),
+    );
+    let error = failed(&terminal);
+    assert_eq!(error.class, ErrorClass::Permanent);
+    assert!(
+        error
+            .message
+            .contains("harness_unavailable: closure_incomplete"),
+        "{}",
+        error.message
+    );
+    assert!(
+        !error.message.contains(SYSTEM_SENTINEL),
+        "diagnostics must not echo the system prompt"
+    );
+    assert_eq!(
+        events,
+        vec![BackendEvent::HarnessDispatch {
+            harness: Harness::Pi
+        }],
+        "dispatch is the only event before the closure check"
+    );
+    assert_eq!(
+        private_dirs(),
+        before,
+        "an unavailable harness must not write the system prompt to disk"
+    );
 }
 
 fn merge_cleanup_contract() {
@@ -3070,17 +3183,21 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
     let mut orphan = spawn_leader();
     let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
         .env(FIXTURE_MODE_ENV, "record_group")
+        .env(STATE_ROOT_ENV, state_root_data_dir())
         .env(GROUP_PID_ENV, orphan.id().to_string())
         .status()
         .expect("run record_group fixture");
     assert!(status.success(), "fixture host failed: {status:?}");
 
     let mut survivor = spawn_leader();
-    let survivor_record =
-        GroupRecord::record(i32::try_from(survivor.id()).expect("pid fits")).expect("record");
+    let survivor_record = GroupRecord::record(
+        &state_root(),
+        i32::try_from(survivor.id()).expect("pid fits"),
+    )
+    .expect("record");
 
     assert!(
-        sweep_orphaned_groups().expect("sweep completes") >= 1,
+        sweep_orphaned_groups(&state_root()).expect("sweep completes") >= 1,
         "sweep must kill at least the orphaned group"
     );
     wait_sigkilled(&mut orphan, "the orphan leader");
@@ -3100,6 +3217,7 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
     let mut zombie_orphan = spawn_leader();
     let mut recorder = std::process::Command::new(std::env::current_exe().expect("current exe"))
         .env(FIXTURE_MODE_ENV, "record_group")
+        .env(STATE_ROOT_ENV, state_root_data_dir())
         .env(GROUP_PID_ENV, zombie_orphan.id().to_string())
         .spawn()
         .expect("spawn record_group fixture");
@@ -3121,7 +3239,7 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        sweep_orphaned_groups().expect("sweep completes") >= 1,
+        sweep_orphaned_groups(&state_root()).expect("sweep completes") >= 1,
         "a zombie owner must count as dead"
     );
     wait_sigkilled(&mut zombie_orphan, "the zombie-owned leader");
@@ -3143,6 +3261,7 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
     };
     let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
         .env(FIXTURE_MODE_ENV, "record_group")
+        .env(STATE_ROOT_ENV, state_root_data_dir())
         .env(GROUP_PID_ENV, leader.id().to_string())
         .status()
         .expect("run record_group fixture");
@@ -3151,7 +3270,7 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
     assert!(leader_exit.success(), "shell leader must exit cleanly");
 
     assert!(
-        sweep_orphaned_groups().expect("sweep completes") >= 1,
+        sweep_orphaned_groups(&state_root()).expect("sweep completes") >= 1,
         "sweep must kill the leaderless group"
     );
 

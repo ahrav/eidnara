@@ -46,9 +46,6 @@ pub struct EnvSnapshot {
 
 /// This cap rejects credential values larger than 16 KiB.
 pub const CREDENTIAL_VALUE_CAP_BYTES: usize = 16 * 1024;
-/// This cap limits the combined byte length of an admitted credential set.
-/// contract's `harness_unavailable.row_cap_bytes`.
-pub const CREDENTIAL_ROW_CAP_BYTES: usize = 64 * 1024;
 /// Every credential fingerprint includes this key-derivation domain.
 pub const CREDENTIAL_FINGERPRINT_DOMAIN: &str = "eidnara-broca-credential-v1";
 /// This identifier fixes the credential-fingerprint pre-image layout.
@@ -231,8 +228,8 @@ impl Default for SubprocessLimits {
             run_timeout: Duration::from_secs(660),
             termination_grace: Duration::from_secs(5),
             drain_grace: Duration::from_secs(2),
-            max_stdout_bytes: 4 * 1024 * 1024,
-            max_stderr_bytes: 64 * 1024,
+            max_stdout_bytes: super::config::MAX_BACKEND_STDOUT_BYTES,
+            max_stderr_bytes: super::config::MAX_BACKEND_STDERR_BYTES,
         }
     }
 }
@@ -248,6 +245,8 @@ pub struct SubprocessSpec {
     pub stdin: Vec<u8>,
     /// `inherit_fds` retains descriptors referenced by child path arguments.
     pub inherit_fds: Vec<RawFd>,
+    /// The crash-ownership record for the child's process group is written here before prompt delivery.
+    pub state_root: group_registry::StateRoot,
 }
 
 /// child output.
@@ -310,6 +309,7 @@ pub async fn run(
         working_dir,
         stdin: prompt,
         inherit_fds,
+        state_root,
     } = spec;
     let mut command = tokio::process::Command::new(&executable);
     command
@@ -337,6 +337,7 @@ pub async fn run(
     let host_pid = std::process::id();
     let child_inherit_fds = inherit_fds.clone();
     // SAFETY: `pre_exec` runs after `fork` and before `exec`, so its closure must avoid allocation and locking.
+    // Every error is built from a raw errno; `io::Error::other` would allocate.
     #[allow(unsafe_code)]
     unsafe {
         command.pre_exec(move || {
@@ -344,7 +345,8 @@ pub async fn run(
             rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
             let parent = rustix::process::getppid().map(|pid| pid.as_raw_nonzero().get() as u32);
             if parent != Some(host_pid) {
-                return Err(io::Error::other("host exited before spawn completed"));
+                // The host exited before spawn completed.
+                return Err(io::Error::from_raw_os_error(libc::ESRCH));
             }
             for fd in &child_inherit_fds {
                 if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
@@ -373,8 +375,16 @@ pub async fn run(
         .and_then(rustix::process::Pid::from_raw);
     // Crash-ownership registration is a barrier before prompt delivery.
     // Registration failure sends `KILL` before stdin delivery.
-    let group_record =
-        group.and_then(|g| group_registry::GroupRecord::record(g.as_raw_nonzero().get()));
+    let group_record = match group {
+        Some(g) => {
+            let leader = g.as_raw_nonzero().get();
+            off_runtime(move || group_registry::GroupRecord::record(&state_root, leader))
+                .await
+                .ok()
+                .flatten()
+        }
+        None => None,
+    };
     if group_record.is_none() {
         let signalled = kill_group(group, rustix::process::Signal::KILL).is_ok();
         // `child.start_kill()` covers a missing or unaddressable process group.
@@ -516,8 +526,9 @@ pub async fn run(
             // After both streams reach EOF, the code waits up to `limits.drain_grace` for the leader to exit without reaping it; its zombie pins the pgid until the descendant sweep completes.
             let exit = wait_exited_unreaped(group, limits.drain_grace).await;
             if exit != LeaderExit::Running {
-                let signalled =
-                    kill_group_fenced(group, exit, rustix::process::Signal::KILL).is_ok();
+                let signalled = kill_group_fenced(group, exit, rustix::process::Signal::KILL)
+                    .await
+                    .is_ok();
                 // A fenced `KILL` only signals; the code retains the process-group fence until the sweep completes to prevent signaling a recycled pgid.
                 // The teardown succeeds only after the process group is observed gone.
                 // The teardown checks member disappearance while the unreaped leader pins the pgid.
@@ -628,7 +639,7 @@ async fn wait_exited_unreaped(group: Option<rustix::process::Pid>, budget: Durat
 /// When the leader has been reaped, the numeric pgid may belong to an unrelated group.
 /// Scan errors do not suppress the signal, prioritizing descendant cleanup over a possible leaked group.
 /// The check-to-signal window can still target a recycled pgid; never signaling can leak descendants.
-fn kill_group_fenced(
+async fn kill_group_fenced(
     group: Option<rustix::process::Pid>,
     exit: LeaderExit,
     signal: rustix::process::Signal,
@@ -636,9 +647,13 @@ fn kill_group_fenced(
     if exit == LeaderExit::ExitedUnfenced {
         let Some(pid) = group else { return Ok(()) };
         let pgid = pid.as_raw_nonzero().get();
-        let live = group_registry::group_has_members(pgid)
-            .or_else(|_| group_registry::group_has_members(pgid))
-            .unwrap_or(true);
+        let live = off_runtime(move || {
+            group_registry::group_has_members(pgid)
+                .or_else(|_| group_registry::group_has_members(pgid))
+                .unwrap_or(true)
+        })
+        .await
+        .unwrap_or(true);
         if !live {
             return Ok(());
         }
@@ -646,23 +661,41 @@ fn kill_group_fenced(
     kill_group(group, signal)
 }
 
+/// Runs a synchronous `/proc` or filesystem step on the blocking pool so it never stalls a runtime worker.
+/// A cancelled or panicked blocking task reads as an unknown answer.
+async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
+}
+
+/// Each poll walks all of `/proc`; the backoff bounds how many walks a lingering member costs.
+const MEMBER_POLL_MIN: Duration = Duration::from_millis(10);
+const MEMBER_POLL_MAX: Duration = Duration::from_millis(250);
+
+fn next_member_poll(current: Duration) -> Duration {
+    current.saturating_mul(5).min(MEMBER_POLL_MAX)
+}
+
 /// Callers must keep the leader unreaped so its zombie prevents pgid recycling during the poll.
-/// Callers must keep the leader unreaped so its zombie prevents pgid recycling during the poll.
-/// pgid.
 /// Return `false` on deadline expiry; scan failures leave teardown unproven and continue polling.
 async fn wait_other_members_gone(group: Option<rustix::process::Pid>, budget: Duration) -> bool {
     let Some(pid) = group else { return true };
     let pgid = pid.as_raw_nonzero().get();
-    const POLL: Duration = Duration::from_millis(10);
     let deadline = tokio::time::Instant::now() + budget;
+    let mut poll = MEMBER_POLL_MIN;
     loop {
-        if matches!(group_registry::group_has_other_members(pgid), Ok(false)) {
+        let empty = off_runtime(move || group_registry::group_has_other_members(pgid)).await;
+        if matches!(empty, Ok(Ok(false))) {
             return true;
         }
         if tokio::time::Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(POLL).await;
+        tokio::time::sleep(poll).await;
+        poll = next_member_poll(poll);
     }
 }
 
@@ -683,7 +716,7 @@ async fn terminate_group(
         // SIGKILL cannot be caught; the bound limits time spent waiting for exit.
         exit = wait_exited_unreaped(group, grace).await;
     }
-    let signalled = kill_group_fenced(group, exit, rustix::process::Signal::KILL);
+    let signalled = kill_group_fenced(group, exit, rustix::process::Signal::KILL).await;
     // Check that no other group members remain before reaping the leader so its zombie pins the pgid.
     // Wait for members to disappear rather than treating `SIGKILL` delivery as teardown proof.
     let members_gone = wait_other_members_gone(group, grace).await;
@@ -725,11 +758,11 @@ pub struct PrivateDir {
 }
 
 impl PrivateDir {
-    pub fn create(prefix: &str) -> io::Result<Self> {
+    pub fn create(root: &group_registry::StateRoot, prefix: &str) -> io::Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
         // The crash sweeper removes directories in the run root whose names identify their creator.
         // The crash sweeper removes stale prompt and transcript directories.
-        let base = group_registry::private_run_root()?;
+        let base = root.run_root()?;
         let owner_boot = group_registry::owner_boot_tag()?;
         let owner_pid = std::process::id();
         let owner_start = group_registry::owner_start_time()?;
@@ -768,6 +801,14 @@ impl PrivateDir {
         self.path.as_deref().expect("live until cleanup")
     }
 
+    /// `create` walks the registry tree and reads `/proc`, so async callers run it on the blocking pool.
+    pub async fn create_async(
+        root: group_registry::StateRoot,
+        prefix: &'static str,
+    ) -> io::Result<Self> {
+        off_runtime(move || Self::create(&root, prefix)).await?
+    }
+
     /// Creates `name` as a fresh regular file forced to `0600` regardless of the inherited umask.
     pub fn write_private(&self, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
         use std::io::Write;
@@ -794,6 +835,17 @@ impl PrivateDir {
     pub fn cleanup(mut self) -> Result<(), CleanupFailure> {
         let path = self.path.take().expect("cleanup runs once");
         fs::remove_dir_all(&path).map_err(|err| CleanupFailure { kind: err.kind() })
+    }
+
+    /// The child controls the size of the tree under `HOME`, so the recursive delete runs on the blocking pool.
+    /// A failed blocking task still reports a cleanup failure so no path can claim the private files are gone without proof.
+    pub async fn cleanup_async(self) -> Result<(), CleanupFailure> {
+        match tokio::task::spawn_blocking(move || self.cleanup()).await {
+            Ok(result) => result,
+            Err(_) => Err(CleanupFailure {
+                kind: io::ErrorKind::Other,
+            }),
+        }
     }
 }
 
@@ -1264,8 +1316,6 @@ pub(crate) fn finalize(
 /// A group matches its recorded run only if its leader's PID, start time, and boot ID match, or the leader is gone while processes remain in its group.
 /// The group can empty between the membership check and `kill(-pgid)`.
 pub mod group_registry {
-    use std::os::unix::fs::MetadataExt;
-
     use super::*;
 
     /// The Linux `/proc/<pid>/stat` field 22 records a process start time in clock ticks since boot.
@@ -1281,12 +1331,16 @@ pub mod group_registry {
         Ok(proc_stat_fields(pid)?.and_then(|(state, start)| (state != 'Z').then_some(start)))
     }
 
+    /// `ENOENT` means the PID was gone at `open(2)`; `ESRCH` means the task exited between `open(2)` and `read(2)` of its stat file.
+    pub(super) fn pid_vanished(err: &io::Error) -> bool {
+        err.kind() == io::ErrorKind::NotFound || err.raw_os_error() == Some(libc::ESRCH)
+    }
+
     /// Parse after the last `)` because `comm` may contain spaces and parentheses.
     fn proc_stat_fields(pid: i32) -> io::Result<Option<(char, u64)>> {
         let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
-            // `NotFound` is the only condition treated as proof that the PID is gone.
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) if pid_vanished(&err) => return Ok(None),
             Err(err) => return Err(err),
         };
         let unreadable = || io::Error::other("unreadable /proc stat format");
@@ -1336,12 +1390,14 @@ pub mod group_registry {
                 continue;
             }
             // A process that exits mid-scan is not a member.
+            // Harness descendants run as this user, so a process whose stat is unreadable under `hidepid` is not a member.
             match proc_stat_pgrp_state(pid) {
                 Ok(Some((pgrp, state))) if pgrp == pgid && state != 'Z' && state != 'X' => {
                     return Ok(true);
                 }
                 Ok(_) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) if pid_vanished(&err) => {}
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {}
                 Err(err) => return Err(err),
             }
         }
@@ -1374,32 +1430,49 @@ pub mod group_registry {
             .to_owned())
     }
 
-    /// The registry directory is shared by all host incarnations of the UID.
-    /// The sweep kills groups named by registry files, so another UID must not be able to write the directory.
+    pub const STATE_DIR_NAME: &str = "broca";
+
+    /// `<managed eidnara dir>/broca`: the crash-ownership registry plus the `runs/` root for per-run private directories.
     ///
-    /// `registry_dir` uses literal `/tmp` because `TMPDIR` can differ between predecessor and replacement.
-    /// A replacement with a different `TMPDIR` would miss predecessor records, allowing recovery while descendant processes still run.
-    /// `PrivateTmp` shares a service's `/tmp` namespace between predecessor and successor.
-    fn registry_dir() -> io::Result<PathBuf> {
-        use std::os::unix::fs::DirBuilderExt;
-        let uid = rustix::process::getuid().as_raw();
-        let dir = PathBuf::from(format!("/tmp/broca-groups-{uid}"));
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(0o700);
-        match builder.create(&dir) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(err) => return Err(err),
+    /// The directory is shared by every host incarnation configured with the same data root, so a successor finds its predecessor's records.
+    /// The sweep kills groups named by registry files, so no other principal may write the directory or any ancestor; `resolve` enforces that through the hardened traversal.
+    /// The daemon passes its configured data directory; deriving the root from `HOME` alone would diverge from a host started with a data-directory override.
+    #[derive(Clone, Debug)]
+    pub struct StateRoot {
+        dir: PathBuf,
+    }
+
+    impl StateRoot {
+        pub fn resolve(data_dir_override: Option<&Path>) -> io::Result<Self> {
+            let dir = crate::instance::managed_dir_path(data_dir_override)
+                .map_err(|err| io::Error::other(format!("broca state root: {err}")))?
+                .join(STATE_DIR_NAME);
+            secure_dir(&dir)?;
+            Ok(Self { dir })
         }
-        let meta = fs::symlink_metadata(&dir)?;
-        if !meta.file_type().is_dir()
-            || meta.file_type().is_symlink()
-            || meta.uid() != uid
-            || meta.mode() & 0o077 != 0
-        {
-            return Err(io::Error::other("group registry dir is not private"));
+
+        pub fn path(&self) -> &Path {
+            &self.dir
         }
-        Ok(dir)
+
+        /// Every use re-validates the tree so a directory replaced after startup cannot redirect record writes or sweeps.
+        fn registry_dir(&self) -> io::Result<PathBuf> {
+            secure_dir(&self.dir)?;
+            Ok(self.dir.clone())
+        }
+
+        pub fn run_root(&self) -> io::Result<PathBuf> {
+            let root = self.registry_dir()?.join("runs");
+            secure_dir(&root)?;
+            Ok(root)
+        }
+    }
+
+    /// Callers operate by pathname after the hardened traversal; every ancestor is owned by this user or root and is not writable by others, so another principal cannot redirect the pathname.
+    fn secure_dir(dir: &Path) -> io::Result<()> {
+        crate::instance::secure_runtime_dir(dir)
+            .map(drop)
+            .map_err(|err| io::Error::other(format!("group registry dir is not private: {err}")))
     }
 
     struct Entry {
@@ -1441,19 +1514,35 @@ pub mod group_registry {
     impl GroupRecord {
         /// `record` returns `None` if it cannot write the record or establish either process identity.
         /// The spawner kills the group before delivering the prompt when `record` returns `None`.
-        pub fn record(leader_pid: i32) -> Option<Self> {
+        pub fn record(root: &StateRoot, leader_pid: i32) -> Option<Self> {
             let leader_start = proc_start_time(leader_pid).ok().flatten()?;
             let owner_pid = std::process::id() as i32;
             let owner_start = proc_start_time(owner_pid).ok().flatten()?;
-            let dir = registry_dir().ok()?;
+            let dir = root.registry_dir().ok()?;
             let mut nonce = [0u8; 8];
             getrandom::getrandom(&mut nonce).ok()?;
-            let path = dir.join(format!("{leader_pid}-{:016x}", u64::from_le_bytes(nonce)));
+            let name = format!("{leader_pid}-{:016x}", u64::from_le_bytes(nonce));
+            let path = dir.join(&name);
             let body = format!(
                 "v1\n{}\n{leader_pid} {leader_start}\n{owner_pid} {owner_start}\n",
                 boot_id().ok()?
             );
-            fs::write(&path, body).ok()?;
+            // A record is visible only once it is complete: a host crash between create and write must not leave a truncated record that the sweep discards without signaling its group.
+            let temp = dir.join(format!(".{name}.tmp"));
+            let written = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp)
+                .and_then(|mut file| {
+                    use std::io::Write;
+                    file.write_all(body.as_bytes())
+                })
+                .and_then(|()| fs::rename(&temp, &path));
+            if written.is_err() {
+                let _ = fs::remove_file(&temp);
+                return None;
+            }
             Some(Self { path })
         }
     }
@@ -1476,14 +1565,23 @@ pub mod group_registry {
     ///
     /// `sweep` propagates unreadable-registry, unreadable-record, and indeterminate `/proc` lookup errors without removing the record.
     /// Treating an unknown `/proc` result as "no orphan" can refire a run while its descendant executes.
-    pub fn sweep_orphaned_groups() -> io::Result<usize> {
-        let dir = registry_dir()?;
+    pub fn sweep_orphaned_groups(root: &StateRoot) -> io::Result<usize> {
+        let dir = root.registry_dir()?;
         let current_boot = boot_id()?;
         let mut killed = 0;
         for file in fs::read_dir(&dir)? {
             let path = file?.path();
             // Only regular files are registry records; `sweep_orphaned_run_dirs` sweeps `runs/`.
             if !path.is_file() {
+                continue;
+            }
+            // A dot-prefixed file is an unpublished temp from a crashed `GroupRecord::record`; its group never received a prompt.
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+            {
+                remove_swept_record(&path)?;
                 continue;
             }
             let text = match fs::read_to_string(&path) {
@@ -1582,31 +1680,14 @@ pub mod group_registry {
         proc_start_time(owner_pid)?.ok_or_else(|| io::Error::other("this process has no stat"))
     }
 
-    pub fn private_run_root() -> io::Result<PathBuf> {
-        use std::os::unix::fs::DirBuilderExt;
-        let root = registry_dir()?.join("runs");
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(0o700);
-        match builder.create(&root) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(err) => return Err(err),
-        }
-        let meta = fs::symlink_metadata(&root)?;
-        if !meta.file_type().is_dir() || meta.file_type().is_symlink() || meta.mode() & 0o077 != 0 {
-            return Err(io::Error::other("private run root is not private"));
-        }
-        Ok(root)
-    }
-
     /// `sweep_orphaned_run_dirs` removes a directory only after proving that its recorded owner is gone.
     /// (R17/R19).
     ///
     /// The sweep uses the recorded PID and start time to avoid deleting a live owner's directory.
     /// The sweep leaves unverifiable directories in place because deleting a live run's private files would break that run.
     /// disk cost.
-    pub fn sweep_orphaned_run_dirs() -> io::Result<usize> {
-        let root = private_run_root()?;
+    pub fn sweep_orphaned_run_dirs(state: &StateRoot) -> io::Result<usize> {
+        let root = state.run_root()?;
         let current_boot = owner_boot_tag()?;
         let mut removed = 0;
         for entry in fs::read_dir(&root)? {
@@ -1653,6 +1734,22 @@ mod tests {
     use std::ffi::OsString;
 
     use super::EnvSnapshot;
+
+    /// A task that exits between `open` and `read` of its `/proc` stat fails with `ESRCH`, not `ENOENT`; both prove the PID is gone.
+    #[test]
+    fn vanished_pid_errors_are_not_scan_failures() {
+        use super::group_registry::pid_vanished;
+        assert!(pid_vanished(&std::io::Error::from_raw_os_error(
+            libc::ENOENT
+        )));
+        assert!(pid_vanished(&std::io::Error::from_raw_os_error(
+            libc::ESRCH
+        )));
+        assert!(!pid_vanished(&std::io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+        assert!(!pid_vanished(&std::io::Error::from_raw_os_error(libc::EIO)));
+    }
 
     /// The vector was produced outside this crate from the documented derivation, so a change to
     /// the domain separator, the canonicalization id, or the row layout fails here.

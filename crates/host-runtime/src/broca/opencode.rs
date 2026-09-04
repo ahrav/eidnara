@@ -11,6 +11,7 @@ use super::backend::{
     EventSink, FinishReason, Harness, LlmExecutionBackend,
 };
 use super::config::MAX_OPENCODE_CONFIG_BYTES;
+use super::subprocess::group_registry::StateRoot;
 use super::subprocess::{
     self, EnvSnapshot, HarnessName, PrivateDir, SubprocessLimits, SubprocessSpec, commit_terminal,
 };
@@ -33,22 +34,25 @@ pub struct OpenCodeBackend {
     runtime: OpenCodeRuntime,
     limits: SubprocessLimits,
     env: EnvSnapshot,
+    state_root: StateRoot,
 }
 
 impl OpenCodeBackend {
-    pub fn new(runtime: OpenCodeRuntime, env: EnvSnapshot) -> Self {
-        Self::with_limits(runtime, env, SubprocessLimits::default())
+    pub fn new(runtime: OpenCodeRuntime, env: EnvSnapshot, state_root: StateRoot) -> Self {
+        Self::with_limits(runtime, env, state_root, SubprocessLimits::default())
     }
 
     pub fn with_limits(
         runtime: OpenCodeRuntime,
         env: EnvSnapshot,
+        state_root: StateRoot,
         limits: SubprocessLimits,
     ) -> Self {
         Self {
             runtime,
             limits,
             env,
+            state_root,
         }
     }
 }
@@ -76,7 +80,22 @@ impl LlmExecutionBackend for OpenCodeBackend {
         let runtime = self.runtime.clone();
         let limits = self.limits.clone();
         let env = self.env.clone();
-        Box::pin(run_opencode(runtime, limits, env, request, events, cancel))
+        let state_root = self.state_root.clone();
+        Box::pin(run_opencode(
+            runtime, limits, env, state_root, request, events, cancel,
+        ))
+    }
+
+    /// Resolving the executable node re-proves the same closure invariants `run_opencode` requires, so a rejected send and a failed run report the same subreason.
+    fn unavailable_reason(&self, harness: Harness) -> Option<&'static str> {
+        if harness != Harness::OpenCode {
+            return None;
+        }
+        self.runtime
+            .closure
+            .resolve_node_descriptor(&self.runtime.executable_node)
+            .is_err()
+            .then_some("closure_incomplete")
     }
 }
 
@@ -109,6 +128,7 @@ async fn run_opencode(
     runtime: OpenCodeRuntime,
     limits: SubprocessLimits,
     env: EnvSnapshot,
+    state_root: StateRoot,
     request: BackendRequest,
     events: EventSink,
     cancel: CancellationToken,
@@ -133,7 +153,20 @@ async fn run_opencode(
             provider_code: None,
         });
     }
-    let dir = match PrivateDir::create("broca-opencode") {
+    // Closure resolution precedes the private directory so an unavailable harness creates no on-disk state.
+    let executable_node = match runtime
+        .closure
+        .resolve_node_descriptor(&runtime.executable_node)
+    {
+        Ok(path) => path,
+        Err(_) => {
+            return subprocess::harness_unavailable_failure(
+                HarnessName::OpenCode,
+                "closure_incomplete",
+            );
+        }
+    };
+    let dir = match PrivateDir::create_async(state_root.clone(), "broca-opencode").await {
         Ok(dir) => dir,
         Err(err) => return subprocess::spawn_failure(HarnessName::OpenCode, &err),
     };
@@ -148,18 +181,6 @@ async fn run_opencode(
         "--format".to_owned(),
         "json".to_owned(),
     ];
-    let executable_node = match runtime
-        .closure
-        .resolve_node_descriptor(&runtime.executable_node)
-    {
-        Ok(path) => path,
-        Err(_) => {
-            return subprocess::harness_unavailable_failure(
-                HarnessName::OpenCode,
-                "closure_incomplete",
-            );
-        }
-    };
 
     child_env.push((
         OsString::from("OPENCODE_DB"),
@@ -188,6 +209,7 @@ async fn run_opencode(
         // The harness receives a rename-immune handle for writing into the validated closure tree.
         // The harness receives a rename-immune handle for writing into the validated closure tree.
         inherit_fds: vec![executable_node.inherited_fd()],
+        state_root,
     };
 
     // The OpenCode CLI closes its streams and exits when the run finishes, so EOF and the drain grace bound the tail without a terminal probe.
@@ -197,21 +219,15 @@ async fn run_opencode(
         Err(err) => {
             return subprocess::merge_cleanup(
                 subprocess::spawn_failure(HarnessName::OpenCode, &err),
-                dir.cleanup(),
+                dir.cleanup_async().await,
             );
         }
     };
 
     // `finalize` trusts a transcript only after a clean end and maps every abnormal end to one canonical failure regardless of printed output.
-    // `finalize` trusts a transcript only after a clean end and maps every abnormal end to one canonical failure regardless of printed output.
     let parsed = subprocess::parse_clean_transcript(&result, &events, parse_opencode_transcript);
-    subprocess::finalize(
-        HarnessName::OpenCode,
-        &result,
-        parsed,
-        &limits,
-        dir.cleanup(),
-    )
+    let cleanup = dir.cleanup_async().await;
+    subprocess::finalize(HarnessName::OpenCode, &result, parsed, &limits, cleanup)
 }
 
 /// The parser accepts only `step_start`, `text`, `step_finish`, and `error`; it rejects `tool_use` because a tool invocation violates the zero-tool contract.
