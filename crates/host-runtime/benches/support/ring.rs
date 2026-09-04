@@ -186,9 +186,11 @@ pub struct OpenLoopResult {
 struct Completion {
     scheduled_ns: u64,
     issue_ns: u64,
+    /// Taken after the response is classified, so the advertised issue-to-validated-terminal
+    /// latency includes validation and excludes nothing the collector does afterwards.
     completion_ns: u64,
     measured: bool,
-    result: CallResult,
+    outcome: Outcome,
 }
 
 fn record_completion(
@@ -199,7 +201,7 @@ fn record_completion(
     lag: &mut Histogram<u64>,
     outcomes: &mut OutcomeCounts,
 ) -> bool {
-    let outcome = classify(&completion.result);
+    let outcome = completion.outcome;
     if !completion.measured {
         return outcome != Outcome::Success;
     }
@@ -316,13 +318,13 @@ async fn run_open_loop_inner(
         }
         let task_client = Arc::clone(&client);
         requests.spawn(async move {
-            let result = request(task_client, route).await;
+            let outcome = classify(&request(task_client, route).await);
             Completion {
                 scheduled_ns,
                 issue_ns,
                 completion_ns: start.elapsed().as_nanos() as u64,
                 measured,
-                result,
+                outcome,
             }
         });
     }

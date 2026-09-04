@@ -532,7 +532,18 @@ impl Client {
                                 "host closed the route before it was published",
                             ));
                         }
-                        routes.insert(handle);
+                        // Live routes have distinct channels; a handle already cached is a host
+                        // protocol violation, and sharing it would let one caller's close break the other.
+                        if !routes.insert(handle) {
+                            drop(torn_down);
+                            drop(routes);
+                            self.inner.retire("invalid_route_response");
+                            return Err(CallError::local(
+                                SendOutcome::Terminal,
+                                "invalid_route_response",
+                                "host returned a route handle that is already live",
+                            ));
+                        }
                     }
                     return Ok(handle);
                 }
@@ -1654,8 +1665,16 @@ impl Inner {
     /// The handler does not treat a duplicate terminal for a cached bind as stranded.
     /// Sending `Goodbye` would close a route still in use.
     fn release_stranded_route(&self, body: &[u8]) {
-        let Ok(route) = parse_route_open(body) else {
-            return;
+        let route = match parse_route_open(body) {
+            Ok(route) => route,
+            Err(_) => {
+                // A body tagged `route.open` with no usable handle names a route the host installed
+                // but the client can never close; only the generation's teardown releases it.
+                if names_route_open(body) {
+                    self.retire("invalid_route_response");
+                }
+                return;
+            }
         };
         if lock_unpoisoned(&self.routes).contains(&route) {
             return;
@@ -2042,12 +2061,25 @@ struct RingWrite {
 
 struct RingWriteSender {
     tx: std::sync::mpsc::SyncSender<RingWrite>,
+    /// Header-only controls (`Pong`, `Cancel`, `Goodbye`) travel on their own lane so the
+    /// bridge attempts them before a data backlog; a `Pong` stuck behind capacity-blocked
+    /// data would let the host's pong deadline invalidate a healthy client.
+    control_tx: std::sync::mpsc::SyncSender<RingWrite>,
     wake: Arc<OwnedFd>,
 }
 
 impl RingWriteSender {
     fn try_send(&self, write: RingWrite) -> Result<(), std::sync::mpsc::TrySendError<RingWrite>> {
         self.tx.try_send(write)?;
+        signal_eventfd(&self.wake);
+        Ok(())
+    }
+
+    fn try_send_control(
+        &self,
+        write: RingWrite,
+    ) -> Result<(), std::sync::mpsc::TrySendError<RingWrite>> {
+        self.control_tx.try_send(write)?;
         signal_eventfd(&self.wake);
         Ok(())
     }
@@ -2109,6 +2141,8 @@ async fn start_ring_bridge(
     ready_deadline: Instant,
 ) -> Result<RingBridge, ClientError> {
     let (write_tx, write_rx) = std::sync::mpsc::sync_channel::<RingWrite>(CLIENT_DATA_QUEUE_FRAMES);
+    let (control_write_tx, control_write_rx) =
+        std::sync::mpsc::sync_channel::<RingWrite>(CLIENT_CONTROL_QUEUE_FRAMES);
     let wake_fd = Arc::new(
         rustix::event::eventfd(
             0,
@@ -2150,12 +2184,21 @@ async fn start_ring_bridge(
                 | rustix::event::PollFlags::HUP
                 | rustix::event::PollFlags::ERR;
             // A write waiting for peer-to-host capacity stays here across loop
-            // iterations so inbound frames keep draining between its slices.
-            let mut pending: Option<RingWrite> = None;
+            // iterations so inbound frames keep draining between its slices. Controls
+            // have their own slot and are attempted first.
+            let mut pending_control: Option<RingWrite> = None;
+            let mut pending_data: Option<RingWrite> = None;
             while !cancel.is_cancelled() {
                 let mut wrote = false;
-                if pending.is_none() {
-                    match write_rx.try_recv() {
+                let mut disconnected = false;
+                for (slot, rx) in [
+                    (&mut pending_control, &control_write_rx),
+                    (&mut pending_data, &write_rx),
+                ] {
+                    if slot.is_some() {
+                        continue;
+                    }
+                    match rx.try_recv() {
                         Ok(write) => {
                             if write
                                 .publish
@@ -2164,14 +2207,22 @@ async fn start_ring_bridge(
                             {
                                 let _ = write.completed.send(Ok(Publication::Skipped));
                             } else {
-                                pending = Some(write);
+                                *slot = Some(write);
                             }
                         }
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => disconnected = true,
                         Err(std::sync::mpsc::TryRecvError::Empty) => {}
                     }
                 }
-                if let Some(write) = pending.take() {
+                if disconnected {
+                    break;
+                }
+                let lane = if pending_control.is_some() {
+                    &mut pending_control
+                } else {
+                    &mut pending_data
+                };
+                if let Some(write) = lane.take() {
                     // `reserve_until` parks on the peer's capacity doorbell, which
                     // cancellation cannot ring, so the wait is taken in slices. The
                     // host may itself be parked on host-to-client capacity that only
@@ -2197,7 +2248,7 @@ async fn start_ring_bridge(
                         result => Some(result),
                     };
                     match result {
-                        None => pending = Some(write),
+                        None => *lane = Some(write),
                         Some(result) => {
                             // An operation that expired before its connection-scoped frame
                             // deadline fails alone; the bridge keeps serving other frames.
@@ -2291,7 +2342,7 @@ async fn start_ring_bridge(
                     Err(_) => break,
                 }
                 // A pending write retries its next slice rather than parking on the data doorbell.
-                if wrote || pending.is_some() {
+                if wrote || pending_control.is_some() || pending_data.is_some() {
                     continue;
                 }
                 if setup_peer_closed(&setup) {
@@ -2346,6 +2397,7 @@ async fn start_ring_bridge(
     Ok(RingBridge {
         write: RingWriteSender {
             tx: write_tx,
+            control_tx: control_write_tx,
             wake: wake_fd,
         },
         read: read_rx,
@@ -2354,7 +2406,7 @@ async fn start_ring_bridge(
     })
 }
 
-/// The bridge writes and completes one frame per iteration in receive order, so awaiting the head is FIFO-safe. commentlint: allow(JUDGE)
+/// Each in-flight frame owns its completion channel, so awaiting the window head is safe even when the bridge's control lane completes a later frame first. commentlint: allow(JUDGE)
 const WRITER_WINDOW: usize = 32;
 /// Data channel depth: `CLIENT_DATA_QUEUE_FRAMES` less the frames the writer may hold in flight.
 const WRITER_QUEUE_FRAMES: usize = CLIENT_DATA_QUEUE_FRAMES - WRITER_WINDOW;
@@ -2386,77 +2438,110 @@ async fn writer_loop(
         window.clear();
         inner.retire("write_failed");
     };
+    // Hands one frame to the bridge. `Err(())` means the bridge is gone.
+    let hand = |write: &RingWriteSender, window: &mut VecDeque<InFlight>, frame: QueuedFrame| {
+        if frame
+            .publish
+            .as_ref()
+            .is_some_and(|state| !claim_for_write(state))
+        {
+            return Ok(());
+        }
+        let (completed_tx, completed_rx) = oneshot::channel();
+        let is_control = frame.publish.is_none();
+        let ring_write = RingWrite {
+            header: frame.header,
+            body: frame.body,
+            commit_by: frame.deadline.min(frame.expires).into_std(),
+            publish: frame.publish.clone(),
+            completed: completed_tx,
+            deadline: frame.deadline.into_std(),
+        };
+        let sent = if is_control {
+            write.try_send_control(ring_write)
+        } else {
+            write.try_send(ring_write)
+        };
+        if sent.is_err() {
+            // The bridge never received the frame, so nothing reached the ring.
+            if let Some(state) = &frame.publish {
+                state.store(QUEUED, Ordering::Release);
+            }
+            return Err(());
+        }
+        window.push_back(InFlight {
+            publish: frame.publish,
+            ack: frame.ack,
+            charge: frame.charge,
+            deadline: frame.deadline,
+            completed: completed_rx,
+        });
+        Ok(())
+    };
     loop {
-        let next = if window.len() < WRITER_WINDOW {
-            if let Ok(frame) = control_rx.try_recv() {
-                Some(frame)
-            } else if let Ok(frame) = data_rx.try_recv() {
-                Some(frame)
-            } else if window.is_empty() {
-                tokio::select! {
-                    biased;
-                    () = inner.cancel.cancelled() => break,
-                    // `Inner` holds `control_tx` and `data_tx`, so a closed channel is unreachable while `inner` is held. commentlint: allow(JUDGE)
-                    // Break on channel closure so every wait remains inside the cancellation `select!`.
-                    frame = control_rx.recv() => match frame {
-                        Some(frame) => Some(frame),
-                        None => break,
-                    },
-                    frame = data_rx.recv() => match frame {
-                        Some(frame) => Some(frame),
-                        None => break,
-                    },
-                }
-            } else {
-                None
+        // One window slot is reserved for controls so a `Pong` is never stuck behind a full data backlog.
+        let room_for_control = window.len() < WRITER_WINDOW;
+        let room_for_data = window.len() + 1 < WRITER_WINDOW;
+        let next = if room_for_control && let Ok(frame) = control_rx.try_recv() {
+            Some(frame)
+        } else if room_for_data && let Ok(frame) = data_rx.try_recv() {
+            Some(frame)
+        } else if window.is_empty() {
+            tokio::select! {
+                biased;
+                () = inner.cancel.cancelled() => break,
+                // `Inner` holds `control_tx` and `data_tx`, so a closed channel is unreachable while `inner` is held. commentlint: allow(JUDGE)
+                // Break on channel closure so every wait remains inside the cancellation `select!`.
+                frame = control_rx.recv() => match frame {
+                    Some(frame) => Some(frame),
+                    None => break,
+                },
+                frame = data_rx.recv() => match frame {
+                    Some(frame) => Some(frame),
+                    None => break,
+                },
             }
         } else {
             None
         };
         if let Some(frame) = next {
-            if frame
-                .publish
-                .as_ref()
-                .is_some_and(|state| !claim_for_write(state))
-            {
-                continue;
-            }
-            let (completed_tx, completed_rx) = oneshot::channel();
-            if write
-                .try_send(RingWrite {
-                    header: frame.header,
-                    body: frame.body,
-                    commit_by: frame.deadline.min(frame.expires).into_std(),
-                    publish: frame.publish.clone(),
-                    completed: completed_tx,
-                    deadline: frame.deadline.into_std(),
-                })
-                .is_err()
-            {
-                // The bridge never received the frame, so nothing reached the ring.
-                if let Some(state) = &frame.publish {
-                    state.store(QUEUED, Ordering::Release);
-                }
+            if hand(&write, &mut window, frame).is_err() {
                 fail(&inner, &mut window, None);
                 break;
             }
-            window.push_back(InFlight {
-                publish: frame.publish,
-                ack: frame.ack,
-                charge: frame.charge,
-                deadline: frame.deadline,
-                completed: completed_rx,
-            });
             continue;
         }
-        let Some(mut head) = window.pop_front() else {
-            continue;
+        enum Step {
+            Completed(
+                Result<
+                    Result<Result<Publication, SendFailure>, oneshot::error::RecvError>,
+                    tokio::time::error::Elapsed,
+                >,
+            ),
+            Control(Option<QueuedFrame>),
+        }
+        let step = {
+            let head = window.front_mut().expect("window is non-empty");
+            tokio::select! {
+                biased;
+                () = inner.cancel.cancelled() => break,
+                result = timeout_at(head.deadline, &mut head.completed) => Step::Completed(result),
+                // A control arriving while the head is blocked still gets its reserved slot.
+                frame = control_rx.recv(), if room_for_control => Step::Control(frame),
+            }
         };
-        let written = tokio::select! {
-            biased;
-            () = inner.cancel.cancelled() => break,
-            result = timeout_at(head.deadline, &mut head.completed) => result,
+        let written = match step {
+            Step::Control(Some(frame)) => {
+                if hand(&write, &mut window, frame).is_err() {
+                    fail(&inner, &mut window, None);
+                    break;
+                }
+                continue;
+            }
+            Step::Control(None) => break,
+            Step::Completed(result) => result,
         };
+        let head = window.pop_front().expect("window is non-empty");
         match written {
             Ok(Ok(Ok(Publication::Published))) => {}
             Ok(Ok(Ok(Publication::Skipped | Publication::Expired))) => {
@@ -2675,6 +2760,12 @@ fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec
             "route-open request could not be encoded",
         )
     })
+}
+
+fn names_route_open(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|value| value.get("op").and_then(Value::as_str) == Some(OP_ROUTE_OPEN))
 }
 
 /// A channel-0 body is a JSON object carrying a string `op` (§7.1).
@@ -3052,7 +3143,7 @@ mod tests {
         assert!(!bridge_claims(&publish));
         assert!(control_rx.try_recv().is_err(), "not-sent needs no Cancel");
 
-        let (write, writes) = fake_ring_writer();
+        let (write, writes, _control_writes) = fake_ring_writer();
         let writer_inner = Arc::clone(&inner);
         let writer = tokio::spawn(async move {
             writer_loop(writer_inner, write, data_rx, control_rx).await;
@@ -3092,8 +3183,14 @@ mod tests {
         assert_eq!(inner.queue_budget.used(), 0);
     }
 
-    fn fake_ring_writer() -> (RingWriteSender, std::sync::mpsc::Receiver<RingWrite>) {
+    /// A bridge stand-in: the writer's data and control lanes, received by the test.
+    fn fake_ring_writer() -> (
+        RingWriteSender,
+        std::sync::mpsc::Receiver<RingWrite>,
+        std::sync::mpsc::Receiver<RingWrite>,
+    ) {
         let (tx, writes) = std::sync::mpsc::sync_channel(WRITER_WINDOW);
+        let (control_tx, control_writes) = std::sync::mpsc::sync_channel(WRITER_WINDOW);
         let wake = Arc::new(
             rustix::event::eventfd(
                 0,
@@ -3101,7 +3198,15 @@ mod tests {
             )
             .unwrap(),
         );
-        (RingWriteSender { tx, wake }, writes)
+        (
+            RingWriteSender {
+                tx,
+                control_tx,
+                wake,
+            },
+            writes,
+            control_writes,
+        )
     }
 
     async fn settle_one_write_with(failure: SendFailure) -> CallError {
@@ -3116,7 +3221,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(5),
             )
             .expect("admitted");
-        let (write, writes) = fake_ring_writer();
+        let (write, writes, _control_writes) = fake_ring_writer();
         let writer_inner = Arc::clone(&inner);
         let writer = tokio::spawn(async move {
             writer_loop(writer_inner, write, data_rx, control_rx).await;
@@ -3147,7 +3252,7 @@ mod tests {
         let (_key, publish) = inner
             .admit(route(1), b"late".to_vec(), false, kind, expires)
             .expect("admitted");
-        let (write, writes) = fake_ring_writer();
+        let (write, writes, _control_writes) = fake_ring_writer();
         let writer_inner = Arc::clone(&inner);
         let writer = tokio::spawn(async move {
             writer_loop(writer_inner, write, data_rx, control_rx).await;
@@ -3197,7 +3302,7 @@ mod tests {
             receivers.push(rx);
             publishes.push(publish);
         }
-        let (write, writes) = fake_ring_writer();
+        let (write, writes, _control_writes) = fake_ring_writer();
         let writer_inner = Arc::clone(&inner);
         let writer = tokio::spawn(async move {
             writer_loop(writer_inner, write, data_rx, control_rx).await;
@@ -3314,6 +3419,59 @@ mod tests {
         );
         responder.await.expect("responder");
         drop(client);
+    }
+
+    #[tokio::test]
+    async fn a_pong_bypasses_a_data_backlog_that_fills_the_window() {
+        // One in-flight slot is reserved for controls, and controls ride their own lane to the bridge.
+        let (inner, data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut receivers = Vec::new();
+        for _ in 0..(WRITER_WINDOW - 1) {
+            let (kind, rx) = unary_sender();
+            inner
+                .admit(route(1), Vec::new(), false, kind, deadline)
+                .expect("admitted");
+            receivers.push(rx);
+        }
+        let (write, writes, control_writes) = fake_ring_writer();
+        let writer_inner = Arc::clone(&inner);
+        let writer = tokio::spawn(async move {
+            writer_loop(writer_inner, write, data_rx, control_rx).await;
+        });
+        // The bridge holds every data frame without completing it.
+        let held = tokio::task::spawn_blocking(move || {
+            let held: Vec<RingWrite> = (0..(WRITER_WINDOW - 1))
+                .map(|_| {
+                    writes
+                        .recv_timeout(Duration::from_secs(2))
+                        .expect("writer fills the data window")
+                })
+                .collect();
+            (held, writes)
+        })
+        .await
+        .expect("bridge receive task");
+        inner
+            .send_control(
+                FrameType::Pong,
+                pure_header_flags(),
+                FrameId::control(7),
+                None,
+            )
+            .expect("reserved control admitted");
+        let pong = tokio::task::spawn_blocking(move || {
+            control_writes
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the Pong reaches the bridge's control lane while data is blocked")
+        })
+        .await
+        .expect("control receive task");
+        assert_eq!(pong.header.ty, FrameType::Pong);
+        inner.retire("test_done");
+        drop(held);
+        drop(pong);
+        writer.await.expect("writer exits on cancel");
     }
 
     #[tokio::test]
@@ -4986,7 +5144,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(5),
             )
             .expect("admitted");
-        let (write, writes) = fake_ring_writer();
+        let (write, writes, _control_writes) = fake_ring_writer();
         drop(writes);
         let writer_inner = Arc::clone(&inner);
         tokio::spawn(async move {
