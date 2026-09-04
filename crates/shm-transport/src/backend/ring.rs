@@ -23,7 +23,8 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::os::fd::RawFd;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -31,6 +32,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::arena::{ArenaCounts, ArenaError, ArenaSpan, MAX_FRAME_BYTES, SpanPlan};
+use crate::backend::sys;
 use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor, Incarnation,
     MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES, WIRE_V2_VERSION, check_wire_header,
@@ -362,22 +364,20 @@ fn removal_ranges(
 static FAIL_NEXT_PAGE_REMOVAL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn remove_pages(base: *mut u8, offset: usize, len: usize) -> libc::c_int {
+fn remove_pages(base: NonNull<u8>, offset: usize, len: usize) -> Result<(), RingError> {
     #[cfg(test)]
     if FAIL_NEXT_PAGE_REMOVAL.swap(false, Ordering::AcqRel) {
-        return -1;
+        return Err(RingError::PageRemovalFailed);
     }
-    // SAFETY: caller supplies a live page-aligned range inside the shared mapping.
-    unsafe { libc::madvise(base.add(offset).cast(), len, libc::MADV_REMOVE) }
+    // SAFETY: caller supplies a page-aligned range inside the live shared mapping with no
+    // live byte in it.
+    unsafe { sys::madvise_remove(base, offset, len) }.map_err(|_| RingError::PageRemovalFailed)
 }
 
 fn system_page_size() -> usize {
     static PAGE_SIZE_CACHE: OnceLock<usize> = OnceLock::new();
     *PAGE_SIZE_CACHE.get_or_init(|| {
-        // SAFETY: sysconf has no pointer or lifetime preconditions.
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        usize::try_from(page_size)
-            .ok()
+        Some(sys::page_size())
             .filter(|size| *size > 0)
             .unwrap_or(PAGE_SIZE)
     })
@@ -398,22 +398,7 @@ impl Mapping {
         let fd = create_linux_memfd(len)?;
 
         validate_object(&fd, len)?;
-        let raw = fd.as_raw_fd();
-        // SAFETY: fd has exact nonzero length, flags request shared read/write mapping.
-        let mapped = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                raw,
-                0,
-            )
-        };
-        if mapped == libc::MAP_FAILED {
-            return Err(RingError::ObjectSetupFailed);
-        }
-        let base = NonNull::new(mapped.cast()).ok_or(RingError::ObjectSetupFailed)?;
+        let base = sys::mmap_shared(fd.as_fd(), len).map_err(|_| RingError::ObjectSetupFailed)?;
         Ok(Self { fd, base, len })
     }
 
@@ -423,21 +408,7 @@ impl Mapping {
         // mapping and leave a page whose first touch is `SIGBUS`.
         validate_seals(&fd)?;
         validate_object(&fd, len)?;
-        // SAFETY: sealed fd was size-validated before mapping.
-        let mapped = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd.as_raw_fd(),
-                0,
-            )
-        };
-        if mapped == libc::MAP_FAILED {
-            return Err(RingError::ObjectSetupFailed);
-        }
-        let base = NonNull::new(mapped.cast()).ok_or(RingError::ObjectSetupFailed)?;
+        let base = sys::mmap_shared(fd.as_fd(), len).map_err(|_| RingError::ObjectSetupFailed)?;
         Ok(Self { fd, base, len })
     }
 
@@ -465,8 +436,9 @@ impl fmt::Debug for Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // SAFETY: base and len came from successful mmap and are unmapped once here.
-        unsafe { libc::munmap(self.base.as_ptr().cast(), self.len) };
+        // SAFETY: base and len came from one successful mmap_shared and are unmapped once
+        // here, in Drop, after every borrow of the mapping has ended.
+        let _ = unsafe { sys::munmap(self.base, self.len) };
     }
 }
 
@@ -512,7 +484,7 @@ impl SyscallCounters {
 /// affect `local`. `MSG_DONTWAIT` prevents blocking regardless of status flags, and
 /// `MSG_NOSIGNAL` keeps a closed peer end from raising `SIGPIPE`.
 struct Doorbell {
-    local: OwnedFd,
+    local: UnixStream,
     /// The peer's end. `attachment` moves it out, so after the handoff only the peer holds
     /// that end and its exit is visible here as EOF or `EPIPE`.
     remote: Cell<Option<OwnedFd>>,
@@ -525,45 +497,31 @@ const DRAIN_BYTES: usize = 256;
 
 impl Doorbell {
     fn create() -> Result<Self, RingError> {
-        let mut raw = [0 as libc::c_int; 2];
-        // SAFETY: `raw` is writable storage for the two descriptors socketpair returns.
-        let result = unsafe {
-            libc::socketpair(
-                libc::AF_UNIX,
-                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                0,
-                raw.as_mut_ptr(),
-            )
-        };
-        if result != 0 {
-            return Err(RingError::DoorbellFailed);
-        }
-        // SAFETY: successful socketpair returns two new owned descriptors.
-        let (local, remote) =
-            unsafe { (OwnedFd::from_raw_fd(raw[0]), OwnedFd::from_raw_fd(raw[1])) };
+        let (local, remote) = UnixStream::pair().map_err(|_| RingError::DoorbellFailed)?;
+        local
+            .set_nonblocking(true)
+            .and_then(|()| remote.set_nonblocking(true))
+            .map_err(|_| RingError::DoorbellFailed)?;
         Ok(Self {
             local,
-            remote: Cell::new(Some(remote)),
+            remote: Cell::new(Some(remote.into())),
             counters: Cell::new(SyscallCounters::default()),
         })
     }
 
-    /// Accepts only a connected `AF_UNIX` stream socket.
+    /// Accepts only a connected `AF_UNIX` stream socket. `UnixStream` itself admits any fd,
+    /// and `peer_addr` proves only that the peer is `AF_UNIX`, so the socket type is checked
+    /// here: `drain` reads a zero-length `recv` as peer close, which a datagram or seqpacket
+    /// socket makes ambiguous.
     fn from_fd(fd: OwnedFd) -> Result<Self, RingError> {
-        if socket_option(&fd, libc::SO_DOMAIN)? != libc::AF_UNIX
-            || socket_option(&fd, libc::SO_TYPE)? != libc::SOCK_STREAM
+        if sys::socket_type(fd.as_fd()).map_err(|_| RingError::DoorbellFailed)? != libc::SOCK_STREAM
         {
             return Err(RingError::DoorbellFailed);
         }
-        // SAFETY: an all-zero sockaddr_un is valid output storage for getpeername.
-        let mut peer: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-        let mut len = size_of::<libc::sockaddr_un>() as libc::socklen_t;
-        // SAFETY: `peer` and `len` describe writable storage of the declared size.
-        if unsafe { libc::getpeername(fd.as_raw_fd(), (&raw mut peer).cast(), &raw mut len) } != 0 {
-            return Err(RingError::DoorbellFailed);
-        }
+        let local = UnixStream::from(fd);
+        local.peer_addr().map_err(|_| RingError::DoorbellFailed)?;
         Ok(Self {
-            local: fd,
+            local,
             remote: Cell::new(None),
             counters: Cell::new(SyscallCounters::default()),
         })
@@ -585,6 +543,7 @@ impl Doorbell {
     fn duplicate(&self) -> Result<OwnedFd, RingError> {
         self.local
             .try_clone()
+            .map(OwnedFd::from)
             .map_err(|_| RingError::DoorbellFailed)
     }
 
@@ -597,22 +556,14 @@ impl Doorbell {
         let token = [1u8];
         loop {
             self.record(false);
-            // SAFETY: pointer and length describe one initialized byte.
-            let result = unsafe {
-                libc::send(
-                    self.local.as_raw_fd(),
-                    token.as_ptr().cast(),
-                    token.len(),
-                    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
-                )
+            let error = match sys::send_token(self.local.as_fd(), &token) {
+                Ok(sent) if sent == token.len() => return Ok(()),
+                Ok(_) => return Err(RingError::DoorbellFailed),
+                Err(error) => error,
             };
-            if result == token.len() as isize {
-                return Ok(());
-            }
-            let error = std::io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::EAGAIN) => return Ok(()),
-                Some(libc::EINTR) => continue,
+            match error.kind() {
+                std::io::ErrorKind::WouldBlock => return Ok(()),
+                std::io::ErrorKind::Interrupted => continue,
                 _ => return Err(RingError::DoorbellFailed),
             }
         }
@@ -623,25 +574,14 @@ impl Doorbell {
         let mut buffer = [0u8; DRAIN_BYTES];
         loop {
             self.record(false);
-            // SAFETY: pointer and length describe writable storage of `DRAIN_BYTES`.
-            let result = unsafe {
-                libc::recv(
-                    self.local.as_raw_fd(),
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len(),
-                    libc::MSG_DONTWAIT,
-                )
+            let error = match sys::recv_tokens(self.local.as_fd(), &mut buffer) {
+                Ok(0) => return Err(RingError::DoorbellFailed),
+                Ok(_) => return Ok(()),
+                Err(error) => error,
             };
-            if result > 0 {
-                return Ok(());
-            }
-            if result == 0 {
-                return Err(RingError::DoorbellFailed);
-            }
-            let error = std::io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::EAGAIN) => return Ok(()),
-                Some(libc::EINTR) => continue,
+            match error.kind() {
+                std::io::ErrorKind::WouldBlock => return Ok(()),
+                std::io::ErrorKind::Interrupted => continue,
                 _ => return Err(RingError::DoorbellFailed),
             }
         }
@@ -656,63 +596,25 @@ impl Doorbell {
             .as_millis()
             .saturating_add(1)
             .min(i32::MAX as u128) as i32;
-        let mut descriptor = libc::pollfd {
-            fd: self.local.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
         // A signal that landed between the caller's last recheck and this call makes the
         // blocking poll return at once; the probe keeps such a call out of `parks`.
         self.record(false);
-        // SAFETY: poll receives one initialized pollfd.
-        if unsafe { libc::poll(&mut descriptor, 1, 0) } > 0 {
+        if sys::poll_readable(self.local.as_fd(), 0).unwrap_or(false) {
             return Ok(true);
         }
         self.record(true);
-        // SAFETY: poll receives one initialized pollfd.
-        let result = unsafe { libc::poll(&mut descriptor, 1, timeout) };
-        if result > 0 {
-            Ok(true)
-        } else if result == 0 {
-            Ok(false)
-        } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-            Ok(Instant::now() < deadline)
-        } else {
-            Err(RingError::DoorbellFailed)
+        match sys::poll_readable(self.local.as_fd(), timeout) {
+            Ok(ready) => Ok(ready),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                Ok(Instant::now() < deadline)
+            }
+            Err(_) => Err(RingError::DoorbellFailed),
         }
     }
 }
 
 fn set_cloexec(fd: &OwnedFd) -> Result<(), RingError> {
-    // SAFETY: F_GETFD and F_SETFD act on a live owned descriptor.
-    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
-    if flags < 0 {
-        return Err(RingError::ObjectValidationFailed);
-    }
-    // SAFETY: same descriptor; only the close-on-exec bit changes.
-    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-        return Err(RingError::ObjectValidationFailed);
-    }
-    Ok(())
-}
-
-fn socket_option(fd: &OwnedFd, option: libc::c_int) -> Result<libc::c_int, RingError> {
-    let mut value: libc::c_int = 0;
-    let mut len = size_of::<libc::c_int>() as libc::socklen_t;
-    // SAFETY: `value` and `len` describe writable storage of the declared size.
-    let result = unsafe {
-        libc::getsockopt(
-            fd.as_raw_fd(),
-            libc::SOL_SOCKET,
-            option,
-            (&raw mut value).cast(),
-            &raw mut len,
-        )
-    };
-    if result != 0 || len != size_of::<libc::c_int>() as libc::socklen_t {
-        return Err(RingError::DoorbellFailed);
-    }
-    Ok(value)
+    sys::set_cloexec(fd.as_fd()).map_err(|_| RingError::ObjectValidationFailed)
 }
 
 /// Everything a peer needs to attach: layout version, incarnation, lane, and geometry. Sent
@@ -1125,13 +1027,11 @@ impl Ring {
     /// set, paired with the grant. Callable once per created ring; an attached ring or a
     /// second call fails with `DoorbellFailed`.
     pub fn attachment(&self) -> Result<RingAttachment, RingError> {
-        // SAFETY: F_DUPFD_CLOEXEC duplicates owned valid descriptor.
-        let raw = unsafe { libc::fcntl(self.raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-        if raw < 0 {
-            return Err(RingError::ObjectSetupFailed);
-        }
-        // SAFETY: successful fcntl returns a newly owned descriptor.
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let fd = self
+            .mapping
+            .fd()
+            .try_clone()
+            .map_err(|_| RingError::ObjectSetupFailed)?;
         Ok(RingAttachment {
             descriptors: [
                 fd,
@@ -1858,17 +1758,17 @@ impl Ring {
         let page_size = system_page_size();
         let arena_len = self.arena_bytes();
         let mut residency = vec![0u8; residency_vector_len(arena_len, page_size)];
-        // SAFETY: arena offset and length lie inside live mapping.
-        let result = unsafe {
-            libc::mincore(
-                self.mapping.base.as_ptr().add(self.layout.arena).cast(),
+        // SAFETY: the arena offset and length were validated against the mapping length by
+        // `checked_layout` before this handle existed, and the mapping lives as long as `self`.
+        unsafe {
+            sys::mincore(
+                self.mapping.base,
+                self.layout.arena,
                 arena_len,
-                residency.as_mut_ptr().cast(),
+                &mut residency,
             )
-        };
-        if result != 0 {
-            return Err(RingError::ObjectValidationFailed);
         }
+        .map_err(|_| RingError::ObjectValidationFailed)?;
         Ok(residency.into_iter().filter(|entry| entry & 1 == 1).count())
     }
 
@@ -2203,10 +2103,7 @@ impl Ring {
         let remove = |offset, len| {
             self.page_removals
                 .set(self.page_removals.get().wrapping_add(1));
-            if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
-                return Err(RingError::PageRemovalFailed);
-            }
-            Ok(())
+            remove_pages(self.mapping.base, offset, len)
         };
         if everything && live_end == reclaimed {
             let start = punched & !(page_size_u64 - 1);
@@ -2313,9 +2210,7 @@ impl Ring {
         {
             self.page_removals
                 .set(self.page_removals.get().wrapping_add(1));
-            if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
-                return Err(RingError::PageRemovalFailed);
-            }
+            remove_pages(self.mapping.base, offset, len)?;
         }
         Ok(())
     }
@@ -2872,20 +2767,14 @@ fn validate_lifecycle(
 }
 
 fn validate_object(fd: &OwnedFd, expected_len: usize) -> Result<(), RingError> {
-    // SAFETY: zeroed stat is valid output storage for fstat.
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: fd is owned and stat points to writable storage.
-    if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } != 0 {
-        return Err(RingError::ObjectValidationFailed);
-    }
-    // SAFETY: geteuid has no preconditions.
-    let current_uid = unsafe { libc::geteuid() };
-    let type_valid = stat.st_mode & libc::S_IFMT == libc::S_IFREG;
-    if stat.st_uid != current_uid
-        || stat.st_size < 0
-        || stat.st_size as usize != expected_len
+    let stat = sys::fstat(fd.as_fd()).map_err(|_| RingError::ObjectValidationFailed)?;
+    let current_uid = sys::geteuid();
+    let type_valid = stat.mode & libc::S_IFMT == libc::S_IFREG;
+    if stat.uid != current_uid
+        || stat.size < 0
+        || stat.size as usize != expected_len
         || !type_valid
-        || stat.st_mode & 0o077 != 0
+        || stat.mode & 0o077 != 0
     {
         return Err(RingError::ObjectValidationFailed);
     }
@@ -2893,53 +2782,30 @@ fn validate_object(fd: &OwnedFd, expected_len: usize) -> Result<(), RingError> {
 }
 
 fn validate_seals(fd: &OwnedFd) -> Result<(), RingError> {
-    // SAFETY: F_GET_SEALS reads flags from an owned valid descriptor.
-    let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
-    let required = libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
-    if seals < 0 || seals & required != required {
+    let seals = sys::get_seals(fd.as_fd()).map_err(|_| RingError::ObjectValidationFailed)?;
+    if seals & sys::RING_SEALS != sys::RING_SEALS {
         return Err(RingError::ObjectValidationFailed);
     }
     Ok(())
 }
 
 fn create_linux_memfd(len: usize) -> Result<OwnedFd, RingError> {
-    let name = c"shm-transport";
-    // SAFETY: static name is valid and flags request sealing support.
-    let raw = unsafe {
-        libc::syscall(
-            libc::SYS_memfd_create,
-            name.as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        ) as libc::c_int
-    };
-    if raw < 0 {
-        return Err(RingError::ObjectSetupFailed);
-    }
-    // SAFETY: successful memfd_create returns newly owned descriptor.
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let fd = sys::memfd_create(c"shm-transport").map_err(|_| RingError::ObjectSetupFailed)?;
     let len = libc::off_t::try_from(len).map_err(|_| RingError::ArithmeticOverflow)?;
-    // SAFETY: fd is valid and length was checked.
-    if unsafe { libc::ftruncate(fd.as_raw_fd(), len) } != 0
-        // SAFETY: fd is valid and mode removes group/other access.
-        || unsafe { libc::fchmod(fd.as_raw_fd(), 0o600) } != 0
-    {
-        return Err(RingError::ObjectSetupFailed);
-    }
+    sys::ftruncate(fd.as_fd(), len)
+        .and_then(|()| sys::fchmod(fd.as_fd(), 0o600))
+        .map_err(|_| RingError::ObjectSetupFailed)?;
     Ok(fd)
 }
 
 fn seal_object(fd: &OwnedFd) -> Result<(), RingError> {
-    let seals = libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
-    // SAFETY: fd supports seals because it was created with MFD_ALLOW_SEALING.
-    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
-        return Err(RingError::ObjectSetupFailed);
-    }
-    Ok(())
+    sys::add_seals(fd.as_fd(), sys::RING_SEALS).map_err(|_| RingError::ObjectSetupFailed)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
@@ -2953,7 +2819,7 @@ mod tests {
 
     use super::{
         Doorbell, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError, RingGrant,
-        SyscallCounters, removal_ranges, residency_vector_len, wire_v2_header,
+        SyscallCounters, removal_ranges, residency_vector_len, sys, wire_v2_header,
     };
 
     fn ring() -> Ring {
@@ -3005,16 +2871,9 @@ mod tests {
         assert_eq!(ring.syscall_counters().since(before).page_removals, 1);
     }
 
-    fn clear_nonblock(fd: &OwnedFd) {
-        // SAFETY: F_GETFL and F_SETFL act on a live owned descriptor.
-        unsafe {
-            let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
-            assert!(flags >= 0);
-            assert_eq!(
-                libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK),
-                0
-            );
-        }
+    fn clear_nonblock(fd: impl AsFd) {
+        let stream = UnixStream::from(fd.as_fd().try_clone_to_owned().unwrap());
+        stream.set_nonblocking(false).unwrap();
     }
 
     #[test]
@@ -3025,23 +2884,23 @@ mod tests {
             Err(RingError::DoorbellFailed)
         ));
 
-        // SAFETY: eventfd returns a fresh owned descriptor on success.
-        let eventfd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        assert!(eventfd >= 0);
-        // SAFETY: the successful eventfd result transfers ownership here.
-        let eventfd = unsafe { OwnedFd::from_raw_fd(eventfd) };
+        let eventfd = sys::eventfd().unwrap();
         assert!(matches!(
             Doorbell::from_fd(eventfd),
             Err(RingError::DoorbellFailed)
         ));
 
-        // SAFETY: socket returns a fresh owned descriptor on success.
-        let unconnected = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-        assert!(unconnected >= 0);
-        // SAFETY: the successful socket result transfers ownership here.
-        let unconnected = unsafe { OwnedFd::from_raw_fd(unconnected) };
+        let unconnected = sys::unix_stream_socket().unwrap();
         assert!(matches!(
             Doorbell::from_fd(unconnected),
+            Err(RingError::DoorbellFailed)
+        ));
+
+        // `drain` reads a zero-length `recv` as peer close, which a datagram socket makes
+        // ambiguous, so `SO_TYPE` must reject it even though it is connected and `AF_UNIX`.
+        let (datagram, _datagram_peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        assert!(matches!(
+            Doorbell::from_fd(OwnedFd::from(datagram)),
             Err(RingError::DoorbellFailed)
         ));
 
@@ -3345,28 +3204,10 @@ mod tests {
         let ring = ring();
         let (descriptors, grant) = ring.attachment().unwrap().into_parts();
         let [_, data_ready, capacity_ready] = descriptors;
-        // SAFETY: static name and flags are valid for memfd_create.
-        let raw = unsafe {
-            libc::syscall(
-                libc::SYS_memfd_create,
-                c"shm-short-test".as_ptr(),
-                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-            ) as libc::c_int
-        };
-        assert!(raw >= 0);
-        // SAFETY: successful memfd_create returned a new owned descriptor.
-        let short = unsafe { OwnedFd::from_raw_fd(raw) };
-        // SAFETY: fd is valid; the length is one page short of the grant.
-        unsafe {
-            assert_eq!(
-                libc::ftruncate(
-                    short.as_raw_fd(),
-                    (ring.object_size() - super::system_page_size()) as libc::off_t
-                ),
-                0
-            );
-            assert_eq!(libc::fchmod(short.as_raw_fd(), 0o600), 0);
-        }
+        let short = sys::memfd_create(c"shm-short-test").unwrap();
+        let short_len = (ring.object_size() - super::system_page_size()) as libc::off_t;
+        sys::ftruncate(short.as_fd(), short_len).unwrap();
+        sys::fchmod(short.as_fd(), 0o600).unwrap();
         super::seal_object(&short).unwrap();
         assert!(matches!(
             Ring::attach([short, data_ready, capacity_ready], grant),
@@ -3445,29 +3286,15 @@ mod tests {
         let ring = ring();
         let (descriptors, grant) = ring.attachment().unwrap().into_parts();
         for descriptor in &descriptors {
-            // SAFETY: F_GETFD and F_SETFD act on a live owned descriptor.
-            unsafe {
-                let flags = libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD);
-                assert!(flags >= 0);
-                assert_eq!(
-                    libc::fcntl(
-                        descriptor.as_raw_fd(),
-                        libc::F_SETFD,
-                        flags & !libc::FD_CLOEXEC
-                    ),
-                    0
-                );
-            }
+            sys::clear_cloexec(descriptor.as_fd()).unwrap();
         }
         let raw = descriptors.each_ref().map(AsRawFd::as_raw_fd);
         let attached = Ring::attach(descriptors, grant).unwrap();
         for fd in raw {
-            // SAFETY: the attached ring keeps these descriptors open.
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-            assert!(flags >= 0);
-            assert_ne!(
-                flags & libc::FD_CLOEXEC,
-                0,
+            // SAFETY: the attached ring keeps these descriptors open until `drop(attached)`.
+            let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+            assert!(
+                sys::is_cloexec(borrowed).unwrap(),
                 "descriptor {fd} stayed inheritable"
             );
         }
