@@ -469,11 +469,13 @@ impl InstanceGuard {
 
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
-        self.remove_setup_socket();
         // Idempotent: the graceful path already removed the publication and
         // took the retained identity, making this a no-op. The same
         // best-effort identity checks run before unlink on the drop path.
+        // The publication is withdrawn before the endpoint it advertises is unlinked,
+        // so a client that reads the publication is not directed at a socket that no longer exists.
         self.remove_publication();
+        self.remove_setup_socket();
         self.remove_lifecycle_record();
     }
 }
