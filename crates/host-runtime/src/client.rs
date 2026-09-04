@@ -602,6 +602,8 @@ impl Client {
             })
             .unwrap_or(false);
         if !acknowledged {
+            // A channel-0 response that is not the tagged JSON object §7.1 requires is framing corruption, not an application result.
+            self.inner.retire("invalid_shutdown_response");
             return Err(CallError::local(
                 SendOutcome::Terminal,
                 "invalid_shutdown_response",
@@ -645,7 +647,9 @@ impl Client {
                 None,
             )
             .await?;
+        // A channel-0 response that is not the tagged JSON object §7.1 requires is framing corruption, not an application result.
         let decoded = serde_json::from_slice::<WireStatus>(&response.body).map_err(|_| {
+            self.inner.retire("invalid_host_status_response");
             CallError::local(
                 SendOutcome::Terminal,
                 "invalid_host_status_response",
@@ -653,6 +657,7 @@ impl Client {
             )
         })?;
         let invalid_identity = || {
+            self.inner.retire("invalid_host_status_response");
             CallError::local(
                 SendOutcome::Terminal,
                 "invalid_host_status_response",
@@ -1386,6 +1391,34 @@ impl Inner {
             }
             FrameType::Push => {}
             FrameType::Response | FrameType::Error | FrameType::StreamEnd => {
+                // A malformed `Error` body is structurally illegal (§6.2) and closes the generation whether or not a correlation matches.
+                let host_error = if header.ty == FrameType::Error {
+                    match CallError::host_terminal(&body) {
+                        Some(error) => Some(error),
+                        None => {
+                            drop(charge);
+                            let key = PendingKey {
+                                channel: header.channel,
+                                epoch: header.epoch,
+                                corr: header.corr,
+                            };
+                            if let Some(state) = lock_unpoisoned(&self.pending).remove(&key) {
+                                self.finish_pending(
+                                    state,
+                                    CallError::local(
+                                        SendOutcome::OutcomeUnknown,
+                                        "protocol_violation",
+                                        "host sent a malformed error body",
+                                    ),
+                                );
+                            }
+                            self.retire("protocol_violation");
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
                 let key = PendingKey {
                     channel: header.channel,
                     epoch: header.epoch,
@@ -1399,27 +1432,6 @@ impl Inner {
                         self.release_stranded_route(&body);
                     }
                     return;
-                };
-                // A malformed `Error` body is structurally illegal (§6.2) and closes the generation.
-                let host_error = if header.ty == FrameType::Error {
-                    match CallError::host_terminal(&body) {
-                        Some(error) => Some(error),
-                        None => {
-                            drop(charge);
-                            self.finish_pending(
-                                state,
-                                CallError::local(
-                                    SendOutcome::OutcomeUnknown,
-                                    "protocol_violation",
-                                    "host sent a malformed error body",
-                                ),
-                            );
-                            self.retire("protocol_violation");
-                            return;
-                        }
-                    }
-                } else {
-                    None
                 };
                 match state.kind {
                     PendingKind::Unary(tx) => {
@@ -1757,9 +1769,12 @@ impl Drop for UnaryAdmissionGuard {
             self.inner.cancel_key(self.key, "caller_dropped"),
             Ok(PendingRemoval::AlreadyTaken)
         ) && self.key.channel == 0
-            && let Ok(Ok(retained)) = self.rx.try_recv()
         {
-            self.inner.release_stranded_route(&retained.response.body);
+            // `close` makes a concurrent `tx.send` fail and hand the value back to `dispatch`, which releases it; a value already sent is still readable here.
+            self.rx.close();
+            if let Ok(Ok(retained)) = self.rx.try_recv() {
+                self.inner.release_stranded_route(&retained.response.body);
+            }
         }
     }
 }
@@ -4641,6 +4656,27 @@ mod tests {
         let error = rx.await.expect("settled").expect_err("retired");
         assert_eq!(error.code(), "protocol_violation");
         assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_error_for_an_unmatched_correlation_still_retires() {
+        // Structural validation precedes the stale-terminal drop (§6.2).
+        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let body = b"garbage".to_vec();
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Error,
+                flags: response_flags(false, false),
+                channel: 7,
+                epoch: 1,
+                corr: 99,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(inner.retired.load(Ordering::Acquire));
     }
 
     #[tokio::test]

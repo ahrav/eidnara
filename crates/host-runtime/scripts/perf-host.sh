@@ -13,34 +13,33 @@ SHM_BENCH=""
 # crates/host-runtime/tests/perf_budget_runner.rs).
 BUDGET_RATES="${BUDGET_RATES:-20000 50000 80000}"
 
-budget_build() {
-  local out
-  out=$(cd "$ROOT" && cargo bench -p host-runtime --bench ipc_budget --no-run --locked 2>&1) || {
+# Builds one bench target and prints the executable path Cargo reports.
+# Cargo's `Executable <src> (<path>)` line names the artifact under whatever
+# target directory is configured (CARGO_TARGET_DIR, build.target-dir): relative
+# to the build cwd when it lies beneath it, absolute otherwise. The path is
+# taken as printed rather than reconstructed under $ROOT/target.
+bench_binary() {
+  local package="${1:?package}" bench="${2:?bench}" out path
+  out=$(cd "$ROOT" && cargo bench -p "$package" --bench "$bench" --no-run --locked 2>&1) || {
     echo "$out"
-    echo "bench build failed" >&2
+    echo "$bench bench build failed" >&2
     exit 1
   }
-  BUDGET_BENCH=$(echo "$out" | grep -oE 'target/release/deps/ipc_budget-[0-9a-f]+' | tail -1)
-  [[ -n "$BUDGET_BENCH" && -x "$ROOT/$BUDGET_BENCH" ]] || {
-    echo "could not locate ipc_budget bench binary" >&2
+  path=$(echo "$out" | sed -nE "s#^[[:space:]]*Executable [^(]*\(([^)]*/${bench}-[0-9a-f]+)\)\$#\1#p" | tail -1)
+  [[ -z "$path" || "$path" = /* ]] || path="$ROOT/$path"
+  [[ -n "$path" && -x "$path" ]] || {
+    echo "could not locate $bench bench binary" >&2
     exit 1
   }
-  BUDGET_BENCH="$ROOT/$BUDGET_BENCH"
+  printf '%s\n' "$path"
+}
+
+budget_build() {
+  BUDGET_BENCH=$(bench_binary host-runtime ipc_budget)
 }
 
 shm_build() {
-  local out
-  out=$(cd "$ROOT" && cargo bench -p shm-transport --bench hardware_envelope --no-run --locked 2>&1) || {
-    echo "$out"
-    echo "shared-memory evidence build failed" >&2
-    exit 1
-  }
-  SHM_BENCH=$(echo "$out" | grep -oE 'target/release/deps/hardware_envelope-[0-9a-f]+' | tail -1)
-  [[ -n "$SHM_BENCH" && -x "$ROOT/$SHM_BENCH" ]] || {
-    echo "could not locate hardware_envelope bench binary" >&2
-    exit 1
-  }
-  SHM_BENCH="$ROOT/$SHM_BENCH"
+  SHM_BENCH=$(bench_binary shm-transport hardware_envelope)
 }
 
 shm_run() {
