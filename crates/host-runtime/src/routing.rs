@@ -473,7 +473,6 @@ mod tests {
             read_tasks: tokio_util::task::TaskTracker::new(),
             shutdown_complete: CancellationToken::new(),
             writer,
-            membership: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             pings: Mutex::new(HashMap::new()),
             busy_rejects: Arc::new(tokio::sync::Semaphore::new(4)),

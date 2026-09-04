@@ -735,7 +735,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "761242be15d800c978d9e26fafcfa4322b2ff9b128923d7bd0861ff8ba074fe0",
+      "destination_sha256": "6eb92ec40fc48794c51fdfaec52160cd37e6137e22ec4174b033645e53fa375d",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -746,7 +746,7 @@
     {
       "source": null,
       "destination": "Cargo.lock",
-      "destination_sha256": "7b6ce944ce086ef6e68d4292c7eca4cac4dd6ab3771b45a4c61bb73fb3fee74d",
+      "destination_sha256": "ac46396b782ca05155cfe595f12d67a74837159ad3d0997892378c47d27e5d35",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -778,7 +778,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "3ac4a44e788e8aa533cf5b3980added7a1184f50620ecb02caf9f0cf6fdc1fcc",
+      "destination_sha256": "c9b2548b6b9af4de09ad50170b7dc6991257d93ef0d33df381f36723a21ef344",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

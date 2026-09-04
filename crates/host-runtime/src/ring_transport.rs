@@ -703,7 +703,11 @@ async fn receive_one(
         tokio::select! {
             biased;
             // An available budget charges before the lifecycle arms are polled, so a frame committed before read cancellation still drains; only a frame that must wait for budget yields to cancellation. commentlint: allow(JUDGE)
-            charge = &mut charge => break charge,
+            charge = &mut charge => match charge {
+                Some(charge) => break charge,
+                // The declared body exceeds the ingress budget's capacity outright; no release can admit it.
+                None => return Err(ReadClose::Overloaded),
+            },
             // Read cancellation stops only the read side: dropping `lease` discards the frame and `Ok(false)` lets the writer keep draining. commentlint: allow(JUDGE)
             () = read_cancel.cancelled() => return Ok(false),
             // The endpoint loop observes `discard` and exits; the dropped lease discards the frame. commentlint: allow(JUDGE)
@@ -1259,7 +1263,9 @@ mod tests {
         let cancel = CancellationToken::new();
         let cancellation = cancel.clone();
         let root = CancellationToken::new();
-        let budget = ByteBudget::new(0);
+        // A held charge leaves the budget genuinely waiting; a zero-capacity budget would refuse the frame outright.
+        let budget = ByteBudget::new(1);
+        let _held = budget.try_charge(1).expect("hold the only byte");
         let receive = receive_one(
             &rings,
             &mut queue,
@@ -1308,7 +1314,8 @@ mod tests {
             frame_sender(1, CancellationToken::new(), Duration::from_secs(1));
         let discard = queue.discard.clone();
         let (inbound, _received) = mpsc::channel(1);
-        let budget = ByteBudget::new(0);
+        let budget = ByteBudget::new(1);
+        let _held = budget.try_charge(1).expect("hold the only byte");
         let root = CancellationToken::new();
         let read_cancel = CancellationToken::new();
         let receive = receive_one(
@@ -1756,6 +1763,8 @@ mod tests {
     #[tokio::test]
     async fn root_cancellation_ends_a_budget_wait() {
         let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let budget = ByteBudget::new(1);
+        let _held = budget.try_charge(1).expect("hold the only byte");
         let PreparedRing {
             descriptor,
             descriptors,
@@ -1765,7 +1774,7 @@ mod tests {
             root,
             ..
         } = transport
-            .prepare(ByteBudget::new(0), 8, Duration::from_secs(30))
+            .prepare(budget.clone(), 8, Duration::from_secs(30))
             .expect("ring prepares");
         let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
             .expect("peer attaches");
@@ -1784,7 +1793,7 @@ mod tests {
             StdInstant::now() + Duration::from_secs(1),
         )
         .expect("peer publishes one frame");
-        // A zero budget parks the endpoint in the ingress wait for this frame.
+        // The held byte parks the endpoint in the ingress wait for this frame.
         tokio::time::sleep(Duration::from_millis(100)).await;
         root.cancel();
         tokio::time::timeout(Duration::from_secs(1), io)

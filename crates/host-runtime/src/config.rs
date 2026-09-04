@@ -53,6 +53,7 @@ pub const UNSTAGED_PAYLOAD_MANIFEST_DIGEST: &str =
 pub struct HostLimits {
     /// The host closes excess unauthenticated sockets without reading client bytes.
     pub max_handshakes: usize,
+    /// `max_connections` cannot exceed [`crate::ring_transport::affordable_connections`], the default.
     pub max_connections: usize,
     /// `max_routes` limits live routes across all connections and cannot exceed the `u16` channel namespace.
     /// namespace).
@@ -76,7 +77,8 @@ impl Default for HostLimits {
     fn default() -> Self {
         Self {
             max_handshakes: 32,
-            max_connections: 64,
+            max_connections: usize::try_from(crate::ring_transport::affordable_connections())
+                .unwrap_or(usize::MAX),
             max_routes: 1024,
             max_pending_requests: 1024,
             max_handler_tasks: 256,
@@ -119,6 +121,16 @@ impl HostLimits {
                 name: "max_routes",
                 configured: self.max_routes,
                 maximum: u16::MAX as usize,
+            });
+        }
+        // Ring admission refuses more connections than the resident arena ceiling affords, so the connection gate and ring admission share one bound.
+        let affordable =
+            usize::try_from(crate::ring_transport::affordable_connections()).unwrap_or(usize::MAX);
+        if self.max_connections > affordable {
+            return Err(ConfigError::LimitTooLarge {
+                name: "max_connections",
+                configured: self.max_connections,
+                maximum: affordable,
             });
         }
         if self.max_resident_bytes < MIN_RESIDENT_BYTES {

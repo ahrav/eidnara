@@ -9,7 +9,6 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
-use std::time::Duration;
 
 #[cfg(test)]
 use rustix::io::FdFlags;
@@ -272,6 +271,9 @@ pub async fn receive_grant(
 }
 
 /// Performs current-format activation and commit on the control-only socket.
+///
+/// `deadline` is the caller's absolute setup deadline; grant, activation read, and commit
+/// use it rather than fresh time windows.
 pub async fn activate_server(
     stream: &mut UnixStream,
     descriptors: &[OwnedFd; RING_DESCRIPTOR_COUNT],
@@ -279,11 +281,8 @@ pub async fn activate_server(
     wire_version: u8,
     descriptor_schema: u16,
     activation_token: &str,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<(), SetupError> {
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or(SetupError::Timeout)?;
     send_grant(
         stream,
         &GrantMessage {
@@ -322,14 +321,14 @@ pub async fn activate_server(
     }
 }
 
-/// Receives, validates, and commits the sole current ring on a client setup socket.
+/// Receives and validates the sole current ring grant on a client setup socket, stopping at
+/// `Activated`. The caller attaches the returned descriptors and then calls
+/// [`commit_activation`]; the host records an activated connection only at commit, so a
+/// client that cannot attach never leaves one behind (protocol §6).
 pub async fn activate_client(
     stream: &mut UnixStream,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<(serde_json::Value, [OwnedFd; RING_DESCRIPTOR_COUNT]), SetupError> {
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or(SetupError::Timeout)?;
     let (value, descriptors) = receive_grant(stream, deadline).await?;
     // Serde does not validate the `type` tag while deserializing `GrantMessage`,
     // so any object carrying the four grant fields would otherwise decode as a
@@ -364,6 +363,14 @@ pub async fn activate_client(
     ) {
         return Err(SetupError::InvalidMessage);
     }
+    Ok((descriptor, descriptors))
+}
+
+/// Commits an activation whose descriptors the client has already attached.
+pub async fn commit_activation(
+    stream: &mut UnixStream,
+    deadline: Instant,
+) -> Result<(), SetupError> {
     write_message(stream, &ClientMessage::Commit, deadline).await?;
     if !matches!(
         read_message(stream, deadline).await?,
@@ -371,7 +378,7 @@ pub async fn activate_client(
     ) {
         return Err(SetupError::InvalidMessage);
     }
-    Ok((descriptor, descriptors))
+    Ok(())
 }
 
 #[allow(dead_code)] // U1: used by client (U2)
@@ -480,6 +487,7 @@ fn encode_message<T: Serialize>(value: &T) -> Result<Vec<u8>, SetupError> {
 mod tests {
     use super::*;
     use std::os::fd::OwnedFd;
+    use std::time::Duration;
 
     fn descriptors() -> [OwnedFd; RING_DESCRIPTOR_COUNT] {
         std::array::from_fn(|_| tempfile::tempfile().expect("temporary descriptor").into())
@@ -642,7 +650,7 @@ mod tests {
                 2,
                 shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
-                Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(1),
             )
             .await
         });
@@ -673,7 +681,7 @@ mod tests {
                 2,
                 shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
-                Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(1),
             )
             .await?;
             Ok::<_, SetupError>(observe_peer(&mut server).await)
@@ -739,7 +747,7 @@ mod tests {
                 2,
                 shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
-                Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(1),
             )
             .await
         });
@@ -805,7 +813,7 @@ mod tests {
                     crate::wire::PROTOCOL_VERSION,
                     shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                     "token",
-                    Duration::from_secs(1),
+                    Instant::now() + Duration::from_secs(1),
                 )
                 .await
             });
@@ -861,7 +869,7 @@ mod tests {
             });
 
             assert!(matches!(
-                activate_client(&mut client, Duration::from_secs(1)).await,
+                activate_client(&mut client, Instant::now() + Duration::from_secs(1)).await,
                 Err(SetupError::InvalidIdentity)
             ));
             assert!(
@@ -916,7 +924,8 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(1);
             // Only the correctly typed payload reaches the activate write; the
             // server side is never driven, so that path times out on the read.
-            let outcome = activate_client(&mut client, Duration::from_millis(200)).await;
+            let outcome =
+                activate_client(&mut client, Instant::now() + Duration::from_millis(200)).await;
             if expect_grant {
                 assert!(
                     matches!(outcome, Err(SetupError::Timeout)),

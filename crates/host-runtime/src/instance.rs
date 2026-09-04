@@ -360,19 +360,13 @@ impl InstanceGuard {
     /// descriptor, so the swap cannot cross filesystems or follow links.
     ///
     /// The publication is refused when `ConnectionInfo::validate` or the client reader rejects it:
-    /// a relative or non-UTF-8 `setup_socket`, an empty `daemon_ver`, or a serialized file over `MAX_CONNECTION_FILE_LEN`.
+    /// a relative or non-UTF-8 `setup_socket`, a `daemon_ver` that is empty, lacks the published prefix, or cannot fit the authentication frame, or a serialized file over `MAX_CONNECTION_FILE_LEN`.
     /// A file rejected by a conforming client must not be installed because publication would succeed but discovery would fail.
     pub fn publish(&mut self, setup_socket: &Path, daemon_ver: &str) -> Result<(), InstanceError> {
         if !setup_socket.is_absolute() {
             return Err(InstanceError::Insecure {
                 what: "relative setup socket path",
                 path: setup_socket.to_path_buf(),
-            });
-        }
-        if daemon_ver.is_empty() {
-            return Err(InstanceError::Insecure {
-                what: "empty daemon version",
-                path: self.dir_path.join(CONNECTION_FILE_NAME),
             });
         }
         let info = ConnectionInfo {
@@ -390,10 +384,17 @@ impl InstanceGuard {
             pid: std::process::id(),
             daemon_ver: daemon_ver.to_owned(),
         };
-        debug_assert!(
-            info.validate().is_ok(),
-            "publish must refuse every publication ConnectionInfo::validate rejects"
-        );
+        // The client reader applies `validate` to every publication, so a file it would refuse is never installed.
+        if let Err(error) = info.validate() {
+            let what = match error {
+                crate::connection_file::ConnectionFileError::Invalid(what) => what,
+                _ => "publication fails client validation",
+            };
+            return Err(InstanceError::Insecure {
+                what,
+                path: self.dir_path.join(CONNECTION_FILE_NAME),
+            });
+        }
         let json =
             serde_json::to_vec_pretty(&info).expect("connection info serialization cannot fail");
         if json.len() > MAX_CONNECTION_FILE_LEN {
@@ -1109,11 +1110,22 @@ mod tests {
                 ..
             })
         ));
-        let oversized = "v".repeat(MAX_CONNECTION_FILE_LEN);
+        assert!(matches!(
+            guard.publish(&guard.dir_path().join("setup.sock"), "test"),
+            Err(InstanceError::Insecure {
+                what: "daemon version lacks the published prefix",
+                ..
+            })
+        ));
+        let oversized = format!(
+            "{}{}",
+            crate::config::DAEMON_VER_PREFIX,
+            "v".repeat(MAX_CONNECTION_FILE_LEN)
+        );
         assert!(matches!(
             guard.publish(&guard.dir_path().join("setup.sock"), &oversized),
             Err(InstanceError::Insecure {
-                what: "connection file exceeds the discovery cap",
+                what: "daemon version cannot fit the authentication frame",
                 ..
             })
         ));

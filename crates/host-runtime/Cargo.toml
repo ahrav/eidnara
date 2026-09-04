@@ -1,0 +1,28 @@
+[package]
+name = "host-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Directly linked host for the context, Synapse, and Broca components."
+
+[lints.clippy]
+duplicate_mod = "allow"
+
+[dependencies]
+serde = { workspace = true }
+subtle = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+rustix = { workspace = true, features = ["fs", "net", "process"] }
+getrandom = { workspace = true }
+shm-transport = { workspace = true }
+
+[dev-dependencies]
+hmac = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "signal"] }
