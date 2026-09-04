@@ -18,3 +18,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[[bench]]
+name = "hardware_envelope"
+harness = false

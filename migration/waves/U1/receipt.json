@@ -23,7 +23,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "c5a0e305ecb34ab32ab87b0e65d1d28a7fe2fb04fc5b5b56d4816599e4ba3706",
+      "destination_sha256": "0a0e5c23d4ede4851a51e923ad82066f158083383a578c73d20c1c5f696779d4",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -122,7 +122,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "9a20deeea2598a4a85b7a717499505291c073b319ef385fab7c9ace69d477ce1",
+      "destination_sha256": "d88a7302dc5746488fa6a0aea814406df60c6360690b27889232cca13048a034",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

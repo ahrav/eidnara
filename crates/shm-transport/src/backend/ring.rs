@@ -470,6 +470,43 @@ impl Drop for Mapping {
     }
 }
 
+/// Syscalls this process has issued through a ring handle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyscallCounters {
+    /// `send`, `recv`, and `poll` calls on either doorbell.
+    pub doorbell: u64,
+    /// Blocking doorbell `poll` calls issued after a zero-timeout probe found nothing ready;
+    /// each is one park/wake transition.
+    pub parks: u64,
+    /// `madvise(MADV_REMOVE)` calls that punched dead arena pages.
+    pub page_removals: u64,
+}
+
+impl SyscallCounters {
+    /// Every counted syscall; `parks` is a subset of `doorbell`.
+    pub const fn total(self) -> u64 {
+        self.doorbell.wrapping_add(self.page_removals)
+    }
+
+    /// Field-wise sum.
+    pub const fn add(self, other: Self) -> Self {
+        Self {
+            doorbell: self.doorbell.wrapping_add(other.doorbell),
+            parks: self.parks.wrapping_add(other.parks),
+            page_removals: self.page_removals.wrapping_add(other.page_removals),
+        }
+    }
+
+    /// Field-wise difference, saturating at zero.
+    pub const fn since(self, earlier: Self) -> Self {
+        Self {
+            doorbell: self.doorbell.saturating_sub(earlier.doorbell),
+            parks: self.parks.saturating_sub(earlier.parks),
+            page_removals: self.page_removals.saturating_sub(earlier.page_removals),
+        }
+    }
+}
+
 /// One wake channel between the peers, built on a `socketpair`. Each socketpair endpoint has a
 /// separate open file description, so peer-set status flags such as `O_NONBLOCK` cannot
 /// affect `local`. `MSG_DONTWAIT` prevents blocking regardless of status flags, and
@@ -479,6 +516,7 @@ struct Doorbell {
     /// The peer's end. `attachment` moves it out, so after the handoff only the peer holds
     /// that end and its exit is visible here as EOF or `EPIPE`.
     remote: Cell<Option<OwnedFd>>,
+    counters: Cell<SyscallCounters>,
 }
 
 /// Each `drain` call consumes at most this many bytes; remaining bytes only cause a spurious
@@ -506,6 +544,7 @@ impl Doorbell {
         Ok(Self {
             local,
             remote: Cell::new(Some(remote)),
+            counters: Cell::new(SyscallCounters::default()),
         })
     }
 
@@ -526,7 +565,21 @@ impl Doorbell {
         Ok(Self {
             local: fd,
             remote: Cell::new(None),
+            counters: Cell::new(SyscallCounters::default()),
         })
+    }
+
+    fn counters(&self) -> SyscallCounters {
+        self.counters.get()
+    }
+
+    fn record(&self, parked: bool) {
+        let mut counters = self.counters.get();
+        counters.doorbell = counters.doorbell.wrapping_add(1);
+        if parked {
+            counters.parks = counters.parks.wrapping_add(1);
+        }
+        self.counters.set(counters);
     }
 
     fn duplicate(&self) -> Result<OwnedFd, RingError> {
@@ -543,6 +596,7 @@ impl Doorbell {
     fn signal(&self) -> Result<(), RingError> {
         let token = [1u8];
         loop {
+            self.record(false);
             // SAFETY: pointer and length describe one initialized byte.
             let result = unsafe {
                 libc::send(
@@ -568,6 +622,7 @@ impl Doorbell {
     fn drain(&self) -> Result<(), RingError> {
         let mut buffer = [0u8; DRAIN_BYTES];
         loop {
+            self.record(false);
             // SAFETY: pointer and length describe writable storage of `DRAIN_BYTES`.
             let result = unsafe {
                 libc::recv(
@@ -606,6 +661,14 @@ impl Doorbell {
             events: libc::POLLIN,
             revents: 0,
         };
+        // A signal that landed between the caller's last recheck and this call makes the
+        // blocking poll return at once; the probe keeps such a call out of `parks`.
+        self.record(false);
+        // SAFETY: poll receives one initialized pollfd.
+        if unsafe { libc::poll(&mut descriptor, 1, 0) } > 0 {
+            return Ok(true);
+        }
+        self.record(true);
         // SAFETY: poll receives one initialized pollfd.
         let result = unsafe { libc::poll(&mut descriptor, 1, timeout) };
         if result > 0 {
@@ -823,6 +886,8 @@ pub struct Ring {
     reserved_end: Cell<Option<u64>>,
     /// Logical arena position below which every reclaimed page has been removed.
     punched: Cell<u64>,
+    /// `madvise(MADV_REMOVE)` calls this handle has issued.
+    page_removals: Cell<u64>,
     /// Set once this handle has reserved. Only the producer knows its live reservation, so
     /// page removal is refused on any other handle.
     producer: Cell<bool>,
@@ -880,6 +945,7 @@ impl Ring {
             quarantined: Cell::new(false),
             reserved_end: Cell::new(None),
             punched: Cell::new(0),
+            page_removals: Cell::new(0),
             producer: Cell::new(false),
             published_allocations: allocation_shadow(profile.descriptor_depth()),
             producer_cursors: Cell::new(ProducerCursors {
@@ -942,6 +1008,7 @@ impl Ring {
             quarantined: Cell::new(false),
             reserved_end: Cell::new(None),
             punched: Cell::new(0),
+            page_removals: Cell::new(0),
             producer: Cell::new(false),
             published_allocations: allocation_shadow(depth),
             producer_cursors: Cell::new(producer_cursors),
@@ -974,6 +1041,18 @@ impl Ring {
     /// Duplicate of the data doorbell, for registering with an event loop that owns its fds.
     pub fn duplicate_data_ready(&self) -> Result<OwnedFd, RingError> {
         self.data_ready.duplicate()
+    }
+
+    /// Both doorbells plus page removals. The counts never reset, so a window is the
+    /// difference of two samples.
+    pub fn syscall_counters(&self) -> SyscallCounters {
+        self.data_ready
+            .counters()
+            .add(self.capacity_ready.counters())
+            .add(SyscallCounters {
+                page_removals: self.page_removals.get(),
+                ..SyscallCounters::default()
+            })
     }
 
     /// Prepares to block on the data doorbell. Records the wake generation, re-checks for
@@ -2122,6 +2201,8 @@ impl Ring {
             return Err(RingError::InvalidSharedState);
         }
         let remove = |offset, len| {
+            self.page_removals
+                .set(self.page_removals.get().wrapping_add(1));
             if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
                 return Err(RingError::PageRemovalFailed);
             }
@@ -2230,6 +2311,8 @@ impl Ring {
         .into_iter()
         .filter(|(_, len)| *len != 0)
         {
+            self.page_removals
+                .set(self.page_removals.get().wrapping_add(1));
             if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
                 return Err(RingError::PageRemovalFailed);
             }
@@ -2858,6 +2941,7 @@ fn seal_object(fd: &OwnedFd) -> Result<(), RingError> {
 mod tests {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
 
     use crate::arena::{ArenaError, MIN_ARENA_BYTES};
     use crate::descriptor::{
@@ -2869,7 +2953,7 @@ mod tests {
 
     use super::{
         Doorbell, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError, RingGrant,
-        removal_ranges, residency_vector_len, wire_v2_header,
+        SyscallCounters, removal_ranges, residency_vector_len, wire_v2_header,
     };
 
     fn ring() -> Ring {
@@ -2883,6 +2967,42 @@ mod tests {
             .unwrap();
         reservation.write(bytes).unwrap();
         reservation.commit(bytes.len()).unwrap();
+    }
+
+    #[test]
+    fn syscall_counters_track_only_actual_ring_syscalls() {
+        let ring = ring();
+        let before = ring.syscall_counters();
+        assert_eq!(before, SyscallCounters::default());
+
+        // No peer is parked and no page is dead, so publishing issues no syscall.
+        publish(&ring, b"quiet");
+        assert_eq!(ring.syscall_counters(), SyscallCounters::default());
+
+        // A wait on a ring with data returns before touching the doorbell.
+        assert!(ring.wait_for_data(Instant::now()).unwrap());
+        assert_eq!(ring.syscall_counters(), SyscallCounters::default());
+        ring.try_receive().unwrap().unwrap().release().unwrap();
+
+        // An empty ring parks once: one drain `recv` while arming, one probe `poll`, one
+        // blocking `poll`.
+        assert!(
+            !ring
+                .wait_for_data(Instant::now() + Duration::from_millis(5))
+                .unwrap()
+        );
+        assert_eq!(
+            ring.syscall_counters().since(before),
+            SyscallCounters {
+                doorbell: 3,
+                parks: 1,
+                page_removals: 0,
+            }
+        );
+
+        // The released frame's page is dead; `trim` punches it with one `madvise`.
+        ring.trim().unwrap();
+        assert_eq!(ring.syscall_counters().since(before).page_removals, 1);
     }
 
     fn clear_nonblock(fd: &OwnedFd) {

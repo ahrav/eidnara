@@ -27,6 +27,10 @@ pub mod arena;
 pub mod backend;
 /// Descriptor schema and validation for frames received from an untrusted peer.
 pub mod descriptor;
+/// Machine-readable evidence records emitted by the hardware-envelope bench.
+pub mod evidence;
+/// Fuzz and corpus-replay entry points for the strict byte decoders.
+pub mod harness;
 /// Receive leases: bounded raw views over the arena that release exactly once.
 pub mod lease;
 /// Close-state machine shared by the native addon and the host.
