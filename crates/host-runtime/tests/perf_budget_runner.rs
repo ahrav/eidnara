@@ -123,7 +123,7 @@ fn plan_blocks_expand_rates_and_cross_numa_tail() {
     let same_l3 = counterbalanced_schedule(2, &budget_arms());
     let cross = counterbalanced_schedule(2, &cross_arms());
 
-    let odd = ipc_budget::plan_block_entries(&same_l3[0], &cross[0], &rates);
+    let odd = ipc_budget::plan_block_entries(&same_l3[0], &cross[0], &rates, false);
     assert_eq!(
         odd,
         [
@@ -138,18 +138,17 @@ fn plan_blocks_expand_rates_and_cross_numa_tail() {
         ]
     );
 
-    // Even blocks reverse the same-L3 arm order and the cross-NUMA tail
-    // (matching the script's `arms` and `cross` arrays); the rate
-    // fan-out inside ring-open keeps the script's `for rate in
-    // $BUDGET_RATES` order.
-    let even = ipc_budget::plan_block_entries(&same_l3[1], &cross[1], &rates);
+    // Even blocks reverse the same-L3 arm order, the cross-NUMA tail, and
+    // the rate fan-out inside ring-open (matching the script's `arms`,
+    // `cross`, and reversed `$BUDGET_RATES` on even blocks).
+    let even = ipc_budget::plan_block_entries(&same_l3[1], &cross[1], &rates, true);
     assert_eq!(
         even,
         [
             "ring-throughput@same-l3",
-            "ring-open@same-l3:r20000",
-            "ring-open@same-l3:r50000",
             "ring-open@same-l3:r80000",
+            "ring-open@same-l3:r50000",
+            "ring-open@same-l3:r20000",
             "ring-serial@same-l3",
             "atomic-floor@same-l3",
             "ring-serial@cross-numa",

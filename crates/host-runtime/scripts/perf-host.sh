@@ -127,12 +127,18 @@ budget_block() {
   local block="$1"
   shift
   local arms=(atomic-floor ring-serial ring-open ring-throughput)
+  # shellcheck disable=SC2206
+  local rates=($BUDGET_RATES)
   if (((block - 1) % 2 == 1)); then
     arms=(ring-throughput ring-open ring-serial atomic-floor)
+    # The rate sweep reverses with the arms so within-block position is not confounded with offered rate.
+    local reversed=()
+    for ((i = ${#rates[@]} - 1; i >= 0; i--)); do reversed+=("${rates[i]}"); done
+    rates=("${reversed[@]}")
   fi
   for arm in "${arms[@]}"; do
     if [[ "$arm" == ring-open ]]; then
-      for rate in $BUDGET_RATES; do
+      for rate in "${rates[@]}"; do
         budget_collect ring-open same-l3 "$block" "$@" "EIDNARA_IPC_BUDGET_RATE=$rate"
       done
     else

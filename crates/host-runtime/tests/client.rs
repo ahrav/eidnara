@@ -131,7 +131,7 @@ async fn ring_terminal_is_typed_redacted_and_generation_remains_usable() {
         .await
         .expect_err("host returns Error terminal");
     assert_eq!(error.outcome(), SendOutcome::Terminal);
-    assert_eq!(error.code(), "stable_failure");
+    assert_eq!(error.code(), "host.stable_failure");
     assert!(!format!("{error:?} {error}").contains(sentinel));
 
     let body = mode_body(serde_json::json!({"mode": "echo", "after": "error"}));

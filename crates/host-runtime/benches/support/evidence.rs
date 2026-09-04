@@ -408,9 +408,13 @@ pub struct GapRow {
     /// Rows from different topology classes are not statistically comparable.
     pub class: Option<String>,
     pub pair: (u32, u32),
+    /// Median of per-batch means, each averaging `exchanges_per_batch` RTTs. Not a per-request order statistic.
     pub atomic_rtt_ns: f64,
+    /// Per-request median.
     pub ring_p50_ns: f64,
+    /// `ring_p50_ns - atomic_rtt_ns`: a per-request median against a batch mean, not a like-for-like median contrast.
     pub gap_ns: f64,
+    /// `ring_p50_ns / atomic_rtt_ns`.
     pub ratio: f64,
 }
 
@@ -575,10 +579,14 @@ pub fn median(values: &mut [f64]) -> Option<f64> {
     })
 }
 
+/// Fewer analysis units than this yields `None`: a resampled median of one or
+/// three blocks is zero-width or the observed range, not a 95% interval.
+pub const BOOTSTRAP_MIN_SAMPLES: usize = 5;
+
 /// Each bootstrap sample contains `values.len()` elements sampled with replacement.
 /// `seed` initializes the deterministic resampling sequence.
 pub fn bootstrap_interval(values: &[f64], iterations: u32, seed: u64) -> Option<(f64, f64)> {
-    if values.is_empty() || iterations == 0 {
+    if values.len() < BOOTSTRAP_MIN_SAMPLES || iterations == 0 {
         return None;
     }
     let mut state = seed.max(1);

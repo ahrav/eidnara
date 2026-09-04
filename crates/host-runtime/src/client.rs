@@ -5,7 +5,7 @@
 //! cancellation, and cleanup. Raw frame types never cross the public API.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt,
     io::Write as _,
@@ -76,11 +76,12 @@ const _: () = assert!(CLIENT_DATA_QUEUED_BYTES >= MAX_BODY_LEN as usize + HEADER
 /// An admitted connection must accept every otherwise-valid frame, so this reservation covers the framing maximum separately from `CLIENT_RETAINED_RESPONSE_BYTES`.
 /// `CLIENT_INBOUND_FRAME_BYTES` is a per-connection ceiling because one reader decodes one frame at a time.
 pub const CLIENT_INBOUND_FRAME_BYTES: usize = MAX_BODY_LEN as usize;
-/// `CLIENT_RETAINED_RESPONSE_BYTES` caps owner-wide bytes retained in pending stream queues and in unary responses their callers have not yet polled.
+/// `CLIENT_RETAINED_RESPONSE_BYTES` caps bytes retained in pending stream queues, and separately caps unary responses their callers have not yet polled.
 ///
 /// Queueing charges each item before a consumer reads it.
-/// Exhausting `CLIENT_RETAINED_RESPONSE_BYTES` cancels only the saturating stream or fails only the saturating unary request.
-/// `CLIENT_RETAINED_RESPONSE_BYTES` admits one maximum-sized item plus 1_048_576 bytes.
+/// The two pools are owner-wide, not per-request: exhausting one fails whichever frame charges it next, which need not be the frame holding the bytes.
+/// A failed stream item cancels only that stream; a failed unary response fails only that request.
+/// Each pool admits one maximum-sized item plus 1_048_576 bytes.
 /// One connection can retain at most `CLIENT_RETAINED_RESPONSE_BYTES + CLIENT_INBOUND_FRAME_BYTES` bytes.
 pub const CLIENT_RETAINED_RESPONSE_BYTES: usize = MAX_BODY_LEN as usize + 1_048_576;
 
@@ -152,9 +153,10 @@ impl CallError {
         value.get("message")?.as_str()?;
         // Raw terminal messages may contain request, credential, or identity data.
         // `CallError` retains the bounded terminal code and discards the raw terminal message.
+        // `host.` identifies host-supplied codes.
         Some(Self::new(
             SendOutcome::Terminal,
-            bounded_code(code),
+            format!("host.{}", bounded_code(code)),
             "host returned a terminal error (message redacted)",
         ))
     }
@@ -323,7 +325,18 @@ impl Client {
         .await
         .map_err(|_| ClientError::new("handshake_timeout", "client handshake timed out"))?
         .map_err(|_| ClientError::new("discovery_failed", "secure discovery failed"))?
-        .map_err(|_| ClientError::new("discovery_failed", "secure discovery failed"))?;
+        .map_err(|error| {
+            use crate::connection_file::ConnectionFileError as E;
+            let code = match error {
+                E::Replaced { .. } => "discovery_replaced",
+                E::Insecure { .. } => "discovery_insecure",
+                E::UnsupportedSchema { .. } | E::WireVersionMismatch { .. } => {
+                    "discovery_unsupported"
+                }
+                _ => "discovery_failed",
+            };
+            ClientError::new(code, "secure discovery failed")
+        })?;
         Self::connect_info(info, deadline).await
     }
 
@@ -377,6 +390,7 @@ impl Client {
         setup_tx.send(setup_stream).map_err(|_| setup_failed())?;
         let (data_tx, data_rx) = mpsc::channel(CLIENT_DATA_QUEUE_FRAMES);
         let (control_tx, control_rx) = mpsc::channel(CLIENT_CONTROL_QUEUE_FRAMES);
+        let bridge_wake = Arc::downgrade(&ring_tx.wake);
         let inner = Arc::new(Inner {
             daemon_id: info.daemon_id,
             daemon_ver: authenticated.daemon_ver,
@@ -392,12 +406,14 @@ impl Client {
             control_budget: Arc::new(ByteCounter::new(CLIENT_CONTROL_QUEUED_BYTES)),
             _read_budget: read_budget,
             retained_budget: Arc::new(ByteCounter::new(CLIENT_RETAINED_RESPONSE_BYTES)),
+            unary_budget: Arc::new(ByteCounter::new(CLIENT_RETAINED_RESPONSE_BYTES)),
             data_tx,
             control_tx,
             close_lock: tokio::sync::Mutex::new(()),
             reader: tokio::sync::Mutex::new(None),
             writer: tokio::sync::Mutex::new(None),
             bridge: Mutex::new(Some(bridge)),
+            bridge_wake,
         });
         let writer_inner = Arc::clone(&inner);
         let writer = tokio::spawn(async move {
@@ -504,10 +520,10 @@ impl Client {
                     if error.outcome == SendOutcome::Terminal
                         && matches!(
                             error.code.as_str(),
-                            "unknown_module"
-                                | "module_reloading"
-                                | "target_unavailable"
-                                | "module_timeout"
+                            "host.unknown_module"
+                                | "host.module_reloading"
+                                | "host.target_unavailable"
+                                | "host.module_timeout"
                         )
                         && Instant::now() < deadline =>
                 {
@@ -542,14 +558,6 @@ impl Client {
     ) -> Result<ResponseStream, CallError> {
         self.require_route(route)?;
         self.inner.start_stream(route, body, options)
-    }
-
-    /// Cancels one correlation on exactly the supplied route epoch.
-    pub fn cancel(&self, route: RouteHandle, correlation: u64) -> Result<(), CallError> {
-        self.require_route(route)?;
-        self.inner
-            .cancel_key(PendingKey::new(route, correlation), "cancelled")?;
-        Ok(())
     }
 
     /// Idempotently closes one exact route generation.
@@ -693,31 +701,25 @@ impl Client {
         if !already_closed {
             self.inner.settle_all("owner_close");
             let routes: Vec<_> = lock_unpoisoned(&self.inner.routes).drain().collect();
-            for route in routes {
+            let goodbyes = routes
+                .into_iter()
+                .map(|route| FrameId::routed(route, 0))
+                .chain(std::iter::once(FrameId::control(0)));
+            for id in goodbyes {
                 if self
                     .inner
-                    .send_control_wait(FrameType::Goodbye, FrameId::routed(route, 0), deadline)
+                    .send_control_wait(FrameType::Goodbye, id, deadline)
                     .await
                     .is_err()
                 {
-                    result = Err(ClientError::new(
-                        "shutdown_timeout",
-                        "client shutdown timed out",
-                    ));
+                    if !self.inner.retired.load(Ordering::Acquire) {
+                        result = Err(ClientError::new(
+                            "shutdown_timeout",
+                            "client shutdown timed out",
+                        ));
+                    }
                     break;
                 }
-            }
-            if result.is_ok()
-                && self
-                    .inner
-                    .send_control_wait(FrameType::Goodbye, FrameId::control(0), deadline)
-                    .await
-                    .is_err()
-            {
-                result = Err(ClientError::new(
-                    "shutdown_timeout",
-                    "client shutdown timed out",
-                ));
             }
             self.inner.cancel.cancel();
         }
@@ -857,10 +859,6 @@ impl ResponseStream {
             return Ok(());
         }
         self.finished = true;
-        // Buffered items retain `ByteCharge`s against the owner-wide retained-response budget.
-        // When `finished` is true, `next` cannot drain buffered items.
-        // Buffered items remain charged while the caller retains `ResponseStream`.
-        // Exhausting the retained-response budget retires the generation.
         // Close the response channel before draining it so the reader task cannot refill it.
         self.items.close();
         while self.items.try_recv().is_ok() {}
@@ -968,6 +966,9 @@ struct Inner {
     /// valid inbound frame; see `CLIENT_INBOUND_FRAME_BYTES`.
     _read_budget: Arc<ByteCounter>,
     retained_budget: Arc<ByteCounter>,
+    /// Unpolled unary responses. Separate from `retained_budget` so a stream
+    /// backlog cannot discard a successfully received unary response.
+    unary_budget: Arc<ByteCounter>,
     data_tx: mpsc::Sender<QueuedFrame>,
     control_tx: mpsc::Sender<QueuedFrame>,
     close_lock: tokio::sync::Mutex<()>,
@@ -975,6 +976,10 @@ struct Inner {
     writer: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     /// The ring bridge thread, joined by `join_tasks_until` after the writer and reader.
     bridge: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The bridge's poll eventfd. `retire` signals it so a drop-only teardown
+    /// does not depend on the writer task being polled again to wake the bridge.
+    /// `Weak` so the fd still closes with the writer and bridge, not with `Inner`.
+    bridge_wake: Weak<OwnedFd>,
 }
 
 impl Inner {
@@ -1214,6 +1219,16 @@ impl Inner {
                 return Err(error);
             }
         };
+        // Reserve inside the locks so a full queue rolls back the insert; the send itself
+        // runs the writer's waker and stays outside the locks.
+        let Ok(permit) = self.data_tx.try_reserve() else {
+            correlations.restore(corr);
+            return Err(CallError::local(
+                SendOutcome::NotSent,
+                "writer_queue_full",
+                "writer data queue is full",
+            ));
+        };
         pending.insert(
             key,
             PendingState {
@@ -1221,15 +1236,10 @@ impl Inner {
                 kind,
             },
         );
-        if self.data_tx.try_send(frame).is_err() {
-            pending.remove(&key);
-            correlations.restore(corr);
-            return Err(CallError::local(
-                SendOutcome::NotSent,
-                "writer_queue_full",
-                "writer data queue is full",
-            ));
-        }
+        drop(correlations);
+        drop(pending);
+        drop(_admission);
+        permit.send(frame);
         Ok((key, publish))
     }
 
@@ -1326,15 +1336,22 @@ impl Inner {
             )
         })?;
         // `send_control` uses the reserved pool so ordinary requests cannot prevent control-frame admission.
-        // self-inflicted teardown.
-        let charge = self.control_budget.charge(HEADER_LEN).ok_or_else(|| {
-            self.retire("control_capacity_exhausted");
+        // Non-`Cancel` control-capacity exhaustion retires the generation.
+        // Cancel is best-effort cleanup; its exhaustion does not retire the generation.
+        let exhausted = || {
+            if ty != FrameType::Cancel {
+                self.retire("control_capacity_exhausted");
+            }
             CallError::local(
                 SendOutcome::Terminal,
                 "control_capacity_exhausted",
                 "reserved control admission exhausted",
             )
-        })?;
+        };
+        let charge = self
+            .control_budget
+            .charge(HEADER_LEN)
+            .ok_or_else(exhausted)?;
         let frame = QueuedFrame {
             header,
             body: Vec::new(),
@@ -1344,12 +1361,7 @@ impl Inner {
             deadline: Instant::now() + CLIENT_FRAME_TIMEOUT,
         };
         if self.control_tx.try_send(frame).is_err() {
-            self.retire("control_capacity_exhausted");
-            return Err(CallError::local(
-                SendOutcome::Terminal,
-                "control_capacity_exhausted",
-                "reserved control admission exhausted",
-            ));
+            return Err(exhausted());
         }
         Ok(())
     }
@@ -1444,7 +1456,7 @@ impl Inner {
                                 // The response is retained until the caller polls it, so its bytes
                                 // move from the read reservation to the retained budget; a caller that
                                 // never polls cannot hold more than `CLIENT_RETAINED_RESPONSE_BYTES`.
-                                match self.retained_budget.charge(body.len()) {
+                                match self.unary_budget.charge(body.len()) {
                                     Some(retained) => Ok(RetainedResponse {
                                         response: Response {
                                             body,
@@ -1552,7 +1564,14 @@ impl Inner {
                         });
                         // The reader releases the read reservation when bytes are retained or discarded.
                         drop(charge);
-                        if item.is_none_or(|item| items.try_send(item).is_err()) {
+                        // Reserve under the lock, send after releasing it: `send` runs the consumer's waker.
+                        let items = items.clone();
+                        let permit =
+                            item.and_then(|item| items.try_reserve().ok().map(|p| (p, item)));
+                        if let Some((permit, item)) = permit {
+                            drop(pending);
+                            permit.send(item);
+                        } else {
                             let state = pending.remove(&key).expect("entry exists");
                             drop(pending);
                             self.finish_pending(
@@ -1705,6 +1724,9 @@ impl Inner {
         }
         self.settle_all(code);
         self.cancel.cancel();
+        if let Some(wake) = self.bridge_wake.upgrade() {
+            signal_eventfd(&wake);
+        }
     }
 
     async fn join_tasks_until(&self, deadline: Instant) -> bool {
@@ -1712,16 +1734,20 @@ impl Inner {
         // The shared deadline bounds total shutdown time across all tasks.
         // A `yield_now` loop re-queues itself every iteration.
         // A `yield_now` loop spins the worker for the whole shutdown budget.
+        // The handle stays in its slot while awaited so a cancelled `close()`
+        // leaves it for the next `close()` to join instead of detaching the task.
         for slot in [&self.writer, &self.reader] {
-            let Some(mut task) = slot.lock().await.take() else {
+            let mut slot = slot.lock().await;
+            let Some(task) = slot.as_mut() else {
                 continue;
             };
-            if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+            if tokio::time::timeout_at(deadline, &mut *task).await.is_err() {
                 within_deadline = false;
                 // `JoinHandle` must not be awaited again after it completes.
                 task.abort();
                 let _ = task.await;
             }
+            *slot = None;
         }
         // The bridge exits on its own once cancelled: the writer's dropped
         // `RingWriteSender` wakes its poll, the reader's dropped receiver fails
@@ -2192,82 +2218,125 @@ async fn start_ring_bridge(
     })
 }
 
+/// The bridge writes and completes one frame per iteration in receive order, so awaiting the head is FIFO-safe. commentlint: allow(JUDGE)
+const WRITER_WINDOW: usize = 32;
+
+struct InFlight {
+    publish: Option<Arc<AtomicU8>>,
+    ack: Option<oneshot::Sender<()>>,
+    charge: ByteCharge,
+    deadline: Instant,
+    completed: oneshot::Receiver<Result<(), SendFailure>>,
+}
+
 async fn writer_loop(
     inner: Arc<Inner>,
     write: RingWriteSender,
     mut data_rx: mpsc::Receiver<QueuedFrame>,
     mut control_rx: mpsc::Receiver<QueuedFrame>,
 ) {
-    loop {
-        let frame = if let Ok(frame) = control_rx.try_recv() {
-            frame
-        } else {
-            tokio::select! {
-                biased;
-                () = inner.cancel.cancelled() => break,
-                // `Inner` holds `control_tx` and `data_tx`, so a closed channel is unreachable while `inner` is held. commentlint: allow(JUDGE)
-                // Break on channel closure so every wait remains inside the cancellation `select!`.
-                frame = control_rx.recv() => match frame {
-                    Some(frame) => frame,
-                    None => break,
-                },
-                frame = data_rx.recv() => match frame {
-                    Some(frame) => frame,
-                    None => break,
-                },
-            }
-        };
-        if frame
-            .publish
-            .as_ref()
-            .is_some_and(|state| !claim_for_write(state))
-        {
-            continue;
-        }
-        let (completed_tx, completed_rx) = oneshot::channel();
-        if write
-            .try_send(RingWrite {
-                header: frame.header,
-                body: frame.body,
-                completed: completed_tx,
-                deadline: frame.deadline.into_std(),
-            })
-            .is_err()
-        {
-            // The bridge never received the frame, so nothing reached the ring.
-            if let Some(state) = &frame.publish {
+    let mut window: VecDeque<InFlight> = VecDeque::with_capacity(WRITER_WINDOW);
+    // Frames behind a failed head never reached the bridge's `try_recv`; they return to `QUEUED`.
+    let fail =
+        |inner: &Inner, window: &mut VecDeque<InFlight>, head_not_sent: Option<&InFlight>| {
+            if let Some(state) = head_not_sent.and_then(|h| h.publish.as_ref()) {
                 state.store(QUEUED, Ordering::Release);
             }
+            for rest in window.drain(..) {
+                if let Some(state) = &rest.publish {
+                    state.store(QUEUED, Ordering::Release);
+                }
+            }
             inner.retire("write_failed");
-            break;
+        };
+    loop {
+        let next = if window.len() < WRITER_WINDOW {
+            if let Ok(frame) = control_rx.try_recv() {
+                Some(frame)
+            } else if let Ok(frame) = data_rx.try_recv() {
+                Some(frame)
+            } else if window.is_empty() {
+                tokio::select! {
+                    biased;
+                    () = inner.cancel.cancelled() => break,
+                    // `Inner` holds `control_tx` and `data_tx`, so a closed channel is unreachable while `inner` is held. commentlint: allow(JUDGE)
+                    // Break on channel closure so every wait remains inside the cancellation `select!`.
+                    frame = control_rx.recv() => match frame {
+                        Some(frame) => Some(frame),
+                        None => break,
+                    },
+                    frame = data_rx.recv() => match frame {
+                        Some(frame) => Some(frame),
+                        None => break,
+                    },
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(frame) = next {
+            if frame
+                .publish
+                .as_ref()
+                .is_some_and(|state| !claim_for_write(state))
+            {
+                continue;
+            }
+            let (completed_tx, completed_rx) = oneshot::channel();
+            if write
+                .try_send(RingWrite {
+                    header: frame.header,
+                    body: frame.body,
+                    completed: completed_tx,
+                    deadline: frame.deadline.into_std(),
+                })
+                .is_err()
+            {
+                // The bridge never received the frame, so nothing reached the ring.
+                if let Some(state) = &frame.publish {
+                    state.store(QUEUED, Ordering::Release);
+                }
+                fail(&inner, &mut window, None);
+                break;
+            }
+            window.push_back(InFlight {
+                publish: frame.publish,
+                ack: frame.ack,
+                charge: frame.charge,
+                deadline: frame.deadline,
+                completed: completed_rx,
+            });
+            continue;
         }
+        let Some(mut head) = window.pop_front() else {
+            continue;
+        };
         let written = tokio::select! {
             biased;
             () = inner.cancel.cancelled() => break,
-            result = timeout_at(frame.deadline, completed_rx) => result,
+            result = timeout_at(head.deadline, &mut head.completed) => result,
         };
         match written {
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(SendFailure::Deadline | SendFailure::Unreserved))) => {
                 // Zero bytes reached the ring, so the frame returns to `QUEUED` and retirement classifies it `NotSent`.
-                if let Some(state) = &frame.publish {
-                    state.store(QUEUED, Ordering::Release);
-                }
-                inner.retire("write_failed");
+                fail(&inner, &mut window, Some(&head));
                 break;
             }
             _ => {
-                inner.retire("write_failed");
+                fail(&inner, &mut window, None);
                 break;
             }
         }
-        if let Some(state) = &frame.publish {
+        if let Some(state) = &head.publish {
             state.store(WRITTEN, Ordering::Release);
         }
-        if let Some(ack) = frame.ack {
+        if let Some(ack) = head.ack {
             let _ = ack.send(());
         }
-        drop(frame.charge);
+        drop(head.charge);
     }
 }
 
@@ -2593,12 +2662,14 @@ mod tests {
                 control_budget: Arc::new(ByteCounter::new(CLIENT_CONTROL_QUEUED_BYTES)),
                 _read_budget: Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
                 retained_budget: Arc::new(ByteCounter::new(CLIENT_RETAINED_RESPONSE_BYTES)),
+                unary_budget: Arc::new(ByteCounter::new(CLIENT_RETAINED_RESPONSE_BYTES)),
                 data_tx,
                 control_tx,
                 close_lock: tokio::sync::Mutex::new(()),
                 reader: tokio::sync::Mutex::new(None),
                 writer: tokio::sync::Mutex::new(None),
                 bridge: Mutex::new(None),
+                bridge_wake: Weak::new(),
             }),
             data_rx,
             control_rx,
@@ -4531,7 +4602,7 @@ mod tests {
         let error = CallError::host_terminal(&body).expect("canonical error body");
         let rendered = format!("{error:?} {error}");
         assert_eq!(error.outcome(), SendOutcome::Terminal);
-        assert_eq!(error.code(), "stable_code");
+        assert_eq!(error.code(), "host.stable_code");
         assert!(!rendered.contains(sentinel));
     }
 
@@ -4629,7 +4700,7 @@ mod tests {
             br#"{"code":"c","message":"m","retry_after_ms":5,"extra":true}"#,
         )
         .expect("unknown members are permitted");
-        assert_eq!(error.code(), "c");
+        assert_eq!(error.code(), "host.c");
     }
 
     #[tokio::test]
@@ -4716,7 +4787,7 @@ mod tests {
         assert!(claim_for_write(&publish));
         drop(data_rx.recv().await);
         deliver(first, vec![0u8; MAX_BODY_LEN as usize]);
-        assert_eq!(inner.retained_budget.used(), MAX_BODY_LEN as usize);
+        assert_eq!(inner.unary_budget.used(), MAX_BODY_LEN as usize);
 
         // The remaining 1 MiB admits a smaller response but not a second maximum one.
         let (kind, second_rx) = unary_sender();
@@ -4745,7 +4816,7 @@ mod tests {
         let retained = first_rx.await.expect("settled").expect("delivered");
         assert_eq!(retained.response.body.len(), MAX_BODY_LEN as usize);
         drop(retained);
-        assert_eq!(inner.retained_budget.used(), 0);
+        assert_eq!(inner.unary_budget.used(), 0);
         inner.retire("test_done");
     }
 
@@ -4776,7 +4847,7 @@ mod tests {
         assert!(claim_for_write(&publish));
         drop(data_rx.recv().await);
         deliver(filler, vec![0u8; CLIENT_RETAINED_RESPONSE_BYTES]);
-        assert_eq!(inner.retained_budget.used(), CLIENT_RETAINED_RESPONSE_BYTES);
+        assert_eq!(inner.unary_budget.used(), CLIENT_RETAINED_RESPONSE_BYTES);
 
         let control = RouteHandle {
             channel: 0,
