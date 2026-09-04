@@ -361,6 +361,9 @@ impl InstanceGuard {
             return;
         };
         if !is_secure_regular(&stat) {
+            // An extra link or loosened mode is not an identity mismatch.
+            // Either can be reverted before `Drop` runs, so the identity is retained.
+            self.publication = Some(identity);
             return;
         }
         // `Stat` field types vary by platform; macOS defines `st_dev` as `i32`.
@@ -374,6 +377,9 @@ impl InstanceGuard {
             return;
         };
         let Ok(info) = serde_json::from_slice::<ConnectionInfo>(&bytes) else {
+            // The inode already matched, so unparseable bytes are not evidence
+            // that another incarnation owns the name.
+            self.publication = Some(identity);
             return;
         };
         if info.daemon_id != self.daemon_id {
@@ -407,7 +413,6 @@ impl Drop for InstanceGuard {
 /// Observational callers must distinguish absent components from insecure or unreadable components.
 /// Mapping an insecure component to absence would report hostile persisted state as "nothing installed yet".
 /// Resolving each component through the previous pinned descriptor prevents intermediate symlinks from redirecting traversal.
-#[allow(dead_code)] // U1: used by generation (U2)
 pub(crate) fn open_secure_dir_existing(dir_path: &Path) -> Result<Option<OwnedFd>, InstanceError> {
     let mut current = open_safe_anchor(dir_path)
         .map_err(|e| io_err("open_anchor", dir_path, e))?
@@ -436,6 +441,14 @@ pub(crate) fn open_secure_dir_existing(dir_path: &Path) -> Result<Option<OwnedFd
         let next = match openat(&current, name, HARDENED_DIR_FLAGS, Mode::empty()) {
             Ok(fd) => fd,
             Err(rustix::io::Errno::NOENT) => return Ok(None),
+            // `O_NOFOLLOW` fails a symlink component with `ELOOP`; a non-directory
+            // component fails with `ENOTDIR`. Both are hostile shapes, not absence.
+            Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
+                return Err(InstanceError::Insecure {
+                    what: "managed directory component",
+                    path: walked.clone(),
+                });
+            }
             Err(e) => return Err(io_err("open_component", &walked, e)),
         };
         // Traversal must not resolve later components through a replaceable pathname.
@@ -511,6 +524,13 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
                         .map_err(|e| io_err("fchmod_component", &walked, e))?;
                 }
                 fd
+            }
+            // A symlink or non-directory at a managed name is a hostile shape, not an I/O fault.
+            Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
+                return Err(InstanceError::Insecure {
+                    what: "runtime directory component",
+                    path: walked.clone(),
+                });
             }
             Err(e) => return Err(io_err("open_component", &walked, e)),
         };
@@ -753,6 +773,13 @@ pub(crate) fn is_secure_regular(stat: &rustix::fs::Stat) -> bool {
     let mode = mode_bits(stat);
     (mode & S_IFMT) == S_IFREG
         && stat.st_nlink == 1
+        && stat.st_uid == rustix::process::geteuid().as_raw()
+        && mode & 0o077 == 0
+}
+
+pub(crate) fn is_owner_only_dir(stat: &rustix::fs::Stat) -> bool {
+    let mode = mode_bits(stat);
+    (mode & S_IFMT) == S_IFDIR
         && stat.st_uid == rustix::process::geteuid().as_raw()
         && mode & 0o077 == 0
 }
@@ -1211,6 +1238,46 @@ mod tests {
         assert!(
             file.exists(),
             "an unexpected second link means the file is not solely ours"
+        );
+
+        // `Drop` retries the deferred cleanup after the extra link is removed.
+        std::fs::remove_file(guard.dir_path().join("extra-link")).expect("drop extra link");
+        drop(guard);
+        assert!(
+            !file.exists(),
+            "a reverted link count must not leave the key-bearing publication behind"
+        );
+    }
+
+    /// A decode failure on the inode this guard published is not proof that a
+    /// successor owns the name, so `Drop` must still retry once the bytes are sane.
+    #[test]
+    fn unparseable_bytes_on_our_own_inode_defer_rather_than_abandon_cleanup() {
+        let root = temp_root();
+        let mut guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
+        guard
+            .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
+            .expect("publish");
+        let file = published(&guard);
+        let original = std::fs::read(&file).expect("read");
+
+        // Truncating the file preserves its inode while making its contents unparseable.
+        let fd = openat(CWD, &file, OFlags::WRONLY | OFlags::TRUNC, Mode::empty())
+            .expect("reopen in place");
+        write_all_fd(&fd, b"{\"schema\":").expect("corrupt");
+        drop(fd);
+        guard.remove_publication();
+        assert!(file.exists(), "corrupt bytes must not be unlinked blindly");
+
+        // Restoring the bytes in place leaves the inode unchanged and still ours.
+        let fd = openat(CWD, &file, OFlags::WRONLY | OFlags::TRUNC, Mode::empty())
+            .expect("reopen in place");
+        write_all_fd(&fd, &original).expect("restore");
+        drop(fd);
+        drop(guard);
+        assert!(
+            !file.exists(),
+            "cleanup must retry after a transient decode failure on our own inode"
         );
     }
 

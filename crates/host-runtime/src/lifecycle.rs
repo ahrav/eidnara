@@ -14,9 +14,10 @@ use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags, flock, openat, unlinkat}
 use crate::connection_file::{ConnectionInfo, KEY_LEN};
 
 use crate::instance::{
-    CONNECTION_FILE_NAME, InstanceError, InstanceGuard, S_IFDIR, S_IFMT, S_IFREG, data_dir_path,
-    flock_bounded, flock_exclusive_bounded, hex, io_err, is_safe_ancestor, is_secure_regular,
-    mode_bits, read_all_fd, runtime_dir_path, secure_runtime_dir,
+    CONNECTION_FILE_NAME, InstanceError, InstanceGuard, S_IFMT, S_IFREG, data_dir_path,
+    flock_bounded, flock_exclusive_bounded, hex, io_err, is_owner_only_dir, is_safe_ancestor,
+    is_secure_regular, mode_bits, open_secure_dir_existing, read_all_fd, runtime_dir_path,
+    secure_runtime_dir,
 };
 
 /// `LIFECYCLE_RECORD_NAME` identifies the lifecycle record in the runtime directory.
@@ -129,7 +130,8 @@ fn open_coordination_lock_probe(
     name: &'static str,
 ) -> Result<Option<(OwnedFd, PathBuf)>, InstanceError> {
     let dir_path = coordination_dir_path(data_dir_override)?;
-    let Some(dir) = open_validated_dir(&dir_path, "coordination directory")? else {
+    let Some(dir) = open_validated_dir(&dir_path, "coordination directory", LeafPolicy::OwnerOnly)?
+    else {
         return Ok(None);
     };
     let path = dir_path.join(name);
@@ -506,6 +508,8 @@ struct AnchorEntry {
     _fd: OwnedFd,
     dev: u64,
     ino: u64,
+    /// `verify` re-opens the entry under the same leaf policy `capture` used.
+    leaf: LeafPolicy,
 }
 
 impl std::fmt::Debug for NamespaceAnchor {
@@ -537,8 +541,14 @@ impl NamespaceAnchor {
     pub fn capture(data_dir_override: Option<&Path>) -> Result<Self, InstanceError> {
         let base = crate::instance::managed_dir_path(data_dir_override)?;
         let mut entries = Vec::new();
-        for path in [base.clone(), base.join("lifecycle"), base.join("run")] {
-            let Some(fd) = open_validated_dir(&path, "managed namespace directory")? else {
+        // `InstanceGuard::acquire` validates `eidnara` only as an ancestor of `run`
+        // and tightens `run` itself, so the anchor applies the same two policies.
+        for (path, leaf) in [
+            (base.clone(), LeafPolicy::SafeAncestor),
+            (base.join("lifecycle"), LeafPolicy::OwnerOnly),
+            (base.join("run"), LeafPolicy::OwnerOnly),
+        ] {
+            let Some(fd) = open_validated_dir(&path, "managed namespace directory", leaf)? else {
                 continue;
             };
             let stat = rustix::fs::fstat(&fd).map_err(|e| io_err("fstat_namespace", &path, e))?;
@@ -548,6 +558,7 @@ impl NamespaceAnchor {
                 _fd: fd,
                 dev,
                 ino,
+                leaf,
             });
         }
         Ok(Self { entries })
@@ -559,7 +570,9 @@ impl NamespaceAnchor {
             let drift = || InstanceError::NamespaceDrift {
                 path: entry.path.clone(),
             };
-            let Some(fd) = open_validated_dir(&entry.path, "managed namespace directory")? else {
+            let Some(fd) =
+                open_validated_dir(&entry.path, "managed namespace directory", entry.leaf)?
+            else {
                 return Err(drift());
             };
             let stat =
@@ -572,74 +585,40 @@ impl NamespaceAnchor {
     }
 }
 
+/// The leaf check an observer applies to the last component of a managed path.
+///
+/// A leaf check stricter than the mutator's would refuse a tree the mutator accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeafPolicy {
+    /// For directories a mutator creates and tightens through `secure_runtime_dir`.
+    OwnerOnly,
+    /// For directories a mutator only traverses as an ancestor.
+    SafeAncestor,
+}
+
 /// `open_validated_dir` does not follow intermediate or final symlinks.
 /// `open_validated_dir` neither creates nor changes permissions on filesystem entries.
 /// `None` indicates that at least one path component does not exist.
 fn open_validated_dir(
     dir_path: &Path,
     what: &'static str,
+    leaf: LeafPolicy,
 ) -> Result<Option<OwnedFd>, InstanceError> {
-    let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC;
-    let insecure = || InstanceError::Insecure {
-        what,
-        path: dir_path.to_path_buf(),
+    let Some(fd) = open_secure_dir_existing(dir_path)? else {
+        return Ok(None);
     };
-    let mut current = match openat(
-        rustix::fs::CWD,
-        if dir_path.is_absolute() { "/" } else { "." },
-        flags,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(e) => return Err(io_err("open_anchor", dir_path, e)),
+    let stat = rustix::fs::fstat(&fd).map_err(|e| io_err("fstat_component", dir_path, e))?;
+    let accepted = match leaf {
+        LeafPolicy::OwnerOnly => is_owner_only_dir(&stat),
+        LeafPolicy::SafeAncestor => is_safe_ancestor(&stat),
     };
-    let anchor_stat =
-        rustix::fs::fstat(&current).map_err(|e| io_err("fstat_anchor", dir_path, e))?;
-    if !is_safe_ancestor(&anchor_stat) {
-        return Err(insecure());
+    if !accepted {
+        return Err(InstanceError::Insecure {
+            what,
+            path: dir_path.to_path_buf(),
+        });
     }
-    let mut names = Vec::new();
-    for component in dir_path.components() {
-        match component {
-            std::path::Component::RootDir | std::path::Component::CurDir => continue,
-            std::path::Component::Normal(name) => names.push(name),
-            std::path::Component::ParentDir | std::path::Component::Prefix(_) => {
-                return Err(insecure());
-            }
-        }
-    }
-    if names.is_empty() {
-        return Err(insecure());
-    }
-    let last = names.len() - 1;
-    for (index, name) in names.into_iter().enumerate() {
-        let next = match openat(&current, name, flags, Mode::empty()) {
-            Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Ok(None),
-            // Opening a symlink component with `O_NOFOLLOW` fails with `ELOOP`.
-            // Opening a non-directory component fails with `ENOTDIR`.
-            // `ELOOP` and `ENOTDIR` are hostile shapes, not absence.
-            Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
-                return Err(insecure());
-            }
-            Err(e) => return Err(io_err("open_component", dir_path, e)),
-        };
-        let stat = rustix::fs::fstat(&next).map_err(|e| io_err("fstat_component", dir_path, e))?;
-        if index != last {
-            if !is_safe_ancestor(&stat) {
-                return Err(insecure());
-            }
-        } else {
-            let mode = mode_bits(&stat);
-            let is_dir = (mode & S_IFMT) == S_IFDIR;
-            let owner_ok = stat.st_uid == rustix::process::geteuid().as_raw();
-            if !is_dir || !owner_ok || mode & 0o077 != 0 {
-                return Err(insecure());
-            }
-        }
-        current = next;
-    }
-    Ok(Some(current))
+    Ok(Some(fd))
 }
 
 /// `LifecycleState::Wedged` records an observation; this crate neither kills processes nor breaks locks.
@@ -829,7 +808,11 @@ pub fn probe_lifecycle(
     // A free runtime lock does not prove that the lifetime-fence holder ended.
     let mut runtime_dir = None;
     for attempt in 0..=LOCK_DISAGREEMENT_GRACE {
-        match open_validated_dir(&dir_path, "lifecycle evidence directory")? {
+        match open_validated_dir(
+            &dir_path,
+            "lifecycle evidence directory",
+            LeafPolicy::OwnerOnly,
+        )? {
             Some(dir) => {
                 runtime_dir = Some(dir);
                 break;
@@ -1581,6 +1564,65 @@ mod tests {
         }
     }
 
+    /// The anchor and probe accept a 0755 `eidnara` ancestor that `InstanceGuard::acquire`
+    /// permits, while a loose `run` leaf still fails closed.
+    #[test]
+    fn observers_accept_the_ancestor_policy_acquire_applies_to_eidnara() {
+        let root = temp_root();
+        let eidnara = root.path().join("eidnara");
+        std::fs::create_dir(&eidnara).expect("eidnara");
+        std::fs::set_permissions(&eidnara, std::fs::Permissions::from_mode(0o755))
+            .expect("loose managed root");
+        std::fs::create_dir(eidnara.join("lifecycle")).expect("lifecycle");
+        std::fs::set_permissions(
+            eidnara.join("lifecycle"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .expect("owner-only lifecycle");
+
+        let mut guard = acquire(root.path());
+        guard
+            .write_lifecycle_record(LifecyclePhase::Running)
+            .expect("running");
+        guard
+            .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
+            .expect("publish");
+        assert_eq!(
+            std::fs::metadata(&eidnara)
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755,
+            "acquire must not have tightened the ancestor"
+        );
+
+        let anchor = NamespaceAnchor::capture(Some(root.path()))
+            .expect("the anchor accepts the tree the daemon is running on");
+        anchor.verify().expect("identity holds");
+        assert_eq!(probe(root.path()).state, LifecycleState::Running);
+
+        std::fs::set_permissions(guard.dir_path(), std::fs::Permissions::from_mode(0o755))
+            .expect("loosen run");
+        assert!(
+            matches!(
+                NamespaceAnchor::capture(Some(root.path())),
+                Err(InstanceError::Insecure {
+                    what: "managed namespace directory",
+                    ..
+                })
+            ),
+            "a loose run leaf must fail closed"
+        );
+        assert!(matches!(
+            probe_lifecycle(Some(root.path()), &ProbeFreshness::default()),
+            Err(InstanceError::Insecure {
+                what: "lifecycle evidence directory",
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn shared_probe_lock_never_creates_and_yields_none_under_a_mutator() {
         let root = temp_root();
@@ -1620,8 +1662,14 @@ mod tests {
         let elsewhere = temp_root();
         let path = coordination_dir_path(Some(root.path())).expect("path");
         std::os::unix::fs::symlink(elsewhere.path(), &path).expect("symlink");
-        assert!(LifecycleTransactionLock::acquire_shared(Some(root.path())).is_err());
-        assert!(LifecycleTransactionLock::acquire_exclusive(Some(root.path())).is_err());
+        assert!(matches!(
+            LifecycleTransactionLock::acquire_shared(Some(root.path())),
+            Err(InstanceError::Insecure { .. })
+        ));
+        assert!(matches!(
+            LifecycleTransactionLock::acquire_exclusive(Some(root.path())),
+            Err(InstanceError::Insecure { .. })
+        ));
         assert!(
             std::fs::read_dir(elsewhere.path())
                 .expect("read target")
