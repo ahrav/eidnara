@@ -40,8 +40,8 @@ pub struct Scratch {
     next: Vec<u32>,
     prev: Vec<u32>,
     rank: Vec<Rank>,
-    /// `(rank << 32) | position` packed so the heap compares one `u64`; the order is the same as
-    /// the tuple's (rank first, then leftmost position).
+    /// `(rank << 32) | position`, packed so the heap compares one `u64`. Lowest rank pops first;
+    /// ties go to the leftmost position.
     heap: BinaryHeap<Reverse<u64>>,
 }
 
