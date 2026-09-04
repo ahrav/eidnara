@@ -728,6 +728,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "fancy-regex",
+ "hashbrown",
  "proptest",
  "regex-syntax",
  "rustc-hash",

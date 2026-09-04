@@ -19,18 +19,24 @@ fn vocab_blob_matches_claude_tiktoken() {
         // both sentinels.
         assert!(rank < DEAD, "{line}: rank collides with a sentinel");
         assert!(seen_ranks.insert(rank), "{line}: duplicate rank");
-        assert_eq!(vocab.ranks.get(token.as_slice()), Some(&rank), "{line}");
         match token.as_slice() {
             [a] => assert_eq!(vocab.byte[*a as usize], rank),
             [a, b] => assert_eq!(vocab.pair[*a as usize * 256 + *b as usize], rank),
-            _ => {}
+            t if t.len() <= 15 => {
+                let mut ids = Vec::new();
+                vocab.encode_piece(t, 0, t.len(), &mut Default::default(), &mut ids);
+                assert_eq!(ids, [rank], "{line}");
+            }
+            t => assert_eq!(vocab.ranks.get(t), Some(&rank), "{line}"),
         }
         n += 1;
     }
-    assert_eq!(vocab.ranks.len(), n);
-    let two_byte_entries = vocab.pair.iter().filter(|&&r| r != NO_RANK).count();
     assert_eq!(
-        two_byte_entries,
-        vocab.ranks.keys().filter(|k| k.len() == 2).count()
+        vocab.ranks.len() + vocab.short.len() + vocab.mid.len() + 256 + two_byte(vocab),
+        n
     );
+}
+
+fn two_byte(vocab: &super::bpe::Vocab) -> usize {
+    vocab.pair.iter().filter(|&&r| r != NO_RANK).count()
 }

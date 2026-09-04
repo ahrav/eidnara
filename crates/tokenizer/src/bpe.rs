@@ -18,6 +18,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
+use hashbrown::HashTable;
 use rustc_hash::FxHashMap;
 
 use crate::Rank;
@@ -44,65 +45,169 @@ pub struct Scratch {
 
 /// Vocabulary views the merge loop needs.
 pub struct Vocab {
-    /// Keys borrow the embedded blob, avoiding per-token key allocations.
+    /// Byte string -> rank for tokens of 16 bytes or more. Keys borrow the embedded blob,
+    /// avoiding per-token key allocations.
     pub ranks: FxHashMap<&'static [u8], Rank>,
+    /// Tokens of 3..=7 bytes as `(packed key, rank)` with the key inline in the bucket: one
+    /// cache line per probe and a single-register compare, where the byte-slice map costs a
+    /// bucket line, a pointer chase to the key bytes, and a `memcmp` call.
+    pub short: HashTable<(u64, Rank)>,
+    /// Tokens of 8..=15 bytes, same idea with a 128-bit inline key; CJK merges look up 9- and
+    /// 12-byte spans constantly and paid the byte-slice map's pointer chase and `memcmp`.
+    pub mid: HashTable<(u128, Rank)>,
     /// Rank of the 2-byte token `[a, b]` at `a * 256 + b`, or `NO_RANK`.
     pub pair: Box<[Rank; 65536]>,
     /// Rank of the single byte `b` at `b`.
     pub byte: [Rank; 256],
 }
 
+/// Packed key for a 3..=7-byte token in `text[start..start + len]`: bytes little-endian in the
+/// low 56 bits, length in the top byte. One unaligned 8-byte load when the text extends that
+/// far (the common case inside a longer text), so the hot path has no length-dependent loop.
+#[inline]
+fn short_key(text: &[u8], start: usize, len: usize) -> u64 {
+    debug_assert!((3..=7).contains(&len));
+    let word = match text.get(start..start + 8) {
+        Some(w) => u64::from_le_bytes(w.try_into().unwrap()),
+        None => {
+            let mut b = [0u8; 8];
+            b[..len].copy_from_slice(&text[start..start + len]);
+            u64::from_le_bytes(b)
+        }
+    };
+    (word & (u64::MAX >> (64 - 8 * len))) | ((len as u64) << 56)
+}
+
+/// Packed key for an 8..=15-byte token: bytes little-endian in the low 120 bits, length in the
+/// top byte. One unaligned 16-byte load when the text extends that far.
+#[inline]
+fn mid_key(text: &[u8], start: usize, len: usize) -> u128 {
+    debug_assert!((8..=15).contains(&len));
+    let word = match text.get(start..start + 16) {
+        Some(w) => u128::from_le_bytes(w.try_into().unwrap()),
+        None => {
+            let mut b = [0u8; 16];
+            b[..len].copy_from_slice(&text[start..start + len]);
+            u128::from_le_bytes(b)
+        }
+    };
+    (word & (u128::MAX >> (128 - 8 * len))) | ((len as u128) << 120)
+}
+
+#[inline]
+fn mid_hash(key: u128) -> u64 {
+    short_hash((key as u64) ^ ((key >> 64) as u64).rotate_left(29))
+}
+
+/// One multiply then fold the high half down: hashbrown takes the bucket index from the low
+/// bits and the tag from the top 7, and the low bits of a bare product depend only on the low
+/// bits of the key, so keys differing only in their upper bytes would collide.
+#[inline]
+fn short_hash(key: u64) -> u64 {
+    let h = key.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^ (h >> 32)
+}
+
 impl Vocab {
-    /// Parses the `build.rs` blob (`u32 count`, `count` x (`u16 len`, `u32 rank`), bytes).
+    /// Parses the `build.rs` blob (`u32 count`, `count` x (`u16 len`, `u32 rank`), bytes) straight
+    /// into the lookup tables; each token is inserted once.
     pub fn from_blob(blob: &'static [u8]) -> Self {
         let count = u32::from_le_bytes(blob[..4].try_into().unwrap()) as usize;
         let (header, mut bytes) = blob[4..].split_at(count * 6);
-        let mut ranks = FxHashMap::with_capacity_and_hasher(count, Default::default());
-        for rec in header.as_chunks::<6>().0 {
+        let records = header.as_chunks::<6>().0;
+        let len_of = |rec: &[u8; 6]| u16::from_le_bytes([rec[0], rec[1]]);
+        let (mut n_short, mut n_mid, mut n_long) = (0usize, 0usize, 0usize);
+        for rec in records {
+            match len_of(rec) {
+                3..=7 => n_short += 1,
+                8..=15 => n_mid += 1,
+                16.. => n_long += 1,
+                _ => {}
+            }
+        }
+        let mut v = Vocab {
+            ranks: FxHashMap::with_capacity_and_hasher(n_long, Default::default()),
+            short: HashTable::with_capacity(n_short),
+            mid: HashTable::with_capacity(n_mid),
+            pair: vec![NO_RANK; 65536].try_into().unwrap(),
+            byte: [NO_RANK; 256],
+        };
+        for rec in records {
             let len = u16::from_le_bytes([rec[0], rec[1]]) as usize;
             let rank = Rank::from_le_bytes([rec[2], rec[3], rec[4], rec[5]]);
             let (token, rest) = bytes.split_at(len);
             bytes = rest;
-            ranks.insert(token, rank);
+            v.insert(token, rank);
         }
         assert!(bytes.is_empty(), "vocab blob has trailing bytes");
-        Self::new(ranks)
-    }
-
-    pub fn new(ranks: FxHashMap<&'static [u8], Rank>) -> Self {
-        let mut pair: Box<[Rank; 65536]> = vec![NO_RANK; 65536].try_into().unwrap();
-        let mut byte = [NO_RANK; 256];
-        for (k, &r) in &ranks {
-            match *k {
-                [a] => byte[*a as usize] = r,
-                [a, b] => pair[*a as usize * 256 + *b as usize] = r,
-                _ => {}
-            }
-        }
         assert!(
-            byte.iter().all(|&r| r != NO_RANK),
+            v.byte.iter().all(|&r| r != NO_RANK),
             "vocabulary must cover every byte"
         );
-        Vocab { ranks, pair, byte }
+        v
     }
 
-    #[inline]
-    fn rank_of(&self, span: &[u8]) -> Rank {
-        match span {
-            [a] => self.byte[*a as usize],
-            [a, b] => self.pair[*a as usize * 256 + *b as usize],
-            _ => self.ranks.get(span).copied().unwrap_or(NO_RANK),
+    fn insert(&mut self, token: &'static [u8], rank: Rank) {
+        match token {
+            [a] => self.byte[*a as usize] = rank,
+            [a, b] => self.pair[*a as usize * 256 + *b as usize] = rank,
+            _ if token.len() <= 7 => {
+                let key = short_key(token, 0, token.len());
+                self.short
+                    .insert_unique(short_hash(key), (key, rank), |e| short_hash(e.0));
+            }
+            _ if token.len() <= 15 => {
+                let key = mid_key(token, 0, token.len());
+                self.mid
+                    .insert_unique(mid_hash(key), (key, rank), |e| mid_hash(e.0));
+            }
+            _ => {
+                self.ranks.insert(token, rank);
+            }
         }
     }
 
-    /// Appends the ids of `piece` (1..=MAX_PIECE_BYTES bytes) to `out`.
-    pub fn encode_piece(&self, piece: &[u8], scratch: &mut Scratch, out: &mut Vec<Rank>) {
-        debug_assert!(!piece.is_empty());
-        let whole = self.rank_of(piece);
+    /// Rank of `text[a..b]` or `NO_RANK`. Takes the enclosing text so a short key can be read
+    /// with one 8-byte load.
+    #[inline(always)]
+    fn rank_of(&self, text: &[u8], a: usize, b: usize) -> Rank {
+        match b - a {
+            1 => self.byte[text[a] as usize],
+            2 => self.pair[text[a] as usize * 256 + text[a + 1] as usize],
+            len @ 3..=7 => {
+                let key = short_key(text, a, len);
+                self.short
+                    .find(short_hash(key), |e| e.0 == key)
+                    .map_or(NO_RANK, |e| e.1)
+            }
+            len @ 8..=15 => {
+                let key = mid_key(text, a, len);
+                self.mid
+                    .find(mid_hash(key), |e| e.0 == key)
+                    .map_or(NO_RANK, |e| e.1)
+            }
+            _ => self.ranks.get(&text[a..b]).copied().unwrap_or(NO_RANK),
+        }
+    }
+
+    /// Appends the ids of the piece `text[start..end]` (1..=MAX_PIECE_BYTES bytes) to `out`.
+    /// Takes the whole text so short-token keys can be read with one 8-byte load.
+    #[inline]
+    pub fn encode_piece(
+        &self,
+        text: &[u8],
+        start: usize,
+        end: usize,
+        scratch: &mut Scratch,
+        out: &mut Vec<Rank>,
+    ) {
+        debug_assert!(start < end && end <= text.len());
+        let whole = self.rank_of(text, start, end);
         if whole != NO_RANK {
             out.push(whole);
             return;
         }
+        let piece = &text[start..end];
         // Multi-byte text merges many more times per byte (a CJK char is one 3-byte token and
         // pairs merge well), so the heap pays off from ~32 bytes there; ASCII runs of one
         // class merge little and the rescan wins to ~192 bytes (`crossover::engine_crossover`).
@@ -116,14 +221,24 @@ impl Vocab {
             HEAP_THRESHOLD_NON_ASCII
         };
         if piece.len() <= threshold {
-            self.merge_scan(piece, &mut scratch.parts, out);
+            self.merge_scan(text, start, end, &mut scratch.parts, out);
         } else {
-            self.merge_heap(piece, scratch, out);
+            self.merge_heap(text, start, end, scratch, out);
         }
     }
 
-    /// `parts[i]` is `(start, rank of the pair starting at start)`.
-    fn merge_scan(&self, piece: &[u8], parts: &mut Vec<(u32, Rank)>, out: &mut Vec<Rank>) {
+    /// `parts[i]` is `(piece-relative start offset, rank of the pair starting there)`. A
+    /// piece-relative offset stays below `MAX_PIECE_BYTES`, so `u32` holds it wherever the piece
+    /// sits in `text`; lookups add `start` to recover the absolute position.
+    fn merge_scan(
+        &self,
+        text: &[u8],
+        start: usize,
+        end: usize,
+        parts: &mut Vec<(u32, Rank)>,
+        out: &mut Vec<Rank>,
+    ) {
+        let piece = &text[start..end];
         let n = piece.len();
         parts.clear();
         parts.reserve(n + 1);
@@ -145,9 +260,9 @@ impl Vocab {
             // Merge parts[i] with parts[i+1]: the span of the new part i runs to parts[i+2].
             // Recompute the pair rank ending at i and the one starting at i before removing.
             if i > 0 {
-                parts[i - 1].1 = self.span_rank(piece, parts, i - 1, i + 2);
+                parts[i - 1].1 = self.span_rank(text, start, parts, i - 1, i + 2);
             }
-            parts[i].1 = self.span_rank(piece, parts, i, i + 3);
+            parts[i].1 = self.span_rank(text, start, parts, i, i + 3);
             parts.remove(i + 1);
 
             min_rank = NO_RANK;
@@ -159,13 +274,21 @@ impl Vocab {
             }
         }
         for w in parts.windows(2) {
-            out.push(self.rank_of(&piece[w[0].0 as usize..w[1].0 as usize]));
+            out.push(self.rank_of(text, start + w[0].0 as usize, start + w[1].0 as usize));
         }
     }
 
     /// Part `i` spans `piece[i..next[i]]`; `rank[i]` is the rank of `piece[i..next[next[i]]]`
     /// (the pair of part `i` and the part after it), `NO_RANK` at the end, `DEAD` once merged.
-    fn merge_heap(&self, piece: &[u8], s: &mut Scratch, out: &mut Vec<Rank>) {
+    fn merge_heap(
+        &self,
+        text: &[u8],
+        start: usize,
+        end: usize,
+        s: &mut Scratch,
+        out: &mut Vec<Rank>,
+    ) {
+        let piece = &text[start..end];
         let n = piece.len();
         let end = n as u32;
         s.next.clear();
@@ -195,7 +318,7 @@ impl Vocab {
             s.rank[j] = DEAD;
             if after < end {
                 s.prev[after as usize] = i as u32;
-                let r = self.rank_of(&piece[i..s.next[after as usize] as usize]);
+                let r = self.rank_of(text, start + i, start + s.next[after as usize] as usize);
                 s.rank[i] = r;
                 if r != NO_RANK {
                     s.heap.push(Reverse((r, i as u32)));
@@ -206,7 +329,7 @@ impl Vocab {
             let p = s.prev[i];
             if p != u32::MAX {
                 let p = p as usize;
-                let r = self.rank_of(&piece[p..after as usize]);
+                let r = self.rank_of(text, start + p, start + after as usize);
                 s.rank[p] = r;
                 if r != NO_RANK {
                     s.heap.push(Reverse((r, p as u32)));
@@ -216,7 +339,7 @@ impl Vocab {
         let mut i = 0usize;
         while i < n {
             let j = s.next[i] as usize;
-            out.push(self.rank_of(&piece[i..j]));
+            out.push(self.rank_of(text, start + i, start + j));
             i = j;
         }
     }
@@ -224,9 +347,20 @@ impl Vocab {
     /// Rank of the span `parts[i].0 .. parts[end].0`, or `NO_RANK` if `end` is past the last
     /// real part (the pair would run off the piece).
     #[inline]
-    fn span_rank(&self, piece: &[u8], parts: &[(u32, Rank)], i: usize, end: usize) -> Rank {
+    fn span_rank(
+        &self,
+        text: &[u8],
+        start: usize,
+        parts: &[(u32, Rank)],
+        i: usize,
+        end: usize,
+    ) -> Rank {
         if end < parts.len() {
-            self.rank_of(&piece[parts[i].0 as usize..parts[end].0 as usize])
+            self.rank_of(
+                text,
+                start + parts[i].0 as usize,
+                start + parts[end].0 as usize,
+            )
         } else {
             NO_RANK
         }
@@ -266,8 +400,8 @@ mod tests {
                 .collect();
             let mut a = Vec::new();
             let mut b = Vec::new();
-            vocab.merge_scan(&piece, &mut scratch.parts, &mut a);
-            vocab.merge_heap(&piece, &mut scratch, &mut b);
+            vocab.merge_scan(&piece, 0, piece.len(), &mut scratch.parts, &mut a);
+            vocab.merge_heap(&piece, 0, piece.len(), &mut scratch, &mut b);
             assert_eq!(
                 a,
                 b,
@@ -311,13 +445,13 @@ mod crossover {
                 let t = std::time::Instant::now();
                 for _ in 0..iters {
                     out.clear();
-                    vocab.merge_scan(&piece, &mut s.parts, &mut out);
+                    vocab.merge_scan(&piece, 0, len, &mut s.parts, &mut out);
                 }
                 let scan = t.elapsed().as_nanos() as f64 / (iters * len) as f64;
                 let t = std::time::Instant::now();
                 for _ in 0..iters {
                     out.clear();
-                    vocab.merge_heap(&piece, &mut s, &mut out);
+                    vocab.merge_heap(&piece, 0, len, &mut s, &mut out);
                 }
                 let heap = t.elapsed().as_nanos() as f64 / (iters * len) as f64;
                 eprintln!("{name:6} len={len:5} scan={scan:8.2} heap={heap:8.2} ns/B");
