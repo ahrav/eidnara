@@ -71,3 +71,26 @@ the adversarial `Vec::remove` shifts), `vm::run` 12.8%+2.7%+1.6%, `_byte_pair_me
 
 Order of attack: H1, then re-attribute (profile moves), then H2/H3/H4, H5 as its own iteration,
 then B/C altitudes.
+
+## Re-attribution at iteration 32 (current best, 8.73 ns/byte composite)
+
+`perf record` per arm on the kept binary with debug symbols (`target/prof/*.data`):
+
+| arm | ns/B | top self-time symbols |
+|---|---|---|
+| ascii_prose | 2.56 | `encode_piece` 54% (mostly the inlined whole-piece hash probe), `encode_bounded` 21% (scanner, inlined), `merge_scan` 14% |
+| code | 3.56 | `encode_piece` 43%, `encode_bounded` 24%, `merge_scan` 21% |
+| cjk | 16.8 | `merge_heap` 60% (heap push/pop 15%, rank lookups the rest), `merge_scan` 25% |
+| whitespace_heavy | 13.8 | `merge_scan` 71% (rescan min loop 40%, span lookups 30%) |
+| numeric | 12.1 | `merge_scan` 59%, `encode_piece` 18%, `encode_bounded` 16% |
+| short_strings | 15.8 | `merge_scan` 45%, `encode_piece` 18%, malloc/free/memmove 7% (per-call Vec growth) |
+| mixed_unicode | 11.6 | `merge_scan` 55%, `class_at` 12%, `class_from_tables` (astral chars) 5% |
+
+What moved since Phase 1: the pre-tokenizer went from 55-70% to ~20% of ASCII arms; the
+allocator from 10-13% to <1% on long texts; the merge loop is now the dominant cost on every
+arm that has multi-token pieces (36-70%). Inside it, the O(n·m) rescan's min loop is at ~1
+cycle/element and three rewrites (iterations 15, 16, 26) did not beat it; the remaining cost
+is rank lookups for candidate spans, which the inline-key tables (iterations 19, 24) already cut.
+
+Remaining hypotheses ranked by expected value are in `REPORT.md` and `.auto/ideas.md`; none
+is expected to exceed ~5% composite without changing the merge algorithm's lookup count.
