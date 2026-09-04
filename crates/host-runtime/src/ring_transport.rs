@@ -277,7 +277,10 @@ impl RingTransport {
         let read_cancel = root.child_token();
         let (sender, queue) = frame_sender(queue_frames, root.clone(), frame_deadline);
         // One slot beyond `queue_frames` is reserved for the terminal event, so a fault or cancellation is reported even when the receiver has stopped draining. commentlint: allow(JUDGE)
-        let (inbound_tx, inbound_rx) = mpsc::channel(queue_frames + 1);
+        let inbound_capacity = queue_frames
+            .saturating_add(1)
+            .min(tokio::sync::Semaphore::MAX_PERMITS);
+        let (inbound_tx, inbound_rx) = mpsc::channel(inbound_capacity);
         let terminal = inbound_tx
             .clone()
             .try_reserve_owned()
@@ -346,7 +349,9 @@ impl RingTransport {
                 }
                 drop(panic_inbound);
                 // A quarantined ring may remain mapped by its peer, so its charges move to the quarantined bucket rather than being refunded.
-                let quarantined = rings.first.is_quarantined() || rings.second.is_quarantined();
+                // A peer that closed its doorbell ends has dropped its attachment, so its ring is reclaimable even though the backend latched quarantine on the closed doorbell. commentlint: allow(JUDGE)
+                let quarantined = (rings.first.is_quarantined() || rings.second.is_quarantined())
+                    && !peer_released_ring(&rings);
                 drop(rings);
                 if quarantined {
                     // A failed quarantine drops the consumed `Admission`, which refunds the charges.
@@ -410,6 +415,20 @@ pub(crate) fn worker_descriptor(
         serde_json::to_value(descriptor).map_err(|_| ())?,
         descriptors,
     ))
+}
+
+/// A stream doorbell reads end-of-file only after its peer end is closed, which is how a peer that exited or dropped its attachment appears to the host. commentlint: allow(JUDGE)
+fn peer_released_ring(rings: &DuplexRing) -> bool {
+    use std::io::Read;
+    let Ok(doorbell) = rings.second.duplicate_data_ready() else {
+        return false;
+    };
+    let mut doorbell = std::os::unix::net::UnixStream::from(doorbell);
+    if doorbell.set_nonblocking(true).is_err() {
+        return false;
+    }
+    // The ring is already retired, so consuming a pending wake token here has no reader to starve.
+    matches!(doorbell.read(&mut [0u8; 1]), Ok(0))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -773,8 +792,7 @@ fn publish_direct(ring: &Ring, direct: DirectFrame, deadline: StdInstant) -> Res
         direct.serialize(&mut writer)
     });
     result.map_err(|_| ())?;
-    reservation.commit(body_len).map_err(|_| ())?;
-    Ok(())
+    commit_before(reservation, body_len, deadline)
 }
 
 fn publish_owned(ring: &Ring, bytes: &[u8], tail: &[u8], deadline: StdInstant) -> Result<(), ()> {
@@ -786,6 +804,18 @@ fn publish_owned(ring: &Ring, bytes: &[u8], tail: &[u8], deadline: StdInstant) -
         .map_err(|_| ())?;
     reservation.write(first_body).map_err(|_| ())?;
     reservation.write(tail).map_err(|_| ())?;
+    commit_before(reservation, body_len, deadline)
+}
+
+// Serialization runs after `reserve_until` returns, so the deadline is re-checked at commit; dropping an uncommitted reservation aborts it. commentlint: allow(JUDGE)
+fn commit_before(
+    reservation: ProducerReservation<'_>,
+    body_len: usize,
+    deadline: StdInstant,
+) -> Result<(), ()> {
+    if StdInstant::now() >= deadline {
+        return Err(());
+    }
     reservation.commit(body_len).map_err(|_| ())?;
     Ok(())
 }
@@ -1659,6 +1689,143 @@ mod tests {
                 Err(ReadClose::Corrupt("shared-memory endpoint panicked"))
             ),
             "the panic reason follows the queued frame instead of a bare channel drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_close_refunds_admission_although_the_backend_quarantines_the_ring() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        peer.send(
+            EnvelopeHeader {
+                len: 0,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Goodbye,
+                flags: crate::wire::pure_header_flags(),
+                channel: 0,
+                epoch: 0,
+                corr: 0,
+            },
+            &[],
+            StdInstant::now() + Duration::from_secs(1),
+        )
+        .expect("peer publishes Goodbye");
+        // An orderly peer closes its attachment right after Goodbye, before the host cancels the generation.
+        drop(peer);
+        assert!(matches!(
+            receiver.recv().await,
+            Ok(InboundEvent::Frame(frame)) if frame.header.ty == FrameType::Goodbye
+        ));
+        assert!(
+            matches!(receiver.recv().await, Err(ReadClose::Corrupt(_))),
+            "the closed doorbell still ends the read side as a transport fault"
+        );
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits after the peer closes")
+            .expect("endpoint task joins");
+        assert!(sender.is_retired());
+
+        let accounting = transport.accounting().unwrap();
+        assert_eq!(accounting.active, ResourceCharges::ZERO);
+        assert_eq!(
+            accounting.quarantined,
+            ResourceCharges::ZERO,
+            "a peer that released its attachment does not consume host capacity"
+        );
+        assert!(
+            transport
+                .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+                .is_ok(),
+            "the next connection admits after an orderly peer close"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_cancellation_ends_a_budget_wait() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender: _sender,
+            receiver: _receiver,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(0), 8, Duration::from_secs(30))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        peer.send(
+            EnvelopeHeader {
+                len: 1,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Request,
+                flags: Flags::new(false, Priority::Interactive, false),
+                channel: 7,
+                epoch: 1,
+                corr: 1,
+            },
+            &[1],
+            StdInstant::now() + Duration::from_secs(1),
+        )
+        .expect("peer publishes one frame");
+        // A zero budget parks the endpoint in the ingress wait for this frame.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        root.cancel();
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("root cancellation must end a budget wait well before the frame deadline")
+            .expect("endpoint task joins");
+        assert_eq!(
+            transport.accounting().unwrap().active,
+            ResourceCharges::ZERO
+        );
+    }
+
+    #[test]
+    fn a_commit_past_the_write_deadline_is_refused() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let header = EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Response,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 7,
+            epoch: 1,
+            corr: 1,
+        };
+        let deadline = StdInstant::now() + Duration::from_millis(20);
+        let direct = DirectFrame::new(
+            header,
+            1,
+            Box::new(|writer| {
+                std::thread::sleep(Duration::from_millis(60));
+                writer.write_all(&[1])
+            }),
+        );
+        assert!(
+            publish_direct(&rings.first, direct, deadline).is_err(),
+            "a serializer that finishes after the deadline must not publish"
+        );
+        let attached = rings.first.attachment().unwrap().attach().unwrap();
+        assert!(
+            attached.try_receive().unwrap().is_none(),
+            "the aborted reservation leaves no frame in the ring"
         );
     }
 
