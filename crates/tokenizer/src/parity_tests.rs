@@ -40,15 +40,20 @@ fn is_ecmascript_whitespace_run(piece: &str) -> bool {
     })
 }
 
+/// The `proptest!` macro layers `PROPTEST_CASES` over this default. A zero budget runs no
+/// cases and still reports success, so it is rejected.
 fn cases() -> ProptestConfig {
-    ProptestConfig {
-        cases: std::env::var("PROPTEST_CASES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2000),
+    let config = ProptestConfig {
+        cases: 2000,
         max_shrink_iters: 2000,
         ..ProptestConfig::default()
-    }
+    };
+    let effective = proptest::test_runner::contextualize_config(config.clone());
+    assert!(
+        effective.cases > 0,
+        "PROPTEST_CASES must be a positive integer"
+    );
+    config
 }
 
 proptest! {
