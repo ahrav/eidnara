@@ -13,7 +13,9 @@ use rustix::fs::{
     AtFlags, CWD, FlockOperation, Mode, OFlags, flock, fsync, mkdirat, openat, renameat, unlinkat,
 };
 
-use crate::connection_file::{ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, SCHEMA_VERSION};
+use crate::connection_file::{
+    ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN, SCHEMA_VERSION,
+};
 
 /// `CONNECTION_FILE_NAME` names the canonical publication file inside the runtime directory.
 pub const CONNECTION_FILE_NAME: &str = "connection.json";
@@ -307,10 +309,9 @@ impl InstanceGuard {
     /// over the canonical name both stay relative to the pinned directory
     /// descriptor, so the swap cannot cross filesystems or follow links.
     ///
-    /// The publication is refused when `ConnectionInfo::validate` would reject
-    /// it on the client side: a relative or non-UTF-8 `setup_socket`, or an
-    /// empty `daemon_ver`. Installing such a file would report success while
-    /// every conforming client failed discovery.
+    /// The publication is refused when `ConnectionInfo::validate` or the client reader rejects it:
+    /// a relative or non-UTF-8 `setup_socket`, an empty `daemon_ver`, or a serialized file over `MAX_CONNECTION_FILE_LEN`.
+    /// A file rejected by a conforming client must not be installed because publication would succeed but discovery would fail.
     pub fn publish(&mut self, setup_socket: &Path, daemon_ver: &str) -> Result<(), InstanceError> {
         if !setup_socket.is_absolute() {
             return Err(InstanceError::Insecure {
@@ -345,6 +346,12 @@ impl InstanceGuard {
         );
         let json =
             serde_json::to_vec_pretty(&info).expect("connection info serialization cannot fail");
+        if json.len() > MAX_CONNECTION_FILE_LEN {
+            return Err(InstanceError::Insecure {
+                what: "connection file exceeds the discovery cap",
+                path: self.dir_path.join(CONNECTION_FILE_NAME),
+            });
+        }
 
         let stat = write_atomic_owner_only(&self.dir, &self.dir_path, CONNECTION_FILE_NAME, &json)?;
         // `Stat` field types vary by platform; macOS defines `st_dev` as `i32`, so the casts are required there and are no-ops on Linux.
@@ -1026,7 +1033,7 @@ mod tests {
         assert!(!published(&guard).exists());
     }
 
-    /// `ConnectionInfo::validate` rejects relative socket paths and empty daemon versions, so `publish` must refuse both before installing a file no client accepts.
+    /// `ConnectionInfo::validate` rejects relative socket paths and empty daemon versions, and `read_for_client` rejects files over `MAX_CONNECTION_FILE_LEN`, so `publish` must refuse all three before installing a file no client accepts.
     #[test]
     fn publication_rejects_what_clients_would_refuse() {
         let root = temp_root();
@@ -1043,6 +1050,14 @@ mod tests {
             guard.publish(&guard.dir_path().join("setup.sock"), ""),
             Err(InstanceError::Insecure {
                 what: "empty daemon version",
+                ..
+            })
+        ));
+        let oversized = "v".repeat(MAX_CONNECTION_FILE_LEN);
+        assert!(matches!(
+            guard.publish(&guard.dir_path().join("setup.sock"), &oversized),
+            Err(InstanceError::Insecure {
+                what: "connection file exceeds the discovery cap",
                 ..
             })
         ));

@@ -406,7 +406,11 @@ impl InstanceGuard {
     /// `O_NOFOLLOW` rejects symlinks but not FIFOs.
     /// Opening a FIFO for reading blocks until a writer arrives.
     /// `is_secure_regular` rejects FIFOs after `openat` succeeds.
-    pub fn remove_lifecycle_record(&self) {
+    ///
+    /// POSIX unlinks by name; a record installed after the identity check can be removed.
+    /// `&mut self` prevents concurrent `write_lifecycle_record` calls on the same guard.
+    /// The runtime lock excludes every other writer.
+    pub fn remove_lifecycle_record(&mut self) {
         let Ok(fd) = openat(
             self.dir(),
             LIFECYCLE_RECORD_NAME,
@@ -813,24 +817,30 @@ pub fn probe_lifecycle(
     const GRACE_DELAY: Duration = Duration::from_millis(25);
 
     let dir_path = runtime_dir_path(data_dir_override)?;
-    // A missing runtime directory means `stopped` only if the stable lifetime fence is free.
-    // A held lifetime fence can identify a live incarnation whose namespace was replaced.
-    // A held lifetime fence can also identify an incarnation still creating its runtime directory.
-    // The probe re-samples `LOCK_DISAGREEMENT_GRACE` times while a live incarnation creates its runtime directory.
-    // A free runtime lock does not prove that the lifetime-fence holder ended.
-    let mut runtime_dir = None;
-    for attempt in 0..=LOCK_DISAGREEMENT_GRACE {
-        match open_validated_dir(
-            &dir_path,
-            "lifecycle evidence directory",
-            LeafPolicy::OwnerOnly,
-        )? {
-            Some(dir) => {
-                runtime_dir = Some(dir);
-                break;
-            }
-            None => {
-                if lifetime_lock_free(data_dir_override)? {
+
+    let mut torn_rereads = 0;
+    let mut grace_rereads = 0;
+    let mut disagreement_rereads = 0;
+    let mut absent_dir_rereads = 0;
+    loop {
+        // A shared transaction lock excludes in-flight mutators for each sample.
+        // If the transaction lock is absent or exclusively held, the probe uses evidence-only sampling.
+        // The bounded reread loop keeps evidence-only samples coherent.
+        // A transaction that replaces `eidnara/run` between two samples is observed by the next sample instead of pinning the displaced directory for the rest of the probe.
+        let sample = {
+            let _root = LifecycleTransactionLock::acquire_shared(data_dir_override)?;
+            // A missing runtime directory means `stopped` only if the stable lifetime fence is free.
+            // A held lifetime fence can identify a live incarnation whose namespace was replaced.
+            // A held lifetime fence can also identify an incarnation still creating its runtime directory.
+            // The probe re-samples `LOCK_DISAGREEMENT_GRACE` times while a live incarnation creates its runtime directory.
+            // A free runtime lock does not prove that the lifetime-fence holder ended.
+            let dir = match open_validated_dir(
+                &dir_path,
+                "lifecycle evidence directory",
+                LeafPolicy::OwnerOnly,
+            )? {
+                Some(dir) => Some(dir),
+                None if lifetime_lock_free(data_dir_override)? => {
                     return Ok(LifecycleProbe {
                         state: LifecycleState::Stopped,
                         reason: "no runtime directory",
@@ -840,40 +850,38 @@ pub fn probe_lifecycle(
                         lifetime_lock_free: true,
                     });
                 }
-                if attempt < LOCK_DISAGREEMENT_GRACE {
-                    std::thread::sleep(GRACE_DELAY);
+                None if absent_dir_rereads < LOCK_DISAGREEMENT_GRACE => {
+                    absent_dir_rereads += 1;
+                    None
+                }
+                None => {
+                    return Ok(LifecycleProbe {
+                        state: LifecycleState::Wedged,
+                        reason: "lifetime fence held without a runtime directory",
+                        record: None,
+                        publication: None,
+                        instance_lock_free: true,
+                        lifetime_lock_free: false,
+                    });
+                }
+            };
+            match dir {
+                None => None,
+                Some(dir) => {
+                    let lifetime_before = lifetime_lock_free(data_dir_override)?;
+                    let before = sample_evidence(&dir);
+                    let lock_free = instance_lock_free(&dir, &dir_path)?;
+                    let after = sample_evidence(&dir);
+                    let lifetime_free = lifetime_lock_free(data_dir_override)?;
+                    Some((lifetime_before, before, lock_free, after, lifetime_free))
                 }
             }
-        }
-    }
-    let Some(dir) = runtime_dir else {
-        return Ok(LifecycleProbe {
-            state: LifecycleState::Wedged,
-            reason: "lifetime fence held without a runtime directory",
-            record: None,
-            publication: None,
-            instance_lock_free: true,
-            lifetime_lock_free: false,
-        });
-    };
-
-    let mut torn_rereads = 0;
-    let mut grace_rereads = 0;
-    let mut disagreement_rereads = 0;
-    loop {
-        // A shared transaction lock excludes in-flight mutators for each sample.
-        // If the transaction lock is absent or exclusively held, the probe uses evidence-only sampling.
-        // The bounded reread loop keeps evidence-only samples coherent.
-        let sample = {
-            let _root = LifecycleTransactionLock::acquire_shared(data_dir_override)?;
-            let lifetime_before = lifetime_lock_free(data_dir_override)?;
-            let before = sample_evidence(&dir);
-            let lock_free = instance_lock_free(&dir, &dir_path)?;
-            let after = sample_evidence(&dir);
-            let lifetime_free = lifetime_lock_free(data_dir_override)?;
-            (lifetime_before, before, lock_free, after, lifetime_free)
         };
-        let (lifetime_before, before, lock_free, after, lifetime_free) = sample;
+        let Some((lifetime_before, before, lock_free, after, lifetime_free)) = sample else {
+            // The sleep runs outside the shared lock so a mutator creating the directory is not held up.
+            std::thread::sleep(GRACE_DELAY);
+            continue;
+        };
         if (before != after || lifetime_before != lifetime_free) && torn_rereads + 1 < MAX_REREADS {
             torn_rereads += 1;
             continue;
@@ -1153,7 +1161,7 @@ mod tests {
     #[test]
     fn record_round_trips_and_removes_fenced() {
         let root = temp_root();
-        let guard = acquire(root.path());
+        let mut guard = acquire(root.path());
         guard
             .write_lifecycle_record(LifecyclePhase::Starting)
             .expect("write starting");
@@ -1179,7 +1187,7 @@ mod tests {
     fn record_removal_spares_a_successor() {
         for field in ["launch_id", "daemon_id"] {
             let root = temp_root();
-            let guard = acquire(root.path());
+            let mut guard = acquire(root.path());
             guard
                 .write_lifecycle_record(LifecyclePhase::Running)
                 .expect("write running");
@@ -1909,7 +1917,7 @@ mod tests {
     #[test]
     fn a_fifo_at_the_record_name_cannot_hang_fenced_removal() {
         let root = temp_root();
-        let guard = acquire(root.path());
+        let mut guard = acquire(root.path());
         let path = record_path(&guard);
         rustix::fs::mkfifoat(rustix::fs::CWD, path.as_path(), Mode::from_raw_mode(0o600))
             .expect("plant fifo");
