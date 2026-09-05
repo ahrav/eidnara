@@ -83,7 +83,7 @@ What was checked and changed:
   renamed from a name that claimed a cross-language agreement no test in this
   tree performs (the TypeScript side lands in U7).
 - Two checks were added for renamed identities the source never pinned:
-  `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/src/profile.rs`)
+  `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs`)
   and `credential_fingerprint_matches_the_committed_vector`
   (`crates/host-runtime/src/broca/subprocess.rs`).
 - The source's task references and repository paths were removed from every

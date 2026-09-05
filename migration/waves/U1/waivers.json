@@ -16,7 +16,7 @@
         "release/registry-gate.json: npm org ls eidnara returned E404 and every @eidnara name returned E404 on 2026-09-02, so the scope is free and the U1 stop condition is not triggered.",
         "Maintainer directive 2026-09-02: no npm login or publish from this host during U1.",
         "Extended from U2 to U3 on 2026-09-03 when the U2 receipt landed: the maintainer directive against npm login or publish from this host still stands, the scope remains unreserved, and the closure condition is unchanged. The extension is recorded here for the approver's confirmation.",
-        "Extended from U3 to U7 on 2026-09-03 when the U3 receipt landed: the maintainer directive against npm login or publish from this host still stands and the scope remains unreserved. U7 is where the registry audit requires every @eidnara name to hold 1.0.0-reserved.1, so the gate must close before U7 lands. Recorded for the approver's confirmation."
+        "Extended from U3 to U7 on 2026-09-04 with the U3 wave record, which carries this extension: the maintainer directive against npm login or publish from this host still stands and the scope remains unreserved. U7 is where the registry audit requires every @eidnara name to hold 1.0.0-reserved.1, so the gate must close before U7 lands. Recorded for the approver's confirmation."
       ]
     }
   ]

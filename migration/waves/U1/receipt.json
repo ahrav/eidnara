@@ -133,7 +133,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "fd8beb43de3e1ab94a401a89ad6943c3e26c9da5288b84fb3a347abad445c6ae",
+      "destination_sha256": "55671917f6699df15fb9b96d12451e3fe1bc95d6412f0dff122ef1ed471cae25",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -166,7 +166,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/waivers.json",
-      "destination_sha256": "5bc0c72afb113c07adc88ed4b3ef2d520dc59cc382c569f53f32e8a76e03ac71",
+      "destination_sha256": "4618f407787a7c5522a9f0191ccfbb09969ef37f6b8b29644228a61b9c1fdf2a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

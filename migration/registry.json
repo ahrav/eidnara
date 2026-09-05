@@ -911,7 +911,7 @@
       "kind": "fixture",
       "path": "crates/tokenizer/testdata/token-golden.json",
       "role": "byte-stable",
-      "rationale": "Tokenizer golden corpus: ids from the ai-tokenizer oracle for 36 texts. Byte-stable under R18; regenerated only by the registered generator as part of a reviewed contract change.",
+      "rationale": "Tokenizer golden corpus: ids from the ai-tokenizer oracle for 46 texts. Byte-stable under R18; regenerated only by the registered generator as part of a reviewed contract change.",
       "evidence": [
         "migration/waves/U3/receipt.json",
         "docs/properties/tokenizer/evidence/tokenizer-encoding-matches-the-independent-oracle.md"

@@ -104,7 +104,9 @@
     "crates/shm-transport/src/profile.rs",
     "crates/shm-transport/src/setup_auth.rs",
     "crates/shm-transport/tests/contract.rs",
+    "crates/shm-transport/tests/evidence.rs",
     "crates/shm-transport/tests/fuzz_corpus.rs",
+    "crates/shm-transport/tests/profile.rs",
     "crates/shm-transport/tests/ring.rs",
     "crates/tokenizer/gen/gen-claude-vocab.ts",
     "crates/tokenizer/gen/gen-token-golden.ts",
@@ -182,13 +184,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -203,7 +205,7 @@
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
         "crates/shm-transport/src/profile.rs",
-        "crates/shm-transport/tests/contract.rs"
+        "crates/shm-transport/tests/profile.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -269,15 +271,15 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/reservation-charge-visible-with-non-free-state.md"
@@ -295,17 +297,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/tests/ring.rs#two_process_zero_copy_exchange_uses_authenticated_grant",
+      "check_pointer": "crates/shm-transport/tests/ring.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/publication-visibility-derives-only-from-the-published-cursor.md"
     },
     {
@@ -320,13 +322,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -344,13 +346,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -525,13 +527,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -723,7 +725,7 @@
       "relationship": "mapped",
       "files": [
         "crates/shm-transport/src/evidence.rs",
-        "crates/shm-transport/tests/contract.rs"
+        "crates/shm-transport/tests/evidence.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -797,13 +799,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -862,13 +864,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -920,7 +922,7 @@
         "crates/shm-transport/src/descriptor.rs",
         "crates/shm-transport/src/harness.rs",
         "crates/shm-transport/src/lease.rs",
-        "crates/shm-transport/tests/contract.rs"
+        "crates/shm-transport/tests/fuzz_corpus.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
@@ -947,22 +949,23 @@
         "crates/host-runtime/src/runtime.rs",
         "crates/shm-transport/src/backend/ring.rs",
         "crates/shm-transport/src/backend/sample.rs",
-        "crates/shm-transport/src/harness.rs"
+        "crates/shm-transport/src/harness.rs",
+        "crates/shm-transport/tests/ring.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
+      "check_pointer": "crates/shm-transport/tests/ring.rs#grant_slice_rejects_every_truncation_point_and_one_byte_suffix",
       "evidence_pointer": "docs/properties/shm-transport/evidence/accepted-decode-consumes-its-declared-width.md"
     },
     {
@@ -974,22 +977,23 @@
         "crates/host-runtime/src/runtime.rs",
         "crates/shm-transport/src/backend/ring.rs",
         "crates/shm-transport/src/backend/sample.rs",
-        "crates/shm-transport/src/descriptor.rs"
+        "crates/shm-transport/src/descriptor.rs",
+        "crates/shm-transport/tests/contract.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
+      "check_pointer": "crates/shm-transport/tests/contract.rs#descriptor_rejects_every_untrusted_identity_and_span_failure",
       "evidence_pointer": "docs/properties/shm-transport/evidence/identity-and-schema-rejection-is-one-contract.md"
     },
     {
@@ -1030,13 +1034,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -1232,13 +1236,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -1284,13 +1288,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -1536,22 +1540,23 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/shm-transport/src/lib.rs"
+        "crates/shm-transport/src/lib.rs",
+        "packages/shm-native/tests/mechanism.ts"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/src/lib.rs",
+      "check_pointer": "packages/shm-native/tests/mechanism.ts#readiness acknowledgement preserves a frame published during callback",
       "evidence_pointer": "docs/properties/shm-transport/evidence/wake-published-during-readiness-callback-is-not-lost.md"
     },
     {
@@ -1657,22 +1662,23 @@
       "relationship": "mapped",
       "files": [
         "crates/shm-transport/src/backend/ring.rs",
-        "crates/shm-transport/src/lib.rs"
+        "crates/shm-transport/src/lib.rs",
+        "packages/shm-native/src/scheduling.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/src/backend/ring.rs",
+      "check_pointer": "packages/shm-native/src/scheduling.rs#pending_callback_waits_for_acknowledgement",
       "evidence_pointer": "docs/properties/shm-transport/evidence/reactor-callback-is-one-in-flight.md"
     },
     {
@@ -1710,7 +1716,8 @@
       "classification": "core",
       "relationship": "mapped",
       "files": [
-        "crates/shm-transport/src/profile.rs"
+        "crates/shm-transport/src/profile.rs",
+        "crates/shm-transport/tests/profile.rs"
       ],
       "disposition": "pass",
       "source_status": {
@@ -1725,7 +1732,7 @@
       "evidence_digest": "4b074ef361a22a0991366d3b8dd336220bffcfdffc9345fb8dd557e33795f298",
       "check_pointer": "crates/shm-transport/tests/profile.rs#host_test_ring_profile_names_one_geometry",
       "check_hash": "ff14509c365bd1efc596abc99095bff7be617a945d99638232c7c23ebc47a1ed",
-      "code_hash": "10514dc838a76fcc46252ccbcc8f9e94e0a04a1a04ec73787157ec79808cf912",
+      "code_hash": "86ab14987e1389c83a13b1626ff239ecc86db9228f51466bdeec6a1762ffdbb8",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -1820,17 +1827,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/routing.rs#concurrent_generations_never_share_a_live_channel",
+      "check_pointer": "crates/host-runtime/src/routing.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/generation-id-strictly-increases-and-is-never-reused.md"
     },
     {
@@ -1843,13 +1850,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -1867,13 +1874,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -1891,13 +1898,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -1914,13 +1921,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -1960,13 +1967,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2021,13 +2028,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2185,13 +2192,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2209,13 +2216,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2256,13 +2263,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2279,13 +2286,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2302,13 +2309,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2325,13 +2332,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2348,13 +2355,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2371,13 +2378,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2395,13 +2402,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2418,13 +2425,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2441,13 +2448,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2487,13 +2494,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2510,13 +2517,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2533,13 +2540,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2579,13 +2586,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2599,22 +2606,23 @@
       "files": [
         "crates/host-runtime/src/dispatch.rs",
         "crates/host-runtime/src/panic_boundary.rs",
-        "crates/host-runtime/src/runtime.rs"
+        "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/dispatch.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/dispatch.rs",
+      "check_pointer": "crates/host-runtime/tests/dispatch.rs#handler_panic_payload_is_redacted_from_process_stderr",
       "evidence_pointer": "docs/properties/host-runtime/evidence/every-callback-invocation-is-inside-the-redaction-guard.md"
     },
     {
@@ -2716,120 +2724,55 @@
     },
     {
       "slug": "negotiation-precedes-every-gated-frame-kind",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/connection.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "partial",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "partial",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
-      "evidence_pointer": "docs/properties/host-runtime/evidence/negotiation-precedes-every-gated-frame-kind.md"
+      "historical_evidence": "docs/properties/host-runtime/evidence/negotiation-precedes-every-gated-frame-kind.md",
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "setup-selection-is-sticky-for-the-generation",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/connection.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "partial",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "partial",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
-      "evidence_pointer": "docs/properties/host-runtime/evidence/setup-selection-is-sticky-for-the-generation.md"
+      "historical_evidence": "docs/properties/host-runtime/evidence/setup-selection-is-sticky-for-the-generation.md",
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "setup-readiness-is-decided-by-one-predicate",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/connection.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
-      "evidence_pointer": "docs/properties/host-runtime/evidence/setup-readiness-is-decided-by-one-predicate.md"
+      "historical_evidence": "docs/properties/host-runtime/evidence/setup-readiness-is-decided-by-one-predicate.md",
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "a-setup-pong-is-required-and-forbidden-in-the-same-window",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/config.rs",
         "crates/host-runtime/src/connection.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/host-runtime/src/config.rs",
-      "evidence_pointer": "docs/properties/host-runtime/evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md"
+      "historical_evidence": "docs/properties/host-runtime/evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md",
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "fallback-reason-precedence-survives-a-silent-preflight",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/config.rs",
         "crates/host-runtime/src/connection.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "partial",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "partial",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/host-runtime/src/config.rs",
-      "evidence_pointer": "docs/properties/host-runtime/evidence/fallback-reason-precedence-survives-a-silent-preflight.md"
+      "historical_evidence": "docs/properties/host-runtime/evidence/fallback-reason-precedence-survives-a-silent-preflight.md",
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "cancellation-preempts-every-bounded-frame-read",
@@ -2904,22 +2847,23 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/config.rs",
-        "crates/host-runtime/src/connection.rs"
+        "crates/host-runtime/src/connection.rs",
+        "crates/host-runtime/tests/client.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/config.rs",
+      "check_pointer": "crates/host-runtime/tests/client.rs#ring_stream_and_control_traffic_share_one_live_generation",
       "evidence_pointer": "docs/properties/host-runtime/evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md"
     },
     {
@@ -2981,13 +2925,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -3131,17 +3075,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
+      "check_pointer": "crates/host-runtime/src/ring_transport.rs#diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-host-never-quarantines-an-admission-charge.md"
     },
     {
@@ -3208,17 +3152,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/client.rs",
+      "check_pointer": "crates/host-runtime/src/ring_transport.rs#diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-ring-unavailability-fails-closed-without-a-classified-reason.md"
     },
     {
@@ -3232,17 +3176,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
+      "check_pointer": "crates/host-runtime/src/ring_transport.rs#diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-reclamation-count-does-not-witness-charge-release.md"
     },
     {
@@ -3256,17 +3200,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/lib.rs",
+      "check_pointer": "crates/host-runtime/src/ring_transport.rs#diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-host-doctor-emits-one-of-five-declared-terminal-classes.md"
     },
     {
@@ -3387,13 +3331,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -3495,17 +3439,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#committed_header_vectors_decode_to_their_documented_fields",
+      "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/encoder-never-emits-a-frame-its-own-decoder-rejects.md"
     },
     {
@@ -3550,17 +3494,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/setup_socket.rs#client_rejects_stale_identity_without_activate_write_or_returned_descriptors",
+      "check_pointer": "crates/host-runtime/src/setup_socket.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token.md"
     },
     {
@@ -3778,17 +3722,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/tests/shm_failure_modes.rs#setup_active_and_idle_sigkill_each_return_exact_capacity",
+      "check_pointer": "crates/host-runtime/tests/shm_failure_modes.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/setup-a-a-stalled-setup-is-torn-down-within-the-transport-setup-deadline.md"
     },
     {
@@ -3826,17 +3770,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/setup_socket.rs#goodbye_and_eof_have_distinct_outcomes",
+      "check_pointer": "crates/host-runtime/src/setup_socket.rs",
       "evidence_pointer": "docs/properties/host-runtime/catalog.md"
     },
     {
@@ -3899,13 +3843,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -3922,17 +3866,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/client.rs#dropped_close_retires_and_repeated_close_joins_tasks",
+      "check_pointer": "crates/host-runtime/src/client.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/client-a-a-retired-generation-forgets-why-it-retired.md"
     },
     {
@@ -3970,17 +3914,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/client.rs",
+      "check_pointer": "crates/host-runtime/src/setup_socket.rs#goodbye_and_eof_have_distinct_outcomes",
       "evidence_pointer": "docs/properties/host-runtime/evidence/client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye.md"
     },
     {
@@ -3995,17 +3939,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/tests/shm_failure_modes.rs#clean_close_returns_exact_single_connection_capacity",
+      "check_pointer": "crates/host-runtime/tests/shm_failure_modes.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/client-a-a-close-completes-before-its-setup-goodbye-is-written.md"
     },
     {
@@ -4361,17 +4305,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs#shutdown_registration_rejection_leaves_no_graceful_drain_work",
+      "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md"
     },
     {
@@ -4430,22 +4374,23 @@
         "crates/host-runtime/src/client.rs",
         "crates/host-runtime/src/dispatch.rs",
         "crates/host-runtime/src/handler.rs",
-        "crates/host-runtime/src/wire.rs"
+        "crates/host-runtime/src/wire.rs",
+        "crates/host-runtime/tests/dispatch.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/client.rs",
+      "check_pointer": "crates/host-runtime/tests/dispatch.rs#oversized_handler_output_cannot_corrupt_framing",
       "evidence_pointer": "docs/properties/host-runtime/evidence/req-a-a-handler-response-is-length-checked-and-never-content-checked.md"
     },
     {
@@ -4481,22 +4426,23 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/config.rs",
-        "crates/host-runtime/src/dispatch.rs"
+        "crates/host-runtime/src/dispatch.rs",
+        "crates/host-runtime/tests/dispatch.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/config.rs",
+      "check_pointer": "crates/host-runtime/tests/dispatch.rs#saturated_request_capacity_returns_server_busy_without_dispatch",
       "evidence_pointer": "docs/properties/host-runtime/evidence/req-a-a-handler-outliving-every-host-deadline-is-reached.md"
     },
     {
@@ -4504,22 +4450,23 @@
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
-        "crates/host-runtime/src/runtime.rs"
+        "crates/host-runtime/src/runtime.rs",
+        "crates/host-runtime/tests/dispatch.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/runtime.rs",
+      "check_pointer": "crates/host-runtime/tests/dispatch.rs#saturated_request_capacity_returns_server_busy_without_dispatch",
       "evidence_pointer": "docs/properties/host-runtime/evidence/req-a-both-admission-classes-and-the-rejection-bound-saturate.md"
     },
     {
@@ -4582,13 +4529,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -4657,13 +4604,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -4706,13 +4653,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -4796,22 +4743,23 @@
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/config.rs",
-        "crates/host-runtime/src/connection.rs"
+        "crates/host-runtime/src/connection.rs",
+        "crates/host-runtime/tests/lifecycle.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "yes",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/config.rs",
+      "check_pointer": "crates/host-runtime/tests/lifecycle.rs#liveness_is_disabled_by_default",
       "evidence_pointer": "docs/properties/host-runtime/evidence/rt-a-the-default-configuration-arms-no-liveness-probe.md"
     },
     {
@@ -4919,13 +4867,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -5256,13 +5204,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -5435,7 +5383,7 @@
       "strategy_decision": "Golden-vector test against ids produced by the `ai-tokenizer` oracle; corpus texts naming the predecessor replaced and the golden regenerated once at U3.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/tokenizer/evidence/tokenizer-encoding-matches-the-independent-oracle.md",
-      "evidence_digest": "e7c90753adef928456425c6ead1e39f8bfaa5805b598ff18f6f129639a5428ca",
+      "evidence_digest": "a076a04dba19aaa71d7311c0c603fa964461c155972b5476a067f2332ad9e365",
       "check_pointer": "crates/tokenizer/tests/token_golden.rs#encode_ordinary_matches_ai_tokenizer_ids",
       "check_hash": "3b0bcdff94563942763dfb97d1d7d730cfce5451b18a16cb4505555253074a24",
       "code_hash": "ea0111223d24a3b71809dcd4e25a55d57b72a754d71e2272e31eb9bbcdb4df0b",
@@ -5444,7 +5392,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "e7c90753adef928456425c6ead1e39f8bfaa5805b598ff18f6f129639a5428ca",
+        "digest": "a076a04dba19aaa71d7311c0c603fa964461c155972b5476a067f2332ad9e365",
         "description": "U3 evidence record docs/properties/tokenizer/evidence/tokenizer-encoding-matches-the-independent-oracle.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5459,13 +5407,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
