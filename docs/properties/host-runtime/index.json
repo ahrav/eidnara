@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "c98b5a7f7f1f84eea0e582ab1897b529cea4361ad05891d757b9e5ab930e24c5",
+  "source_sha256": "8aae93a3e716cf80cdb3fd8ab45971fb4797ffb18bd3067d1ae19fbf2edc7070",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -2080,7 +2080,7 @@
       "slug": "setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "every accepted socket authenticates through `authenticate_server` (`connection.rs:120-129`) and receives its activation token from the grant path inside `run_connection` (`:155-165`), with no configuration gate on either step.",
+      "reachability_note": "every accepted socket authenticates through `authenticate_server` (called at `connection.rs:91`, re-verified) and receives its activation token from the grant path inside `run_connection` (`activate_server` at `:155-165`), with no configuration gate on either step.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -2108,7 +2108,7 @@
       "slug": "setup-a-a-captured-client-proof-never-authenticates-twice",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the proof check runs in `authenticate_server` (`connection.rs:120-129`) for every accepted socket before any transport work; no option disables authentication.",
+      "reachability_note": "the proof check runs in `authenticate_server` (called at `connection.rs:91`, re-verified) for every accepted socket before any transport work; no option disables authentication.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -2220,7 +2220,7 @@
       "slug": "setup-a-a-hostile-occupant-of-the-socket-path-fails-closed",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the setup-socket bind runs once per `run` at publication (`setup_socket.rs:44-48` performs the bind and the `symlink_metadata` classification on the occupant), on every incarnation and for every data directory the embedder passes.",
+      "reachability_note": "the setup-socket bind runs once per `run` at publication (`bind_owner_only`, `setup_socket.rs:28-48`, classifies the occupant with `symlink_metadata` at `:29` before binding at `:45`; re-verified), on every incarnation and for every data directory the embedder passes.",
       "status": "active",
       "exercised": {
         "state": "partial",

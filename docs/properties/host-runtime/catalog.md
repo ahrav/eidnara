@@ -4776,7 +4776,7 @@ Open questions:
 ### setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it
 
 Type: safety
-Reachability: default-production - every accepted socket authenticates through `authenticate_server` (`connection.rs:120-129`) and receives its activation token from the grant path inside `run_connection` (`:155-165`), with no configuration gate on either step.
+Reachability: default-production - every accepted socket authenticates through `authenticate_server` (called at `connection.rs:91`, re-verified) and receives its activation token from the grant path inside `run_connection` (`activate_server` at `:155-165`), with no configuration gate on either step.
 Status: active
 Exercised: partial - the matching and mismatching wire-identity cases are tested
 in-crate; the cross-connection token case is not.
@@ -4832,7 +4832,7 @@ the three whose existing tests are direct.
 ### setup-a-a-captured-client-proof-never-authenticates-twice
 
 Type: safety
-Reachability: default-production - the proof check runs in `authenticate_server` (`connection.rs:120-129`) for every accepted socket before any transport work; no option disables authentication.
+Reachability: default-production - the proof check runs in `authenticate_server` (called at `connection.rs:91`, re-verified) for every accepted socket before any transport work; no option disables authentication.
 Status: active
 Exercised: partial - nonce freshness is asserted; no test replays a captured
 `ClientAuth`.
@@ -5006,7 +5006,7 @@ Open questions:
 ### setup-a-a-hostile-occupant-of-the-socket-path-fails-closed
 
 Type: safety
-Reachability: default-production - the setup-socket bind runs once per `run` at publication (`setup_socket.rs:44-48` performs the bind and the `symlink_metadata` classification on the occupant), on every incarnation and for every data directory the embedder passes.
+Reachability: default-production - the setup-socket bind runs once per `run` at publication (`bind_owner_only`, `setup_socket.rs:28-48`, classifies the occupant with `symlink_metadata` at `:29` before binding at `:45`; re-verified), on every incarnation and for every data directory the embedder passes.
 Status: active
 Exercised: partial - one of four failing occupant shapes is tested.
 Guarantee: `bind_owner_only` refuses every pre-existing occupant that is not a
