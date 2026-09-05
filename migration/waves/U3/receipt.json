@@ -1273,7 +1273,7 @@
         "blob_sha": "1939312fa200dbef74d836b3718b501b12dcd135"
       },
       "destination": "crates/host-runtime/src/synapse/bundle.rs",
-      "destination_sha256": "5bbad6db2d59ee03cb136b451bbe5db53ee8b126e444f58bb5a20ebae3adb360",
+      "destination_sha256": "0cace692f9ac1c6117f254c53d1d155578fe88dafedb18e4db60713077fd50e5",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4912,7 +4912,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "destination_sha256": "e3302582ef8e6ff1174fdd9d86b85650be5ec84c2c5466bbf32538c0415ef0e8",
+      "destination_sha256": "3c1316529cfb77e4a420168fccfeacbee20894b9c11d5e24fd1c96c6cc9603bc",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "e80b3ea6c899289c451038e47caa4665430e3b2c93ab178b2d3897c2024b4a74",
+      "destination_sha256": "e8fe81a9ecbad89abf7270b8fbabd9d523c24d1f4145f016bd6b81cb5feb764b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5644,7 +5644,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "a0b39a042aedf89e15f4c128ac72ae99cf6412dd3be2c37e24058eec494c94ec",
+      "destination_sha256": "ac5b89dd7a44874585f2cd2e9ab8e0c5c713a6258c2d85055f58ccf461432539",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

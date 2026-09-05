@@ -117,8 +117,9 @@ the function against its Python mirror:
   of the test manifest alone (`model_file`, both `external_initializers`, the
   four tokenizer artifacts, `corpus`), each external-initializer `name`
   alone, and each embedding-space scalar alone
-  (`pooling`, `quantization`, each `output` selector form, `max_tokens`,
-  `dims`, `table_epoch`), and asserts `canonical_fingerprint` changes and
+  (`pooling`, `quantization`, each `output` selector form and the numeric
+  `output.index` value under an unchanged tag, `max_tokens`, `dims`,
+  `table_epoch`), and asserts `canonical_fingerprint` changes and
   that no two mutations produce the same fingerprint. An input added to
   `BundleManifest` but omitted from the pre-image fails the test once its
   mutation is listed.

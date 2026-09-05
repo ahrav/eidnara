@@ -238,13 +238,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/charge-release-never-silently-strands.md"
@@ -801,13 +801,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/shm-transport/tests/contract.rs#lifecycle_accepts_only_diagram_edges_and_quarantine_is_terminal",
       "evidence_pointer": "docs/properties/shm-transport/evidence/documented-close-order-has-a-production-driver.md"
@@ -875,13 +875,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/shm-transport/src/lib.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/test-only-surface-absent-from-the-shipped-addon.md"
@@ -1253,13 +1253,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/header-rejection-effect-does-not-depend-on-the-catching-layer.md"
@@ -2898,13 +2898,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/generation.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md"
@@ -5053,16 +5053,16 @@
       "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint), the committed fingerprint pinned as a literal, a structural test that changes each artifact hash and each embedding-space scalar alone and asserts the fingerprint moves, plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "evidence_digest": "e3302582ef8e6ff1174fdd9d86b85650be5ec84c2c5466bbf32538c0415ef0e8",
+      "evidence_digest": "3c1316529cfb77e4a420168fccfeacbee20894b9c11d5e24fd1c96c6cc9603bc",
       "check_pointer": "crates/host-runtime/tests/synapse_bundle.rs#the_committed_fixture_carries_its_canonical_fingerprint",
       "check_hash": "2bd1119b04d575d60614e2e51fd6ca2e8b256dc8f5a27d17fb8e47cb428f9e88",
-      "code_hash": "3a14fca6b96a924cf0c442455bbc1d4db09f089a4e4219de96588a21e6c64f74",
+      "code_hash": "12e0efb343aa20f431719ccc9cb58204b809cbebd6b14aac80682d14027e9817",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "e3302582ef8e6ff1174fdd9d86b85650be5ec84c2c5466bbf32538c0415ef0e8",
+        "digest": "3c1316529cfb77e4a420168fccfeacbee20894b9c11d5e24fd1c96c6cc9603bc",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
