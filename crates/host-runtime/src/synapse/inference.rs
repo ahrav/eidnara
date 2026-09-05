@@ -417,19 +417,24 @@ impl Backend {
             }
         }
         // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so a multi-row call is certified too, with every row attributed to its item.
-        // The first two rows are a pair with different expectations (corpus parsing guarantees one exists), so a permuted output cannot match; the rest cycle through the corpus to fill the batch.
-        let first = &corpus.items[0];
-        let second = corpus
+        // The first two rows are a pair with different expectations, so a permuted output cannot match; the rest cycle through the corpus to fill the batch.
+        let (first, second) = corpus
             .items
             .iter()
-            .find(|item| {
-                super::bundle::expectations_differ(
-                    &first.expected,
-                    &item.expected,
-                    corpus.tolerance,
-                )
+            .enumerate()
+            .find_map(|(index, first)| {
+                corpus.items[index + 1..]
+                    .iter()
+                    .find(|second| {
+                        super::bundle::expectations_differ(
+                            &first.expected,
+                            &second.expected,
+                            corpus.tolerance,
+                        )
+                    })
+                    .map(|second| (first, second))
             })
-            .unwrap_or(first);
+            .unwrap_or((&corpus.items[0], &corpus.items[0]));
         let batch: Vec<&CorpusItem> = [first, second]
             .into_iter()
             .chain(

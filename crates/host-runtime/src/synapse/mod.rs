@@ -292,6 +292,7 @@ impl SynapseComponent {
         engine: Arc<dyn EmbeddingEngine>,
         limits: SynapseLimits,
     ) -> Result<Self, bundle::BundleError> {
+        bundle::validate_lane_identity(&lane)?;
         bundle::validate_serving_limits(lane.dims, lane.recommended_rows as usize, &limits)?;
         // `validate_serving_limits` rejects permit-count overflow.
         // Validated limits always have a permit count.
@@ -392,16 +393,24 @@ const BUSY_REASON: &str = "the synapse lane is busy";
 
 const SHUT_DOWN_REASON: &str = "the synapse lane is shut down";
 
-/// Engines supplied through `ready_with_engine` bypass `Backend`'s own output checks, so the served-vector contract is enforced here for every engine; a violation quarantines the lane like any other invariant failure.
+/// Engines supplied through `ready_with_engine` bypass `Backend`'s own output checks, so the served-vector contract is enforced here for every engine: one row per input text, each with `dims` finite unit-norm components. A violation quarantines the lane like any other invariant failure.
 fn check_engine_vectors(
     inner: &SynapseInner,
     dims: usize,
+    expected_rows: usize,
     vectors: &[Vec<f32>],
 ) -> Result<(), String> {
-    if let Some(reason) = vectors
-        .iter()
-        .find_map(|vector| inference::validate_unit_vector(dims, vector).err())
-    {
+    let violation = if vectors.len() != expected_rows {
+        Some(format!(
+            "inference returned {} vectors for {expected_rows} texts",
+            vectors.len()
+        ))
+    } else {
+        vectors
+            .iter()
+            .find_map(|vector| inference::validate_unit_vector(dims, vector).err())
+    };
+    if let Some(reason) = violation {
         mark_failing(inner, reason.clone());
         return Err(reason);
     }
@@ -655,16 +664,11 @@ impl SynapseComponent {
         }
         match result {
             Ok(vectors) => {
-                // One query yields exactly one row; any other count is a cardinality violation that quarantines the lane, as the batch worker does for a mismatched item count.
-                let [vector] = vectors.as_slice() else {
-                    let reason =
-                        format!("inference returned {} vectors for one query", vectors.len());
-                    mark_failing(&self.inner, reason.clone());
-                    return app_error("artifact_invalid", &reason);
-                };
-                if let Err(reason) = check_engine_vectors(&self.inner, lane.lane.dims, &vectors) {
+                if let Err(reason) = check_engine_vectors(&self.inner, lane.lane.dims, 1, &vectors)
+                {
                     return app_error("artifact_invalid", &reason);
                 }
+                let vector = &vectors[0];
                 // The CPU lane is idle once the verdict arrives, so the handler's admission slot can be released before response reservation waits on egress. The returned vector then lives outside the slot's bound, so it is charged to the resident pool first; when that charge is unavailable the slot stays held as the bound instead. The worker's copy still covers a native call that outlives its receiver.
                 let vector_bytes = vector.len().saturating_mul(std::mem::size_of::<f32>());
                 let _vector_charge = match ctx.try_reserve_resident(vector_bytes) {
@@ -787,20 +791,23 @@ impl SynapseComponent {
                 armed: true,
             };
             let lane_blocking = Arc::clone(&lane);
+            let item_count = items.len();
             let joined = tokio::task::spawn_blocking(move || {
                 let texts: Vec<&str> = items.iter().map(|item| item.text.as_str()).collect();
                 lane_blocking.backend.embed(&texts)
             })
             .await;
             match settle_inference(&inner, joined) {
-                Ok(vectors) => match check_engine_vectors(&inner, lane.lane.dims, &vectors) {
-                    Ok(()) => inner.jobs.publish_ready(seq, vectors),
-                    Err(reason) => {
-                        inner
-                            .jobs
-                            .publish_failed(seq, "artifact_invalid".to_owned(), reason);
+                Ok(vectors) => {
+                    match check_engine_vectors(&inner, lane.lane.dims, item_count, &vectors) {
+                        Ok(()) => inner.jobs.publish_ready(seq, vectors),
+                        Err(reason) => {
+                            inner
+                                .jobs
+                                .publish_failed(seq, "artifact_invalid".to_owned(), reason);
+                        }
                     }
-                },
+                }
                 Err(InferenceError::Input(reason)) => {
                     inner
                         .jobs
@@ -1178,7 +1185,8 @@ mod tests {
     fn lane() -> LaneInfo {
         LaneInfo {
             model: "m".to_owned(),
-            fingerprint: "f".to_owned(),
+            fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
             table_epoch: 1,
             dims: 1,
             execution_provider: "cpu",

@@ -302,6 +302,33 @@ fn parse_manifest(bytes: &[u8]) -> Result<BundleManifest, BundleError> {
     serde_json::from_value(value).map_err(|_| err("manifest schema invalid"))
 }
 
+/// The catalog-facing lane identity every published lane must satisfy, whether it comes from a manifest or from `ready_with_engine`.
+/// These bounds also size the wire reservations: the model name and fingerprint lengths feed the vector-body reservation and the provenance cap bounds the `models.list` body.
+pub(crate) fn validate_lane_identity(lane: &super::LaneInfo) -> Result<(), BundleError> {
+    if lane.model.is_empty() || lane.model.len() > MAX_MODEL_NAME_BYTES {
+        return Err(err("model name out of bounds"));
+    }
+    validate_sha256_hex(&lane.fingerprint).map_err(err)?;
+    if lane.dims == 0 || lane.dims as u64 > MAX_DIMS {
+        return Err(err("dims out of bounds"));
+    }
+    if lane.max_tokens == 0 || u64::from(lane.max_tokens) > MAX_MAX_TOKENS {
+        return Err(err("max_tokens out of bounds"));
+    }
+    if lane.table_epoch > MAX_TABLE_EPOCH {
+        return Err(err("table_epoch out of bounds"));
+    }
+    if lane.recommended_rows == 0 || lane.recommended_token_budget == 0 {
+        return Err(err("recommended batch policy must be nonzero"));
+    }
+    let provenance_bytes =
+        serde_json::to_vec(&lane.provenance).map_err(|_| err("provenance serialization failed"))?;
+    if provenance_bytes.len() > MAX_PROVENANCE_BYTES {
+        return Err(err("provenance too large"));
+    }
+    Ok(())
+}
+
 fn validate_manifest(manifest: &BundleManifest) -> Result<(), BundleError> {
     if manifest.schema_version != 1 {
         return Err(err("unsupported manifest schema version"));
