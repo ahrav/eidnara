@@ -32,9 +32,9 @@ use crate::instance::{
 };
 use crate::lifecycle::{is_canonical_payload_digest, lifecycle_dir_path};
 use crate::store_fs::{
-    HARDENED_DIR_FLAGS, hash_copy, is_stale_mtime, is_temp_name, open_created_dir,
-    open_or_create_parents, open_rel_nofollow, path_names_descriptor, read_dir_names,
-    read_dir_names_partitioned, rename_no_replace, same_snapshot,
+    HARDENED_DIR_FLAGS, MAX_PATH_COMPONENTS, hash_copy, is_stale_mtime, is_temp_name,
+    open_created_dir, open_or_create_parents, open_rel_nofollow, path_names_descriptor,
+    read_dir_names, read_dir_names_partitioned, rename_no_replace, same_snapshot,
 };
 
 pub const GENERATIONS_DIR_NAME: &str = "generations";
@@ -577,10 +577,14 @@ impl GenerationStore {
         }
         self.verify_named_identity()?;
         // The preflight records each source's absolute path and inode snapshot; the copy reopens by that path and rejects a changed snapshot, so only one descriptor is open at a time.
+        // One working directory is captured for the whole batch so a concurrent `chdir` cannot
+        // resolve two relative sources against different directories.
+        let cwd =
+            std::env::current_dir().map_err(|_| invalid("working directory is unavailable"))?;
         let mut preflighted = Vec::with_capacity(sources.len());
         let mut sizes = Vec::with_capacity(sources.len());
         for spec in sources {
-            let source = preflight_source(spec)?;
+            let source = preflight_source(spec, &cwd)?;
             sizes.push(source.stat.st_size as u64);
             preflighted.push(source);
         }
@@ -818,7 +822,9 @@ impl GenerationStore {
 
     /// `is_quarantined_schema` decodes only the manifest because every non-quarantined outcome is removable.
     fn is_quarantined_schema(&self, digest: &str) -> bool {
-        let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
+        // Only ownership gates this open: a future-schema generation with a directory mode the
+        // current schema rejects must still be recognized and preserved.
+        let Ok(dir) = crate::store_fs::open_dir_for_removal(&self.generations_fd, digest) else {
             return false;
         };
         let Some(manifest_fd) = open_rel_file(&dir, GENERATION_MANIFEST_NAME) else {
@@ -910,6 +916,9 @@ fn validate_rel_path(rel: &str) -> Result<(), GenerationError> {
     if rel.is_empty() || rel.len() > 4096 {
         return Err(invalid("staged path length is invalid"));
     }
+    if rel.split('/').count() > MAX_PATH_COMPONENTS {
+        return Err(invalid("staged path is too deep"));
+    }
     for component in rel.split('/') {
         if component.is_empty() || component == "." || component == ".." {
             return Err(invalid("staged path has an invalid component"));
@@ -963,9 +972,12 @@ struct PreflightSource {
 /// Opens one source, checks it is a regular file whose size matches `expected_size` when
 /// specified, and returns its snapshot. The descriptor is closed on return so a generation with
 /// more files than the descriptor limit can still be preflighted.
-fn preflight_source(spec: &SourceSpec) -> Result<PreflightSource, GenerationError> {
-    let path = std::path::absolute(&spec.source)
-        .map_err(|_| invalid("staging source path cannot be made absolute"))?;
+fn preflight_source(spec: &SourceSpec, cwd: &Path) -> Result<PreflightSource, GenerationError> {
+    let path = if spec.source.is_absolute() {
+        spec.source.clone()
+    } else {
+        cwd.join(&spec.source)
+    };
     let (_, stat) = open_source_file(&path)?;
     if spec
         .expected_size
@@ -1257,6 +1269,67 @@ mod tests {
 
         let again = stage_default(&store, src.path());
         assert_eq!(again, digest);
+    }
+
+    /// A future-schema generation is preserved by `prune` even when its directory mode is
+    /// rejected by the current schema validator.
+    #[test]
+    fn a_quarantined_generation_with_a_foreign_directory_mode_is_still_preserved() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let gen_dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        let manifest_path = gen_dir.join(GENERATION_MANIFEST_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("read")).expect("json");
+        value["schema"] = 7.into();
+        std::fs::write(&manifest_path, serde_json::to_vec(&value).expect("encode")).expect("write");
+        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o500)).expect("mode");
+
+        store
+            .stage_and_promote(
+                &[SourceSpec {
+                    rel_path: "bin/eidnara-host".to_owned(),
+                    source: write_source(src.path(), "launcher-b", b"#successor-binary"),
+                    executable: true,
+                    expected_size: None,
+                    expected_sha256: None,
+                }],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .expect("stage successor");
+        let report = store.prune(&BTreeSet::new()).expect("prune");
+        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore");
+        assert_eq!(report.removed_generations, 0);
+        assert_eq!(report.quarantined, 1);
+        assert!(
+            manifest_path.is_file(),
+            "the unknown-schema generation survives"
+        );
+    }
+
+    #[test]
+    fn a_staged_path_deeper_than_the_component_bound_is_rejected() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let deep = vec!["d"; MAX_PATH_COMPONENTS].join("/") + "/leaf";
+        let spec = vec![SourceSpec {
+            rel_path: deep,
+            source: write_source(src.path(), "leaf", b"x"),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        assert!(matches!(
+            store.stage_and_promote(&spec, &meta(), &BTreeSet::new()),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "staged path is too deep"
+            })
+        ));
     }
 
     /// Writes through pinned descriptors land in a detached tree once `lifecycle` is renamed

@@ -20,6 +20,11 @@ use crate::instance::{
     write_all_fd,
 };
 
+/// Validators walk a tree recursively and hold one directory descriptor per level, so a path
+/// may have at most this many components; the bound keeps the walk far below common
+/// `RLIMIT_NOFILE` soft limits.
+pub(crate) const MAX_PATH_COMPONENTS: usize = 128;
+
 /// Sweeps treat a temp whose mtime is older than this as abandoned.
 pub(crate) const STALE_TEMP_AFTER: Duration = Duration::from_secs(600);
 

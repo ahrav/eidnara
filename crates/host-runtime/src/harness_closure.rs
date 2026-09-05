@@ -23,10 +23,10 @@ use crate::instance::{
 };
 use crate::lifecycle::is_canonical_payload_digest;
 use crate::store_fs::{
-    HARDENED_DIR_FLAGS, create_owned_dir, exchange_dirs, hash_copy, is_stale_mtime, is_temp_name,
-    open_created_dir, open_dir_for_removal, open_or_create_parents, open_rel_nofollow,
-    path_names_descriptor, read_dir_names, read_dir_names_partitioned, remove_tree,
-    rename_no_replace, same_snapshot, write_new_file,
+    HARDENED_DIR_FLAGS, MAX_PATH_COMPONENTS, create_owned_dir, exchange_dirs, hash_copy,
+    is_stale_mtime, is_temp_name, open_created_dir, open_dir_for_removal, open_or_create_parents,
+    open_rel_nofollow, path_names_descriptor, read_dir_names, read_dir_names_partitioned,
+    remove_tree, rename_no_replace, same_snapshot, write_new_file,
 };
 
 const MANIFEST_NAME: &str = "manifest.json";
@@ -549,6 +549,9 @@ fn validate_identifier(value: &str) -> Result<(), HarnessClosureError> {
 fn validate_relative_path(path: &str) -> Result<(), HarnessClosureError> {
     if path.is_empty() || path.len() > MAX_PATH_BYTES || path.as_bytes().contains(&0) {
         return Err(invalid("manifest path length is invalid"));
+    }
+    if path.split('/').count() > MAX_PATH_COMPONENTS {
+        return Err(invalid("manifest path is too deep"));
     }
     if path.split('/').any(|part| {
         part.is_empty()
