@@ -352,6 +352,7 @@ and `n/a - invalidated` for an invalidated record.
 | [addon-tokens-never-collide-with-live-entries](#addon-tokens-never-collide-with-live-entries) | safety | high | yes |
 | [attach-makes-every-received-descriptor-close-on-exec](#attach-makes-every-received-descriptor-close-on-exec) | safety | high | yes |
 | [foreign-slot-state-on-reserve-is-a-fault-not-backpressure](#foreign-slot-state-on-reserve-is-a-fault-not-backpressure) | safety | high | yes |
+| [failed-publication-wake-leaves-the-slot-published](#failed-publication-wake-leaves-the-slot-published) | safety | high | yes |
 
 ---
 
@@ -370,12 +371,15 @@ duplex ring (`crates/host-runtime/src/connection.rs:138`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: yes - `quarantine_survives_peer_clearing_shared_flag`
+Exercised: partial - `quarantine_survives_peer_clearing_shared_flag`
 (`crates/shm-transport/src/backend/ring.rs:4261`) quarantines a ring, clears the
-shared flag as the peer would, and asserts operations stay quarantined;
-`shared_quarantine_flag_latches_locally_when_observed` (`:3942`) sets the shared
-flag from outside, has the handle observe it, clears it, and asserts the handle
-stays quarantined.
+shared flag as the peer would, and asserts `try_receive`, `try_reserve`, and
+`trim` stay quarantined; `shared_quarantine_flag_latches_locally_when_observed`
+(`:3942`) sets the shared flag from outside, has the handle observe it, clears
+it, and asserts `try_receive` and `arm_data_wait` stay quarantined. Neither test
+calls `release` or `probe` after the clear; those two are tested only while the
+shared flag is still set, so a regression that made either consult the shared
+byte instead of the local latch would pass every cited test.
 Guarantee: Once a direction is quarantined locally, no action by the peer can
 make it accept a reserve, receive, or release again.
 Check: `always` — after `enter_quarantine()`, for every peer-authored mutation
@@ -4815,6 +4819,11 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   defect: the two records name the same compare-exchange, one as the hazard and
   one as the required disposition, so the older record's Fault/timing angle is
   the negative case of the newer one's Check.
+  `failed-publication-wake-leaves-the-slot-published` closes the commit
+  sequence from the other end: `publish-signal-implies-committed-frame` says a
+  failure before publication must leave no frame, and this record says a
+  failure after publication must leave the frame; together they fix the point
+  in `publish_commit` where the frame becomes the peer's.
 
 ## Discovered at U3
 
@@ -5254,84 +5263,131 @@ Type: safety
 Reachability: default-production - `Ring::attach`
 (`crates/shm-transport/src/backend/ring.rs:1095-1101`) sets `FD_CLOEXEC` on all
 three received descriptors as its first action, before the mapping is validated
-or the doorbells are wrapped; every attach in the addon and the bridge endpoint
-goes through it (`packages/shm-native/src/lib.rs:287`,
-`crates/host-runtime/src/ring_transport.rs:877-879`).
+or the doorbells are wrapped; every attach goes through it: the raw addon path
+(`packages/shm-native/src/lib.rs:287`), the addon `connectSetup` resolve path
+(`lib.rs:814`, `:819`), the bridge endpoint
+(`crates/host-runtime/src/ring_transport.rs:877-879`), and
+`RingAttachment::attach` (`ring.rs:978-980`), the only other entry.
 Status: active
-Exercised: yes - `attach_sets_close_on_exec_on_every_descriptor`
+Exercised: partial - `attach_sets_close_on_exec_on_every_descriptor`
 (`ring.rs:3474-3491`) clears the flag on all three descriptors of a fresh
 attachment (`:3477-3479`), attaches, and asserts `sys::is_cloexec` on each raw
-descriptor while the ring holds it (`:3482-3489`). Nothing tests the failure
-arm, in which `fcntl` fails and attach returns `ObjectValidationFailed`.
-Guarantee: After a successful `Ring::attach`, the mapping descriptor and both
-doorbell ends carry `FD_CLOEXEC`, whatever flags they arrived with; a descriptor
-whose flag cannot be set makes the attach fail before anything is mapped.
+descriptor while the ring holds it (`:3482-3489`; the raw numbers stay valid
+because `Mapping` owns the fd, `:451-455`, and `Doorbell` owns each local end,
+`:714-715`), which covers the successful `fcntl` path only. The failure arm is
+not covered and is not constructible through the safe API: `set_cloexec`
+(`sys.rs:233-244`) issues `F_GETFD`/`F_SETFD` on a `BorrowedFd` taken from an
+`OwnedFd`, so `EBADF` is excluded by construction.
+Guarantee: After a successful `Ring::attach`, the mapping descriptor and this
+side's end of each of the two doorbells (`ring.rs:1102`, `:1127-1128`) carry
+`FD_CLOEXEC`, whatever flags they arrived with; a descriptor whose flag cannot
+be set makes the attach fail before anything is mapped.
 Check: `always` - for each of the three descriptors of an attached ring,
-`fcntl(F_GETFD)` reports `FD_CLOEXEC`; an attach whose `set_cloexec` fails
-returns `RingError::ObjectValidationFailed` and leaves no mapping.
+`fcntl(F_GETFD)` reports `FD_CLOEXEC`. The failure arm is a separate
+`always-or-unreached` obligation, because it cannot be reached through the safe
+API; if it is ever asserted, `ObjectValidationFailed` alone does not identify
+the gate, since `validate_object` (`ring.rs:2834-2843`) and `validate_seals`
+(`:2849-2851`) return the same variant, so the oracle needs a second
+observation such as all three descriptors closed and no mapping made.
+`sys::is_cloexec` is `#[cfg(test)] pub(crate)` (`sys.rs:293-298`), so the
+flag oracle can live only in the crate's own unit tests unless a public accessor
+or a raw `fcntl` is used.
 Fault/timing angle: descriptors received over `SCM_RIGHTS` without
 `MSG_CMSG_CLOEXEC` arrive inheritable (`ring.rs:1096-1098`). If the gate
-regressed, a child this process later execs would hold the mapping and the
-peer's doorbell ends open: the peer's `peer_closed` sentinel and its doorbell
-`drain` would keep seeing a live end after this side exited, so peer death would
-be hidden for as long as the child lives, and the mapping's pages would stay
-resident in a process that never reads them. The addon side sets `SOCK_CLOEXEC`
-on the setup socket and dups with `CLOEXEC` (`packages/shm-native/src/setup.rs:159`,
-`lib.rs:270-284`), so the transport gate is the only one that covers descriptors
-handed to `Ring::attach` by any other caller.
+regressed, a child this process later execs would hold the mapping and this
+side's doorbell ends open: the peer's doorbell `signal` and `drain` would keep
+succeeding after this side exited, because `drain` reports peer death only as a
+zero-length read (`ring.rs:800-806`) and `signal` only as `EPIPE` (`:783-798`),
+so ring-level death detection would be hidden for as long as the child lives,
+the child could read and write every control page and the arena, and the pages
+would stay resident in a process that never reads them. The setup-socket
+sentinel is unaffected: `peer_closed` (`packages/shm-native/src/setup.rs:187-198`)
+probes the setup stream, which is created `CLOEXEC` (`setup.rs:159`). No
+in-tree caller can present an inheritable descriptor: both receivers pass
+`MSG_CMSG_CLOEXEC` (`setup.rs:335`, `crates/host-runtime/src/setup_socket.rs:236`),
+the addon re-dups with `F_DUPFD_CLOEXEC` (`lib.rs:270-284`), and `attachment`
+hands out a cloned mapping fd and moved doorbell ends that already carry the
+flag (`ring.rs:1244-1252`), so the gate is defence in depth in-tree and the
+only line for a caller outside these trees; the test clears the flag by hand
+because nothing else in the tree can.
 Required faults and enabling state: an attachment whose descriptors arrive
 without the flag, then an `exec` from the attaching process; the test clears the
 flag by hand instead of forking.
 Confidence: high - [evidence](evidence/attach-makes-every-received-descriptor-close-on-exec.md).
 The gate, its position in `attach`, `sys::set_cloexec`, and the test were read
 directly.
-Existing check: `attach_sets_close_on_exec_on_every_descriptor`, unaudited.
-Impact: a forked-and-execed child inherits shared memory and the peer's wake
-channel; the peer cannot tell this process exited, and its charges stay pinned
-until the child does.
+Existing check: `attach_sets_close_on_exec_on_every_descriptor`
+(`ring.rs:3474-3491`), covering the postcondition on all three descriptors and
+not the failure arm; unaudited.
+Impact: a forked-and-execed child inherits shared memory and this side's wake
+ends; the peer's ring-level death detection is blind to this process's exit
+while the child lives, and its charges stay pinned until the child exits.
 Open questions: None.
 
 ### foreign-slot-state-on-reserve-is-a-fault-not-backpressure
 
 Type: safety
 Reachability: default-production - every producer reservation goes through
-`try_reserve` (`crates/shm-transport/src/backend/ring.rs:1267-1312`), and the
+`try_reserve` (`crates/shm-transport/src/backend/ring.rs:1267-1340`), and the
 compare-exchange at `:1302-1311` is the only place a slot enters
 `PRODUCER_RESERVED`; the receive side's counterpart is the compare-exchange in
-`try_receive_inner` (`:1431-1438`), reached by every receive.
+`try_receive_inner` (`:1431-1438`), reached by every receive that passes the
+lease-capacity check (`:1417-1422`) and finds `consumed != published`
+(`:1424-1426`).
 Status: active
-Exercised: yes - `foreign_slot_state_on_reserve_is_a_fault_not_backpressure`
-(`ring.rs:3960-3970`) stores `SLOT_PRODUCER_RESERVED` into the next reusable
-slot by hand (`:3964`) and asserts that `try_reserve` returns
-`ProducerError::Ring(RingError::InvalidSharedState)` (`:3965-3968`) and that
-the ring is quarantined (`:3969`); `impossible_slot_state_quarantines_the_receiver`
-(`:4277-4295`) stores `SLOT_RELEASE_PENDING` into a published slot and asserts
-`try_receive` returns `InvalidSharedState` and quarantines. Both tests write the
-shared page in-process; no cross-process peer performs the write.
+Exercised: partial - `foreign_slot_state_on_reserve_is_a_fault_not_backpressure`
+(`ring.rs:3960-3970`) stores `SLOT_PRODUCER_RESERVED` into slot 1 of a fresh
+ring by hand (`:3962-3964`), a slot that has never held a frame, and asserts
+that `try_reserve` returns `ProducerError::Ring(RingError::InvalidSharedState)`
+(`:3965-3968`) and that the ring is quarantined (`:3969`); the recycled-slot
+case the Guarantee is about, a slot whose previous occupant was reclaimed one
+lap earlier, is not constructed. `impossible_slot_state_quarantines_the_receiver`
+(`:4277-4288`) stores `SLOT_RELEASE_PENDING` into a published slot and asserts
+`try_receive` returns `InvalidSharedState` and quarantines. One state per side
+of the five non-matching values is covered, the `reserve_until` clause of the
+Check has no test, and both tests write the shared page in-process.
 Guarantee: When the depth check has established that the next slot's previous
-occupant was reclaimed (`outstanding < depth`, `:1294-1297`), that slot must be
+occupant was reclaimed (`outstanding >= depth` short-circuits to `Exhausted` at
+`:1293-1295`; the rationale is stated at `:1300-1301`), that slot must be
 `SLOT_FREE`; any other state is corruption, so `try_reserve` returns
 `InvalidSharedState` and quarantines the ring rather than reporting
-`Exhausted`. Symmetrically, a published slot the consumer is about to take must
+`Exhausted`. The never-`Exhausted` clause is scoped to the slot-state decision:
+`Exhausted` stays a legitimate outcome after the exchange succeeds when the
+arena has no room, and that path rolls the slot back to `SLOT_FREE` first
+(`:1312-1317`), while a span plan the protocol cannot produce quarantines with
+`ProducerError::Arena` (`:1318-1323`). Symmetrically, a published slot the consumer is about to take must
 be `SLOT_PUBLISHED`; any other state fails the receive with
 `InvalidSharedState` and quarantines through `try_receive`'s `map_err`
 (`:1399-1401`).
-Check: `always` - with `outstanding < depth` and the next slot forced to each
-non-`FREE` state, `try_reserve` returns `InvalidSharedState`, never
-`Exhausted`, and `is_quarantined()` holds afterwards; with a published slot
-forced to each non-`PUBLISHED` state, `try_receive` returns
-`InvalidSharedState` and quarantines; `reserve_until` returns the same error
-without parking.
+Check: `always` - with `outstanding < depth`, a `bound` the arena can satisfy,
+and the next slot forced to each non-`FREE` state on a fresh ring per state
+(quarantine latches and both entry points check it first, `:1275-1277`,
+`:1396-1398`), `try_reserve` returns `InvalidSharedState`, never `Exhausted`,
+and `is_quarantined()` holds afterwards; the sweep is the five defined
+non-`FREE` values (`:54-59`) plus at least one out-of-range byte, which
+`walk_slots` also rejects (`:1736`). With a published slot forced to each
+non-`PUBLISHED` state, `try_receive` returns `InvalidSharedState` and
+quarantines. `reserve_until` returns the same error without parking, with the
+elapsed-time oracle `outstanding_reservation_is_refused_without_parking` uses
+(`:4164-4186`). A forced `SLOT_RELEASE_PENDING` whose `completion_sequence`
+equals `completed + 1` is caught earlier by `reclaim_completed_inner`
+(`:2093-2095`), which `try_reserve` calls first (`:1281`); the error and the
+quarantine are the same, so a test aimed at the reserve exchange must leave
+`completion_sequence` at zero.
 Fault/timing angle: the two errors have opposite downstream contracts.
 `Exhausted` tells `reserve_until` (`:1345-1390`) to park on the capacity
 doorbell and retry until its deadline, so a corruption presented as exhaustion
 would spin the producer against a slot that can never free and surface as a
 `Deadline` after the full budget with the ring still usable;
-`InvalidSharedState` is terminal and wakes both doorbells through
-`enter_quarantine` (`:1915-1922`). The source tree mapped a lost
+`InvalidSharedState` is terminal and rings both wake epochs through
+`enter_quarantine` (`:1915-1922`), where each epoch signals its doorbell only
+if a waiter is marked parked and both results are discarded (`signal_wake`,
+`:2032-2035`), so the wake is best effort. The source tree mapped a lost
 compare-exchange to `Exhausted`, which is the defect
-`crashed-producer-does-not-wedge-the-sequence` records; this record owns the
-regression contract for the corrected mapping on both sides.
+`crashed-producer-does-not-wedge-the-sequence` records, and that record still
+states the pre-correction symptom (`Exhausted` followed by `Deadline`) as the
+source-tree finding it was written against; this record owns the regression
+contract for the corrected mapping on both sides.
 Required faults and enabling state: F2, a peer or corrupted mapping that leaves
 the next reusable slot, or a published slot, in a state the protocol cannot
 reach; a depth that has not been exhausted.
@@ -5342,4 +5398,76 @@ Existing check: the two tests named above, unaudited.
 Impact: protocol corruption presented as backpressure: the producer parks and
 retries until its deadline, the caller sees a timeout rather than a fault, and
 the corrupted ring stays in service for the next connection attempt.
+Open questions: None.
+
+### failed-publication-wake-leaves-the-slot-published
+
+Type: safety
+Reachability: default-production - every commit that passes its guards
+(`crates/shm-transport/src/backend/ring.rs:2537-2567`) ends in
+`publish_commit` (`:2347-2386`), the only non-test writer of `SLOT_PUBLISHED`
+(`:2365`), which stores the descriptor and the state, advances `arena_write` and
+`published`, and then signals the data doorbell (`:2376`). A wake failure there
+needs a peer that has closed its data-doorbell end and a consumer marked parked,
+because `signal_wake` sends nothing unless `parked` is non-zero (`:2032-2035`);
+the production case is a peer that dies while parked in its data wait.
+Status: active
+Exercised: partial - `failed_publication_wake_leaves_the_slot_published`
+(`ring.rs:3973-3996`) drops the peer's doorbell end so the next signal fails
+with `EPIPE` (`:3976`), marks the wake parked (`:3978`), commits one frame,
+asserts `commit` returns `DoorbellFailed` and the ring is quarantined
+(`:3982-3986`), and asserts the slot is still `SLOT_PUBLISHED` with its
+`reservation_len` and the `published` cursor intact (`:3987-3995`).
+`arena_write`, the wake generation, `parked`, and the descriptor's identity
+fields are not asserted, and the raced-quarantine arm is reached by
+`publication_that_raced_a_quarantine_is_not_reported_as_delivered`
+(`:3648-3664`) for its error only, with no slot-state assertion.
+Guarantee: When any step after the slot and descriptor stores fails, the
+commit's shared-memory effects stand: the slot stays `SLOT_PUBLISHED`, its
+descriptor keeps the committed length, whichever cursors advanced keep their
+values, no later reservation reuses its bytes, and the ring quarantines; the
+producer sees an `Err` (`DoorbellFailed` for the closed-end arm,
+`Quarantined` for the raced-quarantine arm) and nothing is rolled back to
+`FREE`.
+Check: `always` - for each post-store failure the producer can see, after
+`commit` returns `Err`: `slot.state == SLOT_PUBLISHED`, `reservation_len`
+equals the committed length, `is_quarantined()` holds, and no later reservation
+touches the slot's bytes. For the closed-end arm the error is `DoorbellFailed`
+(`signal_wake` also propagates whatever `data_wake()` returns, `:2031`), the
+`published` and `arena_write` cursors hold their post-commit values, the data
+wake's `generation` has advanced and its `parked` flag reads zero
+(`:2032-2033`), and the handle's `reserved_end` is cleared (`:2375`). For the
+raced-quarantine arm (`:2382-2384`) the error is `Quarantined` with the same
+shared state.
+Fault/timing angle: the wake is neither the last step nor the only post-store
+failure. After `write_descriptor` and the `SLOT_PUBLISHED` store (`:2364-2365`),
+the `arena_write` cursor exchange (`:2366-2367`), the `published` cursor
+exchange (`:2368-2369`), the wake (`:2376-2379`), and the peer-quarantine
+recheck after a successful wake (`:2382-2384`) can each fail, and none undoes
+a store. The stores are already visible to a peer that may still be alive on
+the mapping (the doorbell end can close while the mapping survives). Rolling
+the slot back would let a later reservation reuse bytes a consumer might
+already hold, and leaving the cursor behind the slot strands the frame, which is
+a live path rather than a hypothesis: `advance_cursor` (`:1951-1956`) fails
+closed on any peer rewrite, so a failure at `:2366-2367` quarantines with the
+slot `SLOT_PUBLISHED` and `published` unadvanced;
+`owned_cursor_advance_fails_closed_when_the_shared_value_moved` (`:3633-3645`)
+tests that exchange on a bare atomic and never composes it with a published
+slot. The record is distinct from
+`publish-signal-implies-committed-frame`, whose failures happen before
+publication and require that the peer see no frame; here the frame is
+published and must stay so.
+Required faults and enabling state: F1 or F4 closing the peer's data-doorbell
+end while the producer commits; constructible in-process by dropping the remote
+end.
+Confidence: high - [evidence](evidence/failed-publication-wake-leaves-the-slot-published.md).
+`publish_commit`, `signal_wake`'s error path, `advance_cursor`, and both tests
+were read directly.
+Existing check: `failed_publication_wake_leaves_the_slot_published`
+(`ring.rs:3973-3996`) for the closed-end arm, and
+`publication_that_raced_a_quarantine_is_not_reported_as_delivered`
+(`:3648-3664`) for the raced-quarantine arm's error only; unaudited.
+Impact: a wake-error cleanup change that resets the slot loses or reuses an
+already published frame; the consumer either never sees it or reads bytes the
+producer has handed to the next reservation.
 Open questions: None.

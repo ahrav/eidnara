@@ -146,7 +146,7 @@ assertion. Rows that a catalog record already cites are marked with the record.
 | `stale_lap_release_cannot_complete_recycled_slot` (`:3910`) | Stale lap release cannot complete recycled slot | unaudited |
 | `shared_quarantine_flag_latches_locally_when_observed` (`:3942`) | Shared quarantine flag latches locally when observed | unaudited; cited by `quarantine-authority-survives-peer-writes` |
 | `foreign_slot_state_on_reserve_is_a_fault_not_backpressure` (`:3960`) | Foreign slot state on reserve is a fault not backpressure | unaudited; cited by `foreign-slot-state-on-reserve-is-a-fault-not-backpressure` |
-| `failed_publication_wake_leaves_the_slot_published` (`:3973`) | Failed publication wake leaves the slot published | unaudited |
+| `failed_publication_wake_leaves_the_slot_published` (`:3973`) | Failed publication wake leaves the slot published | unaudited; cited by `failed-publication-wake-leaves-the-slot-published` |
 | `forged_arena_write_quarantines_instead_of_underflowing` (`:3999`) | Forged arena write quarantines instead of underflowing | unaudited |
 | `unaligned_batch_boundaries_do_not_strand_pages` (`:4016`) | Unaligned batch boundaries do not strand pages | unaudited |
 | `residency_vector_tracks_runtime_page_size` (`:4046`) | Residency vector tracks runtime page size | unaudited |

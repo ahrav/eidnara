@@ -853,3 +853,104 @@ claimed.
 8. An unreachable exhaustion clause inside an `always` record; whether the dead
    `identity exhausted` branch on the per-channel tables is defensive code worth
    keeping or dead code worth deleting is a design decision.
+
+## Evaluation of the three ring additions (fresh context, 85 records)
+
+A fresh-context evaluator that had not read this file or the evidence directory
+evaluated `attach-makes-every-received-descriptor-close-on-exec`,
+`foreign-slot-state-on-reserve-is-a-fault-not-backpressure`, and
+`failed-publication-wake-leaves-the-slot-published` against the merged HEAD.
+Of 29 citations, 23 resolved exactly, four were imprecise, and two were wrong
+(`:4277-4295` for a test that ends at `:4288`; `:1294-1297` for a check at
+`:1293-1295`); all are corrected. All four cited tests run and pass. Index rows
+match all three bodies. Three prose claims were contradicted by code and are
+restated: the wake is not the only post-store failure in `publish_commit`, peer
+death alone does not make the wake fail (`signal_wake` sends only when `parked`
+is set), and `peer_closed` probes the setup socket, not the ring descriptors.
+
+### Refinements applied
+
+1. Close-on-exec: Reachability lists all four `Ring::attach` entry points; the
+   Guarantee names this side's end of each doorbell rather than both ends; the
+   Check splits the failure arm into an `always-or-unreached` obligation that the
+   safe API cannot reach and notes that `ObjectValidationFailed` is shared with
+   `validate_object` and `validate_seals` and that `sys::is_cloexec` is
+   test-only; the Fault/timing angle drops the `peer_closed` claim, names
+   `drain` and `signal` as the ring-level detection that a leaked end defeats,
+   and records that both in-tree receivers already pass `MSG_CMSG_CLOEXEC`, so
+   the gate is defence in depth in-tree; Exercised is partial.
+2. Foreign slot state: Reachability bounds `try_reserve` correctly and states
+   which receives reach the exchange; the Guarantee scopes never-`Exhausted` to
+   the slot-state decision, since `Exhausted` remains legitimate after the
+   exchange when the arena is full; the Check requires a fresh ring per state
+   because quarantine latches, enumerates the five defined states plus an
+   out-of-range byte, names the elapsed-time oracle for the `reserve_until`
+   clause, and records the `reclaim_completed_inner` detection point that
+   catches a forced `RELEASE_PENDING` first; Exercised is partial (one state per
+   side on a never-used slot, no recycled-slot case, no `reserve_until` test);
+   the Fault/timing angle says the quarantine wake is best effort.
+3. Failed wake: Reachability names the guards before `publish_commit` and the
+   two conditions a wake failure needs; the Guarantee and Check generalise from
+   the doorbell to any post-store failure and add the wake generation, `parked`,
+   and `reserved_end` observations; the Fault/timing angle lists the four
+   post-store failure points and marks the cursor-exchange arm as a live path;
+   Exercised is partial and the raced-quarantine test is named for its error
+   only.
+4. `fault-map.md`: the foreign-slot and failed-wake rows move to Partial.
+
+### Gaps queued
+
+Test names below were checked against the catalog before being claimed.
+
+1. `publication_that_raced_a_quarantine_is_not_reported_as_delivered`
+   (`ring.rs:3648-3664`) asserts the error of the raced-quarantine arm and
+   nothing about the slot; folded into the failed-wake record's Check, the slot
+   half stays unasserted.
+2. `two_producer_reserved_slots_are_impossible` (`:3719-3734`): the same forced
+   state rejected at `attachment().attach()` and `probe()`; no record owns
+   "every entry point rejects an impossible slot state".
+3. The four `probe_*` tests (`:3414`, `:3523`, `:3548`, `:3616`) define which
+   slot-state and cursor combinations are protocol-reachable; the tolerance
+   boundary has no owner.
+4. `owned_cursor_advance_fails_closed_when_the_shared_value_moved`
+   (`:3633-3645`): the `advance_cursor` exchange behind every cursor advance is
+   unowned.
+5. `creator_observes_peer_exit_once_the_attachment_is_handed_over`
+   (`:3172-3188`): the positive form of ring-level death detection through
+   `drain`, and `attachment()` being once-only.
+6. `sealed_object_of_the_wrong_size_is_refused_before_mapping` (`:3398-3411`):
+   the seals-before-size ordering in `Mapping::attach`, the gate after the
+   close-on-exec gate in the same chain.
+7. Four attach-time refusals (`:3567`, `:3603`, `:3766`, `:3780`) beyond the one
+   `attach-reconciles-or-refuses-stale-shared-cursors` names.
+8. `outstanding_reservation_is_refused_without_parking` (`:4164-4186`) and
+   `reserve_until_deadline_leaves_the_capacity_wake_unparked` (`:4189-4210`):
+   the no-parking and post-deadline `parked == 0` oracles.
+9. The forged-cursor family (ten tests from `:3255` to `:4291`): F2 against the
+   cursors rather than the slot states, unowned as a group.
+10. `armed_wait_recheck_sees_a_quarantine_that_sent_no_token` and the
+    doorbell-level tests are owned; `syscall_counters_track_only_actual_ring_syscalls`
+    (`:3050`) and the residency tests beyond the trim record are not.
+11. `wrapped_errors_preserve_sources` (`:4309`): error-source chaining has no
+    record.
+
+### Biases requiring human judgment
+
+1. Defence-in-depth records read like production properties: the close-on-exec
+   label is true of the code path and false of the fault, because both in-tree
+   receivers already deliver `CLOEXEC` descriptors. METHOD's three reachability
+   values cannot express "production path, out-of-tree fault".
+2. `Exercised: yes` had been used where `partial` fits, in all three records;
+   the correction is applied here and should be applied consistently.
+3. In-process forged state as evidence for a hostile peer: `Confidence: high` on
+   tests that write and read the shared page from one thread proves the error
+   mapping and the latch, not visibility or ordering under a concurrent writer.
+4. Whether the failed-wake record should be one record or split by failure arm.
+5. `crashed-producer-does-not-wedge-the-sequence` still describes the
+   pre-correction symptom as its source-tree finding and carries `Type: liveness`;
+   at HEAD the wedge is a quarantine, which makes it a terminality question.
+6. How much of `publish_commit`'s failure surface is worth pinning; two arms
+   need a cursor corrupted between `prepare_commit` and `publish_commit`.
+7. Whether the leaked-descriptor impact is a confidentiality and integrity
+   finding rather than a liveness one, since an execed child holds read and write
+   access to the arena.
