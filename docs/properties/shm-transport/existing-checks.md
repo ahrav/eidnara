@@ -12,69 +12,78 @@ runtime invariant guards belong to
 
 ## Rust integration tests
 
-### `crates/shm-transport/tests/contract.rs` — 11 tests
+Inventory regenerated 2026-09-05 from every `#[test]` under
+`crates/shm-transport/tests`. The earlier tables described the source tree's
+layout: they attributed tests to `contract.rs` that now live in `profile.rs`
+and `evidence.rs`, kept names `ring.rs` no longer has, and listed an
+`iceoryx.rs` file that does not exist here. The "Claim asserted" column
+transcribes each test's name; it is a locator, not an audit, and every row is
+`unaudited` until a record reads the assertion. Ignored tests are marked.
 
-| Test | Claim asserted | Status |
+### `crates/shm-transport/tests/contract.rs` - 11 tests
+
+| Test | Claim asserted (from the name) | Status |
 | --- | --- | --- |
-| `descriptor_rejects_every_untrusted_identity_and_span_failure` | 8 tabled malformed descriptors map to exact errors, plus wrong incarnation, lane, and sequence | unaudited |
-| `arena_plans_wrap_and_conserves_all_states` | A wrap reservation yields 2 spans, prefix shortens only the second, both conservation sums hold | unaudited |
-| `lifecycle_accepts_only_diagram_edges_and_quarantine_is_terminal` | Skipped edges and late quarantine are invalid transitions; both terminal states behave as specified | unaudited — proves a model with no production driver |
-| `host_admission_retains_quarantined_commitments` | Quarantine moves charges and zeroes pinned workers; a saturated controller refuses the next admit | unaudited — success path only |
-| `released_admissions_recompute_active_span_charge` | Active span charge is a recomputed max, not a decrement | unaudited |
-| `purity_gate_rejects_injected_copy_allocation_queue_and_wake` | Injected counters produce all six disqualification codes in order | unaudited — circular; supplies its own values |
-| `debug_and_errors_redact_every_sentinel` | Debug output of descriptor, incarnation, identity, frame, and errors leaks no sentinel | unaudited |
-| `sample_prefix_rejects_every_truncation_point_and_bounds_the_body` | Every truncation point rejected; trailing slack stays outside the body range | unaudited |
-| `sample_prefix_rejects_identity_schema_length_and_wire_failures` | 8 tabled sample failures plus an over-declared body | unaudited |
-| `frame_descriptor_rejects_span_count_and_allocation_extremes` | Span counts 0 and 3 rejected; allocation beyond arena and zero arena rejected | unaudited |
-| `harness_replays_terminate_on_arbitrary_lengths` | All three harness decoders terminate across 10 lengths and 2 fills | unaudited — return values discarded; liveness only |
-| `sample_errors_redact_every_sentinel` | Sample prefix and error formatting leak no sentinel | unaudited |
+| `descriptor_rejects_every_untrusted_identity_and_span_failure` (`:58`) | Descriptor rejects every untrusted identity and span failure | unaudited |
+| `arena_plans_wrap_and_conserves_all_states` (`:220`) | Arena plans wrap and conserves all states | unaudited |
+| `arena_reserve_and_prefix_report_every_failure_mode` (`:262`) | Arena reserve and prefix report every failure mode | unaudited |
+| `span_accessors_return_none_past_span_count_without_panicking` (`:329`) | Span accessors return none past span count without panicking | unaudited |
+| `hardware_profile_id_deserialization_enforces_constructor_rules` (`:356`) | Hardware profile id deserialization enforces constructor rules | unaudited |
+| `lifecycle_accepts_only_diagram_edges_and_quarantine_is_terminal` (`:379`) | Lifecycle accepts only diagram edges and quarantine is terminal | unaudited |
+| `debug_and_errors_redact_every_sentinel` (`:446`) | Debug and errors redact every sentinel | unaudited |
+| `sample_prefix_rejects_every_truncation_point_and_bounds_the_body` (`:479`) | Sample prefix rejects every truncation point and bounds the body | unaudited |
+| `sample_prefix_rejects_identity_schema_length_and_wire_failures` (`:528`) | Sample prefix rejects identity schema length and wire failures | unaudited |
+| `frame_descriptor_rejects_span_count_and_allocation_extremes` (`:644`) | Frame descriptor rejects span count and allocation extremes | unaudited |
+| `sample_errors_redact_every_sentinel` (`:714`) | Sample errors redact every sentinel | unaudited |
 
-### `crates/shm-transport/tests/ring.rs` — 12 tests plus one ignored child helper
+### `crates/shm-transport/tests/ring.rs` - 13 tests
 
-| Test | Claim asserted | Status |
+| Test | Claim asserted (from the name) | Status |
 | --- | --- | --- |
-| `boundary_round_trips_include_wrap_and_exact_maximum` | Underfill and overflow publish nothing; 22 size boundaries round-trip; a full maximum frame round-trips; over-bound is rejected | unaudited |
-| `retained_oldest_lease_enforces_fifo_reclamation_and_release_validation` | A retained oldest lease blocks reclamation; wrong incarnation, lane, sequence, and duplicate release map to exact errors | unaudited |
-| `stale_lap_release_cannot_complete_recycled_slot` | After a full lap a stale identity is rejected and the fresh lease's bytes are intact | unaudited — single-threaded |
-| `quarantine_rejects_all_operations_and_reports_conservation` | Post-quarantine reserve, receive, and release all fail; conservation reports full depth and arena as quarantined | unaudited — self-quarantine only |
-| `probe_reads_shared_state_without_consuming_a_frame` | Probe leaves a published frame receivable and reports quarantine after entry | unaudited |
-| `lease_limit_reports_backpressure_then_recovers_after_release` | A full lease set reads as empty rather than as an error, and recovers | unaudited — asserts only `is_none()`; cannot distinguish saturation from an empty ring |
-| `one_span_profile_is_rejected_at_creation` | A single-span profile with a wrapping layout is rejected | unaudited |
-| `sealed_object_prefault_repeated_setup_and_stress_conservation` (Linux) | One mapping, prefault verified, resize in both directions fails, 512 cycles end all-free | unaudited |
-| `attach_rejects_unsealed_objects_and_tampered_grants` (Linux) | 5 tampered grant fields rejected, a nonzero reserved byte rejected at decode, an unsealed object rejected | unaudited |
-| `grant_slice_rejects_every_truncation_point_and_one_byte_suffix` | Every truncation point and a one-byte suffix rejected; the exact length decodes | unaudited |
-| `golden_grant_fixture_matches_the_frozen_ring_profile_encoding` | Corpus bytes equal a frozen hex literal and round-trip byte-exactly | unaudited — instructs a human to hand-update a third copy |
-| `two_process_zero_copy_exchange_uses_authenticated_grant` (Linux) | A child process attached by descriptor reads a full maximum frame; the parent blocks behind the child's held lease | unaudited — lockstep with a sleep; cannot observe reordering |
-| `ring_child_exchange` (Linux, ignored) | Child side of the above | unaudited |
+| `boundary_round_trips_include_wrap_and_exact_maximum` (`:40`) | Boundary round trips include wrap and exact maximum | unaudited |
+| `retained_oldest_lease_enforces_fifo_reclamation` (`:123`) | Retained oldest lease enforces fifo reclamation | unaudited |
+| `quarantine_rejects_all_operations_and_reports_conservation` (`:176`) | Quarantine rejects all operations and reports conservation | unaudited |
+| `probe_reads_shared_state_without_consuming_a_frame` (`:200`) | Probe reads shared state without consuming a frame | unaudited |
+| `lease_limit_reports_backpressure_then_recovers_after_release` (`:213`) | Lease limit reports backpressure then recovers after release | unaudited |
+| `one_span_profile_is_rejected_at_creation` (`:230`) | One span profile is rejected at creation | unaudited |
+| `sealed_sparse_object_repeated_setup_and_stress_conservation` (`:249`) | Sealed sparse object repeated setup and stress conservation | unaudited |
+| `artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected` (`:301`) | Artifact mismatch fails before mapping and unsealed objects are rejected | unaudited |
+| `non_regular_attachment_object_is_rejected_before_mapping` (`:384`) | Non regular attachment object is rejected before mapping | unaudited |
+| `grant_slice_rejects_every_truncation_point_and_one_byte_suffix` (`:395`) | Grant slice rejects every truncation point and one byte suffix | unaudited |
+| `ring_memfd_carries_the_registered_name` (`:461`) | Ring memfd carries the registered name | unaudited |
+| `two_process_zero_copy_exchange_uses_authenticated_grant` (`:483`) | Two process zero copy exchange uses authenticated grant | unaudited |
+| `ring_child_exchange` (`:537`) (ignored child role) | Ring child exchange | unaudited |
 
-### `crates/shm-transport/tests/iceoryx.rs` — 7 tests, requires the `iceoryx` feature
+### `crates/shm-transport/tests/profile.rs` - 7 tests
 
-**Gone at `e447c927`.** `0f336d3c` deleted this suite, the `iceoryx` backend, and
-the `iceoryx` Cargo feature; the removal holds at HEAD `46278f47a` after PR #131
-(merge `5d638e3e8`), and the five Group K catalog records covering this backend
-are `Status: invalidated`. The entry is kept as a record of what used to be
-checked; everything in it resolves against `9c1eb4d1`. Covered allocation slack never reaching the decoder, stale-node observation
-without disturbing a live backend, exact sequence progression, producer
-rejection of oversized and underfilled commits, decoder rejection of truncation
-and stale identity, schema and overflow extremes, and redaction. All unaudited.
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `fixed_ring_identity_survives_profile_validation` (`:11`) | Fixed ring identity survives profile validation | unaudited |
+| `debug_redacts_profile_admission_and_quarantine_record` (`:22`) | Debug redacts profile admission and quarantine record | unaudited |
+| `host_admission_retains_quarantined_commitments` (`:50`) | Host admission retains quarantined commitments | unaudited |
+| `exact_aggregate_capacity_admits_n_and_rejects_n_plus_one_without_charging` (`:85`) | Exact aggregate capacity admits n and rejects n plus one without charging | unaudited |
+| `worker_limit_is_the_only_limit_that_refuses_a_second_fused_admission` (`:128`) | Worker limit is the only limit that refuses a second fused admission | unaudited |
+| `released_admissions_recompute_active_span_charge` (`:168`) | Released admissions recompute active span charge | unaudited |
+| `host_test_ring_profile_names_one_geometry` (`:202`) | Host test ring profile names one geometry | unaudited |
 
-**Correction, 2026-08-29.** An earlier revision of this inventory stated the
-iceoryx suite is "not executed anywhere in CI; only `cargo check --features
-iceoryx` runs". That is wrong. `iceoryx` is a *default* feature of
-`shm-transport`, and the Linux CI step selects the crate by name
-(`cargo nextest run -p shm-native -p shm-transport`), which enables its
-default features regardless of how dependents declare
-`default-features = false`. Confirmed by running `cargo nextest list` with that
-exact package selection: the listing includes `shm-transport::iceoryx` with
-all seven tests. So all seven execute on Linux, and none on macOS, where the step
-names `--test contract --test fuzz_corpus`.
+### `crates/shm-transport/tests/evidence.rs` - 3 tests
 
-### `crates/shm-transport/tests/fuzz_corpus.rs` — 3 tests
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `purity_gate_rejects_injected_copy_allocation_queue_and_wake` (`:4`) | Purity gate rejects injected copy allocation queue and wake | unaudited |
+| `purity_gate_excuses_wake_operations_only_for_a_qualified_arm_that_parked` (`:33`) | Purity gate excuses wake operations only for a qualified arm that parked | unaudited |
+| `purity_gate_never_excuses_a_syscall_the_doorbell_did_not_issue` (`:78`) | Purity gate never excuses a syscall the doorbell did not issue | unaudited |
 
-Each replays all five seeds for one target through the production decoder and
-asserts the seed named `valid` is accepted. **No seed is asserted to be
-rejected.** Status unaudited; see
-[negative-tests-fail-for-their-stated-reason](catalog.md#negative-tests-fail-for-their-stated-reason).
+### `crates/shm-transport/tests/fuzz_corpus.rs` - 4 tests
+
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `frame_descriptor_corpus_replays_without_panic` (`:75`) | Frame descriptor corpus replays without panic | unaudited |
+| `provider_grant_corpus_replays_without_panic` (`:80`) | Provider grant corpus replays without panic | unaudited |
+| `provider_sample_corpus_replays_without_panic` (`:85`) | Provider sample corpus replays without panic | unaudited |
+| `golden_grant_fixture_matches_the_frozen_ring_profile_encoding` (`:92`) | Golden grant fixture matches the frozen ring profile encoding | unaudited |
+
+Total: 38 integration tests across five files.
 
 ### In-crate unit tests
 

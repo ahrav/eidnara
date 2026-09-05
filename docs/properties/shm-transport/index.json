@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shm-transport",
   "source": "catalog.md",
-  "source_sha256": "fa3365d9cdc5ce2431bb78e83c161e574dbfe9f35c75a31d745ae83c29f7b9a8",
+  "source_sha256": "11845999ae29d94d7683b9387ae701ceae1725f525621d87761266e84ec272e8",
   "records": [
     {
       "slug": "quarantine-authority-survives-peer-writes",
@@ -92,7 +92,7 @@
       "slug": "quarantine-charge-transition-is-atomic",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -118,7 +118,7 @@
       "slug": "charge-release-never-silently-strands",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -173,7 +173,7 @@
       "slug": "reservation-charge-visible-with-non-free-state",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -411,8 +411,8 @@
     {
       "slug": "crashed-producer-does-not-wedge-the-sequence",
       "type": "liveness",
-      "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability": "test-only",
+      "reachability_note": "the guarantee needs a replacement producer on the same ring object. The shipped path tears the crashed connection down when its setup-socket sentinel closes (`crates/host-runtime/src/connection.rs`) and gives the next connection a fresh `DuplexRing` with a fresh incarnation (`crates/host-runtime/src/ring_transport.rs`), so no production producer ever re-derives the stranded sequence; the same-object sequence is constructible only in a same-process arrangement or by an explicit re-attach to the same descriptors. The production manifestation of the same crash, a torn-down connection whose charges must return and whose stranded slot must be reported rather than hidden, is `dead-peer-charges-are-reclaimed-or-declared`.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -518,7 +518,7 @@
       "slug": "no-rust-reference-over-peer-writable-payload",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -572,7 +572,7 @@
       "slug": "attach-binds-geometry-to-a-local-profile",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -624,7 +624,7 @@
       "slug": "native-boundary-not-weaker-than-its-wrapper",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the client's default frame channel is `ShmFrameChannel` over this addon (`packages/plugin/src/shared/host-client/connection.ts:393`); only a test `channelFactory` bypasses it (`:389-390`). The host side is unconditional too (`crates/host-runtime/src/runtime.rs:876`), so the test-only framing above predates the ring-transport refactor.",
+      "reachability_note": "the client's default frame channel is `ShmFrameChannel` over this addon (`packages/plugin/src/shared/host-client/connection.ts:393`); only a test `channelFactory` bypasses it (`:389-390`). The host side is unconditional too (`crates/host-runtime/src/runtime.rs:738-744`), so the test-only framing above predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -860,7 +860,7 @@
       "slug": "decoder-totality-over-arbitrary-bytes",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -938,7 +938,7 @@
       "slug": "grant-reserved-bytes-are-rejected-unless-zero",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -1073,7 +1073,7 @@
       "slug": "layout-region-offsets-are-real-page-aligned",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -1474,7 +1474,7 @@
       "slug": "reclamation-keeps-pace-with-completion",
       "type": "liveness",
       "reachability": "default-production",
-      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
+      "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the shipped path. This replaces the test-only, non-default framing in the product-context section above, which predates the ring-transport refactor.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -1765,13 +1765,13 @@
       "reachability_note": "the host stamps `host-test-ring-v1` into every production grant.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "the id string, depth, lease bound, and admission charges are asserted against literals spelled in the test."
+        "state": "partial",
+        "note": "the id string, depth, lease bound, and descriptor charge are asserted against literals spelled in the test; the arena charge is compared against `2 * shm_transport::MIN_ARENA_BYTES`, so a change to that constant moves both sides of the assertion and the arena dimension is unexercised."
       },
       "guarantee": "The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.",
       "check": {
         "semantics": "always",
-        "condition": "`host_test_ring_profile()` matches the literal id, depth, lease bound, and charges."
+        "condition": "`host_test_ring_profile()` matches the literal id, depth, lease bound, descriptor charge, and a literal 64 MiB arena per direction; the current test pins everything but the arena literal."
       },
       "fault_timing": "A peer that echoes the id exercises whatever geometry the host built; if the id survived a geometry change the peer's bounds would be silently wrong.",
       "required_faults": "None; the check is a literal comparison.",
@@ -1823,7 +1823,7 @@
       "guarantee": "At most one readiness callback batch is in flight: the next readiness notification is delivered only after the previous batch has been acknowledged through `readinessHandled()`, and an interrupted wait retries until success or close rather than reporting a spurious wake.",
       "check": {
         "semantics": "always",
-        "condition": "`dispatchReadiness` (`packages/shm-native/index.ts:515-525`) runs every registered handler and calls `readinessHandled()` in its `finally`, and `wait_until_handled` (`packages/shm-native/src/scheduling.rs`) does not release a new wake while the pending flag is set, so no second dispatch begins before the first is acknowledged; and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. The handler runs first and the acknowledgement follows it; the ordering this record forbids is a second dispatch ahead of that acknowledgement. `always` because it must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`."
+        "condition": "`dispatchReadiness` (`packages/shm-native/index.ts:515-525`) runs every registered handler and calls `readinessHandled()` in its `finally`, and `wait_until_handled` (`packages/shm-native/src/scheduling.rs`) does not release a new wake while the pending flag is set, so no second dispatch begins before the first is acknowledged; and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. The handler runs first and the acknowledgement follows it; the ordering this record forbids is a second dispatch ahead of that acknowledgement. The `wait_until_handled` error arm (`packages/shm-native/src/scheduling.rs:184-189`), which records failure, fires one final callback without the pending gate, and stops the reactor, is outside this guarantee, as it is for `reactor-callback-is-one-in-flight`; the record covers the non-error arms. `always` because it must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`."
       },
       "fault_timing": "A missed or duplicated wake leaves the JavaScript side spinning or stalled.",
       "required_faults": "A readiness event with no pending callback; a signal interrupting the wait.",

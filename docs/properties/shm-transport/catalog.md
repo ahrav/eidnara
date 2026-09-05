@@ -229,7 +229,7 @@ and `n/a - invalidated` for an invalidated record.
 | [receive-failure-leaves-no-wedged-slot](#receive-failure-leaves-no-wedged-slot) | safety | high | yes |
 | [release-failure-is-observable](#release-failure-is-observable) | liveness | medium | yes |
 | [attach-reconciles-or-refuses-stale-shared-cursors](#attach-reconciles-or-refuses-stale-shared-cursors) | safety | high | yes |
-| [crashed-producer-does-not-wedge-the-sequence](#crashed-producer-does-not-wedge-the-sequence) | liveness | high | yes |
+| [crashed-producer-does-not-wedge-the-sequence](#crashed-producer-does-not-wedge-the-sequence) | liveness | high | no |
 | [dead-peer-charges-are-reclaimed-or-declared](#dead-peer-charges-are-reclaimed-or-declared) | safety | high | yes |
 | [cancelled-frame-disposition-is-declared](#cancelled-frame-disposition-is-declared) | safety | high | yes |
 | [validated-spans-are-disjoint-and-inside-the-arena](#validated-spans-are-disjoint-and-inside-the-arena) | safety | high | yes |
@@ -457,8 +457,8 @@ descriptor and byte charge exactly once. This group reaches production because
 
 Type: safety
 Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
+(`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a
+duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
@@ -509,8 +509,8 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
+(`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a
+duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
@@ -606,8 +606,8 @@ Open questions:
 
 Type: safety
 Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
+(`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a
+duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
@@ -1044,11 +1044,16 @@ Open questions:
 ### crashed-producer-does-not-wedge-the-sequence
 
 Type: liveness
-Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
-shipped path. This replaces the test-only, non-default framing in the
-product-context section above, which predates the ring-transport refactor.
+Reachability: test-only - the guarantee needs a replacement producer on the
+same ring object. The shipped path tears the crashed connection down when its
+setup-socket sentinel closes (`crates/host-runtime/src/connection.rs`) and gives
+the next connection a fresh `DuplexRing` with a fresh incarnation
+(`crates/host-runtime/src/ring_transport.rs`), so no production producer ever
+re-derives the stranded sequence; the same-object sequence is constructible only
+in a same-process arrangement or by an explicit re-attach to the same
+descriptors. The production manifestation of the same crash, a torn-down
+connection whose charges must return and whose stranded slot must be reported
+rather than hidden, is `dead-peer-charges-are-reclaimed-or-declared`.
 Status: active
 Exercised: not yet — needs a producer killed between reserve and commit.
 Guarantee: A producer crash inside a reservation does not permanently prevent
@@ -1246,8 +1251,8 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
+(`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a
+duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
@@ -1336,8 +1341,8 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
+(`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a
+duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
@@ -1421,7 +1426,7 @@ Reachability: default-production — the client's default frame channel is
 `ShmFrameChannel` over this addon
 (`packages/plugin/src/shared/host-client/connection.ts:393`); only a test
 `channelFactory` bypasses it (`:389-390`). The host side is unconditional too
-(`crates/host-runtime/src/runtime.rs:876`), so the test-only framing above predates
+(`crates/host-runtime/src/runtime.rs:738-744`), so the test-only framing above predates
 the ring-transport refactor.
 Status: active
 Exercised: not yet — needs each wrapper-level rejection driven against the
@@ -1844,8 +1849,8 @@ condition no current check pins.
 
 Type: safety
 Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
+(`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a
+duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
@@ -2007,8 +2012,8 @@ Open questions:
 
 Type: safety
 Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
+(`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a
+duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
@@ -2347,8 +2352,8 @@ Open questions:
 
 Type: safety
 Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
+(`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a
+duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
@@ -3355,8 +3360,8 @@ Open questions:
 
 Type: liveness
 Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
+(`crates/host-runtime/src/runtime.rs:738-744`) and every accepted connection prepares a
+duplex ring (`crates/host-runtime/src/connection.rs:116-117`), so this code is on the
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
@@ -4003,9 +4008,13 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   and no reconciliation path. All three surface as backpressure codes rather
   than faults.
 - **One value, several hand-maintained copies.** `one-profile-name-denotes-one-geometry`,
+  `one-profile-id-names-one-ring-geometry-in-code`,
   `attach-binds-geometry-to-a-local-profile`,
   `negative-tests-fail-for-their-stated-reason`. Defect `daf6e244` is the worked
-  example of this cluster causing a silent test degradation.
+  example of this cluster causing a silent test degradation. The in-code record
+  is the Rust half of the cross-peer record: if the id did not pin one geometry
+  in Rust, no cross-artifact equality could hold, so the in-code record dominates
+  the cross-peer one but not the reverse.
 - **Evidence that cannot detect its own failure.** `operation-counters-are-observed-not-declared`,
   `measured-transfer-is-witnessed-by-the-data`, `traceability-pointers-resolve`,
   `negative-tests-fail-for-their-stated-reason`. These share a shape: an artifact
@@ -4031,7 +4040,13 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   releases an epoch whose re-arm never ran and manufactures the lost wake the
   first record excludes. `attach-validates-doorbell-sockets` sits upstream of
   the entire cluster: none of the wake properties are meaningful over a
-  descriptor that is not a connected `AF_UNIX` stream socket.
+  descriptor that is not a connected `AF_UNIX` stream socket. On the addon
+  side, `addon-scheduling-wakes-only-on-acknowledged-readiness` is the same
+  pending-gate contract as `reactor-callback-is-one-in-flight` stated from the
+  scheduler's wait, so the one-in-flight record dominates it; and
+  `addon-scheduling-reaches-peer-eof-and-interrupted-wait` is the situation
+  coverage that keeps both from passing vacuously when no peer ever dies and no
+  wait is ever interrupted.
 - **Wake delivery outside the ring pages.**
   `queued-write-needs-no-second-wake` and
   `released-charges-wake-blocked-readers` are the same coalesced-eventfd hazard
@@ -4039,6 +4054,21 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   parked-epoch protocol does not apply there, level-observable eventfd state
   does. Neither dominates the other — one guards the write queue, one the read
   budget — but a fix that serialized bridge passes wrongly would break both.
+- **Two definitions of one wire contract.**
+  `setup-proof-vectors-pin-the-shared-hmac-transcript` and
+  `addon-grant-decoding-is-the-shared-setup-envelope` are both agreement
+  properties between the host's and the addon's separate implementations of the
+  setup handshake. The proof vectors have a committed cross-side fixture and an
+  external oracle; the grant envelope has neither, which is why the first is
+  `high` and the second is `low`. A shared fixture for the envelope would put
+  the two on the same footing.
+- **Alias lifetime at channel close.** `addon-reservations-drop-before-the-ring`
+  is the addon-side half of `documented-close-order-has-a-production-driver`:
+  the host's close order returns the charge when the mapping is unmapped, and
+  the addon's drop order keeps every JavaScript alias from outliving the mapping
+  it points into. The abort path in
+  `quarantine-gates-cover-every-storage-mutation` matters most where an alias
+  is still attached to the aborted range, so the three share one hazard.
 - **Reclamation correctness versus reclamation progress.**
   `reclamation-excludes-pages-with-live-wrapped-bytes` is the safety bound on
   the same walk whose progress `reclamation-keeps-pace-with-completion` and
@@ -4071,15 +4101,17 @@ Open questions: None.
 Type: safety
 Reachability: default-production - the host stamps `host-test-ring-v1` into every production grant.
 Status: active
-Exercised: yes - the id string, depth, lease bound, and admission charges are asserted against literals spelled in the test.
+Exercised: partial - the id string, depth, lease bound, and descriptor charge are asserted against literals spelled in the test; the arena charge is compared against `2 * shm_transport::MIN_ARENA_BYTES`, so a change to that constant moves both sides of the assertion and the arena dimension is unexercised.
 Guarantee: The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.
-Check: `always` - `host_test_ring_profile()` matches the literal id, depth, lease bound, and charges.
+Check: `always` - `host_test_ring_profile()` matches the literal id, depth, lease bound, descriptor charge, and a literal 64 MiB arena per direction; the current test pins everything but the arena literal.
 Fault/timing angle: A peer that echoes the id exercises whatever geometry the host built; if the id survived a geometry change the peer's bounds would be silently wrong.
 Required faults and enabling state: None; the check is a literal comparison.
 Confidence: high - [evidence](evidence/one-profile-id-names-one-ring-geometry-in-code.md). The id is a renamed identity, so the record is `core` for U3; the sibling record `one-profile-name-denotes-one-geometry` states the cross-peer half and keeps its source status.
 Existing check: `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs:202`), added at U3; the addon's setup fixture and `packages/shm-native/tests/mechanism.ts` name the same id.
 Impact: A peer sized for a different depth over- or under-runs the ring.
-Open questions: None.
+Open questions:
+
+- Should `host_test_ring_profile_names_one_geometry` compare `arena_bytes` against a spelled 128 MiB (two 64 MiB arenas) instead of `2 * MIN_ARENA_BYTES`, so a constant change is caught? Queue it?
 
 ### addon-reservations-drop-before-the-ring
 
@@ -4103,7 +4135,7 @@ Reachability: default-production - `watch` callbacks and readiness acknowledgeme
 Status: active
 Exercised: partial - one unit test covers acknowledgement waiting, and `packages/shm-native/tests/mechanism.ts` covers a frame published during a callback; no test covers a lost eventfd wake with no frame behind it.
 Guarantee: At most one readiness callback batch is in flight: the next readiness notification is delivered only after the previous batch has been acknowledged through `readinessHandled()`, and an interrupted wait retries until success or close rather than reporting a spurious wake.
-Check: `always` - `dispatchReadiness` (`packages/shm-native/index.ts:515-525`) runs every registered handler and calls `readinessHandled()` in its `finally`, and `wait_until_handled` (`packages/shm-native/src/scheduling.rs`) does not release a new wake while the pending flag is set, so no second dispatch begins before the first is acknowledged; and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. The handler runs first and the acknowledgement follows it; the ordering this record forbids is a second dispatch ahead of that acknowledgement. `always` because it must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`.
+Check: `always` - `dispatchReadiness` (`packages/shm-native/index.ts:515-525`) runs every registered handler and calls `readinessHandled()` in its `finally`, and `wait_until_handled` (`packages/shm-native/src/scheduling.rs`) does not release a new wake while the pending flag is set, so no second dispatch begins before the first is acknowledged; and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. The handler runs first and the acknowledgement follows it; the ordering this record forbids is a second dispatch ahead of that acknowledgement. The `wait_until_handled` error arm (`packages/shm-native/src/scheduling.rs:184-189`), which records failure, fires one final callback without the pending gate, and stops the reactor, is outside this guarantee, as it is for `reactor-callback-is-one-in-flight`; the record covers the non-error arms. `always` because it must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`.
 Fault/timing angle: A missed or duplicated wake leaves the JavaScript side spinning or stalled.
 Required faults and enabling state: A readiness event with no pending callback; a signal interrupting the wait.
 Confidence: medium - [evidence](evidence/addon-scheduling-wakes-only-on-acknowledged-readiness.md). `pending_callback_waits_for_acknowledgement` and `interrupted_wait_retries_until_success_or_close` (`packages/shm-native/src/scheduling.rs`).
