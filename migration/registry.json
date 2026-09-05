@@ -840,6 +840,84 @@
       ],
       "mismatch_behavior": "recreate",
       "probe": "non-mutating `probe_lifecycle` read; an unknown record schema blocks startup instead of being overwritten"
+    },
+    {
+      "kind": "identity",
+      "value": "@eidnara/shm-native",
+      "class": "external-protocol",
+      "rationale": "npm name of the native addon package.",
+      "evidence": [
+        "packages/shm-native/package.json"
+      ]
+    },
+    {
+      "kind": "identity",
+      "value": "@eidnara/host-linux-x64-gnu",
+      "class": "external-protocol",
+      "rationale": "npm name of the Linux x64 payload package the addon loader selects.",
+      "evidence": [
+        "packages/shm-native/index.ts"
+      ]
+    },
+    {
+      "kind": "typescript",
+      "path": "packages/shm-native/index.ts",
+      "class": "permanent",
+      "rationale": "Loader for the native shared-memory addon: selects the Linux x64 payload, reports runtime capability, and exposes the typed API. Permanent: it is the JavaScript side of the cross-language transport boundary.",
+      "contract_test": "packages/shm-native/tests/suite.test.ts",
+      "owner": "ahrav",
+      "tier": "native-addon",
+      "rust_parity_anchor": "packages/shm-native/src/setup.rs#auth_proofs_match_committed_wire_vectors"
+    },
+    {
+      "kind": "typescript",
+      "path": "packages/shm-native/tests/suite.test.ts",
+      "class": "permanent",
+      "rationale": "Bun test entry that runs the mechanism and runtime suites.",
+      "contract_test": "packages/shm-native/tests/suite.test.ts",
+      "owner": "ahrav",
+      "tier": "native-addon",
+      "rust_parity_anchor": "packages/shm-native/src/setup.rs#auth_proofs_match_committed_wire_vectors"
+    },
+    {
+      "kind": "typescript",
+      "path": "packages/shm-native/tests/mechanism.ts",
+      "class": "permanent",
+      "rationale": "Cross-language mechanism tests: setup handshake, ring geometry of `host-test-ring-v1`, buffer bounds, and detachment against the native addon.",
+      "contract_test": "packages/shm-native/tests/suite.test.ts",
+      "owner": "ahrav",
+      "tier": "native-addon",
+      "rust_parity_anchor": "packages/shm-native/src/setup.rs#auth_proofs_match_committed_wire_vectors"
+    },
+    {
+      "kind": "typescript",
+      "path": "packages/shm-native/tests/runtime.ts",
+      "class": "permanent",
+      "rationale": "Runtime capability contract for Bun and Node: which N-API mechanisms the addon requires and how it reports their absence.",
+      "contract_test": "packages/shm-native/tests/suite.test.ts",
+      "owner": "ahrav",
+      "tier": "native-addon",
+      "rust_parity_anchor": "packages/shm-native/src/setup.rs#auth_proofs_match_committed_wire_vectors"
+    },
+    {
+      "kind": "typescript",
+      "path": "packages/shm-native/tests/capability.ts",
+      "class": "permanent",
+      "rationale": "Capability probe executable that prints the addon's availability verdict for a runtime.",
+      "contract_test": "packages/shm-native/tests/suite.test.ts",
+      "owner": "ahrav",
+      "tier": "native-addon",
+      "rust_parity_anchor": "packages/shm-native/src/setup.rs#auth_proofs_match_committed_wire_vectors"
+    },
+    {
+      "kind": "identity",
+      "value": "shm_native.node",
+      "class": "frozen-durable",
+      "rationale": "File name of the native addon inside a payload package (`payload/native/shm_native.node`); the loader resolves it relative to the payload package it selected.",
+      "evidence": [
+        "packages/shm-native/index.ts",
+        "packages/shm-native/package.json"
+      ]
     }
   ]
 }
