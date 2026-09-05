@@ -973,10 +973,17 @@ async fn execute_query(
                 0,
             ));
         }
+        // A variant that consumes the host's retry hint measures that hint; a `queue_full` without an unsigned `retry_after_ms` invalidates the repetition rather than falling back to a harness default.
+        let served_hint_ms = json["retry_after_ms"].as_u64();
+        if ctx.opts.variant.uses_served_query_hint() && served_hint_ms.is_none() {
+            return Err(format!(
+                "queue_full response omitted retry_after_ms while the variant consumes it: {json}"
+            ));
+        }
         let delay = Duration::from_secs_f64(
             ctx.opts
                 .variant
-                .query_retry_delay_ms(json["retry_after_ms"].as_u64(), &mut rng)
+                .query_retry_delay_ms(served_hint_ms, &mut rng)
                 / 1_000.0,
         );
         if Instant::now() + delay >= deadline {

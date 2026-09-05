@@ -244,7 +244,7 @@ impl Backend {
 
         let VerifiedBundle {
             manifest,
-            max_text_bytes: _,
+            max_text_bytes,
             certification_rows,
             onnx,
             initializers,
@@ -322,6 +322,7 @@ impl Backend {
         };
         backend.structural_probe()?;
         backend.certify(&corpus, certification_rows)?;
+        backend.long_input_probe(&corpus, max_text_bytes)?;
         Ok(backend)
     }
 
@@ -444,6 +445,36 @@ impl Backend {
                     .collect();
                 self.certify_batch(&labeled, &matches)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Corpus texts are short, so a graph with a fixed short sequence axis passes every semantic probe and then fails an ordinary long request. This probe embeds a text at the advertised byte limit, which tokenizes past `max_tokens` and exercises the truncation window; the result must be a valid vector, with no expectation to compare.
+    fn long_input_probe(
+        &self,
+        corpus: &Corpus,
+        max_text_bytes: usize,
+    ) -> Result<(), InferenceError> {
+        let mut text = String::new();
+        for item in corpus.items.iter().cycle() {
+            if text.len() >= max_text_bytes {
+                break;
+            }
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&item.text);
+        }
+        let mut end = text.len().min(max_text_bytes);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        let vectors = self.embed(&[text.as_str()])?;
+        if vectors.len() != 1 {
+            return Err(InferenceError::Artifact(
+                "long-input probe returned a wrong item count".to_owned(),
+            ));
         }
         Ok(())
     }

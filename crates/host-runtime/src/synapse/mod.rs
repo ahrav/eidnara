@@ -674,7 +674,14 @@ impl SynapseComponent {
             let joined =
                 tokio::task::spawn_blocking(move || lane_blocking.backend.embed(&[text.as_str()]))
                     .await;
-            let result = settle_inference(&inner, joined).map_err(QueryFault::Engine);
+            // The vector contract is checked here, while the permit is still held, so a malformed engine result quarantines the lane even when the handler has already expired or been cancelled and no later worker can slip past `lane_failure_reason` first.
+            let result = settle_inference(&inner, joined)
+                .and_then(|vectors| {
+                    check_engine_vectors(&inner, lane_task.lane.dims, 1, &vectors)
+                        .map(|()| vectors)
+                        .map_err(InferenceError::Invariant)
+                })
+                .map_err(QueryFault::Engine);
             let _ = tx.send(result);
         });
 
@@ -695,11 +702,10 @@ impl SynapseComponent {
         }
         match result {
             Ok(vectors) => {
-                if let Err(reason) = check_engine_vectors(&self.inner, lane.lane.dims, 1, &vectors)
-                {
-                    return app_error("artifact_invalid", &reason);
-                }
-                let vector = &vectors[0];
+                // The worker already enforced one valid row; an empty verdict here is a host task fault, not an engine fault.
+                let Some(vector) = vectors.first() else {
+                    return app_error("internal_error", "the inference verdict carried no vector");
+                };
                 // The CPU lane is idle once the verdict arrives, so the handler's admission slot can be released before response reservation waits on egress. The returned vector then lives outside the slot's bound, so it is charged to the resident pool first; when that charge is unavailable the slot stays held as the bound instead. The worker's copy still covers a native call that outlives its receiver.
                 let vector_bytes = vector.len().saturating_mul(std::mem::size_of::<f32>());
                 let _vector_charge = match ctx.try_reserve_resident(vector_bytes) {
