@@ -132,3 +132,8 @@ resolver fails. Without it the resolver could pass by resolving nothing.
   convention pointers are correct today. Whether the convention should be
   written down, or the record switched to a literal-resolvable form, remains a
   choice for the record's owner and is not required to close this property.
+
+### Q: Does the traceability artifact exist in the U3 tree? (added 2026-09-05)
+
+- Checked: `docs/evidence/` does not exist; a repository-wide search for `shm-traceability` finds only this catalog. The release manifest is at `crates/shm-transport/benches/manifests/v1.json` and carries no traceability record.
+- Conclusion: no. The record is marked `invalidated` in the catalog; the citation analysis above resolves against the source tree at `9c1eb4d1`.

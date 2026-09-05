@@ -107,9 +107,9 @@ transport path emits is also the signal a peer can erase. It inherits the
 [clean-reclamation-is-reachable](clean-reclamation-is-reachable.md), which is why
 both origins land on quarantine rather than reclamation. It is the third leg of
 the composition alongside
-[wire-header-validation-precedes-every-consumer-action](wire-header-validation-precedes-every-consumer-action.md)
+[wire-header-fully-validated-before-any-consumer-acts](wire-header-fully-validated-before-any-consumer-acts.md)
 and
-[wire-header-field-authority-is-partitioned-and-coupled](wire-header-field-authority-is-partitioned-and-coupled.md).
+[every-shm-header-consumer-applies-its-role-gate](every-shm-header-consumer-applies-its-role-gate.md).
 
 ## What a test must construct
 

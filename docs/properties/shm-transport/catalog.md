@@ -235,7 +235,7 @@ decide whether to ship the transport. A defect there is live today.
 | [native-boundary-not-weaker-than-its-wrapper](#native-boundary-not-weaker-than-its-wrapper) | safety | high | no |
 | [operation-counters-are-observed-not-declared](#operation-counters-are-observed-not-declared) | safety | high | evidence |
 | [measured-transfer-is-witnessed-by-the-data](#measured-transfer-is-witnessed-by-the-data) | safety | high | evidence |
-| [traceability-pointers-resolve](#traceability-pointers-resolve) | safety | high | evidence |
+| [traceability-pointers-resolve](#traceability-pointers-resolve) | safety | high | n/a - invalidated |
 | [negative-tests-fail-for-their-stated-reason](#negative-tests-fail-for-their-stated-reason) | safety | high | evidence |
 | [documented-close-order-has-a-production-driver](#documented-close-order-has-a-production-driver) | reachability | high | no |
 | [capability-probe-gates-every-advertised-mechanism](#capability-probe-gates-every-advertised-mechanism) | safety | high | no |
@@ -274,6 +274,12 @@ decide whether to ship the transport. A defect there is live today.
 | [capacity-recheck-after-a-wake-race](#capacity-recheck-after-a-wake-race) | liveness | medium | yes |
 | [reclamation-excludes-pages-with-live-wrapped-bytes](#reclamation-excludes-pages-with-live-wrapped-bytes) | safety | high | yes |
 | [reactor-callback-is-one-in-flight](#reactor-callback-is-one-in-flight) | safety | high | yes |
+| [setup-proof-vectors-pin-the-shared-hmac-transcript](#setup-proof-vectors-pin-the-shared-hmac-transcript) | safety | high | yes |
+| [one-profile-id-names-one-ring-geometry-in-code](#one-profile-id-names-one-ring-geometry-in-code) | safety | high | yes |
+| [addon-reservations-drop-before-the-ring](#addon-reservations-drop-before-the-ring) | safety | medium | yes |
+| [addon-scheduling-wakes-only-on-acknowledged-readiness](#addon-scheduling-wakes-only-on-acknowledged-readiness) | liveness | medium | yes |
+| [addon-scheduling-reaches-peer-eof-and-interrupted-wait](#addon-scheduling-reaches-peer-eof-and-interrupted-wait) | reachability | medium | yes |
+| [addon-grant-decoding-is-the-shared-setup-envelope](#addon-grant-decoding-is-the-shared-setup-envelope) | safety | low | yes |
 
 ---
 
@@ -320,16 +326,22 @@ Existing check: `crates/shm-transport/tests/ring.rs:240`
 self-quarantine only, never a peer clearing the flag. Status unaudited.
 Impact: a one-byte write by the peer un-terminates a channel the local side
 condemned, defeating "permanently prevents that record's storage from being
-reused" (`docs/shm-transport.md:79`). Under the documented same-user
-trust model this may be in-contract; the point is that it is unstated and
+reused" (former `docs/shm-transport.md:79`; the rewritten document at U3 states
+only that active and quarantined charges are reported separately, `:21`, and
+that quarantined charges stay within the process bound, `:92`, so the quoted
+guarantee is no longer documented). Under the source document's same-user
+trust model this may have been in-contract; the point is that it is unstated and
 unchecked.
 Open questions:
 
 - Is the flag deliberately shared so the *peer* observes quarantine, and if so
   what protects the local decision? A local `Cell<bool>` OR'd into
   `is_quarantined()` would close this without a layout change.
-- Does `docs/shm-transport.md:116`'s explicit non-guarantee about
-  malicious peers extend to control pages, or only to payload bytes? The text
+- The source document's explicit non-guarantee about malicious peers (former
+  `docs/shm-transport.md:116`) is absent from the rewritten document, which
+  makes no statement about peer misbehaviour either way. Did it extend to
+  control pages, or only to payload bytes, and should the U3 document restate
+  it? The text
   says payload. (needs human input)
 
 ### quarantine-gates-cover-every-storage-mutation
@@ -465,7 +477,8 @@ only. Status unaudited.
 Impact: charges vanish from both counters, so the operator-visible snapshot
 under-reports and the admission budget silently over-admits later. Directly
 contradicts "quarantine retains the exact charges" and "charges stay visible"
-(`docs/shm-transport.md:79`, `:90`, `:112`).
+(former `docs/shm-transport.md:79`, `:90`, `:112`; the rewritten document keeps
+the weaker statements at `:21` and `:92`).
 Open questions: None.
 
 ### charge-release-never-silently-strands
@@ -535,8 +548,9 @@ took no incarnation argument at all, so there was no input that could carry a
 stale one, and the recovery contract deliberately kept existing committed
 candidates valid across readiness changes (former `provider_recovery.rs:15-16`).
 The finding was therefore a **documentation-versus-API mismatch**, not an
-unenforced runtime check: `docs/shm-transport.md:79` describes rejecting
-releases "carrying an old provider incarnation", and the API had no such concept.
+unenforced runtime check: the source document (former `docs/shm-transport.md:79`)
+described rejecting releases "carrying an old provider incarnation", and the API
+had no such concept; the rewritten document no longer describes any incarnation.
 `admitted_incarnation()` was stored (former `:143`) and exposed (former `:153`)
 with tests as its only readers.
 Existing check: none. The covering test was
@@ -549,8 +563,9 @@ host path holds one `Admission` and calls the infallible
 `Admission::release` once on the endpoint thread
 (`crates/host-runtime/src/ring_transport.rs:291`), which removes the race rather than
 arbitrating it. The documentation half of the finding still stands and is now
-strictly a doc defect: `docs/shm-transport.md:79` describes an
-incarnation-bearing release protocol that never existed and whose surrounding
+strictly a doc defect in the source document (former `docs/shm-transport.md:79`),
+which described an incarnation-bearing release protocol that never existed and
+whose surrounding
 machinery has since been removed.
 Open questions:
 
@@ -1216,8 +1231,9 @@ Verified by direct read of `crates/shm-transport/src/lease.rs`:
 `std::slice::from_raw_parts(self.base.as_ptr(), self.len)` at line 71, while
 `copy_to` correctly uses `copy_nonoverlapping` at line 63 and `read_byte` uses
 `read_volatile`. The SAFETY argument for the slice cites the peer *contract*,
-and `docs/shm-transport.md:116` explicitly declines to guarantee that
-contract against a misbehaving peer.
+and the source document (former `docs/shm-transport.md:116`) explicitly declined
+to guarantee that contract against a misbehaving peer; the rewritten document
+makes no statement about it, so the premise is unresolved rather than documented.
 Existing check: none.
 Impact: one method's soundness rests on a premise the documentation disclaims,
 while its siblings in the same file avoid the issue. Additionally
@@ -1452,7 +1468,9 @@ Open questions:
 
 - Is `OperationCounters` intended to be wired to real instrumentation, or is it
   permanently a report-schema type? If the latter, the "counts copies" language
-  in `docs/shm-transport.md:25` overstates what any artifact can prove.
+  in the source document (former `docs/shm-transport.md:25`) overstated what any
+  artifact can prove; the rewritten document lists report fields (`:65-73`)
+  without that language.
   (needs human input)
 
 ### measured-transfer-is-witnessed-by-the-data
@@ -1488,15 +1506,13 @@ Open questions: None.
 ### traceability-pointers-resolve
 
 Type: safety
-Reachability: test-only — the subject is the audit artifact
-`docs/evidence/shm-traceability-v1.json` and the test names it cites;
-nothing in `crates/host-runtime` or `packages` reads it at run time. It is the audit
-trail for a release gate whose `designation_status` is still
-`UNSET_REQUIRES_DESIGNATED_HOST` (`benches/manifests/v1.json:4`).
-Status: active
-Exercised: yes — checked mechanically at `9c1eb4d1` and re-run independently.
-Of 51 citation instances, 29 are distinct and contain a fragment; 18 resolve and
-11 do not.
+Reachability: test-only - label retained from the source catalog; the subject
+artifact `docs/evidence/shm-traceability-v1.json` was not migrated into the U3
+tree, so there is nothing for the check to read. See Invalidated.
+Status: invalidated
+Exercised: yes - in the source tree, checked mechanically at `9c1eb4d1` and
+re-run independently: of 51 citation instances, 29 were distinct and contained a
+fragment; 18 resolved and 11 did not. Not repeatable here.
 Guarantee: Every evidence pointer in the traceability record names an artifact
 that exists and a test that is present in it.
 Check: `always` — for each evidence string containing a fragment, assert the
@@ -1528,6 +1544,14 @@ Existing check: none. Nothing validates the traceability record against the tree
 Impact: two requirement citations, one of them load-bearing for three rows,
 point at tests that do not exist under those names. This is the audit trail for a
 release gate, and it has no validator.
+Invalidated: the U3 tree has no `docs/evidence/` directory and no
+`shm-traceability-v1.json`; the release manifest it audited lives at
+`crates/shm-transport/benches/manifests/v1.json` but carries no traceability
+record. There is no artifact left for the pointer check to hold or fail against.
+What the record established is that the source tree's traceability record had
+two stale test citations, one load-bearing for three requirement rows, and that
+no validator existed for it. If a traceability artifact is re-derived against
+this tree, reopen the record against that file.
 Open questions: None.
 
 ### negative-tests-fail-for-their-stated-reason
@@ -1600,8 +1624,9 @@ close path each implement their own ordering, and neither advances this machine.
 Existing check: `lifecycle_accepts_only_diagram_edges_and_quarantine_is_terminal`
 (`tests/contract.rs:272`) proves the model's edges. Status unaudited as evidence
 for the shipping paths.
-Impact: `docs/shm-transport.md:63` describes the close ordering as the
-implemented contract and the traceability record marks the corresponding
+Impact: `docs/shm-transport.md:49` describes the close ordering (joined
+teardown returns the charge when the mapping is unmapped; failed detachments
+keep channel and mapping alive) as the implemented contract and the traceability record marks the corresponding
 requirement PASS, but the PASS rests on a type nothing in production drives. The
 documented "drains published data" stage has no counterpart in either real close
 path.
@@ -1637,8 +1662,11 @@ seven each gate with an `available: false` return (lines 118, 122, 129, 134,
 same object. A runtime without the hook is advertised as capable.
 Existing check: the capability suite asserts channel counts around the probe,
 not the gating itself. Status unaudited.
-Impact: `docs/shm-transport.md:42` states "any failure returns
-`available: false` with a bounded reason", which is falsified for one of the
+Impact: the source document (former `docs/shm-transport.md:42`) stated "any
+failure returns `available: false` with a bounded reason"; the rewritten
+document says an install that cannot load the addon fails before application
+traffic (`:15`) and that unsupported or omitted results are not success states
+(`:98`). The source statement was falsified for one of the
 eight enumerated steps.
 Open questions:
 
@@ -1691,13 +1719,14 @@ nothing now owns the reclaim-versus-isolate obligation. The question the record
 asked — whether the shipped backend can ever reach clean reclamation — is
 answered by deletion rather than by evidence: `crates/host-runtime/src/ring_transport.rs:291`
 returns charges unconditionally, with neither a quarantine outcome nor a
-reclamation proof. `docs/shm-transport.md:87-90` still presents clean
-reclamation and quarantine as two distinct outcomes with distinct experiments,
+reclamation proof. The rewritten `docs/shm-transport.md:49` and `:92` still name
+reclamation and quarantine as two outcomes (former `:87-90` also prescribed
+distinct experiments for them),
 and now describes no code at all.
 Open questions:
 
-- The documentation at `docs/shm-transport.md:87-90` now describes a
-  two-outcome recovery model that no longer exists. Should it be rewritten to the
+- The documentation at `docs/shm-transport.md:49` and `:92` (former `:87-90`)
+  still describes a two-outcome recovery model that no longer exists. Should it be rewritten to the
   unconditional-release behaviour, or is the recovery model intended to return?
   (needs human input)
 
@@ -1731,8 +1760,10 @@ module is likewise ungated in the library (`crates/shm-transport/src/lib.rs:8`).
 Existing check: none.
 Impact: the external-view failpoint can drive both directions into quarantine
 from JavaScript, the cleanup probe is an arbitrary-path file write at teardown,
-and the buffer detach operates on buffers the addon never created. The addon is
-also shipped from a debug build, so release behaviour is never exercised.
+and the buffer detach operates on buffers the addon never created. The former
+debug-build clause is retired: `packages/shm-native/package.json` builds with
+`cargo build --release -p shm-native` and copies
+`target/release/libshm_native.so` to `shm_native.node`.
 Open questions:
 
 - Is a `cfg`- or feature-gated split intended before this transport becomes
@@ -2079,7 +2110,7 @@ never called `Ring::create`. `ed487e11` made the ring mandatory and removed
 platform decision on this path at all.
 Impact: the documented macOS failure status this record was anchored to
 (former `docs/shm-transport.md:121`) is gone from HEAD docs, which now
-declare Linux-x64 glibc the only supported production platform (`:5`, `:83`).
+declare Linux-x64 glibc the only supported production platform (`:5`, `:96`).
 If the Darwin surface returns, the concern stands unchanged: fixing whatever
 failed silently activates the whole untested macOS path at once — creation
 without seals, and an attach whose type predicate is a constant `true` on
@@ -2091,7 +2122,7 @@ Invalidated: the U3 tree carries no Darwin path for this record to guard.
 `validate_object` (`ring.rs:2874-2892`) checks `S_IFREG` unconditionally;
 `compile_error!("shm-transport ring backend supports Linux only")` at
 `ring.rs:18-19` refuses every non-Linux build; and `docs/shm-transport.md:5-7`
-and `:83` declare Linux x64 glibc the only supported platform with no
+and `:96` declare Linux x64 glibc the only supported platform with no
 alternate backend. There is no code left to hold or violate this property.
 What the record established is that the source tree's Darwin object-creation
 path was never executed under observation, and that restoring it would
@@ -2155,8 +2186,9 @@ any macOS build of the crate.
 Existing check: `artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected`
 (`tests/ring.rs:380`) covers the Linux seal path only and is itself Linux-gated,
 with no macOS counterpart. Status unaudited as evidence for the shrink check.
-Impact: `docs/shm-transport.md:117` rests the trusted-peer boundary on
-owner-only attachment. On a macOS build that boundary would be uid plus exact
+Impact: the source document (former `docs/shm-transport.md:117`) rested the
+trusted-peer boundary on owner-only attachment; the rewritten document keeps the
+owner-only setup socket (`:5`) and Linux-only support (`:96`). On a macOS build that boundary would be uid plus exact
 size plus mode bits with a constant-true type predicate and no shrink immunity;
 at HEAD the compensating property is that no such build exists — the crate
 compile-errors off Linux (`ring.rs:1-2`) and no macOS CI job or Darwin package
@@ -2169,7 +2201,7 @@ Invalidated: the U3 tree carries no Darwin path for this record to guard.
 `validate_object` (`ring.rs:2874-2892`) checks `S_IFREG` unconditionally;
 `compile_error!("shm-transport ring backend supports Linux only")` at
 `ring.rs:18-19` refuses every non-Linux build; and `docs/shm-transport.md:5-7`
-and `:83` declare Linux x64 glibc the only supported platform with no
+and `:96` declare Linux x64 glibc the only supported platform with no
 alternate backend. There is no code left to hold or violate this property.
 The `type_valid = true` carve-out this record tracked does not exist here:
 `validate_object` computes `type_valid` from `st_mode & S_IFMT == S_IFREG`
@@ -2238,7 +2270,7 @@ Invalidated: the U3 tree carries no Darwin path for this record to guard.
 `Mapping::create` (`ring.rs:397-398`) calls `create_linux_memfd` only;
 `compile_error!("shm-transport ring backend supports Linux only")` at
 `ring.rs:18-19` refuses every non-Linux build; and `docs/shm-transport.md:5-7`
-and `:83` declare Linux x64 glibc the only supported platform with no
+and `:96` declare Linux x64 glibc the only supported platform with no
 alternate backend. There is no code left to hold or violate this property. What
 the record established is that the source tree's `create_macos_shm` had a
 one-statement window between `shm_open` and `shm_unlink` in which a failure
