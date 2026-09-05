@@ -480,8 +480,29 @@ fn write_message<T: Serialize>(
     let mut frame = Vec::with_capacity(4 + body.len());
     frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
     frame.extend_from_slice(&body);
-    set_timeout(stream, deadline)?;
-    stream.write_all(&frame)
+    write_all(stream, &frame, deadline)
+}
+
+fn write_all(stream: &mut UnixStream, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
+    // `std::io::Write::write_all` grants each underlying send the full remaining budget, so a
+    // slowly draining peer could stretch wall time to remaining × chunks. Re-arming the timeout
+    // per chunk caps the whole write at the deadline, as `read_exact` does.
+    while !bytes.is_empty() {
+        set_timeout(stream, deadline)?;
+        match stream.write(bytes) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn read_exact(stream: &mut UnixStream, mut bytes: &mut [u8], deadline: Instant) -> io::Result<()> {

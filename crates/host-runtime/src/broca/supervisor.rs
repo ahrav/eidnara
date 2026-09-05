@@ -339,23 +339,34 @@ impl Supervisor {
     /// The spawned run task, not admission, waits for a backend permit.
     /// The stored fingerprint uses the exact request bytes in `body`.
     /// The stored fingerprint makes byte-identical retries idempotent.
-    /// Resolves a byte-identical resend of a live run to its run ID without admitting anything.
-    /// A client recovering a lost `send` response must reach this even when the harness has since become unavailable: the existing run keeps executing from its already-open descriptors, so availability checks apply only to a new admission. commentlint: allow(JUDGE)
-    pub fn resend_of_live_run(&self, key: &SessionKey, body: &[u8]) -> Option<String> {
+    /// Resolves a `send` whose outcome is already fixed by the session's existing state — a byte-identical resend of a live run, a conflicting live run, a deletion tombstone, or a closed index — without admitting anything. commentlint: allow(JUDGE)
+    /// These outcomes cannot create a new admission, so a caller must reach them even when the harness has become unavailable or the route's credential fingerprint is stale; availability and credential gates apply only to a genuinely new run. commentlint: allow(JUDGE)
+    pub fn existing_session_outcome(
+        &self,
+        key: &SessionKey,
+        body: &[u8],
+    ) -> Option<Result<String, RequestError>> {
         let fingerprint: [u8; 32] = Sha256::digest(body).into();
         // Declared before the lock so releases drop after it, matching `send`.
         let mut released = Released::default();
         let mut index = lock_index(&self.inner);
-        // A closed index or an expired terminal must not answer as a live run: `send` reports the closed error, and an expired entry would hand back an ID that the next `status` call reports missing. commentlint: allow(JUDGE)
         if index.closed {
-            return None;
+            return Some(Err(closed_error()));
         }
         self.sweep_expired(&mut index, &mut released);
         match index.sessions.get(key) {
             Some(SessionEntry::Live(run)) if run.fingerprint == fingerprint => {
-                Some(run.run_id.clone())
+                Some(Ok(run.run_id.clone()))
             }
-            _ => None,
+            Some(SessionEntry::Live(_)) => Some(Err(app(
+                "idempotency_conflict",
+                "the session already holds a different immutable run",
+            ))),
+            Some(SessionEntry::Tombstone(_)) => Some(Err(app(
+                "session_deleted",
+                "the session was deleted and cannot be reused yet",
+            ))),
+            None => None,
         }
     }
 

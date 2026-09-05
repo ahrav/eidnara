@@ -221,9 +221,12 @@ impl CompositeComponent for BrocaComponent {
         };
         match request {
             Request::Send(send) => {
-                // A byte-identical resend of a live run resolves before any admission gate so a client recovering a lost response is not rejected by a harness that became unavailable after the run started. commentlint: allow(JUDGE)
-                if let Some(run_id) = self.supervisor.resend_of_live_run(&key, &ctx.body) {
-                    return respond(&ctx, protocol::send_response_body(&run_id)).await;
+                // Outcomes fixed by the session's existing state resolve before any admission gate: a client recovering a lost response, or one that must see `idempotency_conflict`/`session_deleted`, is not masked by a harness that became unavailable after the run started. commentlint: allow(JUDGE)
+                if let Some(outcome) = self.supervisor.existing_session_outcome(&key, &ctx.body) {
+                    return match outcome {
+                        Ok(run_id) => respond(&ctx, protocol::send_response_body(&run_id)).await,
+                        Err(error) => request_error(error),
+                    };
                 }
                 // The handler checks harness availability before credentials because descriptor failures take precedence over credential failures.
                 // The probe opens, hashes, and stats closure nodes, so it runs on the blocking pool like the execution-path resolution; a stalled closure store must not occupy runtime workers. commentlint: allow(JUDGE)
