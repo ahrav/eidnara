@@ -3290,13 +3290,16 @@ Open questions:
 ### ring-a-host-doctor-emits-one-of-five-declared-terminal-classes
 
 Type: reachability
-Reachability: default-production for the host counters and the healthy arm; the
-terminal classification itself is **client-side production code**, not host
-code. `diagnostics()` (`ring_transport.rs:142-196`) is ungated, and the plugin
-path that classifies is `packages/plugin/src/shared/host-client/shared-memory-failure.ts:10-30`
-reached from `packages/plugin/src/shared/host-lifecycle/policy.ts:648-672`,
-neither behind a flag. See the `Check:` line for why that relocates the whole
-record.
+Reachability: test-only - the host counters and the healthy arm of `diagnostics()`
+(`ring_transport.rs:142-196`, ungated) are default-production, but the guarantee's
+subject, a `daemon doctor` report carrying one of the five terminal classes, is
+produced by the plugin package (`packages/plugin/src/shared/host-client/shared-memory-failure.ts`
+and `host-lifecycle/policy.ts` in the source repository), and `packages/` in this
+tree holds only `shm-native`; no `classifySharedMemoryFailure`,
+`terminalSharedMemoryDiagnostics`, or `daemon doctor` implementation exists here.
+Until the plugin lands, the five outcomes can be reached only by a test that
+stands in for the classifier. The plugin file citations below are source-repository
+evidence, kept for the wave that reclassifies this record.
 Status: active
 Exercised: partial - `ring_transport.rs:867-868` asserts the healthy shape end
 to end; no campaign drives the doctor to a terminal outcome in any of the five
@@ -3308,7 +3311,9 @@ Check: `sometimes` - at least once per campaign, for each of `missing_addon`,
 `identity_mismatch`, `setup_failure`, `peer_death`, and `resource_exhaustion`,
 observe a completed `daemon doctor` report whose `shared_memory.error_class`
 equals that class, produced by the real classification path from a real host or
-addon condition rather than by constructing the value. **This record previously
+addon condition rather than by constructing the value; in this tree that path is
+absent, so the check is deferred with the record's reachability and no in-tree
+campaign can discharge it yet. **This record previously
 claimed `reachable` over "five distinct emission points" in the host, and both
 the boundary and the semantics were wrong.** There are no five host emission
 points to reach, and there never were: the terminal report is synthesized
@@ -3718,7 +3723,7 @@ defaulted: `connection.rs:391` and
 `:397` are on the ungated read-exit match every connection runs. The subject,
 `ReadClose::RejectedDrainFailed` (`frame_channel.rs:47`), has no producer
 anywhere in the tree, in production or in test, so `ReadExit::PeerKeepQueue`
-(`connection.rs:397`) and the `serve_generation` arm at `:304-308` are compiled
+(`connection.rs:355-358`) and the `serve_generation` arm at `:281-285` are compiled
 and unreachable. `#[allow(dead_code)]` on the enum (`frame_channel.rs:32`) is
 what keeps that compiling silently.
 Status: active
@@ -3732,8 +3737,11 @@ Check: `reachable` - for every `ReadClose` variant the engine handles
 (`frame_channel.rs:32-45`: `CleanEof`, `Corrupt`, `Cancelled`, `Overloaded`,
 `Io`, `RejectedDrainFailed`), the engine arm that consumes it is executed at least
 once per campaign, asserted per variant; the two arms the producer census found
-unproduced are `connection.rs:397` (`ReadExit::PeerKeepQueue`, from
-`RejectedDrainFailed`) and the `Io` arm. `reachable` fits because the claim is
+unproduced are the `Err(ReadClose::RejectedDrainFailed)` arm at
+`connection.rs:355-358`, which is the only producer of `ReadExit::PeerKeepQueue`,
+and the `Err(ReadClose::Io(_))` arm at `:364`; `connection.rs:397` is the
+ordinary oversize-rejection task and must not be used as the marker, since an
+ordinary rejection would satisfy it while the close variant stays dead. `reachable` fits because the claim is
 location coverage over each branch, and the finding is that no input can reach
 those two.
 Fault/timing angle: none. Static producer enumeration.
@@ -3746,10 +3754,10 @@ Confidence: high - [evidence](evidence/ring-a-rejected-drain-failure-close-has-n
 Verified by grepping both variants: `ReadClose::RejectedDrainFailed` appears at
 `frame_channel.rs:47` (declaration) and `connection.rs:391` (consumer) and
 nowhere else; `ReadClose::Io` appears at `frame_channel.rs:45` and
-`connection.rs:403` and nowhere else. `ReadExit::PeerKeepQueue` is produced only
-at `connection.rs:397`, so the `serve_generation` arm at
-`connection.rs:304-308` plus the `reject_written` bookkeeping at
-`connection.rs:385` are dead. `#[allow(dead_code)]` on the `ReadClose` enum
+`connection.rs:364` and nowhere else. `ReadExit::PeerKeepQueue` is produced only
+at `connection.rs:355-358`, so the `serve_generation` arm at
+`connection.rs:281-285` plus the `reject_written` bookkeeping at
+`connection.rs:349`, `:357`, and `:393` are dead. `#[allow(dead_code)]` on the `ReadClose` enum
 (`frame_channel.rs:32`) is what keeps this compiling silently.
 Existing check: none. Part 2a's
 `the-client-body-budget-refusal-drain-is-never-entered` is the closest analogue
@@ -5433,26 +5441,26 @@ Open questions:
 ### setup-a-only-an-authenticated-grant-enters-the-native-channel-registry
 
 Type: safety
-Reachability: default-production for `connect_setup` (`lib.rs:571`), which the
-shipped plugin reaches through `NativeChannel.connectSetup`
-(`packages/shm-native/index.ts:531-534`) from `shm-frame-channel.ts:77`.
-**`attach` is compiled and exported with no shipped-plugin caller**, and that is
-stated rather than defaulted: `attach` (`lib.rs:490-491`) carries no
-`#[cfg(test)]` and no `#[doc(hidden)]`, `NativeChannel.attach` exports it at
-`index.ts:526-529`, and a grep of `packages/plugin/src` at `HEAD` for
-`NativeChannel.attach` and `.attach(` returns **no non-test caller**. So the
-export is production surface by visibility and unreached by the shipped path,
-which is neither `default-production` nor `test-only` and is the reason the
-guarantee below is scoped the way it is.
+Reachability: test-only - `connect_setup` (`packages/shm-native/src/lib.rs:774`) and
+`attach` (`:525`) are both `#[napi]` exports surfaced by `NativeChannel.connectSetup`
+(`packages/shm-native/index.ts:542-545`) and `NativeChannel.attach` (`:537-540`);
+their only in-tree callers are `packages/shm-native/tests/`. The plugin that would
+call `connectSetup` on the shipped frame-channel path (`shm-frame-channel.ts:77` in
+the source repository) is not in this tree, since `packages/` holds only
+`shm-native`. `attach` carries no `#[cfg(test)]` and no `#[doc(hidden)]`, so it is
+production surface by visibility; the shipped-plugin census below is
+source-repository evidence and is the reason the guarantee is scoped as it is.
 Status: active
 Exercised: not yet - no test asserts the shipped wrapper never reaches `attach`.
 Guarantee: **In the shipped plugin path**, every channel inserted into the native
 registry originates from `connect_setup`, which authenticated over the setup
 socket, and never from `attach`, which takes caller-supplied descriptors and
 authenticates nothing.
-Check: `always` - instrument both insertion sites, the `insert_channel` calls at
-`lib.rs:619` (from `attach`) and `:745` (from `connect_setup`), and assert that a
-full shipped-plugin run inserts only through `connect_setup`. `always` rather than
+Check: `always` - instrument the three `insert_channel` call sites, `lib.rs:619`
+(from `attach`), `:745` (from the `finish_setup` task that completes
+`connect_setup`), and `:823` (from `create_test_pair`, a test-only export), and
+assert that a full shipped-plugin run inserts only through the `connect_setup`
+path. `always` rather than
 `unreachable` because `attach` is a published export that tests and embedders may
 legitimately call; the forbidden thing is a *state*, a registry entry with no
 authenticated provenance, and METHOD's rule for a forbidden state with no
@@ -5467,7 +5475,8 @@ embedder, who may call `NativeChannel.attach` deliberately and correctly. What i
 provable, and what this record now claims, is the narrower call-graph fact about
 the **shipped plugin**: the only `NativeChannel` construction on the plugin's
 frame-channel path is `connectSetup` (`shm-frame-channel.ts:77`), and a census
-over `packages/plugin/src` finds no other. Stated plainly, so a later reader does
+over the source repository's `packages/plugin/src` finds no other; that package is
+not in this tree. Stated plainly, so a later reader does
 not recover the stronger claim: **an unauthenticated registry entry is reachable
 in-process by design, and this property only says the shipped plugin does not
 create one.**
@@ -5475,14 +5484,14 @@ Fault/timing angle: none. This is a call-graph property.
 Required faults and enabling state: none beyond running the shipped plugin with
 both sites instrumented.
 Confidence: high - [evidence](evidence/setup-a-only-an-authenticated-grant-enters-the-native-channel-registry.md).
-Verified: `attach` at `lib.rs:491` reads `hostToPeerFd` and `peerToHostFd` as
+Verified: `attach` at `lib.rs:525` reads `hostToPeerFd` and `peerToHostFd` as
 caller-supplied integers (`:510-513`) and never touches a socket;
-`connect_setup` at `:571` calls `setup::connect` which performs the three-message
+`connect_setup` at `:774` starts the `BeginSetupTask` whose completion calls `setup::connect` which performs the three-message
 handshake (`setup.rs:107-113`). Both end in `insert_channel` on the same
-`REGISTRY`, at `:551` and `:612`. `index.ts:526-529` and `:531-534` expose both;
+`REGISTRY`, at `:551` and `:612`. `index.ts:537-540` and `:542-545` expose both;
 `shm-frame-channel.ts:77` uses only `connectSetup`, and grepping
-`packages/plugin/src` for any other `.attach(` call site returns nothing outside
-tests.
+the source repository's `packages/plugin/src` for any other `.attach(` call site
+returns nothing outside tests; that package is absent from this tree.
 Existing check: Part 1's `test-only-surface-absent-from-the-shipped-addon` is the
 neighbouring property and should be checked for whether it already covers
 `attach`. `attach` carries no `#[cfg(test)]` and no `#[doc(hidden)]`, so on the
@@ -6727,12 +6736,12 @@ Exercised: partial - reached only by the test module's 16 direct `dispatch` call
 Guarantee: `dispatch`'s catch-all retirement arm is unreachable from the
 production reader, because `validate_inbound` already rejects every frame type
 that would land there.
-Check: `unreachable` - the statement at `client.rs:1557` is never executed on the
+Check: `unreachable` - the statement at `client.rs:1468` (the `_ => self.retire("protocol_violation")` arm of `dispatch`; `:1557` is `settle_all`'s `cancel_classification` call, which normal retirement with pending work executes) is never executed on the
 `ring_reader_loop` path. `unreachable` rather than `always(!X)` because the
 subject is a specific code location that must not execute, which is exactly
 METHOD's criterion.
 Fault/timing angle: None.
-Required faults and enabling state: No fault. The check is a marker at `:1557`
+Required faults and enabling state: No fault. The check is a marker at `:1468`
 that must not fire during any production-path campaign, combined with the
 independent observation that `validate_inbound` returned `Err` for the same frame
 types.
@@ -9091,7 +9100,7 @@ I traced all eight gates and verified each line, and computed the byte arithmeti
 independently.
 Existing check: four tests, each covering one gate; none asserts the conjunction
 at the use site. Status `unaudited`.
-Impact: a wrapped subtraction at `runtime.rs:896-912` reaching `Semaphore::new`
+Impact: a wrapped subtraction at `runtime.rs:762-767` reaching `Semaphore::new`
 or `ByteBudget::new` panics during `HostShared` construction, after the transport
 is published, so a client can discover a dead endpoint.
 Open questions: None.
@@ -9101,15 +9110,15 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - no test relates `config.rs:23-24` to `runtime.rs:896-902`;
+Exercised: not yet - no test relates `config.rs:23-24` to `runtime.rs:762-767`;
 `config.rs:520-548` asserts the floor decomposition but never the runtime
 subtraction
 Guarantee: The unchecked subtraction that derives `ingress_budget` never
 underflows, and its result is never below one `MAX_BODY_LEN`.
-Check: `always` - immediately before `runtime.rs:896`, assert
+Check: `always` - immediately before the `ByteBudget::new` subtraction at `runtime.rs:762-767`, where `config.limits.max_resident_bytes`, `catalog_resident`, and `reservations.retained_bytes` are all in scope, assert
 `max_resident_bytes >= EGRESS_RESERVED_BYTES + SCRATCH_RESERVED_BYTES +
 catalog_resident + retained_bytes + MAX_BODY_LEN`. `always` because the
-subtraction is unconditional; the guard being 160 lines earlier is exactly why
+subtraction is unconditional; the guard living in `HostConfig::validate` (`config.rs:122`) rather than at the subtraction is exactly why
 the assertion belongs at the consumer.
 Fault/timing angle: none, but the coupling is a maintenance window rather than a
 runtime one: any independent edit to `MIN_RESIDENT_BYTES` or to the subtrahend
@@ -9453,10 +9462,11 @@ Exercised: not yet - no test constructs a component report carrying
 Guarantee: The activation-in-progress fast probe cadence is entered at least once
 per campaign, so its handler-controlled predicate and its 50 ms interval are
 exercised rather than assumed.
-Check: `sometimes` - a marker at `runtime.rs:1130`, fired when the fixed interval
-is selected. `sometimes` and not `reachable` because this is situation coverage: a
+Check: `sometimes` - a marker on the `Duration::from_millis(50)` branch at
+`runtime.rs:972-973`, fired when the fixed interval is selected (`:1129-1130` is
+the test-only `stalled_generation` helper and is unrelated to activation). `sometimes` and not `reachable` because this is situation coverage: a
 campaign can execute the health loop thousands of times, and even execute the
-`if` at `:1129`, while never producing the operational state the branch
+`if` at `:972`, while never producing the operational state the branch
 represents, which is a component that has published `starting` in its health
 metrics. Line coverage of the conditional does not witness that state.
 Fault/timing angle: the situation requires a real post-publication activation
