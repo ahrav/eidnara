@@ -300,10 +300,16 @@ equality against the pre-state.
 
 ## Production assertions and runtime guards
 
-**Explicit `assert!` and `debug_assert!` in production paths: none found.** All
-invariant enforcement is by `Result`-returning guards. The only `assert_eq!` in
-`src` is inside the single unit test; `src/harness.rs` holds 12 assertions by
-design as the fuzz oracle.
+**Compile-time layout assertions and one debug assertion exist; runtime
+invariant enforcement is by `Result`-returning guards.** The `const _: () = { ... }`
+block at `crates/shm-transport/src/backend/ring.rs:159-189` holds 28 `assert!`
+checks that pin the sizes and field offsets of `SharedDescriptor`, `WakeEpoch`,
+`LifecyclePage`, and the other shared-page types against the wire layout; they
+run at compile time, so a layout drift fails the build rather than a test.
+`Ring::create` carries a `debug_assert_eq!` that the profile's descriptor schema
+version equals `DESCRIPTOR_SCHEMA_VERSION` (`:1041-1044`), absent from release
+builds. `src/harness.rs` holds 12 assertions by design as the fuzz oracle. No
+other `assert!` or `debug_assert!` sits on a production path in the crate.
 
 Guard clusters, all unaudited:
 
