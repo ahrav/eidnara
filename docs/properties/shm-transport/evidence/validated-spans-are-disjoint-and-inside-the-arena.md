@@ -12,33 +12,33 @@ is whether the accept path excludes it and by what argument.
 ## Evidence trail
 
 All references are to `crates/shm-transport/src/descriptor.rs`,
-`FrameDescriptor::validate` (`:183-283`), in evaluation order.
+`FrameDescriptor::validate` (`:252-334`), in evaluation order.
 
-- `:214-216` — `body_len > MAX_FRAME_BYTES` is rejected as `FrameTooLarge`.
-- `:218-220` — one combined guard: `arena_bytes == 0 || allocation_len >
+- `:272-274` — `body_len > MAX_FRAME_BYTES` is rejected as `FrameTooLarge`.
+- `:276-278` — one combined guard: `arena_bytes == 0 || allocation_len >
   arena_bytes || allocation_len < body_len` rejects as `InvalidAllocation`. This
   is where `body_len <= allocation_len <= arena_bytes` is established.
-- `:224-226` — `span_count` must be in `1..=MAX_SPANS`, so `1` or `2`.
-- `:227-229` — `spans[0].offset != allocation_start % arena_bytes` rejects as
+- `:282-284` — `span_count` must be in `1..=MAX_SPANS`, so `1` or `2`.
+- `:285-287` — `spans[0].offset != allocation_start % arena_bytes` rejects as
   `InvalidWrapMetadata`. `allocation_start` is itself an untrusted field, so this
   ties span 0's offset to another attacker-chosen value, not to a trusted one.
-- `:230-237` — `first_end = spans[0].offset + spans[0].len` is computed with
+- `:289-295` — `first_end = spans[0].offset + spans[0].len` is computed with
   `checked_add` and rejected if `first_end > arena_bytes` (`OutOfBounds`).
-- `:238-244` — `summed = spans[0].len + spans[1].len` and `summed != body_len`
+- `:296-302` — `summed = spans[0].len + spans[1].len` and `summed != body_len`
   rejects as `LengthMismatch`.
-- `:252-261` — the two-span arm. Five conditions, any one of which rejects:
-  `spans[0].is_empty()` (`:253`), `spans[1].is_empty()` (`:254`), `first_end !=
-  arena_bytes` (`:255`), `spans[1].offset != 0` (`:256`), `spans[1].len >
-  arena_bytes` (`:257`).
-- `:247-251` — the one-span arm requires `spans[1] == ArenaSpan::default()`, so
-  the single-span case is trivially disjoint and in-bounds via `:235`.
-- `crates/shm-transport/src/harness.rs:68` — the fuzz target calls
+- `:310-319` — the two-span arm. Five conditions, any one of which rejects:
+  `spans[0].is_empty()` (`:311`), `spans[1].is_empty()` (`:312`), `first_end !=
+  arena_bytes` (`:313`), `spans[1].offset != 0` (`:314`), `spans[1].len >
+  arena_bytes` (`:315`).
+- `:305-309` — the one-span arm requires `spans[1] == ArenaSpan::default()`, so
+  the single-span case is trivially disjoint and in-bounds via `:293`.
+- `crates/shm-transport/src/harness.rs:73` — the fuzz target calls
   `descriptor.validate(identity, MAX_FRAME_BYTES)`. The arena argument is the
   constant floor, never anything larger.
-- `crates/shm-transport/src/harness.rs:69-81` — the accept-path assertions:
+- `crates/shm-transport/src/harness.rs:74-86` — the accept-path assertions:
   body bound, span count, per-span `end <= MAX_FRAME_BYTES`, and `summed ==
   body_len`. No pairwise comparison.
-- `crates/shm-transport/tests/contract.rs:73` and `:675` — the two tabled
+- `crates/shm-transport/tests/contract.rs:58` and `:644` — the two tabled
   negative tests. Neither constructs an overlapping pair.
 
 ## The derivation
@@ -46,11 +46,11 @@ All references are to `crates/shm-transport/src/descriptor.rs`,
 Write span 0 as `[o0, o0 + l0)` and span 1 as `[o1, o1 + l1)`. For `span_count ==
 2`, the accepted conditions give:
 
-1. `l0 >= 1` and `l1 >= 1` — from `:253-254`.
-2. `o0 + l0 == arena_bytes` — from `:255`, so `o0 == arena_bytes - l0`.
-3. `o1 == 0` — from `:256`, so span 1 is `[0, l1)`.
-4. `l0 + l1 == body_len` — from `:242`.
-5. `body_len <= allocation_len <= arena_bytes` — from `:218`.
+1. `l0 >= 1` and `l1 >= 1` — from `:311-312`.
+2. `o0 + l0 == arena_bytes` — from `:313`, so `o0 == arena_bytes - l0`.
+3. `o1 == 0` — from `:314`, so span 1 is `[0, l1)`.
+4. `l0 + l1 == body_len` — from `:300`.
+5. `body_len <= allocation_len <= arena_bytes` — from `:276`.
 
 Chaining 4 and 5 gives `l0 + l1 <= arena_bytes`, hence `l1 <= arena_bytes - l0`.
 Substituting 2 gives `l1 <= o0`. Span 1's end is `l1` by 3, and span 0's start is
@@ -61,7 +61,7 @@ places, never a stated condition.
 
 Each of conditions 2, 3, and 4 is individually load-bearing:
 
-- Relax 2 (`first_end != arena_bytes`), keeping only `:235`'s `first_end <=
+- Relax 2 (`first_end != arena_bytes`), keeping only `:293`'s `first_end <=
   arena_bytes`: with `arena_bytes = 100`, `allocation_start = 10`,
   `allocation_len = 100`, `body_len = 90`, `spans[0] = (10, 10)`, `spans[1] =
   (0, 80)`, every remaining guard passes and `[0, 80)` overlaps `[10, 20)`.
@@ -72,27 +72,27 @@ Each of conditions 2, 3, and 4 is individually load-bearing:
 
 Condition 3 is the one whose relaxation does the most damage, and is the answer
 to "which single condition, if relaxed, re-opens overlap" in the strongest
-sense: `:256` is the *only* constraint on span 1's position anywhere in
-`validate`. `:257` bounds `spans[1].len` alone, and there is no
-`spans[1].offset + spans[1].len <= arena_bytes` check. So removing `:256` breaks
+sense: `:314` is the *only* constraint on span 1's position anywhere in
+`validate`. `:315` bounds `spans[1].len` alone, and there is no
+`spans[1].offset + spans[1].len <= arena_bytes` check. So removing `:314` breaks
 both disjointness and the in-arena claim at once — a span could sit wholly
-outside the arena — whereas removing `:255` or `:242` breaks only disjointness,
-with span 0 still bounded by `:235`.
+outside the arena — whereas removing `:313` or `:300` breaks only disjointness,
+with span 0 still bounded by `:293`.
 
 ## Failure scenario
 
 A peer writes a descriptor whose two spans cover the same arena bytes. If the
 conjunction above were ever weakened, `try_receive` would build two `LeaseSpan`s
-over one range (`ring.rs:1107-1114`), the addon would expose two writable external
+over one range (`ring.rs:1446-1451`), the addon would expose two writable external
 ArrayBuffers aliasing the same memory
-(`packages/shm-native/src/lib.rs:1195-1198`), and `to_vec` would produce a body
+(`packages/shm-native/src/lib.rs:1382-1390`), and `to_vec` would produce a body
 whose two halves are the same bytes. No guard downstream re-checks disjointness:
-`lease_span` (`ring.rs:1452-1468`) bounds each span independently.
+`lease_span` (`ring.rs:2057-2068`) bounds each span independently.
 
 ## Timing windows and dependencies
 
 None. This is a pure decoding property over one snapshot read
-(`ring.rs:1092`, `:1489`). The exposure is structural rather than temporal: the
+(`ring.rs:1440`, `:1565`). The exposure is structural rather than temporal: the
 guarantee is an emergent consequence of guards written for other purposes, so any
 refactor that reorders, merges, or relaxes one of them silently removes it.
 Related to `reclaim-advance-bounded-by-the-producer-reservation`, which consumes
@@ -101,7 +101,7 @@ the same validated record but trusts a different field of it.
 ## What a test must construct
 
 Two things the current fuzz target does not do. First, `arena_bytes >
-MAX_FRAME_BYTES`, so that `:255`'s `first_end == arena_bytes` and `:218`'s
+MAX_FRAME_BYTES`, so that `descriptor.rs:313`'s `first_end == arena_bytes` and `descriptor.rs:276`'s
 `allocation_len <= arena_bytes` are genuinely distinct bounds rather than
 coincident constants. Second, an explicit pairwise assertion on the accept path:
 for every accepted descriptor with `span_count == 2`, assert `spans[1].offset +
@@ -118,10 +118,10 @@ implementation.
 The record carries no open question, so this log records the one thing that had
 to be settled to accept the record's claim as written.
 
-- Sources examined: `descriptor.rs:183-284` in full;
-  `crates/shm-transport/src/arena.rs:88-115` for whether the producer's
+- Sources examined: `descriptor.rs:252-334` in full;
+  `crates/shm-transport/src/arena.rs:84-123` for whether the producer's
   `SpanPlan::reserve` could be the real source of disjointness;
-  `harness.rs:48-92`; `tests/contract.rs:73` and `:675`.
+  `harness.rs:28-98`; `tests/contract.rs:58` and `:644`.
 - Findings: the catalog names three conditions and says "relaxing any one
   re-opens overlap". That is correct, and the derivation above supplies the
   counterexamples it did not. The catalog's line citations `:367`, `:387-393`,

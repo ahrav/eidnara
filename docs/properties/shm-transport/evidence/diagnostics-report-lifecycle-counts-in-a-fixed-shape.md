@@ -4,29 +4,29 @@
 
 Five records in the catalog say "no counter fires" for a failure they describe,
 while `RingTransport::diagnostics` publishes peer-death, reclamation,
-activation, and exhaustion counts and `docs/shm-transport.md:71` documents them.
+activation, and exhaustion counts and `docs/shm-transport.md:70-73` documents them.
 The report had a test and no record.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/ring_transport.rs:85-88` declare `activations`,
-  `peer_deaths`, `reclamations`, `exhaustions` as `AtomicU64`; `:122-125`
+- `crates/host-runtime/src/ring_transport.rs:132-135` declare `activations`,
+  `peer_deaths`, `reclamations`, `exhaustions` as `AtomicU64`; `:172-175`
   initialise them to zero.
-- `pub fn diagnostics(&self) -> serde_json::Value` at `:139`. The report carries
-  `artifact` (`:180`), `bounds` (`:185`), and at `:187-190` the four counters as
+- `pub fn diagnostics(&self) -> serde_json::Value` at `:190`. The report carries
+  `artifact` (`:231`), `bounds` (`:236`), and at `:238-241` the four counters as
   `activation.completed`, `peer_death.observed`, `reclamation.completed`,
   `exhaustion.observed`, each loaded with `Ordering::Acquire`.
-- Increment sites: `record_activation` (`:194-195`), `record_peer_death`
-  (`:198-199`), `record_reclamation` (`:202-203`), all `fetch_add(1, Relaxed)`;
-  the exhaustion increment sits inside `prepare` at `:221`.
-- Wiring: `crates/host-runtime/src/connection.rs:172` calls
-  `shared.ring.record_activation()`; `:185` calls
-  `peer_ring.record_peer_death()`; `:193` calls
-  `shared.ring.record_reclamation()`; `:640` passes
+- Increment sites: `record_activation` (`:246-247`), `record_peer_death`
+  (`:250-251`), `record_reclamation` (`:254-255`), all `fetch_add(1, Relaxed)`;
+  the exhaustion increment sits inside `prepare` at `:273`.
+- Wiring: `crates/host-runtime/src/connection.rs:188` calls
+  `shared.ring.record_activation()`; `:201` calls
+  `peer_ring.record_peer_death()`; `:209` calls
+  `shared.ring.record_reclamation()`; `:625` passes
   `shared_task.ring.diagnostics()` into the `HostStatus` response.
 - Test: `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts`
-  (`ring_transport.rs:862`) calls `record_activation`, `record_peer_death`, and
-  `record_reclamation` once each (`:865-867`) and asserts `state == "healthy"`,
+  (`ring_transport.rs:1137`) calls `record_activation`, `record_peer_death`, and
+  `record_reclamation` once each (`:1140-1142`) and asserts `state == "healthy"`,
   `error_class == null`, `artifact.profile == RING_PROFILE`, `bounds.arena_bytes
   == limits.arena_bytes`, both accounting `arena_bytes` equal to `0`, and the
   four counts `1, 1, 1, 0`.
@@ -56,8 +56,8 @@ increments at each step and the shape stays closed.
 
 ### Q: Are the counters bumped on the shipped path or only by the test?
 
-- Sources examined: `connection.rs:172`, `:185`, `:193`; `ring_transport.rs:221`,
-  `:862-890`.
+- Sources examined: `connection.rs:188`, `:201`, `:209`; `ring_transport.rs:273`,
+  `:1137-1176`.
 - Findings: three of the four are called from `connection.rs`; exhaustion is
   counted inside `prepare`; the test bypasses `connection.rs`.
 - Missing evidence: a test that reaches the `connection.rs` call sites.
@@ -65,13 +65,22 @@ increments at each step and the shape stays closed.
 
 ### Q: Does the test pin the closed key set?
 
-- Sources examined: `ring_transport.rs:862-901`.
+- Sources examined: `ring_transport.rs:1137-1176`.
 - Findings: the assertions cover `state`, `error_class`, three `artifact` keys,
-  `bounds.arena_bytes` (`:881`), one `accounting` field per side (`:882-883`),
-  and the four counts; the seven-name absence check at `:889-900` is by key
+  `bounds.arena_bytes` (`:1156`), one `accounting` field per side (`:1157-1158`),
+  and the four counts; the seven-name absence check at `:1164-1175` is by key
   name, not by planted value. No assertion says the key set is exactly the
   closed set.
 - Missing evidence: a test that drives the events through `connection.rs` and
   a value-level redaction check on the report.
 - Conclusion: Exercised covers the counter-to-key mapping and part of the shape;
   the Check drives the events through the connection path.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 16, `:187-190` now `:238-241`: The report carries a fifth lifecycle counter at HEAD, `endpoint_panic.observed` (`ring_transport.rs:242`), backed by the `endpoint_panics` field (`:138`).
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

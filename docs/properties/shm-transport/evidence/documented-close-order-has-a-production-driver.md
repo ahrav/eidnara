@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`docs/shm-transport.md:63` states a seven-stage close ordering as
+`docs/shm-transport.md:63` (source tree; not at HEAD) states a seven-stage close ordering as
 implemented behaviour, and the traceability record marks the corresponding
 requirement `PASS` on the strength of a contract test. The type that encodes
 that ordering was traced to its callers to establish which shipping code obeys
@@ -39,16 +39,16 @@ No production caller exists. `Lifecycle` is constructed only by the test.
 
 The two real close paths each implement their own ordering:
 
-- **Addon.** `close` (`packages/shm-native/src/lib.rs:1308`) calls
-  `close_channel` (`:358-373`), which sets `channel.closed = true`, aborts every
+- **Addon.** `close` (`packages/shm-native/src/lib.rs:1498`) calls
+  `close_channel` (`:407-413`), which sets `channel.closed = true`, aborts every
   registered producer reservation via `detach_producer(...)?.abort()`, detaches
-  every active lease, then detaches stranded references. `force_close` (`:1335`)
-  calls `quarantine_channel` (`:375`), which additionally calls
-  `enter_quarantine()` on both rings (`:381-382`) before the same detach
+  every active lease, then detaches stranded references. `force_close` (`:1531`)
+  calls `quarantine_channel` (`:415`), which additionally calls
+  `enter_quarantine()` on both rings (`:421-422`) before the same detach
   sequence. Neither calls `Lifecycle::advance`.
 - **Host.** The endpoint thread wraps `run_endpoint` in `catch_unwind`
-  (`crates/host-runtime/src/ring_transport.rs:264-275`) and then takes no branch at
-  all on the result: the unconditional `admission.release()` at `:276` follows
+  (`crates/host-runtime/src/ring_transport.rs:331-342`) and then takes no branch at
+  all on the result: the unconditional `admission.release()` at `:360` follows
   regardless of outcome (the former clean/unclean custody disposition was
   deleted with `shm_provider.rs`). This is a disposition decision, not an
   ordered teardown, and it does not call `Lifecycle::advance` either.
@@ -102,9 +102,9 @@ A reachability assertion, not a state construction:
 - Sources examined: `crates/shm-transport/src/lifecycle.rs` in full;
   repository-wide search for `CloseState`, `Lifecycle::new`, `mark_prepared`,
   `must_fail_closed` excluding `docs/` and `target/`;
-  `crates/shm-transport/tests/contract.rs:272-335`;
-  `packages/shm-native/src/lib.rs:358-393` and `:1308-1356`;
-  `crates/host-runtime/src/ring_transport.rs:256-282`;
+  `crates/shm-transport/tests/contract.rs:379-444`;
+  `packages/shm-native/src/lib.rs:407-424` and `:1498-1546`;
+  `crates/host-runtime/src/ring_transport.rs:324-367`;
   `docs/shm-transport.md` (the close narrative formerly at `:59-65` is
   gone from the trimmed post-#131 document).
 - Findings: the machine is a complete and internally consistent encoding of the
@@ -124,3 +124,15 @@ A reachability assertion, not a state construction:
   referencing files, no production driver, and one documented stage with no
   counterpart in the addon path — but which artifact is normative for close
   ordering is a decision the tree does not record.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 43, `:358-373` now `:407-413`: `close_channel` now sets `closed`, sends `setup::goodbye`, and delegates the sweep to `detach_all_aliases` (`:386-405`), which aborts producers, detaches leases, then detaches stranded views and returns the first failure instead of stopping at it.
+  - line 51, `:276` now `:360`: The thread does branch on the outcome at HEAD: a panic increments the counter, cancels, and sends a `Corrupt` close at `:343-349`, and the disposition chooses `admission.quarantine()` at `:358` when either ring is quarantined or `admission.release()` at `:360` otherwise.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 5, `docs/shm-transport.md:63` (the seven-stage close ordering): The trimmed document carries no close-ordering narrative; `:63` now describes the diagnostics error class.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

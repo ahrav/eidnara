@@ -41,30 +41,30 @@ test rather than a paragraph.
 ## Evidence trail
 
 - Detection is out of band at HEAD. The setup socket is kept open as the
-  peer-lifetime sentinel: `crates/host-runtime/src/connection.rs:179-190` spawns a
+  peer-lifetime sentinel: `crates/host-runtime/src/connection.rs:195-207` spawns a
   watcher whose `observe_peer` arm records a peer death for any non-`Goodbye`
-  closure (`:183-186`) and cancels the generation and read tokens (`:187-188`).
+  closure (`:200-202`) and cancels the generation and read tokens (`:203-204`).
   `docs/shm-transport.md:49` states the contract: "Unexpected closure
   records peer death, cancels ring work, and tears down the exact connection."
 - The ring path alone detects nothing, by construction. A dead peer never signals
   the `data_ready` doorbell, so the endpoint arms the wait
-  (`crates/host-runtime/src/ring_transport.rs:429`) and parks in the readiness select
-  (`:441-474`) until a cancellation token or queue event fires. `try_receive`
+  (`crates/host-runtime/src/ring_transport.rs:566`) and parks in the readiness select
+  (`:582-617`) until a cancellation token or queue event fires. `try_receive`
   returning `Ok(None)` on emptiness
-  (`crates/shm-transport/src/backend/ring.rs:1073-1075`) is not an error, so
+  (`crates/shm-transport/src/backend/ring.rs:1424-1426`) is not an error, so
   nothing quarantines. The former shape — a 50-microsecond poll loop observing
   `Ok(false)` forever — is gone; the steady state is now a parked thread.
 - Release is unconditional. The endpoint thread runs `run_endpoint` under
-  `catch_unwind` (`ring_transport.rs:264-274`) and then calls
-  `admission.release()` (`:276`) whether the endpoint returned or panicked. The
+  `catch_unwind` (`ring_transport.rs:331-342`) and then calls
+  `admission.release()` (`:360`) whether the endpoint returned or panicked. The
   pre-refactor release-versus-suspect branch (former `shm_provider.rs:364-371`)
   has no successor; both a sentinel-triggered cancellation and a publish failure
-  (`:479-483`) end at the same release.
-- `crates/host-runtime/src/config.rs:221` and `:233` — `pub liveness:
+  (`ring_transport.rs:622-630`) end at the same release.
+- `crates/host-runtime/src/config.rs:238` and `:250` — `pub liveness:
   Option<LivenessPolicy>` still defaults to `None`, so by default nothing on the
   host side writes to the ring on a timer; with outbound traffic queued, a dead
   consumer surfaces as `reserve_until` parking on `capacity_ready` and returning
-  `Deadline` at `frame_deadline` (`ring.rs:1035`, `:1043-1044`).
+  `Deadline` at `frame_deadline` (`ring.rs:1379-1382`, `:1383-1384`).
 - `crates/host-runtime/tests/shm_failure_modes.rs:213-222`
   `setup_active_and_idle_sigkill_each_return_exact_capacity` — the current
   exercise. For setup, active, and idle victims it SIGKILLs a child holding a
@@ -86,9 +86,9 @@ mechanism the ring goes silent rather than busy: the endpoint is parked on the
 `data_ready` doorbell and nothing on the ring path will ever wake it on the
 peer's behalf. The guarantee now rests entirely on the out-of-band chain: kernel
 closes the setup socket, the sentinel watcher observes non-`Goodbye` closure and
-cancels (`connection.rs:183-188`), the endpoint's select wakes on the
-cancellation token (`ring_transport.rs:448`, `:473`), the thread joins, and
-`admission.release()` returns the charges (`:276`). A defect anywhere in that
+cancels (`connection.rs:200-204`), the endpoint's select wakes on the
+cancellation token (`ring_transport.rs:589`, `:616`), the thread joins, and
+`admission.release()` returns the charges (`:360`). A defect anywhere in that
 chain — the watcher not spawned, the cancellation arm not wired, the endpoint
 parked outside the select, or release skipped on a panic path — strands the
 charges silently: readiness stays healthy, the parked endpoint is
@@ -103,11 +103,11 @@ runs after the endpoint thread joins.
 
 **The join is bounded only while the inbound receiver is being drained.** Every
 `select!` arm the endpoint parks in is cancellation-aware
-(`ring_transport.rs:441-474`) and the one synchronous wait, `reserve_until`, is
-deadline-bounded by `frame_deadline` (`ring.rs:1035`, `:1043-1044`) — but
+(`ring_transport.rs:582-617`) and the one synchronous wait, `reserve_until`, is
+deadline-bounded by `frame_deadline` (`ring.rs:1379-1382`, `:1383-1384`) — but
 `receive_one` also awaits a bounded-channel send that is neither:
-`inbound.send(...).await` at `:510-515` (the oversized-control rejection) and
-`:551-556` (the ordinary frame hand-off). Both carry no deadline and no
+`inbound.send(...).await` at `ring_transport.rs:688-694` (the oversized-control rejection) and
+`ring_transport.rs:737-745` (the ordinary frame hand-off). Both carry no deadline and no
 cancellation arm. Their `map_err(|_| ReadClose::Cancelled)` fires only when the
 channel is *closed*; on a full channel with a live receiver the send parks
 indefinitely, and cancelling `root` or `read_cancel` cannot wake it. So if the
@@ -169,19 +169,19 @@ chain is the only mechanism under test.
 
 ### 2026-08-31: re-derivation against the eventfd doorbell mechanism
 
-- Sources examined: `crates/host-runtime/src/ring_transport.rs:238-276`, `:359-485`,
-  `:479-483`; `crates/host-runtime/src/connection.rs:170-199`;
-  `crates/host-runtime/src/config.rs:221-233`;
-  `crates/shm-transport/src/backend/ring.rs:828-854`, `:980-1048`,
-  `:1073-1075`; `crates/host-runtime/tests/shm_failure_modes.rs:118-166`, `:170-199`,
+- Sources examined: `crates/host-runtime/src/ring_transport.rs:305-363`, `:472-632`,
+  `:622-630`; `crates/host-runtime/src/connection.rs:195-207`;
+  `crates/host-runtime/src/config.rs:238-250`;
+  `crates/shm-transport/src/backend/ring.rs:1187-1220`, `:1345-1390`,
+  `:1424-1426`; `crates/host-runtime/tests/shm_failure_modes.rs:118-166`, `:170-199`,
   `:212-255`; `docs/shm-transport.md` (whole file, 85 lines).
 - Findings: the record's original premise — an endpoint that polls
   `try_receive → Ok(false)` forever and never becomes a suspect — has no referent
   at HEAD. Under eventfd a dead peer looks like a parked endpoint: no doorbell
   signal, no poll, no ring-path detection ever. Detection and reclaim moved
   wholly out of band to the setup-socket sentinel
-  (`connection.rs:183-188`), and release became unconditional at
-  `ring_transport.rs:276`, so the former release-versus-suspect open question is
+  (`connection.rs:200-204`), and release became unconditional at
+  `ring_transport.rs:360`, so the former release-versus-suspect open question is
   resolved by code change: both close classifications end in release. The suite
   flipped with it — the retention-pinning test is gone and
   `setup_active_and_idle_sigkill_each_return_exact_capacity` now asserts reclaim
@@ -193,3 +193,14 @@ chain is the only mechanism under test.
 - Conclusion: resolved with answer for the mechanism (sentinel plus unconditional
   release, both cited); the per-identity oracle remains the open test gap carried
   in the catalog record.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 59, `:276` now `:360`: Release is conditional at HEAD: `:353-361` quarantines the admission when either ring is quarantined and the peer has not released it, and calls `admission.release()` only otherwise.
+  - line 109, `:510-515` now `ring_transport.rs:688-694`: At HEAD both hand-offs go through `deliver` (`:649-661`), whose `select!` carries `queue.discard` and `root` cancellation arms, so the send is no longer uncancellable.
+  - line 184, `ring_transport.rs:276` now `ring_transport.rs:360`: Release is conditional at HEAD: `:358` quarantines the admission when a ring is quarantined and the peer has not released it, and `:360` releases it otherwise.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

@@ -9,19 +9,19 @@ forever.
 
 ## Evidence trail
 
-- `packages/shm-native/src/lib.rs:1143-1166`: `readiness_handled` walks
+- `packages/shm-native/src/lib.rs:1304-1343`: `readiness_handled` walks
   `registry.channels`, skips unregistered ones, and for each registered channel
   sets `redispatch |= channel.from_host.complete_data_wait().is_err()` and then
   matches `arm_data_wait()`: `Ok(true) => {}`, `Ok(false) | Err(_) => redispatch
   = true`. It calls `reactor.handled()` and returns `redispatch`.
-- `packages/shm-native/index.ts:515-525`: `dispatchReadiness` runs every
+- `packages/shm-native/index.ts:652-676`: `dispatchReadiness` runs every
   handler, catching per-handler errors, and in `finally` does
   `if (loaded?.readinessHandled()) queueMicrotask(dispatchReadiness)`.
-- `crates/shm-transport/src/backend/ring.rs:1066-1071`: `arm_data_wait` returns
+- `crates/shm-transport/src/backend/ring.rs:1202-1207`: `arm_data_wait` returns
   `Err(RingError::Quarantined)` when `is_quarantined()`; `Ok(false)` when
   `data_available()`.
-- Unregistration sites: `lib.rs:1323` inside `close` and `:1350` inside
-  `force_close`; `scheduling.rs:242-252` inside `Reactor::register`, which
+- Unregistration sites: `lib.rs:1504` inside `close` and `:1537` inside
+  `force_close`; `scheduling.rs:292-302` inside `Reactor::register`, which
   unregisters and fails registration when the first `arm_data_wait` errs. So a
   ring quarantined before `watch` never enters the loop; a ring quarantined
   after a successful registration is never unregistered by the acknowledgement
@@ -56,3 +56,13 @@ count dispatcher invocations and schedule a timer to prove macrotasks run.
 - Missing evidence: none for the mechanism; a test to witness the spin.
 - Conclusion: the property is stated as a requirement the current code does not
   meet; the open question asks which fix is intended.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 12, `packages/shm-native/src/lib.rs:1143-1166` now `packages/shm-native/src/lib.rs:1304-1343`: At HEAD `readiness_handled` walks reactor.take_ready() rather than every registered channel, and a channel whose complete_data_wait fails or whose arm_data_wait errs is unregistered on the spot (`:1337`); redispatch is set only when a lease advanced while data remains ready (`:1330-1333`), so a persistent arm failure removes the channel instead of requeueing the dispatcher forever.
+  - line 17, `packages/shm-native/index.ts:515-525` now `packages/shm-native/index.ts:652-676`: The requeue now goes through `scheduleRedispatch` (`:642-650`), which queues a microtask for at most REDISPATCH_MICROTASK_BUDGET, sixteen, consecutive rounds and then yields with setImmediate, so a self-requeueing chain no longer starves timers and I/O; a handler that throws is also dropped from the map (`:666`).
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

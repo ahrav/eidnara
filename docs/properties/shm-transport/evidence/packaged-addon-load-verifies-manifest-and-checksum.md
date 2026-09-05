@@ -10,25 +10,25 @@ path.
 
 ## Evidence trail
 
-- `packages/shm-native/index.ts:153-190` is `packageAddonPath(platform)`. It
+- `packages/shm-native/index.ts:191-229` is `packageAddonPath(platform)`. It
   resolves the package directory, throws `NativeStartupError("missing_addon")`
-  when the directory is absent (`:159`), reads and parses
-  `payload-manifest.json` or throws `missing_manifest` (`:162-170`), checks
+  when the directory is absent (`:197`), reads and parses
+  `payload-manifest.json` or throws `missing_manifest` (`:200-209`), checks
   `manifest.package.name` and `.target` against the platform or throws
-  `wrong_platform_payload` (`:173-177`), finds the payload entry and requires a
-  64-hex-digit `sha256` or throws `missing_checksum` (`:178-181`), throws
-  `missing_addon` when the payload file is absent (`:183-184`), hashes the
+  `wrong_platform_payload` (`:210-215`), finds the payload entry and requires a
+  64-hex-digit `sha256` or throws `missing_checksum` (`:216-219`), throws
+  `missing_addon` when the payload file is absent (`:221-222`), hashes the
   payload with `createHash("sha256")` and throws `checksum_mismatch` on a
-  difference (`:186-188`), and returns the path (`:190`).
-- `index.ts:196-208` is the load: `requireAddon` computes
+  difference (`:224-226`), and returns the path (`:228`).
+- `index.ts:231-262` is the load: `requireAddon` computes
   `new URL("./shm_native.node", import.meta.url)` and takes that file when it
-  exists (`:198-200`), otherwise `packageAddonPath(platform)` (`:201`); it then
-  `createRequire`s the path (`:202`) and refuses a non-release build
-  (`debug_build`, `:203-205`) or a wrong-target binary (`wrong_platform_binary`,
-  `:206-208`).
-- `index.ts:23-28` is the `NativeStartupError` reason union, which names every
+  exists (`:236-238`), otherwise `packageAddonPath(platform)` (`:239`); it then
+  `createRequire`s the path (`:245`) and refuses a non-release build
+  (`debug_build`, `:249-251`) or a wrong-target binary (`wrong_platform_binary`,
+  `:252-254`).
+- `index.ts:35-45` is the `NativeStartupError` reason union, which names every
   refusal above.
-- `.github/workflows/ci.yml:148-155`: the native step runs `build:native`, then
+- `.github/workflows/ci.yml:170-181`: the native step runs `build:native`, then
   typecheck, the package tests, and the Bun capability test. `build:native`
   places `shm_native.node` beside `index.ts`, so every in-tree run takes the
   local path.
@@ -60,10 +60,20 @@ addon; and one unaltered package that loads and probes available.
 
 ### Q: Does any in-tree run take the package path?
 
-- Sources examined: `ci.yml:148-155`, `packages/shm-native/package.json`
+- Sources examined: `ci.yml:170-181`, `packages/shm-native/package.json`
   scripts, `packages/shm-native/tests/`.
 - Findings: `build:native` always precedes the tests and produces the local
   file; no test stages a package.
 - Missing evidence: none.
 - Conclusion: `not yet` exercised; the record is a requirement with an
   implemented mechanism and no witness.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 23, `index.ts:196-208` now `index.ts:231-262`: `requireAddon` also translates a failed load of a present, checksummed payload into `addon_load_failed` (`index.ts:244-248`).
+  - line 29, `index.ts:23-28` now `index.ts:35-45`: The union carries a tenth reason at HEAD, `addon_load_failed` (`index.ts:44`), which the refusal list above does not name.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

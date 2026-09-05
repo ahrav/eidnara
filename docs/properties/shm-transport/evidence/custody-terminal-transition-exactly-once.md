@@ -17,7 +17,7 @@ no successor. See the refresh note in [../catalog.md](../catalog.md).
 
 ## Discovery trigger
 
-A documentation-claim lens: `docs/shm-transport.md:79` makes three
+A documentation-claim lens: `docs/shm-transport.md:79` (source tree; not at HEAD) makes three
 promises about custody, and each was traced to the code that enforces it. Two
 are enforced. The third, about releases carrying an old provider incarnation, has
 no enforcement point at all.
@@ -57,8 +57,8 @@ no enforcement point at all.
   and results carrying the old incarnation are rejected." The comment states the
   intent that the code does not implement for releases.
 - The two production callers of `release` are on different threads.
-  `crates/host-runtime/src/ring_transport.rs:291` runs on the endpoint thread spawned at
-  `:319-321`, and discards the result: `let _ = custody.release();`.
+  `crates/host-runtime/src/ring_transport.rs:360` runs on the endpoint thread spawned at
+  `:305-307`, and discards the result: `let _ = custody.release();`.
   former `provider_recovery.rs:487` runs on the recovery episode's thread.
 - The racing terminal transition is real and also off-thread.
   former `provider_recovery.rs:557-573` is `run_deadline`, which drains the inbox and
@@ -86,12 +86,12 @@ The incarnation clause fails without any race.
 2. Another candidate becomes a suspect, the episode resolves `Reclaimed`, and
    `state.incarnation` becomes 2 at former `:488`.
 3. The first candidate's endpoint thread finishes cleanly and calls
-   `custody.release()` at `ring_transport.rs:291`. Its record is still
+   `custody.release()` at `ring_transport.rs:360`. Its record is still
    `CustodyState::Active`, so `mem::replace` at `:169` hits the `Active` arm, the
    charges are returned, and the call returns `true`.
 4. A release carrying provider incarnation 1 has therefore succeeded after
    incarnation 2 was minted, which is exactly what
-   `docs/shm-transport.md:79` says is rejected.
+   `docs/shm-transport.md:79` (source tree; not at HEAD) says is rejected.
 
 The consequence is a contract divergence rather than a counter corruption: the
 charges do go back exactly once, because the phase clause holds. What is lost is
@@ -100,11 +100,11 @@ the fencing property the document promises, and the reason it matters is that
 two mechanisms are meant to interlock.
 
 The race scenario is separate and, on this evidence, safe. The endpoint thread at
-`ring_transport.rs:291` and the deadline watcher at former `provider_recovery.rs:571` can
+`ring_transport.rs:360` and the deadline watcher at former `provider_recovery.rs:571` can
 call `release` and `quarantine` concurrently on the same `Arc<CandidateCustody>`.
 Both serialize on the `Mutex<CustodyState>` at former `:144` and both use `mem::replace`,
 so exactly one wins and the loser restores the state it found and returns
-`false`. The loser's `false` is discarded at both `ring_transport.rs:291` and
+`false`. The loser's `false` is discarded at both `ring_transport.rs:360` and
 former `provider_recovery.rs:571`, so the outcome is invisible, which is why this
 property is cataloged even though the mechanism looks correct.
 
@@ -113,15 +113,15 @@ property is cataloged even though the mechanism looks correct.
 The incarnation defect has no window; it is a missing comparison and holds for
 any release issued after any incarnation bump. The race window is the interval
 between a suspect being reported and the endpoint thread reaching
-`ring_transport.rs:291`, bounded in practice by the episode deadline referenced at
-`docs/shm-transport.md:106` as 30 seconds. Reaching it requires a
+`ring_transport.rs:360`, bounded in practice by the episode deadline referenced at
+`docs/shm-transport.md:106` (source tree; not at HEAD) as 30 seconds. Reaching it requires a
 liveness or failure path that makes the same candidate both a suspect and a
 clean close, so it interacts with
 `dead-peer-charges-are-reclaimed-or-declared`: with
 `HostConfig.liveness = None` the endpoint never becomes a suspect and the race is
 unreachable. It also interacts with `charge-release-never-silently-strands`,
 because `release()` returning `true` says the phase transition won, not that
-`AdmissionController::release` (`crates/shm-transport/src/profile.rs:512-520`)
+`AdmissionController::release` (`crates/shm-transport/src/profile.rs:498-506`)
 actually moved any counter.
 
 ## What a test must construct
@@ -154,10 +154,10 @@ module, as former `:811` does.
   reach custody), former `provider_recovery.rs:323-342`
   (`admit_candidate_while_ready` returns the `Arc` and retains no copy), a grep
   confirming **no `impl Drop for CandidateCustody` exists**, and
-  `crates/shm-transport/src/profile.rs:581-588` (`Admission`'s `Drop`).
+  `crates/shm-transport/src/profile.rs:570-577` (`Admission`'s `Drop`).
 - Findings: the premise is confirmed. On each of the three early returns the
   closure ends without touching custody, the last `Arc` drops, `CustodyState::
-  Active(Admission)` drops, and `Admission::drop` at `profile.rs:584` returns the
+  Active(Admission)` drops, and `Admission::drop` at `profile.rs:573` returns the
   charges. The phase is never observed as `Released`, and the record is gone, so
   nothing can observe it afterwards. `CandidateCustody` deliberately has no
   `Drop`, so the return depends entirely on `Admission`'s.
@@ -190,8 +190,8 @@ outside this documentation.
 What now owns the obligation: nothing arbitrates competing terminal transitions,
 because there is only one. The host holds a single `Admission` per connection and
 calls the infallible `Admission::release`
-(`crates/shm-transport/src/profile.rs:562`) exactly once from the endpoint
-thread at `crates/host-runtime/src/ring_transport.rs:291`, after `catch_unwind`
+(`crates/shm-transport/src/profile.rs:553`) exactly once from the endpoint
+thread at `crates/host-runtime/src/ring_transport.rs:360`, after `catch_unwind`
 returns. There is no deadline watcher, no second transition, and no return value,
 so the race the record describes is designed out rather than checked. The
 `Admission::drop` accounting hazard recorded in the investigation log above is
@@ -199,10 +199,27 @@ unaffected and remains live in the transport crate; it is tracked by
 `charge-release-never-silently-strands`.
 
 The documentation half of the finding survives the refactor and is now purely a
-doc defect: `docs/shm-transport.md:79` still describes rejecting releases
+doc defect: `docs/shm-transport.md:79` (source tree; not at HEAD) still describes rejecting releases
 "carrying an old provider incarnation", a protocol that never existed and whose
 surrounding machinery has since been deleted.
 
 Status note, 2026-08-31: the catalog status for this record is now
 `invalidated` (vocabulary normalization); the `superseded-by-refactor` wording
 above is retained as history.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 60, `crates/host-runtime/src/ring_transport.rs:291` now `crates/host-runtime/src/ring_transport.rs:360`: At HEAD the endpoint thread calls the infallible `admission.release()` at `:360`, and only when neither ring stayed quarantined; `admission.quarantine()` runs at `:358` otherwise, and no `custody.release()` or boolean result exists.
+  - line 89, `ring_transport.rs:291` now `ring_transport.rs:360`: The call at `:360` is `admission.release()`; `custody.release()` was deleted with `provider_recovery.rs`.
+  - line 107, `ring_transport.rs:291` now `ring_transport.rs:360`: `Admission::release` returns `()`, so there is no `false` to discard at `:360`.
+  - line 194, `crates/host-runtime/src/ring_transport.rs:291` now `crates/host-runtime/src/ring_transport.rs:360`: The disposition is not unconditional at HEAD: the thread counts a panic and sends a `Corrupt` close at `:343-349`, then quarantines at `:358` when either ring is quarantined and releases at `:360` otherwise.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 20, `docs/shm-transport.md:79` (three documented custody promises): The trimmed 98-line document carries no custody clause; nothing at HEAD states the incarnation, phase, or charge-retention promises.
+  - line 94, `docs/shm-transport.md:79` (documented rejection of a stale-incarnation release): No such sentence exists in the trimmed document.
+  - line 117, `docs/shm-transport.md:106` (30-second episode deadline): The trimmed document has 98 lines and no episode deadline; recovery episodes no longer exist.
+  - line 202, `docs/shm-transport.md:79` (documented old-incarnation rejection): The clause is absent from the trimmed document, so the surviving finding is that the document no longer describes custody at all.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

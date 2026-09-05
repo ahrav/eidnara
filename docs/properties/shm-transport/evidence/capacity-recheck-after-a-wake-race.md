@@ -9,19 +9,19 @@ retries into `reserve_until`. Lead only; the loop was re-read at HEAD.
 
 ## Evidence trail
 
-- `reserve_until` (`crates/shm-transport/src/backend/ring.rs:980-1048`)
+- `reserve_until` (`crates/shm-transport/src/backend/ring.rs:1345-1390`)
   parks a generation-bound epoch before blocking: read `generation`
-  (`:994`), store `parked = generation + 1` (`:996-1000`).
+  (`:646`), store `parked = generation + 1` (`:647-648`).
 - Between parking and blocking, the loop closes the race window three ways:
-  1. re-run `try_reserve` immediately after parking (`:1001-1011`);
-  2. recheck the generation (`:1012-1015`), drain the doorbell
-     (`:1016-1019`), re-run `try_reserve` again (`:1020-1030`);
-  3. recheck the generation once more (`:1031-1034`) and only then block in
-     `capacity_ready.wait_until(deadline)` (`:1035-1041`).
+  1. re-run `try_reserve` immediately after parking (`:1360-1364`);
+  2. recheck the generation (`:1365-1367`), drain the doorbell
+     (`:1368-1370`), re-run `try_reserve` again (`:1371-1375`);
+  3. recheck the generation once more (`:1376-1378`) and only then block in
+     `capacity_ready.wait_until(deadline)` (`:1379-1385`).
 - The publisher's half: `release` signals `capacity_ready` through
-  `signal_wake` (`:1236-1241`, `:1418-1432`), which increments `generation`
-  with SeqCst (`:1426`) and writes the eventfd only when it swapped a nonzero
-  `parked` (`:1427-1429`).
+  `signal_wake` (`:1598-1599`, `:2026-2037`), which increments `generation`
+  with SeqCst (`:2032`) and writes the eventfd only when it swapped a nonzero
+  `parked` (`:2033-2035`).
 - Case analysis for a release concurrent with the park: if the release's
   `generation.fetch_add` precedes the producer's generation read, the freed
   capacity is visible to the first `try_reserve`; if it lands after the read
@@ -30,7 +30,7 @@ retries into `reserve_until`. Lead only; the loop was re-read at HEAD.
   the eventfd, which `wait_until` observes as `POLLIN`. No interleaving
   leaves the producer blocked while capacity is free — under the SeqCst
   orderings the code claims, which no tool currently validates.
-- `arm_data_wait` (`:828-854`) is the same protocol for the consumer
+- `arm_data_wait` (`:1187-1220`) is the same protocol for the consumer
   direction, with the same recheck-after-park and recheck-after-drain shape.
 
 ## Failure scenario
@@ -59,7 +59,7 @@ A parked producer plus a release racing the arm sequence, repeated enough to
 land in the window, with the oracle that `reserve_until` returns success
 strictly before its deadline. Today
 `two_process_zero_copy_exchange_uses_authenticated_grant`
-(`crates/shm-transport/tests/ring.rs:551-592`) blocks a `reserve_until`
+(`crates/shm-transport/tests/ring.rs:489-543`) blocks a `reserve_until`
 behind a child's held lease and converges after the child releases 50 ms
 later — it exercises the block-then-wake path but the release always lands
 well inside the block, never in the arm window. A loom model is the cheap
@@ -72,7 +72,7 @@ Release-not-SeqCst parked resets.
 
 ### Q: why two try_reserve retries rather than one?
 
-- Sources examined: `:1001-1030`; fix diff of `a36f6e687`.
+- Sources examined: `:1360-1375`; fix diff of `a36f6e687`.
 - Findings: the first retry catches releases before the park was visible;
   the drain between them can consume a stale token from a wake that predates
   this park epoch, so capacity freed by that earlier wake must be re-checked
@@ -84,9 +84,9 @@ Release-not-SeqCst parked resets.
 
 ### Q: are the orderings actually sufficient?
 
-- Sources examined: `:994-1000`, `:1426-1429`; generation is SeqCst on both
+- Sources examined: `:646-648`, `:2032-2035`; generation is SeqCst on both
   sides, but every `parked` reset on the exit paths is a `Release` store
-  (`:1004`, `:1013`, and the other exit arms through `:1042`), not SeqCst.
+  (`:655`, `:655`, and the other exit arms through `:655`), not SeqCst.
   The mix is harmless on the current reading — a resetting producer is by
   definition not blocked — but a loom model that silently "corrected" it to
   SeqCst would validate different code.
@@ -95,3 +95,13 @@ Release-not-SeqCst parked resets.
 - Missing evidence: no loom or Miri model of the park/wake protocol exists
   anywhere in the repository.
 - Conclusion: unresolved, needs a loom or Miri pass over the wake protocol.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 24, `:1427-1429` now `:2033-2035`: The wake write is a one-byte token sent on the AF_UNIX socketpair doorbell (`Doorbell::signal`, `ring.rs:783-798`), which `wait_until` observes as `POLLIN` on that socket.
+  - line 89, `:1004` now `:655`: `parked` is cleared in exactly one place at HEAD, `ParkGuard::drop` (`ring.rs:653-657`), with a `Release` store, so the mixed-ordering observation concerns that single site rather than several exit arms.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

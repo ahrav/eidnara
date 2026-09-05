@@ -2,13 +2,13 @@
 
 > Refresh note, 2026-08-31: PR #131 (merge `5d638e3e8`) changed two facts this
 > record relies on. First, the export inventory grew: `lib.rs` now carries 26
-> `#[napi]` attributes, adding `build_profile` (`:459`), `build_target`
-> (`:468`), `connect_setup` (`:765`), `finish_setup` (`:776`), `watch` (`:1109`,
-> the eventfd reactor registration), `readiness_handled` (`:1135`), and
-> `peer_closed` (`:1291`); the inventory below covers only the pre-#131 set and
+> `#[napi]` attributes, adding `build_profile` (`:501`), `build_target`
+> (`:510`), `connect_setup` (`:860`), `finish_setup` (`:871`), `watch` (`:1274`,
+> the eventfd reactor registration), `readiness_handled` (`:1304`), and
+> `peer_closed` (`:1477`); the inventory below covers only the pre-#131 set and
 > needs re-derivation. Second, the debug-build finding is obsolete: the package
 > now builds with `cargo build --release` and copies from `target/release/`
-> (`package.json:16`), and exposes a `build_profile` probe (`lib.rs:459-465`).
+> (`package.json:16`), and exposes a `build_profile` probe (`lib.rs:501-507`).
 > The core claim — the six named test-only exports ship unconditionally and are
 > re-exported through `index.ts` — was re-verified at HEAD. Table line numbers
 > below were re-anchored to HEAD.
@@ -61,14 +61,14 @@ they are a lesser concern, but they belong in an export inventory.
 ### Absence of build-time gating
 
 Every `cfg` attribute in the file is a platform predicate except two additions
-from #131: the in-file unit-test module behind `#[cfg(test)]` at `:1065` and
-the runtime `cfg!(debug_assertions)` inside `build_profile` at `:460`, neither
+from #131: the in-file unit-test module behind `#[cfg(test)]` at `:1193` and
+the runtime `cfg!(debug_assertions)` inside `build_profile` at `:502`, neither
 of which gates an export. There is still **no** `cfg(test)`,
 `cfg(feature = ...)`, or `cfg(debug_assertions)` attribute on any export.
 Nothing in the build can remove any export.
 
 The same shape appears in the transport crate:
-`crates/shm-transport/src/lib.rs:8` is `pub mod harness;`, the fuzz decoder
+`crates/shm-transport/src/lib.rs:33` is `pub mod harness;`, the fuzz decoder
 entry points, exported from the library with no gate.
 
 ### The surface reaches JavaScript as declared package API
@@ -102,7 +102,7 @@ declared interface.
   including buffers the addon never created.
 - `register_cleanup_probe` (432) forwards a caller-supplied `String` as a
   `PathBuf` to `lifecycle::register_cleanup_marker`. The path is written at
-  environment teardown; `tests/mechanism.ts:60` reads the marker back and asserts
+  environment teardown; `tests/mechanism.ts:80` reads the marker back and asserts
   its contents are `"clean"`.
 
 ### Debug versus release
@@ -115,7 +115,7 @@ Resolved by #131 (verified 2026-08-31): `package.json:16` now builds with
 ```
 
 The pre-#131 finding (a debug-only build with no release script) no longer
-holds; a `build_profile` probe (`lib.rs:459-465`) now reports the compiled
+holds; a `build_profile` probe (`lib.rs:501-507`) now reports the compiled
 profile at runtime.
 
 ## Failure scenario
@@ -162,11 +162,11 @@ release build; the export surface stands on its own.
 - Sources examined: `packages/shm-native/src/lib.rs` — every `#[napi]`
   attribute and every `cfg` attribute enumerated;
   `packages/shm-native/package.json` in full;
-  `packages/shm-native/index.ts:393-525` for the re-export surface;
+  `packages/shm-native/index.ts:702-867` for the re-export surface;
   `packages/shm-native/src/napi_buffers.rs:52-87`, `:220-222`, `:268-283`;
-  `packages/shm-native/src/lib.rs:272-294` and `:352-379`;
-  `crates/shm-transport/src/lib.rs:1-17`;
-  `packages/shm-native/tests/mechanism.ts:28-50`.
+  `packages/shm-native/src/lib.rs:290-312` and `:407-424`;
+  `crates/shm-transport/src/lib.rs:1-41`;
+  `packages/shm-native/tests/mechanism.ts:58-81`.
 - Findings: no gating mechanism exists to be intended or unintended — the
   package declares no Cargo features and no `cfg` gates any export. (The
   pre-#131 debug-build observation is obsolete: `build:native` now runs
@@ -187,6 +187,15 @@ release build; the export surface stands on its own.
   `package.json:16`). One catalog
   correction: the sentence attributing the both-direction quarantine to the
   external-view failpoint describes `force_close` instead. `force_close`
-  quarantines both rings unconditionally at `lib.rs:381-382`; the failpoint only
+  quarantines both rings unconditionally at `lib.rs:421-422`; the failpoint only
   reaches the quarantine-capable cleanup path and requires a second failure
   there.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 5, `:459` now `:501`: At HEAD `lib.rs` carries 32 `#[napi]` attributes: 30 exported functions plus two `#[napi(object)]` types.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

@@ -7,7 +7,7 @@ HEAD `46278f47a` after PR #131 (merge `5d638e3e8`).
 
 The ring treats a descriptor that fails validation as a condemnation, not an
 error return: `try_receive` calls `enter_quarantine()` before it returns
-(`backend/ring.rs:806-812`, the call at `:809`), and quarantine is terminal, so
+(`backend/ring.rs:1399-1401`, the call at `:1401`), and quarantine is terminal, so
 every later operation fails closed. The iceoryx backend is presented as a second
 implementation of the same transport contract, and the natural parity question is
 what it does at the same point. It returns one error variant and changes no
@@ -24,44 +24,44 @@ not "a weaker gate" but "no gate exists to weaken".
   guarantee, and resolves against `9c1eb4d1`, not HEAD. No successor backend
   exists in the tree.
 
-- `backend/mod.rs:1-9` — the whole module: a doc comment claiming "Backends use
+- `backend/mod.rs:1-8` — the whole module: a doc comment claiming "Backends use
   same direct producer and scoped receive ownership", a `#[cfg(feature =
-  "iceoryx")]` declaration of `iceoryx` (`:3-5`), and declarations of `ring`
-  (`:7`) and `sample` (`:9`). There is **no trait**. The shared contract is a
+  "iceoryx")]` declaration of `iceoryx` (`:3-5` (source tree; not at HEAD)), and declarations of `ring`
+  (`:4`) and `sample` (`:6`). There is **no trait**. The shared contract is a
   prose assertion, so nothing below is a compile error and no signature forces
   the two backends to answer the same question.
 - The five named guarantees, checked one at a time against
   `crates/shm-transport/src/backend/iceoryx.rs`:
   - **Sequence monotonicity — owed and provided, on a weaker basis.** `commit`
     derives `next_publish + 1` (`:266-271`) and `try_receive` requires exactly
-    `next_receive + 1` (`:158-167` via `backend/sample.rs:100-102`). Both cursors
+    `next_receive + 1` (`:158-167` via `crates/shm-transport/src/descriptor.rs:193-195`). Both cursors
     are `Cell<u64>` fields (`:43-44`) initialized to zero (`:114-115`); the ring
-    reads its equivalents from shared pages (`ring.rs:679`, `:781`).
+    reads its equivalents from shared pages (`ring.rs:1963`, `:1993`).
   - **Release identity validation — structurally absent.** `release(self)`
-    (`:332`) accepts no argument. `Ring::release(identity)` (`ring.rs:849-911`)
+    (`:332`) accepts no argument. `Ring::release(identity)` (`ring.rs:1528-1600`)
     checks quarantine, incarnation, lane, a zero sequence, `sequence <=
     consumed`, and three descriptor fields re-read from shared memory before its
     compare-exchange. No iceoryx call site can present a wrong, stale, or
     duplicate identity, so `LeaseError::DuplicateRelease`, `WrongIncarnation`,
     `WrongLane`, and `InvalidSequence` have no analogue and no need for one.
   - **Incarnation fencing — present as a comparison, fencing nothing.**
-    `sample.rs:94-96` rejects a mismatched incarnation, but the expected value is
-    minted locally by `Incarnation::random()` (`:56`, `descriptor.rs:102-106`) and
+    `crates/shm-transport/src/descriptor.rs:187-189` rejects a mismatched incarnation, but the expected value is
+    minted locally by `Incarnation::random()` (`:56`, `descriptor.rs:127-131`) and
     read back from `self.incarnation` at `:163`. It is never exchanged, so it
     separates no two participants.
   - **Quarantine — absent.** The file contains no occurrence of `quarantine`, and
     no `impl Drop` at all: its only `impl` blocks are the three inherent blocks at
     `:48`, `:84`, `:327` and the `fmt` and `Error` impls at `:192`, `:181`,
     `:232`, `:378`, `:259`, `:396`, `:296`, `:427`, `:318`. The ring's
-    `enter_quarantine` (`ring.rs:1035-1040`) and `is_quarantined`
-    (`:1043-1050`, defaulting to `true` on an unreadable page at `:1049`) gate
-    `try_reserve` (`:672-674`), `try_receive` (`:767-769`), `release`
-    (`:850-852`), `probe` (`:1001-1003`), and `conservation` (`:915-926`).
+    `enter_quarantine` (`ring.rs:1915-1922`) and `is_quarantined`
+    (`:1927-1940`, defaulting to `true` on an unreadable page at `:1935`) gate
+    `try_reserve` (`:1275-1277`), `try_receive` (`:1396-1398`), `release`
+    (`:1529-1531`), `probe` (`:1888-1890`), and `conservation` (`:1608-1619`).
     `IceoryxBackend::try_reserve` (`:120-143`) checks only `bound >
     MAX_FRAME_BYTES` (`:125-127`) and the loan (`:131-134`), and
     `try_receive` (`:149-156`) checks nothing before dequeuing.
-  - **Conservation reporting — absent.** `ring.rs:914-997` reports per-slot
-    descriptor counts and per-state byte charges; `:1000-1005` `probe` is that
+  - **Conservation reporting — absent.** `ring.rs:1607-1745` reports per-slot
+    descriptor counts and per-state byte charges; `:1887-1892` `probe` is that
     snapshot reduced to a readiness answer, and it is what
     the host recovery controller consumed at `9c1eb4d1`
     (`crates/host-runtime/src/provider_recovery.rs:530`, deleted by `ed487e11`, which
@@ -77,7 +77,7 @@ not "a weaker gate" but "no gate exists to weaken".
 - `crates/shm-transport/Cargo.toml:8-10` at `9c1eb4d1` — `default = ["iceoryx"]`
   (`0f336d3c` removed the feature), so the
   backend compiles whenever the transport crate is built on its own, while
-  `crates/host-runtime/Cargo.toml:25` and `packages/shm-native/Cargo.toml:16` both
+  `crates/host-runtime/Cargo.toml:25` (source tree; not at HEAD) and `packages/shm-native/Cargo.toml:16` (source tree; not at HEAD) both
   set `default-features = false`, so no shipped artifact contains it.
 
 ## Failure scenario
@@ -124,7 +124,7 @@ reports a terminal state, or the backend exposes an observation saying the strea
 was broken. Neither can be asserted against the current surface, which is the
 finding — there is no gate to check and no snapshot to read, so the honest test
 today is the static parity assertion that no backend marked `selectable` in
-`benches/manifests/v1.json:107-110` lacks a terminal state and a conservation
+`benches/manifests/v1.json:107-110` (source tree; not at HEAD) lacks a terminal state and a conservation
 observation. Coverage checks, preconditions rather than violations:
 `shm_iceoryx_sample_rejected_through_backend` and
 `shm_iceoryx_operation_attempted_after_rejection`.
@@ -133,10 +133,10 @@ observation. Coverage checks, preconditions rather than violations:
 
 ### Q: Which of the ring's five named guarantees does the iceoryx backend also owe, and which does it structurally not provide?
 
-- Sources examined: `backend/mod.rs:1-9` in full; `backend/iceoryx.rs` in full,
+- Sources examined: `backend/mod.rs:1-8` in full; `backend/iceoryx.rs` in full,
   searched for `quarantine`, `conservation`, `completion`, `active_leases`, and
-  `Drop`, all zero hits; `backend/ring.rs:664-702`, `:761-812`, `:849-1005`,
-  `:1034-1050`; `backend/sample.rs:83-127`; `descriptor.rs:102-106`;
+  `Drop`, all zero hits; `backend/ring.rs:1263-1340`, `:1392-1472`, `:1528-1892`,
+  `:1911-1940`; `backend/sample.rs:83-127`; `descriptor.rs:127-131`;
   `crates/host-runtime/src/provider_recovery.rs:526-533` at `9c1eb4d1`, deleted by
   `ed487e11`;
   `crates/shm-transport/tests/iceoryx.rs` in full; the three `Cargo.toml`
@@ -160,3 +160,21 @@ observation. Coverage checks, preconditions rather than violations:
   one with a constructible failure, and its trigger is reachable only through an
   external provider configuration or an unmodelled fault, which is why the
   semantics are `always-or-unreached` rather than a claim of live risk.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 10, `backend/ring.rs:806-812` now `backend/ring.rs:1399-1401`: At HEAD `try_receive` quarantines through `quarantine_with` (`:1943-1946`), which calls `enter_quarantine` and hands the error back.
+  - line 27, `backend/mod.rs:1-9` now `backend/mod.rs:1-8`: At HEAD the module doc reads 'Backends that publish frames into the arena.' and the module declares ring, sample, and a crate-private sys; there is no iceoryx declaration, and there is still no trait.
+  - line 37, `backend/sample.rs:100-102` now `crates/shm-transport/src/descriptor.rs:193-195`: At HEAD the identity comparisons live in `ReleaseIdentity::check`, which `SamplePrefix::validate` calls at `crates/shm-transport/src/backend/sample.rs:82`.
+  - line 48, `sample.rs:94-96` now `crates/shm-transport/src/descriptor.rs:187-189`: The comparison moved out of `SamplePrefix::validate` into `ReleaseIdentity::check`.
+  - line 59, `:915-926` now `:1608-1619`: At HEAD a quarantined ring's `conservation` returns Ok with every descriptor and every arena byte counted in the quarantined bucket rather than failing.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 29, `:3-5` (cfg(feature = iceoryx) declaration of the iceoryx module): The declaration and the Cargo feature were deleted with the backend; nothing replaced them.
+  - line 80, `crates/host-runtime/Cargo.toml:25` (default-features = false on the shm-transport dependency): The dependency at that line is now a plain `shm-transport = { workspace = true }`; the transport crate has no features left to opt out of.
+  - line 80, `packages/shm-native/Cargo.toml:16` (default-features = false on the shm-transport dependency): The shm-transport dependency moved to `:17` and carries no default-features key.
+  - line 127, `benches/manifests/v1.json:107-110` (the selectable-backend list in the bench manifest): `crates/shm-transport/benches/manifests/v1.json` has no selectable key at HEAD; lines 107 to 110 are the statistics block.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

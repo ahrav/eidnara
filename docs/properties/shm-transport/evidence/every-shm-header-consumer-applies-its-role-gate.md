@@ -4,7 +4,7 @@
 > transport stack this record examines. `tcp-frame-channel.ts`,
 > `transport-provider.ts`, and `shm-transport-provider.ts` were deleted
 > (`907746f7b`, ring transport made mandatory), and `shm-frame-channel.ts` now
-> imports `headerViolation` (`:19`) and calls it at `:348` before dispatch. The
+> imports `headerViolation` (`:19` (source tree; not at HEAD)) and calls it at `:348` (source tree; not at HEAD) before dispatch. The
 > role-gate comparison below therefore describes the pre-#131 client and needs
 > mechanism-level re-derivation, not just citation refresh. Host-side citations
 > were re-verified at HEAD; client-side citations below are left as pre-rewrite
@@ -14,7 +14,7 @@
 ## Discovery trigger
 
 The transport hands the same 21 header bytes to more than one consumer, and it
-validates only five of them (`crates/shm-transport/src/descriptor.rs:265-273`).
+validates only five of them (`crates/shm-transport/src/descriptor.rs:32-40`).
 That makes the role gate a per-consumer obligation rather than a property of the
 transport. Checking the consumers against each other found the Rust host applies
 its gate and the TypeScript peer, over shared memory only, does not — while the
@@ -22,21 +22,21 @@ same peer's TCP path does.
 
 ## Evidence trail
 
-The obligation is normative: `docs/host-wire-protocol.md:266` states that a
+The obligation is normative: `docs/host-wire-protocol.md:285` states that a
 consumer-originated `Response`, `Push`, `StreamData`, `StreamEnd`, or `Error`,
 and every host-originated `Request`, are role-invalid, and that "the receiver MUST
 close the generation rather than extend this profile implicitly."
-`docs/host-wire-protocol.md:260-261` adds `Hello` and `HelloAck` as
+`docs/host-wire-protocol.md:279-280` adds `Hello` and `HelloAck` as
 role-invalid on a consumer connection.
 
 Consumer one, the host. `receive_one` calls `validate_inbound_header`
-(`crates/host-runtime/src/ring_transport.rs:505`), which restricts the type to
+(`crates/host-runtime/src/ring_transport.rs:683`), which restricts the type to
 `Request`, `Cancel`, `Pong`, `Goodbye` and returns `ReadClose::Corrupt` otherwise
-(`frame_channel.rs:61-66`). `Corrupt` is outside the clean set
+(`frame_channel.rs:52-57`). `Corrupt` is outside the clean set
 (the `clean` classification formerly at `shm_provider.rs:498`, deleted by
 `ed487e11`), so the generation closes and the custody record
 goes to `recovery.report_suspect` (`:364-371`). This arm is exercised end to end
-by `crates/host-runtime/tests/shm_failure_modes.rs:195-241`, which publishes a
+by `crates/host-runtime/tests/shm_failure_modes.rs:195-241` (source tree; not at HEAD), which publishes a
 `Response` from a live peer and asserts the charges end up quarantined and
 readiness returns to `Ready`.
 
@@ -71,8 +71,8 @@ passes the range check at `:165`, reaches `dispatch`, and is silently released.
 which is a deliberate profile decision, not the role gate.
 
 Consumer three, the Rust test peer. `TestShmPeer::recv`
-(`ring_transport.rs:702-721`, whose body now sits in `try_recv_with`) calls
-`decode_header` at `:730` and no role gate. It
+(`ring_transport.rs:940-955`, whose body now sits in `try_recv_with`) calls
+`decode_header` at `:947` and no role gate. It
 is test-only surface, but it is a third reader of `ValidatedFrame::wire_header()`
 and it demonstrates that the transport's lease API invites decode-only use.
 
@@ -104,7 +104,7 @@ transport's pass-through, and no part-5 catalog exists yet to hold it.
 
 ## What a test must construct
 
-For the host arm, generalise `shm_failure_modes.rs:195-241` from one role-invalid
+For the host arm, generalise `shm_failure_modes.rs:195-241` (source tree; not at HEAD) from one role-invalid
 type to the full illegal set for the host direction — `Response`, `Push`,
 `StreamData`, `StreamEnd`, `Error`, `Hello`, `HelloAck` — asserting `Corrupt` and
 the suspect path for each. For the peer arm, a host-side driver that publishes
@@ -140,3 +140,18 @@ adding beside both: every inbound channel implementation in
   client package.
 - Conclusion: the omission is real and uncompensated on the path that exists. Its
   urgency depends on the reachability question above, which is unresolved here.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 17, `crates/shm-transport/src/descriptor.rs:265-273` now `crates/shm-transport/src/descriptor.rs:32-40`: The declared-length and version check lives in the shared check_wire_header helper (`:28-42`) that both FrameDescriptor::validate (`:323`) and SamplePrefix::validate call.
+  - line 74, `ring_transport.rs:702-721` now `ring_transport.rs:940-955`: The test peer is RingClientEndpoint, its decode-only body is try_recv_with, and the blocking recv survives only under cfg(test) at `:1013-1032`.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 7, `:19` (headerViolation import in shm-frame-channel.ts): packages/plugin does not exist in this tree, so shm-frame-channel.ts has no HEAD location; the only client package here is packages/shm-native.
+  - line 7, `:348` (headerViolation call before dispatch): Same deletion: no packages/plugin tree exists at HEAD, so the call site cannot be re-anchored.
+  - line 39, `crates/host-runtime/tests/shm_failure_modes.rs:195-241` (end-to-end role-invalid publish test): The rewritten shm_failure_modes.rs has no role-invalid publish exercise; its tests cover capacity, crash, restart, and reclamation only, and no other test in the tree publishes a Response and asserts the suspect path.
+  - line 107, `shm_failure_modes.rs:195-241` (host-arm role-invalid publish test to generalise): There is no such test at HEAD to generalise; the exercise has to be written from scratch.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

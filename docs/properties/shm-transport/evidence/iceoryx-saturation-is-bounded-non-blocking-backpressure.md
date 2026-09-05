@@ -6,11 +6,11 @@ HEAD `46278f47a` after PR #131 (merge `5d638e3e8`).
 ## Discovery trigger
 
 The ring backend answers every capacity limit with a bounded, non-terminal code.
-A full descriptor set is `ProducerError::Exhausted` (`ring.rs:685-687`), which
+A full descriptor set is `ProducerError::Exhausted` (`ring.rs:1293-1295`), which
 `reserve_until` converts to `Deadline` after the profile's scheduling budget
-(`ring.rs:755`). A full lease set is `Ok(None)`, and the doc comment states the
+(`ring.rs:1354`). A full lease set is `Ok(None)`, and the doc comment states the
 rule explicitly: "A full lease set is backpressure, not a fault" and "Errors are
-reserved for faults that end the channel" (`ring.rs:763-779`). The iceoryx
+reserved for faults that end the channel" (`ring.rs:1392-1394`). The iceoryx
 backend has no descriptor set, no lease counter, and no deadline parameter, so
 the question is what it returns instead when the same two limits bind.
 
@@ -24,7 +24,7 @@ the question is what it returns instead when the same two limits bind.
   guarantee, and resolves against `9c1eb4d1`, not HEAD. No successor backend
   exists in the tree.
 
-- `crates/shm-transport/src/backend/mod.rs:1-6` — there is **no shared
+- `crates/shm-transport/src/backend/mod.rs:1-8` — there is **no shared
   backend trait**. At `9c1eb4d1` the module was four declarations whose line 1
   asserted in prose that "Backends use same direct producer and scoped receive
   ownership"; `0f336d3c` cut it to `ring` and `sample` and rewrote that line.
@@ -92,7 +92,7 @@ leases, then publish one more. `try_receive` now sees a channel with data whose
 borrow count is at the cap and returns `Err(ReceiveFailed)`. The ring answers
 the same state with `Ok(None)` and has a test pinning it,
 `lease_limit_reports_backpressure_then_recovers_after_release`
-(`tests/ring.rs:279`).
+(`tests/ring.rs:214`).
 
 ## Timing windows and dependencies
 
@@ -128,8 +128,8 @@ to emit, both preconditions rather than violations:
 ### Q: When the two configured caps bind, does the iceoryx backend return a bounded backpressure code the way the ring does?
 
 - Sources examined: `backend/iceoryx.rs:50-118`, `:121-144`, `:150-176`,
-  `:247-303`; `backend/ring.rs:664-736`, `:739-759`, `:761-779`;
-  `backend/mod.rs:1-9`; `tests/iceoryx.rs:16-43`, `:122-137`;
+  `:247-303`; `backend/ring.rs:1263-1340`, `:1345-1390`, `:1392-1409`;
+  `backend/mod.rs:1-8`; `tests/iceoryx.rs:16-43`, `:122-137`;
   `benches/hardware_envelope.rs:531-598`; and in the vendored iceoryx2 0.9.3
   and iceoryx2-cal 0.9.3 sources, `src/config.rs:300-350`,
   `src/service/port_factory/publisher.rs:160-215`,
@@ -149,3 +149,14 @@ to emit, both preconditions rather than violations:
   no concurrency, and neither is covered by any existing test, because every
   test in `tests/iceoryx.rs` receives and releases immediately after each
   commit.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 11, `ring.rs:755` now `ring.rs:1354`: At HEAD `reserve_until` takes a caller-supplied `deadline: Instant` (`ring.rs:1345-1390`) and converts `Exhausted` to `Deadline` once that deadline has passed; the profile carries no scheduling budget.
+  - line 13, `ring.rs:763-779` now `ring.rs:1392-1394`: The doc comment now says `Ok(None)` means nothing is deliverable and `Err` means the channel is dead (`ring.rs:1392-1394`); the sentence about errors being reserved for channel-ending faults is gone, and the backpressure sentence survives only as an inner comment (`:1418-1420`).
+  - line 27, `crates/shm-transport/src/backend/mod.rs:1-6` now `crates/shm-transport/src/backend/mod.rs:1-8`: At HEAD the module declares `ring`, `sample`, and a crate-private `sys`, and still defines no shared backend trait.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

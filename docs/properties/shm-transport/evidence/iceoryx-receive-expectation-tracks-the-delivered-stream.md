@@ -6,9 +6,9 @@ HEAD `46278f47a` after PR #131 (merge `5d638e3e8`).
 ## Discovery trigger
 
 The ring derives both sequence cursors from shared memory. The producer reads
-`published` out of the shared producer page (`ring.rs:679`, `:688-690`) and the
-receiver reads `consumed` out of the shared consumer page (`ring.rs:781`,
-`:787-789`), so the two sides cannot hold different opinions about where the
+`published` out of the shared producer page (`ring.rs:1963`, `:1962-1967`) and the
+receiver reads `consumed` out of the shared consumer page (`ring.rs:1993`,
+`:1992-1995`), so the two sides cannot hold different opinions about where the
 stream is. The iceoryx backend keeps both cursors in process-local `Cell<u64>`
 fields (`backend/iceoryx.rs:43-44`), initialized to zero at construction
 (`:114-115`). Nothing writes them to shared memory and nothing reads a peer's
@@ -32,9 +32,9 @@ copy, so the question is what happens when the two counters disagree.
   `IceoryxError::InvalidDescriptor`. `:168` advances `next_receive` — **after**
   the `?`. So a rejected sample is consumed and dropped while the expectation
   stays where it was.
-- `backend/sample.rs:100-102` — the sequence comparison that fires on a gap:
+- `crates/shm-transport/src/descriptor.rs:193-195` — the sequence comparison that fires on a gap:
   `self.identity.sequence() != expected.sequence()` yields
-  `DescriptorError::InvalidSequence`. `:94-96` yields `WrongIncarnation` on an
+  `DescriptorError::InvalidSequence`. `crates/shm-transport/src/descriptor.rs:187-189` yields `WrongIncarnation` on an
   identity mismatch. Both collapse to one opaque `InvalidDescriptor` at the
   backend boundary.
 - `backend/iceoryx.rs:266-271` and `:301` — the publish cursor. `commit` derives
@@ -57,8 +57,8 @@ copy, so the question is what happens when the two counters disagree.
   lifecycle flag, no terminal state, and no `is_quarantined` equivalent. The ring
   raises exactly this state on exactly this failure: a descriptor that fails
   `validate` calls `enter_quarantine()` before returning the error
-  (`ring.rs:808-811`), and every later operation then fails closed
-  (`ring.rs:672-674`, `:767-769`, `:850-851`).
+  (`ring.rs:1399-1401`), and every later operation then fails closed
+  (`ring.rs:1275-1277`, `:1396-1398`, `:1529-1531`).
 - `backend/iceoryx.rs:349` — `release(self)` cannot resynchronize either. It
   takes no identity and returns nothing; see
   `iceoryx-completion-is-observable-to-the-host`.
@@ -69,7 +69,7 @@ The clean derivation is the restart the process-local state invites. A fresh
 `IceoryxBackend::create` sets `next_receive: Cell::new(0)` (`:115`), so a
 restarted receiver expects sequence 1. A live publisher that has already
 published N frames holds `next_publish == N` (`:301`) and sends N+1. The
-validation at `sample.rs:100-102` compares N+1 against 1 and returns
+validation at `crates/shm-transport/src/descriptor.rs:193-195` compares N+1 against 1 and returns
 `InvalidSequence`, so the restarted receiver rejects the sample, drops it, and
 leaves its expectation at 1. Every subsequent frame carries a still-larger
 sequence, so every subsequent `try_receive` fails the same way. The stream is
@@ -78,7 +78,7 @@ permanently unreadable and the backend never says so: there is no quarantine, so
 `InvalidDescriptor` forever.
 
 The same stranded state is reachable without a restart, from either direction.
-A single sample whose prefix fails any check in `sample.rs:88-121` is consumed
+A single sample whose prefix fails any check in `sample.rs:79-93` is consumed
 and discarded while the expectation stands still, so the gap opens by one and
 never closes. A `send()` that reports success with zero recipients advances
 `next_publish` past a frame the subscriber never sees, opening the gap from the
@@ -124,7 +124,7 @@ and `shm_iceoryx_send_reported_zero_recipients`.
 
 - Sources examined: `backend/iceoryx.rs:36-46`, `:107-118`, `:150-176`,
   `:247-303`, `:319-355`, `:365-376`; `backend/sample.rs:41-127`;
-  `backend/ring.rs:679-690`, `:761-846`, `:808-811`, `:1035-1050`;
+  `backend/ring.rs:1959-1972`, `:1392-1472`, `:1399-1401`, `:1915-1940`;
   `tests/iceoryx.rs:122-137`; and in the vendored iceoryx2 0.9.3 sources,
   `src/port/publisher.rs:304-321` and `src/port/details/sender.rs:191-280`.
 - Findings: yes to the first half, no to the second. The dequeue at `:151-157`
@@ -143,3 +143,13 @@ and `shm_iceoryx_send_reported_zero_recipients`.
 - Conclusion: resolved with answer. The stranded state is forbidden, reachable
   in principle from three directions, and structurally undetectable on this
   backend. It stays unexercised pending F2 or a two-process pairing.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 35, `backend/sample.rs:100-102` now `crates/shm-transport/src/descriptor.rs:193-195`: At HEAD the comparison lives in `ReleaseIdentity::check`, called from `SamplePrefix::validate` at `crates/shm-transport/src/backend/sample.rs:82`.
+  - line 60, `ring.rs:808-811` now `ring.rs:1399-1401`: The quarantine runs through `quarantine_with` (`:1943-1946`) rather than a direct enter_quarantine call, and `try_receive` also re-checks quarantine after the lease is built (`:1404-1407`).
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

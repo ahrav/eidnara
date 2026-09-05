@@ -10,38 +10,38 @@ gate and the kick deferral. Leads only; re-verified at HEAD.
 
 - The gate is a single `AtomicBool`. The reactor thread dispatches only
   through `pending.compare_exchange(false, true, ..)` followed by
-  `callback.call` (`packages/shm-native/src/scheduling.rs:169-175`); a
+  `callback.call` (`packages/shm-native/src/scheduling.rs:214-219`); a
   failed CAS dispatches nothing, and a failed threadsafe call rolls the flag
-  back (`:175-177`).
+  back (`:220-227`).
 - After a successful dispatch the reactor blocks in `wait_until_handled`
-  (`:52-68`): poll the control eventfd while `pending && !closing`. It
+  (`:85-101`): poll the control eventfd while `pending && !closing`. It
   cannot reach `epoll::wait` again — cannot observe another doorbell edge —
   until JS acknowledges.
-- The acknowledgement is `handled()` (`:279-282`): store `pending = false`,
+- The acknowledgement is `handled()` (`:346-349`): store `pending = false`,
   write the control eventfd. Called from `readiness_handled`
-  (`packages/shm-native/src/lib.rs:1154`) after every channel has been
+  (`packages/shm-native/src/lib.rs:1340`) after every channel has been
   re-armed, so the epoch where a second callback becomes possible starts
   only after the re-arm that makes it safe.
-- A `kick` (`:284-287`) raised during the pending window does not dispatch;
+- A `kick` (`scheduling.rs:352-356`) raised during the pending window does not dispatch;
   `wait_until_handled` returning true with `kick` set rewrites the control
-  fd (`:178-181`), producing exactly one deferred pass through the loop.
+  fd (`scheduling.rs:229-231`), producing exactly one deferred pass through the loop.
 - The error paths keep the callback path single-file too: an epoll failure
-  dispatches one final callback only if the CAS succeeds (`:138-154`), and a
+  dispatches one final callback only if the CAS succeeds (`scheduling.rs:169-191`), and a
   `wait_until_handled` error fires one non-gated call and breaks
-  (`:184-189`) — the sole call site that bypasses the CAS, on a path that
+  (`scheduling.rs:234-239`) — the sole call site that bypasses the CAS, on a path that
   terminates the thread.
 - Why it matters downstream: `readiness_handled` walks a thread-confined
-  `REGISTRY` (`lib.rs:1136-1156`) and the `Ring` is `!Send + !Sync`
-  (`ring.rs:726` `PhantomData<Rc<()>>`); one-in-flight is what makes "at
+  `REGISTRY` (`lib.rs:1304-1343`) and the `Ring` is `!Send + !Sync`
+  (`ring.rs:1033` `PhantomData<Rc<()>>`); one-in-flight is what makes "at
   most one readiness closure touching the channels at a time" true, and the
-  max-queue-size-2 threadsafe function (`scheduling.rs:97`) relies on calls
+  max-queue-size-2 threadsafe function (`scheduling.rs:131`) relies on calls
   being acknowledged, not accumulated.
 
 ## Failure scenario
 
 Two unacknowledged callbacks in flight: the second `dispatchReadiness` runs
 while the first is mid-walk. Both iterate every registered channel
-(`index.ts:515-527`), interleaving `poll`/`readiness_handled` calls; the
+(`index.ts:652-676`), interleaving `poll`/`readiness_handled` calls; the
 registry's `try_borrow_mut` turns the overlap into "native channel is busy"
 errors on a healthy channel, and a double `handled()` un-blocks a reactor
 epoch whose re-arm never ran, which is a manufactured lost wake.
@@ -50,20 +50,20 @@ epoch whose re-arm never ran, which is a manufactured lost wake.
 
 The protected window is dispatch-to-acknowledgement. The property depends on
 JS calling `readinessHandled` exactly once per callback: the wrapper's
-`finally` (`index.ts:524-526`) does this; a raw-addon consumer that calls it
+`finally` (`index.ts:669-675`) does this; a raw-addon consumer that calls it
 twice per callback breaks the epoch pairing from the outside. The
 `closing`/`failed` transitions bound the window at shutdown
-(`wait_until_handled` exits on `closing`, `:58-66`).
+(`wait_until_handled` exits on `closing`, `scheduling.rs:91-99`).
 
 ## What a test must construct
 
 Doorbell edges arriving while a callback is unacknowledged, then an exact
 callback count. Exists in two halves:
 `readiness acknowledgement preserves a frame published during callback`
-(`packages/shm-native/tests/mechanism.ts:211-276`) publishes during
+(`packages/shm-native/tests/mechanism.ts:525-648`) publishes during
 callback 1 and asserts `callbacks === 2` — exactly one deferred dispatch,
 not two; `pending_callback_waits_for_acknowledgement`
-(`scheduling.rs:320-348`) pins that a control write alone does not release
+(`scheduling.rs:398-429`) pins that a control write alone does not release
 the wait while `pending` holds. Not yet constructed: edges from *multiple*
 registered channels landing in one pending window (the coalescing claim),
 and a hostile double-`readinessHandled` probing the epoch pairing.
@@ -72,11 +72,11 @@ and a hostile double-`readinessHandled` probing the epoch pairing.
 
 ### Q: is the non-CAS callback on the wait-error path a violation?
 
-- Sources examined: `scheduling.rs:184-189`.
+- Sources examined: `scheduling.rs:234-239`.
 - Findings: it can overlap an unacknowledged callback only if
   `wait_until_handled` errored, which requires a poll failure on a live
   eventfd; the thread then breaks, `failed` is not set on this branch, but
-  `ensure_healthy` (`:268-276`) is also not consulted by the JS dispatcher.
+  `ensure_healthy` (`:335-344`) is also not consulted by the JS dispatcher.
   One extra callback on a dying reactor is the worst case.
 - Missing evidence: none.
 - Conclusion: resolved with answer — bounded single-shot exception on a
@@ -84,9 +84,20 @@ and a hostile double-`readinessHandled` probing the epoch pairing.
 
 ### Q: does `weak::<true>` let the callback vanish while pending?
 
-- Sources examined: `:96-99` (builder), napi-rs weak threadsafe semantics.
+- Sources examined: `:127-133` (builder), napi-rs weak threadsafe semantics.
 - Findings: a collected callback makes `call` return non-Ok, which rolls
-  `pending` back (`:175-177`); no permanent wedge.
+  `pending` back (`:220-227`); no permanent wedge.
 - Missing evidence: none.
 - Conclusion: resolved with answer — no wedge; delivery stops when the JS
   side drops the function, which is shutdown behavior.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 15, `:175-177` now `:220-227`: A non-Ok call now latches `failed` and breaks the reactor loop as well as clearing `pending`, so a rejected dispatch ends delivery instead of only reopening the gate.
+  - line 75, `scheduling.rs:184-189` now `scheduling.rs:234-239`: `failed` is set on this branch at HEAD (`:235`), so `ensure_healthy` would report the reactor as failed once a caller consults it.
+  - line 89, `:175-177` now `:220-227`: A non-Ok call also latches `failed` and breaks the loop, so delivery stops on that path rather than merely rolling the gate back.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

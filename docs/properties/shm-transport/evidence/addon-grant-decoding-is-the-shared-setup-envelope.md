@@ -6,10 +6,10 @@ The host and the addon each define the setup grant envelope independently. A fie
 
 ## Evidence trail
 
-- The addon's `GrantMessage` (`packages/shm-native/src/setup.rs:38-46`) is a `serde` enum tagged by `type` with `deny_unknown_fields`, one `grant` variant, and a nested `Descriptor` of `profile`, `host_to_peer_grant`, and `peer_to_host_grant`.
-- The host's `GrantMessage` (`crates/host-runtime/src/setup_socket.rs:53-60`) is a struct tagged `grant` whose `descriptor` is an untyped `serde_json::Value`.
-- `peer_closed` (`setup.rs:136`) uses `MSG_PEEK | MSG_DONTWAIT` so a closed host is reported without consuming bytes.
-- `grant_message_accepts_tagged_setup_envelope` (`setup.rs:433`) decodes an addon-local JSON literal; `peer_closed_reports_live_then_dropped_sentinel` (`setup.rs:479`) asserts a held socket is live and a dropped host end is closed.
+- The addon's `GrantMessage` (`packages/shm-native/src/setup.rs:41-50`) is a `serde` enum tagged by `type` with `deny_unknown_fields`, one `grant` variant, and a nested `Descriptor` of `profile`, `host_to_peer_grant`, and `peer_to_host_grant`.
+- The host's `GrantMessage` (`crates/host-runtime/src/setup_socket.rs:58-66`) is a struct tagged `grant` whose `descriptor` is an untyped `serde_json::Value`.
+- `peer_closed` (`setup.rs:187`) uses `MSG_PEEK | MSG_DONTWAIT` so a closed host is reported without consuming bytes.
+- `grant_message_accepts_tagged_setup_envelope` (`setup.rs:597`) decodes an addon-local JSON literal; `peer_closed_reports_live_then_dropped_sentinel` (`setup.rs:751`) asserts a held socket is live and a dropped host end is closed.
 - The host's `grant_transfers_exactly_six_descriptors_close_on_exec` and mismatch tests build their own `GrantMessage` with placeholder descriptors.
 - The transport fuzz corpus (`crates/shm-transport/fuzz/fuzz_targets/provider_grant.rs`) exercises the binary `RingGrant` decoder, not this JSON envelope.
 

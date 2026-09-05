@@ -14,48 +14,48 @@ that decodes and re-encodes?
 
 References are to `crates/shm-transport/src/backend/ring.rs`.
 
-- `GRANT_BYTES` is the literal `58` at `:30`. The seven encoded fields occupy
+- `GRANT_BYTES` is the literal `58` at `:47`. The seven encoded fields occupy
   `2 + 16 + 4 + 8 + 8 + 8 + 8 = 54` bytes, leaving `54..58`.
-- `encode` (`:410-421`) writes the fields into `0..54` and then writes
-  `0u32.to_le_bytes()` into `54..58` at `:419`. The write is unconditional; there
+- `encode` (`:876-887`) writes the fields into `0..54` and then writes
+  `0u32.to_le_bytes()` into `54..58` at `:885`. The write is unconditional; there
   is no field behind it.
-- `decode` (`:429-457`) rejects first: `if bytes[54..58] != [0; 4] { return
-  Err(RingError::InvalidGrant); }` at `:430-432`. This precedes the
-  `layout_version` read at `:439` and the `checked_layout()?` call at `:455`.
-- `checked_layout` (`:465-482`) is where `layout_version != LAYOUT_VERSION`
-  rejects (`:466`, against `LAYOUT_VERSION = 2` at `:27`), and it returns the
+- `decode` (`:893-921`) rejects first: `if bytes[54..58] != [0; 4] { return
+  Err(RingError::InvalidGrant); }` at `:894-896`. This precedes the
+  `layout_version` read at `:903` and the `checked_layout()?` call at `:919`.
+- `checked_layout` (`:929-946`) is where `layout_version != LAYOUT_VERSION`
+  rejects (`:930`, against `LAYOUT_VERSION = 2` at `:44`), and it returns the
   same `RingError::InvalidGrant`. Every grant rejection in this decoder collapses
   to one error variant, so a reserved-byte failure and a wrong-version failure
   are indistinguishable to the caller.
 
 Existing checks are real and narrower than they look.
 
-- `tests/ring.rs:392` `attach_rejects_unsealed_objects_and_tampered_grants`
+- `tests/ring.rs:306` `attach_rejects_unsealed_objects_and_tampered_grants`
   builds nine tampered grants and asserts each decodes to
-  `Err(RingError::InvalidGrant)` at `:415`. One of them is the reserved case:
-  `reserved[54] = 1` at `:402-403`. Bytes 55, 56, and 57 are never perturbed.
-  This case genuinely pins the guard — with `:419-421` removed, that input would
+  `Err(RingError::InvalidGrant)` at `:341`. One of them is the reserved case:
+  `reserved[54] = 1` at `:328-329`. Bytes 55, 56, and 57 are never perturbed.
+  This case genuinely pins the guard — with `backend/ring.rs:885-887` removed, that input would
   decode successfully because its `0..54` region is untouched and its geometry is
   valid — but it pins only one of the four bytes, and it asserts the shared
   category rather than a reason.
 - The checked-in fuzz seed `fuzz/corpus/provider_grant/near-valid` differs from
   `valid` in exactly one place: byte 54 is `0x01` instead of `0x00`. I compared
   the two files byte by byte. So the corpus reserved case exists, and
-  `tests/fuzz_corpus.rs` runs it — but `:33-35` asserts acceptance only for the
+  `tests/fuzz_corpus.rs` runs it — but `:57-59` asserts acceptance only for the
   seed named `valid` and never asserts that any seed is rejected, so the
   `near-valid` seed's outcome is unchecked. That is the same hole
   `negative-tests-fail-for-their-stated-reason` records for the corpus as a
   whole; this is the concrete instance of it.
-- `harness::provider_grant` (`harness.rs:110-121`) asserts an accepted grant
-  re-encodes byte-exactly (`:112-116`). Because `encode` zeroes `54..58`
+- `harness::provider_grant` (`harness.rs:102-113`) asserts an accepted grant
+  re-encodes byte-exactly (`:104-108`). Because `encode` zeroes `54..58`
   unconditionally, that assertion is what would catch a `decode` that started
   reading a field out of the reserved region without a matching `encode` change.
 
 The contrast worth recording: the frame descriptor's shared image has an
-unconstrained equivalent. `SharedDescriptor` (`:57-71`) is `#[repr(C)]`, and I
+unconstrained equivalent. `SharedDescriptor` (`backend/ring.rs:96-108`) is `#[repr(C)]`, and I
 measured its layout — 120 bytes with 12 bytes of padding, at offset 39, at
 `44..48`, and at `81..88`. `commit_reservation` writes the struct whole with
-`write_volatile` at `:1204`, and `snapshot()` (`:88-106`) reads only the eleven
+`write_volatile` at `:204`, and `snapshot()` (`:125-143`) reads only the eleven
 named fields. So those 12 bytes are neither given a defined value on write nor
 constrained on read, which is the opposite discipline from the grant's four.
 
@@ -88,7 +88,7 @@ bytes reserved in fact rather than only in intent.
 
 No timing window; `decode` is a pure function over a fixed-size array. The
 dependencies are two hand-maintained constants and their relationship:
-`GRANT_BYTES = 58` (`:30`) and the seven field widths, which sum to 54. Nothing
+`GRANT_BYTES = 58` (`:47`) and the seven field widths, which sum to 54. Nothing
 in the tree asserts `GRANT_BYTES - 54 == 4`, so narrowing a field would leave
 five reserved bytes with only four checked, and the fifth would become an
 unvalidated hole that `encode` still zeroes. This record shares the
@@ -114,15 +114,15 @@ campaign can show the guard was reached.
 
 ### Q: Does anything today pin the reserved-byte guard, and to what precision?
 
-- Sources examined: `backend/ring.rs:26`, `:29`, `:406-417`, `:425-459`,
-  `:461-478`, `:56-70`, `:87-105`, `:1185-1206`; `harness.rs:110-121`;
-  `tests/ring.rs:380-466` (renamed to
+- Sources examined: `backend/ring.rs:44`, `:47`, `:876-887`, `:893-921`,
+  `:929-946`, `:96-108`, `:125-143`, `:2347-2386`; `harness.rs:102-113`;
+  `tests/ring.rs:305-387` (renamed to
   `artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected` by
-  `0f336d3c`), `:479-509`, `:503-544`; `tests/fuzz_corpus.rs` in
+  `0f336d3c`), `:479-509` (source tree; not at HEAD), `:503-544` (source tree; not at HEAD); `tests/fuzz_corpus.rs` in
   full; both `fuzz/corpus/provider_grant/valid` and `near-valid` compared byte by
   byte.
-- Findings: yes, at one-byte precision. `tests/ring.rs:402-403` is a genuine
-  pin — removing `:419-421` makes that assertion fail — but it exercises only
+- Findings: yes, at one-byte precision. `tests/ring.rs:328-329` is a genuine
+  pin — removing `backend/ring.rs:885-887` makes that assertion fail — but it exercises only
   index 54, and it asserts the category `InvalidGrant` that eight other tampered
   cases in the same loop also expect. The corpus `near-valid` seed is the same
   case in byte form and is unasserted. I also confirmed the descriptor-side
@@ -131,7 +131,7 @@ campaign can show the guard was reached.
   inference.
 - Missing evidence: nothing for the guard's current behaviour. What is missing is
   any statement of the forward-compatibility intent. The doc comment at
-  `:412-417` says decode "rejects reserved-byte tampering", which frames the
+  `backend/ring.rs:889-892` says decode "rejects reserved-byte tampering", which frames the
   guard as an adversarial control; the re-encode stripping hazard is the more
   likely way the four bytes cause trouble, and nothing addresses it.
 - Conclusion: resolved with answer. The guard holds and is pinned at one byte out
@@ -139,3 +139,17 @@ campaign can show the guard was reached.
   the right choice for a reader, `encode`'s unconditional zeroing is the wrong
   behaviour for a relay, and the only thing currently connecting the two is a
   fuzz assertion whose stated purpose is exact consumption.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 26, `:27` now `:44`: LAYOUT_VERSION is 3 at HEAD, not 2.
+  - line 44, `:33-35` now `:57-59`: replay also asserts rejection for every name in REJECTED_SEEDS (`:14`), near-valid included (`:60-66`), and near-valid differs from valid at byte 57 rather than byte 54.
+  - line 134, `:412-417` now `backend/ring.rs:889-892`: The doc comment now says decode rejects a nonzero reserved tail rather than that it rejects reserved-byte tampering, and it still says nothing about forward compatibility or re-encoding.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 121, `:479-509` (unnamed source range): The record does not say what this range held; the only other grant-decode test at HEAD is grant_slice_rejects_every_truncation_point_and_one_byte_suffix (`:400-428`).
+  - line 121, `:503-544` (unnamed source range): The record does not say what this range held and it overlaps the range cited beside it; no single construct at HEAD corresponds to it.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

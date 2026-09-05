@@ -11,30 +11,30 @@ while the prior callback returns". Leads only; mechanism re-verified at HEAD.
 
 - The reactor allows one in-flight callback: after a successful dispatch the
   `shm-readiness` thread blocks in `wait_until_handled`
-  (`packages/shm-native/src/scheduling.rs:52-68`) until JS acknowledges.
+  (`packages/shm-native/src/scheduling.rs:85-101`) until JS acknowledges.
   During that window an epoll edge on a channel doorbell is not observed.
 - The acknowledgement itself is the recovery point. `readiness_handled`
-  (`packages/shm-native/src/lib.rs:1135-1157`) walks every registered
+  (`packages/shm-native/src/lib.rs:1304-1343`) walks every registered
   channel, calls `complete_data_wait` (drains the coalesced token,
-  `ring.rs:857-862`) then `arm_data_wait` (`ring.rs:828-854`). `arm_data_wait`
+  `ring.rs:1237-1242`) then `arm_data_wait` (`ring.rs:1187-1220`). `arm_data_wait`
   returns `Ok(false)` when data or a generation change is already visible —
   exactly the state a publication during the callback leaves behind — and
   `readiness_handled` converts `Ok(false)` or `Err` into `redispatch = true`
-  (`lib.rs:1149-1152`).
+  (`lib.rs:1330-1333`).
 - The JS side re-enters on that value: `dispatchReadiness`
-  (`packages/shm-native/index.ts:515-527`) runs
+  (`packages/shm-native/index.ts:652-676`) runs
   `if (loaded?.readinessHandled()) queueMicrotask(dispatchReadiness)` in a
   `finally`, so a true return is a guaranteed next dispatch even when a
   handler threw. The raw-addon test drives the same contract manually
-  (`mechanism.ts:254` `if (addon.readinessHandled()) queueMicrotask(onReady)`).
+  (`mechanism.ts:590` `if (addon.readinessHandled()) queueMicrotask(onReady)`).
 - A kick raised while the callback is pending is also preserved:
   `wait_until_handled` returning true with `kick` still set rewrites the
-  control eventfd (`scheduling.rs:178-181`), so the reactor loop sees a
+  control eventfd (`scheduling.rs:229-231`), so the reactor loop sees a
   control edge on its next `epoll::wait` instead of dropping the kick.
 - Publisher side: `commit_reservation` signals the data doorbell through
-  `signal_wake` (`ring.rs:1622`), which bumps the shared generation
-  unconditionally (`:1426`) and writes the eventfd only when a parked epoch
-  existed (`:1427-1429`). The generation bump is what `arm_data_wait`'s
+  `signal_wake` (`ring.rs:2376`), which bumps the shared generation
+  unconditionally (`:2032`) and writes the eventfd only when a parked epoch
+  existed (`:2033-2035`). The generation bump is what `arm_data_wait`'s
   recheck observes even when no eventfd byte was written.
 
 ## Failure scenario
@@ -49,7 +49,7 @@ backpressure signal, indistinguishable from an idle channel.
 ## Timing windows and dependencies
 
 The window is the whole callback execution: from the reactor's `pending` CAS
-(`scheduling.rs:169-172`) to `handled()` (`:279-282`). Bounded recovery: one
+(`scheduling.rs:214-218`) to `handled()` (`:346-349`). Bounded recovery: one
 `readiness_handled` call. The property depends on every acknowledger honoring
 the boolean; a caller that ignores a true return reintroduces the lost wake
 (the raw addon API makes this the caller's obligation; `index.ts` honors it).
@@ -59,17 +59,17 @@ the boolean; a caller that ignores a true return reintroduces the lost wake
 A publication strictly inside a callback, then an assertion that a second
 callback delivers it with no further publication. Exists:
 `readiness acknowledgement preserves a frame published during callback`
-(`packages/shm-native/tests/mechanism.ts:211-276`) publishes frame 2 from
+(`packages/shm-native/tests/mechanism.ts:525-648`) publishes frame 2 from
 callback 1 and requires `received == [1, 2]` and `callbacks == 2`. Not yet
 constructed: the same race through the `NativeChannel.startReadiness` wrapper
 with multiple registered channels, and a kick raised by `poll`'s empty-path
-re-arm (`lib.rs:1226-1235`) landing during a pending callback.
+re-arm (`lib.rs:1415-1421`) landing during a pending callback.
 
 ## Investigation log
 
 ### Q: can a saturated eventfd counter drop the wake?
 
-- Sources examined: `Doorbell::signal` (`ring.rs:416-428`).
+- Sources examined: `Doorbell::signal` (`ring.rs:783-798`).
 - Findings: `EAGAIN` on write means the counter is at its maximum, which
   already reads as `POLLIN`; treating it as success loses nothing.
 - Missing evidence: none.
@@ -77,8 +77,8 @@ re-arm (`lib.rs:1226-1235`) landing during a pending callback.
 
 ### Q: is the generation bump alone sufficient when no epoch is parked?
 
-- Sources examined: `signal_wake` (`ring.rs:1418-1432`), `arm_data_wait`
-  rechecks (`:840-853`).
+- Sources examined: `signal_wake` (`ring.rs:2026-2037`), `arm_data_wait`
+  rechecks (`:1205-1218`).
 - Findings: an unparked consumer is by definition about to run
   `data_available` or `arm_data_wait`, both of which observe the published
   cursor or the changed generation before blocking.
@@ -86,3 +86,14 @@ re-arm (`lib.rs:1226-1235`) landing during a pending callback.
 - Conclusion: resolved with answer — yes, for consumers using the arm
   protocol; a consumer blocking on the raw fd without arming would race, and
   none exists at HEAD.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 23, `lib.rs:1149-1152` now `lib.rs:1330-1333`: Only one case sets `redispatch` now: `(true, Ok(false))` with a lease that advanced (`:1330-1333`). A plain `Ok(false)` is ignored (`:1336`) because `poll` arms the channel once the ring is empty, and an `Err` or a failed `complete_data_wait` unregisters the channel (`:1337`).
+  - line 37, `:1427-1429` now `:2033-2035`: The doorbell is an AF_UNIX socketpair (`:710-720`), so this writes a one-byte token through `Doorbell::signal` (`:783-798`) rather than incrementing an eventfd.
+  - line 72, `ring.rs:416-428` now `ring.rs:783-798`: The doorbell is a socketpair, so the saturation case is a full socket buffer: `send_token` returning `WouldBlock` means unread wake tokens are already queued, which is the same readable outcome, and it is treated as success at `:793`.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

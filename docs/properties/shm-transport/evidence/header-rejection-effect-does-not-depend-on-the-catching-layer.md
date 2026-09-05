@@ -18,9 +18,9 @@ no successor. See the refresh note in [../catalog.md](../catalog.md).
 ## Discovery trigger
 
 `ver` is the one header field both layers check: `wire_header[4] != 2` in the
-transport (`crates/shm-transport/src/descriptor.rs:271`) and
-`header_len_for_version` in the host (`crates/host-runtime/src/wire.rs:301-306`,
-`:316`). Tracing what each rejection actually does shows the two paths do not
+transport (`crates/shm-transport/src/descriptor.rs:38`) and
+`header_len_for_version` in the host (`crates/host-runtime/src/wire.rs:313-318`,
+`:328`). Tracing what each rejection actually does shows the two paths do not
 converge. One sets the ring's shared quarantine byte and leaves the slot claimed;
 the other releases the slot and leaves the flag clear. Both end at the same
 admission-charge outcome, so the divergence is invisible in the accounting and
@@ -29,24 +29,24 @@ visible only to the peer.
 ## Evidence trail
 
 **Transport-caught.** `try_receive` compare-exchanges the slot `PUBLISHED →
-RECEIVER_HELD` (`backend/ring.rs:1081-1090`), snapshots the descriptor (`:1093`),
-and calls `validate` (`:1095`). On any `DescriptorError`, including
-`WireHeaderMismatch` from either of the two header checks, the arm at `:1097-1100`
+RECEIVER_HELD` (`backend/ring.rs:1431-1438`), snapshots the descriptor (`:1440`),
+and calls `validate` (`:1444`). On any `DescriptorError`, including
+`WireHeaderMismatch` from either of the two header checks, the arm at `:1442-1445`
 calls `self.enter_quarantine()` and returns `RingError::Descriptor`.
 `enter_quarantine` writes the `quarantined` byte in the shared lifecycle page.
-`consumed` is never advanced — the advance is at `:1116`, past the error — so the
+`consumed` is never advanced — the advance is at `:1453`, past the error — so the
 slot stays `RECEIVER_HELD` and every later `try_receive` on that lane fails its
 CAS. The host maps this to `ReadClose::Corrupt("shared-memory receive failed")`
 (former `shm_provider.rs:558`), a reason shared with every other `RingError`.
 
 **Host-caught.** `decode_header` failure gives
-`ReadClose::Corrupt("invalid shared-memory header")` (`ring_transport.rs:503-504`)
+`ReadClose::Corrupt("invalid shared-memory header")` (`ring_transport.rs:681-682`)
 and `validate_inbound_header` failure gives one of `"body over interoperability
 cap"`, `"invalid pure-header flags"`, or `"role-invalid frame type"`
-(`frame_channel.rs:51-66`). Both propagate with `?`, which drops the local
+(`frame_channel.rs:42-57`). Both propagate with `?`, which drops the local
 `lease`; `ReceiveLease::Drop` calls `release_once` and discards the result
-(`lease.rs:201-207`). The slot therefore moves to `RELEASE_PENDING`, `consumed`
-has already advanced at `ring.rs:1116`, and the ring's `quarantined` byte is never
+(`lease.rs:366-372`). The slot therefore moves to `RELEASE_PENDING`, `consumed`
+has already advanced at `ring.rs:1453`, and the ring's `quarantined` byte is never
 touched.
 
 **Where they rejoin.** The endpoint loop computes `clean = matches!(close,
@@ -61,10 +61,10 @@ and `Uncertain` isolates the record with its exact charges
 (former `provider_recovery.rs:493-495`). So the admission outcome is identical for both
 origins.
 
-**Where the reason dies.** `connection.rs:362-365` matches `ReadClose::CleanEof`,
+**Where the reason dies.** `connection.rs:355-357` matches `ReadClose::CleanEof`,
 `Corrupt(_)`, `Io(_)`, and `Overloaded` together and returns `ReadExit::Peer`.
 The `&'static str` is bound to `_`. `ReadClose` itself carries
-`#[allow(dead_code)]` (`frame_channel.rs:30-32`), consistent with payloads that
+`#[allow(dead_code)]` (`frame_channel.rs:30-32` (source tree; not at HEAD)), consistent with payloads that
 no consumer reads. The four reason strings, plus the clean-EOF case, are one
 observation at the connection engine; the corrupt-versus-clean distinction
 survives only through the separate boolean at former `shm_provider.rs:498`.
@@ -82,7 +82,7 @@ signal.
 
 Now the same peer publishes a frame whose header carries a `Response` type. The
 transport accepts it — type is not one of its two fields. The host rejects it at
-`frame_channel.rs:61-66`. The charges quarantine exactly as before, but the ring's
+`frame_channel.rs:52-57`. The charges quarantine exactly as before, but the ring's
 quarantine byte stays clear and the slot is released. The peer receives no
 terminal signal at all. It keeps publishing into a ring nobody drains, and its
 symptom is eventual `Exhausted` followed by `Deadline` — backpressure codes,
@@ -136,11 +136,11 @@ and states the gap rather than proving it closed.
 
 ### Q: Do the two origins really diverge, or does the host path also quarantine the ring indirectly?
 
-- Sources examined: `backend/ring.rs:1051-1137` for both exits;
-  `lease.rs:184-207`; former `shm_provider.rs:473-505`, former `:546-619`, former `:138-152`,
-  former `:364-371`; former `provider_recovery.rs:450-500`; `connection.rs:350-366`.
+- Sources examined: `backend/ring.rs:1392-1472` for both exits;
+  `lease.rs:350-372`; former `shm_provider.rs:473-505`, former `:546-619`, former `:138-152`,
+  former `:364-371`; former `provider_recovery.rs:450-500`; `connection.rs:351-358`.
 - Findings: they diverge. `enter_quarantine` is called from exactly one place
-  inside `try_receive`, the descriptor-validation arm at `ring.rs:1098`. No host
+  inside `try_receive`, the descriptor-validation arm at `ring.rs:1401`. No host
   code path reaches it — the host never calls a quarantine method on the ring, it
   only stops reading and lets the mapping drop. The admission-side quarantine at
   former `provider_recovery.rs:494` is a different mechanism on a different object: it
@@ -155,3 +155,18 @@ and states the gap rather than proving it closed.
   transport path's ring quarantine is the intended behaviour for all header
   rejections, or an artifact of descriptor validation happening to live below the
   trust boundary, is a design question.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 21, `crates/shm-transport/src/descriptor.rs:271` now `crates/shm-transport/src/descriptor.rs:38`: The comparison is against the WIRE_V2_VERSION constant inside the shared check_wire_header helper rather than a literal 2 inside validate.
+  - line 34, `:1097-1100` now `:1442-1445`: try_receive_inner returns RingError::Descriptor and the try_receive wrapper quarantines through quarantine_with (`:1399-1401`); no enter_quarantine call remains in the validation arm.
+  - line 64, `connection.rs:362-365` now `connection.rs:355-357`: ReadClose::Io and ReadClose::RejectedDrainFailed no longer exist, so the arm matches only CleanEof, Corrupt(_), and Overloaded.
+  - line 67, `frame_channel.rs:30-32`: Every ReadClose variant is constructed at HEAD, so there is no dead-code allowance to cite as corroboration.
+  - line 143, `ring.rs:1098` now `ring.rs:1401`: enter_quarantine is no longer called from a single place inside try_receive; the receive path quarantines through quarantine_with, and reserve, release, conservation, and the doorbell waits call it too.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 67, `frame_channel.rs:30-32` (allow(dead_code) on ReadClose): ReadClose no longer carries an allow(dead_code) attribute; the enum is declared at frame_channel.rs:26-39.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

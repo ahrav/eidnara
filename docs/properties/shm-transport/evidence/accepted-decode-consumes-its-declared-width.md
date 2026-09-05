@@ -14,22 +14,22 @@ third accepts a prefix plus declared body and deliberately ignores the rest.
 
 Three different length contracts, all in `crates/shm-transport`:
 
-- `RingGrant::decode_slice` (`backend/ring.rs:643-646`) converts the slice with
+- `RingGrant::decode_slice` (`backend/ring.rs:923-927`) converts the slice with
   `bytes.try_into()`, so anything other than 58 bytes is `InvalidGrant`.
   Truncation and suffix are both rejected. The four reserved bytes must be zero
-  (`:613-615`) and `encode` writes them as zero (`:594`).
-- `harness::frame_descriptor` (`harness.rs:23-26`) rejects any length other than
+  (`:894-896`) and `encode` writes them as zero (`:885`).
+- `harness::frame_descriptor` (`harness.rs:28-31`) rejects any length other than
   `FRAME_DESCRIPTOR_BYTES`. Exact width, both directions.
-- `SamplePrefix::snapshot` (`backend/sample.rs:32-36`) accepts any payload at
+- `SamplePrefix::snapshot` (`backend/sample.rs:33-37`) accepts any payload at
   least `SAMPLE_PREFIX_BYTES` long and reads only the prefix; bytes past it are
   never inspected here. `validate` then rejects only when
-  `SAMPLE_PREFIX_BYTES + body_len > allocation_len` (`:105-110`). Allocation
+  `SAMPLE_PREFIX_BYTES + body_len > allocation_len` (`:87-92`). Allocation
   bytes past the declared body are documented capacity slack (`sample.rs:1-6`,
-  `:69`) and are excluded from `body_range()` (`:140-145`).
+  `:71`) and are excluded from `body_range()` (`:121-124`).
 
-What the round-trip assertion at `harness.rs:99-103` proves. `decode` reads all
+What the round-trip assertion at `harness.rs:104-108` proves. `decode` reads all
 54 non-reserved bytes into seven fields with no lossy transform, and `encode`
-(`ring.rs:593-604`) writes exactly those seven fields back plus four zero bytes.
+(`ring.rs:876-887`) writes exactly those seven fields back plus four zero bytes.
 So the assertion establishes two things as a tripwire: every one of the 58 input
 bytes is either bound to a decoded field or pinned to a constant, and no byte is
 read-and-discarded or defaulted on the way out. It also catches a widened length
@@ -38,27 +38,27 @@ input slice — a decoder that accepted 59 bytes and ignored the last would fail
 the length half of `assert_eq!`.
 
 What it does not cover. It says nothing about whether the decoded values are
-legal; that is `checked_layout` (`ring.rs:648-665`), a separate concern with its
+legal; that is `checked_layout` (`ring.rs:929-946`), a separate concern with its
 own tests. It never evaluates on a short input, because `try_into` rejects
 before the assertion — truncation is covered instead by
-`tests/ring.rs:459-464`. It cannot detect a *reordering* of two same-width
+`tests/ring.rs:409-415`. It cannot detect a *reordering* of two same-width
 fields, since encode and decode would move together. And it has no counterpart
 for the other two decoders: `FrameDescriptor` has no encoder anywhere in the
 library, so the 108-byte encoding exists only as read offsets inside
 `harness.rs`, and `SamplePrefix` cannot have a byte-exact oracle at all because
 its contract permits trailing slack.
 
-Existing checks. `tests/ring.rs:451-481`
+Existing checks. `tests/ring.rs:400-428`
 `grant_slice_rejects_every_truncation_point_and_one_byte_suffix` sweeps every
-`cut in 0..58` (`:459-464`), a one-byte suffix (`:466-472`), and empty (`:473-477`).
-`tests/ring.rs:482` `golden_grant_fixture_matches_the_frozen_ring_profile_encoding`
-re-asserts the round-trip on one fixture (`:498-503`).
+`cut in 0..58` (`:409-415`), a one-byte suffix (`:416-422`), and empty (`:423-427`).
+`tests/fuzz_corpus.rs:93` `golden_grant_fixture_matches_the_frozen_ring_profile_encoding`
+re-asserts the round-trip on one fixture (`tests/fuzz_corpus.rs:110-115`).
 `tests/iceoryx.rs:164`, deleted with the backend by `0f336d3c` and resolving
 against `9c1eb4d1`, covered the sample policy properly: every truncation point
 below the prefix yields `Truncated` (`:180-186`), every truncation inside the
 declared body yields `InvalidAllocation` (`:187-194`), and a one-byte suffix is
 asserted *accepted* with `body_range()` unchanged (`:196-206`). That coverage
-now lives at `tests/contract.rs:521-569`
+now lives at `tests/contract.rs:478-525`
 (`sample_prefix_rejects_every_truncation_point_and_bounds_the_body`). Nothing asserts
 the frame-descriptor encoding consumes its declared width.
 
@@ -76,9 +76,9 @@ would no longer influence any decision. The fuzz campaign would keep reporting
 coverage over a byte range that has become inert, and nothing would say so.
 
 The sample decoder has the mirror risk. If `validate` stopped bounding
-`body_end` against `allocation_len` (`sample.rs:108-110`), the declared body
+`body_end` against `allocation_len` (`sample.rs:90-92`), the declared body
 would extend past the allocation and `body_range()` would name bytes outside it.
-`harness.rs:120-124` does assert `range.end <= bytes.len()`, so the fuzz target
+`harness.rs:126-129` does assert `range.end <= bytes.len()`, so the fuzz target
 covers this; the production caller's equivalent is
 `tests/iceoryx.rs:78-106`, deleted by `0f336d3c`.
 
@@ -86,8 +86,8 @@ covers this; the production caller's equivalent is
 
 No timing window; all three are pure byte decoders. The dependency is on the
 width constants and on which of them is derived: `SAMPLE_PREFIX_BYTES`
-(`sample.rs:19`) and `FRAME_DESCRIPTOR_BYTES` (`harness.rs:12-13`) are computed
-from `WIRE_V2_HEADER_BYTES`, while `GRANT_BYTES` (`ring.rs:33`) is an
+(`sample.rs:19`) and `FRAME_DESCRIPTOR_BYTES` (`harness.rs:16-17`) are computed
+from `WIRE_V2_HEADER_BYTES`, while `GRANT_BYTES` (`ring.rs:47`) is an
 independent literal. This record depends on
 `decoder-totality-over-arbitrary-bytes`: exact consumption is only meaningful
 for inputs that terminate. It is distinct from
@@ -104,7 +104,7 @@ position where neither happens is an ignored region. That is the property the
 grant gets for free from its encoder and the descriptor cannot get any other
 way. Second, extend the same oracle to the grant's 58 positions, which
 strengthens the current one-fixture round-trip into a per-byte claim and covers
-reserved bytes 55 through 57 that `tests/ring.rs:382-383` leaves untouched.
+reserved bytes 55 through 57 that `tests/ring.rs:328-329` leaves untouched.
 Third, a policy assertion per decoder stating which of exact-width or
 prefix-plus-slack it implements, so a future change from one to the other fails
 a test instead of silently widening acceptance. Coverage check to emit:
@@ -115,10 +115,10 @@ decoder and must never fire for the other two.
 
 ### Q: Can the grant round-trip assertion ever fail on an accepted input at HEAD?
 
-- Sources examined: `harness.rs:97-108`; `backend/ring.rs:593-604`, `:612-646`,
-  `:648-665`, `:33`; `tests/ring.rs:440-514`; `backend/sample.rs:30-115`;
+- Sources examined: `harness.rs:100-113`; `backend/ring.rs:876-887`, `:889-927`,
+  `:929-946`, `:47`; `tests/ring.rs:400-428`; `backend/sample.rs:30-99`;
   `tests/iceoryx.rs:164-229`, `:78-106` (deleted by `0f336d3c`, resolving against
-  `9c1eb4d1`); `tests/contract.rs:521-569`.
+  `9c1eb4d1`); `tests/contract.rs:478-525`.
 - Findings: no. `encode` and `decode` are exact inverses over the seven fields
   at HEAD, and the reserved region is constrained to the one value `encode`
   emits, so the assertion is a tautology on every accepted input. That is not a

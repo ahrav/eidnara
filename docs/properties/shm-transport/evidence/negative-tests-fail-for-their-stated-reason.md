@@ -28,7 +28,7 @@ constant against the layout it mirrors.
 
 ### Current state of the boundary suite
 
-`packages/shm-native/tests/mechanism.ts:148` opens
+`packages/shm-native/tests/mechanism.ts:287` opens
 `describe("raw N-API descriptor boundary")` with
 `DESCRIPTOR_ERROR = /invalid shared-memory descriptor/` at line 139 and a helper
 `expectRejectedWithoutEffects` (lines 141-153) that defaults to that pattern.
@@ -45,11 +45,11 @@ Six cases follow:
 
 The four generic cases cannot distinguish the rejection they name from a
 grant-layout rejection, because `RingGrant::decode` failure maps to
-`descriptor_error()` — the same message (`packages/shm-native/src/lib.rs:511-530`).
+`descriptor_error()` — the same message (`packages/shm-native/src/lib.rs:640-659`).
 
 Ordering matters here and refines the catalog's count. In `attach`, the profile
-comparison is at `src/lib.rs:504`, before the two `RingGrant::decode` calls at
-`:511` and `:521`. The wrong-profile case at line 278 therefore returns before
+comparison is at `src/lib.rs:603`, before the two `RingGrant::decode` calls at
+`:640` and `:650`. The wrong-profile case at line 278 therefore returns before
 grant decode is ever reached and could not have been masked by a stale grant.
 Of the six cases, four are maskable, one short-circuits earlier, and one — line
 288, the only case that needs the grant to be *valid* — is the case that
@@ -75,9 +75,9 @@ catalog's `33-36` citation spans one line more than the assertion itself.
 The gap is cheap to close and demonstrably real: the `empty` seed is 0 bytes in
 all three corpora, and all three decoders reject a 0-byte input on structure —
 `frame_descriptor` returns `false` on a length mismatch at
-`src/harness.rs:31-33`, `provider_grant` returns `false` when
-`RingGrant::decode_slice` errors (`:111-121`), and `provider_sample` returns
-`false` when `SamplePrefix::snapshot` errors (`:128-130`). A guaranteed-rejected
+`src/harness.rs:29-31`, `provider_grant` returns `false` when
+`RingGrant::decode_slice` errors (`:102-113`), and `provider_sample` returns
+`false` when `SamplePrefix::snapshot` errors (`:119-121`). A guaranteed-rejected
 seed exists in every target and no test asserts its rejection.
 
 Three replay tests depend on this: `frame_descriptor_corpus_replays_without_panic`
@@ -134,13 +134,13 @@ during the trail is logged so the count in the catalog can be re-derived.
 
 - Sources examined: `git show daf6e244` message and its diff against
   `packages/shm-native/tests/mechanism.ts`; the current
-  `raw N-API descriptor boundary` block (`mechanism.ts:148-287`); the `attach`
-  validation order (`packages/shm-native/src/lib.rs:490-568`);
+  `raw N-API descriptor boundary` block (`mechanism.ts:287-899`); the `attach`
+  validation order (`packages/shm-native/src/lib.rs:591-723`);
   `crates/shm-transport/tests/fuzz_corpus.rs` in full;
-  `crates/shm-transport/src/harness.rs:30-40` and `:110-135`; the corpus
+  `crates/shm-transport/src/harness.rs:28-38` and `:102-146`; the corpus
   directory listings and file sizes.
 - Findings: four of the six cases assert the generic descriptor message and are
-  maskable; the wrong-profile case returns at `src/lib.rs:492-494`, before grant
+  maskable; the wrong-profile case returns at `src/lib.rs:603-605`, before grant
   decode, so it is not; the unresolvable-descriptor case is the detector. The
   corpus replay has exactly one decoder-result assertion, and it is a positive
   one. A guaranteed-rejected seed (`empty`, 0 bytes) exists in all three
@@ -155,3 +155,13 @@ during the trail is logged so the count in the catalog can be re-derived.
   short-circuits before grant decode. The commit message's "the other boundary
   cases" is the source of the five and is accurate as a statement about which
   cases did not notice.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 31, `packages/shm-native/tests/mechanism.ts:148` now `packages/shm-native/tests/mechanism.ts:287`: The block holds far more than six cases now, DESCRIPTOR_ERROR sits at `:288`, and expectRejectedWithoutEffects is defined mid-block at `:758-770`, so every plain line number in the table below is stale as well.
+  - line 138, `packages/shm-native/src/lib.rs:490-568` now `packages/shm-native/src/lib.rs:591-723`: The order at HEAD is raw type check, profile, fd fields, both grant decodes, distinctness and profile match, descriptor duplication and alias rejection, grant claim, then attach, so the wrong-profile case still short-circuits before any grant decode.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

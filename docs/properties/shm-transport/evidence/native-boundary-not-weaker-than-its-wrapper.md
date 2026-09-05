@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `packages/shm-native/tests/mechanism.ts` loads the addon directly with
-`createRequire` (`:71-78`) and calls `attach` with a hand-built plain object. The
+`createRequire` (`:108-120`) and calls `attach` with a hand-built plain object. The
 addon's own test therefore demonstrates that the TypeScript grant decoder is
 optional. That makes the decoder's rejections a claim about a layer a caller can
 skip, so the question is which of them the native boundary reproduces.
@@ -11,66 +11,66 @@ skip, so the question is which of them the native boundary reproduces.
 ## Evidence trail
 
 The wrapper, `decodeShmGrant` in
-`packages/plugin/src/shared/host-client/shm-grant.ts:198-287`, plus
-`validateRingGrant` (`:146-174`):
+`packages/plugin/src/shared/host-client/shm-grant.ts:198-287` (source tree; not at HEAD), plus
+`validateRingGrant` (`:146-174` (source tree; not at HEAD)):
 
-- `:203-217` — closed field set. `Reflect.ownKeys` is enumerated; any key not in
-  `GRANT_FIELDS` (`:81-89`) is `unexpected_field`, and any missing one is
+- `:203-217` (source tree; not at HEAD) — closed field set. `Reflect.ownKeys` is enumerated; any key not in
+  `GRANT_FIELDS` (`:81-89` (source tree; not at HEAD)) is `unexpected_field`, and any missing one is
   `missing_field`.
-- `:225-230` — `profile !== options.expectedProfile` is `profile_mismatch`.
-- `:232-247` — `candidate_id` is read and compared against a replay high-water
+- `:225-230` (source tree; not at HEAD) — `profile !== options.expectedProfile` is `profile_mismatch`.
+- `:232-247` (source tree; not at HEAD) — `candidate_id` is read and compared against a replay high-water
   mark; `pid === previous.pid && candidateId <= previous.candidateId` is
   `stale_candidate`.
-- `:160-168` — exact geometry: `layoutVersion`, `descriptorDepth === 8n`,
+- `:160-168` (source tree; not at HEAD) — exact geometry: `layoutVersion`, `descriptorDepth === 8n`,
   `arenaBytes === 67_108_864n`, `maxLeases === 8n`, `reserved === 0`, else
   `geometry_mismatch`.
-- `:169-171` — `totalBytes < arenaBytes || totalBytes > MAX_TOTAL_BYTES` is
-  `out_of_range`, where `MAX_TOTAL_BYTES = ARENA_BYTES + 1_048_576n` (`:76`).
-- `:172` — `lane !== expectedLane` is `lane_mismatch`, with lane 0 required for
-  `host_to_peer` and lane 1 for `peer_to_host` (`:78-79`, `:270-281`).
-- `:283-287` — `aliased_lanes` on equal fds, equal grant text, **or equal
+- `:169-171` (source tree; not at HEAD) — `totalBytes < arenaBytes || totalBytes > MAX_TOTAL_BYTES` is
+  `out_of_range`, where `MAX_TOTAL_BYTES = ARENA_BYTES + 1_048_576n` (`:76` (source tree; not at HEAD)).
+- `:172` (source tree; not at HEAD) — `lane !== expectedLane` is `lane_mismatch`, with lane 0 required for
+  `host_to_peer` and lane 1 for `peer_to_host` (`:78-79` (source tree; not at HEAD), `:270-281` (source tree; not at HEAD)).
+- `:283-287` (source tree; not at HEAD) — `aliased_lanes` on equal fds, equal grant text, **or equal
   incarnations**.
 
-The native boundary, `attach` in `packages/shm-native/src/lib.rs:490-568`:
+The native boundary, `attach` in `packages/shm-native/src/lib.rs:592-723`:
 
-- `:498-502` — argument must be an `Object`.
-- `:503-506` — `profile != PROFILE`, where `PROFILE` is `"host-test-ring-v1"`
+- `:597-599` — argument must be an `Object`.
+- `:602-605` — `profile != PROFILE`, where `PROFILE` is `"host-test-ring-v1"`
   (`:27`). Present.
-- `:507-510` — both fds in `0..=i32::MAX`. Present. The `pid` bound is gone with
+- `:606-639` — both fds in `0..=i32::MAX`. Present. The `pid` bound is gone with
   the descriptor field: `0f336d3c` moved attachment onto descriptors transferred
   by the setup socket, so `attach_ring` no longer takes a pid.
-- `:511-530` — both grant strings are read with a `GRANT_HEX_LEN` length cap and
-  decoded by `strict_hex` (`:224-238`, which replaced `decode_hex`), requiring
+- `:640-659` — both grant strings are read with a `GRANT_HEX_LEN` length cap and
+  decoded by `strict_hex` (`:234-253`, which replaced `decode_hex`), requiring
   exact length and strict lowercase hex, then by `RingGrant::decode`
-  (`crates/shm-transport/src/backend/ring.rs:426-453`), which rejects nonzero
-  reserved bytes at `:426-428` and runs `checked_layout` at `:451`.
-- `:533-535` — `host_to_peer_fd == peer_to_host_fd || host_to_peer_grant ==
+  (`crates/shm-transport/src/backend/ring.rs:893-921`), which rejects nonzero
+  reserved bytes at `:894-896` and runs `checked_layout` at `:919`.
+- `:666-672` — `host_to_peer_fd == peer_to_host_fd || host_to_peer_grant ==
   peer_to_host_grant` rejects. Two of the wrapper's three aliasing conditions.
-- `:540-543` — `GrantReservation::claim` refuses a grant already live in this
+- `:694-697` — `GrantReservation::claim` refuses a grant already live in this
   process.
 
 What the native boundary does **not** do, checked against the list above:
 
 1. No closed field set. Extra properties are ignored; only the six named fields
-   are read at `:491-512`.
+   are read at `:602-659`.
 2. No `candidate_id` at all. `NativeDescriptor`
-   (`packages/shm-native/index.ts:17-24`) declares exactly six fields, and
+   (`packages/shm-native/index.ts:55-65`) declares exactly six fields, and
    `candidateId` is not among them, so the wrapper's replay fence is dropped by the
    type contract before it can be dropped by the implementation.
 3. No `stale_candidate` monotonicity, following from 2.
 4. No lane binding. `RingGrant::decode` reads `lane` and `validate_lifecycle`
-   confirms it matches the mapped object (`ring.rs:1665`), but nothing requires
+   confirms it matches the mapped object (`ring.rs:2826`), but nothing requires
    `host_to_peer` to carry lane 0.
-5. No aliasing-by-incarnation. `:533` compares fds and encoded grants, not
+5. No aliasing-by-incarnation. `:666-667` compares fds and encoded grants, not
    incarnations.
-6. No geometry pin. `checked_layout` (`ring.rs:461-478`) accepts any nonzero
+6. No geometry pin. `checked_layout` (`ring.rs:929-946`) accepts any nonzero
    depth with `max_leases <= depth` and an arena at or above the floor, so depth
    32 passes where the wrapper demands 8.
 7. No absolute total-bytes ceiling. Native instead requires `layout.total ==
-   total` exactly (`ring.rs:474-476`), which is *stronger* for internal
+   total` exactly (`ring.rs:942-944`), which is *stronger* for internal
    consistency and *weaker* as a cap, since it admits any consistent total.
 
-`GrantReservation` (`packages/shm-native/src/lib.rs:552-580` for `claim`, and
+`GrantReservation` (`packages/shm-native/src/lib.rs:104-130` for `claim`, and
 its `Drop`) keys on the two encoded grants and removes them on drop, so the claim
 covers only concurrently live grants. A grant released and re-presented is
 admitted again.
@@ -88,11 +88,11 @@ The wrapper's `stale_candidate` fence exists precisely to stop this.
 
 Role confusion. Field *position* is the only thing assigning a direction: `attach`
 passes `host_to_peer_grant` to the `from_host` slot and `peer_to_host_grant` to
-`to_host` (`:544-545`, `:557-558`). If both grants carry the same lane, nothing
+`to_host` (`:698-699`, `:711-712`). If both grants carry the same lane, nothing
 native objects, and two producers end up on one single-producer lane. The
 single-producer assumption is load-bearing: `try_reserve` derives the next
 sequence from `published + 1` and claims the slot with a
-`FREE → PRODUCER_RESERVED` compare-exchange (`ring.rs:689-703`), which is only
+`FREE → PRODUCER_RESERVED` compare-exchange (`ring.rs:1296-1311`), which is only
 race-free with one producer.
 
 ## Timing windows and dependencies
@@ -100,7 +100,7 @@ race-free with one producer.
 No timing window; this is a static asymmetry in where checks live. The production
 path is currently safe by construction: the plugin builds `NativeDescriptor` only
 from the wrapper's validated output
-(`packages/plugin/src/shared/host-client/shm-transport-provider.ts:57-64`), so
+(`packages/plugin/src/shared/host-client/shm-transport-provider.ts:57-64` (source tree; not at HEAD)), so
 role assignment there is correct and `candidateId` is deliberately dropped after
 the fence has already been applied. That makes the role-confusion half latent, and
 the replay half reachable by any direct caller. Depends on
@@ -116,7 +116,7 @@ addon's own test already has. For each of `unexpected_field`, `stale_candidate`,
 `out_of_range`, build the descriptor that triggers it and assert the native
 `attach` rejects, with `activeChannelCount()`, `activeExternalRefCount()`, and
 `nativeLeakDiagnostics()` unchanged across the throw — the pattern
-`expectRejectedWithoutEffects` (`mechanism.ts:149-155`) already uses. Six of these
+`expectRejectedWithoutEffects` (`mechanism.ts:758-770`) already uses. Six of these
 are expected to fail today; that is the point. The replay case needs a full
 attach, close, and re-attach with the same grant, so it needs a real host-created
 object rather than the synthetic fixture.
@@ -126,16 +126,16 @@ object rather than the synthetic fixture.
 ### Q: Can any caller reach native `attach` with attacker-ordered or bug-ordered lane fields, making the role confusion reachable rather than latent?
 
 - Sources examined:
-  `packages/plugin/src/shared/host-client/shm-transport-provider.ts:41-71`,
+  `packages/plugin/src/shared/host-client/shm-transport-provider.ts:41-71` (source tree; not at HEAD),
   the only production construction of a `NativeDescriptor`;
-  `packages/shm-native/index.ts:76` and `:394-399`, where `NativeChannel.attach`
+  `packages/shm-native/index.ts:97` and `:686-689`, where `NativeChannel.attach`
   forwards a `NativeDescriptor` to `native.attach`;
-  `packages/shm-native/tests/mechanism.ts:64-135` for the direct-require path
-  and its synthetic grants; `packages/shm-native/src/lib.rs:470-550` and
-  `:544-545` for how the two grants are bound to `from_host` and `to_host`.
+  `packages/shm-native/tests/mechanism.ts:84-185` for the direct-require path
+  and its synthetic grants; `packages/shm-native/src/lib.rs:592-723` and
+  `:698-699` for how the two grants are bound to `from_host` and `to_host`.
 - Findings: no *attacker*-ordered path exists today. The single production caller
   copies the wrapper's already-validated, already-lane-checked fields into the
-  descriptor by name (`:63-70`), so a hostile provider cannot swap them there —
+  descriptor by name (`:63-70` (source tree; not at HEAD)), so a hostile provider cannot swap them there —
   the wrapper has already bound lane 0 to `host_to_peer` and lane 1 to
   `peer_to_host`. A *bug*-ordered path is fully reachable: `NativeDescriptor` is a
   TypeScript interface, erased at runtime, and the two grant fields are both
@@ -143,11 +143,11 @@ object rather than the synthetic fixture.
   accepted mistake. The mechanism test proves an unvalidated caller can reach
   `attach` at all.
 - Missing evidence: whether the ring's own incarnation and lane checks would
-  catch a transposition in practice. `validate_lifecycle` (`ring.rs:1639-1670`)
+  catch a transposition in practice. `validate_lifecycle` (`ring.rs:2813-2831`)
   compares the grant's lane against the mapped object's lane, so a transposed
   *pair of grants together with their matching fds* would still attach
   successfully with both directions inverted; a transposition of grants without
-  fds would fail at `:1665`. I did not construct either case, so the exact
+  fds would fail at `:2826`. I did not construct either case, so the exact
   survivable transpositions are unestablished.
 - Conclusion: unresolved, needs the transposition matrix. Concretely: enumerate
   the four combinations of swapped and unswapped `(fd, grant)` pairs and record
@@ -155,3 +155,34 @@ object rather than the synthetic fixture.
   descriptors the wrapper rejects", which is established on six independent counts
   above, with the role-confusion consequence rated latent-in-production and
   reachable-by-bug.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 39, `:507-510` now `:606-639`: Six descriptor numbers are now read and bounded, the mapping plus two doorbells per direction, not two fds.
+  - line 47, `:533-535` now `:666-672`: The rejection now also requires six distinct descriptor numbers and calls `grant_matches_profile` on both grants (`:668-669`), with `setup::reject_aliased_files` (`:683`) catching `dup` aliases the number comparison cannot.
+  - line 55, `:491-512` now `:602-659`: Nine named fields are read at HEAD: `profile`, six descriptor numbers, and two grants; extra properties are still ignored.
+  - line 57, `packages/shm-native/index.ts:17-24` now `packages/shm-native/index.ts:55-65`: `NativeDescriptor` declares nine fields at HEAD, still without `candidateId`.
+  - line 66, `ring.rs:461-478` now `ring.rs:929-946`: The addon now pins the geometry itself: `grant_matches_profile` (`packages/shm-native/src/lib.rs:257-266`), called at `:668-669`, compares depth, arena bytes, and lease bound against `host_test_ring_profile`, so a depth-32 grant is refused.
+  - line 70, `ring.rs:474-476` now `ring.rs:942-944`: With depth and arena bytes pinned by `grant_matches_profile`, the consistent total is determined, so the missing absolute ceiling no longer admits an arbitrary total.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 14, `packages/plugin/src/shared/host-client/shm-grant.ts:198-287` (decodeShmGrant): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 15, `:146-174` (validateRingGrant): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 17, `:203-217` (closed field set check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 18, `:81-89` (GRANT_FIELDS): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 20, `:225-230` (profile_mismatch check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 21, `:232-247` (stale_candidate replay fence): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 24, `:160-168` (exact geometry check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 27, `:169-171` (out_of_range total-bytes check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 28, `:76` (MAX_TOTAL_BYTES constant): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 29, `:172` (lane_mismatch check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 30, `:78-79` (expected lane constants): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 30, `:270-281` (lane expectations per direction): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 31, `:283-287` (aliased_lanes check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 103, `packages/plugin/src/shared/host-client/shm-transport-provider.ts:57-64` (the production NativeDescriptor construction): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 129, `packages/plugin/src/shared/host-client/shm-transport-provider.ts:41-71` (the only production NativeDescriptor construction): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 138, `:63-70` (field-by-name copy into the descriptor): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

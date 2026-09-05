@@ -3,12 +3,12 @@
 > Refresh note, 2026-08-31: PR #131 (merge `5d638e3e8`) rewrote
 > `hardware_envelope.rs` and `evidence.rs` in ways that change this record's
 > mechanism, not just its line numbers: `park_wakes` is now observed through a
-> shared `AtomicU64` incremented at the wait site (`hardware_envelope.rs:283`,
-> `:354`), producer-side copy/allocation counting mixes per-site increments
-> (`:302-304`) with bulk arithmetic (`:325-326`), the `SchedulingMode` label and
+> shared `AtomicU64` incremented at the wait site (`hardware_envelope.rs:283` (source tree; not at HEAD),
+> `:354` (source tree; not at HEAD)), producer-side copy/allocation counting mixes per-site increments
+> (`:716-718`) with bulk arithmetic (`:686-687`), the `SchedulingMode` label and
 > the `iceoryx`/stream arms are gone, and
 > `OperationCounters::disqualifications` now takes an
-> `eventfd_wake_qualified` flag (`evidence.rs:22`) that waives the wake, syscall,
+> `eventfd_wake_qualified` flag (`evidence.rs:28`) that waives the wake, syscall,
 > and handoff gates. The per-counter provenance table and the derived prose
 > below describe the pre-#131 bench and need mechanism-level re-derivation; the
 > table's internal line numbers are left as pre-rewrite evidence. Citations
@@ -32,20 +32,20 @@ to it.
 
 Every write to any of the six fields, repository-wide, is one of:
 
-- `crates/shm-transport/tests/contract.rs:463-470` — a literal `1` per field
+- `crates/shm-transport/tests/evidence.rs:6-12` — a literal `1` per field
   in the `purity_gate_rejects_injected_copy_allocation_queue_and_wake` fixture
   (`#[test]` at line 461, `fn` at line 462).
-- `crates/shm-transport/benches/hardware_envelope.rs:131-137` — construction
+- `crates/shm-transport/benches/hardware_envelope.rs:337-345` — construction
   from the `measure` tuple; `generic_queue_hops: 0` and `scheduler_handoffs: 0`
   are literals here.
-- `benches/hardware_envelope.rs:139-146` — all six overwritten with `1` under
+- `benches/hardware_envelope.rs:346-359` — all six overwritten with `1` under
   `if arm == "injected_avoidable_operations"`.
-- `benches/hardware_envelope.rs:161-166` — copied into the emitted
+- `benches/hardware_envelope.rs:374-382` — copied into the emitted
   `Measurement`.
-- `benches/hardware_envelope.rs:183-189` — all six zeroed in `failed()`.
+- `benches/hardware_envelope.rs:400-408` — all six zeroed in `failed()`.
 
 `OperationCounters` is imported by exactly two files outside its own module:
-`tests/contract.rs:9` and `benches/hardware_envelope.rs:8`. No production
+`tests/evidence.rs:1` and `benches/hardware_envelope.rs:11`. No production
 (non-test, non-bench) code path increments any of the six fields.
 
 Per-counter provenance in the bench, by arm family:
@@ -60,22 +60,22 @@ Per-counter provenance in the bench, by arm family:
 | `scheduler_handoffs` | literal `0` (`:188`) | literal `0` | literal `0` | literal `0` |
 
 For the selectable `ring` arm, `copied_producer` and `copied_receiver` are both
-`false` (`:166`), so none of the six counters is observed at an operation site:
+`false` (`:323`), so none of the six counters is observed at an operation site:
 four are literals and `park_wakes` is derived from the schedule label.
 
-The receiver copy is `lease.to_vec()` in `ring_consumer` at `:436`, which runs
-in the child forked at `:361`. The count is added in the parent at `:397-400`,
-after `wait_child(child)` at `:393` — a different process, after the process
+The receiver copy is `lease.to_vec()` in `ring_consumer` at `:757`, which runs
+in the child forked at `:645`. The count is added in the parent at `:686-687`,
+after `wait_child(child)` at `:672` — a different process, after the process
 that performed the copy exited.
 
 `park_wakes` derives from the mode label, not from wakes: the sleep is
-`std::thread::sleep(Duration::from_micros(50))` at `:429`, reached only when
+`std::thread::sleep(Duration::from_micros(50))` at `:429` (source tree; not at HEAD), reached only when
 `try_receive()` returns `Ok(None)`, so the true count is data-dependent while
 the reported count is `iterations` exactly.
 
 The gate control `injected_avoidable_operations` dispatches to
-`run_ring(scheduling, iterations, payload, false, false)` at `:176` — argument
-for argument the same body as the selectable `ring` arm at `:165-167` — and
+`run_ring(scheduling, iterations, payload, false, false)` at `:323` — argument
+for argument the same body as the selectable `ring` arm at `:322-324` — and
 then has all six counters replaced by `1` on the strength of its arm name.
 
 ## Failure scenario
@@ -101,12 +101,12 @@ Two negative controls, each asserting that a counter *drops* when the
 corresponding operation is removed:
 
 1. Run the copied-receiver ablation, record `body_copies`, then run the same
-   arm with the `lease.to_vec()` at `:436` replaced by the leased path, and
+   arm with the `lease.to_vec()` at `:757` replaced by the leased path, and
    assert the value falls by `iterations`. Today it falls because the boolean
    changed, not because the copy went away, so the control must instead keep
    `copied_receiver == true` and remove the copy — which currently produces no
    change and is therefore the discriminating case.
-2. Run the cold arm, record `park_wakes`, then remove the `:429` sleep and
+2. Run the cold arm, record `park_wakes`, then remove the `:429` (source tree; not at HEAD) sleep and
    assert the value falls. It will not.
 
 Both controls require the counter to be incremented in the process and at the
@@ -116,18 +116,18 @@ counts across the fork boundary rather than having them inferred after
 
 ## Investigation log
 
-### Q: Is `OperationCounters` intended to be wired to real instrumentation, or is it permanently a report-schema type? If the latter, the "counts copies" language in `docs/shm-transport.md:25` overstates what any artifact can prove.
+### Q: Is `OperationCounters` intended to be wired to real instrumentation, or is it permanently a report-schema type? If the latter, the "counts copies" language in `docs/shm-transport.md:25` (source tree; not at HEAD) overstates what any artifact can prove.
 
 - Sources examined: `crates/shm-transport/src/evidence.rs` in full;
   repository-wide search for each of the six field names and for
   `OperationCounters` and `disqualifications`;
   `benches/hardware_envelope.rs` in full; `benches/manifests/v1.json`
-  `selection_gate`; `tests/contract.rs:462-485`;
-  `docs/shm-transport.md:25`.
+  `selection_gate`; `tests/evidence.rs:3-30`;
+  `docs/shm-transport.md:25` (source tree; not at HEAD).
 - Findings: the type has no constructor that observes anything and no
   production caller. Its doc comment calls it "Operation counters used to
   produce disqualification reason codes", which describes a classifier, not an
-  instrument. `docs/shm-transport.md:25` reads "Owned-buffer adapters
+  instrument. `docs/shm-transport.md:25` (source tree; not at HEAD) reads "Owned-buffer adapters
   count their copies separately and are never zero-copy evidence", which
   asserts that counting happens. No code performs that counting for the
   transport arms.
@@ -138,3 +138,28 @@ counts across the fork boundary rather than having them inferred after
   production path writes any counter, and the bench derives all six for the
   selectable arm — but whether that is a gap or the intended scope is a design
   decision that is not recorded anywhere in the tree.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 6, `hardware_envelope.rs:283`: `park_wakes` is now `syscalls.parks + peer_parks` at `crates/shm-transport/benches/hardware_envelope.rs:693`, with the child publishing its own `syscalls.parks` at `:785`.
+  - line 8, `:302-304` now `:716-718`: Only the producer body copy is still counted per site (`copies += 1` at `:717`); allocations are bulk arithmetic, and the syscall, park, and scheduler counters come from `Ring::syscall_counters()` and `getrusage` in both processes.
+  - line 11, `evidence.rs:22` now `evidence.rs:28`: The flag is named `doorbell_wake_qualified`, `OperationCounters` now has seven fields because `syscalls` split into `doorbell_syscalls` and `other_syscalls`, and the waiver applies only when `park_wakes` is nonzero.
+  - line 38, `crates/shm-transport/benches/hardware_envelope.rs:131-137` now `crates/shm-transport/benches/hardware_envelope.rs:337-345`: Only `generic_queue_hops` is a literal here; `doorbell_syscalls`, `other_syscalls`, `park_wakes`, and `scheduler_handoffs` are taken from the measured `ArmRun` and its `SyscallSplit`.
+  - line 41, `benches/hardware_envelope.rs:139-146` now `benches/hardware_envelope.rs:346-359`: Seven counters plus a synthetic `SyscallSplit` are overwritten for the gate-control arm.
+  - line 45, `benches/hardware_envelope.rs:183-189` now `benches/hardware_envelope.rs:400-408`: `failed()` zeroes eight counter fields and sets `syscalls: None`.
+  - line 63, `:166` now `:323`: Four of the seven counters are observed at HEAD: doorbell syscalls, other syscalls, and parks come from `Ring::syscall_counters()` in both processes, and `scheduler_handoffs` from `getrusage`, so the claim that none is observed at an operation site no longer holds.
+  - line 72, `:429`: `park_wakes` is no longer derived from a mode label; it is the doorbell's own park count from both processes, so removing a sleep is not the relevant control.
+  - line 78, `:165-167` now `:322-324`: The gate control, `direct_producer_leased_receiver`, and the selectable `ring` arm are literally the same match arm at HEAD, and the override sets seven counters, not six.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 6, `hardware_envelope.rs:283` (shared park_wakes increment at a wait site): The bench no longer increments a shared counter at a wait site; parks are counted by `Doorbell::record` in `crates/shm-transport/src/backend/ring.rs:762-769` and read through `Ring::syscall_counters()`.
+  - line 7, `:354` (second shared park_wakes increment site): The construct is gone; at HEAD `:354` is the injected-arm override of `doorbell_syscalls`.
+  - line 72, `:429` (std::thread::sleep in the consumer poll loop): The consumer now blocks on `ring.wait_for_data(deadline)` at `crates/shm-transport/benches/hardware_envelope.rs:749`.
+  - line 109, `:429` (the cold-arm sleep): There is no `std::thread::sleep` in the bench; the consumer parks through the doorbell at `:749`.
+  - line 119, `docs/shm-transport.md:25` (the owned-buffer copy-counting sentence): The trimmed document contains no copy-counting claim at all.
+  - line 126, `docs/shm-transport.md:25` (the owned-buffer copy-counting sentence): The trimmed document contains no copy-counting claim at all.
+  - line 130, `docs/shm-transport.md:25` (the owned-buffer copy-counting sentence): The trimmed document contains no copy-counting claim at all.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

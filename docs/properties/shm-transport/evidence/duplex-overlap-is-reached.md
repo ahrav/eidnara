@@ -26,24 +26,24 @@ alternation the comment describes is never exercised and
   direction when its slot is past `SLOT_PRODUCER_RESERVED` and not yet reclaimed —
   `SLOT_PUBLISHED`, `SLOT_RECEIVER_HELD`, `SLOT_RECEIVER_LEASED`, or
   `SLOT_RELEASE_PENDING`. `conservation()` counts exactly these
-  (`crates/shm-transport/src/backend/ring.rs:1284-1323`), separately per ring, so
+  (`crates/shm-transport/src/backend/ring.rs:1675-1745`), separately per ring, so
   the overlap is one snapshot of each of `rings.first` and `rings.second` with no new
   instrumentation.
 - The two rings are independent objects with independent cursors and independent
-  random incarnations, created together by `DuplexRing::create` (`ring.rs:1834`).
+  random incarnations, created together by `DuplexRing::create` (`ring.rs:2606`).
   Nothing couples their progress except the single endpoint task that drives both.
-- `crates/host-runtime/src/ring_transport.rs:238-243` and `:264-274` — that task: one
+- `crates/host-runtime/src/ring_transport.rs:305-311` and `:331-342` — that task: one
   `new_current_thread` runtime on one dedicated thread running `run_endpoint`.
-  `:384-484` is the loop; `:387-396` is the one receive per iteration; `:479` is the
+  `:505-631` is the loop; `:521-532` is the one receive per iteration; `:622` is the
   one publish per iteration.
-- The paths whose behaviour only differs under overlap. `:415-421` takes at most one
+- The paths whose behaviour only differs under overlap. `:552-558` takes at most one
   outbound frame with a non-blocking `queue.try_recv()` after each successful receive
   — a no-op unless an outbound frame is already queued while an inbound frame arrives.
-  `:533-538` services outbound frames inside the ingress-budget wait — unreachable
+  `:721-728` services outbound frames inside the ingress-budget wait — unreachable
   unless outbound work exists while an inbound frame is held. Both are the alternation
   machinery, and both are dead code under lockstep traffic. Under the eventfd
-  mechanism the idle path takes neither: it arms the data doorbell (`:429`) and parks
-  in the readiness select (`:441-474`, the `readiness.readable()` arm at `:459`).
+  mechanism the idle path takes neither: it arms the data doorbell (`:566`) and parks
+  in the readiness select (`:582-617`, the `readiness.readable()` arm at `:594`).
 - Existing coverage: none. The former host negotiation test
   `qualified_provider_grants_activates_correlates_and_closes`
   (former `crates/host-runtime/tests/shm_transport.rs:189-271`) performed five
@@ -52,13 +52,13 @@ alternation the comment describes is never exercised and
   reclamation and resource envelopes, not concurrent duplex traffic. At no point in
   any of them are two frames outstanding in opposite directions.
 - The peer harness cannot express the situation on its own. `RingClientEndpoint::send`
-  (`ring_transport.rs:684-700`) reserves, writes, and commits in one blocking call
-  bounded by the caller's deadline, and `recv` (`:702-716`) blocks in `wait_for_data`
-  to a deadline. `try_recv` (`:718-721`) is non-blocking, so the receive half of an
+  (`ring_transport.rs:885-933`) reserves, writes, and commits in one blocking call
+  bounded by the caller's deadline, and `recv` (`:1015-1032`) blocks in `wait_for_data`
+  to a deadline. `try_recv` (`:935-938`) is non-blocking, so the receive half of an
   overlapping shape exists; the missing piece is a non-blocking or threaded send.
 - The transport-level two-process test is single-direction:
   `two_process_zero_copy_exchange_uses_authenticated_grant`
-  (`crates/shm-transport/tests/ring.rs:551-592`) shares one ring, with the parent
+  (`crates/shm-transport/tests/ring.rs:489-543`) shares one ring, with the parent
   producing and the child consuming.
 
 ## Failure scenario
@@ -97,9 +97,9 @@ stale pair into a claim about an interval during which both were non-zero.
 Dependencies. A peer that can hold frames outstanding in both directions at once,
 which today means either two threads over one attached `RingClientEndpoint` or a
 non-blocking send to pair with the existing non-blocking `try_recv`
-(`ring_transport.rs:718-721`). Enough descriptor depth that both lanes can hold a
+(`ring_transport.rs:935-938`). Enough descriptor depth that both lanes can hold a
 frame — depth is 8 per direction (`HOST_TEST_RING_DEPTH`,
-`crates/shm-transport/src/profile.rs:652`, `:655-670`), so this is not a
+`crates/shm-transport/src/profile.rs:679`, `:683-697`), so this is not a
 constraint. No fault injection: this is a normal-operation situation, and every state
 it observes is one a healthy duplex channel occupies constantly.
 
@@ -119,7 +119,7 @@ no progress — is a distinct predicate asserted separately in
 
 Two refinements worth emitting as the same marker rather than separate ones, since both
 are the same situation at different intensities: overlap while neither lane is at
-capacity, which exercises the alternation at `:415-421`; and overlap while the outbound
+capacity, which exercises the alternation at `:552-558`; and overlap while the outbound
 lane is at capacity, which is the state in which `publish_one` parks the shared thread
 on the `capacity_ready` doorbell and is the one that makes the starvation property
 refutable. A campaign that only ever reaches the first has reached the situation but
@@ -129,9 +129,9 @@ not the interesting corner of it, and the test should record which intensity it 
 
 ### Q: Has any existing test ever had frames in flight in both directions simultaneously?
 
-- Sources examined: `crates/host-runtime/tests/shm_transport.rs:189-271`;
-  `crates/host-runtime/src/ring_transport.rs:254-259`, `:279-290`, `:363-453`, `:455-534`,
-  `:711-777`; `crates/shm-transport/tests/ring.rs:581-647`;
+- Sources examined: `crates/host-runtime/tests/shm_transport.rs:189-271` (source tree; not at HEAD);
+  `crates/host-runtime/src/ring_transport.rs:305-311`, `:331-342`, `:472-632`, `:664-747`,
+  `:846-956`; `crates/shm-transport/tests/ring.rs:488-578`;
   `crates/shm-transport/src/backend/ring.rs:536-562`, `:913-997`;
   `crates/host-runtime/tests/shm_soak.rs` role and cycle structure.
 - Findings: no. The host tests are uniformly lockstep, the transport's only two-process
@@ -153,17 +153,17 @@ not the interesting corner of it, and the test should record which intensity it 
 
 ### 2026-08-31: re-derivation against the eventfd doorbell mechanism
 
-- Sources examined: `crates/host-runtime/src/ring_transport.rs:359-485`, `:487-558`,
-  `:651-721`; `crates/shm-transport/src/backend/ring.rs:1250-1333`,
-  `:1824-1844`; `crates/host-runtime/tests/shm_failure_modes.rs` and
+- Sources examined: `crates/host-runtime/src/ring_transport.rs:472-632`, `:664-747`,
+  `:846-956`; `crates/shm-transport/src/backend/ring.rs:1607-1745`,
+  `:2596-2612`; `crates/host-runtime/tests/shm_failure_modes.rs` and
   `crates/host-runtime/tests/shm_soak.rs` structure;
-  `crates/shm-transport/tests/ring.rs:551-625`.
+  `crates/shm-transport/tests/ring.rs:488-578`.
 - Findings: the situation definition, the monotone triple-sample construction,
   and the `sometimes` semantics are unchanged; `conservation()` still exposes
   both rings' in-flight counts. The alternation machinery the marker exists to
-  reach survives at new lines (`:415-421`, `:533-538`), and the eventfd rewrite
+  reach survives at new lines (`:552-558`, `:721-728`), and the eventfd rewrite
   added a third overlap-only behaviour worth reaching: the idle path's
-  arm-and-park (`:429`, `:459`) versus the alternation path is now a real
+  arm-and-park (`:566`, `:594`) versus the alternation path is now a real
   branch, not a sleep-length difference. The harness gap narrowed but did not
   close: `RingClientEndpoint::try_recv` gives a non-blocking receive, `send` is
   still blocking, so overlap still requires a thread or a non-blocking send. The
@@ -175,3 +175,12 @@ not the interesting corner of it, and the test should record which intensity it 
   rewrite intact; only the citations, the harness description, and the
   interesting-corner description (parked doorbell wait instead of a spin)
   needed re-derivation.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 132, `crates/host-runtime/tests/shm_transport.rs:189-271` (host negotiation lockstep test): `crates/host-runtime/tests/shm_transport.rs` does not exist in this tree; the surviving shared-memory suites are `shm_failure_modes.rs` and `shm_soak.rs`.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

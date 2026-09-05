@@ -27,24 +27,24 @@ inbound channel.
 
 ## Evidence trail
 
-- `crates/shm-transport/src/backend/ring.rs:1114-1117` — the commit point for
+- `crates/shm-transport/src/backend/ring.rs:1452-1454` — the commit point for
   acquisition. Inside one `unsafe` block, `try_receive` stores
-  `SLOT_RECEIVER_LEASED` (`:1115`), stores `consumed = sequence` with `Release`
-  (`:1116`), and increments `active_leases` (`:1117`). All three happen before the
-  lease value is constructed at `:1124-1136` and returned.
-- `crates/shm-transport/src/lease.rs:201-207` — `impl Drop for ReceiveLease`
+  `SLOT_RECEIVER_LEASED` (`:1452`), stores `consumed = sequence` with `Release`
+  (`:1453`), and increments `active_leases` (`:1454`). All three happen before the
+  lease value is constructed at `:1462-1470` and returned.
+- `crates/shm-transport/src/lease.rs:366-372` — `impl Drop for ReceiveLease`
   calls `release_once()` if `!self.released`, discarding the result with
   `let _ =`. Dropping a lease is a full release, not an abandonment.
-- `crates/shm-transport/src/backend/ring.rs:1229-1236` — `release` stores the
+- `crates/shm-transport/src/backend/ring.rs:1591-1597` — `release` stores the
   `completion_sequence` and decrements `active_leases`, which makes the slot
   eligible for `reclaim_completed`. Nothing records that the body was never read.
-- `crates/host-runtime/src/ring_transport.rs:496-502` — `receive_one` binds the lease.
+- `crates/host-runtime/src/ring_transport.rs:674-680` — `receive_one` binds the lease.
   From here the lease is a local whose scope ends at every `return`.
-- `crates/host-runtime/src/ring_transport.rs:519-542` — the ingress-charge loop, entered
-  with the lease still live. `:525` returns `Err(ReadClose::Cancelled)` when
-  `read_cancel.is_cancelled()`; `:528-531` returns `Err(ReadClose::Overloaded)`
+- `crates/host-runtime/src/ring_transport.rs:702-730` — the ingress-charge loop, entered
+  with the lease still live. `:712` returns `Err(ReadClose::Cancelled)` when
+  `read_cancel.is_cancelled()`; `:715-720` returns `Err(ReadClose::Overloaded)`
   on the frame deadline. Both drop the lease.
-- `crates/host-runtime/src/ring_transport.rs:543-548` — the only path that reads the
+- `crates/host-runtime/src/ring_transport.rs:731-736` — the only path that reads the
   body: `lease.to_vec()` then an explicit `lease.release()`. Reaching it requires
   the charge loop to have broken with a charge.
 - former `crates/host-runtime/src/shm_provider.rs:498` — `let clean = matches!(close,
@@ -57,7 +57,7 @@ inbound channel.
 - former `crates/host-runtime/src/shm_provider.rs:364-365` — `clean` reaches
   `custody.release()`, so the charges return and the channel's close is recorded
   as ordinary retirement.
-- `docs/shm-transport.md:96-104` — the documented failure and close
+- `docs/shm-transport.md:47-49` — the documented failure and close
   contract covers generation retirement and charge classification. It does not
   state a disposition for an acquired-but-undelivered frame.
 
@@ -74,8 +74,8 @@ indistinguishable from a cancellation that arrived before the frame existed.
 
 ## Timing windows and dependencies
 
-The window opens at `ring.rs:1116` when `consumed` advances and closes at
-`ring_transport.rs:544` when `to_vec` runs. Its width is the duration of the
+The window opens at `ring.rs:1453` when `consumed` advances and closes at
+`ring_transport.rs:732` when `to_vec` runs. Its width is the duration of the
 ingress-charge loop, which is bounded above by `frame_deadline` but is not
 bounded below and is zero-width on an uncontended budget. That is why the window
 needs deterministic injection rather than load. `Overloaded` widens it to the
@@ -101,7 +101,7 @@ precondition, since both events are legal individually.
 
 - Sources examined: `git log -1 --format=%B 3bf6c22b`, which states the
   cancellation change in terms of admission charges only;
-  `docs/shm-transport.md:96-112` for the documented failure, fallback,
+  `docs/shm-transport.md:47-49` for the documented failure, fallback,
   and close contract; former `crates/host-runtime/src/shm_provider.rs:475-503` for the
   classification; the three failure-hardening and release-gate plans listed in
   `../README.md` for a lossless-until-close requirement.
@@ -118,3 +118,13 @@ precondition, since both events are legal individually.
   close, the commit point is wrong — `consumed` advances before delivery. If
   single-frame loss on retirement is in contract, the record reduces to a
   documentation gap and the check becomes an assertion that the loss is reported.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 30, `crates/shm-transport/src/backend/ring.rs:1114-1117` now `crates/shm-transport/src/backend/ring.rs:1452-1454`: The three writes are no longer inside one `unsafe` block, and the two cursor writes are `advance_cursor` compare-exchanges followed by a local mirror at `:1455-1458`.
+  - line 44, `:525` now `:712`: Read cancellation now returns `Ok(false)` rather than `Err(ReadClose::Cancelled)`, so the acquired frame is still dropped but the generation is not retired and the writer keeps draining.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

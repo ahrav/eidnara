@@ -20,56 +20,56 @@ emptiness cannot prove that saturation ends.
 
 ## Evidence trail
 
-- `crates/shm-transport/src/backend/ring.rs:1063-1068` — the saturation gate. It
-  loads `active_leases` (`:1062`) and returns `Ok(None)` when
+- `crates/shm-transport/src/backend/ring.rs:1417-1422` — the saturation gate. It
+  loads `active_leases` (`:1413-1416`) and returns `Ok(None)` when
   `active >= self.grant.max_leases`, **before** reading `consumed` or `published`.
-  The comment at `:1064-1067` states the intent: a full lease set is backpressure,
+  The comment at `:1418-1420` states the intent: a full lease set is backpressure,
   not a fault, and published frames stay queued until a lease is released and the
   caller polls again.
-- `ring.rs:1070-1075` — the emptiness gate. It loads `consumed` and `published` and
+- `ring.rs:1423-1426` — the emptiness gate. It loads `consumed` and `published` and
   returns `Ok(None)` when they are equal. Same return value, unrelated cause, and
   reached only when the first gate did not fire.
-- `ring.rs:1115-1117` — the lease accounting the first gate reads:
+- `ring.rs:1452-1454` — the lease accounting the first gate reads:
   `state = SLOT_RECEIVER_LEASED`, `consumed = sequence` with `Release`, and
   `active_leases.fetch_add(1, Relaxed)`. The counter lives on the consumer page and is
   touched only by the receiver.
-- `ring.rs:1229-1234` — the only decrement: `release` stores `completion_sequence`
+- `ring.rs:1591-1593` — the only decrement: `release` stores `completion_sequence`
   with `Release`, then `active_leases.fetch_sub(1, Relaxed)`. It runs after the
-  `SLOT_RECEIVER_LEASED → SLOT_RELEASE_PENDING` compare-exchange at `:1211-1219`, so
+  `SLOT_RECEIVER_LEASED → SLOT_RELEASE_PENDING` compare-exchange at `:1575-1580`, so
   a duplicate release cannot decrement twice.
-- `ring.rs:1236-1241` — new with the eventfd mechanism: after the decrement,
+- `ring.rs:1598-1599` — new with the eventfd mechanism: after the decrement,
   `release` signals both the `capacity_ready` and `data_ready` doorbells through
-  `signal_wake` (`:1418-1432`), which bumps the wake generation and writes the
-  eventfd only when a waiter was parked. `data_available` (`:1160-1172`) returns
+  `signal_wake` (`:2026-2037`), which bumps the wake generation and writes the
+  eventfd only when a waiter was parked. `data_available` (`:1501-1512`) returns
   true only when `published != consumed` **and** `active < max_leases`, so a
-  consumer parked in `wait_for_data` (`:1138-1158`) during saturation is exactly
+  consumer parked in `wait_for_data` (`:1476-1499`) during saturation is exactly
   the waiter this signal exists to wake.
-- `crates/shm-transport/src/lease.rs:160-161`, `:184-190`, `:203-204` — release
+- `crates/shm-transport/src/lease.rs:324-326`, `:350-357`, `:368-369` — release
   reaches the ring through `release_once`, guarded by a local `released` flag, from
   either the explicit `release()` or `Drop`. Either path clears one lease.
-- The available witness for "frames were queued": `ring.rs:1250-1333`
+- The available witness for "frames were queued": `ring.rs:1675-1745`
   `conservation()` counts each slot by state, including `SLOT_PUBLISHED` into
-  `descriptors.published` (`:1284-1293`) and `SLOT_RECEIVER_LEASED` into
-  `descriptors.receiver_leased` (`:1304-1313`). So `published >= 1` at the moment of
+  `descriptors.published` (`:1696-1705`) and `SLOT_RECEIVER_LEASED` into
+  `descriptors.receiver_leased` (`:1716-1725`). So `published >= 1` at the moment of
   the `None` is observable, which is precisely the fact the current test does not
   check. Caveat carried from `reservation-charge-visible-with-non-free-state`:
   `conservation()` may be test-only, and its `bytes.free` is derived rather than
-  observed (`:1327-1331`).
+  observed (`:1739-1743`).
 - Existing check: `lease_limit_reports_backpressure_then_recovers_after_release`
-  (`crates/shm-transport/tests/ring.rs:272-286`), against
+  (`crates/shm-transport/tests/ring.rs:214-228`), against
   `lease_limited_profile()` with `descriptor_depth: 2` and `max_leases: 1`
-  (`tests/ring.rs:22-34`). It publishes two frames, takes one lease, asserts
-  `ring.try_receive().unwrap().is_none()` (`:278-281`), releases, and asserts the
-  next receive yields the byte `2` (`:283-284`). The recovery half is real. The
+  (`tests/ring.rs:18-30`). It publishes two frames, takes one lease, asserts
+  `ring.try_receive().unwrap().is_none()` (`:220-223`), releases, and asserts the
+  next receive yields the byte `2` (`:225-226`). The recovery half is real. The
   saturation half is not: at that assertion nothing pins that a frame was pending, so
   an implementation that had lost the second publication entirely would satisfy it up
   to the recovery line.
 - The shipped host cannot reach saturation at all. `receive_one` acquires at most one
   lease per call and releases it before returning, on every path: the
-  oversized-control rejection at `crates/host-runtime/src/ring_transport.rs:507-509`, the
-  normal path at `:546-548`, and `Drop` on every error return. `max_leases` is
+  oversized-control rejection at `crates/host-runtime/src/ring_transport.rs:685-687`, the
+  normal path at `:734-736`, and `Drop` on every error return. `max_leases` is
   `HOST_TEST_RING_DEPTH`, which is 8
-  (`crates/shm-transport/src/profile.rs:652`, `:655-670`), so the endpoint loop
+  (`crates/shm-transport/src/profile.rs:679`, `:683-697`), so the endpoint loop
   holds at most one of eight. Saturation is reachable only through a synthetic
   profile or a caller that retains leases.
 
@@ -77,14 +77,14 @@ emptiness cannot prove that saturation ends.
 
 1. A receiver holds `max_leases` leases while the producer has published further
    frames. Those frames sit in `SLOT_PUBLISHED` with `consumed < published`.
-2. `try_receive` takes the gate at `:1063` and returns `Ok(None)`. The caller sees
+2. `try_receive` takes the gate at `ring.rs:1417` and returns `Ok(None)`. The caller sees
    the same value it would see on an idle channel. A caller that blocks instead
-   parks on the `data_ready` doorbell: `arm_data_wait` (`:828-854`) sees
+   parks on the `data_ready` doorbell: `arm_data_wait` (`ring.rs:1187-1220`) sees
    `data_available() == false` because `active == max_leases`, records a parked
-   epoch, and the consumer sleeps in `wait_until` (`:1149`).
+   epoch, and the consumer sleeps in `wait_until` (`ring.rs:1490-1493`).
 3. The receiver releases a lease. `active_leases` drops below `max_leases`,
    `completion_sequence` is published for the released sequence, and both doorbells
-   are signalled (`:1236-1241`).
+   are signalled (`ring.rs:1598-1599`).
 4. Two defect families now break resumption. State defect: the decrement missed,
    `release_once`'s flag inverted, or the gate comparison off by one in the closing
    direction leaves `active_leases` at or above `max_leases` permanently, and every
@@ -95,22 +95,22 @@ emptiness cannot prove that saturation ends.
    re-evaluated the gates every 50 microseconds regardless.
 5. Either way the channel looks dead and its only signal is the value that also
    means "idle". In the host, `receive_one` returns `Ok(false)`
-   (`ring_transport.rs:500-501`), the endpoint loop re-arms the data wait and parks
-   (`:429`, `:459`), no error is raised, no quarantine occurs, and no counter moves.
+   (`ring_transport.rs:678-679`), the endpoint loop re-arms the data wait and parks
+   (`:566`, `:594`), no error is raised, no quarantine occurs, and no counter moves.
    This is the same silent-capacity-loss signature as
    `attach-reconciles-or-refuses-stale-shared-cursors`, reached without any crash.
 
 ## Timing windows and dependencies
 
 There is no race window on the counter: it is incremented and decremented by the
-same thread-confined receiver, both `Relaxed`, and read `Relaxed` at `:1062`. The
+same thread-confined receiver, both `Relaxed`, and read `Relaxed` at `ring.rs:1413-1416`. The
 state half of the property is about state, not ordering, and its bounded fault-free
 window is short and exactly statable: once a release has returned `Ok`, the **next
 single** `try_receive` must deliver, because both gates are pure reads of state the
 release already updated. The wake half has a window the polling design did not: a
-consumer parks between `arm_data_wait`'s final recheck (`:847-852`) and the
-`wait_until` (`:1149`), and correctness depends on `release` observing the parked
-flag in `signal_wake`'s swap (`:1427`) and writing the eventfd. The arm/recheck
+consumer parks between `arm_data_wait`'s final recheck (`ring.rs:1216-1218`) and the
+`wait_until` (`ring.rs:1490-1493`), and correctness depends on `release` observing the parked
+flag in `signal_wake`'s swap (`ring.rs:2033`) and writing the eventfd. The arm/recheck
 protocol (park epoch, recheck data, undo park on generation change) closes the
 race where data arrives between the check and the park. Cross-process changes
 nothing about the counter, since `active_leases` is receiver-local. Dependencies:
@@ -144,7 +144,7 @@ separation that localises a lost wake.
 **That wake arm cannot be built by extending the existing in-process test, and
 needs a harness decision before it is queued as work.** `wait_for_data` blocks
 the calling thread, so the release has to come from somewhere else; but both
-`Ring` (`ring.rs:719-726`) and `ReceiveLease` (`:1688`) carry
+`Ring` (`ring.rs:1001-1034`) and `ReceiveLease` (`crates/shm-transport/src/lease.rs:256`) carry
 `PhantomData<Rc<()>>` and are therefore neither `Send` nor `Sync`, so neither the
 ring nor a held lease can be moved to a second thread to release it there. The
 arm requires one of: a cross-process harness driving the release over raw
@@ -165,9 +165,9 @@ property from passing vacuously in a configuration that can never saturate.
 
 ### Q: Can the two `Ok(None)` causes be distinguished by any current caller, and is saturation reachable in the shipped topology?
 
-- Sources examined: `ring.rs:766-846`, `:848-911`, `:913-997`; `lease.rs:170-221`;
-  `crates/host-runtime/src/ring_transport.rs:32`, `:41-58`, `:455-534`, `:378-452`;
-  `tests/ring.rs:28-55`, `:278-293`.
+- Sources examined: `ring.rs:1267-1340`, `:1345-1390`, `:1395-1472`; `lease.rs:324-371`;
+  `crates/host-runtime/src/ring_transport.rs:32`, `:41-58`, `:664-747`, `:472-632`;
+  `tests/ring.rs:18-38`, `:213-228`.
 - Findings: no caller can distinguish the two causes from the return value; the only
   distinguishing evidence is `conservation()`, and no existing test uses it at the
   point of a `None`. Saturation is reachable in-crate only through
@@ -188,19 +188,19 @@ property from passing vacuously in a configuration that can never saturate.
 
 ### 2026-08-31: re-derivation against the eventfd doorbell mechanism
 
-- Sources examined: `crates/shm-transport/src/backend/ring.rs:828-854`,
-  `:1055-1075`, `:1115-1117`, `:1138-1172`, `:1211-1241`, `:1250-1333`,
-  `:1418-1432`; `crates/shm-transport/src/lease.rs:160-204`;
-  `crates/host-runtime/src/ring_transport.rs:429`, `:459`, `:496-509`, `:546-548`;
-  `crates/shm-transport/tests/ring.rs:22-34`, `:272-286`;
-  `crates/shm-transport/src/profile.rs:652-670`.
+- Sources examined: `crates/shm-transport/src/backend/ring.rs:1187-1220`,
+  `:1395-1426`, `:1452-1454`, `:1476-1512`, `:1575-1599`, `:1675-1745`,
+  `:2026-2037`; `crates/shm-transport/src/lease.rs:324-371`;
+  `crates/host-runtime/src/ring_transport.rs:566`, `:594`, `:674-687`, `:734-736`;
+  `crates/shm-transport/tests/ring.rs:18-30`, `:214-228`;
+  `crates/shm-transport/src/profile.rs:679-697`.
 - Findings: the guarantee, both gates, and the single decrement site survive PR
   #131 with only line moves. What changed is resumption for a blocked consumer:
   the pre-eventfd argument was "the endpoint keeps polling, so the next poll after
   the release delivers"; at HEAD `release` signals `data_ready` and
-  `capacity_ready` (`:1236-1241`) and a parked `wait_for_data` waiter is woken
-  sparsely (`signal_wake` writes the eventfd only when `parked != 0`, `:1427`).
-  `data_available` includes the lease gate (`active < max_leases`, `:1171`), so
+  `capacity_ready` (`ring.rs:1598-1599`) and a parked `wait_for_data` waiter is woken
+  sparsely (`signal_wake` writes the eventfd only when `parked != 0`, `ring.rs:2033`).
+  `data_available` includes the lease gate (`active < max_leases`, `ring.rs:1511`), so
   saturation is a parking state, and the release's signal is load-bearing for
   liveness rather than an optimization. This adds a wake-defect family (lost or
   skipped signal) alongside the original state-defect family and adds the
@@ -211,3 +211,18 @@ property from passing vacuously in a configuration that can never saturate.
   `always-or-unreached`, the single-call recovery window stands for the state
   half, and the wake half needs its own arm with a deadline strictly separating a
   wake from a timeout.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 23, `crates/shm-transport/src/backend/ring.rs:1063-1068` now `crates/shm-transport/src/backend/ring.rs:1417-1422`: At HEAD `verified_consumer_cursors` reads `consumed` and `active_leases` together (`:1413-1416`) before the gate, so only `published` is read after it (`:1423`).
+  - line 32, `ring.rs:1115-1117` now `ring.rs:1452-1454`: At HEAD both cursors move through `advance_cursor` (`:1951-1956`), which compare-exchanges the expected prior value with `AcqRel` instead of a `Relaxed` `fetch_add`.
+  - line 36, `ring.rs:1229-1234` now `ring.rs:1591-1593`: At HEAD the decrement is an `advance_cursor` compare-exchange (`:1592-1593`), not a `Relaxed` `fetch_sub`.
+  - line 40, `ring.rs:1236-1241` now `ring.rs:1598-1599`: At HEAD `release` signals only the `capacity_ready` doorbell; the doc comment at `:1519-1523` states the data doorbell is deliberately left alone, so a consumer parked in `wait_for_data` is not woken by a release.
+  - line 87, `:1236-1241` now `ring.rs:1598-1599`: At HEAD only `capacity_ready` is signalled on release, so a release does not wake a parked `wait_for_data`.
+  - line 106, `:1062` now `ring.rs:1413-1416`: At HEAD both cursors are loaded with `Acquire` and checked against the handle's own record in `verified_consumer_cursors` (`:1990-2000`), not read `Relaxed`.
+  - line 201, `:1236-1241` now `ring.rs:1598-1599`: At HEAD `release` signals `capacity_ready` only; `data_ready` is deliberately not touched (`:1519-1523`), so the release does not wake a parked `wait_for_data` waiter.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

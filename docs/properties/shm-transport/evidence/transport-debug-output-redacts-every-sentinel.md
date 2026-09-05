@@ -10,16 +10,16 @@ property.
 
 ## Evidence trail
 
-- `crates/shm-transport/src/lib.rs:13-22` defines `macro_rules! redacted_debug`,
+- `crates/shm-transport/src/lib.rs:13-21` defines `macro_rules! redacted_debug`,
   which implements `core::fmt::Debug` for each listed type as
   `formatter.write_str(concat!(stringify!($ty), "(<redacted>)"))`. The doc
   comment at `:11-12` gives the reason: the values are sentinels a peer must
-  echo back, so they stay out of logs. `:23` re-exports it `pub(crate)`.
+  echo back, so they stay out of logs. `:22` re-exports it `pub(crate)`.
 - Invocation sites (thirteen types): `profile.rs:228` (`TargetProfile`), `:568`
   (`Admission`), `:585` (`QuarantineRecord`); `backend/sample.rs:101`
-  (`SamplePrefix`), `:127` (`ValidatedSample`); `descriptor.rs:87`
-  (`HardwareProfileId`), `:116` (`TransportDescriptor`), `:144` (`Incarnation`),
-  `:199` (`ReleaseIdentity`), `:336` (`FrameDescriptor`), `:391`
+  (`SamplePrefix`), `:127` (`ValidatedSample`); `descriptor.rs:88`
+  (`HardwareProfileId`), `:117` (`TransportDescriptor`), `:145` (`Incarnation`),
+  `:200` (`ReleaseIdentity`), `:337` (`FrameDescriptor`), `:392`
   (`ValidatedFrame`); `arena.rs:67` (`ArenaSpan`), `:181` (`SpanPlan`).
 - `debug_and_errors_redact_every_sentinel` (`contract.rs:446`) formats a
   transport descriptor, an incarnation, a release identity, a frame descriptor,

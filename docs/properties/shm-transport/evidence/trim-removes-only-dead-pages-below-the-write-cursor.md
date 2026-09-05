@@ -5,47 +5,47 @@
 Review of the reclamation records found that
 `reclamation-excludes-pages-with-live-wrapped-bytes` covers the reclaim-time
 page-removal pass only, while `Ring::trim`
-(`crates/shm-transport/src/backend/ring.rs:2259`) is a second entry into the same
+(`crates/shm-transport/src/backend/ring.rs:2247`) is a second entry into the same
 `punch_dead_pages` with three dedicated tests and no record.
 
 ## Evidence trail
 
-- `ring.rs:2259-2278` is `pub fn trim(&self) -> Result<(), RingError>`. It returns
+- `ring.rs:2247-2266` is `pub fn trim(&self) -> Result<(), RingError>`. It returns
   `RingError::Quarantined` when `is_quarantined()` holds, `RingError::RoleMismatch`
   when `self.producer` is false, calls `self.reclaim_completed()?`, reads
   `arena_write` and `arena_reclaimed` from `verified_producer_cursors()`, and calls
   `self.punch_dead_pages(arena_reclaimed, arena_write, true)`. Both fallible
   reads map their error through `quarantine_with`.
-- `punch_dead_pages` (`:2172-2260`): the dead range is `[punched, reclaimed)`
-  (`:2172`); `everything` counts partially covered pages as dead once no live
-  bytes remain (`:2173`, `:2235-2238`); the function returns early when
-  `punched == reclaimed` (`:2185-2187`), so a ring with nothing released
-  removes nothing. `live_end` (`:2163-2165`) returns the producer-local
+- `punch_dead_pages` (`:2163-2242`): the dead range is `[punched, reclaimed)`
+  (`:2163`); `everything` counts partially covered pages as dead once no live
+  bytes remain (`:2164`, `:2223-2226`); the function returns early when
+  `punched == reclaimed` (`:2176-2178`), so a ring with nothing released
+  removes nothing. `live_end` (`:2154-2156`) returns the producer-local
   `reserved_end` when a reservation is open, which is what keeps an uncommitted
   reservation's page out of the dead range; the shared `arena_write` cursor
-  excludes that reservation (`:2256-2258`), which is why `trim` is producer-only.
-- `quarantine_survives_peer_clearing_shared_flag` (`:4257`) asserts
-  `ring.trim()` returns `Err(RingError::Quarantined)` at `:4270`; the
+  excludes that reservation (`:2244-2246`), which is why `trim` is producer-only.
+- `quarantine_survives_peer_clearing_shared_flag` (`:4261`) asserts
+  `ring.trim()` returns `Err(RingError::Quarantined)` at `:4273`; the
   syscall-counter test asserts `page_removals == 1` after one `trim`
-  (`:3004-3005`).
-- The comment at `:2266-2267` states the reason for the reclaim call: releases
+  (`:3086-3087`).
+- The comment at `:2254-2255` states the reason for the reclaim call: releases
   become reclaimed capacity only through that pass, which otherwise runs inside
   `try_reserve`, so an idle ring would keep newly dead pages resident without it.
-- `reclaim_completed` is at `:2073`; `punch_dead_pages` at `:2178`;
-  `resident_arena_pages` at `:1857`; `quarantine_with` at `:1920`.
-- `only_a_producer_handle_may_trim` (`:3150`) asserts the consumer handle's `trim`
+- `reclaim_completed` is at `:2070`; `punch_dead_pages` at `:2169`;
+  `resident_arena_pages` at `:1896`; `quarantine_with` at `:1943`.
+- `only_a_producer_handle_may_trim` (`:3221`) asserts the consumer handle's `trim`
   returns `Err(RingError::RoleMismatch)` and the producer's succeeds.
-- `trim_reclaims_pending_releases_before_punching` (`:3276`) publishes and
+- `trim_reclaims_pending_releases_before_punching` (`:3329`) publishes and
   releases so that `resident_arena_pages()` is 2, calls `trim`, and asserts the
   residency drops with the message "an idle trim must reclaim the released frame
   before punching"; it also asserts descriptor and byte capacity return to the
   grant totals.
-- `trim_preserves_bytes_of_an_uncommitted_reservation` (`:4183`) takes a
+- `trim_preserves_bytes_of_an_uncommitted_reservation` (`:4136`) takes a
   reservation whose start lies inside the page `trim` would otherwise treat as
-  fully dead (comment at `:4191`), calls `trim`, and asserts the reservation's
+  fully dead (comment at `:4144`), calls `trim`, and asserts the reservation's
   bytes survive.
-- Caller search: `.trim()` on a ring appears only in `ring.rs` tests (`:3004`,
-  `:3155`, `:3159`, `:3282`) and in the `:4183` test. `crates/host-runtime/src` and
+- Caller search: `.trim()` on a ring appears only in `ring.rs` tests (`:3086`,
+  `:3226`, `:3230`, `:3335`) and in the `:4136` test. `crates/host-runtime/src` and
   `packages/shm-native/src` have no `Ring::trim` call; the two `.trim()` hits in
   `crates/shm-transport/src/profile.rs:273` and `:278` are string trims.
 
@@ -83,9 +83,9 @@ the same ring. Assert residency, byte survival, and the role error.
 
 ### Q: What bounds the punch?
 
-- Sources examined: `ring.rs:2259-2278`, `:2178`, `:4183-4200`.
+- Sources examined: `ring.rs:2247-2266`, `:2169`, `:4136-4153`.
 - Findings: `punch_dead_pages(arena_reclaimed, arena_write, true)`; the third
-  argument enables trailing-page removal; the `:4183` test pins that a
+  argument enables trailing-page removal; the `:4136` test pins that a
   reservation above `arena_write` survives.
 - Missing evidence: the exact trailing-page rule inside `punch_dead_pages` was
   not re-derived here; it is covered by the reclamation record's `removal_ranges`
@@ -95,3 +95,12 @@ the same ring. Assert residency, byte survival, and the role error.
   the protective bound for reserved bytes is `live_end()`'s `reserved_end`, not
   `arena_write`, and the Check requires a released frame so the removal path is
   actually taken.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 47, `:3004` now `:3086`: The caller list is no longer complete: `.trim()` also appears at `:4104` and `:4113` in `subpage_releases_stay_resident_until_trim` (`:4091`) and at `:4129` in `partial_page_reclaim_preserves_live_neighbor` (`:4118`).
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

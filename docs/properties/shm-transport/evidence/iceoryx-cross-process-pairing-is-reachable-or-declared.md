@@ -40,37 +40,37 @@ creates both ports itself, under a service name it never discloses.
   `IceoryxBackend::create` builds one of each, a second process that somehow
   guessed the name could not construct a backend against a live pair at all.
 - `backend/iceoryx.rs:56` and `:163` — the incarnation is minted locally by
-  `Incarnation::random()` (`descriptor.rs:102-106`), and `try_receive` builds the
+  `Incarnation::random()` (`descriptor.rs:127-131`), and `try_receive` builds the
   expected identity from `self.incarnation`. There is no accessor for it, no
   constructor that accepts one, and no encode or decode path. Compare
-  `backend/sample.rs:94-96`: a sample whose prefix carries any other incarnation
+  `backend/sample.rs:82`: a sample whose prefix carries any other incarnation
   is rejected as `WrongIncarnation`. So even a hypothetical second participant
   would have every one of its samples refused.
-- `backend/ring.rs:398-488` `RingGrant` with `encode` (`:406`), `decode`
-  (`:425`), and `decode_slice` (`:456`); `:619-621` `grant()`; `:624-626`
-  `raw_fd()`; `:629-642` `attachment()` duplicating the descriptor with
+- `backend/ring.rs:851-962` `RingGrant` with `encode` (`:876`), `decode`
+  (`:893`), and `decode_slice` (`:924`); `:1153-1155` `grant()`; `:1158-1160`
+  `raw_fd()`; `:1247-1261` `attachment()` duplicating the descriptor with
   `F_DUPFD_CLOEXEC`. That is the transfer channel the iceoryx backend lacks.
-- `backend/ring.rs:606` calls `validate_lifecycle`, which at `:1639-1670` reads
+- `backend/ring.rs:1107` calls `validate_lifecycle`, which at `:2813-2831` reads
   eight fields from the shared page and compares all eight against the grant,
-  including the incarnation (`snapshot.6` at `:1655`, compared at `:1665`). On
-  Linux `create_in` also seals the object (`:580-581`) and
-  `validate_seals` (`:1701-1708`) requires `F_SEAL_GROW|SHRINK|SEAL`. None of
+  including the incarnation (`snapshot.6` at `:2825`, compared at `:2825`). On
+  Linux `create_in` also seals the object (`:1063-1064`) and
+  `validate_seals` (`:2848-2854`) requires `F_SEAL_GROW|SHRINK|SEAL`. None of
   these three mechanisms — grant equality, incarnation equality against shared
   state, or seals — exists on the iceoryx path.
 - `crates/shm-transport/tests/iceoryx.rs` — all seven tests construct exactly
   one `IceoryxBackend` and use it as both producer and receiver (`:79`, `:108`,
   `:123`, `:141`, `:289`; the two decoder tests at `:164` and `:233` call
   `SamplePrefix` directly and touch no backend at all).
-  `benches/hardware_envelope.rs:564` does the same, and the bench report
+  `benches/hardware_envelope.rs:564` (source tree; not at HEAD) does the same, and the bench report
   classifies the arm accordingly: `loopback_smoke_arms: ["iceoryx_0_9_3"]`
-  (`:141`), against nine `paired_process_arms` at `:140` that include `ring`.
-- `crates/shm-transport/tests/ring.rs:581`
+  (`:141` (source tree; not at HEAD)), against nine `paired_process_arms` at `:289` that include `ring`.
+- `crates/shm-transport/tests/ring.rs:489`
   `two_process_zero_copy_exchange_uses_authenticated_grant` is the ring's
   two-process test. There is no iceoryx analogue, and none can be written against
   this API.
-- `crates/shm-transport/Cargo.toml:9-10` — `default = ["iceoryx"]`. The
+- `crates/shm-transport/Cargo.toml:9-10` (source tree; not at HEAD) — `default = ["iceoryx"]`. The
   backend is compiled by default *for the transport crate*.
-  `crates/host-runtime/Cargo.toml:25` and `packages/shm-native/Cargo.toml:16` both
+  `crates/host-runtime/Cargo.toml:25` and `packages/shm-native/Cargo.toml:17` both
   depend with `default-features = false`, so neither the host nor the shipped
   addon contains it.
 
@@ -78,7 +78,7 @@ creates both ports itself, under a service name it never discloses.
 
 Nothing breaks at runtime; the loss is evidential. The iceoryx backend is
 `selectable` in the release-gate manifest
-(`benches/manifests/v1.json:107-110`) as one of two candidate providers for a
+(`benches/manifests/v1.json:107-110` (source tree; not at HEAD)) as one of two candidate providers for a
 transport whose entire purpose is moving frames between the host process and a
 JavaScript runtime process. Every observation that exists about it was produced
 by one process talking to itself.
@@ -110,7 +110,7 @@ That is the command at `the source repository `ci.yml` workflow:162`, guarded by
 macOS branch at `:172-173` selects only `--test contract --test fuzz_corpus`, so
 it never runs there, while `cargo check -p shm-transport --features iceoryx`
 at `:157` compiles it on both. This corrects
-`existing-checks.md:56`, which states the suite is "not executed anywhere in CI;
+`existing-checks.md:56` (source tree; not at HEAD), which states the suite is "not executed anywhere in CI;
 only `cargo check --features iceoryx` runs."
 
 ## What a test must construct
@@ -132,24 +132,45 @@ the evidence.
 ### Q: Given no grant, no descriptor, no seals, and no lifecycle page, what authenticates a peer on the iceoryx path?
 
 - Sources examined: `backend/iceoryx.rs:48-118`, `:150-176`, `:36-46`;
-  `crates/shm-transport/src/descriptor.rs:100-117`;
-  `backend/sample.rs:83-127`; `backend/ring.rs:398-488`, `:534-611`,
-  `:613-639`, `:1639-1670`, `:1701-1708`; `tests/iceoryx.rs` in full;
-  `tests/ring.rs:581`; `benches/hardware_envelope.rs:140-141`, `:531-598`;
-  `benches/manifests/v1.json:100-155`; the three `Cargo.toml` files;
+  `crates/shm-transport/src/descriptor.rs:122-145`;
+  `backend/sample.rs:74-127`; `backend/ring.rs:851-962`, `:1040-1150`,
+  `:1153-1160`, `:2813-2831`, `:2848-2854`; `tests/iceoryx.rs` in full;
+  `tests/ring.rs:489`; `benches/hardware_envelope.rs:289`, `:531-598` (source tree; not at HEAD);
+  `benches/manifests/v1.json:100-155` (source tree; not at HEAD); the three `Cargo.toml` files;
   `the source repository `ci.yml` workflow:154-176`; and in iceoryx2 0.9.3,
   `src/port/publisher.rs:560-570` and `src/port/subscriber.rs:320-332`.
 - Findings: nothing authenticates a peer, because the design admits no peer. The
   service name is locally random and undisclosed, both port slots are consumed by
   the creator under caps of one, and the expected incarnation is the local one.
   Three independent facts, each sufficient on its own. The backend is a loopback,
-  and the bench's own report already says so at `:141` while the manifest calls
-  the arm selectable at `:107-110`.
+  and the bench's own report already says so at `:141` (source tree; not at HEAD) while the manifest calls
+  the arm selectable at `:107-110` (source tree; not at HEAD).
 - Missing evidence: whether loopback is the intended permanent shape of this
   candidate or a scaffold pending a grant-equivalent. The transport document
   scopes it as "a source-built candidate, not a selected backend"
-  (`docs/shm-transport.md:120`), which is consistent with either reading.
+  (`docs/shm-transport.md:120` (source tree; not at HEAD)), which is consistent with either reading.
 - Conclusion: resolved with answer, and it reframes the gap. The parity question
   is not which ring guarantees the iceoryx backend fails to meet; it is that a
   whole class of them is unprovable on it by construction, and that the release
   gate does not currently notice.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 66, `:140` now `:289`: At HEAD the report emits only paired_process_arms with six arms, h0_metadata_cacheline_ping_pong, the four ownership ablations, and ring, and no loopback classification exists.
+  - line 73, `packages/shm-native/Cargo.toml:16` now `packages/shm-native/Cargo.toml:17`: Neither dependent sets default-features = false any more, because shm-transport no longer declares any features.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 64, `benches/hardware_envelope.rs:564` (the iceoryx bench arm): No iceoryx arm remains in the bench; the file contains no occurrence of the name.
+  - line 66, `:141` (loopback_smoke_arms in the bench report): The report has no loopback_smoke_arms key at HEAD.
+  - line 71, `crates/shm-transport/Cargo.toml:9-10` (default = [iceoryx] feature default): The manifest has no [features] section at HEAD; the iceoryx feature was deleted with the backend.
+  - line 81, `benches/manifests/v1.json:107-110` (the selectable iceoryx candidate provider): The manifest has no selectable key and its transport arm list is [ring] at `:95`.
+  - line 113, `existing-checks.md:56` (the claim that the iceoryx suite is not executed in CI): The quoted sentence no longer appears anywhere in the inventory; line 56 is now a section header, and the retired suite is recorded at `:404-410`.
+  - line 138, `:531-598` (the iceoryx bench arm body): The arm was deleted with the backend.
+  - line 139, `benches/manifests/v1.json:100-155` (the manifest's candidate provider block): The manifest is 122 lines at HEAD and contains no candidate provider or selectable list.
+  - line 146, `:141` (the bench report calling the arm loopback): No loopback_smoke_arms key exists at HEAD.
+  - line 147, `:107-110` (the manifest calling the arm selectable): No selectable key exists in benches/manifests/v1.json at HEAD.
+  - line 151, `docs/shm-transport.md:120` (the source-built candidate scoping sentence): The transport document is 98 lines at HEAD and no longer mentions a candidate backend.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

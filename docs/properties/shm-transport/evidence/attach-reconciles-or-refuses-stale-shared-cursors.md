@@ -13,45 +13,45 @@ were added.
 
 ## Evidence trail
 
-- `crates/shm-transport/src/backend/ring.rs:783-798` `attach` — the whole
-  function: `grant.checked_layout()?` (`:785`), a `total_bytes` conversion (`:786`),
-  `Mapping::attach` (`:787`), `validate_lifecycle` (`:788`), then construct and
-  return, including the two `Doorbell::from_fd` conversions (`:789-797`;
+- `crates/shm-transport/src/backend/ring.rs:1095-1150` `attach` — the whole
+  function: `grant.checked_layout()?` (`:1103`), a `total_bytes` conversion (`:1105`),
+  `Mapping::attach` (`:1106`), `validate_lifecycle` (`:1107`), then construct and
+  return, including the two `Doorbell::from_fd` conversions (`:1123-1149`;
   `prefault_read` is gone from attach post-#131). It never reads a cursor, a slot
   state, or the quarantine flag.
-- `ring.rs:2067-2098` `validate_lifecycle` — re-verified at post-#131 HEAD.
-  It reads exactly eight fields (`:2074-2085`): `magic`,
+- `ring.rs:2813-2831` `validate_lifecycle` — re-verified at post-#131 HEAD.
+  It reads exactly eight fields (`:2818`): `magic`,
   `layout_version`, `descriptor_depth`, `arena_bytes`, `max_leases`, `total_bytes`,
   `incarnation`, `lane`, and compares each against the expected grant
-  (`:2086-2096`). Notably it does not read `quarantined` either.
-- `ring.rs:127-137` `LifecyclePage` — the complete field list is the eight above plus
+  (`:2819-2826`). Notably it does not read `quarantined` either.
+- `ring.rs:209-219` `LifecyclePage` — the complete field list is the eight above plus
   `quarantined: AtomicU8`. There is no holder count, attach epoch, heartbeat,
   generation, or peer pid, which confirms the catalog's claim that no field exists
   for a reconciliation to read.
-- `ring.rs:119-124` `DescriptorSlot` — `state`, `completion_sequence`,
+- `ring.rs:147-154` `DescriptorSlot` — `state`, `completion_sequence`,
   `reservation_len`, `descriptor`. All four survive the death of whichever process
   last wrote them.
-- `ring.rs:43-58` — `ProducerPage { published, arena_write }`,
+- `ring.rs:66-85` — `ProducerPage { published, arena_write }`,
   `ConsumerPage { consumed, active_leases }`,
   `ReclaimPage { completed, arena_reclaimed }`. Six cursors, all in shared memory,
   none reset on attach.
 - Why the symptoms are all benign codes:
-  `ring.rs:1063-1067` — `if active >= self.grant.max_leases { return Ok(None); }`, with
+  `ring.rs:1417-1422` — `if active >= self.grant.max_leases { return Ok(None); }`, with
   the comment "A full lease set is backpressure, not a fault";
-  `ring.rs:1482-1484` — `reclaim_completed` breaks at the first slot whose
+  `ring.rs:2090-2092` — `reclaim_completed` breaks at the first slot whose
   `completion_sequence` does not match the next expected sequence, so reclamation
   head-of-line blocks at the lowest stale sequence;
-  `ring.rs:926-928` — `try_reserve` returns `ProducerError::Exhausted` once
+  `ring.rs:1293-1295` — `try_reserve` returns `ProducerError::Exhausted` once
   `published - completed` reaches `descriptor_depth`;
-  `ring.rs:989` — `reserve_until` converts sustained `Exhausted` into
+  `ring.rs:1354` — `reserve_until` converts sustained `Exhausted` into
   `ProducerError::Deadline`. None of these calls `enter_quarantine`, and
-  `enter_quarantine` (`ring.rs:1373-1379`) is the only writer of the quarantine flag.
-- Non-test attach callers: `packages/shm-native/src/lib.rs:252-270` `attach_ring`
-  (`Ring::attach` at `:263`), reached from the bootstrap at `:609-610`, and
-  `ring.rs:698` inside `RingAttachment::attach`. The host-side
+  `enter_quarantine` (`ring.rs:1915-1922`) is the only writer of the quarantine flag.
+- Non-test attach callers: `packages/shm-native/src/lib.rs:286-288` `attach_ring`
+  (`Ring::attach` at `:287`), reached from the bootstrap at `:698-699`, and
+  `ring.rs:979` inside `RingAttachment::attach`. The host-side
   the host-side `attach_ring` that opened `/proc/{pid}/fd/{fd}` is gone: `ed487e11`
   deleted it with `shm_provider.rs`, and its successor
-  `crates/host-runtime/src/ring_transport.rs:660-680`
+  `crates/host-runtime/src/ring_transport.rs:855-882`
   `RingClientEndpoint::attach_with_descriptors` receives already-transferred
   descriptors instead of opening one.
 - Existing check: none, confirmed against the rewritten
@@ -63,20 +63,20 @@ were added.
 ## Failure scenario
 
 1. A receiver attaches and takes `K == max_leases` leases. Each lease sets its slot
-   to `RECEIVER_LEASED` (`ring.rs:1115`), advances `consumed` (`:1116`), and increments
-   `active_leases` (`:1117`).
+   to `RECEIVER_LEASED` (`ring.rs:1452`), advances `consumed` (`:1453`), and increments
+   `active_leases` (`:1454`).
 2. The receiver is killed. None of `ReceiveLease::Drop`
-   (`crates/shm-transport/src/lease.rs:201-207`) runs, so no release is recorded
+   (`crates/shm-transport/src/lease.rs:366-372`) runs, so no release is recorded
    and `completion_sequence` stays 0 for all K slots.
 3. A fresh process attaches with the same grant. `validate_lifecycle` compares the
    eight geometry and identity fields, all of which still match, and attach succeeds.
 4. The new receiver calls `try_receive`. `active_leases` still reads `K`, so the
-   check at `:1063-1067` short-circuits and returns `Ok(None)` — indistinguishable from
+   check at `:1417-1422` short-circuits and returns `Ok(None)` — indistinguishable from
    an empty ring.
 5. The producer calls `try_reserve`. `reclaim_completed` cannot advance past the
-   lowest stale sequence (`:1482-1484`), so `completed` is frozen; `published`
-   continues until `published - completed == descriptor_depth`, then `:926-928`
-   returns `Exhausted`, and `reserve_until` reports `Deadline` (`:989`).
+   lowest stale sequence (`:2090-2092`), so `completed` is frozen; `published`
+   continues until `published - completed == descriptor_depth`, then `:1293-1295`
+   returns `Exhausted`, and `reserve_until` reports `Deadline` (`:1354`).
 6. Consequence: the channel is permanently dead in both directions, every symptom is
    a legal backpressure code, `is_quarantined()` is false, `conservation()` still
    conserves, no charge is retained as quarantined, and no recovery episode starts.
@@ -87,23 +87,23 @@ were added.
 There is no narrow window: the stale state is permanent from the moment the receiver
 dies until the object is destroyed. The kill must land while at least one lease is
 held, which in the shipped client path means between `poll`'s
-`std::mem::forget(lease)` (`packages/shm-native/src/lib.rs:1208`) and the
-corresponding `detach_active` completion (`:314-334`) — that is, while a frame is in
+`std::mem::forget(lease)` (`packages/shm-native/src/lib.rs:1208` (source tree; not at HEAD)) and the
+corresponding `detach_active` completion (`:332-357`) — that is, while a frame is in
 JavaScript hands. The worst case is `K == max_leases`, because then even the lease
 bound alone kills the receive direction. Configuration dependencies:
 `HostConfig.liveness` is `None` by default
-(`crates/host-runtime/src/config.rs:221`, `:233`), so nothing probes the peer and the
+(`crates/host-runtime/src/config.rs:238`, `:250`), so nothing probes the peer and the
 receive side waits on the data doorbell indefinitely (`wait_for_data`,
-`ring.rs:1138-1160`); with a liveness policy configured the
+`ring.rs:1476-1499`); with a liveness policy configured the
 ring instead fills and a failed publish makes the close unclean, which is the same
 divergence `dead-peer-charges-are-reclaimed-or-declared` records. Platform gating:
 post-#131 attach receives already-transferred descriptors plus two eventfd
-doorbells (`ring.rs:783`), so the attach path is Linux-only via `eventfd`
-(`ring.rs:389`); the former `/proc/{pid}/fd/{fd}` open is gone.
+doorbells (`ring.rs:1095`), so the attach path is Linux-only via `eventfd`
+(`ring.rs:389` (source tree; not at HEAD)); the former `/proc/{pid}/fd/{fd}` open is gone.
 
 One scoping correction worth stating plainly. In the shipped two-process topology a
 *replacement* peer does not attach to the dead peer's object — each candidate gets a
-fresh `DuplexRing` (`ring.rs:1834-1843`) with a fresh random incarnation (`:757`).
+fresh `DuplexRing` (`ring.rs:2604-2612`) with a fresh random incarnation (`:1051`).
 The literal "fresh attach inherits stale leases" sequence therefore requires the
 same descriptor to be re-offered, which the activation-token fence formerly
 exercised by `shm_failure_modes.rs:358`
@@ -127,7 +127,7 @@ pre-#131 harness had `RoleProcess::kill`
 scenarios were `idle`, `publish`, `pending`, `roundtrip`, and
 `roundtrip_park` (former `:712-749`), and none of them could hold a lease across
 the kill, because the client endpoint's `recv` releases inside itself at
-`crates/host-runtime/src/ring_transport.rs:732-736` before returning. So a new scenario is
+`crates/host-runtime/src/ring_transport.rs:952-953` before returning. So a new scenario is
 required that receives without releasing — K frames, ideally `K == max_leases` — and
 emits a barrier record before parking. The oracle after the attach: either the attach
 fails, or `active_leases == 0` and no slot remains in `RECEIVER_LEASED`. Add the
@@ -140,16 +140,16 @@ check to emit: `shm_kill_with_leases_held`.
 
 ### Q: Is a peer crash meant to be recoverable at all? If yes, something must reset the cursors or force quarantine; today it does neither
 
-- Sources examined: `ring.rs:783-798`, `:2067-2098`, `:127-137`, `:43-58`,
-  `:119-124`, `:1373-1392`, `:1063-1067`, `:926-928`, `:989`, `:1470-1566`, `:1834-1843`;
-  `packages/shm-native/src/lib.rs:252-270`, `:522-610`, `:1160-1230`;
-  `crates/host-runtime/src/config.rs:221`, `:233`;
+- Sources examined: `ring.rs:1095-1150`, `:2813-2831`, `:209-219`, `:66-85`,
+  `:147-154`, `:1915-1940`, `:1417-1422`, `:1293-1295`, `:1354`, `:2070-2151`, `:2604-2612`;
+  `packages/shm-native/src/lib.rs:286-288`, `:592-699`, `:1346-1452`;
+  `crates/host-runtime/src/config.rs:238`, `:250`;
   `crates/host-runtime/tests/support/shm_process.rs:256-292`, `:644-757` (file since
   deleted by `907746f7b`);
   `crates/host-runtime/tests/shm_failure_modes.rs` test inventory;
-  `crates/host-runtime/src/ring_transport.rs:650-734` (the branch formerly at
+  `crates/host-runtime/src/ring_transport.rs:855-955` (the branch formerly at
   `shm_provider.rs:363-371` is gone; `ed487e11` replaced it with the
-  unconditional `admission.release()` at `ring_transport.rs:276`).
+  unconditional `admission.release()` at `ring_transport.rs:360`).
 - Findings: the mechanism half is fully resolved and matches the catalog. There is no
   reconciliation, no reset, and no field to reconcile against; the three progress
   paths all degrade to legal backpressure rather than to a fault; and the quarantine
@@ -176,5 +176,20 @@ check to emit: `shm_kill_with_leases_held`.
 
 ### Q: Does attach inspect the shared cursors at HEAD? (added 2026-09-05)
 
-- Checked: `Ring::attach` (`ring.rs:969-1030`) loads `published`, `arena_write`, `completed`, `arena_reclaimed`, `consumed`, and `active_leases`, refuses a quarantined ring (`:1020-1021`), and runs `conservation_inner(true)` (`:1027`). Six unit tests (`:3478`, `:3573`, `:3612`, `:3715`, `:3789`, `:3806`) refuse inconsistent cursors, phantom leases, orphaned receiver slots, a quarantined ring, a write cursor past the committed frames, and a live slot whose descriptor does not validate.
+- Checked: `Ring::attach` (`ring.rs:1095-1150`) loads `published`, `arena_write`, `completed`, `arena_reclaimed`, `consumed`, and `active_leases`, refuses a quarantined ring (`:1141-1142`), and runs `conservation_inner(true)` (`:1148`). Six unit tests (`:3494`, `:3567`, `:3603`, `:3697`, `:3766`, `:3780`) refuse inconsistent cursors, phantom leases, orphaned receiver slots, a quarantined ring, a write cursor past the committed frames, and a live slot whose descriptor does not validate.
 - Conclusion: yes, for inconsistent state. Stale-but-consistent state left by a receiver killed while holding leases still passes conservation and is inherited; that residual is what the record now describes.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 16, `crates/shm-transport/src/backend/ring.rs:783-798` now `crates/shm-transport/src/backend/ring.rs:1095-1150`: At HEAD `attach` loads all six shared cursors as this handle's baseline, refuses a quarantined mapping, and runs `conservation_inner(true)`, so it does read cursors, slot states, and the quarantine flag.
+  - line 90, `packages/shm-native/src/lib.rs:1208`: The lease is owned by the channel's `active` map from `poll` until `detach_active` releases it, so the window is the life of that entry.
+  - line 101, `ring.rs:783` now `ring.rs:1095`: Attach receives three already-transferred descriptors and each doorbell is one end of an AF_UNIX socketpair rather than an eventfd.
+  - line 152, `ring_transport.rs:276` now `ring_transport.rs:360`: The release is not unconditional at HEAD: a quarantined ring whose peer has not released its attachment moves its charges through `admission.quarantine()` instead (`ring_transport.rs:353-361`).
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 90, `packages/shm-native/src/lib.rs:1208` (std::mem::forget(lease) in poll): `poll` no longer forgets the lease; it moves it into `channel.active` as an `ActiveLease` at `packages/shm-native/src/lib.rs:1397-1403`.
+  - line 102, `ring.rs:389` (eventfd doorbell creation): No eventfd remains in the ring backend: `Doorbell::create` builds an AF_UNIX socketpair at `ring.rs:727-738`, and Linux-only support is enforced by the `compile_error!` at `ring.rs:18-19`.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

@@ -8,7 +8,7 @@ security-load-bearing component: a 128-bit random name, `mkdir` at `0o700`, an
 between the by-path and by-fd views, an owner check, a file-type check, a mode
 check, and a `validate()` that repeats all five before every ring creation. The
 inventory reports no negative test for any of it
-(`docs/properties/part-1-shm-transport/existing-checks.md:170`). Before writing a
+(`docs/properties/part-1-shm-transport/existing-checks.md:170` (source tree; not at HEAD)). Before writing a
 property about it, the scoping question had to be settled: what is actually inside
 the directory the authentication protects. The answer is nothing, on either
 platform.
@@ -59,7 +59,7 @@ Teardown is not authenticated. `Drop` (`:390-394`) calls
 descriptor, and with no `validate()` first.
 
 Do not confuse this with the host's runtime directory. `host_runtime::runtime_dir_path`
-(`crates/host-runtime/src/instance.rs:178-180`) is `data_dir/run`, it does hold files —
+(`crates/host-runtime/src/instance.rs:185-187`) is `data_dir/run`, it does hold files —
 connection files — and it has negative tests
 (`crates/host-runtime/tests/instance_security.rs:48`, `:108`, `:158`, `:211`). The
 transport's `RuntimeDir` is a different, unrelated object.
@@ -81,7 +81,7 @@ remove theirs. `rmdir` on a path whose final component is a symlink fails with
 `ENOTDIR`, so this cannot be redirected to delete a directory elsewhere; it is a
 narrow denial primitive against a same-user process, inside a trust model that
 already grants a same-user peer write access to the mapped payload
-(`docs/shm-transport.md:116`).
+(`docs/shm-transport.md:116` (source tree; not at HEAD)).
 
 The scenario worth guarding against is not an attack but a belief: a future
 change that stores something real under this directory — a bootstrap file, a
@@ -150,5 +150,15 @@ have.
 
 ### Q: Does the U3 tree have a runtime directory? (added 2026-09-05)
 
-- Checked: `rg -n 'RuntimeDir|create_in|remove_dir' crates/shm-transport/src` returns nothing. `Mapping::create` (`crates/shm-transport/src/backend/ring.rs:397-398`) takes only a length and calls `create_linux_memfd` (`:2905`); `Ring::create` (`:914`) takes a profile and a lane. No path is touched during ring creation. The host's `secure_runtime_dir` in `crates/host-runtime/src/lifecycle.rs` is the daemon's data directory, not the ring object container this record described.
+- Checked: `rg -n 'RuntimeDir|create_in|remove_dir' crates/shm-transport/src` returns nothing. `Mapping::create` (`crates/shm-transport/src/backend/ring.rs:458-459`) takes only a length and calls `create_linux_memfd` (`:2856`); `Ring::create` (`:1040`) takes a profile and a lane. No path is touched during ring creation. The host's `secure_runtime_dir` in `crates/host-runtime/src/lifecycle.rs` is the daemon's data directory, not the ring object container this record described.
 - Conclusion: no. The record is marked `invalidated` in the catalog; the `ring.rs` line references in the trail above resolve against the source tree.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 11, `docs/properties/part-1-shm-transport/existing-checks.md:170` (inventory entry reporting no negative test): `docs/properties/part-1-shm-transport/` does not exist at HEAD; the catalog under `docs/properties/shm-transport/` replaced it.
+  - line 84, `docs/shm-transport.md:116` (the trust-model statement about same-user peer write access to the mapped payload): `docs/shm-transport.md` is 98 lines at HEAD and no longer states it.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

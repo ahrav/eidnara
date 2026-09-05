@@ -7,9 +7,9 @@ The native addon's `Channel` holds producer reservations and receive leases that
 ## Evidence trail
 
 - `Channel` (`packages/shm-native/src/lib.rs:69-88`) declares `producers`, `active`, and `stranded` before `to_host` and `from_host`; the field comment states the order is load-bearing because Rust drops fields in declaration order.
-- `close_channel` (`lib.rs:361-376`) detaches every producer, every active lease, and every stranded alias with `?`, so a detachment failure returns before the entry is removed.
-- `close` (`lib.rs:1317-1339`) removes the registry entry only when `producers`, `active`, and `stranded` are all empty; otherwise the entry and its mapping stay registered and a later `close` retries.
-- `channel_drops_borrowing_reservations_before_the_ring` (`lib.rs:1079`) builds a `Channel` holding a reservation that borrows `to_host` and drops it; the test passes only if the reservation is destroyed first.
+- `close_channel` (`lib.rs:407-413`) detaches every producer, every active lease, and every stranded alias with `?`, so a detachment failure returns before the entry is removed.
+- `close` (`lib.rs:1498-1513`) removes the registry entry only when `producers`, `active`, and `stranded` are all empty; otherwise the entry and its mapping stay registered and a later `close` retries.
+- `channel_drops_borrowing_reservations_before_the_ring` (`lib.rs:1234`) builds a `Channel` holding a reservation that borrows `to_host` and drops it; the test passes only if the reservation is destroyed first.
 - `packages/shm-native/tests/runtime.ts` asserts detachment under Bun and records `detachment_unavailable` under Node.
 
 ## Failure scenario
@@ -33,3 +33,12 @@ None at close. The harm lands later, when the JavaScript finalizer runs.
 - Findings: On a detachment error `close` returns the error and keeps the entry and mapping registered by design, so the view stays valid until a later `close` succeeds.
 - Missing evidence: A test that drives the failure path.
 - Conclusion: resolved with answer: the check is scoped to `close` returning `Ok`; the error path is the designed quarantine.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 10, `lib.rs:361-376` now `lib.rs:407-413`: At HEAD `close_channel` delegates to `detach_all_aliases` (`:386-405`), which does not stop at the first failure: it detaches every producer, lease, and stranded alias and returns the first failure afterwards.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

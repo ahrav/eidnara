@@ -10,29 +10,29 @@ granularity are two different numbers on any host whose page is not 4096.
 
 ## Evidence trail
 
-`crates/shm-transport/src/backend/ring.rs:28` declares
-`const PAGE_SIZE: usize = 4096`. `Layout::new` (`:141-182`) uses `CACHELINE`
+`crates/shm-transport/src/backend/ring.rs:46` declares
+`const PAGE_SIZE: usize = 4096`. `Layout::new` (`:279-345`) uses `CACHELINE`
 (128) for the three control pages and `PAGE_SIZE` for the rest: `arena =
-align_up(slots + slot_bytes, PAGE_SIZE)` (`:158-163`), `lifecycle =
-align_up(arena + arena_bytes, PAGE_SIZE)` (`:164-169`), and `total =
-lifecycle.checked_add(PAGE_SIZE)` (`:170-172`). `system_page_size()`
-(`:194-200`) exists and falls back to `PAGE_SIZE`, but its only caller is
-`verify_prefaulted` (`:1009`), which uses it to size the `mincore` residency
+align_up(slots + slot_bytes, PAGE_SIZE)` (`:318-323`), `lifecycle =
+align_up(arena + arena_bytes, PAGE_SIZE)` (`:324-329`), and `total =
+lifecycle.checked_add(PAGE_SIZE)` (`:330-332`). `system_page_size()`
+(`:443-450`) exists and falls back to `PAGE_SIZE`, but its only caller is
+`verify_prefaulted` (`:1009` (source tree; not at HEAD)), which uses it to size the `mincore` residency
 vector. No layout arithmetic consults it.
 
 `total` is what leaves the crate. `Ring::create_in` passes it to
-`Mapping::create(layout.total)` (`:569`), which `ftruncate`s the object to that
-length (`:1734` on Linux, `:1784` on macOS) and `mmap`s exactly `len`
-(`:224-234`). It is also published in the grant as `total_bytes` (`:566`) and
+`Mapping::create(layout.total)` (`:1061`), which `ftruncate`s the object to that
+length (`:2859` on Linux, `:1784` (source tree; not at HEAD) on macOS) and `mmap`s exactly `len`
+(`crates/shm-transport/src/backend/sys.rs:86-104`). It is also published in the grant as `total_bytes` (`:1059`) and
 re-derived on the attaching side by `checked_layout`, which requires
-`layout.total == total` (`:478-480`). So both sides agree on a number computed
+`layout.total == total` (`:942-944`). So both sides agree on a number computed
 from a constant neither of them checks against the kernel.
 
 I computed the layout for the three profiles that exist in the tree —
-`lease_limited_profile` depth 2 (`tests/ring.rs:43`), `qualified_test_profile`
-depth 8 (`crates/host-runtime/src/ring_transport.rs:824`), and `ring_profile` depth 32
-(`src/profile.rs:681`) — all with `arena_bytes = MIN_ARENA_BYTES = 67_108_864`
-(`src/arena.rs:4-6`), using `size_of::<DescriptorSlot>() = 256` and 128 for each
+`lease_limited_profile` depth 2 (`tests/ring.rs:18`), `qualified_test_profile`
+depth 8 (`crates/host-runtime/src/ring_transport.rs:38`), and `ring_profile` depth 32
+(`src/profile.rs:700`) — all with `arena_bytes = MIN_ARENA_BYTES = 67_108_864`
+(`src/arena.rs:4-7`), using `size_of::<DescriptorSlot>() = 256` and 128 for each
 of the three control pages. Depth 2 and depth 8 produce identical offsets because
 both slot regions fit inside the first 4096 bytes.
 
@@ -58,7 +58,7 @@ larger than the depth-32 figure.
 
 On a 16 KiB-page host the lifecycle page stops being a page. For depth 8, real
 page 4096 spans bytes 67108864 to 67125248; the lifecycle structure sits at
-67112960 for 128 bytes (`LifecyclePage` is 128 bytes, `:117-129`), and the arena's
+67112960 for 128 bytes (`LifecyclePage` is 128 bytes, `ring.rs:208-219`), and the arena's
 final 4096 bytes — bytes 67108864 to 67112960, peer-writable payload — occupy the
 first quarter of that same real page. For depth 32 the shared prefix is 12288
 bytes. The lifecycle page holds the magic, the layout version, the geometry
@@ -73,10 +73,10 @@ three control pages and the entire descriptor-slot array.
 The second divergence is the mapping tail. For depth 2 and 8, `total` of
 67117056 is not a multiple of 16384, so `mmap` and `ftruncate` round the mapping
 up to 67125248 and 8192 bytes are addressable past `mapping.len`. `ptr_at`
-bounds-checks every typed access against `self.len` (`:283-290`), and both
+bounds-checks every typed access against `self.len` (`:489-498`), and both
 prefault walks stop at `len`, so those 8192 bytes are mapped, writable, and never
 initialised — reachable only through a pointer computed outside `ptr_at`.
-`Mapping::drop` munmaps `len` (`:302-306`), which the kernel rounds up, so they
+`Mapping::drop` munmaps `len` (`:665-671`), which the kernel rounds up, so they
 are released.
 
 ## Timing windows and dependencies
@@ -94,7 +94,7 @@ succeed before a layout is mapped at all.
 A ring created on a host whose page size is not 4096, asserting that `arena`,
 `lifecycle`, and `total` are each multiples of `system_page_size()`. The offsets
 are private, so this needs either an accessor or a unit test inside the module,
-alongside the existing `residency_vector_len` test (`:1790-1800`). The stronger
+alongside the existing `residency_vector_len` test (`:4046-4051`). The stronger
 form is a pure test that does not need special hardware: call the layout
 computation with an injected page size of 16384 and 65536 and assert the same
 three divisibility conditions, which fails today at HEAD because the page size is
@@ -107,17 +107,17 @@ addressable bytes past `len`.
 
 ### Q: Is the layout total required to be a multiple of the real page size, or only of 4096?
 
-- Sources examined: `ring.rs:27-28`, `:116-182`, `:186-204`, `:215-245`,
-  `:266-289`, `:461-478`, `:544-590`, `:1009`, `:1672-1677`, `:1729`, `:1779`,
-  `:1785-1795`; `src/arena.rs:4-6`, `:225-236`; `src/profile.rs:681-684`;
-  `tests/ring.rs:20-55`; `crates/host-runtime/src/ring_transport.rs:821-827`; the diff
+- Sources examined: `ring.rs:45-46`, `:208-345`, `:367-450`, `:451-483`,
+  `:489-513`, `:929-946`, `:1040-1091`, `:1009` (source tree; not at HEAD), `:1672-1677` (source tree; not at HEAD), `:2859`, `:1779` (source tree; not at HEAD),
+  `:4046-4051`; `src/arena.rs:4-7`, `:225-236` (source tree; not at HEAD); `src/profile.rs:700-703`;
+  `tests/ring.rs:14-38`; `crates/host-runtime/src/ring_transport.rs:38-40`; the diff
   of `a5568707` restricted to the page-size change. The offsets in the table were
   computed by replicating `Layout::new` with verified struct sizes
   (`size_of::<DescriptorSlot>() = 256`, 128 for each control page,
   `size_of::<SharedDescriptor>() = 120`), not read from a run.
 - Findings: not required by any in-tree caller. `mmap` accepts a non-page-multiple
   length and rounds up; `ftruncate` accepts one; `munmap` accepts one; and
-  `residency_vector_len` (`:204-205`) already computes `div_ceil` against the
+  `residency_vector_len` (`crates/shm-transport/src/backend/sys.rs:153-155`) already computes `div_ceil` against the
   runtime size, so `mincore`'s vector is correctly sized regardless. The
   consequences are the shared real page between the lifecycle structure and the
   arena tail, the non-page-aligned arena start, and the addressable slack past
@@ -134,5 +134,25 @@ addressable bytes past `len`.
 
 ### Q: Does `Layout::new` still use a 4096 literal at HEAD? (added 2026-09-05)
 
-- Checked: `Layout::new` (`crates/shm-transport/src/backend/ring.rs:227-282`) reads `page_size = system_page_size()` (`:374-383`), rejects an `arena_bytes` that is not a multiple of it, aligns `arena` and `lifecycle` to `page_size`, and sets `total = lifecycle + page_size`. No 4096 literal remains in the layout.
+- Checked: `Layout::new` (`crates/shm-transport/src/backend/ring.rs:279-345`) reads `page_size = system_page_size()` (`:443-450`), rejects an `arena_bytes` that is not a multiple of it, aligns `arena` and `lifecycle` to `page_size`, and sets `total = lifecycle + page_size`. No 4096 literal remains in the layout.
 - Conclusion: no. The offsets are page multiples by construction; the divergence computed in the trail above applies to the source tree only. No test asserts this under a non-4096 page.
+
+### Q: What did the post-merge re-anchor find at HEAD?
+
+- Sources examined: every file this trail cites, at the merged HEAD.
+- Findings:
+  Mechanisms whose citation moved and whose surrounding claim needed restating:
+  - line 14, `:141-182` now `:279-345`: At HEAD Layout::new reads page_size = system_page_size() (`:280`), rejects an arena_bytes that is not a multiple of it (`:283-285`), aligns arena and lifecycle to that runtime page size, adds one runtime page for total, and uses CACHELINE for five control pages rather than three.
+  - line 16, `:158-163` now `:318-323`: The alignment argument is the runtime page_size local, not the PAGE_SIZE constant.
+  - line 17, `:164-169` now `:324-329`: The alignment argument is the runtime page_size local, not the PAGE_SIZE constant.
+  - line 18, `:170-172` now `:330-332`: The addend is the runtime page_size local, not the PAGE_SIZE constant.
+  - line 20, `:1009`: system_page_size() has many callers at HEAD, including Layout::new (`:280`), punch_batch_bytes (`:2160`), punch_dead_pages (`:2185`), and punch_range (`:2294`), so the layout arithmetic does consult the kernel page size.
+  Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
+  - line 20, `:1009` (verify_prefaulted): No verify_prefaulted exists; the mincore residency vector is sized in Mapping::resident_pages (`:583-596`).
+  - line 25, `:1784` (the macOS ftruncate path): The macOS object-creation path was removed; only create_linux_memfd (`:2856-2863`) remains.
+  - line 111, `:1009` (verify_prefaulted): Removed; Mapping::resident_pages (`:583-596`) is the only mincore caller.
+  - line 111, `:1672-1677` (unnamed source range): The record does not say what this range held and no construct at HEAD corresponds to it; the neighbouring object checks are validate_object (`:2833-2846`) and validate_seals (`:2848-2854`).
+  - line 111, `:1779` (the macOS ftruncate): The macOS creation path was removed.
+  - line 112, `:225-236` (unnamed source range): crates/shm-transport/src/arena.rs ends at line 223 and the record does not say what this range held; ArenaCounts::conserves (`:208-222`) is the last item in the file.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
