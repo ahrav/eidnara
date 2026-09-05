@@ -84,7 +84,7 @@ is no liveness policy, so the generation persists holding one of 64 connection
 permits (`runtime.rs:914`) and its writer queue until the process dies and the
 ring's own peer-death path notices.
 
-The catalog consequence is larger. Part 2a holds several liveness records —
+The catalog consequence is larger. Part 2a holds several liveness records -
 `a-timely-pong-sustains-the-generation-within-a-bounded-round`,
 `slow-egress-alone-does-not-retire-a-probed-generation`,
 `host-ping-correlation-exhaustion-retires-the-generation`,
@@ -138,7 +138,7 @@ visible, and would fail loudly if `tests/lifecycle.rs:402` were ever deleted.
   are entirely separate mechanisms, which matches
   `docs/host-wire-protocol.md:679-685` treating them in separate paragraphs.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the health task is `default-production`;
+- Conclusion: resolved with answer - the health task is `default-production`;
   only the Ping/Pong loop is opt-in.
 
 ### Q: does any non-test caller of `run` exist besides `serve.rs`?
@@ -152,6 +152,6 @@ visible, and would fail loudly if `tests/lifecycle.rs:402` were ever deleted.
 - Missing evidence: none, though I did not audit whether any downstream
   repository embeds `host_runtime` and sets `liveness`. `lib.rs:57` exports
   `LivenessPolicy` publicly, so an external embedder could.
-- Conclusion: resolved with answer for this repository — `None` in production.
+- Conclusion: resolved with answer for this repository - `None` in production.
   The label `default-production` on the "no Ping" guarantee is correct, and the
   liveness subsystem itself is reachable only from tests here.

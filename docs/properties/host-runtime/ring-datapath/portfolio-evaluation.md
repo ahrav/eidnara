@@ -52,7 +52,7 @@ following the convention Parts 4a through 4c used. Two moves: the release-identi
 record from `unreachable` to `always` (B1), and the doctor record from `reachable`
 to `sometimes` (B2). The part keeps one `unreachable`, on
 `ring-a-host-never-quarantines-an-admission-charge`, and that one is now flagged
-rather than defended — see bias 1.
+rather than defended - see bias 1.
 
 Reachability-class labels: **10 `default-production`, 2
 `compiled-with-no-production-producer`, 1 mixed
@@ -142,8 +142,8 @@ built **client-side**. `classifySharedMemoryFailure`
 (`packages/plugin/src/shared/host-client/shared-memory-failure.ts:10-30`) maps
 an observed error to a `SharedMemoryTerminalClass` (`types.ts:68-73`), and
 `policy.ts:648-672` passes the result to `terminalSharedMemoryDiagnostics`
-(`policy.ts:854-872`), which constructs the entire terminal object — `state`,
-`error_class`, zeroed `bounds`, `accounting: null`, and both derived counters —
+(`policy.ts:854-872`), which constructs the entire terminal object - `state`,
+`error_class`, zeroed `bounds`, `accounting: null`, and both derived counters -
 without consulting the host. So `reachable` was location coverage over locations
 that were never meant to be there, and the record was hunting in the wrong
 language.
@@ -161,7 +161,7 @@ produced by real conditions.
 
 **Premise sharpening.** The evaluation said "there are no Rust emission points to
 reach". There is exactly one: `"setup_failure"` at `ring_transport.rs:187`. It is
-not a member of the client taxonomy that happens to live in Rust — it is the
+not a member of the client taxonomy that happens to live in Rust - it is the
 host's own poisoned-`Mutex` arm, reached only when `AdmissionController::snapshot`
 returns `Err` (`profile.rs:501-505`), which no host path causes. Recording it
 matters because it is the one thing an oracle on the host side could ever observe,
@@ -175,8 +175,8 @@ Applied in `fault-map.md` on the rows for
 the relationship map's "machinery with no input that reaches it" cluster in
 `catalog.md`, which now states the consequence for their `Exercised` lines.
 
-Both rows read "**Yes** — enumeration only" while both records read
-`Exercised: not yet — unconstructible`. Those cannot both be true. The rows were
+Both rows read "**Yes** - enumeration only" while both records read
+`Exercised: not yet - unconstructible`. Those cannot both be true. The rows were
 counting the availability of a **census** as the constructibility of the
 **check**, and the check in each case is `reachable` over a location
 (`connection.rs:397`, `frame_channel.rs:477`) that no input can reach. A census
@@ -275,9 +275,9 @@ frames: at most `N + 1` further `receive_one` passes for `N` frames committed
 before the cancellation edge, one pass per `Ok(true)` through `:409-415` plus the
 empty observation that reaches the `read_cancel` check at `:394`, and no post-edge
 frame forwarded. The window closes by stopping the peer's publication, per
-METHOD.md's requirement for a bounded fault-free window. The residual — the case
+METHOD.md's requirement for a bounded fault-free window. The residual - the case
 where the inbound channel neither closes nor drains, where there is no bound at
-all — is recorded as unresolved in the open questions and as a new question about
+all - is recorded as unresolved in the open questions and as a new question about
 whether those three sends should carry deadlines. A generous timeout in its place
 would have been unrefutable, which is the specific thing METHOD.md's liveness rule
 forbids.
@@ -307,9 +307,9 @@ directly below it.
 What is actually unowned is **admission-quarantine accounting**, and every
 statement of the claim is narrowed to that. The narrow version survives
 verification cleanly: a `quarantine` grep over `crates/host-runtime/src` at `HEAD`
-returns only unrelated hits — the `LeaseTracker` flag (`frame_channel.rs:392`,
+returns only unrelated hits - the `LeaseTracker` flag (`frame_channel.rs:392`,
 `:420-433`), two `instance.rs` doc comments (`:67`, `:250`), and one tracker
-contract test (`contract_tests.rs:690`) — so `Admission::quarantine`
+contract test (`contract_tests.rs:690`) - so `Admission::quarantine`
 (`profile.rs:568`) has no host caller in production or in test, while
 `docs/shm-transport.md:21`, `:65`, and `:79` present the accounting as
 live.
@@ -360,7 +360,7 @@ prose are removed now that the corrections are in the text.
 - `catalog.md:417-418`: `Admission::quarantine` is `profile.rs:568`, not `:566`.
   Verified by grep at `HEAD`. The record's own trailing note said so and the check
   line still said `:566`.
-- `catalog.md:456-460`: the note itself. Its second correction is also applied —
+- `catalog.md:456-460`: the note itself. Its second correction is also applied -
   the in-crate assertion is at `ring_transport.rs:800`, so the record's `:799-800`
   spanned the assertion plus its preceding line, and the second assertion of the
   same fact at `:774` is now named in the `Existing check` line rather than in a
@@ -415,7 +415,7 @@ Recorded, not mined.
    fault-map totals become 5 non-vacuous, 5 partial, 0 not constructible. If it
    does, the two Group F records need a stated answer to "what would make this
    check fail, other than someone fixing the gap", and the quarantine record's
-   `unreachable` needs either a defence or a move to `always(!X)` — because
+   `unreachable` needs either a defence or a move to `always(!X)` - because
    METHOD.md reserves `unreachable` for a *forbidden* location and
    `Admission::quarantine` is not forbidden by anyone. Both totals are recorded so
    neither answer requires re-deriving the map.
@@ -445,9 +445,9 @@ Recorded, not mined.
    the distinction in three places, which favours the second. METHOD.md rule 3
    forbids resolving it in the documentation's favour and rule 2 forbids guessing.
    *Judgment required:* answer the accounting question first. Then the charge
-   records can be made consistent, and B4's new question — whether a peer should
+   records can be made consistent, and B4's new question - whether a peer should
    be able to condemn the shared ring at all through the public
-   `Ring::enter_quarantine` — becomes answerable, because it is the same question
+   `Ring::enter_quarantine` - becomes answerable, because it is the same question
    about who owns quarantine authority seen from the peer's side.
 
 ## Verdict
@@ -523,7 +523,7 @@ method raised it. B2 said four of five emission points did not exist without
 enumerating where they were supposed to be, and they were in TypeScript by design.
 B5 said a bound was stated in the units the code bounds without enumerating what
 `frame_deadline` actually bounds, and it bounds one loop out of three awaits. The
-common shape is not "a seam was missed" — it is that **an absence was asserted
+common shape is not "a seam was missed" - it is that **an absence was asserted
 from one failed search**. A capability, an owner, a producer, and a bound are all
 existential claims, and a negative existential needs the search space named, not
 just one probe reported.

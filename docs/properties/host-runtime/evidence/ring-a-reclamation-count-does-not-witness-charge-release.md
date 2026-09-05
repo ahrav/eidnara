@@ -69,7 +69,7 @@ At that instant the endpoint thread may still be running. What stops it is
 (`frame_channel.rs:701-703`; not re-swept post-#131), which `run_endpoint`
 observes in the `select!` at
 `ring_transport.rs:443` and returns. The thread then drops the `DuplexRing`,
-releases the charge at `:276`, and fires `done_tx` at `:277` — to a receiver
+releases the charge at `:276`, and fires `done_tx` at `:277` - to a receiver
 whose awaiting task was already aborted.
 
 So `reclamation.completed` increments before `accounting().active` decreases.
@@ -91,7 +91,7 @@ that every charge came back. If any connection retired through the
 already-draining path at `connection.rs:273-276`, the count is ahead of reality,
 and a host that is still holding charges reports as fully reclaimed.
 
-The window is small — one `select!` observation plus one `DuplexRing` drop — but
+The window is small - one `select!` observation plus one `DuplexRing` drop - but
 it is exactly the window a shutdown-time gate samples, because that path is
 *only* taken during shutdown. So the sampling and the defect coincide by
 construction rather than by chance, which is what makes this worth a record
@@ -105,7 +105,7 @@ either a lower or an upper bound without knowing which paths ran.
 
 Window: from `connection.rs:209` to the endpoint thread reaching
 `ring_transport.rs:276`. Bounded by how quickly `run_endpoint` observes the
-`discard` token, which is one loop pass — but only if the loop reaches the
+`discard` token, which is one loop pass - but only if the loop reaches the
 `select!` at `:441-474`. The `received == true` branch (`:415-421`) skips that
 `select!` entirely, so a peer publishing continuously extends the window. That
 coupling is the subject of
@@ -163,12 +163,12 @@ binary.
   about `record_reclamation` needs the connection's context. Moving it would make
   the count release-witnessed by construction and would also fix the
   skipped-increment shape, because every path that admits a charge spawns the
-  thread that would then count it — except the `spawn` failure path at
+  thread that would then count it - except the `spawn` failure path at
   `:279-281`, which admits and releases without a thread at all.
 - Missing evidence: whether "reclamation" is intended to mean "charge returned"
   or "connection fully torn down". `docs/shm-transport.md:49` couples them
-  — "Joined endpoint teardown returns its admission charge when the mapping is
-  unmapped" — which supports the charge reading. `:68`'s "completed reclamation
+  - "Joined endpoint teardown returns its admission charge when the mapping is
+  unmapped" - which supports the charge reading. `:68`'s "completed reclamation
   count" does not disambiguate.
 - Conclusion: resolved on feasibility, unresolved on semantics. If reclamation
   means charge return, the move is correct and closes both shapes. If it means

@@ -47,7 +47,7 @@ Err(ReadClose::CleanEof)
 
 `ReadExit::Peer` takes the silent-retirement arm at `connection.rs:315-318`:
 `gen.token.cancel()` then `gen.writer.discard()`. The comment at
-`connection.rs:309-314` states the intent — "a client that sent a corrupt frame
+`connection.rs:309-314` states the intent - "a client that sent a corrupt frame
 never receives terminals or a Goodbye after the close decision (protocol §6.3)".
 That is correct handling for a peer-caused close. It is applied here to a
 host-caused one.
@@ -55,15 +55,15 @@ host-caused one.
 **Cause erasure inside `publish_one`.** `publish_one` returns
 `Result<(), ()>` (`:560-565`). Four distinct causes collapse into that unit:
 
-1. `reserve_until` deadline expiry — `:607-609` and `:623-625`, mapping
+1. `reserve_until` deadline expiry - `:607-609` and `:623-625`, mapping
    `ProducerError::Deadline` (`ring.rs:1880`) to `()`.
-2. Wire-header/length disagreement — `commit_reservation` rejects it at
+2. Wire-header/length disagreement - `commit_reservation` rejects it at
    `ring.rs:1585-1593` with `ProducerError::WireHeaderMismatch`, mapped to `()`
    at `:615` and `:628`.
-3. A panic in the direct serializer — caught by the inner `catch_unwind` at
+3. A panic in the direct serializer - caught by the inner `catch_unwind` at
    `:584-587` and turned into `Err(())` by the `!matches!(result, Ok(Ok(())))`
    test at `:588-590`.
-4. `ReservationWriter` exhaustion — `:635-643` produces
+4. `ReservationWriter` exhaustion - `:635-643` produces
    `io::ErrorKind::WriteZero`, which `publish_direct` maps to `()` at `:614`.
 
 The erasure happens at `:588-590`, before `run_endpoint` ever sees it.
@@ -122,10 +122,10 @@ There is one ordering subtlety worth stating. `run_endpoint` cancels
 `queue.retired` and `root` *before* returning, so the `FrameSender` is retired
 (`frame_channel.rs:755-757`) and the generation token is cancelled before the
 engine reads `CleanEof`. So the engine's `ReadExit::Peer` arm finds
-`gen.token` already cancelled. That does not change the classification — the
+`gen.token` already cancelled. That does not change the classification - the
 `ReadExit::HostCancelled if !gen.token.is_cancelled()` guard at
 `connection.rs:298` is not reached because the cause was `CleanEof`, not
-`Cancelled` — but it does mean a host that wanted to distinguish the two cases
+`Cancelled` - but it does mean a host that wanted to distinguish the two cases
 already has the signal available in `gen.token`.
 
 Dependencies: Part 2a's
@@ -190,7 +190,7 @@ not a check.
 - Findings: both comments explain the *scheduling* rationale and neither
   mentions error reporting. `:535-537` returning `Corrupt` looks like a
   consequence of being inside a function that already returns
-  `Result<bool, ReadClose>` — the ergonomic path — rather than a deliberate
+  `Result<bool, ReadClose>` - the ergonomic path - rather than a deliberate
   classification choice. `:479-484` is in a function returning `()`, where
   sending the close requires an extra `.await`, and the code takes the shorter
   route.

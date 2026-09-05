@@ -5,7 +5,7 @@
 The write-completion hook is the one place where arbitrary generation-owned code
 runs inside the shared writer task. Reading `write_frames` to see how it is
 invoked showed the call has no unwind guard, while the statement fifty lines
-above it — in the same loop body — does. That asymmetry is what makes this a
+above it - in the same loop body - does. That asymmetry is what makes this a
 policy gap rather than an oversight in isolation.
 
 ## Evidence trail
@@ -41,16 +41,16 @@ poisoned lock. All five non-test sites: `connection.rs:505` (the read loop's Pon
 path), `:1357` (the liveness loop's wake computation), `:1371` (the expiry scan),
 `:1381` (the clear-or-skip block), `:1403` (the insert). So a single poisoning
 converts the read loop and the liveness loop into panicking tasks for that
-generation, and the catalog's list — read loop, wake computation, expiry scan,
-insert — is exact. Contrast `connection.rs:737`, where `health_snapshot` is read
+generation, and the catalog's list - read loop, wake computation, expiry scan,
+insert - is exact. Contrast `connection.rs:737`, where `health_snapshot` is read
 with `unwrap_or_else(std::sync::PoisonError::into_inner)`: the crate does have a
 poison-tolerant idiom, and the `pings` lock does not use it.
 
 The skipped retirement signal is confirmed. `queue.retired.cancel()` sits at
 `tcp_frame_channel.rs:402`, *after* the loop. An unwind out of `:394` leaves the
 loop by unwinding, so `:402` never executes. `SenderQueue`
-(`frame_channel.rs:838-854`) has no `Drop` impl — the only `Drop` in that file is
-`ReceiveLease` at `:381` — so nothing cancels `retired` during the unwind.
+(`frame_channel.rs:838-854`) has no `Drop` impl - the only `Drop` in that file is
+`ReceiveLease` at `:381` - so nothing cancels `retired` during the unwind.
 Consequences for senders: `is_retired()` (`frame_channel.rs:828-830`) keeps
 returning false, and `send_ticket_before`'s biased first arm on
 `self.retired.cancelled()` (`:814`) never fires, so admission falls through to
@@ -61,14 +61,14 @@ closed channel," verified.
 The comparable guarded boundaries, so the record can state this is the gap in an
 otherwise consistent policy. All three the catalog names exist:
 
-- **Provider preflight** — `connection.rs:907-913`: `catch_unwind` wrapping
+- **Provider preflight** - `connection.rs:907-913`: `catch_unwind` wrapping
   `redact_sync(|| provider.preflight(..))`, defaulting to
   `PreflightEligibility::StaticallyOmitted` on unwind.
-- **Prepare worker** — `transport_provider.rs:243-248`: `catch_unwind` wrapping
+- **Prepare worker** - `transport_provider.rs:243-248`: `catch_unwind` wrapping
   `redact_sync(|| provider.prepare(&ctx))`, defaulting to
   `Err(ProviderFailure::Unavailable)`, with a comment stating a panicking gate
   is one failed preparation, not a dead worker.
-- **Writer's owned-conversion** — `tcp_frame_channel.rs:348-349`, above.
+- **Writer's owned-conversion** - `tcp_frame_channel.rs:348-349`, above.
 
 Three more exist beyond the catalog's list: `shm_provider.rs:351` (endpoint
 panic, so the thread can take the quarantine branch), `shm_provider.rs:645`,
@@ -94,7 +94,7 @@ the liveness hook takes a lock or does arithmetic.
    loop at `connection.rs:296` and Pings carry the hook at `:1455`.
 2. The writer completes a Ping's bytes and calls `written(completed_at)` at
    `tcp_frame_channel.rs:394`.
-3. The hook takes the `pings` lock at `connection.rs:1427` and panics — the
+3. The hook takes the `pings` lock at `connection.rs:1427` and panics - the
    catalog's mechanism is the arithmetic at `:1434-1435`.
 4. The unwind poisons `pings` and leaves `write_frames` without reaching
    `:402`, so `retired` stays uncancelled and the mpsc receiver drops with the
@@ -106,7 +106,7 @@ the liveness hook takes a lock or does arithmetic.
    completions where they are not.
 6. Because the panic originates in the writer task rather than inside a handler
    callback, it never passes through `panic_boundary::redact`, so its payload
-   prints unredacted — the catalog's second impact clause.
+   prints unredacted - the catalog's second impact clause.
 
 ## Timing windows and dependencies
 
@@ -117,18 +117,18 @@ reachable today: the arithmetic at `:1434-1435` guards `duration_since` with
 `answered_at >= completed_at`, and tokio's `Instant::duration_since` saturates
 rather than panicking in any case, so no current hook has an operation that must
 overflow. That is why the catalog's confidence is high on mechanism and medium on
-whether a hook can panic — and why this is a hardening property. The mechanism
+whether a hook can panic - and why this is a hardening property. The mechanism
 is one edit away from live: any future hook that indexes, unwraps, or asserts
 under the `pings` lock inherits the whole failure path.
 
 ## What a test must construct
 
 An injected panic inside a completion hook while the `pings` lock is held, then
-progress assertions on the two consumers — the catalog's check. The hook is not
+progress assertions on the two consumers - the catalog's check. The hook is not
 injectable from outside the crate, so this is an in-crate test that builds an
 `OutboundFrame` with `written: Some(Box::new(|_| { let _g = gen.pings.lock(); panic!() }))`
 and drives it through a real `write_frames`, not the `#[cfg(test)]`
-`spawn_writer` helper — `spawn_writer` is fine here, since the hook path at
+`spawn_writer` helper - `spawn_writer` is fine here, since the hook path at
 `:393-395` is identical, and it avoids standing up a full connection.
 
 The oracle is that the read loop's Pong path and the liveness loop still make
@@ -144,8 +144,8 @@ gap.
 
 ## Investigation log
 
-The catalog records no open questions. The verification duties — confirm the hook
-is invoked with no unwind guard, and list the comparable guarded boundaries —
+The catalog records no open questions. The verification duties - confirm the hook
+is invoked with no unwind guard, and list the comparable guarded boundaries -
 both resolved.
 
 - Sources examined: `tcp_frame_channel.rs:303-404`, `:334-336`, `:348-359`,

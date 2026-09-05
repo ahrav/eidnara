@@ -37,8 +37,8 @@ verified here, not assumed.
    `:132-134`, `:178-179`, `:187`, `:190`. The named binaries are `client`,
    `lifecycle`, `shm_failure_modes`, `shm_soak`, plus `--doc`. So
    `tests/dispatch.rs`, `tests/routing.rs`, `tests/handler_contract.rs`, and
-   `tests/composite_routing.rs` — the four suites that carry almost every
-   existing check in this sub-part — run locally only. Grep across all five
+   `tests/composite_routing.rs` - the four suites that carry almost every
+   existing check in this sub-part - run locally only. Grep across all five
    workflow files returns no hit for any of those four names. Every
    `Existing check:` below states this where it applies.
 
@@ -99,7 +99,7 @@ Two structural asymmetries against the routed chain:
 
 ### Cancel
 
-`connection.rs:470-477`: structural shape only — nonzero channel, nonzero
+`connection.rs:470-477`: structural shape only - nonzero channel, nonzero
 epoch, nonzero correlation, else silent generation close. No permit, no charge,
 no terminal. `handle_cancel` (`dispatch.rs:1489-1496`) is a map lookup that
 cancels only an unsettled entry.
@@ -255,91 +255,91 @@ below by nothing the host can witness.
 
 Every line reference below was read at `e447c927`.
 
-1. `dispatch.rs:34-59` — `Settlement` is three fields: `won`, an async `order`
+1. `dispatch.rs:34-59` - `Settlement` is three fields: `won`, an async `order`
    mutex, and `streamed`. The `swap` at `:408` is the sole arbiter.
-2. `dispatch.rs:79-95` — `MAX_TERMINAL_CODE_LEN = 128` and
+2. `dispatch.rs:79-95` - `MAX_TERMINAL_CODE_LEN = 128` and
    `MAX_TERMINAL_MESSAGE_LEN = 4096`. `bounded_terminal_error` replaces an
    over-cap pair wholesale with `internal_error` and drops `retry_after_ms`.
    The doc comment at `:75-78` states the reason: diagnostics are held across
    the egress wait without a byte charge.
-3. `dispatch.rs:1210-1218` — the same two caps are re-applied by hand to a
+3. `dispatch.rs:1210-1218` - the same two caps are re-applied by hand to a
    handler `BindOutcome::Reject`, with a different substitute message. Two copies
    of one policy.
-4. `dispatch.rs:101-124`, `:228-245` — `escaped_json_len` models `serde_json`'s
+4. `dispatch.rs:101-124`, `:228-245` - `escaped_json_len` models `serde_json`'s
    escaping exactly so the byte charge is taken before the body is materialized.
    `debug_assert_eq!` at `:212` is the only guard, and `host-runtime` inline tests do
    not run in CI, so the model has no release-build check.
-5. `dispatch.rs:143-168` — `charge_frame_or_cancel` is `biased` on request
+5. `dispatch.rs:143-168` - `charge_frame_or_cancel` is `biased` on request
    cancellation, then generation cancellation, then the budget wait. A budget
    wait that outlives the writer's admission deadline **cancels the generation**
    (`:163`), converting one slow frame into a connection close.
-6. `dispatch.rs:195-197`, `:277-282`, `:323-325` — every emit entry rechecks
+6. `dispatch.rs:195-197`, `:277-282`, `:323-325` - every emit entry rechecks
    `gen.writer.is_retired() || gen.token.is_cancelled()` before doing work.
-7. `dispatch.rs:377-380`, `:429-431`, `:443`, `:458`, `:471`, `:484`, `:498` —
+7. `dispatch.rs:377-380`, `:429-431`, `:443`, `:458`, `:471`, `:484`, `:498` -
    seven distinct sites where an emission failure answers by cancelling the
    generation token. A per-request failure is escalated to a connection close.
-8. `dispatch.rs:613-641` — `emit_rejection`. On `busy_rejects` exhaustion
+8. `dispatch.rs:613-641` - `emit_rejection`. On `busy_rejects` exhaustion
    (`:629`) it cancels the token **and** calls `gen.writer.discard()` (`:638`),
    which drops the queued frames of every other correlation on the generation.
    The comment at `:630-636` names the tradeoff and says the unemitted terminals
    "become outcome_unknown".
-9. `dispatch.rs:1058-1061` — the non-panic join-error arm returns without
+9. `dispatch.rs:1058-1061` - the non-panic join-error arm returns without
    settling. This is the only routed exit with no terminal and no generation
    cancellation.
-10. `dispatch.rs:1031-1034` — the handler `Response` guard is
+10. `dispatch.rs:1031-1034` - the handler `Response` guard is
     `body.len() <= MAX_BODY_LEN`. There is no lower bound and no content check.
     `OutputBuffer::len()` (`handler.rs:362-366`) returns the *declared*
     `exact_len` for a direct output and the *written* length for an owned one.
-11. `handler.rs:381-396` — `extend_from_slice` and `resize` both refuse to grow
+11. `handler.rs:381-396` - `extend_from_slice` and `resize` both refuse to grow
     past `max_len` and both refuse outright when `direct.is_some()`. A handler
     that reserves and never writes is a supported, silent state.
-12. `dispatch.rs:326-350` with `ring_transport.rs:580-593` — a direct output's
+12. `dispatch.rs:326-350` with `ring_transport.rs:580-593` - a direct output's
     serializer runs inside the writer, long after `settle` returned. A short or
     long write reaches `reservation.commit(body_len)`, which rejects on
     `cursor != body_len` (`shm-transport/src/backend/ring.rs:1363-1367`,
     `ProducerError::Underfill`).
-13. `ring_transport.rs:564-566` — a failed publication returns `Err` from
+13. `ring_transport.rs:564-566` - a failed publication returns `Err` from
     `publish_one` without running the `written` hook and without touching the
     settlement. Part 2b established that this presents to the peer as a clean
     close.
-14. `dispatch.rs:844-855` versus `:1112-1122` — the same shutdown condition,
+14. `dispatch.rs:844-855` versus `:1112-1122` - the same shutdown condition,
     two different codes: `CODE_SERVER_BUSY` for routed, `CODE_TARGET_UNAVAILABLE`
     for `route.open`.
-15. `dispatch.rs:770-779` — the shutdown-commit watchdog is a bare
+15. `dispatch.rs:770-779` - the shutdown-commit watchdog is a bare
     `tokio::spawn`, not `spawn_tracked` and not in `gen.read_tasks`. It is the
     only spawn in this sub-part outside the host's task tracker.
-16. `dispatch.rs:1348-1372` — route close is grace, then abort, then a second
+16. `dispatch.rs:1348-1372` - route close is grace, then abort, then a second
     bounded wait; a tracker that still will not drain trips the fatal latch and
     returns `false` so route-gone never runs beside live request code.
-17. `dispatch.rs:1374-1380` — `settle_route_work` removes the pending keys it
+17. `dispatch.rs:1374-1380` - `settle_route_work` removes the pending keys it
     collected, "Aborted tasks never removed their own pending entries".
     `force_close_all_routes` (`:1421-1452`) performs no equivalent sweep.
-18. `routing.rs:294-320` — `register_dispatch` is the linearization point. It
+18. `routing.rs:294-320` - `register_dispatch` is the linearization point. It
     checks `inner.accepting` first (`:305`), so the shutdown freeze and dispatch
     admission share one lock.
-19. `routing.rs:317` — `occupant.aborts.retain(|abort| !abort.is_finished())`
+19. `routing.rs:317` - `occupant.aborts.retain(|abort| !abort.is_finished())`
     prunes only on the dispatch path that grows the list. A route that stops
     receiving requests retains its last handles until close.
-20. `routing.rs:184` — `unreachable!("bind completion found route in {state:?}")`
-    and `routing.rs:441-452` — `expect_occupant` panics with "registry lost
+20. `routing.rs:184` - `unreachable!("bind completion found route in {state:?}")`
+    and `routing.rs:441-452` - `expect_occupant` panics with "registry lost
     route it owns". Two registry invariants enforced by panic, inside a
     `Mutex`, so tripping either poisons the registry lock for the process.
-21. `composite.rs:277-287` — an unmapped route in `handle` returns
+21. `composite.rs:277-287` - an unmapped route in `handle` returns
     `RequestOutcome::error(CODE_INTERNAL_ERROR, ...)`. This is the one
     handler-side failure in the sub-part that is correctly shaped as an error.
-22. `composite.rs:359-389` — the composite's `shutdown` collects child failures
+22. `composite.rs:359-389` - the composite's `shutdown` collects child failures
     and re-raises them as a single `panic!`, deliberately, so the runtime
     classifies the callback as failed.
-23. `control.rs:300-319` — classification runs only after every bound held, so a
+23. `control.rs:300-319` - classification runs only after every bound held, so a
     hostile body cannot pick its rejection code to probe the catalog cheaply.
-24. `control.rs:397-410`, `:441-461` — the catalog is serialized once at startup
+24. `control.rs:397-410`, `:441-461` - the catalog is serialized once at startup
     through a `CappedWriter`, so `catalog.list` allocates nothing per request
     and cannot be used to amplify.
-25. `config.rs:199-218` — `HostTiming` has seven fields. None of them bounds a
+25. `config.rs:199-218` - `HostTiming` has seven fields. None of them bounds a
     request's lifetime. `frame_deadline`, `route_close_budget`, and
     `lifecycle_callback_deadline` bound frames, closes, and lifecycle callbacks
     respectively; the handler callback itself is unbounded.
-26. `handler.rs:552-557` — the trait doc states the failure policy: a `handle`
+26. `handler.rs:552-557` - the trait doc states the failure policy: a `handle`
     panic maps to one `internal_error` terminal, and `initialize`, `bind`,
     `route_gone`, and `health` overruns are host-fatal. The code matches.
 
@@ -350,13 +350,13 @@ Every line reference below was read at `e447c927`.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/dispatch.rs:358` and `:453` race cancel against
+Exercised: partial - `tests/dispatch.rs:358` and `:453` race cancel against
 completion and assert one terminal; neither binary runs in CI, and neither
 races route close or generation teardown into the same settlement.
 Guarantee: For one routed correlation, at most one of `Response`, `Error`, or
 `StreamEnd` reaches the writer queue, whichever of handler completion,
 cancellation, route close, and generation teardown arrives first.
-Check: `always` — over every correlation observed on a generation, the count of
+Check: `always` - over every correlation observed on a generation, the count of
 terminal-typed frames carrying that `(channel, epoch, corr)` is at most one, and
 no `StreamData` for that correlation follows its terminal. `always` because the
 arbiter is evaluated on every settlement attempt, not on an optional path.
@@ -368,7 +368,7 @@ Required faults and enabling state: A live route with a handler that both
 streams and returns a unary `Response`, plus a client `Cancel` and a route
 `Goodbye` delivered inside the handler's execution window. Three settlement
 claimants must be in flight at once.
-Confidence: high — [evidence](evidence/req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame.md).
+Confidence: high - [evidence](evidence/req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame.md).
 Verified the `swap` is the only mutator of `won`, that all five emission sites
 take the order lock, and that the `streamed` store precedes lock release.
 Existing check: `tests/dispatch.rs:358` `cancel_and_completion_settle_exactly_once`,
@@ -385,13 +385,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test distinguishes a queued terminal from a delivered
+Exercised: not yet - no test distinguishes a queued terminal from a delivered
 one for a routed correlation, because the host exposes no signal to distinguish
 them.
 Guarantee: A routed terminal's logical settlement records only that the frame
 entered the writer queue; the host retains no evidence that any routed terminal
 reached the peer.
-Check: `always` — for every routed terminal emission, the `OutboundFrame`
+Check: `always` - for every routed terminal emission, the `OutboundFrame`
 carries `written: None`, so host-side acknowledged effects are identically zero
 while attempted effects equal the settlement count. Per METHOD's effect
 accounting, assert observed client terminals at most the host's settlement count
@@ -403,7 +403,7 @@ inside the endpoint thread (`ring_transport.rs:536-578`).
 Required faults and enabling state: A generation whose writer queue holds a
 settled terminal when the generation is cancelled or the publication fails. The
 settlement is already recorded; the frame never leaves.
-Confidence: high — [evidence](evidence/req-a-a-routed-terminal-carries-no-delivery-acknowledgement.md).
+Confidence: high - [evidence](evidence/req-a-a-routed-terminal-carries-no-delivery-acknowledgement.md).
 Enumerated every `written:` construction in the sub-part: three hooks exist, all
 on control or teardown frames, none on a routed terminal.
 Existing check: none.
@@ -420,13 +420,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test drives a serializer that writes the wrong number
+Exercised: not yet - no test drives a serializer that writes the wrong number
 of bytes, and none asserts what the client observes when a settled terminal
 fails to publish.
 Guarantee: When a settled terminal fails to publish, the settling path has
 already returned success, the request is recorded as settled, and the client's
 only signal is a clean connection close.
-Check: `always` — whenever `publish_one` returns `Err` for a frame whose
+Check: `always` - whenever `publish_one` returns `Err` for a frame whose
 correlation has `won == true`, assert that no `Error` terminal for that
 correlation is emitted afterwards and that the generation's close carries no
 distinguishing reason. `always` rather than `always-or-unreached` because the
@@ -440,7 +440,7 @@ Required faults and enabling state: A handler that calls
 match, or a ring reservation that fails under contention.
 `reservation.commit(body_len)` then returns `ProducerError::Underfill`
 (`shm-transport/src/backend/ring.rs:1363-1367`).
-Confidence: high — [evidence](evidence/req-a-a-response-publication-failure-never-reaches-the-settling-path.md).
+Confidence: high - [evidence](evidence/req-a-a-response-publication-failure-never-reaches-the-settling-path.md).
 Traced the direct-output path from `dispatch.rs:332-349` through
 `ring_transport.rs:580-593` into `commit`, and confirmed `publish_one` discards
 the `written` hook on failure without touching the settlement.
@@ -461,14 +461,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/dispatch.rs:665`
+Exercised: partial - `tests/dispatch.rs:665`
 `oversized_handler_output_cannot_corrupt_framing` covers the upper bound only.
 No test constructs a handler that reserves output and returns `Response`
 without writing.
 Guarantee: The dispatch layer validates a handler `Response` against the frame
 size ceiling and nothing else, so a handler that reserved output and wrote
 nothing produces a successful zero-length `Response` terminal.
-Check: `always` — for every `RequestOutcome::Response` accepted at
+Check: `always` - for every `RequestOutcome::Response` accepted at
 `dispatch.rs:1031`, the only predicate applied is
 `body.len() <= MAX_BODY_LEN`; assert there is no lower-bound, emptiness, or
 declared-versus-written comparison anywhere on the path to
@@ -478,7 +478,7 @@ Required faults and enabling state: A handler that reserves an `OutputBuffer`,
 takes an early error return without writing, and still returns
 `RequestOutcome::Response`. Parts 4c and 4d found handlers returning success
 without writing, on the other side of this boundary.
-Confidence: high — [evidence](evidence/req-a-a-handler-response-is-length-checked-and-never-content-checked.md).
+Confidence: high - [evidence](evidence/req-a-a-handler-response-is-length-checked-and-never-content-checked.md).
 Confirmed `encode_owned_frame` (`wire.rs:571-602`) accepts an empty body and
 that `decode`'s pure-header rule (`wire.rs:340`) covers only Cancel, Ping,
 Pong, and Goodbye, so a zero-length `Response` is a well-formed frame.
@@ -497,12 +497,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/dispatch.rs:295` and `:271` assert the terminal on
+Exercised: partial - `tests/dispatch.rs:295` and `:271` assert the terminal on
 the healthy path. Nothing exercises the exhaustion path.
 Guarantee: Every pre-dispatch rejection either enters the writer queue or the
 generation is retired with its queue discarded; no rejection is silently
 dropped while the generation stays live.
-Check: `always` — on every `emit_rejection` call, assert either that a terminal
+Check: `always` - on every `emit_rejection` call, assert either that a terminal
 frame for the correlation is queued, or that `gen.token.is_cancelled()` and
 `gen.writer` is discarding. `always` because the disjunction must hold at every
 call, and the second disjunct is the code's actual answer past the bound
@@ -514,7 +514,7 @@ Required faults and enabling state: A saturated egress byte budget plus a client
 pipelining more than 32 requests that fail admission. Both are reachable: the
 budget saturates in `tests/dispatch.rs:788`, and admission failure needs only a
 closed route or an exhausted permit pool.
-Confidence: high — [evidence](evidence/req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired.md).
+Confidence: high - [evidence](evidence/req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired.md).
 Verified the permit is acquired before the spawn on both call paths and that the
 exhaustion arm cancels and discards rather than awaiting inline.
 Existing check: `tests/dispatch.rs:271` `an_unknown_route_is_refused_with_zero_dispatch`,
@@ -533,14 +533,14 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/routing.rs:396` and `:570`, and
+Exercised: partial - `tests/routing.rs:396` and `:570`, and
 `tests/handler_contract.rs:229`, cover the answering exits. No test drives a
 bind panic, a bind deadline overrun, or a close that races a bind through
 `open_route`.
 Guarantee: A `route.open` correlation receives exactly one terminal unless the
 host has tripped its fatal latch or the route's close already won, in which
 case it receives none and the client learns only from its own deadline.
-Check: `always` — on every `open_route` return, assert either that one terminal
+Check: `always` - on every `open_route` return, assert either that one terminal
 frame carries the control correlation, or that `shared.fatal` is tripped, or
 that the registry reports the handle in `Closing`. `always` because the
 disjunction must hold on all seven exits.
@@ -553,7 +553,7 @@ panics or blocks. Parts 4c and 4d found handler panics, so this is not
 hypothetical. For the third, a generation teardown or forced drain concurrent
 with an in-flight bind; `routing.rs:408-413` marks mid-bind routes
 close-requested rather than draining them.
-Confidence: high — [evidence](evidence/req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining.md).
+Confidence: high - [evidence](evidence/req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining.md).
 Enumerated all seven exits, and confirmed via `runtime.rs:186-207` that both
 lifecycle-failure variants trip the fatal latch before returning.
 Existing check: `tests/routing.rs:396` `rejected_bind_never_publishes_and_still_reports_route_gone`,
@@ -578,12 +578,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test sends a `route.open` and a routed request into the
+Exercised: not yet - no test sends a `route.open` and a routed request into the
 same draining host and compares the two codes.
 Guarantee: The shutdown admission fence is one condition evaluated at two call
 sites, and the two sites answer with different error codes carrying different
 client retry rules.
-Check: `always` — whenever `shared.draining` is set or `shared.shutdown` is
+Check: `always` - whenever `shared.draining` is set or `shared.shutdown` is
 cancelled, assert that every routed request receives `server_busy` and every
 `route.open` receives `target_unavailable`, and record that both are attributed
 to the same cause. `always` because the fence is evaluated on every admission.
@@ -595,7 +595,7 @@ commit point and the fence coincide.
 Required faults and enabling state: An authenticated `host.shutdown`, or an
 external shutdown signal, with a client pipelining both a routed request and a
 `route.open` behind it.
-Confidence: high — [evidence](evidence/req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes.md).
+Confidence: high - [evidence](evidence/req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes.md).
 Both call sites read; protocol §10.2's two retry rows compared.
 Existing check: none.
 Impact: Protocol §10.2 tells a client to retry `target_unavailable` "with new
@@ -613,13 +613,13 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/dispatch.rs:295` parks a handler in a "hang" mode to
+Exercised: partial - `tests/dispatch.rs:295` parks a handler in a "hang" mode to
 occupy a permit, so the state is constructed; nothing asserts the absence of a
 host-side bound or measures how long the permits stay held.
 Guarantee: A campaign reaches the state where an admitted request's handler has
 been executing longer than every deadline the host configures, with its route
 and generation still live and no `Cancel` outstanding.
-Check: `sometimes` — at least once per campaign, observe a request whose
+Check: `sometimes` - at least once per campaign, observe a request whose
 handler has held its task and pending permits for longer than
 `max(frame_deadline, lifecycle_callback_deadline, route_close_budget)` while
 `route_tracker` still reports the route live and the pending entry is unsettled.
@@ -634,7 +634,7 @@ Required faults and enabling state: A handler whose `handle` blocks on an
 external dependency with no internal timeout. Protocol §11 assigns the
 30-second request deadline to the *client*, so a client that dies without
 sending `Cancel` leaves the host holding the permits indefinitely.
-Confidence: high — [evidence](evidence/req-a-a-handler-outliving-every-host-deadline-is-reached.md).
+Confidence: high - [evidence](evidence/req-a-a-handler-outliving-every-host-deadline-is-reached.md).
 Read all seven `HostTiming` fields and every `timeout`/`timeout_at` call in
 `dispatch.rs`; none wraps the handler callback.
 Existing check: `tests/dispatch.rs:295` constructs the state incidentally.
@@ -654,14 +654,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/dispatch.rs:835`
+Exercised: partial - `tests/dispatch.rs:835`
 `closing_a_route_settles_its_admitted_work` and `tests/routing.rs:435` cover
 close-then-request. No test lets a handler complete *after* its generation
 retired and asserts nothing is emitted.
 Guarantee: A handler result that arrives after its generation was cancelled or
 retired, or after its correlation was settled by another claimant, produces no
 frame on any generation.
-Check: `always` — at every emission entry point, assert that
+Check: `always` - at every emission entry point, assert that
 `gen.writer.is_retired() || gen.token.is_cancelled()` implies no frame is
 constructed, and that `settlement.won` already true implies no frame is
 constructed. `always` because the recheck runs unconditionally on each of the
@@ -676,7 +676,7 @@ free-standing root, not a child of the generation token
 Required faults and enabling state: A handler that completes while its
 generation is being torn down, with the terminal's byte charge acquired before
 the cancellation and consumed after it.
-Confidence: high — [evidence](evidence/req-a-no-emission-reaches-a-retired-generation-or-a-settled-correlation.md).
+Confidence: high - [evidence](evidence/req-a-no-emission-reaches-a-retired-generation-or-a-settled-correlation.md).
 Verified all four entry points recheck, and that `StreamSink::reserve` rechecks
 on both sides of the await so a charge granted before cancellation cannot be
 used after it.
@@ -694,7 +694,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/dispatch.rs:976` and `:1074` prove the two classes
+Exercised: partial - `tests/dispatch.rs:976` and `:1074` prove the two classes
 cannot consume each other; `tests/handler_contract.rs:323` and `:636` prove the
 startup checked-sum. No test proves the permits are acquired *before* the spawn
 rather than inside it.
@@ -702,7 +702,7 @@ Guarantee: Concurrent handler callbacks are bounded by the class-scoped
 `task_permits` pool, concurrent unsettled requests by the class-scoped
 `pending_permits` pool, both acquired non-blockingly on the read loop before any
 task is spawned, and each class is unreachable from the other.
-Check: `always` — assert that live handler callbacks never exceed the class's
+Check: `always` - assert that live handler callbacks never exceed the class's
 task-permit count, that unsettled requests never exceed its pending-permit
 count, and that both acquisitions are `try_acquire_owned` on the reader so
 exhaustion rejects instead of queueing. `always` because both bounds must hold
@@ -715,7 +715,7 @@ capacity.
 Required faults and enabling state: A client pipelining more requests than
 `max_handler_tasks` on one route, plus a slow-reading peer so terminals queue
 and the pending count exceeds the task count.
-Confidence: high — [evidence](evidence/req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs.md).
+Confidence: high - [evidence](evidence/req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs.md).
 Verified pool construction at `runtime.rs:905-912`, class selection at
 `dispatch.rs:873-879` from `route_tracker`'s stored class, and Broca's live
 96/96 reserved declaration.
@@ -737,12 +737,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test inspects `gen.pending` after a forced close, and
+Exercised: not yet - no test inspects `gen.pending` after a forced close, and
 the map is private to the crate.
 Guarantee: Every entry inserted into `gen.pending` is removed either by the
 outer dispatch task on each of its exits, or by the route close that aborted
 that task.
-Check: `always` — after a generation quiesces, assert `gen.pending` is empty.
+Check: `always` - after a generation quiesces, assert `gen.pending` is empty.
 `always` on an emptiness postcondition rather than `unreachable` on a leak site,
 because a stranded entry is a forbidden *state* with no dedicated detection
 point, which METHOD's first coverage rule assigns to `always(!X)`.
@@ -755,7 +755,7 @@ never removed their own pending entries". `force_close_all_routes`
 Required faults and enabling state: A forced shutdown past the drain deadline
 with requests in flight, so `force_close_all_routes` aborts outer tasks whose
 keys no `settle_route_work` collected.
-Confidence: medium — [evidence](evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md).
+Confidence: medium - [evidence](evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md).
 The sweep asymmetry is verified by reading both functions. What I could not
 verify is whether the forced path is always followed by the whole
 `GenerationCore` being dropped, which would make the leak unobservable; that
@@ -776,13 +776,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/routing.rs:212` and `:98` exercise the semantic
+Exercised: partial - `tests/routing.rs:212` and `:98` exercise the semantic
 path. Part 2a holds `oversize-control-drain-work-is-bounded-without-ingress-budget`
 for the oversize path. Nothing exercises all three under one saturation.
 Guarantee: A channel-0 rejection is bounded by exactly one of three different
 counters depending on why it was rejected, and only one of the three can prove
 its terminal reached the peer.
-Check: `always` — classify every channel-0 rejection emission by path and
+Check: `always` - classify every channel-0 rejection emission by path and
 assert the matching bound: semantic rejections by `pending_permits`, capacity
 rejections and oversize rejections by the per-generation `busy_rejects` count of
 32, and assert that only the oversize path attaches a `written` hook.
@@ -797,7 +797,7 @@ close (`connection.rs:391-400`).
 Required faults and enabling state: Concurrent floods of malformed control
 bodies, oversize control bodies, and requests past the pending-permit bound on
 one generation.
-Confidence: high — [evidence](evidence/req-a-three-control-rejection-paths-carry-three-different-bounds.md).
+Confidence: high - [evidence](evidence/req-a-three-control-rejection-paths-carry-three-different-bounds.md).
 All three call sites and both bounding counters read; `MAX_INFLIGHT_BUSY_REJECTS`
 confirmed as 32 at `connection.rs:42` and used at `:244`.
 Existing check: `tests/routing.rs:98` `unsupported_operations_leave_the_generation_usable`,
@@ -818,14 +818,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/dispatch.rs:1524` `diagnostic_limit_substitution_drops_retry_hint`
+Exercised: partial - `tests/dispatch.rs:1524` `diagnostic_limit_substitution_drops_retry_hint`
 is an inline unit test covering `bounded_terminal_error` only, and inline
 `host-runtime` tests do not run in CI. The `BindOutcome::Reject` copy of the same
 policy has no test.
 Guarantee: Handler-authored error codes and messages are truncated-by-
 substitution to at most 128 and 4,096 bytes before the terminal is held across
 any await, on both the request-error and bind-rejection paths.
-Check: `always` — assert that no `Terminal::Error` or bind rejection retained
+Check: `always` - assert that no `Terminal::Error` or bind rejection retained
 across an await carries a code above 128 bytes or a message above 4,096, and
 assert the two capping sites use identical limits. `always` because the cap is
 applied on every handler-authored diagnostic.
@@ -837,7 +837,7 @@ for up to `max_routes` concurrent binds.
 Required faults and enabling state: A handler returning a multi-megabyte error
 message, at pending-pool or route-pool saturation, with a slow-reading peer so
 the terminals queue.
-Confidence: high — [evidence](evidence/req-a-handler-authored-diagnostics-are-capped-before-any-egress-wait.md).
+Confidence: high - [evidence](evidence/req-a-handler-authored-diagnostics-are-capped-before-any-egress-wait.md).
 Both capping sites read and their limits compared: same constants, different
 substitute messages, and the bind path re-implements the comparison by hand
 instead of calling `bounded_terminal_error`.
@@ -853,12 +853,12 @@ Open questions: None.
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/dispatch.rs:295`, `:976`, and `:1074` saturate
+Exercised: partial - `tests/dispatch.rs:295`, `:976`, and `:1074` saturate
 pending capacity in both classes. Task-permit saturation and `busy_rejects`
 saturation are constructed by no test.
 Guarantee: A campaign reaches each of the five distinct saturation states this
 layer can enter, so no admission bound is asserted only in theory.
-Check: `sometimes` — at least once per campaign, observe each of: general
+Check: `sometimes` - at least once per campaign, observe each of: general
 pending exhaustion, general task exhaustion, reserved pending exhaustion,
 reserved task exhaustion, and per-generation `busy_rejects` exhaustion.
 `sometimes` and not `reachable` because a campaign can execute the
@@ -874,7 +874,7 @@ Required faults and enabling state: A shrunk configuration (`max_handler_tasks`
 and `max_pending_requests` lowered, as `tests/dispatch.rs:295` already does for
 pending), a parked handler, a saturated egress budget, and a client pipelining
 past each bound.
-Confidence: high — [evidence](evidence/req-a-both-admission-classes-and-the-rejection-bound-saturate.md).
+Confidence: high - [evidence](evidence/req-a-both-admission-classes-and-the-rejection-bound-saturate.md).
 Enumerated the five `try_acquire_owned` sites and confirmed which existing tests
 reach which.
 Existing check: `tests/dispatch.rs:295`, `:976`, `:1074` for pending in both
@@ -907,7 +907,7 @@ Each cites both sides. None is resolved in the doc's favour.
    client cannot see.
 3. **§12 step 1 and §8.3 do not name a code for `route.open` during shutdown.**
    §12 step 1 specifies `server_busy` for "a complete, valid routed `Request`";
-   §8.3 reserves `target_unavailable` for "route admission — `route.open`
+   §8.3 reserves `target_unavailable` for "route admission - `route.open`
    failures such as channel exhaustion". Shutdown is not channel exhaustion,
    yet `dispatch.rs:1117` emits `target_unavailable` for it. Two doc sections
    jointly under-specify the case the code decides.
@@ -930,8 +930,8 @@ Each cites both sides. None is resolved in the doc's favour.
    absolute deadline" to managed clients. `config.rs:199-218` shows `HostTiming`
    carries no request field. §11's rule that "per-stage timers MUST NOT
    multiply" a single owning deadline arguably *requires* this, but the
-   consequence — host handler-task capacity reclaimable only by handler
-   cooperation or client action — is stated nowhere.
+   consequence - host handler-task capacity reclaimable only by handler
+   cooperation or client action - is stated nowhere.
 7. **§8.3's finite-limits sentence lists "queued requests" and "aggregate
    buffered bodies" as separate bounds.** In the code the unsettled bound
    (`pending_permits`) and the buffered-byte bound (`ingress_budget`,

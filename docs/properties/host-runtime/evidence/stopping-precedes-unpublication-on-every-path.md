@@ -6,7 +6,7 @@ The catalog recorded the ordering itself as verified and flagged a separate gap:
 the phase write's error is discarded and teardown proceeds regardless. The lens
 is fault-injection on a path whose in-code justification covers a different
 failure than the one the code admits. `begin_stopping` documents itself as best
-effort because "a stale phase ages to `wedged` honestly" — that reasoning holds
+effort because "a stale phase ages to `wedged` honestly" - that reasoning holds
 for a successful write followed by a hang, not for a write that never landed.
 
 ## Evidence trail
@@ -14,8 +14,8 @@ for a successful write followed by a hang, not for a write that never landed.
 - `crates/host-runtime/src/lifecycle.rs:450-453` is `begin_stopping`. The order is
   correct and total: `write_lifecycle_record(LifecyclePhase::Stopping)` at `:451`
   then `remove_publication()` at `:452`. The doc comment at `:439-449` states
-  why — `classify` maps a held lock plus a `running` record with no publication
-  to `wedged` — and names the discarded error explicitly at `:448-449`.
+  why - `classify` maps a held lock plus a `running` record with no publication
+  to `wedged` - and names the discarded error explicitly at `:448-449`.
 - The discard is literal: `let _ = self.write_lifecycle_record(...)` at `:451`.
   No branch inspects the result, so `remove_publication` at `:452` runs whether
   the record now reads `stopping` or still reads `running`.
@@ -28,7 +28,7 @@ for a successful write followed by a hang, not for a write that never landed.
   `crates/host-runtime/src/instance.rs:393-401` is `Drop for InstanceGuard`: it calls
   `remove_publication()` at `:398` and `remove_lifecycle_record()` at `:399`,
   with no phase write. Its comment at `:395-397` says the graceful path already
-  removed the publication, making this a no-op — true when a `begin_stopping`
+  removed the publication, making this a no-op - true when a `begin_stopping`
   path ran first, and not true for a drop that reaches `Drop` without one.
 - The target of the ordering is `classify`'s running arm,
   `lifecycle.rs:1144-1157`: a `running` record with no publication returns
@@ -62,7 +62,7 @@ for a successful write followed by a hang, not for a write that never landed.
 ## Timing windows and dependencies
 
 The window opens at `lifecycle.rs:452` and closes when the guard drops and
-`remove_lifecycle_record` (`instance.rs:399`) unlinks the record — which is
+`remove_lifecycle_record` (`instance.rs:399`) unlinks the record - which is
 bounded by the drains this teardown is waiting on, and those are deliberately
 unbounded (`runtime.rs:286-290`). So the misreporting window is not short; it
 lasts as long as the drain. Nothing about the timing depends on an adversary.
@@ -92,8 +92,8 @@ direction is already covered by the two tests the catalog names.
   `instance.rs:342`, `:393-401`.
 - Findings: **Correction.** The catalog says "all five teardown paths route
   through it." There are four `begin_stopping` call sites (`runtime.rs:299`,
-  `:356`, `:382`, `:442`), and a fifth unpublication route —
-  `Drop for InstanceGuard` at `instance.rs:398` — does not demote the phase at
+  `:356`, `:382`, `:442`), and a fifth unpublication route -
+  `Drop for InstanceGuard` at `instance.rs:398` - does not demote the phase at
   all. It is documented as a no-op after a graceful path, which is correct only
   when one of the four ran first.
 - Missing evidence: whether a drop can reach `instance.rs:398` with a

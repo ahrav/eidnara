@@ -71,7 +71,7 @@ order, so when both a cancellation and a completed read are ready, cancellation
 wins deterministically.
 
 Without `biased`, tokio's `select!` picks a random ready branch. The read branch
-would then win about half the time, consume bytes, and let the loop continue —
+would then win about half the time, consume bytes, and let the loop continue -
 so a cancelled `read_exact` could still return `Ok(())`, and the host would
 admit and charge a frame on a generation that is already retiring. That is the
 failure the bias prevents, and it is adjacent to but not covered by
@@ -318,7 +318,7 @@ buffer case (O3), and nothing tests the helpers directly.
 comment at `:1965-1969` claims this can never fire: "The reservation covers the
 framing maximum and belongs to the reader alone... A refusal here therefore
 means the header declared more than the framing maximum, which
-`validate_inbound` has already rejected — it survives only as the structural
+`validate_inbound` has already rejected - it survives only as the structural
 guard for that invariant."
 
 Per rule 3 of `../../METHOD.md` that is a claim, not a fact. It checks out, on four
@@ -346,7 +346,7 @@ consequences: `drain_until`'s own doc claim at `client.rs:2010-2011` (the
 failure "is reported against a stream still aligned on a header boundary")
 describes a realignment no code depends on, and even if it fired,
 `read_active_frame` returns `Err(())` immediately after, which retires the
-connection at `client.rs:1897-1899` — so the realignment would be discarded
+connection at `client.rs:1897-1899` - so the realignment would be discarded
 anyway. It is a guard, correctly labelled as one, whose *value* is entirely as a
 tripwire for step 4 breaking.
 
@@ -363,13 +363,13 @@ they need one `../`. Every evidence file exists at
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no in-crate test cancels a token while any `frame_read`
+Exercised: not yet - no in-crate test cancels a token while any `frame_read`
 helper is running, so the precedence branch has no oracle anywhere. Integration
 shutdown tests execute it incidentally and assert nothing about it.
 Guarantee: When a bounded frame read's cancellation token is cancelled, the read
 returns `ReadStop::Cancelled` and performs no further read, even when input
 bytes are simultaneously available.
-Check: `always` — with the token cancelled and a full read's worth of bytes
+Check: `always` - with the token cancelled and a full read's worth of bytes
 already buffered on the reader, each of `read_exact`, `read_body`, and `drain`
 returns `Err(ReadStop::Cancelled)`, and the reader's unconsumed byte count is
 unchanged. `always`, not `always-or-unreached`: cancellation fires on every
@@ -386,7 +386,7 @@ Required faults and enabling state: a reader with bytes buffered and ready, plus
 a token cancelled before the poll. Both are constructible with
 `tokio::io::duplex`: write the bytes, cancel the token, then call the helper. No
 scheduler control is needed because the ordering is established before the call.
-Confidence: high — [evidence](evidence/cancellation-preempts-every-bounded-frame-read.md).
+Confidence: high - [evidence](evidence/cancellation-preempts-every-bounded-frame-read.md).
 Verified the `biased;` keyword and branch order at `frame_read.rs:47-49`,
 `:81-83`, `:111-113`; the production cancellation sources at `connection.rs:305`,
 `runtime.rs:1160`, and `runtime.rs:431`; and by exhaustive `awk` over both test
@@ -407,12 +407,12 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test passes a non-empty buffer, and no test asserts the
+Exercised: not yet - no test passes a non-empty buffer, and no test asserts the
 consumed-byte count rather than the buffer contents.
 Guarantee: A successful `read_body(reader, buf, len, ..)` consumes exactly `len`
 bytes from the reader: never more, so a pipelined next header cannot be read as
 this frame's body, and never fewer, so the stream stays aligned.
-Check: `always-or-unreached` — for an empty `buf`, assert both that
+Check: `always-or-unreached` - for an empty `buf`, assert both that
 `buf.len() == len` and that exactly `len` bytes were consumed from the reader,
 with a following pipelined header still intact and readable. For a non-empty
 `buf` holding `k` bytes, either the call consumes `len` bytes or it must not
@@ -431,7 +431,7 @@ Required faults and enabling state: no fault. Call `read_body` directly with a
 buffer pre-filled with `k` bytes, `0 < k < len`, and a reader holding `len` body
 bytes followed by a valid header. The observable is that the header no longer
 parses on the next read.
-Confidence: high — [evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md).
+Confidence: high - [evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md).
 The cap and the loop condition were read at `frame_read.rs:79-80`; the
 freshness of both callers' buffers was verified at `tcp_frame_channel.rs:217`
 and `client.rs:2003`; the `take` semantics were confirmed against tokio 1.53.1.
@@ -455,12 +455,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `read_body`'s EOF is proven by an exact-string assertion,
+Exercised: partial - `read_body`'s EOF is proven by an exact-string assertion,
 `read_exact`'s only by a wildcard that cannot discriminate the defect, and
 `drain`'s only through the `RejectedDrainFailed` mapping.
 Guarantee: A read returning zero bytes with the target unfilled terminates the
 helper as `ReadStop::Eof` rather than continuing the loop.
-Check: `always` — for each of the three helpers, close the peer mid-target and
+Check: `always` - for each of the three helpers, close the peer mid-target and
 assert the helper returns `Err(ReadStop::Eof)` promptly, well inside the
 deadline. Assert the deadline is *not* consumed, because that is what separates
 this property from a looping implementation: both return an error, and only the
@@ -476,7 +476,7 @@ Required faults and enabling state: a mid-target peer close, three times: after
 one header byte (`read_exact`), after a partial declared body (`read_body`), and
 after a partial drained body (`drain`). All three are one `drop(client)` on a
 `tokio::io::duplex` pair.
-Confidence: high — [evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md).
+Confidence: high - [evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md).
 Read the three `if read == 0` sites at `frame_read.rs:55-57`, `:89-91`,
 `:119-121`, and verified the non-empty-target guards at `:46`, `:109-110`. The
 `read_body` case needed dependency evidence, since `read_buf` has two other
@@ -503,13 +503,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — the host's obligation is structurally enforced by an
+Exercised: partial - the host's obligation is structurally enforced by an
 exhaustive match, which is stronger than a test; the client's is enforced by
 code inspection only, and no test drives a stop and then attempts a second read.
 Guarantee: After any `ReadStop`, no caller performs another framed read on the
 same reader. All three helpers abandon partially consumed frames and keep no
 offset, so a resumed read would begin mid-frame.
-Check: `always` — for every `Err` exit of the host's `recv` and the client's
+Check: `always` - for every `Err` exit of the host's `recv` and the client's
 `read_active_frame`, the enclosing loop terminates without calling the reader
 again. The compile-time form is stronger and already present on the host side:
 the `ReadClose` match at `connection.rs:398-415` is exhaustive with every arm
@@ -525,7 +525,7 @@ would read body bytes as a header with no pending drain left.
 Required faults and enabling state: any stop class, then an attempted second
 read. Cheapest construction: a truncated declared body for EOF, a paused clock
 for the deadline, a cancelled token for cancellation.
-Confidence: high — [evidence](evidence/no-framed-read-resumes-after-a-read-stop.md).
+Confidence: high - [evidence](evidence/no-framed-read-resumes-after-a-read-stop.md).
 Verified that no helper retains an offset (`frame_read.rs:45`, `:79`, `:108`),
 and that both callers stop: the host's four exhaustive `Err` arms at
 `connection.rs:400`, `:401-410`, `:411-414`, and the client's `break` at
@@ -534,7 +534,7 @@ Existing check: `connection.rs:398-415` is a production structural guard rather
 than a test, and covers the host completely. The client has neither a test nor a
 guard, only `reader_loop`'s shape. Status unaudited.
 Impact: a resumed read parses body bytes as a header. Every downstream identity
-decision — correlation, channel, epoch, frame type — is then made from
+decision - correlation, channel, epoch, frame type - is then made from
 attacker-chosen bytes on a stream the host believes is aligned.
 Open questions:
 - The obligation is not written down. `frame_read.rs:5-8` assigns short-read
@@ -547,7 +547,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — the zero-budget property is asserted, its cost bound is
+Exercised: partial - the zero-budget property is asserted, its cost bound is
 not. `tcp_frame_channel.rs:803-807` proves an oversize declaration holds no
 ingress budget; nothing bounds how much read-and-discard work one peer can
 provoke.
@@ -555,7 +555,7 @@ Guarantee: An early-rejected oversize control frame is drained without charging
 the ingress byte budget, and the work it costs is bounded by the rejected
 frame's own absolute frame deadline, by the connection permit semaphore, and by
 nothing else.
-Check: `always` — across a sustained reject-then-drain cycle, the ingress
+Check: `always` - across a sustained reject-then-drain cycle, the ingress
 budget's available permits return to their starting value after every cycle
 (the intended property, already asserted once), and each drain completes or
 fails within the deadline armed at the rejected frame's first header byte. State
@@ -575,7 +575,7 @@ Required faults and enabling state: a peer sending channel-0 `Request` headers
 with strictly increasing correlations (`connection.rs:426-429`) declaring
 `len > MAX_CONTROL_BODY_LEN`, each followed by the declared bytes, repeated. To
 observe the aggregate, run `max_connections` of them.
-Confidence: high on the mechanism, medium on whether the cost is a defect —
+Confidence: high on the mechanism, medium on whether the cost is a defect -
 [evidence](evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md).
 Verified that the oversize branch at `tcp_frame_channel.rs:198-202` precedes the
 budget charge at `:204-215`; that the ceiling is `MAX_BODY_LEN` and not the
@@ -608,12 +608,12 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet — nothing observes the branch, so it could start firing
+Exercised: not yet - nothing observes the branch, so it could start firing
 without notice.
 Guarantee: The client's inbound read reservation is exclusively the reader's and
 sized to the framing maximum, so the budget-refusal branch at
 `client.rs:1970-1973` never executes.
-Check: `unreachable` — the `else` arm at `client.rs:1970` must not be entered.
+Check: `unreachable` - the `else` arm at `client.rs:1970` must not be entered.
 `unreachable` and not `always(!X)` because this is one specific code location
 with a natural detection point, exactly the case the semantics table reserves
 `unreachable` for. Entering it means the reservation is no longer
@@ -628,7 +628,7 @@ borrows the read charge instead of `retained_budget` (`:1523`).
 Required faults and enabling state: to *prove* unreachability, none: it follows
 from the four verified steps in the evidence. To detect a regression, instrument
 the arm and run the ordinary inbound suite.
-Confidence: high — [evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md).
+Confidence: high - [evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md).
 Verified all four steps the claim rests on: the cap equals the framing maximum
 (`client.rs:88`, `:403`); `validate_inbound` rejects a larger `len` first
 (`:2040`, called at `:1957`); `ByteCounter::charge` refuses only when

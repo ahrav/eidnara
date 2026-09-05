@@ -68,7 +68,7 @@ release: the gate at `lifecycle.rs:278` returns `Ok(true)` and the start is
 refused with `unsupported_state_schema` and `align_versions`, which is the
 intended forward-compatibility behaviour. A 100 KiB manifest sits well under
 1 MiB, so it is decoded normally and is quarantined only if its schema is unknown
-— a different mechanism entirely. The size threshold that is supposed to be one
+- a different mechanism entirely. The size threshold that is supposed to be one
 value is two, and the maintainer who moves one on the comment's authority moves
 only one.
 
@@ -98,8 +98,8 @@ record is statically checkable. Depends on
 
 ## What a test must construct
 
-Nothing to inject. Either an equality assertion over the two constants, or —
-since the two caps gate different decisions — separate assertions that an
+Nothing to inject. Either an equality assertion over the two constants, or -
+since the two caps gate different decisions - separate assertions that an
 over-cap record quarantines and an over-cap manifest quarantines on every read
 path rather than only in `prune`. No test exists.
 
@@ -121,7 +121,7 @@ path rather than only in `prune`. No test exists.
   cannot distinguish oversize from any other read error.
 - Missing evidence: none for the mismatch. Not established is which of the two
   values is the intended one, or whether the profile's threshold was ever meant
-  to be the manifest's — that is a design question, not a readable fact.
+  to be the manifest's - that is a design question, not a readable fact.
 - Conclusion: resolved as to fact, and broader than stated. The caps differ 16x,
   the comment asserting otherwise is false, and the two thresholds also differ in
   what exceeding them means, so making the numbers equal would not by itself make

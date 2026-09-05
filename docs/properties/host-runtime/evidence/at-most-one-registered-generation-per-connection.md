@@ -8,7 +8,7 @@ commit `1c193ae0` and `git diff d90e7811 HEAD` is empty for `connection.rs`,
 
 A socket that negotiates a non-TCP transport mints two generation ids on one
 `run_connection` stack, and the registry is a flat `HashMap<u64, _>` with no
-per-socket grouping. Nothing in the type system says "one live entry per socket" —
+per-socket grouping. Nothing in the type system says "one live entry per socket" -
 the invariant is an emergent consequence of where the bootstrap's removal sits
 relative to the promoted generation's insert. Reading those two points in order
 shows they are not adjacent: there is a stretch of `run_connection` between them.
@@ -40,19 +40,19 @@ shows they are not adjacent: there is a stretch of `run_connection` between them
   `:362`, then `run_connection:198-216` (handoff unwrap, promotion slot take,
   second `new_generation`), then the second `serve_generation` entry. Every await
   in that stretch is a yield point at which a drain can land.
-- `connection.rs:217-224` — the promoted `serve_generation`'s return value is
+- `connection.rs:217-224` - the promoted `serve_generation`'s return value is
   discarded (`.await;`, no binding), so its early `return None` at `:286` is
   indistinguishable at the call site from an ordinary served-to-completion exit.
 - Existing check, confirmed: `tests/lifecycle.rs:1722`
   `shutdown_during_candidate_setup_reaps_both_channels`. Its doc comment at
   `:1715-1721` claims the setup's registry membership is removed and the
-  connection permit released. It lands the drain during *setup* — before the
-  grant commits — not in the transfer window. Its file is named in no CI workflow.
+  connection permit released. It lands the drain during *setup* - before the
+  grant commits - not in the transfer window. Its file is named in no CI workflow.
 
 ## Failure scenario
 
 The exclusion itself holds; the reachable scenario is the complementary gap the
-same structure creates — a window in which *neither* id is registered:
+same structure creates - a window in which *neither* id is registered:
 
 1. A socket negotiates a non-TCP transport and the grant commits, so the
    candidate is prepared and the bootstrap's read loop returns.
@@ -65,8 +65,8 @@ same structure creates — a window in which *neither* id is registered:
    under the lock. This socket contributes nothing to that vector.
 4. The promoted `serve_generation` then reaches `:285`, observes
    `draining == true`, and returns `None` at `:286` without inserting.
-5. Consequence: the socket receives no connection Goodbye — the Goodbye loop at
-   `runtime.rs:1167-1169` iterates only the snapshot — and it is not reaped by the
+5. Consequence: the socket receives no connection Goodbye - the Goodbye loop at
+   `runtime.rs:1167-1169` iterates only the snapshot - and it is not reaped by the
    un-promoted arm at `connection.rs:226-234` either, because the code took the
    `Some(receiver)` branch. The peer sees the socket close with no protocol close
    frame. This is the same early return that
@@ -75,14 +75,14 @@ same structure creates — a window in which *neither* id is registered:
 
 ## Timing windows and dependencies
 
-Two distinct windows. The *exclusion* window — bootstrap still registered while
-the promoted generation is being built — does not exist: the removal at
+Two distinct windows. The *exclusion* window - bootstrap still registered while
+the promoted generation is being built - does not exist: the removal at
 `dispatch.rs:1390` strictly precedes the second insert on one stack, with no
 concurrency between them. The *neither-registered* window is real, spans
 `connection.rs:345` to the second `:288`, and includes at least three awaits
 (`:345`, `:361`, and the tracked-task joins inside `close_generation`), so it is
 wide in wall-clock terms rather than instruction-narrow. Reaching it requires a
-committed non-TCP grant, which requires a configured transport provider — on a
+committed non-TCP grant, which requires a configured transport provider - on a
 default TCP-only deployment `serve_generation` returns no handoff
 (`connection.rs:198`) and the second registration never happens, so the window is
 provider-gated. Interacts with `no-generation-registers-after-the-drain-snapshot`,
@@ -103,7 +103,7 @@ exclusion: instrument `connections.insert` at `:288` and assert it never returns
 `Some(_)`, and sample the registry under the lock asserting at most one of the
 socket's two ids is present. For the window: assert the peer socket observes
 either exactly one connection Goodbye or a close with no Goodbye, and record which
-— the current behaviour is the second, and the catalog's open question is whether
+- the current behaviour is the second, and the catalog's open question is whether
 that is intended. Coverage checks to emit:
 `host_drain_landed_in_generation_transfer_window` and
 `host_promoted_registration_refused_by_draining`.
@@ -124,7 +124,7 @@ that is intended. Coverage checks to emit:
   cannot receive one. The reap at `connection.rs:229-230` is on the `None` arm
   only, so the `Some(receiver)` path that early-returns runs neither. Confirmed:
   in this window the promoted generation gets neither.
-- Missing evidence: whether it *should*. This is a wire-protocol question — does
+- Missing evidence: whether it *should*. This is a wire-protocol question - does
   §9.4 permit a socket close with no Goodbye when the host is draining, or does
   the drain owe every authenticated connection a Goodbye? The protocol sections
   the code cites (`§6.3`, `§9.4`, `§12`) are named in comments, but the normative

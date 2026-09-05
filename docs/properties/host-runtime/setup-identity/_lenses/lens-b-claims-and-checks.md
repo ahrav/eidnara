@@ -3,7 +3,7 @@
 Attention focus: what the sub-part *promises*, and what mechanically holds each
 promise. Claim sources are the doc comments in the scope files, the error and
 close-reason strings they emit, `docs/shm-transport.md`,
-`docs/host-wire-protocol.md`, and — per the task's additional instruction —
+`docs/host-wire-protocol.md`, and - per the task's additional instruction -
 `packages/shm-native/src/setup.rs` and its TypeScript wrapper
 `packages/shm-native/index.ts`, mined for claims about the boundary itself.
 No property records; no evidence files. Method contract in
@@ -23,8 +23,8 @@ doc comment rather than a document.** `auth.rs:693-698` states that the
 TypeScript client asserts its handshake against the same fixed proof vectors, in
 the file `packages/plugin/src/shared/host-client/auth.test.ts`, and calls the
 pair "a cross-language contract". That file does not exist. Neither does
-`auth.ts`. Both were deleted by `ed487e11` — the same commit that made the ring
-mandatory — at 365 and 314 lines respectively, verified with
+`auth.ts`. Both were deleted by `ed487e11` - the same commit that made the ring
+mandatory - at 365 and 314 lines respectively, verified with
 `git show --stat ed487e11`. The only surviving trace is
 `packages/plugin/dist/shared/host-client/auth.d.ts`, an untracked build
 artifact under a `dist/` path that `.gitignore:16` excludes. This is the
@@ -50,8 +50,8 @@ confirmed, and it means the 49 in-crate tests across this sub-part's four
 and `ci.yml:177` runs `cargo nextest run -p shm-native -p shm-transport`
 **unfiltered** on Linux, with `cargo nextest run -p shm-native` likewise
 unfiltered on macOS (`:184`). So the 2 in-crate tests in
-`packages/shm-native/src/setup.rs` — including the one that pins the
-committed proof vectors — do run in CI, while the 11 in `auth.rs` that pin the
+`packages/shm-native/src/setup.rs` - including the one that pins the
+committed proof vectors - do run in CI, while the 11 in `auth.rs` that pin the
 same construction on the host side do not. **The two halves of one
 two-party protocol have opposite CI status.**
 
@@ -71,8 +71,8 @@ The three findings the task asked this lens to engage were each verified.
   applies `fchmod(0o700)` unconditionally to the validated runtime-directory
   descriptor at `:571-572` (the sibling's cited `:560-573` is the enclosing
   block, whose owner and directory-type checks are at `:561-570`). The occupant
-  gate at `:30-32` is a conjunction of three clauses — `is_socket()`, `uid()`
-  equals the effective uid, and `mode() & 0o777 == 0o600` — and the sole test
+  gate at `:30-32` is a conjunction of three clauses - `is_socket()`, `uid()`
+  equals the effective uid, and `mode() & 0o777 == 0o600` - and the sole test
   (`insecure_stale_occupant_is_not_replaced`, `:494`) plants a regular file
   (`:497`), so only `is_socket()` is exercised. Engaged as claim C6 and quiet
   area Q2.
@@ -94,7 +94,7 @@ The three findings the task asked this lens to engage were each verified.
 20 claims, ordered by consequence. `Where stated` is the claim source;
 `Implementing code` is where the obligation is discharged, or `NOT FOUND`.
 
-### C1 — the setup socket carries authentication and descriptor transfer only, and can never carry application frames
+### C1 - the setup socket carries authentication and descriptor transfer only, and can never carry application frames
 
 Where stated: `setup_socket.rs:3-5` ("This module deliberately has no dependency
 on application frame types or decoders. Its closed message set ..."),
@@ -102,21 +102,21 @@ on application frame types or decoders. Its closed message set ..."),
 socket"), `docs/host-wire-protocol.md:28`, `:561` ("It has no
 application-envelope decoder or router").
 
-Implementing code: the closed message set at `setup_socket.rs:52-78` —
+Implementing code: the closed message set at `setup_socket.rs:52-78` -
 `GrantMessage`, `ClientMessage` (`Activate`/`Commit`/`Goodbye`), `ServerMessage`
-(`Activated`/`Committed`) — plus the absence of any `crate::wire` frame import.
+(`Activated`/`Committed`) - plus the absence of any `crate::wire` frame import.
 `ClientMessage` carries `deny_unknown_fields` (`:62`), so an unmodelled field is
 rejected.
 
 Existing check: `application_message_is_not_a_setup_message`
 (`setup_socket.rs:569`). In-crate, never runs in CI.
 
-### C2 — one absolute deadline bounds the whole handshake, not each stage
+### C2 - one absolute deadline bounds the whole handshake, not each stage
 
-Where stated: `auth.rs:155-159`, explicitly reasoning about the failure mode —
+Where stated: `auth.rs:155-159`, explicitly reasoning about the failure mode -
 "Passing a bare `Duration` to each step instead would let a slow peer spend the
-full budget on every length read AND every body read — multiplying the real
-bound" — and `docs/host-wire-protocol.md:159` ("one absolute deadline across
+full budget on every length read AND every body read - multiplying the real
+bound" - and `docs/host-wire-protocol.md:159` ("one absolute deadline across
 every length read, body read, write, comparison, descriptor transfer, and
 failed-handshake shutdown").
 
@@ -128,7 +128,7 @@ Existing check: `an_unrepresentable_auth_deadline_is_rejected_not_panicked`
 (`auth.rs`, in the `#[cfg(test)]` module at `:633`) covers the fallible
 constructor the doc comment justifies at `:167-170`. In-crate.
 
-### C3 — the proof construction is `HMAC-SHA256(key, domain || client_nonce || server_nonce || daemon_id)`, pinned by committed vectors on both sides
+### C3 - the proof construction is `HMAC-SHA256(key, domain || client_nonce || server_nonce || daemon_id)`, pinned by committed vectors on both sides
 
 Where stated: `docs/host-wire-protocol.md:186-190` (the byte formula and the
 worked vectors at `:176-184`), `auth.rs:398-403`
@@ -148,11 +148,11 @@ arrays as `docs/host-wire-protocol.md:180` and `:182`, and **does** run in CI
 through `ci.yml:177` and `:184`. So the construction is CI-pinned, but only from
 the peer's implementation.
 
-### C4 — `role` is unverified reporting metadata and never grants authority
+### C4 - `role` is unverified reporting metadata and never grants authority
 
 Where stated: `auth.rs:70-81`, at length: "`Authenticated` ... Deliberately
 empty: everything else in the handshake transcript is client-asserted and
-unverified. `ClientHello.role` in particular is parsed and then discarded — any
+unverified. `ClientHello.role` in particular is parsed and then discarded - any
 peer holding the key can claim any role, so it must never decide admission,
 capacity, or privilege." Also `docs/host-wire-protocol.md:190` and `:26-28`.
 
@@ -165,10 +165,10 @@ Existing check: none direct. No test presents two different roles with the same
 valid key and asserts identical admission. The claim is held by the type having
 no fields.
 
-### C5 — the 32-byte connection key is a bearer capability and every key reader is stop-capable
+### C5 - the 32-byte connection key is a bearer capability and every key reader is stop-capable
 
-Where stated: `docs/host-wire-protocol.md:26` — "Possession grants every
-direct-profile operation — including host-global `host.shutdown` ... a
+Where stated: `docs/host-wire-protocol.md:26` - "Possession grants every
+direct-profile operation - including host-global `host.shutdown` ... a
 diagnostic or proxy principal that holds the bearer is not read-only, whatever
 its role label or mount permissions claim."
 
@@ -181,7 +181,7 @@ Existing check: none. The claim's whole content is that no check exists, which
 makes it unfalsifiable as written and a documentation-only obligation on
 deployers.
 
-### C6 — the setup socket is never connectable outside the owning uid
+### C6 - the setup socket is never connectable outside the owning uid
 
 Where stated: `docs/shm-transport.md:5` ("owner-only Unix setup
 socket"), `docs/host-wire-protocol.md:28`, `:157` ("owner-only setup
@@ -190,7 +190,7 @@ socket"), and the function name `bind_owner_only`.
 Implementing code: `setup_socket.rs:27-50`. Note the order: the listener is bound
 at `:44` and the mode narrowed at `:45`, so between those two lines the socket
 exists at the umask-derived mode. The gate that makes the window safe is not in
-this file — it is the unconditional `fchmod(&current, 0o700)` on the runtime
+this file - it is the unconditional `fchmod(&current, 0o700)` on the runtime
 directory at `instance.rs:571-572`, reached through the validated,
 `O_NOFOLLOW`-anchored descriptor the module doc describes at `instance.rs:4-7`.
 The socket path is derived from that same directory at `runtime.rs:834` and
@@ -202,7 +202,7 @@ final mode is `0o600` (`:490`). It cannot observe the pre-chmod window.
 (`tests/instance_security.rs:15`) and its subprocess child (`:34`) cover the
 umask direction at the publication level. Both in-crate or in an unnamed binary.
 
-### C7 — exactly two ring descriptors transfer, and duplicate, extra, missing or truncated ancillary data fails closed
+### C7 - exactly two ring descriptors transfer, and duplicate, extra, missing or truncated ancillary data fails closed
 
 Where stated: `docs/shm-transport.md:42` ("Transfer exactly two mapping
 descriptors"), `docs/host-wire-protocol.md:561` ("transfers exactly two ring
@@ -216,13 +216,13 @@ over-count at `:223-225`, and sets `CLOEXEC` on each at `:226-228`. The receive
 buffer is deliberately sized for `RING_DESCRIPTOR_COUNT + 1` (`:184`) so an
 extra descriptor is *received and rejected* rather than silently truncated.
 
-Existing check: four tests, the densest cluster in the sub-part —
+Existing check: four tests, the densest cluster in the sub-part -
 `grant_transfers_exactly_two_descriptors` (`:451`),
 `grant_without_ancillary_descriptors_is_rejected` (`:504`),
 `grant_with_extra_descriptor_is_rejected` (`:518`),
 `truncated_ancillary_data_is_rejected` (`:543`). All in-crate, none in CI.
 
-### C8 — setup accepts only the release's current wire version, descriptor schema, and ring profile
+### C8 - setup accepts only the release's current wire version, descriptor schema, and ring profile
 
 Where stated: `docs/host-wire-protocol.md:561` ("Setup accepts only the
 release's current wire version, descriptor schema, and ring profile"),
@@ -244,7 +244,7 @@ and `client_rejects_stale_identity_without_activate_write_or_returned_descriptor
 (`packages/shm-native/src/setup.rs:382`), which runs in CI but asserts only
 that a well-formed envelope decodes.
 
-### C9 — activation is one-use and token-gated
+### C9 - activation is one-use and token-gated
 
 Where stated: `docs/host-wire-protocol.md:561` ("validates the fixed release
 identity and one-use activation token"), `:562` ("token mismatch ... retires the
@@ -269,14 +269,14 @@ Existing check: `activation_and_commit_complete_on_setup_socket` (`:600`) and
 `activation_token_with(|_| Err(()))` is driven under `catch_unwind` at
 `connection.rs:942`, which is Part 2a scope.
 
-### C10 — credentials are fresh per host incarnation and never survive one
+### C10 - credentials are fresh per host incarnation and never survive one
 
 Where stated: `docs/host-wire-protocol.md:105` ("generate a fresh 32-byte key
 and 16-byte daemon ID for every host incarnation"), `:47` ("one process lifetime
 with one fresh key and daemon ID"), `instance.rs:28-30`, `:223-226` ("credentials
 never exist for an incarnation that lost a lock race").
 
-Implementing code: `instance.rs:182-232`, the guard construction ordering —
+Implementing code: `instance.rs:182-232`, the guard construction ordering -
 lifetime fence, directory, lock, then mint.
 
 Existing check: `restart_rotates_credentials_and_invalidates_old_state`
@@ -285,7 +285,7 @@ Existing check: `restart_rotates_credentials_and_invalidates_old_state`
 (`tests/instance_security.rs:227`) and `startup_errors_render_without_key_material`
 (`:243`) cover the leak direction; that binary is also unnamed.
 
-### C11 — key bytes never appear in formatting, errors, panics, metrics or diagnostics
+### C11 - key bytes never appear in formatting, errors, panics, metrics or diagnostics
 
 Where stated: `docs/host-wire-protocol.md:109` ("redact key bytes in logs,
 errors, panic formatting, metrics, and diagnostics"), `instance.rs:28-30` ("Its
@@ -303,9 +303,9 @@ Existing check: `proof_debug_output_never_carries_the_proof_bytes` (`auth.rs`),
 `startup_errors_render_without_key_material`
 (`tests/instance_security.rs:243`).
 
-### C12 — the managed Rust client repeats every native-peer rejection
+### C12 - the managed Rust client repeats every native-peer rejection
 
-Where stated: `docs/shm-transport.md:83` — "Managed Rust clients use the
+Where stated: `docs/shm-transport.md:83` - "Managed Rust clients use the
 same setup protocol, ring profile, wire version, and descriptor schema."
 
 Implementing code: **partially NOT FOUND, and the gap has a polarity flip in
@@ -314,13 +314,13 @@ it.** Three native checks have no managed counterpart at the same layer.
 | Native peer check | Site | Managed Rust equivalent |
 | --- | --- | --- |
 | `grant.descriptor.profile != PROFILE` | `shm-native/src/setup.rs:122` | not in `activate_client`; deferred to `ring_transport.rs:642` |
-| `host_to_peer_grant == peer_to_host_grant` rejected | `shm-native/src/setup.rs:122` | **no equivalent.** `ring_transport.rs:648` instead rejects when the two geometries *differ* — the opposite test. Identical grants pass the managed check and fail the native one |
+| `host_to_peer_grant == peer_to_host_grant` rejected | `shm-native/src/setup.rs:122` | **no equivalent.** `ring_transport.rs:648` instead rejects when the two geometries *differ* - the opposite test. Identical grants pass the managed check and fail the native one |
 | separate `MAX_AUTH_MESSAGE_LEN` of 4,096 for auth messages | `shm-native/src/setup.rs:18`, applied at `:190`, `:192`, `:218` | the host's `setup_socket.rs` has only `MAX_SETUP_MESSAGE_LEN` (16 KiB, `:24`); the 4,096 auth cap lives in `auth.rs` (`MAX_AUTH_MESSAGE_LEN`, exported at `lib.rs:44`) |
 
 Existing check: none. Nothing compares the two peers' rejection sets. Engaged as
 lead L1.
 
-### C13 — the connection file is read through one descriptor-anchored snapshot, bounded before parsing, with replacement rejected
+### C13 - the connection file is read through one descriptor-anchored snapshot, bounded before parsing, with replacement rejected
 
 Where stated: `connection_file.rs:3-6`, `docs/host-wire-protocol.md:92-98`
 (the five-step client obligation), `:100` ("The validated descriptor snapshot is
@@ -338,11 +338,11 @@ Existing check: `discovery_validates_the_publication_the_way_a_client_must`
 **unnamed** in `ci.yml`. The TypeScript twin `connection-file.test.ts` (27 tests)
 **does** run in CI (`ci.yml:211`).
 
-### C14 — every mutation is anchored to one validated directory descriptor, so a path swap cannot redirect it
+### C14 - every mutation is anchored to one validated directory descriptor, so a path swap cannot redirect it
 
-Where stated: `instance.rs:4-7` — "path-based operations never cross the security
+Where stated: `instance.rs:4-7` - "path-based operations never cross the security
 boundary, so a concurrent path/symlink swap cannot redirect a create, rename, or
-unlink outside that directory (plan KTD4, protocol §4.2)" — and
+unlink outside that directory (plan KTD4, protocol §4.2)" - and
 `docs/host-wire-protocol.md:112-114`.
 
 Implementing code: the directory-validation walk ending at `instance.rs:561-573`,
@@ -355,7 +355,7 @@ Existing check: `a_planted_symlink_at_the_record_name_is_replaced_not_followed`
 `publication_is_an_owner_only_regular_file_in_an_owner_only_dir` (`:65`). Binary
 unnamed.
 
-### C15 — shutdown removal is fenced by daemon identity under the held lock
+### C15 - shutdown removal is fenced by daemon identity under the held lock
 
 Where stated: `docs/host-wire-protocol.md:116` ("Before unlinking, the host
 MUST reread metadata without following links and confirm that the file is its own
@@ -371,7 +371,7 @@ Existing check: `shutdown_removes_the_publication_and_releases_the_lock`
 `coordination_locks_are_owner_only_and_survive_teardown` (`:393`). Binary
 unnamed.
 
-### C16 — every setup message is length-prefixed and capped before allocation
+### C16 - every setup message is length-prefixed and capped before allocation
 
 Where stated: `docs/host-wire-protocol.md:163` ("Length MUST be at most
 4,096. Length 4,096 is valid; 4,097 is rejected before allocation"),
@@ -389,7 +389,7 @@ enforced in `auth.rs`, not here.
 **`read_message_unbounded` is bounded.** The re-scope left open whether the name
 signalled a missing bound (`scope-map-and-risk-ranking.md:744-746`). It does not:
 `:361-363` applies the same `MAX_SETUP_MESSAGE_LEN` check as `read_message`. The
-word `unbounded` refers to the *deadline*, not the length — it is the only reader
+word `unbounded` refers to the *deadline*, not the length - it is the only reader
 with no `timeout_at`, because it is the peer-lifetime sentinel that must block
 indefinitely (`:344-353`). The name is misleading; the bound is present. Resolved.
 
@@ -398,7 +398,7 @@ Existing check: `over_cap_auth_message_is_rejected_before_allocation`
 `setup_socket.rs`, and nothing covers `read_message_from_prefix`'s
 prefix-longer-than-total branch (`:405-407`).
 
-### C17 — clean Goodbye and unexpected closure are distinct outcomes
+### C17 - clean Goodbye and unexpected closure are distinct outcomes
 
 Where stated: `docs/shm-transport.md:49` ("Clean `Goodbye` and
 unexpected setup-socket closure are distinct. Unexpected closure records peer
@@ -407,8 +407,8 @@ death, cancels ring work, and tears down the exact connection"),
 
 Implementing code: `PeerClose` has three variants (`setup_socket.rs:80-85`) and
 `observe_peer` (`:345-353`) maps `Goodbye` to `PeerClose::Goodbye`, an
-`UnexpectedEof` io error to `PeerClose::UnexpectedEof`, and everything else —
-including a timeout, a malformed message, and an oversize length — to
+`UnexpectedEof` io error to `PeerClose::UnexpectedEof`, and everything else -
+including a timeout, a malformed message, and an oversize length - to
 `PeerClose::ProtocolError` (`:351`). The consumer at `connection.rs:199-204`
 collapses the three back to two: anything other than `Goodbye` records peer
 death.
@@ -416,7 +416,7 @@ death.
 Existing check: `goodbye_and_eof_have_distinct_outcomes`
 (`setup_socket.rs:811`). In-crate. Nothing reaches the `ProtocolError` arm.
 
-### C18 — the peer-lifetime sentinel keeps the setup socket open after commit
+### C18 - the peer-lifetime sentinel keeps the setup socket open after commit
 
 Where stated: `docs/shm-transport.md:45` ("Keep the setup socket open as
 the peer-lifetime sentinel"), `docs/host-wire-protocol.md:28` ("remains open
@@ -432,7 +432,7 @@ end-to-end by `tests/shm_failure_modes.rs`
 `repeated_crashes_do_not_ratchet_single_connection_capacity`, `:248`), which is
 **named** in CI (`ci.yml:133`).
 
-### C19 — the addon's manifest and checksum are verified before loading, and a debug or wrong-target binary is refused
+### C19 - the addon's manifest and checksum are verified before loading, and a debug or wrong-target binary is refused
 
 Where stated: `docs/shm-transport.md:83` ("The package manifest and
 addon checksum are verified before loading. Build profile and target identity are
@@ -453,8 +453,8 @@ local sibling addon: `:194-197` tests `existsSync(localPath)` for
 `./shm_native.node` and calls `packageAddonPath` only in the `else`. CI builds
 exactly that file (`ci.yml:193`, `bun run --cwd packages/shm-native
 build:source`) before every native and plugin test step, and removes it only
-afterwards (`:219-223`). So the manifest and checksum branch — five of the nine
-failure reasons — is skipped in every CI run. The profile and target checks
+afterwards (`:219-223`). So the manifest and checksum branch - five of the nine
+failure reasons - is skipped in every CI run. The profile and target checks
 (`:199-204`) do run. See quiet area Q4.
 
 Existing check: `shm-frame-channel.test.ts:49-53` asserts the *classification* of
@@ -462,9 +462,9 @@ four `NativeStartupError` reasons, constructed directly rather than produced by
 the loader. Runs in CI (`ci.yml:211`). No check constructs a manifest with a
 wrong checksum and observes `checksum_mismatch` from `packageAddonPath`.
 
-### C20 — macOS lacks the Linux size-seal contract, so a same-user descriptor holder is trusted not to resize
+### C20 - macOS lacks the Linux size-seal contract, so a same-user descriptor holder is trusted not to resize
 
-Where stated: `docs/shm-transport.md:85` — "Linux seals ring objects
+Where stated: `docs/shm-transport.md:85` - "Linux seals ring objects
 against size changes. macOS does not provide the same seal contract, so a
 same-user process that holds a shared-memory descriptor remains trusted not to
 resize it after validation. macOS release remains blocked until designated-host
@@ -474,7 +474,7 @@ Implementing code: nothing in this sub-part. The claim is a *stated trust
 assumption* plus a release block, and the descriptor transfer that hands out the
 trusted descriptor is `setup_socket.rs:132-175`.
 
-Existing check: **none found, by design** — the doc states the proving test does
+Existing check: **none found, by design** - the doc states the proving test does
 not exist ("release remains blocked until designated-host attachment tests
 prove"). Recorded so a later pass does not read the absence as an oversight. The
 macOS CI legs (`ci.yml:181-187`) build and run `shm-native`,
@@ -485,14 +485,14 @@ macOS CI legs (`ci.yml:181-187`) build and run `shm-native`,
 
 Four leads, recorded with both sides cited and not resolved.
 
-**L1 — the managed Rust peer and the native peer accept different grants, and on
+**L1 - the managed Rust peer and the native peer accept different grants, and on
 one check the polarity is reversed.** `docs/shm-transport.md:83` promises
 "Managed Rust clients use the same setup protocol, ring profile, wire version,
 and descriptor schema." Three concrete divergences are tabulated under claim C12.
 The reversed one deserves restating because a reader scanning for a *missing*
 check will not find it: the native peer rejects a grant where
 `host_to_peer_grant == peer_to_host_grant`
-(`packages/shm-native/src/setup.rs:122`) — a single ring presented as two
+(`packages/shm-native/src/setup.rs:122`) - a single ring presented as two
 directions. The managed Rust peer's nearest check is
 `from_host_grant.geometry() != to_host_grant.geometry()`
 (`ring_transport.rs:648`), which rejects grants whose *geometries differ*. Two
@@ -501,7 +501,7 @@ exactly the input the native client is coded to refuse. Whether that input is
 reachable from a non-malicious host is undetermined; the host always emits two
 distinct rings (`ring_transport.rs:327-328`).
 
-**L2 — the activation token cannot gate what the contract implies it gates.**
+**L2 - the activation token cannot gate what the contract implies it gates.**
 `docs/host-wire-protocol.md:561` lists validation of the "one-use activation
 token" alongside descriptor transfer as part of what setup completes before the
 wire becomes active, and the state diagram at `:565-575` puts
@@ -512,9 +512,9 @@ the peer's `[OwnedFd; 2]` is already in hand when it first speaks
 `Activate` (`:307-316`). The token therefore gates the host's *acknowledgement*,
 not the peer's *capability*. Confirmed from the sibling's 2c lens-A finding and
 extended: nothing revokes the descriptors on `InvalidActivation`
-(`:275`) either — the host drops only its own copies, at `connection.rs:186`.
+(`:275`) either - the host drops only its own copies, at `connection.rs:186`.
 
-**L3 — the doctor's five terminal classes are one contract implemented on two
+**L3 - the doctor's five terminal classes are one contract implemented on two
 sides with a 1:4 split, and the four are produced by regular expressions over
 error text.** `docs/shm-transport.md:53-59` states the set and `:71` says
 "Client diagnostics use the same terminal-class set". Exactly one of the five
@@ -530,7 +530,7 @@ a *malformed grant* classify identically, and renaming any of the three Rust
 strings silently reclassifies a terminal class with no build failure. Also
 recorded in the 2b sibling lens; the string producers are 2c scope.
 
-**L4 — `SetupError` has nine variants and the peer sees three outcomes.** The
+**L4 - `SetupError` has nine variants and the peer sees three outcomes.** The
 host distinguishes `Io`, `Timeout`, `MessageTooLarge`, `InvalidMessage`,
 `InvalidIdentity`, `InvalidActivation`, `MissingDescriptors`,
 `DuplicateDescriptors`, `TruncatedAncillary` (`setup_socket.rs:88-98`), each with
@@ -550,7 +550,7 @@ made. Recorded as a lead rather than a finding because the contract is silent.
 category the task predicted would be non-empty here, and it is the only place in
 either sub-part where it is.
 
-**D1 — `auth.rs:693-698` cites a TypeScript test file deleted by the refactor.**
+**D1 - `auth.rs:693-698` cites a TypeScript test file deleted by the refactor.**
 The comment reads: "The TypeScript client asserts its handshake against the same
 fixed vectors (`packages/plugin/src/shared/host-client/auth.test.ts`), so they
 form a cross-language contract: changing the domain separator, the field order,
@@ -567,30 +567,30 @@ uses the string as a *forbidden-name fixture*, and
 `packages/plugin/dist/shared/host-client/auth.d.ts:24-25` is an untracked
 build artifact under a `dist/` path excluded by `.gitignore:16`.
 
-Why it matters beyond a stale path. The comment's stated *mechanism* — "breaks
-the build here, where the change is being made" — was the reason a host-side
+Why it matters beyond a stale path. The comment's stated *mechanism* - "breaks
+the build here, where the change is being made" - was the reason a host-side
 developer could trust the domain constants. That mechanism is gone. What replaced
 it is a *different* cross-language pin: the native peer's
 `auth_proofs_match_committed_wire_vectors`
 (`packages/shm-native/src/setup.rs:401`), which asserts the same literal
-vectors, is in a different crate, and — unlike the host's own vector test — runs
+vectors, is in a different crate, and - unlike the host's own vector test - runs
 in CI (`ci.yml:177`, `:184`). So the contract survived and moved, and the comment
 now names the one location where it no longer lives. Per METHOD rule 3 the
 disagreement is recorded, not resolved in the comment's favour.
 
-**D2 — `auth.rs:394-396` cites a test that does not exist anywhere in the tree.**
+**D2 - `auth.rs:394-396` cites a test that does not exist anywhere in the tree.**
 The comment reads: "ALWAYS-TRUE is caught by
-`foreign_server_reused_port_never_receives_client_auth` — the case where a client
+`foreign_server_reused_port_never_receives_client_auth` - the case where a client
 must refuse a server that cannot produce the proof. Named for the refusal, and it
 holds that direction directly."
 
-Verified: a repository-wide grep for that identifier returns exactly one hit —
+Verified: a repository-wide grep for that identifier returns exactly one hit -
 the comment itself, `auth.rs:394`. No such test exists in `crates/`,
 `packages/`, or the integration binaries. Two surviving tests in `auth.rs` hold
 the same direction under different names, `invalid_server_proof_sends_no_client_auth`
 and `daemon_id_mismatch_sends_no_client_auth`, so the *coverage* is probably
-intact while the *citation* is not. This is a weaker finding than D1 — a renamed
-test rather than a deleted mechanism — but it sits inside a 19-line comment
+intact while the *citation* is not. This is a weaker finding than D1 - a renamed
+test rather than a deleted mechanism - but it sits inside a 19-line comment
 (`auth.rs:385-403`) whose entire purpose is to explain which named tests fence
 the two mutation directions of a proof comparison. A comment that exists to make
 mutation coverage auditable, naming a test that cannot be found, defeats its own
@@ -634,7 +634,7 @@ name.
    (`lib.rs:43-44`) and redefined at
    `packages/shm-native/src/setup.rs:20-21`.
    `docs/host-wire-protocol.md:14` states they "MUST NOT be renamed without a
-   separately versioned wire or lifecycle migration" — enforced by prose plus,
+   separately versioned wire or lifecycle migration" - enforced by prose plus,
    partially, the forbidden-name fixture at
    `packages/plugin/scripts/host-client-boundary.test.ts:221`.
 3. **`MAX_SETUP_MESSAGE_LEN` is 16 KiB in two crates, independently.**
@@ -665,8 +665,8 @@ name.
 9. **The architecture gate never reads `docs/`.**
    `scripts/check-shm-architecture.ts:7-23` lists five source roots, one file
    and six manifests; no documentation path appears. It also skips `.test.ts`
-   (`:48`) and never walks `crates/host-runtime/tests/`. So both findings D1 and D2 —
-   documentation naming deleted code — are outside every mechanical gate this
+   (`:48`) and never walks `crates/host-runtime/tests/`. So both findings D1 and D2 -
+   documentation naming deleted code - are outside every mechanical gate this
    repository has. Its one non-grep property is that `:59` fails when a required
    audit input is *missing*, which pins the continued existence of
    `packages/shm-native/index.ts` and the five roots.
@@ -694,7 +694,7 @@ in reverse: `ci.yml:177` runs `cargo nextest run -p shm-native
 | `connection_file.rs` | `mod tests`, `:337-471` | 135 | **4** | no |
 | `packages/shm-native/src/setup.rs` | `mod tests`, `:377-433` | 57 | **2** | **yes** |
 
-The `setup_socket.rs` twelve, clustered by what they gate — this is the
+The `setup_socket.rs` twelve, clustered by what they gate - this is the
 sub-part's own coverage shape:
 
 | Cluster | Tests | Sites |
@@ -728,7 +728,7 @@ doctests are its only CI-executed source-resident checks.
 forbids direct `st_mode` access outside the cfg-gated accessor. Its doc comment
 (`:341-345`) records why: the bug it prevents "reached CI as a macOS-only
 failure". Recorded because a split on a formatting-sensitive literal is brittle
-in a way a later `cargo fmt` change could silently vacate — the test would find
+in a way a later `cargo fmt` change could silently vacate - the test would find
 no split point, take `.next()`, and scan the whole file including its own tests.
 
 ### Integration tests (with CI named/unnamed status and workflow line refs)
@@ -739,16 +739,16 @@ not**, and the split runs against the claims.
 
 | Binary | Tests | Reaches | CI status |
 | --- | --- | --- | --- |
-| `lifecycle.rs` | 35 | setup socket, auth, lifecycle record | **named** — `ci.yml:179`, `:187` |
-| `client.rs` | 6 | `activate_client`, full attach | **named** — `ci.yml:132`, `:179`, `:187` |
-| `shm_failure_modes.rs` | 6 | auth, setup, peer death, capacity | **named** — `ci.yml:133`, `--test-threads=1` |
+| `lifecycle.rs` | 35 | setup socket, auth, lifecycle record | **named** - `ci.yml:179`, `:187` |
+| `client.rs` | 6 | `activate_client`, full attach | **named** - `ci.yml:132`, `:179`, `:187` |
+| `shm_failure_modes.rs` | 6 | auth, setup, peer death, capacity | **named** - `ci.yml:133`, `--test-threads=1` |
 | `instance_security.rs` | 15 | publication, discovery, permissions, cleanup | **unnamed** |
 | `host_roundtrip.rs` | 4 | credential rotation, concurrent clients | **unnamed** |
 | `activation.rs` | 4 | bootstrap-before-publication ordering | **unnamed** |
 
 **The unnamed three carry the claims with no other coverage.**
-`instance_security.rs` is the sole home of C13, C14 and C15 — descriptor-anchored
-discovery, symlink and replacement safety, and fenced shutdown removal — 15 tests
+`instance_security.rs` is the sole home of C13, C14 and C15 - descriptor-anchored
+discovery, symlink and replacement safety, and fenced shutdown removal - 15 tests
 across `:15`, `:34`, `:65`, `:80`, `:117`, `:154`, `:168`, `:196`, `:227`,
 `:243`, `:281`, `:301`, `:339`, `:393`, `:424`. `host_roundtrip.rs:153` is the
 sole home of C10's rotation half and one of the two "bootstrap tests" the
@@ -794,8 +794,8 @@ so the capability leg accepts a TERMINAL_STARTUP_FAILURE as a pass
 (`tests/capability.ts:27-39`).
 
 **One gate has no Rust counterpart and shapes claim C19.** `ci.yml:219-223`,
-"Reject prebuilt native modules", runs `test -z "$(git ls-files '*.node')"` —
-verified: zero paths at `HEAD` — then removes
+"Reject prebuilt native modules", runs `test -z "$(git ls-files '*.node')"` -
+verified: zero paths at `HEAD` - then removes
 `packages/shm-native/shm_native.node` and asserts its absence. Because the
 removal runs *after* the four native and plugin test steps, every CI TypeScript
 test executes against a locally built addon and therefore through
@@ -819,7 +819,7 @@ production halves: none found**, across `setup_socket.rs`, `auth.rs`,
 | HMAC key acceptance | 1 | `packages/shm-native/src/setup.rs:229` `"HMAC accepts every key length"` |
 
 The third is the only one stating a library contract rather than a local
-invariant, and it is reached before the key length is validated by the caller —
+invariant, and it is reached before the key length is validated by the caller -
 `connect` checks `key.len() != 32` at `:102-104`, so the `expect` is unreachable
 in practice, not by construction.
 
@@ -830,7 +830,7 @@ its own; `connection.rs:942` wraps `activation_token_with` in a test, which is
 Part 2a scope.
 
 **Discarded results (`let _ =`): 5, and three are on the teardown path.**
-`setup_socket.rs:46` (removing a socket whose chmod failed — a failure here
+`setup_socket.rs:46` (removing a socket whose chmod failed - a failure here
 leaves an over-permissive socket at the path and returns the chmod error),
 `:336` and `:337` (`goodbye_client` discards both the write and the shutdown),
 and `packages/shm-native/src/setup.rs:165` and `:171` (the peer's `goodbye`,
@@ -843,8 +843,8 @@ also uses a hardcoded 100 ms deadline (`setup_socket.rs:335`, mirrored at
 Host: `subtle::ConstantTimeEq::ct_eq` on the activation token
 (`setup_socket.rs:267-272`). Peer: `ct_eq` on the server proof
 (`packages/shm-native/src/setup.rs:200`) and on the daemon ID (`:201`).
-`auth.rs:385-387` states the design reason — "a proof check has the failure mode
-where a suite proves only that it can say NO" — and the client proof is compared
+`auth.rs:385-387` states the design reason - "a proof check has the failure mode
+where a suite proves only that it can say NO" - and the client proof is compared
 in constant time on the host side per `docs/host-wire-protocol.md:190`.
 **One comparison in the chain is not constant-time and the wire document says it
 need not be**: `server.daemon_ver != expected_daemon_ver`
@@ -869,7 +869,7 @@ Ranked by the gap between what the code decides and what any check proves.
    `setup_socket.rs:30-32` admits removal of an existing path entry only when it
    is a socket, owned by the effective uid, and mode exactly `0o600`. The sole
    test plants a regular file (`:497`), so the uid clause and the mode clause are
-   both unexercised — and the mode clause is the interesting one, because a
+   both unexercised - and the mode clause is the interesting one, because a
    *same-uid socket at mode `0o666`* is exactly the residue a previous
    incarnation running under a permissive umask would leave. Nothing plants a
    FIFO, a directory, a symlink, or a `0o666` socket. `instance.rs:571-572`
@@ -885,9 +885,9 @@ Ranked by the gap between what the code decides and what any check proves.
    from `docs/host-wire-protocol.md:180` and `:182`. Only the peer's runs. So
    the CI-enforced authority for the proof construction is the implementation
    that is *not* the host, in a crate the host does not depend on for
-   authentication, while the host's own 11 auth tests — including
+   authentication, while the host's own 11 auth tests - including
    server-nonce freshness, the 4,096 pre-allocation cap, and both no-`ClientAuth`
-   refusal directions — are unexecuted.
+   refusal directions - are unexecuted.
 
 3. **`observe_peer`'s `ProtocolError` arm is unreachable from any test, and it is
    the arm a hostile peer would drive.** `setup_socket.rs:351` catches everything
@@ -895,7 +895,7 @@ Ranked by the gap between what the code decides and what any check proves.
    message, an oversize length, a non-`UnexpectedEof` io error. The only test
    covers the two named outcomes (`:811`). Downstream,
    `connection.rs:199-204` treats `ProtocolError` identically to
-   `UnexpectedEof`, so the third variant has no observable consequence — which
+   `UnexpectedEof`, so the third variant has no observable consequence - which
    makes the question whether it should exist, and no check can currently tell.
 
 4. **The manifest-and-checksum branch is five of nine failure reasons and CI
@@ -912,7 +912,7 @@ Ranked by the gap between what the code decides and what any check proves.
    thing standing in for it.
 
 5. **Nothing revokes a transferred descriptor on any post-transfer failure.**
-   `activate_server` can fail after `send_grant` succeeded — on
+   `activate_server` can fail after `send_grant` succeeded - on
    `InvalidActivation` (`setup_socket.rs:275`), `InvalidIdentity` (`:278`),
    `InvalidMessage` (`:279`, `:283`), or a `Timeout` in either
    `read_message`. In every case the peer keeps both mapping file descriptors,
@@ -921,7 +921,7 @@ Ranked by the gap between what the code decides and what any check proves.
    scope) plus `sender.discard()` and `root.cancel()`
    (`connection.rs:180-183`). No test asserts what the peer can still do with the
    mappings after a refused activation, and the ring's own size seal
-   (`docs/shm-transport.md:85`) is the only stated containment — which
+   (`docs/shm-transport.md:85`) is the only stated containment - which
    the same document says macOS does not provide.
 
 6. **`read_message_from_prefix` is the one reader with two branches no test
@@ -941,7 +941,7 @@ Ranked by the gap between what the code decides and what any check proves.
    `over_cap_auth_message_is_rejected_before_allocation` in `auth.rs`, which
    drives the 4,096 auth cap. A grant whose `descriptor` value pushes the
    envelope past 16 KiB would be refused at `encode_message` on the host's own
-   send path — a self-inflicted failure — and nothing measures the current
+   send path - a self-inflicted failure - and nothing measures the current
    envelope's headroom against the cap.
 
 8. **`activation.rs` holds the startup-ordering claim and is named in no

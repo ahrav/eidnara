@@ -19,8 +19,8 @@ with. Following `draining` backwards shows it is written by the shutdown
 - The window is structural, not incidental. `crates/host-runtime/src/runtime.rs:910-911`
   runs `accept_loop(...).await` and only then `shutdown_sequence(...)`; the accept
   loop returns solely on `shared.shutdown.cancelled()` (`runtime.rs:996`). So the
-  freeze at `runtime.rs:1127-1130` — the `draining` store and
-  `registry.freeze_admission()` — cannot execute until after the token is already
+  freeze at `runtime.rs:1127-1130` - the `draining` store and
+  `registry.freeze_admission()` - cannot execute until after the token is already
   cancelled. `shutdown_sequence` itself begins at `runtime.rs:1119`; the catalog's
   `~1127` cites the freeze block, not the function.
 - Before the repair, the three gates read `draining` alone. The diff replaces each
@@ -56,8 +56,8 @@ with. Following `draining` backwards shows it is written by the shutdown
 
 1. An authenticated client sends `host.shutdown`. The owner enqueues the
    committing response and its hook.
-2. In a hypothetical hook that cancelled before freezing — or on the
-   pre-`0fe5eba1` code, where the freeze was only in `shutdown_sequence` —
+2. In a hypothetical hook that cancelled before freezing - or on the
+   pre-`0fe5eba1` code, where the freeze was only in `shutdown_sequence` -
    `shutdown.cancel()` runs while `accepting` is still true and `draining` is
    still false.
 3. A socket already accepted at `runtime.rs:1017-1019` authenticates
@@ -87,8 +87,8 @@ latch and the token but never `accepting`.
 
 A running host with a live registry, one authenticated `host.shutdown`, and a
 second connection whose accept lands before the commit and whose authentication
-completes after it. Assert that the second connection registers no generation —
-observable as no `route.open` succeeding and no handler invocation — and that any
+completes after it. Assert that the second connection registers no generation -
+observable as no `route.open` succeeding and no handler invocation - and that any
 routed frame it sends is refused with `server_busy`. Separately, assert the
 ordering directly: at the moment `shared.shutdown.is_cancelled()` first observes
 true, `registry` admission is already frozen. A registry-visible probe or a
@@ -107,9 +107,9 @@ and assert the registration is refused at `routing.rs:305`.
 - Findings: yes, three. The fatal trip at `runtime.rs:84`, `AbandonGuard::drop` at
   `:424`, and the post-drain cancel at `:1189` all cancel without freezing.
   Only the first two matter, and for both the freeze follows once the accept loop
-  returns and `shutdown_sequence` reaches `:1127-1130`. The guarantee as worded —
+  returns and `shutdown_sequence` reaches `:1127-1130`. The guarantee as worded -
   "at the instant the commit cancels the shutdown token, registry admission is
-  already frozen" — is about the latch commit, and it holds; the broader claim
+  already frozen" - is about the latch commit, and it holds; the broader claim
   that a cancelled token always implies a frozen registry does not.
 - Missing evidence: no comment ties the fatal and abandon paths to the same fence
   argument, and no test covers a fatal trip racing a registration.

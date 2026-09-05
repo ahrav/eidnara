@@ -68,14 +68,14 @@ targets of kind `test` for the package, matching the 26 `.rs` files directly und
 | 16 | `perf_measurement` | unnamed |
 | 17 | `protocol_vectors` | unnamed |
 | 18 | `routing` | unnamed |
-| 19 | `shm_failure_modes` | **named** — `ci.yml:123` |
-| 20 | `shm_soak` | **named** — `ci.yml:123`, `:178` |
-| 21 | `shm_transport` | **named** — `ci.yml:168` |
+| 19 | `shm_failure_modes` | **named** - `ci.yml:123` |
+| 20 | `shm_soak` | **named** - `ci.yml:123`, `:178` |
+| 21 | `shm_transport` | **named** - `ci.yml:168` |
 | 22 | `synapse_bundle` | unnamed |
 | 23 | `synapse_jobs` | unnamed |
 | 24 | `synapse_protocol` | unnamed |
 | 25 | `synapse_roundtrip` | unnamed |
-| 26 | `transport_negotiation` | **named** — `ci.yml:168` |
+| 26 | `transport_negotiation` | **named** - `ci.yml:168` |
 
 **Exactly 4 of 26 named; exactly 22 unnamed.** The catalog's counts are correct.
 The three this record turns on are `lifecycle` (36 tests, 1872 lines),
@@ -114,8 +114,8 @@ stopped at an earlier failure before reaching the macOS test step".
    commit, fence overlap refusal, or probe-across-an-incarnation.
 2. Every workflow passes. The named binaries are shared-memory and negotiation
    suites plus doc tests, and none constructs a host lifecycle.
-3. The regression tests for the repaired lifecycle defects — the class
-   `0fe5eba1` and `86913952` belong to — are compiled and executed by nobody in
+3. The regression tests for the repaired lifecycle defects - the class
+   `0fe5eba1` and `86913952` belong to - are compiled and executed by nobody in
    the pipeline.
 4. Detection waits for a contributor to run `bun run test:rust` locally, or for
    the defect to surface in a shipped configuration, since Part 2a's scope is
@@ -137,8 +137,8 @@ argument paired with `-p host-runtime` (and each nextest profile's `default-filt
 and assert that `lifecycle`, `activation`, and `host_roundtrip` appear. To make it
 resistant to the substring trap that produced `lifecycle_cli`, the extraction must
 key on the package argument and match target names exactly, not by containment. A
-stronger form asserts the complement — that the named set equals the full
-`cargo metadata` target set for the package — so a newly added binary is unnamed
+stronger form asserts the complement - that the named set equals the full
+`cargo metadata` target set for the package - so a newly added binary is unnamed
 loudly rather than silently. The macOS half needs a separate assertion: that at
 least one in-crate test from this scope executes under `runner.os == 'macOS'`,
 which today would fail against the single filter at `ci.yml:179-180`.
@@ -152,7 +152,7 @@ which today would fail against the single filter at `ci.yml:179-180`.
   and the commit messages of `ad52aa3b`, `5a91b29f`, `e38e7894`, and `c37b9bc1`.
 - Findings: the shape argues oversight rather than targeted exclusion. 22 of 26
   binaries are unnamed, and the four that are named are exactly the shared-memory
-  and negotiation suites — the subject of the two workflows that exist
+  and negotiation suites - the subject of the two workflows that exist
   (`shm-crash-recovery`, `shm-source-build`, `shm-hardening-optin`). Both jobs are
   organized around shared memory, so `host-runtime` is present in CI as a shared-memory
   dependency, not as a host. No comment anywhere states that lifecycle tests are

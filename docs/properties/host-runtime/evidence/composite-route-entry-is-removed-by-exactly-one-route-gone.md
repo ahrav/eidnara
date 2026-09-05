@@ -20,16 +20,16 @@ it is delegated to the host's promise to deliver `route_gone`.
 
 **The insert, and why it is where it is.** `bind` is `composite.rs:242-275`. It
 resolves the child by module id at `:248-253`, and for an unmapped module returns
-`BindOutcome::Reject` at `:257-260` — **before** the insert, so that path adds
+`BindOutcome::Reject` at `:257-260` - **before** the insert, so that path adds
 nothing and needs no removal. Then:
 
-- `:262-265` — the comment stating the contract: "Inserted before the child
+- `:262-265` - the comment stating the contract: "Inserted before the child
   observes the handle and retained through rejection, panic, and close-wins-bind:
   the host still owes exactly one route-gone for each of those outcomes, and that
   callback needs this entry to reach the same child."
-- `:266-269` — the insert: `self.routes.lock().expect("composite route map")
+- `:266-269` - the insert: `self.routes.lock().expect("composite route map")
   .insert(route, child)`.
-- `:270-274` — the `match child` that awaits the child's own `bind` at `:271`,
+- `:270-274` - the `match child` that awaits the child's own `bind` at `:271`,
   `:272` or `:273`.
 
 So the insert precedes the `await`. A panic inside the child's `bind` leaves the
@@ -39,15 +39,15 @@ explicitly.
 **The removal, and its intentional window.** `route_gone` is
 `composite.rs:289-303`:
 
-- `:290` — `let child = self.child_of_route(route);`
-- `:291-296` — the `match child`, whose three `Some` arms at `:292-294` dispatch
+- `:290` - `let child = self.child_of_route(route);`
+- `:291-296` - the `match child`, whose three `Some` arms at `:292-294` dispatch
   to the owning child's `route_gone` and await it.
-- `:295` — `None => return`, the unmapped arm, which returns **without touching
+- `:295` - `None => return`, the unmapped arm, which returns **without touching
   the map**. This is what makes a spurious callback harmless: it cannot remove a
   different handle's entry.
-- `:297-298` — the comment: "Removed only after the child's callback stopped, so
+- `:297-298` - the comment: "Removed only after the child's callback stopped, so
   the map can never claim a child is done with a handle it is still cleaning up."
-- `:299-302` — the removal, `self.routes.lock().expect("composite route map")
+- `:299-302` - the removal, `self.routes.lock().expect("composite route map")
   .remove(&route)`.
 
 The record's `Fault/timing angle:` cites the comment and the removal together as
@@ -81,13 +81,13 @@ latch.** Traced at carry time by reading every `run_route_gone` call site
 (`dispatch.rs:1166`, `:1199`, `:1220`, `:1313`, `:1446`) and every early return
 that skips one:
 
-1. **`dispatch.rs:1174`** — `Err(LifecycleFailure { stopped: false })`, the bind
+1. **`dispatch.rs:1174`** - `Err(LifecycleFailure { stopped: false })`, the bind
    is still executing past `lifecycle_callback_deadline`. The function returns
    with no `route_gone`. The comment at `:1171-1173` is explicit that this is
    deliberate: "running route-gone or freeing the channel would overlap it for the
    same handle. The latch is already tripped, so the route stays claimed and the
    incarnation terminates."
-2. **`dispatch.rs:1440-1444`** — a dispatch task did not stop before route-gone.
+2. **`dispatch.rs:1440-1444`** - a dispatch task did not stop before route-gone.
    `shared.fatal.trip(..., "dispatch task did not stop before route-gone")` then
    `return`, before the `run_route_gone` at `:1446`.
 3. **`run_route_gone` returning `false`** at `dispatch.rs:1276`
@@ -133,7 +133,7 @@ The sharper failure is the second half of the record's `Impact:`, and it does no
 need a leak that lives forever. Take path 1: a handler's `bind` blocks past
 `lifecycle_callback_deadline`. `dispatch.rs:1174` returns, the latch is tripped,
 and the composite's map still holds `route → child`. The registry has *not*
-finalized the route, so the channel is not freed for reuse — that is exactly what
+finalized the route, so the channel is not freed for reuse - that is exactly what
 the comment at `:1171-1173` is protecting. So during the shutdown window the map
 entry is stale but the handle it names cannot be reissued, and `handle` for that
 route resolves to a child that is still inside its own `bind`. What the
@@ -146,7 +146,7 @@ site is guarded by a `run_route_gone` that returned `true`
 (`dispatch.rs:1167`, `:1200`, `:1222`, `:1314`, `:1447`). So on the paths where
 the composite's entry leaks, the channel is not freed, and on the paths where the
 channel is freed, the composite's `route_gone` ran. That is a real coupling and it
-is not stated anywhere in `composite.rs` — the composite's own comment claims the
+is not stated anywhere in `composite.rs` - the composite's own comment claims the
 host "owes exactly one route-gone", which is the strong form, and the actual
 protection for the reuse hazard is the weaker but sufficient
 `finalize_close`-follows-`route_gone` ordering.
@@ -183,7 +183,7 @@ Dependencies:
 
 ## What a test must construct
 
-The oracle is per-handle accounting, with total map size as a cheap screen — the
+The oracle is per-handle accounting, with total map size as a cheap screen - the
 record's `Check:` is explicit that an insert and an unrelated remove cancel in the
 total.
 
@@ -231,7 +231,7 @@ from the client's side or from the latch, not from a subsequent request.
   file), `routing.rs:377-390` (`mark_gone_started`).
 - Findings: **yes, resolved.** The chain is: `handler.bind` is invoked inside
   `panic_boundary::redact_sync` at `dispatch.rs:1148`, and `redact_sync`
-  (`panic_boundary.rs:52-55`) does **not** `catch_unwind` — it increments a
+  (`panic_boundary.rs:52-55`) does **not** `catch_unwind` - it increments a
   thread-local depth counter through `CallbackPollGuard` (`:15-28`) so the
   process panic hook installed at `:38-49` prints a redacted line instead of the
   payload, then calls the closure directly. The same is true of the async
@@ -246,7 +246,7 @@ from the client's side or from the latch, not from a subsequent request.
   names.
 - Missing evidence: none for the question as asked. The lens marked this "needs
   verification in the runtime" and the runtime file is `dispatch.rs`, which is
-  inside this sub-part's own scope — so the question was answerable in the
+  inside this sub-part's own scope - so the question was answerable in the
   sub-part that absorbed the record, and would have been answered by the lens
   passes if they had carried it.
 - Conclusion: resolved with answer. Yes, for all three named outcomes. See the
@@ -271,7 +271,7 @@ from the client's side or from the latch, not from a subsequent request.
   composite, which would drop the map with it. `StaticComposite` is owned by the
   value `serve.rs:575` builds and `:632` moves into `host_runtime::run`, so its
   lifetime is the `run` call, but tracing whether `run` returns on every
-  latch-tripping path was not done — that is 2a's and 2f's scope.
+  latch-tripping path was not done - that is 2a's and 2f's scope.
 - Conclusion: unresolved, needs the fatal-latch teardown path traced in
   `part-2a-host-lifecycle` or `part-2f-runtime-config`. The bound is at worst a
   terminating incarnation rather than the host's lifetime, which is enough to

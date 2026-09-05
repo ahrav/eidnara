@@ -374,7 +374,7 @@ and pong records. The four store records belong in Group F.
 Type: liveness
 Reachability: explicit-config-only
 Status: active
-Exercised: partial — `tests/client.rs:97-145` keeps a generation alive across
+Exercised: partial - `tests/client.rs:97-145` keeps a generation alive across
 roughly seven ping intervals with a real answering client, but asserts only that
 an unrelated unary request later succeeds. It observes no Ping, no Pong, and no
 retirement, so it passes unchanged if the probe never runs at all. No test covers
@@ -384,7 +384,7 @@ Guarantee: For a configured policy, a peer that answers each Ping within
 uncancelled indefinitely; and when `invalidate_on_missed` is set, a peer that
 does not answer has its generation cancelled within one `pong_deadline` of write
 completion.
-Check: `always` — under paused virtual time, for a policy with a chosen
+Check: `always` - under paused virtual time, for a policy with a chosen
 `ping_interval` and `pong_deadline`: (a) answer every Ping strictly inside
 `pong_deadline` measured from the write-completion instant recorded at
 `connection.rs:1443`, advance the clock by `k * ping_interval + pong_deadline`
@@ -413,7 +413,7 @@ shipped configuration supplies. For (a) a cooperative peer, which the in-crate
 duplex harness at `connection.rs:1480` onward already provides. For (b) a peer
 that reads but never sends a Pong, plus `invalidate_on_missed: true`. Paused
 tokio time for both. No adversary and no concurrency campaign.
-Confidence: high — [evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). Every bound was read at HEAD and the two `sent` anchors were
+Confidence: high - [evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). Every bound was read at HEAD and the two `sent` anchors were
 traced through both writers of the field.
 Existing check: partial. `tests/client.rs:97-145` covers direction (a) with an
 indirect oracle, and is the only place in the crate where a full client answers a
@@ -436,11 +436,11 @@ Open questions:
 Type: reachability
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet — no test fills the writer queue while liveness is configured.
+Exercised: not yet - no test fills the writer queue while liveness is configured.
 Guarantee: Application egress backpressure, on its own, never retires a
 generation whose peer is answering Pings, and in particular never retires one
 when `invalidate_on_missed` is `false`.
-Check: `sometimes` — a constant marker `probe_queued_behind_saturated_egress`
+Check: `sometimes` - a constant marker `probe_queued_behind_saturated_egress`
 fires when all of these independent, legal preconditions hold at one instant: a
 `LivenessPolicy` is configured; `invalidate_on_missed` is `false`; the writer
 queue holds `writer_queue_frames` admitted frames; and a Ping tick is due. A
@@ -480,7 +480,7 @@ stops reading is retired by the write deadline on its own, which
 `config.rs:204-206` documents as intended. Paused time makes the 30 second window
 cheap. The second marker needs only a Ping enqueued behind at least one unwritten
 frame plus a prompt Pong.
-Confidence: high — [evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md). The admission path was traced from the Ping send through the
+Confidence: high - [evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md). The admission path was traced from the Ping send through the
 cancel calls, and the absence of a host-side control lane was confirmed by
 reading the whole `FrameSender` and its constructor.
 Existing check: none. `tests/client.rs:97-145` is named
@@ -512,14 +512,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — one byte-exact golden vector exists
+Exercised: partial - one byte-exact golden vector exists
 (`generation.rs:1395-1412`) but its fixture omits the optional field and carries
 an empty `files`, so it pins neither the optional field's position nor
 `ManifestFile`'s field order, and it asserts no digest.
 Guarantee: The canonical manifest encoding is fixed by a golden vector that
 covers every field in the schema, so no change to declaration order can alter a
 generation's bytes or its digest without a test failing.
-Check: `always` — a golden test asserts a hardcoded byte string and a hardcoded
+Check: `always` - a golden test asserts a hardcoded byte string and a hardcoded
 lowercase-hex SHA-256 for a fully populated `GenerationManifest`: all four
 leading scalars, `source_payload_manifest_sha256` present as `Some`, and `files`
 holding at least two entries so sortedness is also pinned. Assert both
@@ -538,7 +538,7 @@ bytes.
 Required faults and enabling state: none. The check is a pure unit test with no
 store, no filesystem, and no fault injection. It is the cheapest record in this
 pass.
-Confidence: high — [evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). Both structs, both encoding functions, and the existing
+Confidence: high - [evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). Both structs, both encoding functions, and the existing
 fixture were read at HEAD, and the three blind spots were each confirmed by
 reasoning from the fixture's literal contents.
 Existing check: `generation.rs:1395-1412`
@@ -560,11 +560,11 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test validates a manifest written under one declaration
+Exercised: not yet - no test validates a manifest written under one declaration
 order against a binary using another.
 Guarantee: A retained generation staged by an earlier release keeps validating,
 and keeps its directory name, under any later release of the same schema number.
-Check: `always` — for a manifest fixture whose bytes were produced under the
+Check: `always` - for a manifest fixture whose bytes were produced under the
 previous declaration order, `store.validate(old_digest)` succeeds under the
 current binary. Equivalently, and cheaper: for every field of
 `GenerationManifest` and `ManifestFile`, a permutation of the declaration order
@@ -589,7 +589,7 @@ content-addressed deduplication stops deduplicating without any error at all.
 Required faults and enabling state: none at runtime. Constructing the check needs
 a fixture manifest whose bytes encode an older field order, which is a string
 literal, plus a staged directory whose files match it. No fault injection.
-Confidence: high — [evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md). Both equality checks were read at HEAD, and the
+Confidence: high - [evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md). Both equality checks were read at HEAD, and the
 fail-closed conclusion was derived from them rather than assumed; the prompt's
 "silently change every retained generation's digest" is corrected in the evidence
 file.
@@ -612,12 +612,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — the Linux arm has one test through `promote_temp`
+Exercised: not yet - the Linux arm has one test through `promote_temp`
 (`generation.rs:1689`), and the macOS arm has never executed under observation.
 Guarantee: Wherever the digest-target exchange runs, the two names are swapped
 atomically inside one directory, or an error is returned and neither name is left
 unoccupied; on a platform without the primitive it fails closed.
-Check: `always-or-unreached` — for each supported platform, drive
+Check: `always-or-unreached` - for each supported platform, drive
 `promote_temp` into the exchange branch and assert that after the call the digest
 name holds the validated candidate and the temp name holds the displaced corrupt
 orphan, with no observable state in which either name is absent. Also assert the
@@ -642,7 +642,7 @@ occupying the digest target, plus a restage of the same digest. The existing tes
 (`generation.rs:1689`) already builds that fixture, so the fault is available; the
 missing element is executing it on macOS. On the stub platforms the check is a
 compile-and-call assertion.
-Confidence: high — [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms, the call site, and the whole macOS CI job were
+Confidence: high - [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms, the call site, and the whole macOS CI job were
 read at HEAD; the claim that no macOS lifecycle or generation test executes is
 derived from the four host-runtime steps in that job rather than asserted.
 Existing check: partial, Linux only. `generation.rs:1689`
@@ -667,12 +667,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — the branch is unreachable on Linux without a filesystem that
+Exercised: not yet - the branch is unreachable on Linux without a filesystem that
 rejects `renameat2` flags, and it is the only path on macOS, where no test in this
 scope runs.
 Guarantee: `rename_no_replace` never replaces an occupied target, on any platform
 and for any occupant, including an empty directory.
-Check: `always` — plant a directory at `to`, call `rename_no_replace`, and assert
+Check: `always` - plant a directory at `to`, call `rename_no_replace`, and assert
 it returns `Ok(false)` and leaves both names as they were. Run the assertion for
 an empty occupant and a nonempty occupant, on both the flagged Linux path and the
 portable path, forcing the portable path either by a filesystem that rejects
@@ -702,7 +702,7 @@ calls, or an extracted fallback called with the target pre-planted. Reaching the
 fallback on Linux at all needs a filesystem that rejects `renameat2` flags;
 running it as the default needs macOS.
 Confidence: high on the mechanism, medium on severity, since the transaction lock
-does exclude the in-model actors and no out-of-model writer is demonstrated —
+does exclude the in-model actors and no out-of-model writer is demonstrated -
 [evidence](evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md). Both branches, the caller's contract, and the lock references
 were read at HEAD.
 Existing check: none. No test drives the portable fallback on any platform, and

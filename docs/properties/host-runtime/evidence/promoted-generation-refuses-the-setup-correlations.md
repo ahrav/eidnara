@@ -13,9 +13,9 @@ downstream re-derives it, so a wrong value would be silent.
 The two constructors sit adjacent in `crates/host-runtime/src/connection.rs`:
 
 - `:805` `initial_watermark: 0,` for the default setup.
-- `:810-818` `provider_active()`, whose doc comment states the reasoning — "Correlations 1 and 2
+- `:810-818` `provider_active()`, whose doc comment states the reasoning - "Correlations 1 and 2
   were consumed by activation and commit, so the first application request on a promoted candidate
-  is 3 (§7.7.4)" — and whose body is `initial_watermark: COMMIT_CORRELATION` at `:815`.
+  is 3 (§7.7.4)" - and whose body is `initial_watermark: COMMIT_CORRELATION` at `:815`.
 
 The constants are in `crates/host-runtime/src/transport_negotiation.rs`: `ACTIVATION_CORRELATION: u64 =
 1` (`:36`), `COMMIT_CORRELATION: u64 = 2` (`:38`), `FIRST_APPLICATION_CORRELATION: u64 = 3` (`:40`).
@@ -34,11 +34,11 @@ rather than a fresh one.
 
 ## Failure scenario
 
-The pipelining that makes this reachable is not incidental — it is designed in, and the design
+The pipelining that makes this reachable is not incidental - it is designed in, and the design
 comment says so. `connection.rs:1156-1161`, on the candidate commit path:
 
 ```
-// Promotion is gated on this exact frame's local completion — not
+// Promotion is gated on this exact frame's local completion - not
 // queue admission, not an aggregate flush (KTD4). The receiver is
 // deliberately NOT polled while waiting: an un-promoted host never
 // consumes candidate frames, so a request pipelined ahead of the
@@ -71,7 +71,7 @@ covers the seed.
 
 A client that pipelines a correlation-1 or correlation-2 request behind its commit request, then
 survives promotion, then observes the generation close before dispatch. The pipelining must be real
-— written to the socket before the commit response completes — because a client that waits for the
+- written to the socket before the commit response completes - because a client that waits for the
 commit response and then sends correlation 1 is testing a different thing.
 
 `tests/transport_negotiation.rs:1268`
@@ -87,7 +87,7 @@ promoted, which is the case this record names.
 
 - Sources examined: `grep -n "provider_active()"` across `crates/host-runtime/src/`;
   `crates/host-runtime/src/connection.rs:205-232`.
-- Findings: two hits only — the definition at `:812` and one call site at `:222`. That call site is
+- Findings: two hits only - the definition at `:812` and one call site at `:222`. That call site is
   the `Some(receiver)` arm of the promotion match at `:207`, which is the production promotion path:
   it takes the promoted receiver, builds a generation at `:211-216`, and serves it at `:217-224`.
   The `None` arm at `:226-232` reaps an unpromoted candidate and never serves.
@@ -99,7 +99,7 @@ promoted, which is the case this record names.
 - Sources examined: `crates/host-runtime/src/connection.rs:1150-1180`.
 - Findings: supported verbatim by the source comment at `:1156-1161`, quoted above. The driver reads
   the commit request at `:1154`, decodes at `:1155`, sends the response at `:1163-1170`, then awaits
-  `written_rx` at `:1171` — the receiver is not touched between `:1155` and the end of the exchange.
+  `written_rx` at `:1171` - the receiver is not touched between `:1155` and the end of the exchange.
 - Missing evidence: none.
 - Conclusion: resolved with answer. The catalog's fault/timing angle is a restatement of the code's
   own stated design, not an inference.

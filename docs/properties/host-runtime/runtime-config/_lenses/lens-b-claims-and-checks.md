@@ -233,7 +233,7 @@ configured value while the fast path is active.
 Two aggravating details. The 50 ms is a bare literal, not a named constant, so
 it is invisible to anyone reading `HostTiming`. And each probe invokes the
 handler's `health` callback under `lifecycle_join` (`:1117`), where an overrun
-is host-fatal (`handler.rs:554-556`) — so the fast path both raises callback
+is host-fatal (`handler.rs:554-556`) - so the fast path both raises callback
 frequency by 600x and keeps every invocation on a fatal-if-slow path.
 
 The design intent is legible: fast polling during activation is how the host
@@ -287,10 +287,10 @@ module manifest the refactor edited, and it is clean. It declares
 miscount them as stale.** Both are forward references to unbuilt work, not
 descriptions of removed work:
 
-1. `runtime.rs:3-5` — "future production wiring in the source module-host work will
+1. `runtime.rs:3-5` - "future production wiring in the source module-host work will
    map SIGINT/SIGTERM, while tests inject deterministic shutdown." No signal
    handling was deleted; none has been written. Register row 11.
-2. `config.rs:5-6` — CLI and config-file exposure "belongs to the spawn/doctor
+2. `config.rs:5-6` - CLI and config-file exposure "belongs to the spawn/doctor
    integration (the source daemon-lifecycle work), not this crate." Register row 2, and
    the reason the configuration contract is doc comments.
 
@@ -453,7 +453,7 @@ is included.
 
 | Cluster | Sites | Labels |
 | --- | --- | --- |
-| Startup and abandon cleanup guards | 7 | `runtime.rs:348`, `:359`, `:361`, `:369`, `:370`, `:385` — `"armed startup cleanup"` / `"started startup cleanup"`; `:409`, `:415` — `"armed abandon guard"` |
+| Startup and abandon cleanup guards | 7 | `runtime.rs:348`, `:359`, `:361`, `:369`, `:370`, `:385` - `"armed startup cleanup"` / `"started startup cleanup"`; `:409`, `:415` - `"armed abandon guard"` |
 | Mutex and lock invariants | 6 | `runtime.rs:79`, `:88` `"fatal lock"`; `:152`, `:215` `"abort lock"`; `:428`, `:1179` `"connections lock"` |
 | Infallible serialization | 2 | `config.rs:320` `"fixed auth shape serializes"`, `:331` `"fixed publication shape serializes"` |
 | Validated-above contracts | 2 | `harness_closure.rs:218` `"key was collected from this object"`, `:400` `"launch and dependency roots were checked above"` |

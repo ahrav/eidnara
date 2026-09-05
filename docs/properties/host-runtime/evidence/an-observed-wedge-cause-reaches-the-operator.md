@@ -4,7 +4,7 @@
 
 The catalog recorded this as a reachability record: the classifier computes
 thirteen distinct wedge reasons and the sole production consumer forwards one.
-The lens is output coverage rather than state construction — the reasons are
+The lens is output coverage rather than state construction - the reasons are
 already computed and already asserted by in-crate tests, so the only question is
 whether any of them crosses the process boundary. That makes it verifiable by
 counting producers and tracing the single consumer.
@@ -15,7 +15,7 @@ Thirteen distinct reason strings can accompany a `Wedged` verdict. The count is
 **verified** at thirteen. One is produced in `probe_lifecycle` and twelve in
 `classify`, all in `crates/host-runtime/src/lifecycle.rs`:
 
-1. `:965` `"lifetime fence held without a runtime directory"` — the only one
+1. `:965` `"lifetime fence held without a runtime directory"` - the only one
    outside `classify`.
 2. `:1093` `"lifetime and runtime locks disagree"`
 3. `:1097` `UNSUPPORTED_STATE_SCHEMA_REASON`, i.e. `"unsupported_state_schema"`
@@ -56,8 +56,8 @@ There are only two `state: LifecycleState::Wedged` constructions in the file
   `align_versions` (`:92`). Twelve causes therefore share one remediation.
 - **A probe error collapses to the same output.** When `probe()` itself fails,
   `cmd_probe` takes `:590-595` and calls `instance_failure` (`:329-342`). Two of
-  its arms — `InstanceError::Insecure` and `InstanceError::NamespaceDrift` at
-  `:335-337` — return exactly `("wedged", "wedged")`, byte-identical to the
+  its arms - `InstanceError::Insecure` and `InstanceError::NamespaceDrift` at
+  `:335-337` - return exactly `("wedged", "wedged")`, byte-identical to the
   twelve collapsed classifier reasons. Confirmed.
   - **Refinement:** the catalog describes this as "erasing the distinction
     between fence incoherence and an I/O failure." An I/O failure is in fact
@@ -70,7 +70,7 @@ There are only two `state: LifecycleState::Wedged` constructions in the file
 
 ## Failure scenario
 
-1. Any wedge other than the quarantined-schema case occurs — say a replaced
+1. Any wedge other than the quarantined-schema case occurs - say a replaced
    runtime directory under a live daemon, which produces reason `:965`, or a
    record that failed its security checks, which produces `:1100`.
 2. `probe_lifecycle` returns a `LifecycleProbe` whose `reason` names the cause
@@ -91,7 +91,7 @@ a single conditional at `:388`, evaluated identically on every path. The record
 depends on the classifier's reason set staying complete, which
 `probe-never-reports-stopped-while-either-fence-is-held` and
 `clock-anomalies-do-not-invalidate-live-evidence` both rely on from the other
-direction — those records reason about which verdict is correct, while this one
+direction - those records reason about which verdict is correct, while this one
 observes that the correctness detail never leaves the process.
 
 ## What a test must construct
@@ -119,7 +119,7 @@ demonstration. A third case should invoke the probe-error path with an
 - Findings: thirteen distinct strings, matching the catalog's count. Exactly one,
   `"unsupported_state_schema"`, is forwarded, via the single conditional at
   `:388`. The other twelve collapse to `"wedged"` at `:605`. **Correction:** the
-  reasons are not all in one function — twelve are in `classify`, one (`:965`) is
+  reasons are not all in one function - twelve are in `classify`, one (`:965`) is
   in `probe_lifecycle`.
 - Missing evidence: none.
 - Conclusion: resolved. Thirteen computed, one conveyed, twelve lost.
@@ -128,7 +128,7 @@ demonstration. A third case should invoke the probe-error path with an
 
 - Sources examined: `cmd_probe` `:588-596`; `instance_failure` `:329-342`;
   `remediation_for` `:86-118`; `crates/host-runtime/Cargo.toml` dependency list.
-- Findings: confirmed for two arms — `Insecure` and `NamespaceDrift` at
+- Findings: confirmed for two arms - `Insecure` and `NamespaceDrift` at
   `:335-337` both emit `("wedged", "wedged")`, identical to a collapsed
   classifier wedge. `Io` is distinguishable as `"internal_error"` at `:338-340`,
   so the catalog's framing of the erased pair needs the refinement noted above.

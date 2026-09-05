@@ -65,7 +65,7 @@ from admission only (runtime.rs)", naming the coupling it does not test.
 
 ## Failure scenario
 
-Someone adds a fourth resident class — say a per-incarnation prompt cache — and
+Someone adds a fourth resident class - say a per-incarnation prompt cache - and
 subtracts it at `:896-902` alongside the others, which is the natural local
 edit. They do not add it to `resident_floor` at `:733-735`, because that is in a
 different function 165 lines away and the compiler says nothing.
@@ -130,7 +130,7 @@ violation.
   reads the resulting `ingress_budget` capacity, and `ByteBudget::capacity` is
   `pub(crate)` (`wire.rs:405`), so an integration test cannot.
 - Missing evidence: none; the gap is real.
-- Conclusion: resolved with answer — the gate's boundary is covered, the
+- Conclusion: resolved with answer - the gate's boundary is covered, the
   consumer's postcondition is not, and the visibility of `capacity` is why.
 
 ### Q: could `catalog_resident` alone exceed the headroom and force a wrap?

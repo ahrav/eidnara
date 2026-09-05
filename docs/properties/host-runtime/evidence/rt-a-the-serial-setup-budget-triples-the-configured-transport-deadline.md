@@ -12,7 +12,7 @@ operation. `docs/host-wire-protocol.md:731` forbids exactly that.
 Three serial windows inside `run_connection` (`connection.rs:115`), each
 verified:
 
-`connection.rs:120-127` — authentication:
+`connection.rs:120-127` - authentication:
 
 ```
 let auth = crate::auth::authenticate_server(
@@ -25,7 +25,7 @@ let auth = crate::auth::authenticate_server(
 .await;
 ```
 
-`connection.rs:157-164` — ring preparation, a **fresh** absolute deadline:
+`connection.rs:157-164` - ring preparation, a **fresh** absolute deadline:
 
 ```
 timeout_at(
@@ -34,7 +34,7 @@ timeout_at(
 )
 ```
 
-`connection.rs:170-178` — activation, the **same duration again**:
+`connection.rs:170-178` - activation, the **same duration again**:
 
 ```
 if crate::setup_socket::activate_server(
@@ -108,7 +108,7 @@ prepared endpoint pair, until it notices the peer is gone.
 
 `docs/host-wire-protocol.md:296` says "Unexpected setup-socket EOF has
 equivalent retirement effect but no peer drain guarantee", so the generation is
-retired — but the client retries, and the same arithmetic applies again. Under
+retired - but the client retries, and the same arithmetic applies again. Under
 sustained load the host burns handshake and connection permits on peers that have
 already given up, which is the failure the §11:747 warning was written to
 prevent.
@@ -171,7 +171,7 @@ added to this path shows up as a changed number.
   at `:158`.
 - Missing evidence: the body of `activate_server`, which is 2c's file. I read the
   signature and the call site only.
-- Conclusion: resolved with answer for the arithmetic — passing a `Duration`
+- Conclusion: resolved with answer for the arithmetic - passing a `Duration`
   makes a shared absolute deadline impossible. Whether `activate_server`
   subdivides it further is 2c's question; if it does, the total only grows.
 
@@ -182,7 +182,7 @@ added to this path shows up as a changed number.
   constants (`lib.rs:48-52`, including `CLIENT_HANDSHAKE_TIMEOUT`) are the
   client's own and are not readable by `HostConfig::validate` as configuration.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the cross-field check the specification
+- Conclusion: resolved with answer - the cross-field check the specification
   implies cannot be written against the current type. Either `HostTiming` gains a
   declared peer budget, or the coupling stays a documentation obligation.
 
@@ -196,7 +196,7 @@ added to this path shows up as a changed number.
   several records as an enabling knob. No 2c record asserts the serial sum, and
   no 2c record states it is armed twice.
 - Missing evidence: none.
-- Conclusion: resolved with answer — not a duplicate. This record corrects 2c's
+- Conclusion: resolved with answer - not a duplicate. This record corrects 2c's
   figure and promotes the observation to a property. Synthesis should
   cross-reference rather than merge, and 2c's `existing-checks.md` line needs the
   figure amended by whoever owns that file.

@@ -12,32 +12,32 @@ nothing can.
 
 ## Evidence trail
 
-Every `gen.read_tasks.track_future(..)` call outside a test module — twelve
+Every `gen.read_tasks.track_future(..)` call outside a test module - twelve
 sites. `connection.rs` `mod tests` starts at `:1481`, `dispatch.rs` at `:1466`.
 
 The read loop itself, and the one site that precedes it:
 
-- `connection.rs:276-278` — `read_loop` is wrapped into the set and awaited
+- `connection.rs:276-278` - `read_loop` is wrapped into the set and awaited
   inline at `:304`. **The read loop is tracked in its own set**, which is the
   safety net the catalog names: the count cannot reach zero while the loop
   runs, so no producer it spawns can be missed.
-- `connection.rs:296` — `liveness_loop`. Registered at `:296`, after the
+- `connection.rs:296` - `liveness_loop`. Registered at `:296`, after the
   registry insert at `:288` but before `read_task.await` at `:304`, so it
   precedes the read loop's first poll.
 
 The ten inside the read loop's dynamic extent:
 
-- `connection.rs:452` — authoritative rejection, from `read_loop`'s
+- `connection.rs:452` - authoritative rejection, from `read_loop`'s
   `InboundEvent::Rejected` arm.
-- `connection.rs:573` — route Goodbye close, from the `FrameType::Goodbye` arm.
-- `connection.rs:687`, `:705`, `:724`, `:732`, `:761` — the `Reject`,
+- `connection.rs:573` - route Goodbye close, from the `FrameType::Goodbye` arm.
+- `connection.rs:687`, `:705`, `:724`, `:732`, `:761` - the `Reject`,
   `CatalogList`, `HostShutdown`, `HostStatus`, and `RouteOpen` arms of
   `handle_control`, which `read_loop` awaits at `:475`.
-- `connection.rs:983` — `respond_tcp`, reached from `handle_negotiate`, which
+- `connection.rs:983` - `respond_tcp`, reached from `handle_negotiate`, which
   `handle_control` returns into at `:638`.
-- `connection.rs:1094` — the candidate setup driver, from `grant_candidate`,
+- `connection.rs:1094` - the candidate setup driver, from `grant_candidate`,
   also under `handle_negotiate`.
-- `dispatch.rs:612` — `emit_rejection`.
+- `dispatch.rs:612` - `emit_rejection`.
 
 `dispatch.rs:612` needed its own check, because `emit_rejection` is called from
 six places and one of them looked like it might sit in a spawned task. All six
@@ -45,14 +45,14 @@ are inside the read loop's extent: `dispatch.rs:823`, `:840`, `:863`, `:875`,
 and `:1070` are all in `dispatch_request`'s own body (`:805-1072`), which
 `read_loop` awaits at `connection.rs:486`; `connection.rs:669` is in
 `handle_control`. In particular `:1070` is in the `else` arm after
-`register_dispatch` at `:1046-1049`, *not* inside the task spawned at `:909` —
+`register_dispatch` at `:1046-1049`, *not* inside the task spawned at `:909` -
 that task is registered in `route_tracker`, not `read_tasks`.
 
 The transitive check also holds. Three tasks are themselves registered in
 `read_tasks` and could in principle register again: `open_route` (spawned at
 `connection.rs:761`), `close_route_decision` (`:573`), and
 `run_candidate_setup` (`:1094`). None registers into `read_tasks`. `open_route`
-spawns at `dispatch.rs:1123` and `:1239` — both `spawn_lifecycle` with no
+spawns at `dispatch.rs:1123` and `:1239` - both `spawn_lifecycle` with no
 tracker wrapper. `close_route_decision` reaches `settle_route_work`, which uses
 the registry-owned route tracker (`dispatch.rs:1326`), and `run_route_gone`,
 which is `spawn_lifecycle` again. `run_candidate_setup`
@@ -89,7 +89,7 @@ unlike the integration-suite proofs this one is executed.
 2. The wait at `:1164` blocks, because the read loop is itself a member
    (`connection.rs:276-278`). Any emission the loop spawns before it exits
    raises the count again, and the wait covers it.
-3. Now suppose a refactor moved one emission out of the read loop's extent — for
+3. Now suppose a refactor moved one emission out of the read loop's extent - for
    example, spawning `emit_rejection` from the route-settle path, which runs at
    `runtime.rs:1146` *before* the close at `:1161`. That task registers into
    `read_tasks`, but if it registers after the count reached zero, the wait at
@@ -106,7 +106,7 @@ unlike the integration-suite proofs this one is executed.
 No narrow window for the property as it holds today; the exposure is to
 refactors, which is why the catalog frames the impact that way. The
 enabling state for observing the *positive* case is a read cancellation fired
-while an emission is mid-flight — `gen.read_cancel.cancel()` at
+while an emission is mid-flight - `gen.read_cancel.cancel()` at
 `runtime.rs:1160` with a task spawned at one of the ten in-loop sites still
 parked on contended egress. Two orderings make that reachable: the shutdown
 sequence closes the tracker at `:1161` while the read loop is live, and
@@ -116,15 +116,15 @@ just before the close.
 
 ## What a test must construct
 
-The real read loop driving a real emission, then a close-and-wait — which is
+The real read loop driving a real emission, then a close-and-wait - which is
 exactly what the existing check does not do. Drive a client that sends a
 control request whose handling spawns an emission (a `catalog.list` reaching
 `connection.rs:705`, or a `server_busy` rejection reaching `dispatch.rs:612`
 with `pending_permits` saturated), stall egress so the emission parks, then
 cancel the read and close the tracker. The oracle is the catalog's: after the
 wait returns, the read loop has returned and no registration site is reachable.
-The reachable half is assertable — the emission's frame appears on the socket
-before the Goodbye — and that is what `:1598-1606` already proves for a
+The reachable half is assertable - the emission's frame appears on the socket
+before the Goodbye - and that is what `:1598-1606` already proves for a
 hand-rolled producer. The part that needs the real loop is that the emission was
 registered *by the loop*, so the test also pins the tracked-read-loop
 invariant. A mutation control makes it meaningful: removing
@@ -148,7 +148,7 @@ one count clarification and one citation correction.
   tracked. No task registered in `read_tasks` registers into it again. The
   catalog's "all ten registration sites enumerated" counts the ten in-loop
   sites; the other two are the read loop itself and `liveness_loop`, which
-  precedes it. Both framings agree — the count differs only in whether the
+  precedes it. Both framings agree - the count differs only in whether the
   net and the pre-loop registration are included.
 - Missing evidence: none.
 - Conclusion: resolved. The property holds at HEAD, no registration site sits

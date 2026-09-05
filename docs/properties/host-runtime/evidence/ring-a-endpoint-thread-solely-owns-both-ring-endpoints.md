@@ -29,8 +29,8 @@ Ownership is established in four steps, all inside `prepare`
 4. What crosses the thread boundary is a `std::sync::mpsc::sync_channel(1)`
    created at `:231` and carrying
    `Result<(serde_json::Value, [OwnedFd; RING_DESCRIPTOR_COUNT]), RingUnavailable>`
-   — six descriptors post-#131 (three per direction: mapping, data doorbell,
-   capacity doorbell), up from two — sent at `:261`
+   - six descriptors post-#131 (three per direction: mapping, data doorbell,
+   capacity doorbell), up from two - sent at `:261`
    and received at `:282`. No ring, no mapping pointer, no arena reference.
 
 `PreparedRing` (`:93-101`) is the handle the connection task receives. Its
@@ -71,7 +71,7 @@ is a future change that keeps the types legal while breaking confinement:
   a multi-thread runtime, at which point `run_endpoint`'s futures could migrate
   between worker threads. `run_endpoint` holds `&rings` across `await` points
   (`:386-397`, `:479-484`), so a multi-thread runtime would immediately require
-  `DuplexRing: Send` and fail to compile — but only as long as the ring is held
+  `DuplexRing: Send` and fail to compile - but only as long as the ring is held
   across an await, which is an incidental rather than a stated invariant.
 
 If confinement broke, the observable consequence would be descriptor validation

@@ -9,7 +9,7 @@ one repair is recorded in the trail.
 
 `wire::decode_header` is the first thing that touches peer-authored bytes on the
 host's inbound path, and its doc comment at `wire.rs:305` states the obligation
-outright: "Never panics on malformed input — returns a typed `DecodeError`."
+outright: "Never panics on malformed input - returns a typed `DecodeError`."
 That is a claim under test, per METHOD rule 3. The body parses by constant index
 after a single length gate, so the whole totality argument rests on one
 comparison and one constant.
@@ -98,7 +98,7 @@ The property holds at `HEAD`. The failure it guards is a two-step regression
 that no check would catch.
 
 Step one: a caller starts passing a slice whose length is not statically 21.
-Today all three production callers pass an exactly-21-byte array —
+Today all three production callers pass an exactly-21-byte array -
 `ring_transport.rs:503` and `:730` pass `&lease.wire_header()`, typed
 `[u8; WIRE_V2_HEADER_BYTES]` at `crates/shm-transport/src/lease.rs:152` with
 that constant equal to 21 at `descriptor.rs:10`, and `client.rs:1978` passes
@@ -112,7 +112,7 @@ the largest constant index and `:355-357` panics inside the read loop on
 peer-controlled input. Because `run_endpoint`'s outer `catch_unwind` result is
 discarded with `let _ =` (`ring_transport.rs:264`) and `admission.release()`
 (`:276`) runs regardless, the panic is reported to the connection engine as
-orderly completion — which is this sub-part's own
+orderly completion - which is this sub-part's own
 `ring-a-endpoint-thread-panic-is-reported-as-orderly-completion`. So a decoder
 panic would surface as an unattributable peer close, not as a crash.
 
@@ -162,7 +162,7 @@ lib target, which no CI job builds.
   `ver` with no relationship to the parse body, and the indexes are literals.
   A `const` assertion tying `HEADER_LEN` to the largest offset would be
   mechanical, but choosing whether future versions may shrink the header is a
-  protocol decision, not a code one — §6.1's frozen prefix guarantees only that
+  protocol decision, not a code one - §6.1's frozen prefix guarantees only that
   `len` and `ver` keep their positions, and says nothing about the total width
   being monotonic.
 - Missing evidence: none technical. What is missing is a protocol intent.

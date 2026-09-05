@@ -26,7 +26,7 @@ duration, and the question is only whether any legitimate operation exceeds it.
   `runtime.rs:833-835` writes `Running`; `lifecycle.rs:451` writes `Stopping`
   inside `begin_stopping`. Every other `write_lifecycle_record` call in the tree
   is inside `#[cfg(test)] mod tests`, which opens at `lifecycle.rs:1300-1301`.
-  No timer, task, or interval re-writes the file — grep for
+  No timer, task, or interval re-writes the file - grep for
   `write_lifecycle_record` returns no periodic caller.
 - The comparison is `timestamp_fresh` at `lifecycle.rs:1029-1033`, called from
   the `Starting` arm at `:1138` and the `Stopping` arm at `:1162`. Failure
@@ -81,9 +81,9 @@ Exactly 60 seconds from the last transition write, measured on the wall clock in
 both the writer (`now_ms()` at `lifecycle.rs:427`) and the reader (`now_ms()` at
 `:1030`). No adversary is needed: a slow filesystem, a large payload, a
 throttled cgroup, or a raised callback deadline suffices. This record shares the
-comparison with `clock-anomalies-do-not-invalidate-live-evidence` — that one
+comparison with `clock-anomalies-do-not-invalidate-live-evidence` - that one
 attacks the same 60 s window from the clock side while this one attacks it from
-the duration side — and shares its verdict target with
+the duration side - and shares its verdict target with
 `stopping-precedes-unpublication-on-every-path`.
 
 ## What a test must construct
@@ -108,7 +108,7 @@ actually configure.
   `begin_stopping` across `crates/`; the `mod tests` boundary at
   `lifecycle.rs:1300-1301`; `runtime.rs:663-671` and `:820-838`;
   `lifecycle.rs:416-453`.
-- Findings: three production write sites — `runtime.rs:668-670` (`Starting`),
+- Findings: three production write sites - `runtime.rs:668-670` (`Starting`),
   `runtime.rs:833-835` (`Running`), `lifecycle.rs:451` (`Stopping`). All 20
   other calls are above `:1300` in the test module. No periodic or refresh
   caller exists. Confirmed.
@@ -133,7 +133,7 @@ actually configure.
   inside `host_runtime::run`, which is entered afterwards. That hashing precedes the
   record's existence rather than ageing it.
 - Missing evidence: whether 60 s is realistic for the target deployment's
-  payload sizes and queue depths — a deployment fact, not a code fact.
+  payload sizes and queue depths - a deployment fact, not a code fact.
 - Conclusion: partially resolved. Two code-supported operations exceed the
   window and one catalog candidate is refuted. Realism remains open, as the
   catalog records.

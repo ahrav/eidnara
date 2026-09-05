@@ -95,7 +95,7 @@ its own generation by the 32-slot counter.
 **Shared-counter interference.** Paths 2 and 3 share `busy_rejects`, so a client
 streaming oversize control bodies consumes the same slots that capacity rejections
 need. When the 32 are gone, the next arrival of *either* kind cancels the
-generation — `connection.rs:431-433` for oversize, `dispatch.rs:637-638` for
+generation - `connection.rs:431-433` for oversize, `dispatch.rs:637-638` for
 capacity. Both also call `gen.writer.discard()`, so both drop other correlations'
 queued terminals.
 
@@ -117,11 +117,11 @@ Path 3's fence has a precise window: the oneshot must be created before the next
 `reject_written` at `:436` inside the same loop iteration that spawns the emitter,
 before the loop continues. `reject_written` is overwritten by each subsequent
 oversize rejection (`:436` assigns unconditionally), so only the **most recent**
-authoritative frame can be fenced — which matches §7.1, since only the frame
+authoritative frame can be fenced - which matches §7.1, since only the frame
 whose body drain then failed matters.
 
 Dependency: path 1's bound is the same pool that funds real requests, by design.
-Protocol §8.3 says "Every channel-0 request — including semantic rejections — is
+Protocol §8.3 says "Every channel-0 request - including semantic rejections - is
 one consumer request against the global unsettled bound", and the comment at
 `connection.rs:606-609` restates it. So the global charge is intentional; what is
 not stated anywhere is that it makes malformed traffic a cross-connection
@@ -134,7 +134,7 @@ throughput lever.
    request on generation B gets `server_busy`. This proves the cross-generation
    coupling.
 2. **Capacity containment**: the same flood but past the pending bound, and assert
-   generation A is retired while generation B keeps serving — the contrast that
+   generation A is retired while generation B keeps serving - the contrast that
    makes the asymmetry visible.
 3. **Shared-counter interference**: interleave oversize control bodies and
    capacity rejections on one generation and assert the 33rd of the combined total
@@ -164,7 +164,7 @@ workflow.
   emissions", which describes path 2 only and does not mention path 3, even though
   path 3 uses it.
 - Missing evidence: none.
-- Conclusion: resolved with answer — shared counter, and the field doc
+- Conclusion: resolved with answer - shared counter, and the field doc
   under-describes its own use. A fourth in-crate comment that does not match the
   code.
 
@@ -178,7 +178,7 @@ workflow.
   and the drain failure surfaces on the very next `recv`, the most recent receiver
   is the correct one to keep.
 - Missing evidence: none.
-- Conclusion: resolved with answer — correct as written.
+- Conclusion: resolved with answer - correct as written.
 
 ### Q: Is charging malformed traffic to the global pool the intended reading of §8.3?
 

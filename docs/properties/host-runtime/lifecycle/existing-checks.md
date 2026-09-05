@@ -34,7 +34,7 @@ compile on macOS on main.
 
 ## Integration tests
 
-### `crates/host-runtime/tests/lifecycle.rs` — 36 tests. Runs in no CI job.
+### `crates/host-runtime/tests/lifecycle.rs` - 36 tests. Runs in no CI job.
 
 Grouped by claim, since the per-test list is long:
 
@@ -66,20 +66,20 @@ Grouped by claim, since the per-test list is long:
   overlapping incarnation; successive incarnations lock the same coordination
   inodes.
 
-### `crates/host-runtime/tests/activation.rs` — 4 tests. Runs in no CI job.
+### `crates/host-runtime/tests/activation.rs` - 4 tests. Runs in no CI job.
 
 Publication precedes a blocked activation; an activation invariant failure reaches
 the fatal channel with handler detail redacted; expected artifact faults degrade
 only their lane; bootstrap precedes publication and activation follows it.
 
-### `crates/host-runtime/tests/host_roundtrip.rs` — 5 tests. Runs in no CI job.
+### `crates/host-runtime/tests/host_roundtrip.rs` - 5 tests. Runs in no CI job.
 
 The full profile composes over one connection; restart rotates credentials and
 invalidates old state; concurrent clients settle independently; degraded storage
 is an application error not a disconnect; a negotiated connection outlives the
 candidate-setup deadline.
 
-### `crates/host-runtime/tests/transport_negotiation.rs` — 33 tests. Linux-only in CI.
+### `crates/host-runtime/tests/transport_negotiation.rs` - 33 tests. Linux-only in CI.
 
 Twelve codec tests (offer round-trip, ordering, documented fallback encodings,
 version and name bounds, duplicate-key rejection at every depth, offer-list and
@@ -98,7 +98,7 @@ and activation-timeout paths retiring both channels; prepared candidates bounded
 and released; one setup admitting one candidate; sentinel data staying off
 diagnostic surfaces.
 
-### `crates/daemon/tests/lifecycle_cli.rs` — 12 tests. The only in-scope suite on both Linux and macOS.
+### `crates/daemon/tests/lifecycle_cli.rs` - 12 tests. The only in-scope suite on both Linux and macOS.
 
 Subprocess tests against the real binary, and the only executed path into the
 store's staging, promotion, prune, and restart-preflight logic. Usage errors exit
@@ -197,12 +197,12 @@ current-thread, including all four shutdown-latch tests and the three connection
 tests, and `tests/transport_negotiation.rs` is current-thread throughout. So the
 latch wake protocol, the pings reconciliation, and the drain snapshot are
 exercised only under a scheduler that cannot interleave the writer task with the
-read loop — but the claim does not extend to the whole suite, and three of the
+read loop - but the claim does not extend to the whole suite, and three of the
 multi-threaded tests are in the very file this inventory flags as ungated.
 
 ## Suspiciously quiet areas
 
-1. `tests/lifecycle.rs`, `tests/activation.rs`, `tests/host_roundtrip.rs` — 45
+1. `tests/lifecycle.rs`, `tests/activation.rs`, `tests/host_roundtrip.rs` - 45
    tests, ungated. The regression tests for ten repaired lifecycle defects are
    among them.
 2. No in-crate lifecycle or generation test executes on macOS.
@@ -212,8 +212,8 @@ multi-threaded tests are in the very file this inventory flags as ungated.
    panic. Installation is once-only, so a later hook installed by another crate
    silently removes the boundary and nothing detects it.
 4. **`frame_read.rs` has zero tests.** Its three loops are exercised only
-   indirectly. The biased cancellation preference — one of the three properties
-   its own doc calls load-bearing — is never exercised: every one of the 24
+   indirectly. The biased cancellation preference - one of the three properties
+   its own doc calls load-bearing - is never exercised: every one of the 24
    frame-channel tests constructs a fresh token and never cancels it.
 5. The body-read function's non-empty-buffer precondition is unstated and
    unchecked; a partially filled buffer silently under-reads.
@@ -232,8 +232,8 @@ multi-threaded tests are in the very file this inventory flags as ungated.
 11. The instance guard's field drop order is load-bearing and unasserted:
     reordering the struct fields would silently reclassify a teardown window as a
     pre-coordination incumbent.
-12. The probe blocks the calling thread — up to six sleeps plus a bounded lock
-    retry — and is called inline from two async test bodies. A repaired defect
+12. The probe blocks the calling thread - up to six sleeps plus a bounded lock
+    retry - and is called inline from two async test bodies. A repaired defect
     established that parking an executor thread on a lifecycle fence is a defect;
     the probe was not changed.
 13. The 18 mutex sites have no poisoning check.

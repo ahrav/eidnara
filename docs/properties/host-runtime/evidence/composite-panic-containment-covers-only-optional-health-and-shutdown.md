@@ -21,7 +21,7 @@ and deliberate is the property.
 **The helper, and what it does not do.** `catch_child_panic` is
 `composite.rs:160-171`, under a doc comment at `:155-159` that states the division
 of labour explicitly: it "polls `future` with every poll wrapped in
-`catch_unwind`", and "the caller — not this helper — decides whether the caught
+`catch_unwind`", and "the caller - not this helper - decides whether the caught
 payload is dropped (health) or aggregated and re-raised (shutdown)". The body
 pins the future at `:163` and wraps each individual `poll` at `:165`, returning
 `Poll::Ready(Err(payload))` at `:167`. Per-poll wrapping is what makes a child
@@ -75,7 +75,7 @@ fault becomes a failing report for that component, and the mandatory primary's
 report keeps deciding the aggregate." Then `:312` calls
 `self.primary.health().await` with **no** wrapper, while `:318` and `:321` wrap
 the other two. So the primary is deliberately uncontained and the comment says why
-only by implication — it says the primary's report "keeps deciding the aggregate",
+only by implication - it says the primary's report "keeps deciding the aggregate",
 not that a primary panic is fatal. That gap between what the comment discusses and
 what `:312` does is why the record asks for an explicit test.
 
@@ -88,14 +88,14 @@ live", so failures "are collected as redacted notes and surfaced only after ever
 child has drained, as one deterministic panic so the runtime still classifies this
 callback as failed rather than cleanly returned". The mechanism:
 
-- `:370` — `let mut failures: Vec<String> = Vec::new();`
-- `:371-385` — an `outcomes` array literal whose three elements each call
+- `:370` - `let mut failures: Vec<String> = Vec::new();`
+- `:371-385` - an `outcomes` array literal whose three elements each call
   `shutdown_failure_note(&id, catch_child_panic(child.shutdown()).await)`, in the
   order tertiary (`:372-375`), secondary (`:376-379`), primary (`:380-383`). All
   three `await`s complete before the array is built, which is what makes the
   drain unconditional.
-- `:386` — `failures.extend(outcomes.into_iter().flatten());`
-- `:387-388` — `if !failures.is_empty() { panic!("{}", failures.join("; ")); }`
+- `:386` - `failures.extend(outcomes.into_iter().flatten());`
+- `:387-388` - `if !failures.is_empty() { panic!("{}", failures.join("; ")); }`
 
 `shutdown_failure_note` is documented at `:173-175`: the note carries "the child
 name" as "manifest identity (never sensitive)", a returned error contributes
@@ -126,8 +126,8 @@ at `:1048` and `}` at `:1049`. The corrected span is `:1028-1049`.
 This drift is worth stating precisely because the earlier triage predicted the
 opposite. It recorded that both composite records' subjects and both existing
 checks were byte-identical and concluded that "neither needs a citation refresh".
-The file contents claim is true — blob `2201b830` at `1c193ae0`, `793a973e` and
-`e447c927` alike — and the conclusion still failed, because **the span was wrong
+The file contents claim is true - blob `2201b830` at `1c193ae0`, `793a973e` and
+`e447c927` alike - and the conclusion still failed, because **the span was wrong
 when the lens wrote it** rather than made wrong by a change. A byte-identical
 subject guarantees that citations which were right stay right; it guarantees
 nothing about citations that were never right.
@@ -135,7 +135,7 @@ nothing about citations that were never right.
 **What has no coverage.** All nine uncontained positions. No test asserts that a
 panic in `install_connection_key`, `manifest`, `resources`, `initialize`,
 `activate`, `bind`, `handle`, `route_gone`, or the primary's `health` reaches the
-runtime rather than being contained. That is the record's `Exercised: partial —
+runtime rather than being contained. That is the record's `Exercised: partial -
 both contained categories have dedicated tests; no test pins that the other
 categories deliberately escalate.`
 
@@ -150,8 +150,8 @@ Two, in opposite directions, and the record names both.
 **Containment added where escalation is required.** Someone sees a host torn down
 by a panic in a child's `handle` and wraps `:279-281` in `catch_child_panic`,
 substituting an error `RequestOutcome`. The host now survives, which looks like an
-improvement. What actually happened is that a handler invariant break — the
-condition the runtime's fatal cell exists to catch — has been converted into a
+improvement. What actually happened is that a handler invariant break - the
+condition the runtime's fatal cell exists to catch - has been converted into a
 per-request error, and the host continues serving with a child in an unknown
 state. The failure is invisible in exactly the way the fatal latch exists to
 prevent, and no test would fail.
@@ -173,7 +173,7 @@ literal is what makes it a single-point change: the three `await`s are siblings 
 one expression, so removing one wrapper skips the rest.
 
 **The asymmetry that is correct and undocumented.** A panic in the primary's
-`health` at `:312` escapes and is fatal, which is intended — the primary is
+`health` at `:312` escapes and is fatal, which is intended - the primary is
 mandatory. But a reader following the comment at `:306-311` learns the containment
 rationale for optional children and is not told that the line immediately below is
 deliberately different. Someone "completing" the pattern by wrapping `:312` would
@@ -214,7 +214,7 @@ Dependencies:
 Eleven panicking-child positions, and the harness for all of them already exists.
 
 `tests/composite_routing.rs` already carries child stubs whose callbacks panic on
-demand — two such stub impls exist, their trait methods spanning `:825-846` and
+demand - two such stub impls exist, their trait methods spanning `:825-846` and
 `:960-981`, and the five tests above use them. The construction for each new case
 is a stub whose one callback panics.
 
@@ -234,14 +234,14 @@ is a stub whose one callback panics.
    over one file, it fails informatively when a wrapper is added or removed, and it
    is the only form that catches the "containment added where escalation is
    required" failure without constructing a panic at all. The record's `Check:`
-   third clause — "a panic in any other child callback reaches the runtime" — is a
+   third clause - "a panic in any other child callback reaches the runtime" - is a
    universal over nine positions, and a census discharges it far more cheaply than
    nine tests.
 
 Faults needed: `C1` and `C3` from the fault map supply hostile handler callbacks,
 and both are already available. Nothing here needs a seam. Note that the nine
 escalating cases terminate the host, so each needs its own test process or a
-`TestHost` whose teardown tolerates a tripped latch — which is what
+`TestHost` whose teardown tolerates a tripped latch - which is what
 `a_child_shutdown_failure_makes_the_host_incarnation_non_graceful` (`:918-985`)
 already demonstrates for the shutdown case.
 
@@ -256,8 +256,8 @@ independently and matches exactly, and the `:1028-1060` span was repaired to
 One observation is logged as a lead rather than a question, because it is a
 finding about this catalog's method rather than about the code. The repaired span
 was wrong at the lens commit, not made wrong by the refactor. The triage that
-routed this record forward reasoned from blob identity — subject byte-identical,
-existing check byte-identical, therefore no refresh needed — and that inference is
+routed this record forward reasoned from blob identity - subject byte-identical,
+existing check byte-identical, therefore no refresh needed - and that inference is
 sound only for citations that were correct to begin with. Since the four wire
 records carried alongside these two produced six further repairs, five of them from
 changed files and one from a span that was always short, the pattern holds in both

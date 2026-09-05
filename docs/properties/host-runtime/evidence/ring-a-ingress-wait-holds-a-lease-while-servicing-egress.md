@@ -16,8 +16,8 @@ across a potentially long wait. `receive_one` takes a lease at
 `crates/host-runtime/src/ring_transport.rs:496-501` and does not release it until
 `:546-548`, with an ingress-charge wait in between that can run for the whole
 `frame_deadline`. That wait services queued outbound frames while it parks,
-and the joint state — lease held, budget saturated, egress published from
-inside the wait — is what nothing constructs.
+and the joint state - lease held, budget saturated, egress published from
+inside the wait - is what nothing constructs.
 
 ## Evidence trail
 
@@ -54,8 +54,8 @@ let charge = loop {
 Post-#131 the wait parks instead of polling: `ByteBudget::charge`
 (`crates/host-runtime/src/wire.rs:397-407`) is `acquire_many_owned` on a tokio
 semaphore, so the future queues and resolves when another holder's
-`ByteCharge` drops its permits. Egress servicing is likewise event-driven —
-`queue.recv()` is an async receive, not the polling-era `try_recv` — so an
+`ByteCharge` drops its permits. Egress servicing is likewise event-driven -
+`queue.recv()` is an async receive, not the polling-era `try_recv` - so an
 outbound frame queued at any point during the wait is published from inside
 it (`:533-540`).
 
@@ -112,8 +112,8 @@ finding of this record:
    Requires a frame on the sender queue while the charge is pending; post-#131
    the `queue.recv()` arm makes this an arrival, not a poll coincidence.
 
-A polling-era sub-precondition — a second loop iteration with an empty queue,
-to cover the `POLL_INTERVAL` sleep — has no post-#131 counterpart and is
+A polling-era sub-precondition - a second loop iteration with an empty queue,
+to cover the `POLL_INTERVAL` sleep - has no post-#131 counterpart and is
 withdrawn; there is no sleep arm left to cover. The resume path worth covering
 instead is the charge future waking when another holder's `ByteCharge` drops.
 
@@ -133,8 +133,8 @@ mechanisms are never exercised together:
   of the same intent is `run_endpoint`'s alternation comment at `:416-420`.
   If the arm never runs under real pressure, the claim is unverified. Note
   that this is the site whose publish failure produces `ReadClose::Corrupt`
-  (`:536`) while the main loop's produces `CleanEof` — the asymmetry in
-  `ring-a-publish-failure-is-reported-as-a-clean-peer-close` — and reaching
+  (`:536`) while the main loop's produces `CleanEof` - the asymmetry in
+  `ring-a-publish-failure-is-reported-as-a-clean-peer-close` - and reaching
   this state is what makes that asymmetry observable.
 - The lease's long hold itself, which is the longest any host code holds a
   reference into shared storage, and therefore the widest window for Part 1's
@@ -220,7 +220,7 @@ an integration binary.
   objectless. The lease-hold window is unchanged in shape: bound at
   `:496-501`, released at `:546-548`, live across the whole wait.
 - Missing evidence: none for the mechanics.
-- Conclusion: resolved with answer — mechanism description and citations
+- Conclusion: resolved with answer - mechanism description and citations
   replaced; guarantee kept. History: the pre-#131 version of this file quoted
   the `try_charge` loop with its `tokio::time::sleep(POLL_INTERVAL)` arm
   (then-`:488-518`, publish branch then-`:504-509`, sleep then-`:514`,
@@ -240,7 +240,7 @@ an integration binary.
   (`:525`, `:531`, `:539`), and `Drop` releases. `run_endpoint` never has two
   `receive_one` calls in flight. So the host's contribution to `active_leases`
   is bounded by one, and the eight-slot budget exists for a consumer that
-  leases concurrently — which the peer side does not do either, since
+  leases concurrently - which the peer side does not do either, since
   `RingClientEndpoint::try_recv_with` (`:723-739`) also holds one at a time.
 - Missing evidence: whether any consumer in the system leases concurrently.
   The native side is Part 1 scope and was not read in this pass.

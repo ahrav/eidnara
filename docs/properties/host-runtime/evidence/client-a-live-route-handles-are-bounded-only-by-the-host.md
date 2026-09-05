@@ -90,7 +90,7 @@ The consequence is transitive. Each entry corresponds to a host-side route bindi
 and a global channel permit, which
 `docs/host-wire-protocol.md:658` describes as finite and whose exhaustion it
 says returns `target_unavailable`: "`target_unavailable` is reserved for route
-admission — `route.open` failures such as channel exhaustion (Section 8.2)". So the
+admission - `route.open` failures such as channel exhaustion (Section 8.2)". So the
 looping caller exhausts the host rather than itself, and the client has no local
 signal that it is doing so.
 

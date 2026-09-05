@@ -13,8 +13,8 @@ The constants, `dispatch.rs:75-80`:
 
 ```
 /// Longest handler-authored diagnostic retained on a terminal. Diagnostics
-/// are held across the egress wait without a charge, so the cap — not the
-/// frame limit — is what bounds their retained cost per pending request.
+/// are held across the egress wait without a charge, so the cap - not the
+/// frame limit - is what bounds their retained cost per pending request.
 /// Anything larger is replaced immediately, dropping the oversized strings.
 const MAX_TERMINAL_CODE_LEN: usize = 128;
 const MAX_TERMINAL_MESSAGE_LEN: usize = 4096;
@@ -96,7 +96,7 @@ for an empty handler code, after the cap check. So a handler returning
 
 Without site 1:
 
-1. A handler returns `RequestOutcome::Error` with a 16 MiB message — a stack
+1. A handler returns `RequestOutcome::Error` with a 16 MiB message - a stack
    trace, a serialized request echo, a database error with the full query.
 2. `dispatch.rs:1040-1051` builds the `Terminal` and the outer task holds it.
 3. The inner task has returned, so the handler task permit is free and another
@@ -131,7 +131,7 @@ Site 2's window: from `:1210` to `emit_error_terminal` at `:1229-1236`, spanning
 `finalize_close` (`:1222`), the budget wait, and the admission wait.
 
 Dependency: the cap only binds if it is applied before the first await. Both sites
-satisfy this — site 1 is a synchronous call inside the `match`, site 2 is a
+satisfy this - site 1 is a synchronous call inside the `match`, site 2 is a
 synchronous `if` before `take_rejected_bind`. Moving either after an await would
 void the property while leaving the code looking correct.
 
@@ -170,7 +170,7 @@ no test at all, and `tests/handler_contract.rs:229`
   `retry_after_ms` is dropped (site 2 has no retry field to drop), and the empty
   code fallback which exists only at site 2.
 - Missing evidence: none.
-- Conclusion: resolved with answer — same constants, duplicated logic.
+- Conclusion: resolved with answer - same constants, duplicated logic.
 
 ### Q: Is the frame-limit check at `:184-193` reachable?
 
@@ -181,10 +181,10 @@ no test at all, and `tests/handler_contract.rs:229`
   (`emit_authoritative_rejection`, `&'static str`).
 - Findings: `:468` is the only path carrying handler-authored strings, and they
   are capped at 4 KiB by then, far under `MAX_BODY_LEN`. `emit_error_terminal`'s
-  `&code` at `:1233` carries a handler bind code — but that is capped at site 2
+  `&code` at `:1233` carries a handler bind code - but that is capped at site 2
   first. So no live caller can trip the frame check.
 - Missing evidence: none.
-- Conclusion: resolved with answer — currently unreachable defence-in-depth. Worth
+- Conclusion: resolved with answer - currently unreachable defence-in-depth. Worth
   noting for the reachability lens but not a defect: it guards the invariant
   independently of the two caps, which is what defence-in-depth is for.
 
@@ -198,5 +198,5 @@ no test at all, and `tests/handler_contract.rs:229`
   `debug_assert_eq!` at `:212` is the only guard that the model matches
   `serde_json`, and it is compiled out in release.
 - Missing evidence: whether any release-build check exists elsewhere.
-- Conclusion: resolved with answer — the cap is sound; the model's release-build
+- Conclusion: resolved with answer - the cap is sound; the model's release-build
   verification is a separate concern, recorded as observation 4 in the lens file.

@@ -129,7 +129,7 @@ sub-part 2f, and `close_generation`'s removal at `:1409-1413` is the only site i
 Dependency on the abort actually landing: `AbortHandle::abort` takes effect only
 at an await point. `force_close_all_routes` waits on the tracker afterwards
 (`:1433-1445`) and trips the fatal latch if the wait fails, so a non-yielding
-handler makes the incarnation fatal rather than proceeding — which is the same
+handler makes the incarnation fatal rather than proceeding - which is the same
 rule the graceful path applies at `:1358-1372`.
 
 ## What a test must construct
@@ -141,7 +141,7 @@ rule the graceful path applies at `:1358-1372`.
 4. Assert, after `force_close_all_routes` returns, that `gen.pending` is empty.
    This requires crate-internal access, since `pending` is `pub` on
    `GenerationCore` but `GenerationCore` is reachable only through
-   `shared.connections`, which is also `pub` — so an in-crate integration test can
+   `shared.connections`, which is also `pub` - so an in-crate integration test can
    reach it, but `tests/` cannot without an accessor.
 5. The paired positive: run the same scenario through the *graceful* path and
    assert the map empties via `settle_route_work`'s sweep, confirming the
@@ -160,7 +160,7 @@ No existing test inspects `gen.pending` at all.
   the map. The forced path deliberately returns less, presumably because it does
   not need to cancel entries (it aborts instead).
 - Missing evidence: none.
-- Conclusion: resolved with answer — structurally impossible on the forced path as
+- Conclusion: resolved with answer - structurally impossible on the forced path as
   written. Fixing it would require `force_drain` to return the generation.
 
 ### Q: Are all five outer-task exits covered on the graceful path?
@@ -171,7 +171,7 @@ No existing test inspects `gen.pending` at all.
   cancel arm and by all other handler-outcome arms. So every non-abort exit
   removes.
 - Missing evidence: none.
-- Conclusion: resolved with answer — full coverage on non-abort exits.
+- Conclusion: resolved with answer - full coverage on non-abort exits.
 
 ### Q: Is the graceful path's sweep complete, or can an entry be inserted after the collection?
 
@@ -186,7 +186,7 @@ No existing test inspects `gen.pending` at all.
   decision was taken. A request already past `register_dispatch` is in the
   tracker, which the sweep waits on.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the sweep is complete for its route, because
+- Conclusion: resolved with answer - the sweep is complete for its route, because
   the registry transition fences insertion.
 
 ### Q: Does the forced path always drop the `GenerationCore` immediately after?

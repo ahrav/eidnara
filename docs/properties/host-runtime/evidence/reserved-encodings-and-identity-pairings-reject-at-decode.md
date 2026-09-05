@@ -34,12 +34,12 @@ Every one returns `Err`. None clears a bit, defaults a value, or normalizes.
 **The `Option`-versus-`bool` asymmetry, which is the record's real subject.**
 `Flags` is `pub struct Flags(pub u8)` at `wire.rs:142`. Its accessors:
 
-- `is_binary` at `:159-161` — `bool`, `self.0 & FLAG_BINARY != 0`
-- `is_last` at `:164-166` — `bool`, `self.0 & FLAG_LAST != 0`
-- `priority` at `:169-171` — `Option<Priority>` via `Priority::from_bits`
-- `admission_class` at `:174-176` — `Option<AdmissionClass>` via
+- `is_binary` at `:159-161` - `bool`, `self.0 & FLAG_BINARY != 0`
+- `is_last` at `:164-166` - `bool`, `self.0 & FLAG_LAST != 0`
+- `priority` at `:169-171` - `Option<Priority>` via `Priority::from_bits`
+- `admission_class` at `:174-176` - `Option<AdmissionClass>` via
   `AdmissionClass::from_bits`
-- `has_reserved_bits` at `:179-181` — `bool`, `self.0 & FLAG_RESERVED_MASK != 0`
+- `has_reserved_bits` at `:179-181` - `bool`, `self.0 & FLAG_RESERVED_MASK != 0`
 
 The two `Option` accessors are the only reason a reserved priority or admission
 encoding is refused rather than silently coerced, and the refusal happens because
@@ -102,7 +102,7 @@ pairing halves. Missing: the exhaustive 256×256 sweep, and any assertion that a
 rejected encoding is never normalized. The second gap is the interesting one,
 because the existing tests all assert a specific `DecodeError` variant, which
 means they would catch a *changed* rejection but not a rejection replaced by
-acceptance-with-masking — that would simply stop matching `Err(..)` and fail, so
+acceptance-with-masking - that would simply stop matching `Err(..)` and fail, so
 in fact they would catch it for these four inputs and only these four.
 
 **Reachability.** The three production `decode_header` call sites named in
@@ -173,7 +173,7 @@ One in-crate sweep and one negative assertion, both in `wire.rs`'s test module.
    `docs/host-wire-protocol.md:226-234` (the offset table), `:240-246` (the
    flag bit fields, with `:246` reading "| 6-7 | reserved | MUST be zero |") and
    `:248` (the Sheddable restriction), not from `Flags`' own accessors,
-   or the oracle is circular — per METHOD's rule against a circular expected
+   or the oracle is circular - per METHOD's rule against a circular expected
    value.
 2. **Both pairing classes.** Cross the above with `(channel, epoch)` in
    `{(0, 0), (0, 1), (1, 0), (1, 1)}` and assert `NonzeroEpochOnControlChannel`
@@ -201,7 +201,7 @@ impact.
 
 One observation is logged because it is a lead rather than a question. The
 existing tests all assert a specific `DecodeError` variant, which means they are
-already stronger than "rejects" — they pin *which* gate fired. That is the shape
+already stronger than "rejects" - they pin *which* gate fired. That is the shape
 the sweep above should preserve, and it is the reason a masking regression on any
 of the four covered inputs would fail today. The gap is the other 65,532 pairs,
 not the oracle's strength.

@@ -17,9 +17,9 @@ let deadline = Instant::now() + shared.timing.shutdown_deadline;
 
 Used twice as intended:
 
-- `:1200` — `timeout_at(deadline, drain).await.is_ok()` bounds the whole route
+- `:1200` - `timeout_at(deadline, drain).await.is_ok()` bounds the whole route
   settle, read-fence, and Goodbye sequence.
-- `:1214` — `timeout_at(deadline, shared.tracker.wait())` bounds the tracker
+- `:1214` - `timeout_at(deadline, shared.tracker.wait())` bounds the tracker
   drain after closure.
 
 Then, inside the `:1214` failure branch, `runtime.rs:1223-1227`:
@@ -62,7 +62,7 @@ graceful-shutdown drain") and by this code.
 Note the word "graceful" in `config.rs:214`. The forced path is not the graceful
 drain, so a narrow reading says `shutdown_deadline` never claimed to bound it.
 The counter-reading is that `:1148` computes one deadline for the entire
-function, uses it for both graceful phases, and then abandons it — and that a
+function, uses it for both graceful phases, and then abandons it - and that a
 supervisor budgeting a stop has no other number to use.
 
 If shutdown never expires, none of this runs: `:1243` returns
@@ -89,8 +89,8 @@ own duration. `:1224` does.
 ## Failure scenario
 
 A supervisor is configured to send a stop signal and hard-kill after a grace
-period. The natural grace period is `shutdown_deadline` plus margin — the only
-shutdown number the host exposes — so it picks 15 s for a 10 s deadline.
+period. The natural grace period is `shutdown_deadline` plus margin - the only
+shutdown number the host exposes - so it picks 15 s for a 10 s deadline.
 
 A route's bind wrapper is inside a non-yielding poll. `:1214` expires at 10 s.
 `:1205-1206` aborts what it can and force-closes routes, but the abort-exempt
@@ -117,7 +117,7 @@ Sequential phases inside `shutdown_sequence`:
    in itself; `force_close_all_routes` is `dispatch.rs`'s, so its internal budget
    is 2e's question.
 4. `:1212-1214` close the tracker, bounded by the same absolute `deadline`, which
-   by now may already be in the past — in which case `timeout_at` returns
+   by now may already be in the past - in which case `timeout_at` returns
    immediately with `Err`.
 5. `:1223-1239` the fresh `2 * lifecycle_callback_deadline` budget.
 6. `:1240` or `:1243` `run_handler_shutdown`, itself bounded by one
@@ -164,7 +164,7 @@ grace period has the real number rather than the configured one.
   value exceeds what `validate` would accept as an input whenever the configured
   value is above ~182 days.
 - Missing evidence: none.
-- Conclusion: resolved with answer — cannot overflow or panic. It is an internal
+- Conclusion: resolved with answer - cannot overflow or panic. It is an internal
   coherence gap only, and `saturating_mul` is defensive rather than load-bearing.
 
 ### Q: does the `config.rs:214` wording "graceful-shutdown drain" exempt the forced path?
@@ -192,6 +192,6 @@ grace period has the real number rather than the configured one.
   not awaited by `run`. `:951` calls `retain_lock_until_drained` and then falls
   through to `:954`, returning immediately.
 - Missing evidence: none.
-- Conclusion: resolved with answer — no. Only `:1224` extends `run`. The detached
+- Conclusion: resolved with answer - no. Only `:1224` extends `run`. The detached
   reapers hold the instance lock past `run`'s return, which is a separate property
   and belongs to Part 2a's lifecycle territory.

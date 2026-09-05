@@ -68,9 +68,9 @@ at `:736`, and its seven data rows at `:737-743`.
 `Implementing code` is where the obligation is discharged, or `NOT FOUND`. Doc
 references without a file are `docs/host-wire-protocol.md`.
 
-### C1 — `host_shutdown` returning `Ok` is the stop linearization point
+### C1 - `host_shutdown` returning `Ok` is the stop linearization point
 
-Where stated: `client.rs:575`, verbatim — "The host commits the stop only after
+Where stated: `client.rs:575`, verbatim - "The host commits the stop only after
 the complete `host.shutdown` response frame reaches the socket, so `Ok` here is
 the stop linearization point the native lifecycle owner waits on; the connection
 itself stays open." Backed by `:532-557` (§7.6, the `open ->
@@ -87,7 +87,7 @@ Existing check: none. No in-crate test and none of the six `tests/client.rs`
 tests calls `host_shutdown`; the integration tests use
 `host.shutdown_gracefully()` (a harness path) instead.
 
-### C2 — the three send outcomes are exact, and only proven pre-send failures may be retried
+### C2 - the three send outcomes are exact, and only proven pre-send failures may be retried
 
 Where stated: `:60-62` (the definitions), `:699-708` (the outcome table plus
 "Managed Rust and TypeScript clients retry only proven pre-send failures ...
@@ -109,9 +109,9 @@ Existing check: `tests/client.rs` asserts an outcome in five of six tests
 (`:131`, `:171-174`, `:207`, `:240`); `outcome_spellings_are_exact`
 (`client.rs:3993`) pins the three strings.
 
-### C3 — `u64::MAX` may identify one final request, then the sender MUST retire the generation
+### C3 - `u64::MAX` may identify one final request, then the sender MUST retire the generation
 
-Where stated: `:654`, verbatim — "A correlation MUST NOT be reused, even after
+Where stated: `:654`, verbatim - "A correlation MUST NOT be reused, even after
 terminal completion. `u64::MAX` may identify one final request; before another
 request, sender MUST retire the generation and reconnect." Also V22 (`:860`),
 "Use once, then retire/reconnect generation before another request".
@@ -122,8 +122,8 @@ and returns `None` forever after `u64::MAX`. The MUST-retire half is `NOT
 FOUND`: `admit` (`:1177-1183`) returns `correlations_exhausted` with
 `SendOutcome::NotSent` and calls no `retire`, so `retired` stays false and
 `daemon_id`, `host_status`, and every public accessor keep reporting a healthy
-connection. The pattern exists two dozen lines away — `send_control` retires on
-its own unrecoverable capacity failure at `:1341` and `:1356` — and is simply
+connection. The pattern exists two dozen lines away - `send_control` retires on
+its own unrecoverable capacity failure at `:1341` and `:1356` - and is simply
 not applied here. A grep for `correlations_exhausted` across the tree returns
 only `client.rs:1180`.
 
@@ -132,8 +132,8 @@ provably-never-sent and therefore safe to retry (`:60`, `client.rs:117`), so a
 caller with an ordinary retry loop spins forever against a connection that can
 never serve another request and will never retire itself, and a caller that keys
 reconnection off retirement never reconnects. Reaching the state needs 2^64
-admissions, so practical severity is low; the shape — a permanent local capacity
-failure reported as a retryable per-call error — is what carries forward.
+admissions, so practical severity is low; the shape - a permanent local capacity
+failure reported as a retryable per-call error - is what carries forward.
 
 Test recipe, preserved verbatim from the demoted record
 `client-a-correlation-exhaustion-does-not-retire-the-generation`: build an
@@ -148,9 +148,9 @@ Existing check: partial and on the wrong half.
 both cover the no-reuse half and the absence of a second charge or frame.
 Neither asserts anything about `retired`.
 
-### C4 — implementations MUST use finite limits for live routes
+### C4 - implementations MUST use finite limits for live routes
 
-Where stated: `:658`, verbatim — "Implementations MUST use finite limits for
+Where stated: `:658`, verbatim - "Implementations MUST use finite limits for
 live connections, routes, pending correlations, handler tasks, queued requests,
 and aggregate buffered bodies." Routes are named explicitly. V28 (`:866`) is the
 scenario.
@@ -167,15 +167,15 @@ by `CLIENT_DATA_QUEUE_FRAMES` (`:59`), `CLIENT_QUEUED_BYTES` (`:69`),
 live or retired, so route growth is bounded by a limit stated in another
 component and enforced nowhere in this file.
 
-Existing check: none. Reapers are exercised — `settle_route` (`:1623`), `retire`
-(`:1673`), `close` (`:684`) — but no test drives the route set toward any
+Existing check: none. Reapers are exercised - `settle_route` (`:1623`), `retire`
+(`:1673`), `close` (`:684`) - but no test drives the route set toward any
 ceiling, because there is none to drive it toward.
 
-### C5 — a clean `Goodbye` and an unexpected setup-socket loss are distinct
+### C5 - a clean `Goodbye` and an unexpected setup-socket loss are distinct
 
-Where stated: `:296`, verbatim — "Clean `Goodbye` followed by joined teardown is
-orderly connection close." `:691` — "Unexpected setup-socket EOF has equivalent
-retirement effect but no peer drain guarantee." `:563` — "Runtime ring
+Where stated: `:296`, verbatim - "Clean `Goodbye` followed by joined teardown is
+orderly connection close." `:691` - "Unexpected setup-socket EOF has equivalent
+retirement effect but no peer drain guarantee." `:563` - "Runtime ring
 corruption or unexpected setup-socket EOF also retires the connection."
 
 Implementing code: **NOT FOUND, and the code actively defeats the distinction on
@@ -192,9 +192,9 @@ looking clean, and the host's peer-death counter under-reports transport faults.
 Existing check: none. No test inspects the setup socket after a client-side ring
 failure, and the in-crate suite never constructs a bridge thread at all.
 
-### C6 — connection close is a bounded, joined teardown
+### C6 - connection close is a bounded, joined teardown
 
-Where stated: `:691`, verbatim — "Connection close is Goodbye on channel 0,
+Where stated: `:691`, verbatim - "Connection close is Goodbye on channel 0,
 epoch 0, correlation 0, followed by joined ring teardown and setup-socket
 close." `:741` bounds it at "one 5 s absolute deadline"; `client.rs:51` is the
 matching `CLIENT_SHUTDOWN_TIMEOUT`.
@@ -204,7 +204,7 @@ Implementing code: **partial, with the bridge half NOT FOUND.** `close`
 `result.is_ok()`, then cancels, then calls `join_tasks_until` (`:1677-1695`).
 That function iterates exactly `[&self.writer, &self.reader]` (`:1682`) and
 aborts on deadline overrun (`:1687-1691`). Nothing joins the bridge OS thread,
-because its `JoinHandle` was discarded at `:1852-1895` — the only combinator
+because its `JoinHandle` was discarded at `:1852-1895` - the only combinator
 applied to `spawn`'s result is `.map_err` at `:1895`. So `close()` returning
 `Ok` proves the two Tokio tasks finished; it does not prove the setup-socket
 `Goodbye` of C5 reached the socket, nor that the thread exited. The same thread
@@ -215,16 +215,16 @@ Existing check: `close_rejects_new_sends` (`tests/client.rs:227-243`) and
 `dropped_close_retires_and_repeated_close_joins_tasks` (`client.rs:3121`) cover
 the task half. Nothing observes the thread.
 
-### C7 — retirement immediately invalidates routes, pending correlations, and caches
+### C7 - retirement immediately invalidates routes, pending correlations, and caches
 
-Where stated: `:751`, verbatim — "Any EOF, authentication failure, framing
+Where stated: `:751`, verbatim - "Any EOF, authentication failure, framing
 corruption, liveness failure, or explicit connection close retires the
 connection generation. Client MUST immediately invalidate its routes, pending
 correlations, capability/catalog caches, and late responses." Also `:656`
 ("No frame from an old generation, wrong channel/epoch, unknown correlation, or
 terminal correlation may affect current work").
 
-Implementing code: `retire` (`client.rs:1667-1675`) — idempotent through
+Implementing code: `retire` (`client.rs:1667-1675`) - idempotent through
 `retired.swap` (`:1668`), sets `closed` (`:1671`), `settle_all(code)` (`:1672`),
 `routes.clear()` (`:1673`), `cancel.cancel()` (`:1674`). Late-response fencing
 is separate: `PendingKey` carries channel and epoch (`:1406-1410`), so a
@@ -235,7 +235,7 @@ Existing check: strong. `settle_all` and the epoch fence are covered by
 `stale_epoch_terminal_cannot_settle_reused_channel` (`:3270`), and
 `epoch_is_part_of_pending_key` (`:3959`). All in-crate.
 
-### C8 — a retirement cause is a stable bounded code
+### C8 - a retirement cause is a stable bounded code
 
 Where stated: `client.rs:183` ("Stable bounded error code"), `:142` ("Managed
 call failure. Formatting never includes payload or identity data"), and V24
@@ -248,11 +248,11 @@ Implementing code: **NOT FOUND for retention.** The cause reaches
 cause slot. A caller arriving after retirement gets the constant
 `connection_retired` from `admit` (`:1129`, `:1145`) or `generation_retired`
 from `send_control` via `retired_error` (`:1327`, `:2237`). So eight distinct
-causes — `connection_goodbye` (`:1397`), `protocol_violation` (`:1557`, `:1979`),
+causes - `connection_goodbye` (`:1397`), `protocol_violation` (`:1557`, `:1979`),
 `eof` (`:1987`), `write_failed` (`:1954`, `:1963`),
 `control_capacity_exhausted` (`:1341`, `:1356`), `invalid_route_response`
 (`:486`), `stranded_route_cleanup_failed` (`:1588`), and the three local
-lifecycle codes (`:676`, `:744`, `:766`) — collapse to two constants for every
+lifecycle codes (`:676`, `:744`, `:766`) - collapse to two constants for every
 caller that was not already pending at the instant of retirement.
 
 Existing check: partial and only on the constants.
@@ -261,9 +261,9 @@ Existing check: partial and only on the constants.
 `:2556` and `:3043`. Nothing asserts what a late caller can learn about the
 cause.
 
-### C9 — data and reserved-control frames share one queued-byte budget
+### C9 - data and reserved-control frames share one queued-byte budget
 
-Where stated: `:745`, verbatim — "Data and reserved-control frames share one
+Where stated: `:745`, verbatim - "Data and reserved-control frames share one
 queued-byte budget; reserved admission is not a byte-budget bypass. Data traffic
 cannot consume control slots."
 
@@ -277,7 +277,7 @@ here retires the whole generation, so charging it against bytes that ordinary
 requests can legitimately occupy turned a busy connection into a self-inflicted
 teardown." The constant's own doc at `:63-70` says the same. Note that the
 *second* half of `:745`, "Data traffic cannot consume control slots", **is**
-satisfied — `CLIENT_CONTROL_QUEUE_FRAMES` (`:61`) funds a separate `control_tx`
+satisfied - `CLIENT_CONTROL_QUEUE_FRAMES` (`:61`) funds a separate `control_tx`
 (`:956`). Only the shared-byte-pool half is contradicted. Sibling lead L1 owns
 this from the design side; it is registered here because the doc is normative and
 binds the TypeScript client by the same sentence.
@@ -286,9 +286,9 @@ Existing check: `data_capacity_spares_control_reserve_and_does_not_burn_correlat
 (`:3155`) and `data_saturation_never_starves_a_control_frame` (`:3225`) assert
 the *separation*, which is the code's behaviour and the doc's negation. In-crate.
 
-### C10 — exhausting the control reserve retires the generation and settles pending work deterministically
+### C10 - exhausting the control reserve retires the generation and settles pending work deterministically
 
-Where stated: `:745` — "Exhausting control reserve retires the generation and
+Where stated: `:745` - "Exhausting control reserve retires the generation and
 deterministically settles pending work."
 
 Implementing code: `send_control` (`client.rs:1340-1347` on byte-charge failure,
@@ -300,11 +300,11 @@ Existing check: `control_exhaustion_retires_and_releases_all_queued_bytes`
 (`:3196`) and `route_settlement_never_floods_the_reserved_control_queue`
 (`:2621`). Both in-crate.
 
-### C11 — every operation owns one absolute deadline and per-stage timers do not multiply it
+### C11 - every operation owns one absolute deadline and per-stage timers do not multiply it
 
-Where stated: `:731`, verbatim — "Every operation owns one absolute deadline;
+Where stated: `:731`, verbatim - "Every operation owns one absolute deadline;
 per-stage timers MUST NOT multiply it." The seven defaults are `:737-743`. Also
-`:745` — "Backoff counts the first attempt, and retry delay or a later stage
+`:745` - "Backoff counts the first attempt, and retry delay or a later stage
 never resets the owning deadline."
 
 Implementing code: `client.rs:43-51` declares the five budgets and they match the
@@ -322,9 +322,9 @@ the request domain only. `an_out_of_range_timeout_is_rejected_instead_of_panicki
 (`client.rs:2856`) covers `deadline_at`. Nothing covers the handshake budget's
 pre-discovery start.
 
-### C12 — a `Pong` exactly echoes the `Ping`'s version, flags, channel, epoch, and correlation
+### C12 - a `Pong` exactly echoes the `Ping`'s version, flags, channel, epoch, and correlation
 
-Where stated: `:681` — "client returns Pong with identical version, flags,
+Where stated: `:681` - "client returns Pong with identical version, flags,
 channel, epoch, and correlation", V35 (`:873`), and `client.rs:1316-1318`:
 "`flags` is explicit because a `Pong` must echo the `Ping`'s flags exactly
 (conformance vector V35), and §6.1 lets a conforming peer pick any valid
@@ -343,9 +343,9 @@ Existing check:
 (`tests/client.rs:61`), which configures a real `LivenessPolicy`
 (`:64-68`) and is CI-executed.
 
-### C13 — Ping/Pong is owned independently of application waits, and stream saturation must not block it
+### C13 - Ping/Pong is owned independently of application waits, and stream saturation must not block it
 
-Where stated: `:683`, verbatim — "Managed Rust and TypeScript readers own
+Where stated: `:683`, verbatim - "Managed Rust and TypeScript readers own
 Ping/Pong independently of application waits and stream consumption. A Ping
 during a unary or streaming request MUST produce Pong without settling,
 cancelling, or delaying the application request. Stream queue saturation MUST
@@ -369,11 +369,11 @@ Existing check: `data_saturation_never_starves_a_control_frame`
 host and a real 20 ms `ping_interval`, and it is CI-executed. Neither drives the
 bridge thread into `blocking_send` backpressure.
 
-### C14 — the reader validates every header field before the body is used, and enforces the channel-0 cap on the header
+### C14 - the reader validates every header field before the body is used, and enforces the channel-0 cap on the header
 
-Where stated: `:236` — "A reader MUST read the prefix, reject unsupported
+Where stated: `:236` - "A reader MUST read the prefix, reject unsupported
 version, read the remaining 16 header bytes, validate the complete header, and
-only then allocate/read the body." `:294` — "The receiver MUST validate all
+only then allocate/read the body." `:294` - "The receiver MUST validate all
 offsets, lengths, sequence metadata, header fields, and descriptor identity
 before exposing a scoped receive lease." `:321` caps a channel-0 body at 65,536
 bytes. V16 (`:854`).
@@ -382,7 +382,7 @@ Implementing code: `validate_inbound` (`client.rs:2006-2082`), called first in
 `ring_reader_loop` (`:1978`) alongside a `body.len() != header.len` recheck. The
 channel-0 cap is enforced on the header at `:2015` with the allocation rationale
 at `:2010-2014`: "Rejecting on the header keeps one oversize control response
-from being allocated and retained at all — `parse_route_open` ignores unknown
+from being allocated and retained at all - `parse_route_open` ignores unknown
 fields, so a padded response would otherwise open a route and leave the
 generation live while holding roughly 64 MiB." The per-type identity table is
 `:2019-2068` and the pure-header flag check follows at `:2069`.
@@ -390,9 +390,9 @@ generation live while holding roughly 64 MiB." The per-type identity table is
 Existing check: `inbound_validation_enforces_the_direct_profile_table`
 (`client.rs:2658`) is the densest single test in the sub-part, 96 lines. In-crate.
 
-### C15 — a host-originated `Request` is role-invalid and closes the generation
+### C15 - a host-originated `Request` is role-invalid and closes the generation
 
-Where stated: `:269`, verbatim — "A consumer-originated `Response`, `Push`,
+Where stated: `:269`, verbatim - "A consumer-originated `Response`, `Push`,
 `StreamData`, `StreamEnd`, or `Error`, and every host-originated `Request`, are
 role-invalid. The receiver MUST close the generation rather than extend this
 profile implicitly." V42 (`:880`). `:267` adds `Hello`/`HelloAck`.
@@ -411,9 +411,9 @@ not list it as role-invalid. Sibling record
 Existing check: `inbound_validation_enforces_the_direct_profile_table`
 (`:2658`). In-crate.
 
-### C16 — the writer verifies `len` against the body, publishes exactly once, and keeps one FIFO writer per direction
+### C16 - the writer verifies `len` against the body, publishes exactly once, and keeps one FIFO writer per direction
 
-Where stated: `:298`, verbatim — "Writers MUST verify header `len` equals body
+Where stated: `:298`, verbatim - "Writers MUST verify header `len` equals body
 length, reserve enough bounded ring capacity for the complete frame, fill the
 reservation, and publish exactly once. Each direction has one logical writer and
 FIFO publication order. A failed or underfilled reservation aborts without
@@ -435,9 +435,9 @@ Existing check: `cancel_winning_queued_prevents_writer_claim_and_frame`
 `a_pre_cancelled_stream_never_enqueues_a_frame` (`:2867`). All in-crate. Nothing
 asserts FIFO across the two queues.
 
-### C17 — an unmatched control `Response` naming a route is a late bind the client must release
+### C17 - an unmatched control `Response` naming a route is a late bind the client must release
 
-Where stated: `:650`, verbatim in part — "The client MUST therefore treat an
+Where stated: `:650`, verbatim in part - "The client MUST therefore treat an
 unmatched control `Response` that names a route as a late bind it cannot own and
 apply the same remedy. A bind already present in the client route cache belongs
 to a caller that received it and MUST NOT be released this way." `:648` gives the
@@ -454,7 +454,7 @@ Existing check: `an_abandoned_control_open_releases_a_late_bound_route`
 (`:3503`) and `a_duplicate_bind_terminal_never_closes_an_owned_route` (`:3587`).
 Both in-crate, and together the largest pair in the suite at 84 and 44 lines.
 
-### C18 — call formatting never includes payload or identity data, and codes are bounded
+### C18 - call formatting never includes payload or identity data, and codes are bounded
 
 Where stated: `client.rs:142` ("Managed call failure. Formatting never includes
 payload or identity data"), `:183` ("Stable bounded error code"), `:188`
@@ -476,9 +476,9 @@ Existing check: `terminal_formatting_redacts_peer_message_and_body`
 and `Display` (`:133`). The second is CI-executed and is the strongest redaction
 proof in the sub-part.
 
-### C19 — `Push` is reserved, decoded and fenced, and never emitted by this host
+### C19 - `Push` is reserved, decoded and fenced, and never emitted by this host
 
-Where stated: `:256` — "reserved | decoded and fenced; host does not emit it in
+Where stated: `:256` - "reserved | decoded and fenced; host does not emit it in
 this profile". `:279` gives it a "client drops absent/stale route" disposition.
 
 Implementing code: `validate_inbound` accepts it structurally (`client.rs:2050`)
@@ -489,7 +489,7 @@ the event, so a host that began emitting `Push` would be invisible.
 Existing check: `inbound_validation_enforces_the_direct_profile_table`
 (`:2658`) covers the structural half. No test drives the `dispatch` arm.
 
-### C20 — discovery and authentication obligations, discharged outside this sub-part
+### C20 - discovery and authentication obligations, discharged outside this sub-part
 
 Where stated: `:86-96` (descriptor-anchored snapshot, reject non-2
 `wire_version` before opening the setup socket, "A client MUST NOT validate by
@@ -522,7 +522,7 @@ unbounded routes, absent `Recovering` state, ambiguous host-originated `Cancel`)
 are folded into C9, C3, C4, the note below, and C15 respectively. The four below
 are new.
 
-**L1 — the `CLIENT_FRAME_TIMEOUT` contract is stated in terms of a reader this
+**L1 - the `CLIENT_FRAME_TIMEOUT` contract is stated in terms of a reader this
 client no longer has.** `client.rs:44` reads "Deadline for a frame after its
 first header byte. Idle header waits are unbounded", and `:738` states the same
 normatively: "frame completion after first header byte | one 30 s absolute
@@ -538,7 +538,7 @@ but it bounds outbound publication rather than inbound frame completion, and the
 Recorded again in the deleted-mechanism section, because the reader it describes
 was deleted by `ed487e11`.
 
-**L2 — `host_shutdown` and `close` disagree about which deadline they own.**
+**L2 - `host_shutdown` and `close` disagree about which deadline they own.**
 `host_shutdown` (`client.rs:585`) computes `Instant::now() + CLIENT_SHUTDOWN_TIMEOUT`
 and passes it as a *request* deadline into `unary`. `:740` gives the request
 domain "one caller-overridable 30 s absolute deadline" and `:741` gives client
@@ -550,7 +550,7 @@ which by C1 means the caller cannot tell whether the stop committed. Whether the
 5 s choice is deliberate is unresolved: there is no comment at `:585`, and
 `close` (`:673`) uses the same constant for its own genuinely-shutdown budget.
 
-**L3 — the two `unreachable!()` sites are production panics reachable only if
+**L3 - the two `unreachable!()` sites are production panics reachable only if
 `validate_inbound` and `dispatch` disagree.** `client.rs:1440` and `:1457` are
 the catch-all arms of the terminal match inside `dispatch`, and they are the only
 `unreachable!` in the file's production half; there is no `assert!`,
@@ -563,7 +563,7 @@ deadline instead of being settled. `:296` and `:724` both promise that a framing
 fault retires the generation; a reader panic is the one inbound fault that does
 not. Nothing in the file states the coupling between the two match sites.
 
-**L4 — `settle_all`'s single code cannot express a mixed close.** `close`
+**L4 - `settle_all`'s single code cannot express a mixed close.** `close`
 (`client.rs:671-721`) walks the route `Goodbye` loop and `break`s on the first
 failure (`:696`), guards the connection `Goodbye` on `result.is_ok()`
 (`:699-710`), then cancels unconditionally (`:711`). `:691` requires that at
@@ -591,26 +591,26 @@ negotiation request that owned correlation 1 is gone.
 **Five statements describe those deleted mechanisms. One is in `client.rs`; four
 are in the normative document.**
 
-1. **`client.rs:44`** — "Deadline for a frame after its first header byte. Idle
+1. **`client.rs:44`** - "Deadline for a frame after its first header byte. Idle
    header waits are unbounded." The client has no first header byte. The deleted
    `read_active_frame` and `read_exact_until` were what made this true. See lead
    L1.
-2. **`:738`** — "frame completion after first header byte | one 30 s absolute
+2. **`:738`** - "frame completion after first header byte | one 30 s absolute
    deadline; idle first-header wait is unbounded". Same mechanism, stated
    normatively for both managed clients. Neither managed client reads a byte
    stream any more.
-3. **`:724`** — "malformed framing / EOF | no terminal possible | classify
+3. **`:724`** - "malformed framing / EOF | no terminal possible | classify
    pending writes from byte evidence; invalidate generation". There is no byte
    evidence on the ring path. A ring write either completes or does not, and the
    client's classification is the three-state `publish` atomic
    (`client.rs:1939-1967`, `:2215-2231`), not a count of bytes that reached a
    socket. The classification obligation survives; the evidence it names does
    not.
-4. **`:852` (V14)** — "Partial header/body EOF | Close as corruption; pending
+4. **`:852` (V14)** - "Partial header/body EOF | Close as corruption; pending
    write outcomes use byte evidence". Same, as a conformance vector. A partial
    header or body EOF is not constructible against the ring, because `:294` says
    "A published ring descriptor names one complete header and body."
-5. **`:296`** — the client-side retirement list still contains "truncated
+5. **`:296`** - the client-side retirement list still contains "truncated
    declared frame" alongside items that are live on the ring path (unexpected
    setup-socket EOF, invalid ring descriptor, unsupported version, unknown type,
    invalid flags, nonzero channel-0 epoch, zero epoch on a routed channel,
@@ -629,7 +629,7 @@ private behavior is migration history, not permission to add a compatibility
 branch."
 
 **One residual of the opposite shape.** `:762-764` diagrams a client
-`Recovering` state, and `client.rs` has no reconnect path — but no reconnect path
+`Recovering` state, and `client.rs` has no reconnect path - but no reconnect path
 was deleted either. `git diff` of `ed487e11` shows no removed reconnect
 function. So this is a contract gap, carried by sibling lead L4, not a
 deleted-mechanism finding. Recovery lives in
@@ -664,8 +664,8 @@ name.
    TypeScript client's own bounds are independent.
 5. **`CLIENT_DISCOVERY_SLOTS` = 64 is justified against Tokio's default
    512-thread blocking pool in prose only.** `client.rs:96-104`. The reasoning is
-   explicit and good — "Sized well above the connects a process makes at once ...
-   while staying far below Tokio's default 512-thread blocking pool" — and
+   explicit and good - "Sized well above the connects a process makes at once ...
+   while staying far below Tokio's default 512-thread blocking pool" - and
    nothing asserts either number, so a runtime configured with a smaller blocking
    pool silently invalidates the argument.
 6. **The 50-microsecond bridge poll is a bare literal.** `client.rs:1886` is
@@ -853,7 +853,7 @@ half. Of those, the close-and-error vocabulary is: 8 retirement causes
 (`connection_retired`, `generation_retired`), and 14 per-call local codes.
 `lock_unpoisoned` (`:2242-2246`) converts every mutex poisoning into
 `PoisonError::into_inner`, so a panic while holding any `Inner` mutex is
-recovered rather than propagated — which is what makes the absent `catch_unwind`
+recovered rather than propagated - which is what makes the absent `catch_unwind`
 consequential rather than merely unusual.
 
 ## Suspiciously quiet areas
@@ -866,7 +866,7 @@ Ranked by the gap between what the code decides and what any check proves.
    attach (`:1855`), the completion signal every outbound frame waits on
    (`:1872`), and the setup-socket departure the host reads as its peer-death
    discriminator (`:1890-1893`). No in-crate test constructs it (zero hits for
-   `start_ring_bridge` in `mod tests`), and no integration test observes it —
+   `start_ring_bridge` in `mod tests`), and no integration test observes it -
    the six `tests/client.rs` tests exercise it only transitively, and none
    inspects the setup socket or thread state. Three separate claims depend on
    it: C5's Goodbye-versus-EOF distinction, C6's joined teardown, and C13's
@@ -890,7 +890,7 @@ Ranked by the gap between what the code decides and what any check proves.
    into an `Inner` collection with no capacity test, while `pending` (`:1169`)
    and `streams` (`:1058`) both have one and `:658` lists routes alongside both.
    Compounding it, `routes` is a `HashSet<RouteHandle>` (`:944`), so a duplicate
-   host bind silently merges two callers onto one entry — and
+   host bind silently merges two callers onto one entry - and
    `release_stranded_route`'s already-cached early return (`:1576-1578`), which
    is correct for the §8.2 case, means a genuine duplicate is never released
    either. Nothing tests either the growth or the merge; the two route tests
@@ -910,17 +910,17 @@ Ranked by the gap between what the code decides and what any check proves.
    distinct sites (`:330`, `:340`, `:349`, `:354`, `:361`), `discovery_failed`
    at two (`:341`, `:342`), `dial_failed` (`:350`),
    `authentication_failed` (`:363`), and `setup_failed` at three (`:369`,
-   `:372`, `:375`). The post-setup retirement recheck at `:425-430` — whose
+   `:372`, `:375`). The post-setup retirement recheck at `:425-430` - whose
    comment at `:418-424` explicitly notes "the historian does not reconnect on
    that path, so a daemon reload race would abort the run instead of
-   establishing a replacement" — is the most consequential of them. Only the
+   establishing a replacement" - is the most consequential of them. Only the
    success path is tested, by `authenticates_attaches_ring_routes_unary_and_closes`
    (`tests/client.rs:31`). The in-crate suite cannot reach any of them, because
    it never calls `connect`.
 
 6. **The `CLIENT_DISCOVERY_SLOTS` cap has a long written justification and no
    check.** `:96-107` argues the 64-permit design carefully, including the
-   subtle part — the permit is moved into the blocking closure (`:335`) so a
+   subtle part - the permit is moved into the blocking closure (`:335`) so a
    detached worker still counts against the cap. Nothing tests that a detached
    worker holds its permit, and nothing tests the exhaustion path, which by
    design surfaces as `handshake_timeout` (`:330`) rather than a distinct code
@@ -967,8 +967,8 @@ Ranked by the gap between what the code decides and what any check proves.
   from sibling lead L4. (unresolved, needs a daemon pass)
 - Should the deleted-mechanism findings be documentation corrections or property
   records? Items 3 and 4 of that section (`:724`, `:852`) name "byte evidence"
-  as the classification input, and the surviving mechanism — the three-state
-  `publish` atomic (`client.rs:2215-2231`) — is stronger than byte evidence, not
+  as the classification input, and the surviving mechanism - the three-state
+  `publish` atomic (`client.rs:2215-2231`) - is stronger than byte evidence, not
   weaker. A correction that simply deletes the phrase would lose the fact that
   the obligation is now discharged by a different and better mechanism.
   (needs human input)

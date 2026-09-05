@@ -16,18 +16,18 @@ The complete rejection inventory, each verified:
 
 | Site | Condition | Error, and whether it names the key |
 | --- | --- | --- |
-| `:157-159` | count is zero | `ZeroLimit { name }` — yes |
-| `:160-166` | count above `Semaphore::MAX_PERMITS` | `LimitTooLarge { name, configured, maximum }` — yes, with both values |
-| `:168-174` | `max_routes > u16::MAX` | `LimitTooLarge` — yes |
-| `:175-180` | below `MIN_RESIDENT_BYTES` | `ResidentBytesBelowInteropMinimum { configured, minimum }` — no name needed, one field |
-| `:186-191` | above `min(MAX_PERMITS, u32::MAX)` | `ResidentBytesTooLarge { configured, maximum }` — yes |
-| `:302-304` | empty `daemon_ver` | `EmptyDaemonVer` — yes |
-| `:305-309` | non-canonical digest | `InvalidPayloadDigest { len }` — length only, deliberately (`:399`) |
-| `:333-340` | `daemon_ver` oversizes auth or publication | `DaemonVerTooLarge { auth_message_bytes, connection_file_bytes }` — yes |
-| `:357-359` | zero duration | `ZeroDuration { name }` — yes |
-| `:360-362` | duration above `MAX_CONFIG_DURATION` | `DurationTooLarge { name }` — yes |
-| `:365-369` | zero liveness period | `ZeroDuration { name: "liveness period" }` — coarse; does not say which of the two |
-| `:370-376` | oversize liveness period | `DurationTooLarge { name: "liveness period" }` — same coarseness |
+| `:157-159` | count is zero | `ZeroLimit { name }` - yes |
+| `:160-166` | count above `Semaphore::MAX_PERMITS` | `LimitTooLarge { name, configured, maximum }` - yes, with both values |
+| `:168-174` | `max_routes > u16::MAX` | `LimitTooLarge` - yes |
+| `:175-180` | below `MIN_RESIDENT_BYTES` | `ResidentBytesBelowInteropMinimum { configured, minimum }` - no name needed, one field |
+| `:186-191` | above `min(MAX_PERMITS, u32::MAX)` | `ResidentBytesTooLarge { configured, maximum }` - yes |
+| `:302-304` | empty `daemon_ver` | `EmptyDaemonVer` - yes |
+| `:305-309` | non-canonical digest | `InvalidPayloadDigest { len }` - length only, deliberately (`:399`) |
+| `:333-340` | `daemon_ver` oversizes auth or publication | `DaemonVerTooLarge { auth_message_bytes, connection_file_bytes }` - yes |
+| `:357-359` | zero duration | `ZeroDuration { name }` - yes |
+| `:360-362` | duration above `MAX_CONFIG_DURATION` | `DurationTooLarge { name }` - yes |
+| `:365-369` | zero liveness period | `ZeroDuration { name: "liveness period" }` - coarse; does not say which of the two |
+| `:370-376` | oversize liveness period | `DurationTooLarge { name: "liveness period" }` - same coarseness |
 
 `Display` (`:417-458`) renders each with the configured and maximum values, so
 the caller learns which bound and by how much. `:430-434` even prints
@@ -75,8 +75,8 @@ The clamping scenario does not exist for `HostConfig`; the signatures prevent it
 The `raw_mode` scenario is cross-module. `file_mode.rs:1-5` says the function is
 "shared by the closure and generation stagers", and `generation.rs` is outside
 this footprint. If a generation manifest ever committed a `mode` with a bit
-above `0o7777` — a full `st_mode` including `S_IFREG`, for example, which is
-`0o100000` — the mask would silently reduce `0o100700` to `0o700`. That happens
+above `0o7777` - a full `st_mode` including `S_IFREG`, for example, which is
+`0o100000` - the mask would silently reduce `0o100700` to `0o700`. That happens
 to be the intended permission, so the file is created correctly and nothing
 reports the narrowing. A subsequent `verify_secure_file`-style comparison
 against the unmasked value would then fail, so the outcome is a confusing
@@ -122,7 +122,7 @@ a validated newtype.
   published host when a deadline is armed". The test at `:670-672` asserts the
   exact maximum is accepted.
 - Missing evidence: none.
-- Conclusion: resolved with answer — reject, with the boundary value accepted,
+- Conclusion: resolved with answer - reject, with the boundary value accepted,
   and a test pinning it.
 
 ### Q: is any bound derived rather than configured, and therefore clamped downstream?
@@ -135,7 +135,7 @@ a validated newtype.
   activation interval at `:1130`, and the 25 ms lock retry delay at
   `instance.rs:675`.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the derived `saturating_mul(2)` is the only
+- Conclusion: resolved with answer - the derived `saturating_mul(2)` is the only
   one that can produce an out-of-contract duration, and it cannot overflow, so it
   is a coherence issue tracked under
   `rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline` rather than a

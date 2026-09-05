@@ -65,7 +65,7 @@ be attached (Part 1 cites
 peer side, not on the host's own mapping.
 
 So the honest reading is that quarantine is a peer-side concern and the host
-never needed it — and the doc, which attributes quarantined accounting to the
+never needed it - and the doc, which attributes quarantined accounting to the
 host's process bound and doctor output, is what is out of date.
 
 ## Failure scenario
@@ -137,7 +137,7 @@ an existing check that passes vacuously.
   Part 1's index rows for `quarantine-charge-transition-is-atomic` and
   `custody-terminal-transition-exactly-once`, both marked
   `Reaches production: yes`.
-- Findings: the transport-side machinery is fully intact —
+- Findings: the transport-side machinery is fully intact -
   `AdmissionController::quarantine`, `Admission::quarantine`,
   `QuarantineRecord`, `Ring::enter_quarantine`, and the per-operation gates are
   all present and tested in `shm-transport`. Only the host-side driver is

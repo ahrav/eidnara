@@ -13,8 +13,8 @@ panic, and the hook's own `Drop` behaves differently depending on which one does
   `written` callback. Its body is three statements in order:
   `shared.draining.store(true, Ordering::SeqCst)` (`:729`),
   `shared.registry.freeze_admission()` (`:730`), `commit.acknowledge()` (`:731`).
-  The comment at `:723-728` reasons about ordering — the fence must flip
-  "atomically with" the commit — and says nothing about partial application.
+  The comment at `:723-728` reasons about ordering - the fence must flip
+  "atomically with" the commit - and says nothing about partial application.
 - **The hook is not panic-isolated.**
   `crates/host-runtime/src/tcp_frame_channel.rs:393-394` calls `written(completed_at)`
   with no `catch_unwind`, in contrast with `:349`, where the same function wraps
@@ -27,9 +27,9 @@ panic, and the hook's own `Drop` behaves differently depending on which one does
   body itself. Aborting the writer task at some *earlier* await drops the hook
   unrun, which is the clean reopen case, not a partial one.
 - Two prefixes are reachable in principle, and they differ:
-  - A panic in `freeze_admission` — `crates/host-runtime/src/routing.rs:210` is
+  - A panic in `freeze_admission` - `crates/host-runtime/src/routing.rs:210` is
     `self.inner.lock().expect("registry lock")`, so a poisoned registry mutex
-    panics — leaves `draining == true`, `accepting` still true, the token live,
+    panics - leaves `draining == true`, `accepting` still true, the token live,
     and `CommitOnAck::drop` (`crates/host-runtime/src/lifecycle.rs:1292-1297`) reopens
     the latch because `acknowledged` is still false.
   - A panic inside `acknowledge` is worse. `lifecycle.rs:1285-1289` sets
@@ -50,8 +50,8 @@ panic, and the hook's own `Drop` behaves differently depending on which one does
 - The panic is silent. The workspace sets no `panic = "abort"`, so the writer task
   unwinds alone, and `connection.rs:361` awaits it as `let _ = (&mut io_task).await;`,
   discarding the `JoinError`. No counter, no fatal trip, no log.
-  `tcp_frame_channel.rs:402-403` — `queue.retired.cancel()` and `stream.shutdown()`
-  — are skipped on the unwind path, and this file declares no `impl Drop` for the
+  `tcp_frame_channel.rs:402-403` - `queue.retired.cancel()` and `stream.shutdown()`
+  - are skipped on the unwind path, and this file declares no `impl Drop` for the
   queue.
 - Existing check: `lifecycle.rs:1913-1954`,
   `a_discarded_writer_drops_the_hook_unrun_and_reopens_the_latch`, covers the hook
@@ -75,7 +75,7 @@ panic, and the hook's own `Drop` behaves differently depending on which one does
 6. Any connection whose read tasks have quiesced parks at `connection.rs:341-343`
    forever. The host holds the instance lock, serves nothing, and answers no
    further shutdown unless a new authenticated requester arrives and wins the
-   reopened latch — which, in the `acknowledge` variant, cannot happen at all.
+   reopened latch - which, in the `acknowledge` variant, cannot happen at all.
 
 ## Timing windows and dependencies
 
@@ -84,7 +84,7 @@ single-threaded statement sequence. The dependency is entirely the enabling
 state: a poisoned mutex, which means a prior panic inside a critical section
 (fault class H2, deterministic panic injection, which the fault map records as
 unavailable for the freeze step). The commit must also actually reach write
-completion, so the peer has to read the response — a stalled reader retires the
+completion, so the peer has to read the response - a stalled reader retires the
 generation through the watchdog at `dispatch.rs:747-756` instead. This record is
 the partial-application half of `shutdown-commits-exactly-once-on-write-ack` and
 supplies the wedged-host precondition that
@@ -101,7 +101,7 @@ With the second, assert the stronger negative: the latch is neither `Open` nor
 `shutdown_sequence`. A bounded assertion is required in both cases, because the
 failing shape is a hang: wrap the run future in a timeout and assert the run does
 *not* complete, rather than waiting on it. A cheaper partial substitute needs no
-injection at all — assert that for every prefix, `draining == true` implies either
+injection at all - assert that for every prefix, `draining == true` implies either
 the token is cancelled or `try_own()` returns `Owner`.
 
 ## Investigation log
@@ -113,7 +113,7 @@ the token is cancelled or `try_own()` returns `Owner`.
   root `Cargo.toml`.
 - Findings: `Drop` distinguishes them, and not in the direction the guarantee
   implies. A panic before `acknowledge` reopens the latch, so a successor can
-  still commit — the effects are not all-or-nothing but the state is recoverable.
+  still commit - the effects are not all-or-nothing but the state is recoverable.
   A panic *inside* `acknowledge` after `:1286` suppresses the reopen, so the
   effects are neither all, nothing, nor recoverable. The catalog's check clause
   ("if draining is set then the shutdown token is cancelled, or a successor

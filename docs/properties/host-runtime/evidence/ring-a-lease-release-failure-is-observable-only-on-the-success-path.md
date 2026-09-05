@@ -35,12 +35,12 @@ Delivery path, `:546-548`: the identical form.
 
 **The three returns that hold a lease and drop it.**
 
-- `:525` — the charge-wait `select!`'s `read_cancel.cancelled()` arm returns
+- `:525` - the charge-wait `select!`'s `read_cancel.cancelled()` arm returns
   `Err(ReadClose::Cancelled)`. (Post-#131 the ingress wait is one `select!`
   over an async charge, `:522-542`, not a poll loop with an inner select.)
-- `:527-532` — the absolute frame deadline expires, returning
+- `:527-532` - the absolute frame deadline expires, returning
   `Err(ReadClose::Overloaded)` at `:531`.
-- `:539` — the sender queue closes while the charge is pending, returning
+- `:539` - the sender queue closes while the charge is pending, returning
   `Err(ReadClose::Cancelled)`.
 
 All three return while `lease` is a live local, so `ReceiveLease`'s `Drop` runs.
@@ -71,12 +71,12 @@ the explicit release at `:548`, so no lease is live.
 **What can make a release fail.** `Ring::release` (`ring.rs:1175-1210`,
 continuing past the excerpt) returns `Err` on:
 
-- quarantine — `ring.rs:1176-1178`, `LeaseError::Quarantined`;
-- wrong incarnation — `:1179-1181`, and again at `:1202-1204` against the slot descriptor;
-- wrong lane — `:1182-1184`, and again at `:1205-1207` against the descriptor;
-- sequence zero — `:1186-1188`, `InvalidSequence`;
-- sequence ahead of `consumed` — `:1193-1196`, `InvalidSequence`;
-- duplicate release — `lease.rs:185-187`, `DuplicateRelease`, raised before the
+- quarantine - `ring.rs:1176-1178`, `LeaseError::Quarantined`;
+- wrong incarnation - `:1179-1181`, and again at `:1202-1204` against the slot descriptor;
+- wrong lane - `:1182-1184`, and again at `:1205-1207` against the descriptor;
+- sequence zero - `:1186-1188`, `InvalidSequence`;
+- sequence ahead of `consumed` - `:1193-1196`, `InvalidSequence`;
+- duplicate release - `lease.rs:185-187`, `DuplicateRelease`, raised before the
   callback is even invoked.
 
 Quarantine is the reachable one from a host's point of view, because
@@ -170,8 +170,8 @@ Preconditions, all three needed:
    by the inline test `budget_wait_observes_read_cancellation`
    (`ring_transport.rs:1028`).
 3. An oracle that can see the discarded `Result`. Since `Drop` discards it, the
-   test cannot observe it directly. Two options: assert the *consequence* —
-   `active_leases` on the consumer page did not decrease — or add a
+   test cannot observe it directly. Two options: assert the *consequence* -
+   `active_leases` on the consumer page did not decrease - or add a
    `#[cfg(debug_assertions)]` counter inside `ReceiveLease::drop` for failed
    drop-path releases. The second is the honest oracle; the first is a proxy that
    also fires for unrelated reasons.
@@ -202,7 +202,7 @@ the host's handling of it on the drop paths.
 - Missing evidence: whether anything downstream of `ReadExit::Peer` distinguishes
   backpressure from corruption. `connection.rs:401-404` collapses `CleanEof`,
   `Corrupt`, `Io`, and `Overloaded` into the same `ReadExit::Peer`, so at that
-  level the distinction is already discarded — which means upgrading the cause
+  level the distinction is already discarded - which means upgrading the cause
   would change nothing observable unless the classification is also split.
 - Conclusion: resolved with a nuance that changes the priority. Because
   `connection.rs:401-404` already collapses `Corrupt` and `Overloaded` into one

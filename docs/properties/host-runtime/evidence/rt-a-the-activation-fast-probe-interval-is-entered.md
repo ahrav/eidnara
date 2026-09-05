@@ -69,8 +69,8 @@ The specification sanctions the state. `docs/host-wire-protocol.md:685`:
 transport unready."
 
 Current coverage is zero. `tests/lifecycle.rs:165` sets
-`config.timing.health_interval = Duration::from_millis(50)` — the same value as
-the hardcoded literal — so even if that test happened to enter the branch, it
+`config.timing.health_interval = Duration::from_millis(50)` - the same value as
+the hardcoded literal - so even if that test happened to enter the branch, it
 could not tell. No test in the repository constructs a component report carrying
 `storage_state` or `synapse_state`. The only occurrences of those keys are the
 host's own literals at `runtime.rs:1065` and `:1069`, and
@@ -146,7 +146,7 @@ The marker is at `runtime.rs:1130`, fired when the fixed interval is selected.
 Semantics `sometimes`, and deliberately not `reachable`: a campaign can execute
 the `if` at `:1129` on every one of thousands of iterations, always taking the
 `else`, and a line-coverage report would show `:1129` covered. What must be
-witnessed is the operational state — a component that has published `starting` —
+witnessed is the operational state - a component that has published `starting` -
 and that is situation coverage.
 
 `tests/activation.rs` is the natural home, since it already drives the
@@ -165,7 +165,7 @@ post-publication activation path this situation belongs to.
   health loop's predicate. No integration test sets the value to `"starting"` and
   runs the loop.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the situation is never produced. The
+- Conclusion: resolved with answer - the situation is never produced. The
   `control.rs` test does confirm the nesting shape the predicate expects, which is
   useful: it means conditions 1 through 4 are real and only condition 5 is
   missing.
@@ -178,7 +178,7 @@ post-publication activation path this situation belongs to.
   determined by the predicate. So the branch is not moot, it is merely
   unobservable under that configuration.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the coincidence at
+- Conclusion: resolved with answer - the coincidence at
   `tests/lifecycle.rs:165` is why no existing test can serve as partial coverage,
   and it is the first thing to change.
 
@@ -190,6 +190,6 @@ post-publication activation path this situation belongs to.
   satisfy the predicate. The in-repository production handler is a
   `StaticComposite`, which does emit the outer shape.
 - Missing evidence: none.
-- Conclusion: resolved with answer — a test handler can satisfy the predicate
+- Conclusion: resolved with answer - a test handler can satisfy the predicate
   directly without a composite, which makes the fixture cheaper than it first
   appears.

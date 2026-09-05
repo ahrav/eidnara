@@ -31,15 +31,15 @@ was right in every case.
    multi-threaded tests are in the very file flagged as ungated.
 2. **The fault-map's leverage ranking was wrong twice.** It put multi-thread
    scheduling first as the cheapest high-leverage gap. But multi-threaded tests
-   already exist, and more threads alone does not reach a specific lock order —
+   already exist, and more threads alone does not reach a specific lock order -
    that needs a barrier or an extracted state machine. The ranking is rewritten to
    order by *cheapest valid oracle*, which promotes five records to
    exercisable-today with no new infrastructure.
 3. **"Every record reaches a shipped configuration" was false, and this was the
    most consequential error.** Verified: `liveness` defaults to `None`
    (`config.rs:296`) and the only `liveness: Some(..)` in the crate is inside the
-   test module (`config.rs:664`), so the entire liveness probe path — including the
-   sharpest record in the part — does not run in any shipped configuration in this
+   test module (`config.rs:664`), so the entire liveness probe path - including the
+   sharpest record in the part - does not run in any shipped configuration in this
    tree. Non-TCP providers are explicitly test-only. The preamble now states three
    reachability classes and assigns records to them.
 4. **Two retirement records contradicted each other.** One correctly said
@@ -63,7 +63,7 @@ was right in every case.
    ageing out is specified, not a violation. Reframed as the real defect: a
    *coupling* gap, since the window is a hardcoded 60 seconds with no override while
    the phase budgets it judges are operator-settable to 365 days. One candidate
-   cause the record named — per-file hashing during payload validation — was
+   cause the record named - per-file hashing during payload validation - was
    refuted: it runs before the phase record exists.
 8. **The quarantine record over-claimed by including non-regular shapes.**
    Replacing a planted symlink or FIFO at the record name without following it is
@@ -83,7 +83,7 @@ Two refinements accepted without a change, because the record already admits the
 alternative: the quarantine-cap equality record (its check already permits
 "or the comment is removed and each cap separately justified", which is the
 evaluator's preferred resolution), and the CI record's classification as
-repository governance rather than a runtime property — kept as a record because it
+repository governance rather than a runtime property - kept as a record because it
 gates roughly 20 existing checks, with its nature now explicit.
 
 ## Gaps queued for a follow-up pass
@@ -132,7 +132,7 @@ claim, with any cache-key concern belonging to a later part.
 The evaluator's verdict was "not ready for full handoff", and after applying the
 refinements that is still the right call, for a narrower reason than before.
 
-Ready now: the records the evaluator classed as cheap in-crate units — the ping
+Ready now: the records the evaluator classed as cheap in-crate units - the ping
 counter's checked exhaustion, an injected panicking completion hook, permit release
 under abort, the two quarantine caps, and the reason-id producer table. Those need
 no new infrastructure and several are single unit tests.

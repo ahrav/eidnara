@@ -85,7 +85,7 @@ let closure = store
 
 `:405` maps the absent store to `"closure_incomplete"`, and `:406-408` maps every
 `validate` failure to the *same* string. `validate`
-(`harness_closure.rs:571-609`) has its own distinct reasons — a digest mismatch
+(`harness_closure.rs:571-609`) has its own distinct reasons - a digest mismatch
 (`:578`), a non-canonical retained manifest (`:585`), a missing listed node
 (`:597`), an unlisted entry (`:601`), plus everything `validate_manifest` and
 `validate_tree` produce. All of them, plus all seven `open` reasons, arrive at
@@ -103,7 +103,7 @@ choice, not an absence of machinery.
 
 ## Failure scenario
 
-An operator's data root is on a path with a group-writable ancestor — a shared
+An operator's data root is on a path with a group-writable ancestor - a shared
 `/opt` tree, or a home directory relaxed to `0o775`. Or `${dataDir}/eidnara` is
 a symlink to a volume mount, which is a routine deployment shape.
 
@@ -176,8 +176,8 @@ Two assertions, in order of value:
    something an operator reads. That requires changing `serve.rs`, which is not
    this pass's business, and is why the record's confidence is medium.
 
-The check asserts the precondition — that a distinguishable cause exists and is
-carried — rather than the swallowing itself.
+The check asserts the precondition - that a distinguishable cause exists and is
+carried - rather than the swallowing itself.
 
 ## Investigation log
 
@@ -190,7 +190,7 @@ carried — rather than the swallowing itself.
   ignored test `production_closures_from_environment_materialize` driven by
   `scripts/run-host-closure-qualification.ts` with three environment roots.
 - Missing evidence: none.
-- Conclusion: resolved with answer — well covered as a library, entirely
+- Conclusion: resolved with answer - well covered as a library, entirely
   unexercised as part of host startup, and its `open` failure paths are the
   uncovered part even in the library tests.
 
@@ -199,9 +199,9 @@ carried — rather than the swallowing itself.
 - Sources examined: `serve.rs:394-417` in full.
 - Findings: **no.** `:405` is `let store = store.ok_or("closure_incomplete")?;`
   and `:406-408` is `.validate(..).map_err(|_| "closure_incomplete")?`. Both
-  produce the identical string. The function *is* capable of distinct strings —
+  produce the identical string. The function *is* capable of distinct strings -
   `"descriptor_absent"` at `:400`, the snapshot's own `reason` at `:403`,
-  `"descriptor_invalid"` at `:410`, `"argument_variant_invalid"` at `:413` — so
+  `"descriptor_invalid"` at `:410`, `"argument_variant_invalid"` at `:413` - so
   the collapse is deliberate at exactly these two lines.
 - Missing evidence: none.
 - Conclusion: resolved with answer, and it strengthens the record. The operator
@@ -216,6 +216,6 @@ carried — rather than the swallowing itself.
   in the user data root", each holding "an entire harness runtime (hundreds of
   megabytes)". So a silently failing prune is an unbounded-growth path.
 - Missing evidence: whether any operator-visible signal exists for it elsewhere.
-- Conclusion: unresolved. This is a genuinely separate property — bounded disk
-  growth in the closure store — and it belongs to whoever catalogs `serve.rs`.
+- Conclusion: unresolved. This is a genuinely separate property - bounded disk
+  growth in the closure store - and it belongs to whoever catalogs `serve.rs`.
   Recorded here so it is not lost; not claimed as this record's scope.

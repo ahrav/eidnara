@@ -8,7 +8,7 @@ commit `1c193ae0` and `git diff d90e7811 HEAD` is empty for `connection.rs`,
 
 Insert and remove are 100 lines and one function apart, on opposite sides of the
 whole read lifetime, and nothing between them is unwind-protected. The registry
-holds an `Arc<GenerationCore>`, so a leaked entry is not just a stale key — it
+holds an `Arc<GenerationCore>`, so a leaked entry is not just a stale key - it
 keeps the writer sender, the pending map, the pings map, and the busy-reject
 semaphore alive for the rest of the host's life, and it stays visible to a
 shutdown that will then try to drain it.
@@ -19,7 +19,7 @@ shutdown that will then try to drain it.
   inside the lock taken at `:280`. Repo-wide grep confirms this is the only insert.
 - Removal: `dispatch.rs:1386-1390`, the tail of `close_generation`
   (`:1371-1391`), which locks `shared.connections` and calls
-  `.remove(&gen.id)`. Repo-wide grep confirms this is the only removal — the two
+  `.remove(&gen.id)`. Repo-wide grep confirms this is the only removal - the two
   other readers of the map (`runtime.rs:425-430` in `AbandonGuard::drop`,
   `runtime.rs:1151-1157` in the drain snapshot) iterate values and never remove.
 - The single call to `close_generation` from the connection path is
@@ -28,7 +28,7 @@ shutdown that will then try to drain it.
   `begin_close_generation` (`:338`), after `read_tasks.close()` and
   `read_tasks.wait().await` (`:339-340`), and after the shutdown rendezvous
   `gen.shutdown_complete.cancelled().await` (`:341-343`) when draining.
-- Nothing guards the interval. There is no `catch_unwind` on this stack — repo-wide
+- Nothing guards the interval. There is no `catch_unwind` on this stack - repo-wide
   grep for `catch_unwind` in `crates/host-runtime/src/` returns 9 hits, and the only one
   in `connection.rs` is `:907`, inside `handle_negotiate`'s eligibility callback,
   which contains a *handler* panic rather than protecting the registry. No `Drop`
@@ -37,10 +37,10 @@ shutdown that will then try to drain it.
   task.
 - The connection task is spawned at `runtime.rs:1017-1019` via `spawn_tracked`
   (`runtime.rs:146-155`), which is `tracker.spawn` plus an abort-handle push. A
-  panic is therefore contained at the tokio task boundary — the process survives,
+  panic is therefore contained at the tokio task boundary - the process survives,
   the `JoinHandle` carries the `JoinError`, and nobody reads it (`:1017-1019`
   discards the handle). So a panicking connection task fails silently.
-- What the leaked `Arc` retains: `connection.rs:97-124` — `writer: FrameSender`,
+- What the leaked `Arc` retains: `connection.rs:97-124` - `writer: FrameSender`,
   `membership`, `pending`, `pings`, `busy_rejects`, and `liveness` (holding a
   `JoinHandle`). The `pending` map holds `Arc<Settlement>` per in-flight request
   (`:82-85`).
@@ -59,9 +59,9 @@ shutdown that will then try to drain it.
 2. A panic occurs on the `serve_generation` stack. Reachable sites, all of which
    unwind rather than return: any `.expect()` on a poisoned or contended lock
    (`:280` `"connections lock"`, `:302` `"liveness lock"`, `:505` `"pings lock"`),
-   the `read_loop` body and everything it calls inline —
+   the `read_loop` body and everything it calls inline -
    `handle_control` (`:626`), `handle_negotiate` (`:839`), `grant_candidate`
-   (`:1001`) — or `close_generation` itself before it reaches `dispatch.rs:1386`.
+   (`:1001`) - or `close_generation` itself before it reaches `dispatch.rs:1386`.
    Note the distinction: a panic in a *spawned* tracked task (the rejection
    emission at `connection.rs:452-464`, the route-close task at `:567-575`) does
    **not** unwind this stack, so those do not leak the entry.
@@ -69,7 +69,7 @@ shutdown that will then try to drain it.
    `writer_finish`, the `AbortOnDropHandle` (aborting the writer task), and the
    local `Arc<GenerationCore>`. It does not reach `:345`.
 4. The unwind continues through `run_connection`, dropping `_connection_permit`
-   (`:167`) — so capacity *is* returned — and the task dies. `shared.connections`
+   (`:167`) - so capacity *is* returned - and the task dies. `shared.connections`
    still holds its `Arc`.
 5. Consequence: the entry is permanent, since the only remover is on the stack that
    just died. At shutdown, `runtime.rs:1163-1165` awaits `read_tasks.wait()` on a
@@ -77,20 +77,20 @@ shutdown that will then try to drain it.
    `send_connection_goodbye` at `:1168` tries to admit a frame on a writer whose
    task was aborted at step 3. Because the abort drops the `SenderQueue` receiver,
    `tx.send` fails and `send_ticket_before` returns `WriterGone`
-   (`frame_channel.rs:815-818`), which `:1442` discards — so the drain completes,
+   (`frame_channel.rs:815-818`), which `:1442` discards - so the drain completes,
    but it has spent a pass on a dead generation and the retained `Arc` (pending
    settlements, pings, semaphore permits) is never freed.
 
 ## Timing windows and dependencies
 
-The window is the entire served lifetime of a connection — `connection.rs:288` to
-`dispatch.rs:1390` — which is the longest-lived window in Group A: seconds to
+The window is the entire served lifetime of a connection - `connection.rs:288` to
+`dispatch.rs:1390` - which is the longest-lived window in Group A: seconds to
 hours, not instructions. Every await inside it is a point at which an abort can
 land, and every `.expect()` inside it is a point at which a panic can. There is no
 configuration dependency. One interaction is load-bearing: if the panic occurs
 while `shared.connections`'s `Mutex` is *held* (i.e. between `:280` and `:289`),
-the lock is poisoned, and every subsequent `.expect("connections lock")` — at
-`:280`, `dispatch.rs:1389`, `runtime.rs:1154`, `runtime.rs:428` — panics in turn,
+the lock is poisoned, and every subsequent `.expect("connections lock")` - at
+`:280`, `dispatch.rs:1389`, `runtime.rs:1154`, `runtime.rs:428` - panics in turn,
 so a single unlucky panic converts a leaked entry into a host-wide failure of every
 registration, every close, and the drain snapshot. This record is a precondition
 for `no-task-outlives-the-generation-it-serves` (a leaked entry is exactly a
@@ -101,11 +101,11 @@ leaked entry's rendezvous).
 ## What a test must construct
 
 A panic or an abort strictly between the insert and the removal (fault classes H2,
-deterministic panic injection, partial — callback panics are injectable through the
+deterministic panic injection, partial - callback panics are injectable through the
 test handler but internal points are not; and H3, task abort at a chosen point,
 unavailable). Concretely, two tests:
 
-- Panic: a failpoint on the `serve_generation` stack after `:288` — the cheapest
+- Panic: a failpoint on the `serve_generation` stack after `:288` - the cheapest
   real one available today is a handler callback that panics during `route.open`,
   since that path runs inline through `handle_control`. Drive one connection to a
   registered state, fire the panic, then assert `shared.connections` no longer
@@ -144,7 +144,7 @@ The catalog records no open question. The claims worth verifying are that
   without removing. No `catch_unwind`, no `Drop` impl, and no `scopeguard`-style
   RAII owns the entry; `GenerationCore` is a plain struct. The `AbandonGuard::drop`
   path at `runtime.rs:419-435` is the closest thing to a safety net and it
-  deliberately does not remove — it cancels `read_cancel`, `shutdown_complete`, and
+  deliberately does not remove - it cancels `read_cancel`, `shutdown_complete`, and
   `token` for every entry and then calls `abort_all()`, which is teardown of a
   dying host rather than release of one entry. One refinement to the catalog's
   Fault/timing angle: it lists "a panic in the read loop, control handling, grant,
@@ -156,6 +156,6 @@ The catalog records no open question. The claims worth verifying are that
   and no abort-at-a-chosen-point facility, so the leak is a reading of the
   structure rather than an observation, and the poisoned-lock escalation in
   particular is untested in either direction.
-- Conclusion: resolved with answer — the single-remover structure is confirmed, the
+- Conclusion: resolved with answer - the single-remover structure is confirmed, the
   interval is unguarded, and an unwind on the inline stack leaks the entry and the
   `Arc` it holds. The catalog's list of panic sites needs the narrowing above.

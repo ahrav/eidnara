@@ -35,12 +35,12 @@ silently (`:463-465`); on `checked_sub` underflow it silently does nothing
 **The three paths that never reach `:276`.** All rely on `Admission`'s `Drop`
 (`profile.rs:531-537`), which releases when the state is still `Active`:
 
-1. `:249-255` — runtime build or `DuplexRing::create` failure. Sends
+1. `:249-255` - runtime build or `DuplexRing::create` failure. Sends
    `Err(RingUnavailable)` on the init channel and `return`s from the closure.
    `admission` is a live local, so unwinding is not involved: the ordinary
    scope-exit drop runs.
-2. `:256-259` — `worker_descriptor(&rings)` failure. Same shape.
-3. `:261-263` — `initialized_tx.send(..).is_err()`, meaning `prepare` already
+2. `:256-259` - `worker_descriptor(&rings)` failure. Same shape.
+3. `:261-263` - `initialized_tx.send(..).is_err()`, meaning `prepare` already
    gave up on the receive at `:282`. Same shape.
 
 **A fourth path outside the closure.** `:279-281`: if
@@ -48,8 +48,8 @@ silently (`:463-465`); on `checked_sub` underflow it silently does nothing
 `Admission` guard is still a local of `prepare` and its `Drop` releases at the
 `return Err(RingUnavailable)`. Confirmed by reading `:223-281`: `admission` is
 bound at `:223` and moved at `:240` only if `spawn` is reached, and `spawn`
-consumes the closure by value, so a spawn failure means the closure — and the
-guard inside it — is dropped when `spawned` is inspected at `:279`.
+consumes the closure by value, so a spawn failure means the closure - and the
+guard inside it - is dropped when `spawned` is inspected at `:279`.
 
 **The panic path.** A panic inside `run_endpoint` unwinds into the
 `catch_unwind` at `:264`, whose result is discarded with `let _ =`. Execution
@@ -60,10 +60,10 @@ drops it and unmaps both mappings before `:276`. That ordering matches
 admission charge when the mapping is unmapped."
 
 **What owns recovery: nothing.** `provider_recovery.rs` is gone. The surviving
-observation surface is `pub(crate)` counters — post-#131 three,
+observation surface is `pub(crate)` counters - post-#131 three,
 `record_activation`/`record_peer_death`/`record_reclamation`
 (`ring_transport.rs:198-207`), since `record_attachment` was removed by the
-eventfd rewrite — called from `connection.rs`. Those are counters, not a state
+eventfd rewrite - called from `connection.rs`. Those are counters, not a state
 machine.
 `AdmissionController` has no sweeper, no timer, and no reconciliation pass: its
 only mutators are `admit`, `release`, and `quarantine` (`profile.rs`), and the
@@ -74,8 +74,8 @@ last has no `host-runtime` caller at all (see
 
 A charge stranded on any path is permanent for the host incarnation. Because
 `process_limits(connections)` multiplies the per-connection charge by
-the connection count with checked arithmetic — post-#131 additionally capped by
-`MAX_RING_RESIDENT_BYTES` (`ring_transport.rs:60-80`) — one
+the connection count with checked arithmetic - post-#131 additionally capped by
+`MAX_RING_RESIDENT_BYTES` (`ring_transport.rs:60-80`) - one
 stranded connection's worth of arena bytes permanently removes one connection
 slot. The failure surfaces much later, on an unrelated connect, as
 `admit` returning `Err` at `:223`, which becomes `RingUnavailable`, which
@@ -83,8 +83,8 @@ slot. The failure surfaces much later, on an unrelated connect, as
 `state: "healthy"` (`:165-179`), with the leak visible only as
 `accounting.active` never returning to zero.
 
-The realistic route to a strand is not one of the four paths above — those are
-all `Drop`-covered — but a future edit that adds a fifth early return inside the
+The realistic route to a strand is not one of the four paths above - those are
+all `Drop`-covered - but a future edit that adds a fifth early return inside the
 closure after the guard has been partially consumed, or a `release()` that runs
 twice. A double release cannot go negative because of the `checked_sub` at
 `profile.rs:516`, but it also cannot be detected, so a double release silently
@@ -160,7 +160,7 @@ the transport layer only.
   underflow as a reportable accounting fault; `release` swallows it. Since
   `Admission` is consumed by value in both `release` and `quarantine` and its
   `Drop` checks the state flag, a double release through the safe API is not
-  constructible — the type system prevents it. So the silent branch is
+  constructible - the type system prevents it. So the silent branch is
   defence-in-depth for an unreachable case.
 - Missing evidence: none needed for the correctness question.
 - Conclusion: resolved. The silent branch is currently unreachable through the

@@ -142,7 +142,7 @@ check and then fails to fill.
   `Underfill`), aborting the reservation in both cases. So an underfilled
   reservation is never published, and the arena is not exposed.
 - Missing evidence: none.
-- Conclusion: resolved with answer — exact fill is enforced, so the failure is a
+- Conclusion: resolved with answer - exact fill is enforced, so the failure is a
   clean abort, not a data-exposure bug. The finding is about attribution, not
   memory safety.
 

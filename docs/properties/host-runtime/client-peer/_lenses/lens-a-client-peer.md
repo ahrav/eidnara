@@ -282,12 +282,12 @@ plus this one, the material is in L2 and the record can be reconstructed from it
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test asserts what a caller arriving after retirement can learn about the cause
+Exercised: not yet - no test asserts what a caller arriving after retirement can learn about the cause
 Guarantee: A caller that arrives after the generation retires can determine that it retired but never why.
-Check: `always` — whenever `retire` has run and a subsequent `admit` or `send_control` rejects a call, the returned `CallError::code()` is one of the two constants `connection_retired` (`client.rs:1129`) or `generation_retired` (`:2237`), and never the `&'static str` that `retire` was called with. `always` because the condition is evaluable at every post-retirement call, and the property is about a total function from state to observable code rather than about one window.
+Check: `always` - whenever `retire` has run and a subsequent `admit` or `send_control` rejects a call, the returned `CallError::code()` is one of the two constants `connection_retired` (`client.rs:1129`) or `generation_retired` (`:2237`), and never the `&'static str` that `retire` was called with. `always` because the condition is evaluable at every post-retirement call, and the property is about a total function from state to observable code rather than about one window.
 Fault/timing angle: The distinguishing information exists for exactly the duration of `settle_all`'s loop (`:1654-1664`). A caller holding a pending entry at that instant sees the cause; a caller that calls one instruction later does not.
 Required faults and enabling state: Retire the generation by any of the eight cited causes with the `pending` map empty, then issue any call. Compare against the same fault with one pending request outstanding.
-Confidence: high — [evidence](evidence/client-a-a-retired-generation-forgets-why-it-retired.md). Verified that `Inner` (`:934-960`) has no cause field, that `retire` (`:1667-1675`) forwards `code` only to `settle_all`, and that both post-retirement rejection sites use constants.
+Confidence: high - [evidence](evidence/client-a-a-retired-generation-forgets-why-it-retired.md). Verified that `Inner` (`:934-960`) has no cause field, that `retire` (`:1667-1675`) forwards `code` only to `settle_all`, and that both post-retirement rejection sites use constants.
 Existing check: none. `dropped_close_retires_and_repeated_close_joins_tasks` (`:3121`) exercises retirement but asserts nothing about cause visibility.
 Impact: An operator or a recovery policy cannot tell a host reload from a ring fault after the fact. Combined with Part 2b's finding that the host reports itself healthy on ring unavailability, neither side of the connection retains the diagnosis.
 Open questions:
@@ -298,12 +298,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test drives the bridge thread's four distinct break paths and compares the resulting caller-visible code
+Exercised: not yet - no test drives the bridge thread's four distinct break paths and compares the resulting caller-visible code
 Guarantee: A pending caller cannot distinguish a host that shut down without a channel-0 Goodbye from a ring transport failure, because both retire the generation with the code `eof`.
-Check: `always` — whenever `ring_reader_loop` reaches `:1987`, the code passed to `retire` is the literal `"eof"` regardless of which of the five bridge-thread exits at `:1866`, `:1874`, `:1877`, `:1883`, or `:1887` closed the channel. `always` because it is a claim about a single code path's constant, checkable on every entry.
+Check: `always` - whenever `ring_reader_loop` reaches `:1987`, the code passed to `retire` is the literal `"eof"` regardless of which of the five bridge-thread exits at `:1866`, `:1874`, `:1877`, `:1883`, or `:1887` closed the channel. `always` because it is a claim about a single code path's constant, checkable on every entry.
 Fault/timing angle: None. This is a static property of the code, and the two operational causes it merges are unrelated in time.
 Required faults and enabling state: Two runs with one pending request each. Run A: host exits after its drain without emitting a channel-0 Goodbye. Run B: fail `RingClientEndpoint::send` or `try_recv_with` so the bridge breaks at `:1874` or `:1887`. Assert both callers observe `CallError::code() == "eof"`.
-Confidence: high — [evidence](evidence/client-a-a-clean-host-close-and-a-transport-failure-share-one-code.md). Verified all five bridge exits funnel into the same channel closure and that only `:1987` handles it. Part 2b's `ring-a-publish-failure-is-reported-as-a-clean-peer-close` establishes the host-side half.
+Confidence: high - [evidence](evidence/client-a-a-clean-host-close-and-a-transport-failure-share-one-code.md). Verified all five bridge exits funnel into the same channel closure and that only `:1987` handles it. Part 2b's `ring-a-publish-failure-is-reported-as-a-clean-peer-close` establishes the host-side half.
 Existing check: none.
 Impact: This is the significant finding the task anticipated. A recovery policy that wants to back off on transport faults but reconnect promptly on a host reload has no signal to branch on, and Part 2b established the host's own diagnostics are equally silent, so the fault is invisible from both ends.
 Open questions:
@@ -314,12 +314,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test observes the setup socket after a forced ring failure
+Exercised: not yet - no test observes the setup socket after a forced ring failure
 Guarantee: The client's setup-socket departure signal does not distinguish a clean exit from a transport failure, so the host's peer-death accounting under-reports ring faults.
-Check: `always` — whenever the bridge thread leaves its `while` loop at `client.rs:1866`, it reaches `:1890-1893` and attempts `encoded_goodbye` followed by `shutdown(Both)`, with no branch on why the loop ended. `always` because the post-loop block is unconditional and evaluable on every thread exit.
+Check: `always` - whenever the bridge thread leaves its `while` loop at `client.rs:1866`, it reaches `:1890-1893` and attempts `encoded_goodbye` followed by `shutdown(Both)`, with no branch on why the loop ended. `always` because the post-loop block is unconditional and evaluable on every thread exit.
 Fault/timing angle: None for the write itself. The consequence lands on the host, whose watcher at `connection.rs:199-206` calls `record_peer_death()` only for a non-`Goodbye` close (`:200`).
 Required faults and enabling state: Force the ring endpoint to fail after activation, so the bridge breaks at `:1874` or `:1887`. Observe the host's setup socket and assert whether `record_peer_death` fired.
-Confidence: high — [evidence](evidence/client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye.md). Verified the post-loop block is outside every `break` and that `connection.rs:200` gates the peer-death counter on the message.
+Confidence: high - [evidence](evidence/client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye.md). Verified the post-loop block is outside every `break` and that `connection.rs:200` gates the peer-death counter on the message.
 Existing check: `setup_socket.rs:820` and `:824` assert `observe_peer` returns `Goodbye` and `UnexpectedEof` respectively, but nothing ties either to a client transport state.
 Impact: The host metric intended to count dead peers counts only peers that failed to complete a socket write. A fleet losing rings would look like a fleet of well-behaved clients.
 Open questions:
@@ -330,12 +330,12 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet — nothing constructs the ordering
+Exercised: not yet - nothing constructs the ordering
 Guarantee: The window in which `close()` has returned `Ok` while the detached bridge thread has not yet written its setup-socket Goodbye is genuinely reachable, so a clean client close can be observed by the host as an abrupt EOF.
-Check: `sometimes` — at least once per campaign, observe the joint state: `close()` has returned, `join_tasks_until` reported both Tokio tasks joined, and the bridge thread has not yet executed `client.rs:1891`. `sometimes` rather than `reachable` because the lines at `:1890-1893` are executed on essentially every shutdown; what must be produced is the operational *ordering* in which the owner outruns them, and location coverage cannot witness that.
+Check: `sometimes` - at least once per campaign, observe the joint state: `close()` has returned, `join_tasks_until` reported both Tokio tasks joined, and the bridge thread has not yet executed `client.rs:1891`. `sometimes` rather than `reachable` because the lines at `:1890-1893` are executed on essentially every shutdown; what must be produced is the operational *ordering* in which the owner outruns them, and location coverage cannot witness that.
 Fault/timing angle: The whole record. `close` cancels at `:711`, joins only writer and reader at `:1682`, and returns. The bridge thread observes `cancel.is_cancelled()` at `:1866` only at the top of its next iteration, after up to a 50-microsecond sleep (`:1886`) or a full in-flight ring write.
 Required faults and enabling state: Independent preconditions, per the coverage-check rule: (a) `close()` observed returning with `within_deadline == true`; (b) the bridge thread observed still inside its loop body or its sleep at that moment. Assert both, never the misclassification itself.
-Confidence: high — [evidence](evidence/client-a-a-close-completes-before-its-setup-goodbye-is-written.md). Verified `join_tasks_until` (`:1677-1695`) iterates only `[&self.writer, &self.reader]` and that the spawn at `:1852` discards its handle.
+Confidence: high - [evidence](evidence/client-a-a-close-completes-before-its-setup-goodbye-is-written.md). Verified `join_tasks_until` (`:1677-1695`) iterates only `[&self.writer, &self.reader]` and that the spawn at `:1852` discards its handle.
 Existing check: none.
 Impact: A clean shutdown is recorded by the host as a peer death, which is the exact inverse of the previous record. Together they mean the host's `record_peer_death` signal is uncorrelated with reality in both directions.
 Open questions:
@@ -346,12 +346,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `dropped_unary_future_cleans_pending_and_possibly_sent_request` (`client.rs:3090`) and `a_dropped_sender_after_an_absent_entry_reports_the_send_outcome` (`:3014`) cover single-request classification, not bulk settlement on host death
+Exercised: partial - `dropped_unary_future_cleans_pending_and_possibly_sent_request` (`client.rs:3090`) and `a_dropped_sender_after_an_absent_entry_reports_the_send_outcome` (`:3014`) cover single-request classification, not bulk settlement on host death
 Guarantee: When the host dies, every pending request is failed exactly once with a send outcome that is `NotSent` only if its bytes provably never reached the writer, and no pending request is silently dropped or retried.
-Check: `always` — after any `retire`, the `pending` map is empty and, per pending identity, exactly one settlement was delivered whose outcome is `NotSent` if and only if `cancel_classification` (`client.rs:2223`) won the `QUEUED -> CANCELLED` CAS. Per METHOD's effect-accounting rule the per-identity check is primary; the cheap screen is that observed host-side effects lie between the count of `NotSent` settlements subtracted from the total and the total. `always` because it must hold at every retirement.
+Check: `always` - after any `retire`, the `pending` map is empty and, per pending identity, exactly one settlement was delivered whose outcome is `NotSent` if and only if `cancel_classification` (`client.rs:2223`) won the `QUEUED -> CANCELLED` CAS. Per METHOD's effect-accounting rule the per-identity check is primary; the cheap screen is that observed host-side effects lie between the count of `NotSent` settlements subtracted from the total and the total. `always` because it must hold at every retirement.
 Fault/timing angle: The CAS at `:2225` races `claim_for_write` at `:1942`, which is the writer's own `QUEUED -> WRITING` transition. A frame claimed by the writer but not yet completed must classify `OutcomeUnknown`, which `classify` (`:2215`) delivers by mapping both `WRITING` and `WRITTEN` there.
 Required faults and enabling state: Kill the host with N pending requests spanning all four publish states. Assert one settlement per identity and that no `NotSent` claim was issued for a frame the host actually received.
-Confidence: high — [evidence](evidence/client-a-every-in-flight-request-is-settled-with-a-classified-send-outcome.md). Verified `settle_all` drains under the `admission` mutex, that `finish_pending` is the single settlement funnel, and that no retry path exists outside `open_route`.
+Confidence: high - [evidence](evidence/client-a-every-in-flight-request-is-settled-with-a-classified-send-outcome.md). Verified `settle_all` drains under the `admission` mutex, that `finish_pending` is the single settlement funnel, and that no retry path exists outside `open_route`.
 Existing check: `cancel_winning_queued_prevents_writer_claim_and_frame` (`:2478`) and `writer_winning_cancel_is_outcome_unknown_and_queues_cancel` (`:2508`) cover the CAS race for one request; status `unaudited`.
 Impact: If a `NotSent` were ever issued for a delivered request, the caller would replay a side-effecting operation. This is the client's core replay-safety guarantee.
 Open questions: None.
@@ -361,12 +361,12 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `max_correlation_is_used_once_then_exhausted` (`client.rs:2328`) and `data_capacity_spares_control_reserve_and_does_not_burn_correlation` (`:3155`) cover allocation and rewind in isolation
+Exercised: partial - `max_correlation_is_used_once_then_exhausted` (`client.rs:2328`) and `data_capacity_spares_control_reserve_and_does_not_burn_correlation` (`:3155`) cover allocation and rewind in isolation
 Guarantee: The sequence of `Request` correlations the client places on the wire is strictly increasing, so a conforming host's per-generation watermark never closes the generation on this client.
-Check: `always` — for every pair of `Request` frames the writer completes in order, the second correlation is strictly greater than the first, across control (`0/0`) and routed identities alike, since both draw from one `Correlations` (`client.rs:393`). `always` because the host evaluates it on every ingress frame (`docs/host-wire-protocol.md:656`).
+Check: `always` - for every pair of `Request` frames the writer completes in order, the second correlation is strictly greater than the first, across control (`0/0`) and routed identities alike, since both draw from one `Correlations` (`client.rs:393`). `always` because the host evaluates it on every ingress frame (`docs/host-wire-protocol.md:656`).
 Fault/timing angle: Two windows. First, `admit` must not release the `correlations` guard between allocation and enqueue; it does not (`:1176-1217`). Second, `restore` must never rewind past a frame already handed to the writer; its guard (`:1742-1744`) plus the fact that a failed `try_send` returns the frame (`:1207`) prevents that.
 Required faults and enabling state: Concurrent `request`, `request_stream`, `open_route`, `host_status`, and `host_shutdown` callers, interleaved with encode failures (oversize body) and `data_tx` saturation to drive both `restore` sites. Record the correlation of each frame as the writer completes it.
-Confidence: high — [evidence](evidence/client-a-no-request-frame-carries-a-non-increasing-correlation.md). Verified guard scope by reading `admit` end to end, and verified both `restore` call sites precede any delivery to `data_tx`. Part 2a's `request-correlation-strictly-increases-per-generation` is the host-side enforcement this satisfies.
+Confidence: high - [evidence](evidence/client-a-no-request-frame-carries-a-non-increasing-correlation.md). Verified guard scope by reading `admit` end to end, and verified both `restore` call sites precede any delivery to `data_tx`. Part 2a's `request-correlation-strictly-increases-per-generation` is the host-side enforcement this satisfies.
 Existing check: `max_correlation_is_used_once_then_exhausted` (`:2328`); status `unaudited`.
 Impact: A violation is a host-side generation close before dispatch (`docs/host-wire-protocol.md:882`, vector V44), taking every unrelated route down. I found no path that produces one.
 Open questions: None.
@@ -376,12 +376,12 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `a_ping_at_any_valid_priority_is_answered_with_an_exact_flag_echo` (`client.rs:2754`) covers the success path only
+Exercised: partial - `a_ping_at_any_valid_priority_is_answered_with_an_exact_flag_echo` (`client.rs:2754`) covers the success path only
 Guarantee: When the client fails to enqueue a Pong for a reason that does not retire the generation, it records nothing, so a well-behaved host retires the generation for a missed probe while the client still believes it is healthy.
-Check: `always-or-unreached` — whenever `send_control` returns `Err` from its encode branch (`client.rs:1329-1335`) while called from the `Ping` arm (`:1390`), no counter, log, or state change results, because the result is bound to `_`. `always-or-unreached` because the encode branch may never run against a conforming host, but the swallowing must be safe if it does.
+Check: `always-or-unreached` - whenever `send_control` returns `Err` from its encode branch (`client.rs:1329-1335`) while called from the `Ping` arm (`:1390`), no counter, log, or state change results, because the result is bound to `_`. `always-or-unreached` because the encode branch may never run against a conforming host, but the swallowing must be safe if it does.
 Fault/timing angle: The window is one host probe interval. The client learns only when the host's own retirement arrives as an `eof` or `connection_goodbye`, by which point the cause is lost; see `client-a-a-retired-generation-forgets-why-it-retired`.
 Required faults and enabling state: Inject an `encode_owned_frame` failure for a `Pong`, or drive the reserved control channel to a state where the Pong path is refused without retiring. Assert that no observable client state changed.
-Confidence: medium — [evidence](evidence/client-a-a-dropped-pong-is-never-observable-to-the-client.md). The swallowing at `:1390` is verified. I could not construct an `encode_owned_frame` failure for a pure-header frame whose flags `validate_inbound` already accepted, so the reachability of the failing branch is unresolved and the confidence reflects that, not the code reading.
+Confidence: medium - [evidence](evidence/client-a-a-dropped-pong-is-never-observable-to-the-client.md). The swallowing at `:1390` is verified. I could not construct an `encode_owned_frame` failure for a pure-header frame whose flags `validate_inbound` already accepted, so the reachability of the failing branch is unresolved and the confidence reflects that, not the code reading.
 Existing check: `a_ping_at_any_valid_priority_is_answered_with_an_exact_flag_echo` (`:2754`); status `unaudited`.
 Impact: The client's only protocol obligation toward host liveness fails silently. Part 2a's `a-timely-pong-sustains-the-generation-within-a-bounded-round` is the host-side liveness property this could break.
 Open questions:
@@ -392,12 +392,12 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: not yet — no test stalls inbound delivery and measures Pong egress
+Exercised: not yet - no test stalls inbound delivery and measures Pong egress
 Guarantee: Once inbound delivery backpressures, an enqueued Pong waits on the same bridge thread that is parked delivering inbound frames, and the client tolerates that for the full 30-second frame deadline before reacting.
-Check: `always` — with the inbound channel full and the bridge parked in `read_tx.blocking_send` (`client.rs:1882`), a control frame enqueued at `:1355` is not written until either the bridge resumes or `timeout_at(frame.deadline, completed_rx)` (`:1960`) expires, where `frame.deadline` is `now + CLIENT_FRAME_TIMEOUT` (`:1353`, 30 s per `:45`). State the bound in the unit the code bounds: one frame deadline, not "eventually". `always` because the dependency holds on every control write once the precondition is met.
+Check: `always` - with the inbound channel full and the bridge parked in `read_tx.blocking_send` (`client.rs:1882`), a control frame enqueued at `:1355` is not written until either the bridge resumes or `timeout_at(frame.deadline, completed_rx)` (`:1960`) expires, where `frame.deadline` is `now + CLIENT_FRAME_TIMEOUT` (`:1353`, 30 s per `:45`). State the bound in the unit the code bounds: one frame deadline, not "eventually". `always` because the dependency holds on every control write once the precondition is met.
 Fault/timing angle: The bridge thread is the sole producer of write completions (`:1872`) and the sole consumer of the write channel, so any inbound stall is also an egress stall. This is the client-side mirror of Part 2b's `ring-a-ingress-wait-holds-a-lease-while-servicing-egress`.
 Required faults and enabling state: Bounded fault-free window, per METHOD's liveness rule. Stall `ring_reader_loop` so the 256-slot inbound channel (`:1850`) fills, enqueue a Pong, release the stall, then poll until the write completes within an explicit bound of one frame deadline.
-Confidence: high — [evidence](evidence/client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget.md). Verified the bridge is the single completion producer, that `writer_loop` awaits it before dequeuing the next frame, and that `RingClientEndpoint::send`'s own bound is a hardcoded 2 s (`ring_transport.rs:663-667`) that ignores the frame deadline.
+Confidence: high - [evidence](evidence/client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget.md). Verified the bridge is the single completion producer, that `writer_loop` awaits it before dequeuing the next frame, and that `RingClientEndpoint::send`'s own bound is a hardcoded 2 s (`ring_transport.rs:663-667`) that ignores the frame deadline.
 Existing check: `data_saturation_never_starves_a_control_frame` (`:3225`) covers queue-slot starvation, which is a different mechanism; status `unaudited`.
 Impact: Whether the host retires the generation first depends on its probe interval against 30 seconds. If the probe is shorter, an inbound stall presents to the operator as a liveness failure rather than as backpressure.
 Open questions:
@@ -408,12 +408,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test opens routes to exhaustion
+Exercised: not yet - no test opens routes to exhaustion
 Guarantee: The client imposes no limit on concurrently live route handles, so the only bound on its route cache is the host's willingness to keep binding.
-Check: `always` — every successful `open_route` inserts into `routes` at `client.rs:507` with no capacity predicate anywhere on that path, in contrast to `pending` (`:1169`) and `streams` (`:1058`). `always` because the absence is a total property of the insert path.
+Check: `always` - every successful `open_route` inserts into `routes` at `client.rs:507` with no capacity predicate anywhere on that path, in contrast to `pending` (`:1169`) and `streams` (`:1058`). `always` because the absence is a total property of the insert path.
 Fault/timing angle: None. The growth is caller-driven, not race-driven.
 Required faults and enabling state: A host that binds every `route.open`. Open routes in a loop without closing and observe `routes` growth against the absent cap.
-Confidence: high — [evidence](evidence/client-a-live-route-handles-are-bounded-only-by-the-host.md). Verified only two `CLIENT_MAX_*` constants exist (`:53`, `:55`) and that neither is consulted at `:507`. Contract side at `docs/host-wire-protocol.md:658`, which names routes in its finite-limits list.
+Confidence: high - [evidence](evidence/client-a-live-route-handles-are-bounded-only-by-the-host.md). Verified only two `CLIENT_MAX_*` constants exist (`:53`, `:55`) and that neither is consulted at `:507`. Contract side at `docs/host-wire-protocol.md:658`, which names routes in its finite-limits list.
 Existing check: none.
 Impact: Unbounded caller-driven growth with no local reaper is the recurring shape this catalog has found in every part. Here the damage is transitive: each entry corresponds to a host channel and route permit, so a looping caller exhausts host resources rather than its own.
 Open questions:
@@ -424,12 +424,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `a_duplicate_bind_terminal_never_closes_an_owned_route` (`client.rs:3587`) covers the unmatched-terminal case, not two successful opens returning one handle
+Exercised: partial - `a_duplicate_bind_terminal_never_closes_an_owned_route` (`client.rs:3587`) covers the unmatched-terminal case, not two successful opens returning one handle
 Guarantee: If the host answers two `route.open` requests with the same `(channel, epoch)`, the client conflates them into one cache entry, and one `close_route` settles both callers' work while neither bind is separately released.
-Check: `always` — whenever `parse_route_open` yields a handle already present in `routes`, `routes.insert` (`client.rs:507`) returns `false` and the set is unchanged, so `settle_route` (`:1623`) can remove it at most once and `release_stranded_route` returns early at `:1576-1578`. `always` because the set semantics hold on every insert.
+Check: `always` - whenever `parse_route_open` yields a handle already present in `routes`, `routes.insert` (`client.rs:507`) returns `false` and the set is unchanged, so `settle_route` (`:1623`) can remove it at most once and `release_stranded_route` returns early at `:1576-1578`. `always` because the set semantics hold on every insert.
 Fault/timing angle: None required, but the damage compounds if the two opens overlap: the second caller receives `Ok(handle)` for a route the first caller can close underneath it.
 Required faults and enabling state: A host, or a fake peer, that answers two distinct `route.open` correlations with an identical `route_channel` and `route_epoch`. Assert both callers received `Ok`, that `routes.len() == 1`, and that one `close_route` settles both callers' pending requests.
-Confidence: high — [evidence](evidence/client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle.md). Verified `routes` is a `HashSet<RouteHandle>` (`:944`), that `parse_route_open` (`:2167-2206`) validates only shape, and that the early return at `:1576` is the intended behaviour for the §8.2 case and therefore blocks cleanup here too.
+Confidence: high - [evidence](evidence/client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle.md). Verified `routes` is a `HashSet<RouteHandle>` (`:944`), that `parse_route_open` (`:2167-2206`) validates only shape, and that the early return at `:1576` is the intended behaviour for the §8.2 case and therefore blocks cleanup here too.
 Existing check: `a_duplicate_bind_terminal_never_closes_an_owned_route` (`:3587`); status `unaudited`.
 Impact: A host bug or a hostile peer at the setup path turns into cross-caller interference inside one client: caller A's `close_route` silently settles caller B's requests with `route_gone`. Part 2c established that epochs are host-minted and that the activation token cannot gate mapping, so the client has no independent basis to reject a repeated handle.
 Open questions:
@@ -440,12 +440,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test supplies a well-formed echo from a host that did not stop
+Exercised: not yet - no test supplies a well-formed echo from a host that did not stop
 Guarantee: `host_shutdown` returns `Ok` on the strength of a response body echoing its own operation name, and nothing in the client verifies the host actually stopped.
-Check: `always` — `host_shutdown` (`client.rs:576-615`) returns `Ok(())` if and only if the response body parses as JSON with `op == "host.shutdown"` (`:598-606`); no other host state is consulted, and the connection is left open by design (`:575`). `always` because the acceptance predicate is total over responses.
+Check: `always` - `host_shutdown` (`client.rs:576-615`) returns `Ok(())` if and only if the response body parses as JSON with `op == "host.shutdown"` (`:598-606`); no other host state is consulted, and the connection is left open by design (`:575`). `always` because the acceptance predicate is total over responses.
 Fault/timing angle: None inside the client. The window that matters is between the host writing the response and the host actually stopping, which the doc's shutdown ordering places at steps 3 through 9 (`docs/host-wire-protocol.md`, section 12).
 Required faults and enabling state: A fake peer that answers `{"op":"host.shutdown"}` and then continues serving. Assert `host_shutdown` returns `Ok` and that the caller's next operation still succeeds, which is the observable form of "the stop was not real".
-Confidence: high — [evidence](evidence/client-a-host-shutdown-success-rests-only-on-a-json-echo.md). Verified the predicate, and verified that the `Ok` is load-bearing for a downstream owner because the doc comment at `:575` declares it "the stop linearization point the native lifecycle owner waits on".
+Confidence: high - [evidence](evidence/client-a-host-shutdown-success-rests-only-on-a-json-echo.md). Verified the predicate, and verified that the `Ok` is load-bearing for a downstream owner because the doc comment at `:575` declares it "the stop linearization point the native lifecycle owner waits on".
 Existing check: none found for `host_shutdown` in `client.rs`'s test module.
 Impact: This is the shape a sibling part found on a producer that advanced a durable checkpoint on an acknowledgement truthful about nothing. Here the acknowledgement gates a lifecycle owner's belief that a daemon stopped, which is the precondition for starting a replacement. A stale echo could produce two live daemons.
 Open questions:
@@ -457,13 +457,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test drives the retry loop against a host that binds after answering one of the four codes
+Exercised: not yet - no test drives the retry loop against a host that binds after answering one of the four codes
 Guarantee: `open_route` retries after four specific host terminal codes, and each retry is a fresh `route.open` attempt whose safety depends entirely on those codes proving no route was bound.
-Check: `always` — for a sequence of `open_route` attempts ending in success, the number of routes the host bound for that call is exactly one. Per METHOD's effect-accounting rule, track attempted and acknowledged separately: attempts equal loop iterations at `client.rs:461`, acknowledged failures equal the retried terminals at `:511-519`, and host-side binds must equal one, not the attempt count. The aggregate bound is the cheap screen; the per-attempt check is the oracle.
+Check: `always` - for a sequence of `open_route` attempts ending in success, the number of routes the host bound for that call is exactly one. Per METHOD's effect-accounting rule, track attempted and acknowledged separately: attempts equal loop iterations at `client.rs:461`, acknowledged failures equal the retried terminals at `:511-519`, and host-side binds must equal one, not the attempt count. The aggregate bound is the cheap screen; the per-attempt check is the oracle.
 Check semantics rationale: `always` because it must hold for every `open_route` call, not merely be witnessed once.
 Fault/timing angle: The retry is gated on `outcome == Terminal` (`:512`), so an `OutcomeUnknown` never retries. The risk is confined to whether `module_timeout` is a completed rejection or a host-side deadline that leaves module work in flight.
 Required faults and enabling state: A fake peer that answers `route.open` with `Error{code:"module_timeout"}` and then also binds a route and emits a late `Response` on `0/0`. Count host-side binds against client-side handles, and check whether `release_stranded_route` (`:1572`) reclaims the extra.
-Confidence: medium — [evidence](evidence/client-a-route-open-retries-treat-four-host-terminals-as-proof-of-no-bind.md). The retry predicate and the fresh-correlation-per-attempt behaviour are verified. Whether `module_timeout` is authoritative about the bind is a host-side question I could not resolve, which is why this is medium and why the guarantee is worded as a dependency rather than a defect.
+Confidence: medium - [evidence](evidence/client-a-route-open-retries-treat-four-host-terminals-as-proof-of-no-bind.md). The retry predicate and the fresh-correlation-per-attempt behaviour are verified. Whether `module_timeout` is authoritative about the bind is a host-side question I could not resolve, which is why this is medium and why the guarantee is worded as a dependency rather than a defect.
 Existing check: `an_abandoned_control_open_releases_a_late_bound_route` (`:3503`) covers the late-bind remedy that would partially mitigate this; status `unaudited`.
 Impact: If `module_timeout` is a deadline rather than a rejection, each retry can strand a host route and channel permit, bounded only by the 30-second route-open deadline divided by the backoff. The mitigation at `:1572` works only while the generation stays live.
 Open questions:
@@ -474,12 +474,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `inbound_validation_enforces_the_direct_profile_table` (`client.rs:2658`) exercises `validate_inbound` broadly; whether it asserts the `Cancel` disposition is unverified
+Exercised: partial - `inbound_validation_enforces_the_direct_profile_table` (`client.rs:2658`) exercises `validate_inbound` broadly; whether it asserts the `Cancel` disposition is unverified
 Guarantee: The client treats a host-originated `Cancel` as a framing violation that retires the whole generation, although the protocol's role table does not list host-originated `Cancel` as role-invalid and assigns `Cancel` an idempotent no-op disposition.
-Check: `always` — for `header.ty == FrameType::Cancel` (`wire.rs:58`), `validate_inbound` (`client.rs:2006`) has no matching arm and falls to `_ => return Err(())` at `:2067`, so `ring_reader_loop:1979` retires with `protocol_violation`. `always` because the classification is total over inbound frame types.
+Check: `always` - for `header.ty == FrameType::Cancel` (`wire.rs:58`), `validate_inbound` (`client.rs:2006`) has no matching arm and falls to `_ => return Err(())` at `:2067`, so `ring_reader_loop:1979` retires with `protocol_violation`. `always` because the classification is total over inbound frame types.
 Fault/timing angle: None.
 Required faults and enabling state: A fake peer that sends a well-formed pure-header `Cancel` on a live route with a pending correlation. Assert the client retires rather than treating it as a no-op.
-Confidence: high — [evidence](evidence/client-a-a-host-originated-cancel-retires-the-generation.md). Verified `validate_inbound`'s arms are exactly `Response|Error`, `StreamData|StreamEnd`, `Push`, `Ping`, `Goodbye`, plus the catch-all, and that `Cancel` is therefore in the residue. Contract side at `docs/host-wire-protocol.md:269` and `:280`.
+Confidence: high - [evidence](evidence/client-a-a-host-originated-cancel-retires-the-generation.md). Verified `validate_inbound`'s arms are exactly `Response|Error`, `StreamData|StreamEnd`, `Push`, `Ping`, `Goodbye`, plus the catch-all, and that `Cancel` is therefore in the residue. Contract side at `docs/host-wire-protocol.md:269` and `:280`.
 Existing check: `inbound_validation_enforces_the_direct_profile_table` (`:2658`); status `unaudited`, and its coverage of `Cancel` specifically is unverified.
 Impact: If a host ever emits `Cancel`, every route on the generation dies. If a host never does, the strictness is free and the finding is a documentation defect rather than a code defect. Which of those holds is the open question.
 Open questions:
@@ -490,12 +490,12 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: partial — reached only by the test module's 16 direct `dispatch` calls
+Exercised: partial - reached only by the test module's 16 direct `dispatch` calls
 Guarantee: `dispatch`'s catch-all retirement arm is unreachable from the production reader, because `validate_inbound` already rejects every frame type that would land there.
-Check: `unreachable` — the statement at `client.rs:1557` is never executed on the `ring_reader_loop` path. `unreachable` rather than `always(!X)` because the subject is a specific code location that must not execute, which is exactly METHOD's criterion.
+Check: `unreachable` - the statement at `client.rs:1557` is never executed on the `ring_reader_loop` path. `unreachable` rather than `always(!X)` because the subject is a specific code location that must not execute, which is exactly METHOD's criterion.
 Fault/timing angle: None.
 Required faults and enabling state: No fault. The check is a marker at `:1557` that must not fire during any production-path campaign, combined with the independent observation that `validate_inbound` returned `Err` for the same frame types.
-Confidence: high — [evidence](evidence/client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production.md). Verified that `dispatch` handles `Ping`, `Goodbye`, `Push`, `Response|Error|StreamEnd`, and `StreamData`, that its catch-all therefore covers `Request`, `Cancel`, `Pong`, `Hello`, and `HelloAck` (`wire.rs:52-63`), and that `validate_inbound:2067` rejects all five. Confirmed `dispatch`'s only non-test caller is `:1982`.
+Confidence: high - [evidence](evidence/client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production.md). Verified that `dispatch` handles `Ping`, `Goodbye`, `Push`, `Response|Error|StreamEnd`, and `StreamData`, that its catch-all therefore covers `Request`, `Cancel`, `Pong`, `Hello`, and `HelloAck` (`wire.rs:52-63`), and that `validate_inbound:2067` rejects all five. Confirmed `dispatch`'s only non-test caller is `:1982`.
 Existing check: none as a guard. The 16 test call sites listed in the evidence file reach `dispatch` directly, bypassing validation.
 Impact: Low on its own. It matters as a structural fact: the tests exercise a dispatch surface the production reader cannot reach, so a regression that loosened `validate_inbound` would be caught by nothing, and the duplicated classification at `:1557` and `:2067` can drift.
 Open questions: None.

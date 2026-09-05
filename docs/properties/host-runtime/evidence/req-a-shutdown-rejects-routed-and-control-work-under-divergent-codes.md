@@ -79,8 +79,8 @@ rule does.
 Protocol §8.3 constrains which code is admissible:
 
 > Limit exhaustion before dispatch of a routed or control request returns
-> terminal `server_busy`; `target_unavailable` is reserved for route admission —
-> `route.open` failures such as channel exhaustion (Section 8.2) — so each code
+> terminal `server_busy`; `target_unavailable` is reserved for route admission -
+> `route.open` failures such as channel exhaustion (Section 8.2) - so each code
 > keeps exactly one recovery rule in Section 10.2.
 
 Shutdown is neither limit exhaustion nor channel exhaustion, so §8.3 does not
@@ -92,7 +92,7 @@ valid routed `Request`", not to `route.open`.
 1. An authenticated client sends `host.shutdown`. The commit hook fires inside
    the writer task, setting `draining` and freezing admission
    (`dispatch.rs:752-753`).
-2. A second client — or the same one, pipelined — has both a routed `Request` and
+2. A second client - or the same one, pipelined - has both a routed `Request` and
    a `route.open` in flight behind that commit.
 3. The routed request gets `server_busy` and, per §10.2, backs off.
 4. The `route.open` gets `target_unavailable` and, per §10.2, may immediately
@@ -105,7 +105,7 @@ So the host sheds the traffic it can afford to shed and invites un-backed-off
 retries of the traffic that costs it more, from exactly the clients it is trying
 to drain.
 
-Effect accounting is unaffected here — both codes are emitted terminals and both
+Effect accounting is unaffected here - both codes are emitted terminals and both
 prove no bind occurred, since exit 1 of `open_route` precedes `registry.reserve`.
 The divergence is purely in the recovery rule the client applies.
 
@@ -119,12 +119,12 @@ answered by `dispatch.rs:1084-1092`, which picks `server_busy`. A `route.open`
 that passes `dispatch.rs:1112` and then loses the race is caught by
 `registry.reserve`'s own `!inner.accepting` check (`routing.rs:115`) and answered
 at `dispatch.rs:1127-1137` with `target_unavailable` and the message "route
-capacity exhausted" — which is now a *third* inconsistency, because the cause is
+capacity exhausted" - which is now a *third* inconsistency, because the cause is
 frozen admission, not capacity.
 
 That third case is worth stating precisely: `reserve` returns `None` for three
-distinct reasons (`routing.rs:115`) — frozen admission, a cancelled generation, or
-`live >= max_routes` — and `open_route` reports all three as "route capacity
+distinct reasons (`routing.rs:115`) - frozen admission, a cancelled generation, or
+`live >= max_routes` - and `open_route` reports all three as "route capacity
 exhausted".
 
 Dependency: `handle_host_shutdown`'s commit hook is what makes the fence
@@ -142,7 +142,7 @@ fence only engages once the later shutdown sequence stores it.
    the same fence.
 5. Separately: freeze admission without exhausting `max_routes`, send a
    `route.open`, and assert the message is "route capacity exhausted" even though
-   capacity was not the cause — the third inconsistency.
+   capacity was not the cause - the third inconsistency.
 
 No existing test compares the two codes. `tests/routing.rs:570`
 (`route_capacity_exhaustion_is_refused_without_binding`) covers the genuine
@@ -159,7 +159,7 @@ capacity cause only, and it is not in CI.
   for a frozen-admission cause is not a contract violation. It is still a
   misleading operator signal.
 - Missing evidence: none.
-- Conclusion: resolved with answer — only the code choice is a contract question;
+- Conclusion: resolved with answer - only the code choice is a contract question;
   the message mismatch is a diagnostics-quality finding.
 
 ### Q: Which code does the protocol intend for a `route.open` during shutdown?
@@ -184,7 +184,7 @@ capacity cause only, and it is not in CI.
 - Findings: the comment justifies the fence's *placement*, not the code. Nothing
   in the file or the doc argues for the code choice. §12 does say the client
   "MUST immediately invalidate its routes" on retirement, which suggests a fresh
-  `route.open` after reconnect is expected — but that is after a reconnect, not
+  `route.open` after reconnect is expected - but that is after a reconnect, not
   an immediate retry against a draining host.
 - Missing evidence: a design note or commit message explaining the code choice.
 - Conclusion: unresolved, needs the author's intent. Recorded as lead 3.

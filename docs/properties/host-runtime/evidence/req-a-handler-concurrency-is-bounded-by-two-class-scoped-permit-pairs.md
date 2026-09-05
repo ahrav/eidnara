@@ -176,17 +176,17 @@ permit.
   this catalog has hit, after the three the ring resolution had to overcome, so it
   was checked against the binary rather than believed.
 - Missing evidence: none.
-- Conclusion: resolved with answer — `default-production`.
+- Conclusion: resolved with answer - `default-production`.
 
 ### Q: Is a control request bounded by a task permit too?
 
 - Sources examined: `connection.rs:600-727` (`handle_control`) in full.
 - Findings: only `pending_permits` (or `reserved_pending_permits` for a
   reserved-target `route.open`, `:616-624`). No task permit is acquired on any
-  channel-0 path. The control operations spawn tasks — `:644`, `:662`, `:681`,
-  `:689`, `:721` — but each holds only the pending permit.
+  channel-0 path. The control operations spawn tasks - `:644`, `:662`, `:681`,
+  `:689`, `:721` - but each holds only the pending permit.
 - Missing evidence: none.
-- Conclusion: resolved with answer — control work is bounded by one pool, routed
+- Conclusion: resolved with answer - control work is bounded by one pool, routed
   work by two. Recorded as an asymmetry in the lens file's admission map.
 
 ### Q: Is per-connection handler-capacity fairness owned anywhere?

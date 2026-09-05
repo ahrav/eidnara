@@ -96,8 +96,8 @@ One descriptor names one complete header and body
 (`docs/host-wire-protocol.md:294`), so releasing the lease discards the whole
 frame atomically. There is no partially-consumed stream to realign, no declared
 byte count to drain, and no deadline on the rejection. The two failure modes that
-`RejectedDrainFailed` existed to report — the declared body truncating or stalling
-after an early terminal — cannot occur on a descriptor transport.
+`RejectedDrainFailed` existed to report - the declared body truncating or stalling
+after an early terminal - cannot occur on a descriptor transport.
 
 The variant is a residue of the deleted `frame_read.rs` and
 `tcp_frame_channel.rs`, which read a length-prefixed byte stream and therefore
@@ -192,8 +192,8 @@ and was written against deleted code.
   stream transport, and the retention argument regains some force. The re-scope
   raised the same question and it is still open.
 - Conclusion: unresolved pending that script, but leaning strongly toward
-  removal for `RejectedDrainFailed`, since its entire semantic — realignment
-  after a partially-consumed frame — is meaningless on a descriptor transport and
+  removal for `RejectedDrainFailed`, since its entire semantic - realignment
+  after a partially-consumed frame - is meaningless on a descriptor transport and
   would need re-designing rather than reusing even if a stream transport
   returned.
 
@@ -204,15 +204,15 @@ and was written against deleted code.
   `InboundEvent::Rejected` handler and its watermark check at `:415-417`);
   `wire.rs:374` (`MAX_CONTROL_BODY_LEN = 65_536`).
 - Findings: the doc's clauses split cleanly. "A channel-0 header declaring `len`
-  greater than 65,536 already proves the violation" — satisfied at `:506`. "the
-  host MAY emit that terminal as soon as header validation completes" —
+  greater than 65,536 already proves the violation" - satisfied at `:506`. "the
+  host MAY emit that terminal as soon as header validation completes" -
   satisfied, `validate_inbound_header` runs at `:505` and the rejection follows
-  at `:506`. "MUST NOT buffer the oversize body" — satisfied, the lease is
+  at `:506`. "MUST NOT buffer the oversize body" - satisfied, the lease is
   released at `:507-509` before any body byte is read, and no ingress charge is
   taken. "drains and discards the declared bytes under the frame's absolute
-  deadline to preserve stream alignment" — inapplicable, there is no stream. "The
+  deadline to preserve stream alignment" - inapplicable, there is no stream. "The
   early terminal is authoritative for its correlation even if the declared body
-  then truncates, stalls, or EOFs" — vacuously true, since the body cannot
+  then truncates, stalls, or EOFs" - vacuously true, since the body cannot
   separately fail.
 - Missing evidence: none.
 - Conclusion: resolved with answer. The ring satisfies every applicable clause

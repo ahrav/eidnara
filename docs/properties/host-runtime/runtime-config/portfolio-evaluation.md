@@ -19,8 +19,8 @@ production signal wiring future work and an escapable teardown unconditional.
 The asymmetry between F1 and F2 is the part worth carrying forward, because they
 are the same error in opposite directions. A check that cannot fail and a check
 that cannot pass both look like checks and neither is one. Neither would have been
-caught by asking "is the mechanism verified" — both mechanisms were verified
-correctly, with correct citations — and both are caught immediately by asking
+caught by asking "is the mechanism verified" - both mechanisms were verified
+correctly, with correct citations - and both are caught immediately by asking
 "what observation makes this fail, and what observation makes it pass".
 
 Four lenses: harness fit, coverage balance, implementability, and a wildcard pass
@@ -75,13 +75,13 @@ is stated here as well as in the catalog because the natural inference from "the
 map is unreliable" is that the labels resting on it must move.** They do not, and
 the reason is structural rather than lucky: METHOD's three reachability classes
 encode whether a *configuration or a test* is needed to reach a state, and both of
-F3's errors are about *control flow* — who installs the signal handler, and who
+F3's errors are about *control flow* - who installs the signal handler, and who
 keeps polling the future. Neither error touches a config key or a `cfg` gate, and
 those are what the labels depend on. Two labels are strengthened in their
 justification without moving: see F3.
 
 Fault-map totals **9 non-vacuous today, 4 partial, 1 not constructible**, against
-11/3/1 before — reading the pre-disposition text's "2 partial" plus its own
+11/3/1 before - reading the pre-disposition text's "2 partial" plus its own
 separately-stated blocked row as 11/2/1, which is how it was written. Two rows
 moved from `Yes` to `Partial`, both pessimistic, both from F1 and F2. No row
 improved. That direction is worth naming: this disposition found no capability the
@@ -116,13 +116,13 @@ configuration". Its check then asked an oracle to assert the `else` branch and t
 "record the number of consecutive iterations that selected 50 ms so a campaign can
 bound it". **Recording a number is not a check.** Every observation satisfies it,
 so it cannot fail, and a marker that cannot fail cannot witness the property the
-record exists for — which is the override, not the non-override.
+record exists for - which is the override, not the non-override.
 
 **Premise narrowed, in the direction that costs the finding something.** The
 evaluation said the record "has no pass/fail bound". That is true of the half that
 matters and false of the record as a whole: the `else`-branch conjunct is a genuine
-pass/fail assertion — `interval == shared.timing.health_interval` whenever
-`activation_in_progress` is false — and it is non-vacuous as soon as
+pass/fail assertion - `interval == shared.timing.health_interval` whenever
+`activation_in_progress` is false - and it is non-vacuous as soon as
 `tests/lifecycle.rs:165` stops setting `health_interval` to exactly 50 ms. So the
 record is not unfalsifiable; it is half falsifiable, and the falsifiable half is
 the one that proves the *absence* of the override rather than its bound. Stating it
@@ -143,8 +143,8 @@ count reported as a measurement.
 
 **What this costs, stated rather than hidden.** The record can no longer reach
 `Exercised: yes` by fixture work alone, and the fault map says so. Its 600-fold
-callback-frequency finding is unaffected — that is arithmetic on verified
-constants — but the finding is now explicitly a *described* hazard with a partial
+callback-frequency finding is unaffected - that is arithmetic on verified
+constants - but the finding is now explicitly a *described* hazard with a partial
 oracle rather than a bounded one.
 
 ### F2. The forced-shutdown record's bound is the bound of the exit that does the least work, and "floor" is the wrong word for all of it
@@ -164,7 +164,7 @@ Three separate errors, and they compound.
 
 **The omission.** `shutdown_sequence` has three exits, not one. The check bounded
 "the forced path" at `shutdown_deadline + 2 * lifecycle_callback_deadline`, which
-is the bound of the exit at `runtime.rs:1238` — the fatal-latch branch, and the
+is the bound of the exit at `runtime.rs:1238` - the fatal-latch branch, and the
 **only** one of the three that never calls `run_handler_shutdown`, because
 `:1234-1238` returns before `:1240`. The other two exits both pay
 `run_handler_shutdown`, each under its own fresh
@@ -176,7 +176,7 @@ written to the old bound fails on a correct build as soon as the handler callbac
 takes appreciable time.
 
 **The terminology.** The catalog called the composed total a "floor" in three
-places, and the number is a **ceiling** — a sum of per-stage maxima on one branch.
+places, and the number is a **ceiling** - a sum of per-stage maxima on one branch.
 Every stage returns as soon as its awaited future resolves:
 `timeout(lifecycle_chain, tracker.wait())` at `:1224` returns the instant the
 tracker drains, and `run_handler_shutdown` returns the instant the callback task
@@ -232,15 +232,15 @@ about the crate and stale about production. `serve.rs:617-619` installs a `SIGTE
 stream and `:620-622` a `SIGINT` stream, each failing startup on installation
 failure; `:623-631` spawns a task that cancels the `CancellationToken` on the first
 of the two; and all of it precedes `host_runtime::run` at `:632`. The comment at
-`serve.rs:604-616` states why the ordering is mandatory — registering inside the
+`serve.rs:604-616` states why the ordering is mandatory - registering inside the
 spawned task would race `run`, and a signal arriving first would take the default
 disposition and kill the daemon outright. So the register row moves from "no
 implementing code" to "implemented by the caller".
 
 **Error 2: the shutdown sequence is escapable.** The map called
 `shutdown_sequence` at `:936` unconditional. It is reached only if the caller polls
-`run` past `:934`. If the `run` future is dropped at any point after `:929` — a
-supervisor aborting the task, a `select!` arm losing — `AbandonGuard::drop`
+`run` past `:934`. If the `run` future is dropped at any point after `:929` - a
+supervisor aborting the task, a `select!` arm losing - `AbandonGuard::drop`
 (`:419-476`) runs instead: it cancels the token and every generation's three tokens
 (`:424-434`), calls `abort_all` (`:435`), demotes the phase (`:442`), then spawns a
 detached task running `force_close_all_routes` (`:450`), `tracker.close()`, an
@@ -288,8 +288,8 @@ Recorded, not mined. Both verified for this disposition.
 
 | # | Gap | Evidence |
 | --- | --- | --- |
-| G1 | **Shutdown has no bounded fault-free liveness record, in a sub-part whose type distribution is 12 safety, 2 reachability, and zero liveness.** METHOD's liveness rules require a bounded fault-free window stated in the units the code bounds, and shutdown is the one place in 2f where that shape applies: cancel the token, stop the pressure, and assert the host reaches a terminal state within an explicit bound. Fourteen records and none of them states it. The two candidates are different in kind. **On the `shutdown_sequence` path** the bound exists but is per exit, at `shutdown_deadline + k * lifecycle_callback_deadline` for `k` in `{1, 2, 3}` (`runtime.rs:1148`, `:1223-1224`, `:1276`), and the forced-shutdown record now states those as ceilings on *elapsed time* — which is a safety bound on a maximum, not a liveness claim that the terminal state is reached at all. Those are different properties: the safety bound is refuted by taking too long, the liveness claim by never finishing. **On the `AbandonGuard::drop` path there is no bound to state**, because `:457` and `:471` are unbounded `tracker.wait()` calls by explicit design (`:452-456`), and METHOD forbids writing an unbounded "eventually" — so a record here must either bound the wait in some unit the code does not currently use, or record that no finite test can refute the current design, which is itself a finding. Cancellation cleanup is the specific hole: nothing asserts that a cancelled-token teardown reaches a terminal state, releases the instance lock, and runs the handler shutdown callback exactly once across *both* paths, which is what the once-latch at `:1265-1270` exists to arrange. |
-| G2 | **`harness_closure.rs` is 1,122 lines and is represented in the catalog by exactly one record, about the reporting of `open`'s failure — and `open` is one function of fifty-odd.** `rt-a-a-closure-store-open-failure-is-classified-not-swallowed` covers `HarnessClosureStore::open` (`:491`) and the classification of its error, and that is the whole of 2f's coverage of the file. Uncatalogued, verified by reading the function inventory at `HEAD`: **manifest validation** (`validate_manifest`, `:231-410`, with `validate_identifier` `:435`, `validate_relative_path` `:447`, `validate_hash` `:463`, and the `require_existing_node` and `require_root` helpers at `:413` and `:423`) enforcing five hard caps (`MAX_MANIFEST_BYTES` 16 MiB, `MAX_NODES` 65,536, `MAX_PATH_BYTES` 4096, `MAX_STRING_BYTES` 1024, `:25-28`) over untrusted input, with `:400`'s `.expect` turning a validation gap into a panic rather than a rejection; **materialization** (`materialize`, `:501`, through `create_temp` `:611`, `stage_candidate` `:626`, `open_source_roots` `:665`, `copy_node` `:687`, `same_file_snapshot` `:753`, `create_parent_dirs` `:764`, `validate_tree` `:784`); **pruning** (`prune`, `:554-609`, alongside `validate` at `:571`); and **filesystem integrity** (`verify_node_file` `:826`, `verify_secure_file` `:859`, `open_relative_file` `:872`, `open_direct_file` `:897`, `open_owned_dir` `:907`, `verify_owned_directory` `:919-925`, plus `verify_safe_ancestor` `:1088` and the sticky-bit and non-regular-file guards at `:29-32`). The file has zero in-crate tests, its one integration binary (`tests/harness_closure.rs`, 15 tests) is named by no CI job, and its two production constructions are `.ok()` in a file outside this crate. This is a security-relevant untrusted-input surface with one record on its front door. |
+| G1 | **Shutdown has no bounded fault-free liveness record, in a sub-part whose type distribution is 12 safety, 2 reachability, and zero liveness.** METHOD's liveness rules require a bounded fault-free window stated in the units the code bounds, and shutdown is the one place in 2f where that shape applies: cancel the token, stop the pressure, and assert the host reaches a terminal state within an explicit bound. Fourteen records and none of them states it. The two candidates are different in kind. **On the `shutdown_sequence` path** the bound exists but is per exit, at `shutdown_deadline + k * lifecycle_callback_deadline` for `k` in `{1, 2, 3}` (`runtime.rs:1148`, `:1223-1224`, `:1276`), and the forced-shutdown record now states those as ceilings on *elapsed time* - which is a safety bound on a maximum, not a liveness claim that the terminal state is reached at all. Those are different properties: the safety bound is refuted by taking too long, the liveness claim by never finishing. **On the `AbandonGuard::drop` path there is no bound to state**, because `:457` and `:471` are unbounded `tracker.wait()` calls by explicit design (`:452-456`), and METHOD forbids writing an unbounded "eventually" - so a record here must either bound the wait in some unit the code does not currently use, or record that no finite test can refute the current design, which is itself a finding. Cancellation cleanup is the specific hole: nothing asserts that a cancelled-token teardown reaches a terminal state, releases the instance lock, and runs the handler shutdown callback exactly once across *both* paths, which is what the once-latch at `:1265-1270` exists to arrange. |
+| G2 | **`harness_closure.rs` is 1,122 lines and is represented in the catalog by exactly one record, about the reporting of `open`'s failure - and `open` is one function of fifty-odd.** `rt-a-a-closure-store-open-failure-is-classified-not-swallowed` covers `HarnessClosureStore::open` (`:491`) and the classification of its error, and that is the whole of 2f's coverage of the file. Uncatalogued, verified by reading the function inventory at `HEAD`: **manifest validation** (`validate_manifest`, `:231-410`, with `validate_identifier` `:435`, `validate_relative_path` `:447`, `validate_hash` `:463`, and the `require_existing_node` and `require_root` helpers at `:413` and `:423`) enforcing five hard caps (`MAX_MANIFEST_BYTES` 16 MiB, `MAX_NODES` 65,536, `MAX_PATH_BYTES` 4096, `MAX_STRING_BYTES` 1024, `:25-28`) over untrusted input, with `:400`'s `.expect` turning a validation gap into a panic rather than a rejection; **materialization** (`materialize`, `:501`, through `create_temp` `:611`, `stage_candidate` `:626`, `open_source_roots` `:665`, `copy_node` `:687`, `same_file_snapshot` `:753`, `create_parent_dirs` `:764`, `validate_tree` `:784`); **pruning** (`prune`, `:554-609`, alongside `validate` at `:571`); and **filesystem integrity** (`verify_node_file` `:826`, `verify_secure_file` `:859`, `open_relative_file` `:872`, `open_direct_file` `:897`, `open_owned_dir` `:907`, `verify_owned_directory` `:919-925`, plus `verify_safe_ancestor` `:1088` and the sticky-bit and non-regular-file guards at `:29-32`). The file has zero in-crate tests, its one integration binary (`tests/harness_closure.rs`, 15 tests) is named by no CI job, and its two production constructions are `.ok()` in a file outside this crate. This is a security-relevant untrusted-input surface with one record on its front door. |
 
 ## Biases requiring human judgment
 
@@ -301,16 +301,16 @@ Recorded, not mined. Both verified for this disposition.
    *For inclusion:* `harness_closure.rs` is in the scope list at the top of
    `catalog.md`, it is `pub mod` in `lib.rs:18` with no `#[doc(hidden)]`, and it is
    a third of the sub-part's line count. *Against:* the crate never constructs the
-   store — zero references to `HarnessClosureStore`, `ClosureCandidate`, or
+   store - zero references to `HarnessClosureStore`, `ClosureCandidate`, or
    `HarnessClosureStore::open` anywhere under `crates/host-runtime/src`, which the map
-   already records — so every production path through those 1,122 lines begins at
+   already records - so every production path through those 1,122 lines begins at
    `serve.rs:162` or `:349`, in `daemon`, and the one record 2f does have is
    `medium` confidence *precisely because* its call sites are outside the
    footprint. *Judgment required:* decide whether 2f owns the closure store's
    behaviour or only its host-facing surface. If it owns the behaviour, G2 is a
    large gap in this catalog and the sub-part is under-recorded by perhaps six to
    ten records on manifest validation, materialization, pruning, and filesystem
-   integrity, none of which is about runtime assembly or configuration — the two
+   integrity, none of which is about runtime assembly or configuration - the two
    things the sub-part is named for. If it owns only the surface, then the honest
    statement is that a 1,122-line untrusted-input filesystem module belongs to
    **no sub-part in this catalog**, since the `daemon` binary pass that would
@@ -332,8 +332,8 @@ could not decide, one in each direction, and both now say what they can and cann
 assert. The forced-shutdown bound is stated per exit at 40, 70, and 100 seconds of
 configured units instead of as one figure belonging to no exit, the exit that skips
 the handler callback is identified, and the ceiling-versus-floor confusion is
-corrected in all three places it appeared. The construction conditionality map — the
-artifact three sibling sub-parts read for their own labels — no longer calls
+corrected in all three places it appeared. The construction conditionality map - the
+artifact three sibling sub-parts read for their own labels - no longer calls
 production signal wiring future work or an escapable teardown unconditional, and
 every dependent claim is enumerated with its status. One whole teardown path,
 `AbandonGuard::drop`, went from invisible to recorded as a quiet area in two
@@ -352,8 +352,8 @@ producer as well.
 
 Not ready, for four reasons no further work of this kind resolves. The fast-probe
 bound is a product decision, and until it is made the record's load-bearing half is
-a measurement. The forced-shutdown record needs a fixture nobody has written — slow
-and yielding, in two variants — and its ceilings are conditional on cooperative
+a measurement. The forced-shutdown record needs a fixture nobody has written - slow
+and yielding, in two variants - and its ceilings are conditional on cooperative
 cancellability in a way `config.rs` documents nowhere. G1 is a missing property
 type rather than a missing detail, and on the abandon path there may be no bound to
 state, which is itself the finding. And the scope bias above sits upstream of G2:
@@ -363,7 +363,7 @@ short of nothing or ten records short of a security surface.
 The largest fact about 2f is untouched by every correction above and was not
 disputed: **11 in-crate tests reach 3,246 lines, none of them executes in any CI
 job, there are zero doctests, and CI names none of the four integration binaries
-that carry this sub-part's claims** — while `ci.yml:190` runs
+that carry this sub-part's claims** - while `ci.yml:190` runs
 `cargo test -p host-runtime --doc` and `config.rs`, `harness_closure.rs`, and `lib.rs`
 are all `pub mod`, so a doctest added to any 2f file would execute today. For a
 sub-part whose entire configuration contract is doc comments, the one CI lane it
@@ -406,7 +406,7 @@ a description.
 
 The second lesson is 4c's and 2d's, recurring for the fourth part in a row, and F2
 is the sharpest instance yet: **the correction was already inside the artifact.**
-Not merely implied by it — *written in it*. The synthesis note after the
+Not merely implied by it - *written in it*. The synthesis note after the
 forced-shutdown record said in as many words that an oracle written to the check
 "would **fail** on a correct build", and then declined to act on the grounds that
 record text is preserved verbatim. The information was not missing, the inference
@@ -445,7 +445,7 @@ Four other triggers, each firing independently:
 - **Any record written against `AbandonGuard::drop`.** It would be the sub-part's
   first property over a teardown path that honours no configured deadline, and
   METHOD's prohibition on unbounded "eventually" means writing it forces the
-  question of what unit bounds `:457` and `:471` — which is a design question the
+  question of what unit bounds `:457` and `:471` - which is a design question the
   code currently answers with "nothing, deliberately".
 - **Any fixture that builds a slow-but-yielding lifecycle callback.** It is the
   input the forced-shutdown record's three ceilings are conditional on, it separates

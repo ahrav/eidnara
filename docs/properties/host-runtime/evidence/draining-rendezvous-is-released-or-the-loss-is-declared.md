@@ -46,7 +46,7 @@ that task was spawned with `shared.spawn_tracked` at `runtime.rs:1017`, which
 registers an abort handle (`runtime.rs:151-154`). The catalog's conditional is
 exact: had `runtime.rs:1017` used `spawn_lifecycle` (`:162-168`), no handle
 would exist, `abort_all` would not reach the task, and the tracker wait at
-`:1191` would block on a generation parked forever — with `run` holding the
+`:1191` would block on a generation parked forever - with `run` holding the
 instance lock. The same handle is link 1 of the writer abort chain, so one spawn
 choice carries two properties.
 
@@ -57,7 +57,7 @@ returns at `:1215` and `:1218` return false. So a drain timeout is reported.
 What is *not* distinguished is why: a drain that timed out in the route-settle
 loop and a drain that timed out in the Goodbye loop produce the same `false`,
 and a generation released at `:1174` is indistinguishable from one aborted
-mid-rendezvous. There is no counter, no reason field, and no log — the crate has
+mid-rendezvous. There is no counter, no reason field, and no log - the crate has
 no tracing dependency.
 
 Corrected reference: the task brief placed `shutdown_sequence` at
@@ -68,7 +68,7 @@ lifecycle-chain wait at `:1200-1216` to the return at `:1220`.
 ## Failure scenario
 
 1. Shutdown starts. `draining` is stored at `runtime.rs:1127-1129`.
-2. A generation's read loop exits inside the drain window — peer EOF, a corrupt
+2. A generation's read loop exits inside the drain window - peer EOF, a corrupt
    frame, or the read cancel at `:1160`. `serve_generation` reaches `:341`,
    observes `draining` true, and parks at `:342`.
 3. The route-settle loop at `:1145-1149` is slow: each `settle_route` waits on
@@ -89,7 +89,7 @@ lifecycle-chain wait at `:1200-1216` to the return at `:1220`.
 ## Timing windows and dependencies
 
 Three conditions must coincide. `draining` must be true when the generation
-reaches `connection.rs:341` — that is the whole interval from
+reaches `connection.rs:341` - that is the whole interval from
 `runtime.rs:1127` onward, or from the commit hook's store at
 `dispatch.rs:729` on the `host.shutdown` path, so the window is wide. The read
 loop must exit inside it. And the drain must consume `shutdown_deadline` before
@@ -98,7 +98,7 @@ loop must exit inside it. And the drain must consume `shutdown_deadline` before
 route count, plus `read_tasks.wait()` at `:1164` which is bounded only by the
 tracked emissions' own frame deadlines. This is `always-or-unreached` for a
 real reason: when `draining` is false at `:341` the branch is skipped, no task
-parks, and the obligation does not exist — a check that fired then would be
+parks, and the obligation does not exist - a check that fired then would be
 wrong.
 
 ## What a test must construct
@@ -109,7 +109,7 @@ route-settle phase: bind a route whose `route_gone` callback sleeps, so
 `finish_route_close` at `runtime.rs:1147` consumes the budget, and arrange a
 second generation whose read loop exits during the window (drop its client
 socket). The oracle has two halves, matching the catalog's check. After
-`shutdown_sequence` returns, no task is parked at the rendezvous — observable as
+`shutdown_sequence` returns, no task is parked at the rendezvous - observable as
 the tracker wait completing and `run` returning. And the return value is
 non-graceful. The second half is what makes the test meaningful: without it, an
 abort-rescued hang passes as success. Add the negative control that the fatal

@@ -6,7 +6,7 @@ Two correlation namespaces share one connection and one `u64` space. The wire pr
 permits them to collide numerically, so the only question is whether the host's lookup structures
 keep them apart. They do, and the mechanism is worth recording precisely because it is structural
 rather than a comparison: there is no test anywhere that a correlation belongs to the right
-namespace, because no such test is needed — the two namespaces are two different maps with two
+namespace, because no such test is needed - the two namespaces are two different maps with two
 different key types.
 
 ## Evidence trail
@@ -16,7 +16,7 @@ different key types.
 - `:114` `pub pending: Mutex<HashMap<PendingKey, PendingEntry>>,`
 - `:116` `pub pings: Mutex<HashMap<u64, PingProbe>>,`
 
-`PendingKey` is `(u16, u32, u64)` (`:46`) — channel, epoch, correlation. The pings map is keyed by a
+`PendingKey` is `(u16, u32, u64)` (`:46`) - channel, epoch, correlation. The pings map is keyed by a
 bare `u64`. The key types are not merely different values; they are different types, so a lookup in
 one cannot be spelled against the other.
 
@@ -42,14 +42,14 @@ by `PendingKey`, and `dispatch.rs:1456-1457` `handle_cancel` locks `pending` and
 
 The pings map is written from three sites, all in the liveness path: the probe insert at
 `connection.rs:1403-1411`, the expiry sweep at `:1370-1392`, and the write-completion hook at
-`:1427-1447`. `grep -rn "pings.lock"` over `crates/host-runtime/src/` returns exactly six sites —
-`connection.rs:505`, `:1357`, `:1371`, `:1381`, `:1403`, `:1427` — and none of them is in
+`:1427-1447`. `grep -rn "pings.lock"` over `crates/host-runtime/src/` returns exactly six sites -
+`connection.rs:505`, `:1357`, `:1371`, `:1381`, `:1403`, `:1427` - and none of them is in
 `dispatch.rs`.
 
 `docs/host-wire-protocol.md:748` states the contract this satisfies: "The two directions are
 independent namespaces: a host `Ping` correlation MAY be numerically equal to a pending consumer
 correlation on the same connection, and neither affects the other. Matching is direction-scoped by
-frame type — `Response`, `Error`, `StreamData`, and `StreamEnd` settle only consumer-originated
+frame type - `Response`, `Error`, `StreamData`, and `StreamEnd` settle only consumer-originated
 requests; `Pong` settles only host-originated `Ping`."
 
 ## Failure scenario
@@ -86,8 +86,8 @@ The existing test is `tests/lifecycle.rs:400`
 `ping_and_consumer_correlations_do_not_cross_settle`. It configures liveness explicitly at
 `:401-408` with `ping_interval: 50ms` and `pong_deadline: 30s`, so a probe is live and cannot expire
 during the test. Note the catalog cites `tests/lifecycle.rs:468` for this test; `:468` is a line
-inside the body — the `.expect("unmatched pong")` on a Pong sent with correlation `999_999`
-(`:465-468`) — and the function itself begins at `:400`. That file runs in no CI workflow.
+inside the body - the `.expect("unmatched pong")` on a Pong sent with correlation `999_999`
+(`:465-468`) - and the function itself begins at `:400`. That file runs in no CI workflow.
 
 Because the separation is structural, the test that would actually protect it is a source- or
 review-level assertion: the Pong arm names only `pings`, and no terminal path names `pings`. A
@@ -114,7 +114,7 @@ merged the maps if the merged key still happened to disambiguate.
 - Findings: it can. `:501` requires `header.channel == 0`, which a Pong satisfies by construction,
   and `:511` requires the echoed flags to match the probe's. Neither filter inspects the
   correlation's provenance, so a numerically equal correlation does reach `pings.get_mut` at `:506`
-  — it simply looks up a different map than a request would.
+  - it simply looks up a different map than a request would.
 - Missing evidence: none.
 - Conclusion: resolved with answer. The filters are not what provides the separation; the map
   boundary is.

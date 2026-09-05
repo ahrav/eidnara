@@ -85,8 +85,8 @@ reorders the struct fields and updates `encode` to write `epoch` before
 Every existing test still passes, because every one of them round-trips through
 both functions. `little_endian_and_frozen_prefix_layout` would catch it, but only
 because its fixture happens to use ascending distinctive values, and it asserts
-`encode` alone, so the mirror-image error — decode reading `epoch` from `7..9`
-while `encode` still writes `channel` there — is invisible to it as well.
+`encode` alone, so the mirror-image error - decode reading `epoch` from `7..9`
+while `encode` still writes `channel` there - is invisible to it as well.
 
 The consequence is not a local bug. It is an interoperability break with a peer
 that implements the documented layout at
@@ -134,7 +134,7 @@ Three oracles, all in-crate in `wire.rs`'s test module, all cheap.
 Getting an accepted seed needs care: the eleven gates constrain flags, type,
 and the channel-and-epoch pairing, so a naive arbitrary 21 bytes is almost
 always rejected. The practical shape is to generate a legal `EnvelopeHeader`
-through `hdr_with_epoch` (`wire.rs:654-671`), encode it, and mutate from there —
+through `hdr_with_epoch` (`wire.rs:654-671`), encode it, and mutate from there -
 which is exactly what makes this a decode-first round-trip rather than an
 encode-first one.
 

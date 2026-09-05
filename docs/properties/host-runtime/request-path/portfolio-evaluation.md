@@ -64,8 +64,8 @@ half was spot-checked here.
 
 Confidence **13 high, 1 medium**, unchanged. E2 was expected to raise the
 pending-entry record from `medium`, and it does not: the record's `medium` rests on
-a *second* unresolved question — whether the forced path drops the `GenerationCore`
-immediately — which E2 does not touch and which is answerable only from sub-part
+a *second* unresolved question - whether the forced path drops the `GenerationCore`
+immediately - which E2 does not touch and which is answerable only from sub-part
 2f. The record's observability premise was corrected while its confidence stayed
 put, and the record now says which of its two premises moved.
 
@@ -153,8 +153,8 @@ splitting and the second is false.
   test.
 - **An in-crate test already constructs a complete `GenerationCore`.**
   `connection.rs:946-963`, `shutdown_registration_rejection_leaves_no_graceful_drain_work`,
-  builds all eleven fields — using `frame_sender` for the writer at `:950` and
-  empty maps for `membership`, `pending`, and `pings` — and asserts against it at
+  builds all eleven fields - using `frame_sender` for the writer at `:950` and
+  empty maps for `membership`, `pending`, and `pings` - and asserts against it at
   `:967-973`.
 
 So the postcondition is assertable today. What survives is a **placement
@@ -168,7 +168,7 @@ said "integration placement is inconvenient rather than unobservable", which is
 exactly right. It did not say what that does to the record's `medium` confidence,
 and the answer is nothing: the `medium` rests on the *second* unresolved question,
 whether `force_close_all_routes` is always followed by the `GenerationCore` being
-dropped — which would make the leak unobservable because it would not exist long
+dropped - which would make the leak unobservable because it would not exist long
 enough to matter. That is answerable only from `runtime.rs:1144-1244`, sub-part 2f,
 and the synthesis note already attached to this record establishes that 2f's
 existing pass does *not* answer it. Two premises, one corrected, one still open.
@@ -211,7 +211,7 @@ What is **not** supported is calling this a handler *failure* surfacing as a
 success. `handler.rs:220-225` documents `RequestOutcome::Response` as "Unary
 success; the host emits one `Response` terminal", and a handler that returns it has
 explicitly selected that variant. Nothing observable distinguishes an abandoned
-reservation from a deliberate empty result — which is the record's real content,
+reservation from a deliberate empty result - which is the record's real content,
 and is a narrower and more defensible claim than the one it replaces.
 
 **Second scope correction, which the evaluation supplied and which decides how much
@@ -229,7 +229,7 @@ now all say owned.
 **What the narrowing costs.** The record loses its headline. It was the sub-part's
 most quotable finding and is now a precise statement about a missing lower bound
 whose severity depends entirely on an unanswered contract question. The existing
-open question — is a zero-length `Response` a defect or a supported outcome? — is
+open question - is a zero-length `Response` a defect or a supported outcome? - is
 promoted to the record and to the biases below, because after the narrowing it is no
 longer a detail of the record, it *is* the record's severity. One weak piece of
 evidence was added on the "supported" side: `OutputBuffer::is_empty()`
@@ -266,8 +266,8 @@ successful response. Part 2d's `host_shutdown` accepts a JSON echo of its own
 operation name; its oracle is to answer the echo, keep serving, and show the
 caller's next call succeeds. This one is an empty body nothing rejects; its oracle
 is a census of the gate. **Part 4c's own disposition made exactly this correction
-one layer up** — its F14 removed a third site from a three-site equivalence
-precisely because that site's oracle differed — so the precedent for splitting on
+one layer up** - its F14 removed a third site from a three-site equivalence
+precisely because that site's oracle differed - so the precedent for splitting on
 oracle rather than on shape is already in this catalog.
 
 What replaces the ordinal is a cross-part note that names the three sites, states
@@ -290,22 +290,22 @@ swap under the order lock is the whole arbiter. All five silent exits satisfy
 at-most-one by emitting zero. But the original list read as five instances of one
 thing, and they are three different things:
 
-- **`:1058` — the only exit about an admitted routed request's settlement.** It is
+- **`:1058` - the only exit about an admitted routed request's settlement.** It is
   the `Err(_)` arm of the join match, and it `return`s at `:1060`, *before* the
   `settle(&settlement, ..)` call at `:1063`. An aborted handler task settles
   nothing.
-- **`:637-638` — pre-dispatch.** The rejection never became an admitted request and
+- **`:637-638` - pre-dispatch.** The rejection never became an admitted request and
   no `Settlement` exists for it. Its blast radius reaches other correlations
   through `gen.writer.discard()`, which is why it cannot be described as confined
   to the request that triggered it.
-- **`:1164`, `:1174`, `:1199` — three control `route.open` exits**, all inside
+- **`:1164`, `:1174`, `:1199` - three control `route.open` exits**, all inside
   `open_route`'s bind handling, all on channel 0.
 
 **And no record asserts silence at `:1058`.** The relationship map claimed the
 pending-entry record covered "the abort that produces `:1058`". It does not: it
 cites `:1059`, the `remove_pending` on the same arm, which is the entry's removal
-and not the missing terminal. The two are different obligations — one is about a
-map, one is about a frame — and the record's `Check` is an emptiness postcondition
+and not the missing terminal. The two are different obligations - one is about a
+map, one is about a frame - and the record's `Check` is an emptiness postcondition
 on `gen.pending`, which says nothing about what the client received. The fault map
 already proposes a marker for the exit
 (`req_request_join_error_was_not_a_panic`), so the sub-part has coverage machinery
@@ -317,9 +317,9 @@ Recorded, not mined. Each was verified for this disposition.
 
 | # | Gap | Evidence |
 | --- | --- | --- |
-| G1 | **The non-panic join-error silence at `dispatch.rs:1053-1061` has no record.** E5 established that this is the only one of the five silent exits concerning an admitted routed request's settlement, and that nothing asserts it. The arm is `Err(_) => { remove_pending(&gen_task, key); return; }`, reached when the handler task was aborted rather than panicking, which `:1053`'s `join_err.is_panic()` guard separates out and answers with `internal_error`. Its producer is `force_close_all_routes` (`:1421-1452`), which aborts before waiting. The pending-entry record covers `:1059` (the map) and the fault map proposes `req_request_join_error_was_not_a_panic` (the marker), so the exit has an owner for its side effect and for its reachability and none for its silence. The missing property is that an admitted routed request whose task is aborted receives no terminal, which per protocol §10.1 makes it `outcome_unknown` client-side while the host records nothing at all — the same reconciliation gap `req-a-a-routed-terminal-carries-no-delivery-acknowledgement` describes, arriving by a different route. |
-| G2 | **There is no bounded request-path progress or permit-reclamation property.** The catalog has no `liveness` record at all, which its own index states, and this is the hole that produces. `req-a-a-handler-outliving-every-host-deadline-is-reached` is a `sometimes` reachability record: it asserts that the unbounded state *occurs*, which is the opposite of a bound. Nothing states what must eventually happen. The four permit pools are reclaimed only by handler cooperation, client `Cancel`, route close, or generation teardown (`dispatch.rs:990` for the task permit, `:933` for the pending permit), and `HostTiming` (`config.rs:199-218`) has no field bounding a request's lifetime, which the catalog verifies field by field. So the obvious candidate property — after load stops, all four pools return to full within an explicit bound — is stated nowhere, and METHOD's liveness rule would require that bound to be named in the units the code bounds. The code bounds nothing here, which is precisely why the property is worth writing: its bound would have to come from the handler contract or from a new host deadline, and choosing which is the open design question in `req-a-a-handler-outliving-every-host-deadline-is-reached`'s own open question. |
-| G3 | **Four host-global permit pools have no per-connection fairness property.** `runtime.rs:905-914` constructs `pending_permits`, `task_permits`, `reserved_pending_permits`, and `reserved_task_permits` once, on `HostShared`, from `config.limits` minus reservations — verified by reading the four `Arc::new(Semaphore::new(..))` calls. The permit-pair record's `Impact` states the consequence (one connection can hold every general permit) and the synthesis note attached to it establishes, from 2f's 21-key enumeration, that **no layer supplies per-connection fairness**. That is a resolved fact with no record. What makes it notable rather than merely absent is the interaction with G2: because no request deadline exists anywhere, a single misbehaving module holding all 256 general task permits is bounded by nothing at all, and every other route's traffic receives `server_busy` while the host reports itself healthy. Two absences that are each survivable compose into one that is not, and no record names the composition. |
+| G1 | **The non-panic join-error silence at `dispatch.rs:1053-1061` has no record.** E5 established that this is the only one of the five silent exits concerning an admitted routed request's settlement, and that nothing asserts it. The arm is `Err(_) => { remove_pending(&gen_task, key); return; }`, reached when the handler task was aborted rather than panicking, which `:1053`'s `join_err.is_panic()` guard separates out and answers with `internal_error`. Its producer is `force_close_all_routes` (`:1421-1452`), which aborts before waiting. The pending-entry record covers `:1059` (the map) and the fault map proposes `req_request_join_error_was_not_a_panic` (the marker), so the exit has an owner for its side effect and for its reachability and none for its silence. The missing property is that an admitted routed request whose task is aborted receives no terminal, which per protocol §10.1 makes it `outcome_unknown` client-side while the host records nothing at all - the same reconciliation gap `req-a-a-routed-terminal-carries-no-delivery-acknowledgement` describes, arriving by a different route. |
+| G2 | **There is no bounded request-path progress or permit-reclamation property.** The catalog has no `liveness` record at all, which its own index states, and this is the hole that produces. `req-a-a-handler-outliving-every-host-deadline-is-reached` is a `sometimes` reachability record: it asserts that the unbounded state *occurs*, which is the opposite of a bound. Nothing states what must eventually happen. The four permit pools are reclaimed only by handler cooperation, client `Cancel`, route close, or generation teardown (`dispatch.rs:990` for the task permit, `:933` for the pending permit), and `HostTiming` (`config.rs:199-218`) has no field bounding a request's lifetime, which the catalog verifies field by field. So the obvious candidate property - after load stops, all four pools return to full within an explicit bound - is stated nowhere, and METHOD's liveness rule would require that bound to be named in the units the code bounds. The code bounds nothing here, which is precisely why the property is worth writing: its bound would have to come from the handler contract or from a new host deadline, and choosing which is the open design question in `req-a-a-handler-outliving-every-host-deadline-is-reached`'s own open question. |
+| G3 | **Four host-global permit pools have no per-connection fairness property.** `runtime.rs:905-914` constructs `pending_permits`, `task_permits`, `reserved_pending_permits`, and `reserved_task_permits` once, on `HostShared`, from `config.limits` minus reservations - verified by reading the four `Arc::new(Semaphore::new(..))` calls. The permit-pair record's `Impact` states the consequence (one connection can hold every general permit) and the synthesis note attached to it establishes, from 2f's 21-key enumeration, that **no layer supplies per-connection fairness**. That is a resolved fact with no record. What makes it notable rather than merely absent is the interaction with G2: because no request deadline exists anywhere, a single misbehaving module holding all 256 general task permits is bounded by nothing at all, and every other route's traffic receives `server_busy` while the host reports itself healthy. Two absences that are each survivable compose into one that is not, and no record names the composition. |
 
 ## Biases requiring human judgment
 
@@ -380,7 +380,7 @@ was blocked outright is constructible from an in-crate test using a `pub` field 
 a constructor that already exists in the tree. So **no record here is blocked**,
 which none of the three sibling parts can say. One record's framing no longer claims
 more than the code supports, and in narrowing it the disposition also established
-which sibling record owns the case it gave up — the direct-output underfill, caught
+which sibling record owns the case it gave up - the direct-output underfill, caught
 at `commit` rather than at the gate. One unverifiable ordinal is gone and what it
 was gesturing at survives as three named sites with three named oracles. And the
 five silent exits are now three classes rather than one list, which immediately
@@ -389,7 +389,7 @@ settlement, is owned by no record at all.
 
 Ready now for test implementation, in this order. Audit the CI-executed check E1
 surfaced, because it is the only assertion in this sub-part that automation
-protects and its adequacy is unaudited — that is
+protects and its adequacy is unaudited - that is
 `/testing:invariant-test-review`'s job, not this method's, and it is the cheapest
 valuable thing on the list. Then the in-crate pending-entry oracle E2 unblocked,
 which is a fixture over `connection.rs:946-963`'s existing construction pattern.
@@ -415,7 +415,7 @@ evidence files. Records and index rows both equal 14 and their order matches;
 evidence files remain at 14 and none was renamed. Four evidence files now understate
 their records, because E1, E2, E3, and E5 moved verified material into the catalog
 that the evidence files do not carry: the divergent-codes, pending-entry,
-empty-response, and — through the framing section — the at-most-one records. This
+empty-response, and - through the framing section - the at-most-one records. This
 disposition was scoped to `catalog.md`, `existing-checks.md`, and `fault-map.md`,
 and was forbidden from touching `evidence/`, `_lenses/`, source, tests, or CI.
 
@@ -431,7 +431,7 @@ followed.
 Part 4c's evaluation named a pattern and prescribed a guard: five of its sixteen
 refinements were cases where the artifacts already contained the correction
 somewhere and the record or summary did not use it, and the guard was a
-cross-reference pass — for each record, grep the other artifacts for its slug and
+cross-reference pass - for each record, grep the other artifacts for its slug and
 its identifiers, and read what comes back. **Three of this part's five findings are
 that pattern again, and two of them are its purest form yet.**
 
@@ -463,9 +463,9 @@ needed any new code reading.
 A fresh pass is warranted once G2 is mined, because it adds a category rather than
 adding inside one. A bounded progress or reclamation property would be this
 sub-part's first `liveness` record, its bound would have to be stated in units the
-code does not currently bound — which forces the design question in
+code does not currently bound - which forces the design question in
 `req-a-a-handler-outliving-every-host-deadline-is-reached`'s open question into the
-open — and its oracle is a post-load quiescence measurement, which is a kind of
+open - and its oracle is a post-load quiescence measurement, which is a kind of
 oracle no record here has. G3 fires the same trigger for a related reason: a
 fairness property would be the sub-part's first over *two connections* rather than
 over one request or one generation.

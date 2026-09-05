@@ -118,7 +118,7 @@ CI workflow.
   else in the crate.
 - Findings: `:408` is the only write. All other uses are `load`.
 - Missing evidence: none.
-- Conclusion: resolved with answer — `won` flips only under the order lock.
+- Conclusion: resolved with answer - `won` flips only under the order lock.
 
 ### Q: Does the `streamed` flag have a torn window against `has_streamed`?
 
@@ -129,5 +129,5 @@ CI workflow.
   the lock, but it only selects which `Terminal` to build; `settle` re-reads
   authoritatively at `:418`, and the comment at `:413-417` says so.
 - Missing evidence: none.
-- Conclusion: resolved with answer — no torn window; the outside-the-lock read
+- Conclusion: resolved with answer - no torn window; the outside-the-lock read
   at `:1020` is an optimization, not the oracle.

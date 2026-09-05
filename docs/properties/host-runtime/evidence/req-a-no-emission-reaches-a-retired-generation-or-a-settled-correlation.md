@@ -98,7 +98,7 @@ cancels entries explicitly when it collects them." Route close does that at
 Without the post-wait recheck in `reserve`:
 
 1. A handler calls `ctx.reserve_output(N)`. The budget is contended, so it awaits.
-2. The generation is cancelled — peer EOF, framing corruption, or teardown.
+2. The generation is cancelled - peer EOF, framing corruption, or teardown.
 3. The budget frees and `charge_frame_or_cancel` returns a charge, because the
    `biased` select's generation arm and the charge arm can both be ready in the
    same poll and the bias only decides which wins that poll.
@@ -112,8 +112,8 @@ two independent defences. The one at `:531-536` is the cheaper one: it fails
 before the buffer is allocated, so it also prevents the charge from being held
 across a pointless allocation.
 
-The forbidden end state — a frame carrying a settled correlation, or any frame on
-a retired generation — is therefore guarded at every one of the four entry points
+The forbidden end state - a frame carrying a settled correlation, or any frame on
+a retired generation - is therefore guarded at every one of the four entry points
 plus inside the select that gates them.
 
 ## Timing windows and dependencies
@@ -130,7 +130,7 @@ Dependency: `gen.writer.is_retired()` and `gen.token.is_cancelled()` are two
 distinct conditions and both are checked. The writer's retirement is
 `frame_channel`'s state (Part 2b); the token is the generation's. A retirement
 that set only one of them would leave a gap, which is presumably why both are
-always tested together — all four entry points test the pair, never one alone.
+always tested together - all four entry points test the pair, never one alone.
 
 ## What a test must construct
 
@@ -168,7 +168,7 @@ silence. Neither binary is in CI.
   (`if gen.writer.is_retired() || gen.token.is_cancelled() { return; }`).
   `emit_authoritative_rejection` relies on `charged_error_body`'s check at
   `:195-197`, which it calls first at `:794-795`. `send_connection_goodbye` has
-  **no** check — it queues the `Goodbye` unconditionally and relies on
+  **no** check - it queues the `Goodbye` unconditionally and relies on
   `send_before` returning `Err` for a dead writer.
 - Missing evidence: whether `send_before` on a retired writer reliably returns
   `Err(WriterGone)` rather than queueing. That is `frame_channel.rs`, Part 2b.
@@ -179,7 +179,7 @@ silence. Neither binary is in CI.
 
 ### Q: Can a charge outlive its generation and starve a successor?
 
-- Sources examined: `ByteCharge` usage — `dispatch.rs:214-219` (charge moved into
+- Sources examined: `ByteCharge` usage - `dispatch.rs:214-219` (charge moved into
   the `OutputBuffer`), `:326-350` (moved into the `OutboundFrame`),
   `ring_transport.rs:576` (`drop(charge)` after successful publication) and the
   early return at `:563-565`, which drops it by scope exit.
@@ -189,5 +189,5 @@ silence. Neither binary is in CI.
   `a-cancelled-emission-releases-every-permit-it-held`, which covers this from the
   generation side.
 - Missing evidence: none.
-- Conclusion: resolved with answer — charges do not survive their frame. Cited to
+- Conclusion: resolved with answer - charges do not survive their frame. Cited to
   Part 2a rather than re-cataloged.

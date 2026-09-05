@@ -4,8 +4,8 @@
 
 `crates/host-runtime/src/ring_transport.rs:264` wraps the whole of `run_endpoint` in
 `std::panic::catch_unwind` and discards the result with `let _ =`. Reading what
-runs after it — `admission.release()` at `:276` and `done_tx.send(())` at `:277`
-— showed that the panic and the orderly exit produce identical observable
+runs after it - `admission.release()` at `:276` and `done_tx.send(())` at `:277`
+- showed that the panic and the orderly exit produce identical observable
 effects. A second, narrower `catch_unwind` inside `publish_one` (`:584-587`)
 then raised the question of what sits outside it.
 
@@ -96,7 +96,7 @@ A panic inside `on_publish()` leaves the state at `PUBLISHED` with nothing
 written to the ring. `FrameSendTicket::cancel` (`frame_channel.rs:674-682`)
 then finds the exchange from `QUEUED` failing and returns
 `SendOutcome::PossibleSend`. `docs/host-wire-protocol.md:60` defines
-`not_sent` as "sender proves the request frame was not published to the ring" —
+`not_sent` as "sender proves the request frame was not published to the ring" -
 here the frame provably was not published, and the host reports
 `PossibleSend`. That is conservative, so it is safe, but it is a false negative
 on a guarantee the doc states as a proof.
@@ -115,7 +115,7 @@ swallows, charge released, `done_tx` fired, thread gone.
 Now the connection has no transport thread and does not know it. Inbound: the
 `inbound` sender was dropped during unwind, so `ShmReceiver::recv` yields
 `Err(ReadClose::CleanEof)` (`:354`) and the read loop retires as
-`ReadExit::Peer` — the same misattribution as
+`ReadExit::Peer` - the same misattribution as
 `ring-a-publish-failure-is-reported-as-a-clean-peer-close`. Outbound: frames
 admitted between the panic and the read loop noticing sit in the mpsc and each
 eventually fails its own admission deadline.
@@ -135,7 +135,7 @@ Two windows.
 
 Dependencies: Part 2a owns `no-writer-hook-panic-poisons-a-generation-lock`,
 which covers completion-hook panics on the *writer task*. This is a different
-owner — the endpoint OS thread — with a different boundary, namely none. The two
+owner - the endpoint OS thread - with a different boundary, namely none. The two
 records are complementary and neither subsumes the other. Part 2a also owns
 `a-cancelled-emission-releases-every-permit-it-held`; note that on this path the
 `charge` local of `publish_one` (destructured at `:568-574`) is dropped by the
@@ -180,7 +180,7 @@ closure in the same position.
   `frame_channel.rs:645-657` (`begin_publication`),
   `frame_channel.rs:674-682` (`FrameSendTicket::cancel`).
 - Findings: the two options are not equivalent. Moving `COMPLETE` after the
-  hooks would make a hook panic leave the frame at `PUBLISHED` — but the frame
+  hooks would make a hook panic leave the frame at `PUBLISHED` - but the frame
   really did reach the ring, so `PUBLISHED`-not-`COMPLETE` would then be a lie in
   the other direction, and any waiter on `COMPLETE` would hang. Moving the hooks
   inside a `catch_unwind` preserves the truthful `COMPLETE` and converts the
@@ -204,7 +204,7 @@ closure in the same position.
 - Findings: `panic_boundary::install()` installs a process panic hook, and a
   panic hook runs *before* unwinding begins, so it fires even when the panic is
   later caught. So the panic is not entirely invisible: the hook sees it. What is
-  invisible is the *consequence* — the loss of the transport thread — because
+  invisible is the *consequence* - the loss of the transport thread - because
   nothing correlates the hook's output with the connection.
   `panic_boundary.rs` is Part 2a scope (66 lines) and I did not read it.
 - Missing evidence: whether the installed hook records enough to attribute a

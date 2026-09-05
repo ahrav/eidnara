@@ -35,7 +35,7 @@ outside the six; see the correction under "Integration tests".**
 | `handler.rs` | no test module | 0 | **0** | n/a |
 | `composite.rs` | no test module | 0 | **0** | n/a |
 | Six integration binaries | `tests/` | 4,993 | **84** | **No** |
-| `handler.rs` doctests | four `compile_fail` fences | — | **4** | **Yes**, `ci.yml:190` |
+| `handler.rs` doctests | four `compile_fail` fences | - | **4** | **Yes**, `ci.yml:190` |
 
 The reason the 121 tests do not run is structural rather than an omission. Every
 `-p host-runtime` test invocation in `ci.yml` carries a `--test <name>` filter, which
@@ -124,7 +124,7 @@ checks, and the number CI executes is zero.
 > by the catalog and the fault map. `tests/lifecycle.rs:576-657`
 > `shutdown_refuses_new_routes_and_new_routed_work` sends a `route.open` and a
 > routed request into one draining host and asserts `target_unavailable` at `:638`
-> and `server_busy` at `:657` — which is
+> and `server_busy` at `:657` - which is
 > [req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes](catalog.md#req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes)
 > in full, in the record's own shape, including the parked handler that holds the
 > drain open (`:582`, `:590-606`). `lifecycle` is named at `ci.yml:178-179`
@@ -183,7 +183,7 @@ printed and confirmed here.
 
 The crate-wide picture, derived by grepping every doc fence under
 `crates/host-runtime/src/`: **six compiled doctests exist in the whole library**, all
-`compile_fail` — these four plus `frame_channel.rs:296-301` and `:303-308`,
+`compile_fail` - these four plus `frame_channel.rs:296-301` and `:303-308`,
 which are 2b's and are that sub-part's only CI-executed source-resident checks.
 2d has zero. Two further fences are `text` and are not compiled
 (`wire.rs:4-14`, `generation.rs:6-11`).
@@ -214,7 +214,7 @@ state. Counts were derived from each file's production half only.
 
 | Cluster | Sites | Label |
 | --- | --- | --- |
-| Registry and membership locks | 16 | `routing.rs:114`, `:163`, `:174`, `:192`, `:210`, `:237`, `:262`, `:277`, `:300`, `:331`, `:345`, `:361`, `:378`, `:399`, `:421`, `:437` — `"registry lock"` / `"membership lock"` |
+| Registry and membership locks | 16 | `routing.rs:114`, `:163`, `:174`, `:192`, `:210`, `:237`, `:262`, `:277`, `:300`, `:331`, `:345`, `:361`, `:378`, `:399`, `:421`, `:437` - `"registry lock"` / `"membership lock"` |
 | Pending, connections, and composite maps | 9 | `dispatch.rs:916`, `:1098`, `:1335`, `:1376`, `:1412`, `:1490`; `composite.rs:141`, `:268`, `:301` |
 | Infallible serialization | 6 | `dispatch.rs:235`, `:237`, `:241`, `:717`, `:1464`; `control.rs:261`, `:531`, `:604` |
 | Real stated contracts | 1 | `dispatch.rs:1126` `"validated route.open target is indexed"` |
@@ -336,8 +336,8 @@ crates/host-runtime/src/handler.rs` returns `cf281ace` (the commit that added
 `git log -S'```compile_fail' -- crates/host-runtime/src/handler.rs` returns
 `cf281ace` and `98b7270d`. The document line dates from `d0dbb25a` and has not
 moved. The current variant is `RequestOutcome::Response { body: OutputBuffer,
-binary }` (`handler.rs:224`), and the reservation mechanism the code enforces —
-`OutputBuffer`, `reserve_output`, `output_from_writer` — appears nowhere in
+binary }` (`handler.rs:224`), and the reservation mechanism the code enforces -
+`OutputBuffer`, `reserve_output`, `output_from_writer` - appears nowhere in
 `docs/host-wire-protocol.md`, grepped, zero hits.
 
 **No source comment in this sub-part describes a deleted mechanism.** Checked
@@ -395,7 +395,7 @@ proves. The framing point that applies to all three: this is not thin coverage.
    `:1164`, `:1174`, and `:1199` the code emits no frame, records no cause, and
    increments no metric; `remove_pending` (`:1097`) removes the entry and returns
    nothing. The comments at `:1162-1163` and `:1171-1173` argue each case
-   correctly on ordering grounds, and the arguments are sound — running
+   correctly on ordering grounds, and the arguments are sound - running
    route-gone beside a still-executing bind would be worse than leaving the
    correlation unsettled. What is quiet is that the *chosen* outcome has no
    observation point. A caller learns only by its own deadline expiring, which is
@@ -414,7 +414,7 @@ proves. The framing point that applies to all three: this is not thin coverage.
    owned by nothing.** The three records above cover `:637-638` (pre-dispatch),
    `:1164`, `:1174`, and `:1199` (all three control `route.open` exits). The
    fourth, `:1058`, is the *only* one of the five that concerns an admitted routed
-   request's settlement — it returns before the `settle` call at `:1063` — and no
+   request's settlement - it returns before the `settle` call at `:1063` - and no
    record asserts its silence. The pending-entry record cites `:1059`, which is the
    `remove_pending` on the same arm, so it covers the entry's removal and not the
    missing terminal. Queued as a gap in
@@ -578,7 +578,7 @@ proxies for the removal rather than observations of it.
 
 ### One production assertion already inventoried, cross-referenced
 
-`composite.rs:387` — `panic!("{}", failures.join("; "))` — is already in the
+`composite.rs:387` - `panic!("{}", failures.join("; "))` - is already in the
 deliberate-`panic!` table above, classified there as converting a child shutdown
 failure into a failed callback the runtime can classify. That is the same site the
 containment record cites as the aggregate re-raise at the end of

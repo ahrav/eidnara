@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 Off-reader emissions acquire their admission permit on the read loop, before the
-spawn, so a client cannot pipeline past the capacity gate — the comments at
+spawn, so a client cannot pipeline past the capacity gate - the comments at
 `connection.rs:439-442` and `dispatch.rs:858-860` both say so. That means the
 permit is a local at the spawn site, and whether an aborted task releases it
 depends entirely on which side of the `async move` boundary the binding sits.
@@ -17,37 +17,37 @@ statement *inside* the async block. Naming them:
 Five hold a pending permit, acquired at `connection.rs:668` from the pool
 selected at `:659-667`:
 
-- `connection.rs:687-697` — `Reject`; `let _pending_permit = pending_permit;`
+- `connection.rs:687-697` - `Reject`; `let _pending_permit = pending_permit;`
   at `:688`.
-- `connection.rs:705-719` — `CatalogList`; binding at `:706`.
-- `connection.rs:724-727` — `HostShutdown`; binding at `:725`.
-- `connection.rs:732-751` — `HostStatus`; binding at `:733`.
-- `connection.rs:761-764` — `RouteOpen`; binding at `:762`. This is the one
+- `connection.rs:705-719` - `CatalogList`; binding at `:706`.
+- `connection.rs:724-727` - `HostShutdown`; binding at `:725`.
+- `connection.rs:732-751` - `HostStatus`; binding at `:733`.
+- `connection.rs:761-764` - `RouteOpen`; binding at `:762`. This is the one
   site using `spawn_lifecycle` rather than `spawn_tracked`, so it is
-  abort-exempt — the permit is released by completion, not abort.
+  abort-exempt - the permit is released by completion, not abort.
 
 Two hold a per-generation reject permit from `gen.busy_rejects`
 (`connection.rs:254`, capacity 32 at `:53`):
 
-- `connection.rs:452-463` — the authoritative rejection; permit acquired at
+- `connection.rs:452-463` - the authoritative rejection; permit acquired at
   `:443`, bound at `:453`.
-- `dispatch.rs:612-615` — `emit_rejection`; permit acquired at `:608`, bound at
+- `dispatch.rs:612-615` - `emit_rejection`; permit acquired at `:608`, bound at
   `:613`.
 
 In every case the pattern is identical: the permit is moved into the closure by
 `async move` and immediately rebound to a `_`-prefixed local, so it is owned by
-the future's state. Dropping the future — which is what abort does once the task
-stops — drops that local and returns the permit. Moving any binding above the
+the future's state. Dropping the future - which is what abort does once the task
+stops - drops that local and returns the permit. Moving any binding above the
 `async move` would put the permit in the enclosing frame, where it is dropped on
 success (the frame returns) but leaked on abort, exactly the asymmetry the
 catalog names.
 
 Two sites nearby are *not* in the seven, and knowing why matters for the test:
 
-- `connection.rs:983-997` — `respond_tcp` holds no permit at all. The comment at
+- `connection.rs:983-997` - `respond_tcp` holds no permit at all. The comment at
   `:977-980` states the bound instead: the setup state machine admits at most two
   TCP negotiation responses per generation.
-- `connection.rs:573-580` — the route-Goodbye close holds no permit; the comment
+- `connection.rs:573-580` - the route-Goodbye close holds no permit; the comment
   at `:567-570` explains the bound is the `CloseDecision::Owner` filter.
 
 The third resource, the egress byte charge, is released by a different mechanism
@@ -65,7 +65,7 @@ connection permits, and that binary *is* named in CI
 `byte_charges_release_with_their_frame` and `:1062`
 `stalled_consumer_write_retires_generation_and_frees_charges` cover charges;
 both are `--lib` tests, which CI runs (`ci.yml:122`). Nothing covers pending or
-reject permits under abort, confirmed — no test in the crate saturates
+reject permits under abort, confirmed - no test in the crate saturates
 `pending_permits` or `busy_rejects` and then aborts.
 
 ## Failure scenario
@@ -84,8 +84,8 @@ to distinguish.
    `spawn_tracked`. The task is aborted mid-await.
 4. As written, the future drops, the `_pending_permit` local drops, and the
    semaphore returns to full. Had the binding been outside the `async move`,
-   the permit would be owned by `handle_control`'s frame — which already
-   returned at `:770` — and the count would be permanently one lower.
+   the permit would be owned by `handle_control`'s frame - which already
+   returned at `:770` - and the count would be permanently one lower.
 5. The same shape on `busy_rejects` is worse in a specific way: it is
    per-generation with capacity 32, and past the bound `emit_rejection` retires
    the generation (`dispatch.rs:625-626`). A leak there converts a transient
@@ -97,7 +97,7 @@ to distinguish.
 
 Saturation is a hard prerequisite, not a convenience. Below saturation the
 semaphore has headroom, so a leaked permit and a released one produce the same
-observable count for as long as the test runs — the catalog's "without
+observable count for as long as the test runs - the catalog's "without
 saturation the check cannot distinguish a leak from headroom" is exact. The
 window itself is wide: the emission must be parked, and it parks on the shared
 `egress_budget`, whose wait is bounded by the frame deadline
@@ -109,7 +109,7 @@ close.
 
 The `:761` site is a documented exception. Because `spawn_lifecycle` registers
 no abort handle (`runtime.rs:157-161`), `abort_all` cannot reach it, so its
-permit is never released by abort — it is released when `open_route` completes,
+permit is never released by abort - it is released when `open_route` completes,
 self-bounded by `lifecycle_callback_deadline` twice over
 (`dispatch.rs:1123-1136`, `:1239-1250`). A test that aborts and then asserts the
 pending pool is full must account for this one outstanding permit, or drive a
@@ -118,21 +118,21 @@ request that does not take the `RouteOpen` arm.
 ## What a test must construct
 
 Saturate both pools, park the emissions, abort, then assert both semaphores
-return to full and the egress budget to zero — the catalog's check verbatim.
+return to full and the egress budget to zero - the catalog's check verbatim.
 Concretely: set `limits.max_pending_requests` low, open enough concurrent
 control requests to hold every pending permit, and shrink `egress_budget` so the
 emissions block inside their charge acquisition rather than completing. For the
 reject pool, exhaust `pending_permits` first so control requests take the
 `server_busy` path at `connection.rs:669`, then send more than a few so
 `busy_rejects` fills without reaching 32 (at 32 the generation retires and the
-observable changes). Then force the abort — a shutdown whose drain misses its
+observable changes). Then force the abort - a shutdown whose drain misses its
 deadline reaches `abort_all` at `runtime.rs:1182`.
 
 Oracle: `pending_permits.available_permits()` and
 `gen.busy_rejects.available_permits()` both return to their configured
 capacities, and `egress_budget.available()` returns to its baseline. The
 mutation control that makes the test worth writing is to hoist one binding above
-its `async move` — for instance move `connection.rs:706` to just before `:705` —
+its `async move` - for instance move `connection.rs:706` to just before `:705` -
 and confirm the test fails. Without that control the test passes on both the
 correct and the leaking code, because a happy-path completion releases the
 permit either way.

@@ -78,7 +78,7 @@ reason for the host not to add a second one.
 
 ## Failure scenario
 
-1. A module's handler calls an external dependency with no internal timeout — a
+1. A module's handler calls an external dependency with no internal timeout - a
    subprocess, a network fetch, a lock.
 2. The dependency hangs.
 3. The client's own 30-second request deadline expires. Per protocol §9.2,
@@ -128,7 +128,7 @@ liveness probing by default.
 3. Send one request into the parked handler. Advance or wait past
    `max(frame_deadline, lifecycle_callback_deadline, route_close_budget)`.
 4. Assert the route is still live via a second request that dispatches normally,
-   and assert the parked request's pending entry is still unsettled — that is the
+   and assert the parked request's pending entry is still unsettled - that is the
    `sometimes` observation.
 5. Then fill the pool and assert the next request gets `server_busy`, and that a
    reserved-class request on a Broca route still dispatches.
@@ -152,7 +152,7 @@ live" assertion.
   handler callback. The handler is cancelled only when `close_generation` gets as
   far as `settle_route_work`.
 - Missing evidence: none.
-- Conclusion: resolved with answer — generation cancellation does not directly
+- Conclusion: resolved with answer - generation cancellation does not directly
   cancel handler execution; route close does.
 
 ### Q: Is there a host request deadline anywhere outside `HostTiming`?
@@ -178,6 +178,6 @@ live" assertion.
 - Missing evidence: none.
 - Conclusion: needs human input. The tension is real: §11's rule argues against a
   host request deadline, and the capacity consequence argues for some host-side
-  reclamation that is not a deadline — a parked-task bound, which
+  reclamation that is not a deadline - a parked-task bound, which
   `ResourceDeclaration::general_task_hold_bound` (`handler.rs:98-107`) already
   provides as a *declared* limit checked at startup but not enforced at runtime.

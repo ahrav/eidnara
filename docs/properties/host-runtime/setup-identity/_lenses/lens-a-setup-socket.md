@@ -48,22 +48,22 @@ without reading a byte when none is free (`runtime.rs:1035-1040`).
 | 1 | peer to host | `ClientHello { client_nonce, role }` (`auth.rs:26-29`) | nothing; `role` is parsed and discarded (`auth.rs:70-83`, doc `:215`) | nothing |
 | 2 | host to peer | `ServerProof { daemon_id, server_nonce, daemon_ver, server_proof }` (`auth.rs:31-37`) | host holds the key: `HMAC-SHA256(key, "eidnara-server-v1" ‖ client_nonce ‖ server_nonce ‖ daemon_id)` (`auth.rs:246-252`) | nothing; the host has not yet authenticated the peer |
 | 3 | peer to host | `ClientAuth { client_auth }` (`auth.rs:55-58`) | peer holds the key, under the same nonce pair and the `"eidnara-client-v1"` domain (`auth.rs:268-274`) | **everything.** Host returns `Authenticated` (`auth.rs:279`) |
-| — | host internal | acquire connection permit, release handshake permit (`connection.rs:137-141`) | — | authenticated capacity |
-| — | host internal | `ring.prepare` on a blocking thread, bounded by `transport_setup_deadline` (`connection.rs:146-164`) | — | two memfds and a `WireDescriptor` |
-| — | host internal | mint a fresh 32-byte hex activation token (`connection.rs:165`, `:212-226`) | — | — |
+| - | host internal | acquire connection permit, release handshake permit (`connection.rs:137-141`) | - | authenticated capacity |
+| - | host internal | `ring.prepare` on a blocking thread, bounded by `transport_setup_deadline` (`connection.rs:146-164`) | - | two memfds and a `WireDescriptor` |
+| - | host internal | mint a fresh 32-byte hex activation token (`connection.rs:165`, `:212-226`) | - | - |
 | 4 | host to peer | `GrantMessage { wire_version, descriptor_schema, activation_token, descriptor }` **plus exactly two fds in one `SCM_RIGHTS`** (`setup_socket.rs:132-175`, called first thing in `activate_server` at `:249-260`) | nothing new | **the ring.** The peer now holds mappable descriptors |
 | 5 | peer to host | `Activate { wire_version, descriptor_schema, activation_token }` (`setup_socket.rs:64-68`) | that the peer read message 4 and echoed it back | `Activated`, after a constant-time token compare (`setup_socket.rs:266-276`) |
-| 6 | host to peer | `Activated` (`setup_socket.rs:76`) | — | permission to proceed to commit |
+| 6 | host to peer | `Activated` (`setup_socket.rs:76`) | - | permission to proceed to commit |
 | 7 | peer to host | `Commit` (`setup_socket.rs:69`) | nothing | `Committed` |
-| 8 | host to peer | `Committed` (`setup_socket.rs:77`) | — | the host records attachment and activation (`connection.rs:186-188`) and starts the ring |
-| 9 | peer to host | `Goodbye`, or EOF, or anything else (`setup_socket.rs:70`, `:345-353`) | — | a `PeerClose` classification: `Goodbye`, `UnexpectedEof`, or `ProtocolError` |
+| 8 | host to peer | `Committed` (`setup_socket.rs:77`) | - | the host records attachment and activation (`connection.rs:186-188`) and starts the ring |
+| 9 | peer to host | `Goodbye`, or EOF, or anything else (`setup_socket.rs:70`, `:345-353`) | - | a `PeerClose` classification: `Goodbye`, `UnexpectedEof`, or `ProtocolError` |
 
 **The exact point at which a peer becomes authorized to map shared memory:**
 `crates/host-runtime/src/connection.rs:130-133`, the `if auth.is_err() { return; }`
 that follows `authenticate_server`. That is the only gate. Everything after it is
 unconditional from the peer's point of view: `connection.rs:146-164` builds the
-ring, and `setup_socket.rs:249-260` — the *first* statement of `activate_server`
-— sends the grant and both file descriptors before reading a single setup-phase
+ring, and `setup_socket.rs:249-260` - the *first* statement of `activate_server`
+- sends the grant and both file descriptors before reading a single setup-phase
 byte from the peer. So authorization to map is exactly "possession of the 32-byte
 connection-file key", proved once in message 3.
 
@@ -82,7 +82,7 @@ them is verified, and it is a bearer secret rather than a name.
 
 | Identifier | Where it comes from | Caller-supplied? | Verified? | Replayable? |
 | --- | --- | --- | --- | --- |
-| Connection key, 32 bytes | `getrandom` in `InstanceGuard::acquire` (`instance.rs:263-264`), published in the connection file (`instance.rs:326`) | no, host-minted | it is the verification input, via HMAC (`auth.rs:268-277`) | across connections **within one incarnation, yes by design** — it is a bearer credential with no per-use state. Across incarnations no; see below |
+| Connection key, 32 bytes | `getrandom` in `InstanceGuard::acquire` (`instance.rs:263-264`), published in the connection file (`instance.rs:326`) | no, host-minted | it is the verification input, via HMAC (`auth.rs:268-277`) | across connections **within one incarnation, yes by design** - it is a bearer credential with no per-use state. Across incarnations no; see below |
 | `daemon_id`, 16 bytes | `getrandom` in the same call (`instance.rs:265-266`) | no | folded into both proofs (`auth.rs:151`) and separately compared by the peer against its connection-file snapshot (`auth.rs:336-338`; native `setup.rs:201`) | it changes every incarnation, so a captured transcript does not carry forward |
 | `client_nonce`, 32 bytes | peer's `getrandom` (`auth.rs:313`; native `setup.rs:181-182`) | **yes, entirely peer-chosen** | never checked for freshness, uniqueness, or non-repetition | the peer may repeat it freely; harmless because the host's own nonce is fresh |
 | `server_nonce`, 32 bytes | host `getrandom` per handshake (`auth.rs:245`, `:379-383`) | no | not checked against history, only freshly drawn | this is the replay defence (doc `host-wire-protocol.md:177`) |
@@ -193,15 +193,15 @@ Every reference below was opened at `e447c927`.
 ### setup-a-no-descriptor-leaves-the-host-without-a-verified-client-proof
 
 Type: safety
-Reachability: default-production — `run_connection` is the only accept-path body
+Reachability: default-production - `run_connection` is the only accept-path body
 (`runtime.rs:1042-1044`), the ring is mandatory after the refactor, and
 `config.rs:223` gives `auth_deadline` a shipped default.
 Status: active
-Exercised: partial — three integration tests prove an unauthenticated socket
+Exercised: partial - three integration tests prove an unauthenticated socket
 receives no bytes; none instruments the descriptor-send site itself.
 Guarantee: A `SCM_RIGHTS` message carrying ring descriptors is never written to a
 setup socket on which `authenticate_server` has not returned `Ok`.
-Check: `always` — instrument `send_grant` (`setup_socket.rs:151-159`); every
+Check: `always` - instrument `send_grant` (`setup_socket.rs:151-159`); every
 invocation is preceded on that same stream by an `Ok(Authenticated)` from
 `auth.rs:279`. `always` because it is a per-send ordering invariant with no
 optional path and no eventual convergence; a single violation is a full loss of
@@ -213,7 +213,7 @@ handshake silently opens the gate.
 Required faults and enabling state: a peer that connects and then presents a
 malformed `ClientHello`, a short nonce, a wrong `ClientAuth`, or nothing at all,
 while the send site is instrumented.
-Confidence: high — [evidence](../evidence/setup-a-no-descriptor-leaves-the-host-without-a-verified-client-proof.md).
+Confidence: high - [evidence](../evidence/setup-a-no-descriptor-leaves-the-host-without-a-verified-client-proof.md).
 Verified: `authenticate_server` is called at `connection.rs:120-129` and its
 error return exits at `:130-133`; `activate_server` is reached only at `:170`;
 `send_grant` is `activate_server`'s first statement (`setup_socket.rs:249`).
@@ -232,15 +232,15 @@ Open questions: None.
 ### setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token
 
 Type: safety
-Reachability: default-production — same path as the record above.
+Reachability: default-production - same path as the record above.
 Status: active
-Exercised: partial — `shm_failure_modes.rs:44-58` constructs the peer that takes
+Exercised: partial - `shm_failure_modes.rs:44-58` constructs the peer that takes
 the descriptors and never activates, but it asserts capacity return, not the
 authority question.
 Guarantee: The activation token is not a mapping gate. A peer that has proved key
 possession can map the ring whether or not it ever presents a correct token, and
 no host-side check between message 3 and message 4 can refuse it.
-Check: `always` — for a peer that authenticates and then sends nothing, a wrong
+Check: `always` - for a peer that authenticates and then sends nothing, a wrong
 token, or a truncated `Activate`, the two descriptors it already holds still map
 successfully. Stated as `always` because it is a standing property of the message
 order at `setup_socket.rs:249-276` rather than an occasional outcome.
@@ -251,7 +251,7 @@ one peer round trip wide and is bounded only by `transport_setup_deadline`,
 Required faults and enabling state: a peer that completes authentication, calls
 `receive_grant`, and then diverges from the protocol. `shm_failure_modes.rs:44-58`
 already builds it; the missing part is mapping the received fds and writing.
-Confidence: high — [evidence](../evidence/setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token.md).
+Confidence: high - [evidence](../evidence/setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token.md).
 Verified: `activate_server` sends before it reads (`setup_socket.rs:249-261`);
 the token is minted by the host (`connection.rs:165`, `:216-226`) and travels
 inside the same message as the descriptors (`setup_socket.rs:254`).
@@ -274,12 +274,12 @@ Open questions:
 Type: safety
 Reachability: default-production.
 Status: active
-Exercised: partial — nonce freshness is asserted; no test replays a captured
+Exercised: partial - nonce freshness is asserted; no test replays a captured
 `ClientAuth`.
 Guarantee: Bytes captured from one successful handshake, replayed verbatim as
 `ClientHello` then `ClientAuth` on a fresh connection to the same live host, are
 refused with `InvalidClientAuth`.
-Check: `always` — record a full transcript, open a new connection, send the
+Check: `always` - record a full transcript, open a new connection, send the
 recorded `ClientHello` and then the recorded `ClientAuth` without recomputing,
 and assert `AuthError::InvalidClientAuth` from `auth.rs:275-277` specifically,
 not merely a closed socket. `always` because every handshake must resist it.
@@ -291,7 +291,7 @@ server nonce carries the whole burden.
 Required faults and enabling state: a passive observer of one handshake. On a
 Unix socket that means a same-uid process able to trace the peer, so this is a
 defence-in-depth property under the stated trust model.
-Confidence: high — [evidence](../evidence/setup-a-a-captured-client-proof-never-authenticates-twice.md).
+Confidence: high - [evidence](../evidence/setup-a-a-captured-client-proof-never-authenticates-twice.md).
 Verified: `random_nonce` at `auth.rs:379-383` is a direct `getrandom` per call,
 called once per `authenticate_server_inner` at `:245`; nothing caches or reuses
 it.
@@ -309,16 +309,16 @@ Open questions:
 ### setup-a-credentials-do-not-survive-a-host-incarnation
 
 Type: safety
-Reachability: default-production — `InstanceGuard::acquire` runs on every host
+Reachability: default-production - `InstanceGuard::acquire` runs on every host
 start (`runtime.rs` startup path), and the fields it mints are the only ones the
 handshake consults (`runtime.rs:913` region, `connection.rs:120-129`).
 Status: active
-Exercised: not yet — no test authenticates against incarnation N+1 using
+Exercised: not yet - no test authenticates against incarnation N+1 using
 incarnation N's snapshot.
 Guarantee: A connection-file snapshot from a previous host incarnation
 authenticates against no later incarnation, and the peer refuses before it emits
 `ClientAuth`.
-Check: `always` — capture a snapshot, restart the host, dial the new socket with
+Check: `always` - capture a snapshot, restart the host, dial the new socket with
 the old snapshot, and assert the peer fails at `InvalidServerProof`
 (`auth.rs:333-335`) or `DaemonIdMismatch` (`:336-338`) and that no `ClientAuth`
 frame was written. `always` because it must hold for every pair of incarnations.
@@ -327,7 +327,7 @@ a cached `ConnectionInfo`. The client is not required to re-read the file, so
 this is the realistic path into the property rather than an attack.
 Required faults and enabling state: two host incarnations in the same data
 directory, plus a peer that reuses the earlier snapshot.
-Confidence: high — [evidence](../evidence/setup-a-credentials-do-not-survive-a-host-incarnation.md).
+Confidence: high - [evidence](../evidence/setup-a-credentials-do-not-survive-a-host-incarnation.md).
 Verified: key and daemon id are each a fresh `getrandom` inside `acquire`
 (`instance.rs:263-266`), the ordering comment at `:222-231` states credentials
 are minted after the lock is won, and `ConnectionInfo` carries both by value
@@ -349,11 +349,11 @@ Open questions:
 Type: safety
 Reachability: default-production.
 Status: active
-Exercised: partial — the matching and mismatching wire-identity cases are tested
+Exercised: partial - the matching and mismatching wire-identity cases are tested
 in-crate; the cross-connection token case is not.
 Guarantee: An activation token accepted on one connection is refused on every
 other connection, and no connection accepts a second `Activate`.
-Check: `always` — run two setups concurrently, feed connection A's token to
+Check: `always` - run two setups concurrently, feed connection A's token to
 connection B, and assert `SetupError::InvalidActivation` from
 `setup_socket.rs:275`. Separately, send `Activate` twice on one connection and
 assert the second is `SetupError::InvalidMessage` from `:283`. `always` because
@@ -364,7 +364,7 @@ Fault/timing angle: two setups overlapping inside the same
 rather than a rare one.
 Required faults and enabling state: two peers that both authenticate and then
 swap the tokens they received.
-Confidence: high — [evidence](../evidence/setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it.md).
+Confidence: high - [evidence](../evidence/setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it.md).
 Verified: the token is drawn per `run_connection` at `connection.rs:165` from a
 32-byte `getrandom` (`:216-226`), compared with `subtle::ConstantTimeEq` at
 `setup_socket.rs:267-272`, and `activate_server` reads exactly one message in the
@@ -386,14 +386,14 @@ Open questions:
 ### setup-a-the-setup-socket-is-never-connectable-outside-the-owning-uid
 
 Type: safety
-Reachability: default-production — `bind_owner_only` is called unconditionally at
+Reachability: default-production - `bind_owner_only` is called unconditionally at
 `runtime.rs:836` on the publication path.
 Status: active
-Exercised: partial — the final mode is asserted; the interval before the chmod is
+Exercised: partial - the final mode is asserted; the interval before the chmod is
 not.
 Guarantee: From the instant the setup socket appears in the filesystem until it
 is unlinked, no principal outside the effective uid can connect to it.
-Check: `always` — under a permissive umask such as `0o000`, sample the socket's
+Check: `always` - under a permissive umask such as `0o000`, sample the socket's
 mode from a concurrent observer between `bind` and `set_permissions`, and assert
 either that the mode is already `0600` or that the containing directory denies
 traversal to every other uid. `always` because the exposure is instantaneous and
@@ -407,7 +407,7 @@ Required faults and enabling state: a permissive umask in the host's process, an
 an observer sampling the mode. Demonstrating actual cross-uid connectability
 additionally needs a second uid, which may be unconstructible in CI and should be
 recorded as such rather than skipped silently.
-Confidence: high — [evidence](../evidence/setup-a-the-setup-socket-is-never-connectable-outside-the-owning-uid.md).
+Confidence: high - [evidence](../evidence/setup-a-the-setup-socket-is-never-connectable-outside-the-owning-uid.md).
 Verified: the bind-then-chmod order at `setup_socket.rs:44-48`, the failure
 rollback that unlinks on a failed chmod at `:45-47`, and the parent's
 unconditional `fchmod(0o700)` at `instance.rs:560-573`.
@@ -430,11 +430,11 @@ Open questions:
 Type: safety
 Reachability: default-production.
 Status: active
-Exercised: partial — one of four failing occupant shapes is tested.
+Exercised: partial - one of four failing occupant shapes is tested.
 Guarantee: `bind_owner_only` refuses every pre-existing occupant that is not a
 socket owned by the effective uid at exactly mode `0600`, refuses without
 following links, and never removes an occupant it refused.
-Check: `always` — for each of a dangling symlink, a symlink to a live socket, a
+Check: `always` - for each of a dangling symlink, a symlink to a live socket, a
 socket at mode `0666`, a socket owned by another uid, a directory, and a FIFO,
 assert `io::ErrorKind::PermissionDenied` and assert the occupant is still present
 afterwards. `always` because it is a per-call invariant over adversary-chosen
@@ -449,7 +449,7 @@ not an impersonation.
 Required faults and enabling state: filesystem state planted at the socket path
 before the host starts. Four of the six shapes are constructible unprivileged in
 a temporary directory. The wrong-owner case needs a second uid.
-Confidence: high — [evidence](../evidence/setup-a-a-hostile-occupant-of-the-socket-path-fails-closed.md).
+Confidence: high - [evidence](../evidence/setup-a-a-hostile-occupant-of-the-socket-path-fails-closed.md).
 Verified: `symlink_metadata` and not `metadata`, so a symlink is classified as a
 symlink and fails the `is_socket()` clause (`setup_socket.rs:28-32`); the three
 clauses are one conjunction at `:30-32`; the refusal at `:33-38` precedes the
@@ -470,14 +470,14 @@ Open questions:
 ### setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof
 
 Type: safety
-Reachability: default-production — both peer implementations connect without
+Reachability: default-production - both peer implementations connect without
 inspecting the socket (`client.rs:347`, native `setup.rs:106`).
 Status: active
-Exercised: partial — the in-crate unit suite covers the three refusal reasons
+Exercised: partial - the in-crate unit suite covers the three refusal reasons
 individually.
 Guarantee: A listener that occupies the published socket path without holding the
 connection key learns nothing from a peer and receives no `ClientAuth`.
-Check: `always` — stand up a listener that answers `ClientHello` with a
+Check: `always` - stand up a listener that answers `ClientHello` with a
 syntactically valid `ServerProof` carrying a wrong proof, a wrong `daemon_id`, or
 a wrong `daemon_ver`, and assert the peer writes exactly one message, the
 `ClientHello`, and then closes. `always` because it must hold on every dial.
@@ -487,7 +487,7 @@ Fault/timing angle: none. The peer performs all three checks
 that ordering not regressing.
 Required faults and enabling state: an impostor listener. Constructible in-process
 with `UnixStream::pair`, which is what the existing tests do.
-Confidence: high — [evidence](../evidence/setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof.md).
+Confidence: high - [evidence](../evidence/setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof.md).
 Verified: all three peer checks precede the `ClientAuth` write in both
 implementations, and the native side short-circuits them into one `if` with
 `ct_eq` on the proof and the daemon id (`setup.rs:200-205`).
@@ -510,14 +510,14 @@ Open questions:
 ### setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released
 
 Type: safety
-Reachability: default-production — the bound is `config.rs:128`, default 32, with
+Reachability: default-production - the bound is `config.rs:128`, default 32, with
 no opt-in.
 Status: active
-Exercised: partial — two lifecycle tests cover saturation and non-starvation.
+Exercised: partial - two lifecycle tests cover saturation and non-starvation.
 Guarantee: The number of connections that have been accepted but not yet
 authenticated never exceeds `max_handshakes`, excess accepts are closed without
 reading a client byte, and every terminal outcome releases the slot.
-Check: `always` — with `max_handshakes = 1`, hold the slot with a socket that
+Check: `always` - with `max_handshakes = 1`, hold the slot with a socket that
 never speaks, assert a second accept closes with no bytes read, then release the
 squatter and assert the slot becomes available. Enumerate every exit from
 `run_connection` before `drop(handshake_permit)` and assert each releases:
@@ -531,7 +531,7 @@ transfer, bounded by `transport_setup_deadline` at 2 seconds
 Required faults and enabling state: a squatter that authenticates and stalls, and
 a squatter that never speaks; both already exist in the test support
 (`tests/support/raw_client.rs:878`).
-Confidence: high — [evidence](../evidence/setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released.md).
+Confidence: high - [evidence](../evidence/setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released.md).
 Verified: `try_acquire_owned` before spawn at `runtime.rs:1037-1040`, the
 `drop(stream)` on failure at `:1038`, and the two pre-swap exits in
 `connection.rs`.
@@ -554,12 +554,12 @@ Open questions:
 Type: safety
 Reachability: default-production.
 Status: active
-Exercised: partial — SIGKILL after `receive_grant` is covered; the `prepare`
+Exercised: partial - SIGKILL after `receive_grant` is covered; the `prepare`
 timeout path is not.
 Guarantee: Every exit from `run_connection` that occurs after `ring.prepare`
 succeeds and before activation completes releases the prepared ring's charge, so
 repeated abandoned setups do not ratchet capacity.
-Check: `always` — drive N abandoned setups through each distinct exit and assert
+Check: `always` - drive N abandoned setups through each distinct exit and assert
 the ring accounting reported at `ring_transport.rs:199-203` returns to its
 pre-attempt value. `always` because the accounting must balance after every
 attempt, not eventually.
@@ -573,7 +573,7 @@ Required faults and enabling state: a `transport_setup_deadline` short enough fo
 `ring.prepare` to miss it, which needs either a configured near-zero deadline or
 injected slowness in `prepare`. The other three exits need a peer that stalls
 after `receive_grant`, which `shm_failure_modes.rs:44-58` already builds.
-Confidence: medium — [evidence](../evidence/setup-a-an-abandoned-setup-strands-no-ring-charge.md).
+Confidence: medium - [evidence](../evidence/setup-a-an-abandoned-setup-strands-no-ring-charge.md).
 Verified by inspection: the discard-and-cancel pairs at `connection.rs:166-169`
 and `:180-185`, and their absence at `:157-164`. Not verified: whether dropping a
 `PreparedRing` releases the charge. Part 1's
@@ -595,15 +595,15 @@ Open questions:
 ### setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable
 
 Type: safety
-Reachability: default-production — `observe_peer` runs for the whole life of
+Reachability: default-production - `observe_peer` runs for the whole life of
 every activated connection (`connection.rs:196-206`).
 Status: active
-Exercised: partial — the two `PeerClose` outcomes are tested; the cap and the
+Exercised: partial - the two `PeerClose` outcomes are tested; the cap and the
 cancellation are not.
 Guarantee: The post-commit sentinel read never allocates more than
 `MAX_SETUP_MESSAGE_LEN`, whatever length the peer declares, and it always yields
 to `read_cancel`.
-Check: `always` — declare a length of `u32::MAX` and assert
+Check: `always` - declare a length of `u32::MAX` and assert
 `SetupError::MessageTooLarge` with no allocation of that size; separately, cancel
 `read_cancel` while the sentinel is parked and assert the task exits. `always`
 because both must hold on every sentinel read.
@@ -616,7 +616,7 @@ behaviour, and it resolves the re-scope open question at
 Required faults and enabling state: a peer that completes commit and then sends a
 huge length prefix, and separately one that sends a partial prefix and stalls
 while the connection is cancelled.
-Confidence: high — [evidence](../evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md).
+Confidence: high - [evidence](../evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md).
 Verified: the cap at `setup_socket.rs:361-363` precedes the `vec![0u8; len]` at
 `:364`, and the `select!` at `connection.rs:196-206` is `biased` with
 `read_cancel` first.
@@ -640,11 +640,11 @@ Reachability: default-production for the native path
 (`shm-frame-channel.ts:77`); the managed Rust peer is the `host_runtime::Client`
 surface reached from `client.rs:346`, also production for embedders.
 Status: active
-Exercised: not yet — no test drives a malformed grant at the managed Rust peer.
+Exercised: not yet - no test drives a malformed grant at the managed Rust peer.
 Guarantee: Every grant-level rejection the native peer performs is also performed
 by the managed Rust peer, so choosing the Rust client cannot admit a descriptor
 the native addon would refuse.
-Check: `always` — for each native rejection reason, construct the grant that
+Check: `always` - for each native rejection reason, construct the grant that
 triggers it and assert the managed Rust path also refuses. Enumerated from the
 native side: wire version (`setup.rs:115`), descriptor schema (`:116`), grant hex
 and decode (`:120-121`), profile (`:122`), grant distinctness (`:122`), and the
@@ -656,7 +656,7 @@ independently maintained validation lists.
 Required faults and enabling state: a host, or a stand-in, that emits a grant
 naming two identical grant strings, or a second concurrent attach of the same
 grant in one process.
-Confidence: high — [evidence](../evidence/setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection.md).
+Confidence: high - [evidence](../evidence/setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection.md).
 Verified: two divergences. First, `ring_transport.rs:646-650` compares
 `from_host_grant.geometry() != to_host_grant.geometry()` and rejects on
 *inequality*, whereas native `setup.rs:122` and `lib.rs:582-584` reject on grant
@@ -686,12 +686,12 @@ Type: safety
 Reachability: default-production for `connect_setup`; `attach` is the surface
 under test and is exported without a cfg gate.
 Status: active
-Exercised: not yet — no test asserts the shipped wrapper never reaches `attach`.
+Exercised: not yet - no test asserts the shipped wrapper never reaches `attach`.
 Guarantee: In a shipped configuration every channel inserted into the native
 registry originates from `connect_setup`, which authenticated over the setup
 socket, and never from `attach`, which takes caller-supplied descriptors and
 authenticates nothing.
-Check: `always` — instrument both insertion sites (`lib.rs:550-556` and
+Check: `always` - instrument both insertion sites (`lib.rs:550-556` and
 `:589-596`) and assert that a full shipped-wrapper run inserts only through
 `connect_setup`. `always` rather than `unreachable` because `attach` is a
 published export that tests and embedders may legitimately call; the forbidden
@@ -701,7 +701,7 @@ METHOD's rule for a forbidden state with no dedicated detection point is
 Fault/timing angle: none. This is a call-graph property.
 Required faults and enabling state: none beyond running the shipped wrapper with
 both sites instrumented.
-Confidence: high — [evidence](../evidence/setup-a-only-an-authenticated-grant-enters-the-native-channel-registry.md).
+Confidence: high - [evidence](../evidence/setup-a-only-an-authenticated-grant-enters-the-native-channel-registry.md).
 Verified: `attach` at `lib.rs:491` reads `hostToPeerFd` and `peerToHostFd` as
 caller-supplied integers (`:510-513`) and never touches a socket;
 `connect_setup` at `:571` calls `setup::connect` which performs the three-message
@@ -725,15 +725,15 @@ Open questions:
 ### setup-a-concurrent-setup-saturation-is-reached
 
 Type: reachability
-Reachability: default-production — reaching it needs only enough concurrent
+Reachability: default-production - reaching it needs only enough concurrent
 peers, both bounds ship enabled.
 Status: active
-Exercised: not yet — the saturation tests pin `max_handshakes` to 1 or 4 and use
+Exercised: not yet - the saturation tests pin `max_handshakes` to 1 or 4 and use
 sockets that never speak, so they never produce the mixed state.
 Guarantee: A campaign actually reaches the state in which the unauthenticated
 handshake class is saturated at the same time as at least one authenticated
 connection sits between the descriptor send and the `Activated` reply.
-Check: `sometimes` — a marker fires when, at one observation, handshake permits
+Check: `sometimes` - a marker fires when, at one observation, handshake permits
 available equals zero **and** at least one connection is inside
 `activate_server` between `setup_socket.rs:260` and `:273`. The two clauses are
 independent preconditions of the vulnerable window, so the marker still fires on
@@ -749,7 +749,7 @@ concurrent setups overlap. With `max_handshakes = 1` they cannot.
 Required faults and enabling state: `max_handshakes` and `max_connections` both
 above 1, more concurrent dialers than `max_handshakes`, and at least one dialer
 that authenticates and then delays its `Activate` inside the setup deadline.
-Confidence: high — [evidence](../evidence/setup-a-concurrent-setup-saturation-is-reached.md).
+Confidence: high - [evidence](../evidence/setup-a-concurrent-setup-saturation-is-reached.md).
 Verified: the two existing saturation tests set `max_handshakes` to 1
 (`tests/lifecycle.rs:239`) and 4 (`:339`) and both use squatters that never
 speak (`:243-244`, `:355-357`), so neither can populate the second clause.

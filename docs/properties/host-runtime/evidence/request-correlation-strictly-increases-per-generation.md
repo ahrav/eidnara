@@ -3,8 +3,8 @@
 ## Discovery trigger
 
 The rule is enforced in two places and asserted in neither. `connection.rs` tests the watermark
-twice — once on the rejected-frame path at `:426-429` and once on the accepted-request path at
-`:469-472` — but the structure that actually depends on the rule, the pending map, is written by
+twice - once on the rejected-frame path at `:426-429` and once on the accepted-request path at
+`:469-472` - but the structure that actually depends on the rule, the pending map, is written by
 `dispatch.rs:893` with `HashMap::insert`, whose returned `Option<PendingEntry>` is discarded. The
 guarantee that a pending key is unique therefore lives one function away from the code that would
 break if it were not, with no local evidence at the insert that the key was free.
@@ -12,18 +12,18 @@ break if it were not, with no local evidence at the insert that the key was free
 ## Evidence trail
 
 `crates/host-runtime/src/connection.rs:391` seeds the counter: `let mut watermark: u64 =
-setup.initial_watermark;`, with the comment at `:388-390` naming the rule — "any non-increasing
+setup.initial_watermark;`, with the comment at `:388-390` naming the rule - "any non-increasing
 Request closes the generation before dispatch (protocol §8.3, V44)". Two guards read it:
 
 - Accepted requests, `:469-472`: `if header.corr <= watermark { return ReadExit::Peer; }` then
   `watermark = header.corr;`. This precedes the channel-0 split at `:473`, so it covers control and
-  routed requests alike — the catalog's claim on that point is verified.
+  routed requests alike - the catalog's claim on that point is verified.
 - Rejected frames, `:426-429`: the same `corr <= watermark` test and the same advance, on the
   `InboundEvent::Rejected` arm. The comment at `:421-422` states the ordering intent: "The watermark
   still applies first."
 
 The dependent structure is `pending: Mutex<HashMap<PendingKey, PendingEntry>>`
-(`connection.rs:114`), keyed by `pub type PendingKey = (u16, u32, u64)` (`connection.rs:46`) — the
+(`connection.rs:114`), keyed by `pub type PendingKey = (u16, u32, u64)` (`connection.rs:46`) - the
 channel, epoch, and correlation triple. `crates/host-runtime/src/dispatch.rs:892-899` builds the key and
 inserts:
 
@@ -59,7 +59,7 @@ necessarily the request the client meant to cancel.
 No concurrency window on the ingress half: the watermark is a local `u64` on the read task's stack
 (`:391`), read and advanced only by that one task, so there is no interleaving to construct. The
 insert is reached from the same reader path. The exposure is therefore entirely a code-structure
-exposure — the invariant is upheld by two guards in a different file from the one that consumes it —
+exposure - the invariant is upheld by two guards in a different file from the one that consumes it -
 rather than a race. It depends on `setup.initial_watermark`, which is `0` for an ordinary connection
 (`:805`) and `COMMIT_CORRELATION` for a promoted candidate (`:815`); see
 `promoted-generation-refuses-the-setup-correlations` for that seed.
@@ -70,11 +70,11 @@ The first clause is covered: `tests/dispatch.rs:211`
 `a_non_increasing_correlation_closes_the_generation_before_dispatch` loops over `["repeat",
 "lower"]` (`:212`), so both shapes of violation are driven. That test is in `tests/dispatch.rs`.
 
-The second clause has no test. It needs an assertion at the insert itself — that the returned
-`Option` is `None` — because no black-box client behaviour can distinguish "the watermark rejected
+The second clause has no test. It needs an assertion at the insert itself - that the returned
+`Option` is `None` - because no black-box client behaviour can distinguish "the watermark rejected
 the reuse" from "the watermark let it through and the insert overwrote silently". A mutation that
 weakens only the `<=` to `<` at `:469` while leaving `dispatch.rs:893` alone is the discriminating
-fault, and it would survive the existing test only if the test's "repeat" case did not cover it — it
+fault, and it would survive the existing test only if the test's "repeat" case did not cover it - it
 does, so the watermark half is mutation-covered and the insert half is not.
 
 ## Investigation log
@@ -94,7 +94,7 @@ does, so the watermark half is mutation-covered and the insert half is not.
   `crates/host-runtime/src/`.
 - Findings: `:893` is a bare `.insert(...)` statement; the value is discarded. The other five
   `pending.lock()` sites are `:1075` (`remove`), `:1309-1312` (key snapshot), `:1353`, and `:1457`
-  (`handle_cancel`) — all reads or removals, none of which would observe a collision either. No
+  (`handle_cancel`) - all reads or removals, none of which would observe a collision either. No
   assertion, `debug_assert`, or counter anywhere records that the key was free.
 - Missing evidence: none.
 - Conclusion: resolved with answer. The insert is unguarded, and correctness rests entirely on the

@@ -7,7 +7,7 @@ does not test the thing the promise names. `connection.rs:57-58`:
 
 ```
 /// Acceptance is decided by comparing WHEN the Pong was observed against WHEN
-/// the Ping's write COMPLETED — never by which side won the `pings` mutex.
+/// the Ping's write COMPLETED - never by which side won the `pings` mutex.
 ```
 
 and `:65-67`:
@@ -20,7 +20,7 @@ and `:65-67`:
 
 The hook's arm implements exactly that: `:1434` tests `answered_at >= completed_at`. The read loop's
 arm does not. It tests only a deadline. So the promise holds in one mutex order and is unenforced in
-the other — which is precisely the case the comment says the design does not depend on.
+the other - which is precisely the case the comment says the design does not depend on.
 
 ## Evidence trail
 
@@ -36,7 +36,7 @@ number the catalog recorded at `d90e7811` still resolves.
 ```
 
 **2. The completion-recorded arm tests only the deadline.** `:512-526`. The arm is selected by
-`Some(_)` at `:518` — the bound value is discarded, so `written_at`'s instant is never compared
+`Some(_)` at `:518` - the bound value is discarded, so `written_at`'s instant is never compared
 against anything:
 
 ```
@@ -69,7 +69,7 @@ So after the hook runs, `probe.sent` and `probe.written_at` both hold `completed
 compares `now` against `completed_at`.
 
 **4. `duration_since` saturates.** `connection.rs:15` is `use tokio::time::{timeout_at, Instant};`
-— so every `Instant` in this file, including `now` at `:504` and `PingProbe::sent` at `:77`, is
+- so every `Instant` in this file, including `now` at `:504` and `PingProbe::sent` at `:77`, is
 `tokio::time::Instant`, not `std::time::Instant`. The pinned version is **tokio 1.53.1**
 (`Cargo.lock`, `name = "tokio"` / `version = "1.53.1"`). In
 `tokio-1.53.1/src/time/instant.rs:70-74`:
@@ -83,7 +83,7 @@ compares `now` against `completed_at`.
 ```
 
 tokio's `duration_since` is not std's; it delegates to `saturating_duration_since` unconditionally.
-That makes the saturation independent of the Rust version — `std::time::Instant::duration_since` also
+That makes the saturation independent of the Rust version - `std::time::Instant::duration_since` also
 saturates in current Rust, but the argument here does not rest on it. With `completed_at > now`,
 `:521` evaluates `0ns < pong_deadline`, which is true, and `:524` removes the probe.
 
@@ -95,13 +95,13 @@ completion store at `:389-392`.
 ## Failure scenario
 
 A peer that never reads its socket keeps a generation alive by answering probes it never received.
-Correlations are sequential — `connection.rs:1399` `gen.next_ping_corr.fetch_add(1, Ordering::SeqCst)`
-seeded at 1 (`:255`) — so the peer predicts the next correlation and emits its Pong early. The
+Correlations are sequential - `connection.rs:1399` `gen.next_ping_corr.fetch_add(1, Ordering::SeqCst)`
+seeded at 1 (`:255`) - so the peer predicts the next correlation and emits its Pong early. The
 losing interleaving:
 
 1. `liveness_loop` inserts the probe with `written_at: None` (`:1403-1411`), then queues the frame
    (`:1450-1456`).
-2. The peer's pre-answer Pong arrives. The read loop samples `now` at `:504` — call it `t0`.
+2. The peer's pre-answer Pong arrives. The read loop samples `now` at `:504` - call it `t0`.
 3. The read loop is descheduled between `:504` and `:505`.
 4. The writer finishes `write_all` and captures `completed_at = t1 > t0` (`tcp_frame_channel.rs:376`),
    then calls the hook (`:394`), which takes the pings lock (`:1427`). `answered_at` is still `None`,
@@ -111,7 +111,7 @@ losing interleaving:
 
 The probe is gone. The expiry sweep at `:1370-1375` finds nothing outstanding, so
 `invalidate_on_missed` never fires. This defeats exactly the detection the design exists to provide,
-and the guard that would catch it — `answered_at >= completed_at` — exists only in the hook's branch.
+and the guard that would catch it - `answered_at >= completed_at` - exists only in the hook's branch.
 
 ## Timing windows and dependencies
 
@@ -123,7 +123,7 @@ cannot yield inside the window. Delay there must come from OS thread preemption.
 **The lock is blocking, which widens the loss.** Because it is a `std::sync::Mutex`, a read loop that
 reaches `:505` while the hook holds the lock parks the worker thread until the hook releases, then
 proceeds with its already-stale `now`. So the interleaving does not require a preemption long enough
-for the whole writer path — only long enough for the writer to travel `:376` → `:394` → `:1427` and
+for the whole writer path - only long enough for the writer to travel `:376` → `:394` → `:1427` and
 take an uncontended lock.
 
 **The two parties are genuinely concurrent.** The hook runs in the writer task
@@ -144,7 +144,7 @@ reachable in a shipped configuration unless marked otherwise", and this record n
 
 ## What a test must construct
 
-Not a client-visible scenario — the outcome is a probe silently removed, which no wire observation
+Not a client-visible scenario - the outcome is a probe silently removed, which no wire observation
 distinguishes from a legitimate answer. The test has to reach inside.
 
 A direct unit test on the two arms is enough and needs no scheduler race: build a `GenerationCore`,
@@ -200,7 +200,7 @@ No test covers this. `tests/lifecycle.rs:400`
   bytes but answers without reading them". The pre-answer case is addressed separately and
   unconditionally at `:65-67`, and `:57-58` explicitly disclaims dependence on the mutex order. The
   read-loop arm's own comment at `:513-517` says "`sent` is the completion instant, so the deadline
-  applies here" — true, but it treats the deadline as the whole test, which is the gap.
+  applies here" - true, but it treats the deadline as the whole test, which is the gap.
 - Missing evidence: whether this was intended. That is author intent, not a fact in the tree.
-- Conclusion: unresolved — needs human input. The code and the comment disagree; which one is wrong
+- Conclusion: unresolved - needs human input. The code and the comment disagree; which one is wrong
   is not decidable from the source.

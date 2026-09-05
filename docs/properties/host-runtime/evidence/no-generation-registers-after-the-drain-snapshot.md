@@ -69,7 +69,7 @@ cancels the shutdown token, and the in-code comment at `connection.rs:281-284`
 records exactly that window.
 
 Existing check: none, confirmed. The comment at `connection.rs:281-284` documents
-only the token half of the window — the gap between a committed `host.shutdown`
+only the token half of the window - the gap between a committed `host.shutdown`
 and the sequence storing `draining`. Nothing in code or comment states the
 snapshot half, which is the obligation this property names.
 
@@ -86,7 +86,7 @@ reach it.
 3. The connection completes authentication (`connection.rs:143-160`), acquires
    the connection permit at `:165`, mints a generation at `:188`, and reaches the
    registration gate at `:279`.
-4. Suppose the load at `:285` read stale `false` — with `Relaxed` instead of
+4. Suppose the load at `:285` read stale `false` - with `Relaxed` instead of
    `SeqCst`, or with the check outside the lock scope. The insert lands after the
    snapshot at `:1151`.
 5. The generation is absent from `generations`, so `:1160` never cancels its
@@ -101,8 +101,8 @@ reach it.
 
 ## Timing windows and dependencies
 
-The window is from the `draining` store — at `runtime.rs:1127-1129`, or earlier
-at `dispatch.rs:729` on the committed-`host.shutdown` path — to the snapshot at
+The window is from the `draining` store - at `runtime.rs:1127-1129`, or earlier
+at `dispatch.rs:729` on the committed-`host.shutdown` path - to the snapshot at
 `:1151`. A socket must be accepted before the store (accepts stop once
 `shared.shutdown` is cancelled, `runtime.rs:996`) and complete authentication
 inside the window, which is bounded by `auth_deadline`
@@ -115,9 +115,9 @@ current-thread test proves nothing.
 
 A socket accepted and authenticated concurrently with the store-to-snapshot
 interval, on `#[tokio::test(flavor = "multi_thread")]`. Because the window is
-narrow, a plain race is unreliable; the honest form is to widen it deliberately —
+narrow, a plain race is unreliable; the honest form is to widen it deliberately -
 insert at least one route so the settle loop at `:1145-1149` awaits, and make its
-`route_gone` slow — then start a fresh connection during that phase. The oracle
+`route_gone` slow - then start a fresh connection during that phase. The oracle
 is the catalog's: every generation that inserts either appears in the snapshot or
 completed its close before the snapshot was taken. Observing that needs
 instrumentation, since `generations` is a local. Two proxies are available

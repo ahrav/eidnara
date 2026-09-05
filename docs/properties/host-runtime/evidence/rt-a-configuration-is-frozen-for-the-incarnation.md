@@ -4,7 +4,7 @@
 
 Every sibling sub-part has records whose enabling state is "a configured value of
 X". None of them states whether that value can change mid-run. If it can, each of
-those records needs a window. I checked, and it cannot — but the reason is
+those records needs a window. I checked, and it cannot - but the reason is
 structural rather than asserted, so it is worth pinning once here instead of
 implicitly 55 times across the catalog.
 
@@ -27,7 +27,7 @@ and when:
 | `max_pending_requests`, `max_handler_tasks` | read for the gates and the pools | `:693`, `:698`, `:707`, `:906`, `:909` |
 | `max_handshakes`, `max_connections` | read once each for their semaphores | `:913`, `:914`; `max_connections` also at `:872` |
 
-After `runtime.rs:927` — the closing brace of the `HostShared` literal — the
+After `runtime.rs:927` - the closing brace of the `HostShared` literal - the
 identifier `config` does not appear again in the function. Verified by reading
 `:928-961`.
 
@@ -43,7 +43,7 @@ No `Mutex`, no `RwLock`, no `AtomicU64`, no `ArcSwap`. `HostShared` is handed
 around as `Arc<HostShared<H>>` (`:882`, and every `Arc::clone` thereafter), and
 `Arc` gives shared references only, so these fields are immutable for every
 holder. `HostLimits` and `HostTiming` derive `Debug, Clone` only
-(`config.rs:89`, `:198`) and contain no interior-mutability types — six `usize`,
+(`config.rs:89`, `:198`) and contain no interior-mutability types - six `usize`,
 one `u64`, seven `Duration`.
 
 Contrast with the fields on `HostShared` that *are* mutable, which is what makes
@@ -58,7 +58,7 @@ where they did not.
 
 There is no reload surface. The public API is `run` and `run_with_publish_hook`
 (`lib.rs:78`), both taking `config: HostConfig` by value. `HostShared` is not
-exported — `runtime` is a private module (`lib.rs:33`), and only `run`,
+exported - `runtime` is a private module (`lib.rs:33`), and only `run`,
 `run_with_publish_hook`, and `HostError` are re-exported. So no external caller
 can reach the fields at all, let alone mutate them.
 
@@ -81,7 +81,7 @@ startup and would not follow: `ingress_budget`'s capacity (`:896-902`),
 `pending_permits`'s count (`:905-907`), the ring's `process_limits` (`:872`), and
 the route registry's ceiling (`:895`) are all snapshots. A reload that changed
 `max_resident_bytes` without rebuilding the budget would leave the host enforcing
-the old value while reporting the new one — and the resident-floor gate at `:736`
+the old value while reporting the new one - and the resident-floor gate at `:736`
 would not re-run, so the underflow protection in
 `rt-a-the-ingress-pool-derivation-cannot-underflow` would no longer cover it.
 
@@ -112,7 +112,7 @@ Nothing at runtime. The honest checks are structural.
 1. A compile-level assertion that `HostLimits`, `HostTiming`, and
    `LivenessPolicy` contain no interior mutability. Rust has no `Freeze` bound
    available on stable, so the practical form is a test that constructs a
-   `HostShared`, takes `&shared.limits`, and relies on the borrow checker — which
+   `HostShared`, takes `&shared.limits`, and relies on the borrow checker - which
    proves nothing a reader cannot already see. A better mechanical form is a
    review gate on those three types.
 2. A snapshot-and-compare test: capture `limits`, `timing`, and `liveness`
@@ -137,7 +137,7 @@ the absence of a defect.
   reference. The parameter is declared `mut config` at `:643` solely for the
   `std::mem::take` at `:751`.
 - Missing evidence: none.
-- Conclusion: resolved with answer — `mut` is needed for exactly one move, and
+- Conclusion: resolved with answer - `mut` is needed for exactly one move, and
   nothing mutates the config after construction.
 
 ### Q: is `HostShared` reachable from outside the crate, so an embedder could mutate it?
@@ -148,7 +148,7 @@ the absence of a defect.
   private module, so it is crate-visible only. `pub` on its fields matters for
   `connection.rs`, `dispatch.rs`, and `control.rs`, not for embedders.
 - Missing evidence: none.
-- Conclusion: resolved with answer — unreachable externally. The `pub` fields are
+- Conclusion: resolved with answer - unreachable externally. The `pub` fields are
   crate-internal wiring.
 
 ### Q: are any of the derived-once values re-derived anywhere during the run?
@@ -163,6 +163,6 @@ the absence of a defect.
   (`wire.rs:384-390`), so a clone is a handle onto the same permits, not a
   resized copy.
 - Missing evidence: none.
-- Conclusion: resolved with answer — every derived quantity is computed exactly
+- Conclusion: resolved with answer - every derived quantity is computed exactly
   once, which is why a future reload would desynchronise the stored config from
   the enforced capacity. That asymmetry is the substance of this record.

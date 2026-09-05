@@ -151,19 +151,19 @@ subject, and three of the seven are CI-named.** Counted by grepping each of the
 
 | Binary | `Client::connect` sites | CI status |
 | --- | --- | --- |
-| `shm_failure_modes.rs` | 9 | **named** — `ci.yml:133`, with `--test-threads=1` |
-| `lifecycle.rs` | 7 | **named** — `ci.yml:179`, `:187` |
+| `shm_failure_modes.rs` | 9 | **named** - `ci.yml:133`, with `--test-threads=1` |
+| `lifecycle.rs` | 7 | **named** - `ci.yml:179`, `:187` |
 | `host_roundtrip.rs` | 3 | unnamed |
 | `activation.rs` | 2 | unnamed |
 | `composite_routing.rs` | 1 | unnamed |
 | `protocol_vectors.rs` | 1 | unnamed |
-| `shm_soak.rs` | 1 | **partial** — `ci.yml:134-135` names `short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` with `--exact`, so one of that binary's two tests runs |
+| `shm_soak.rs` | 1 | **partial** - `ci.yml:134-135` names `short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` with `--exact`, so one of that binary's two tests runs |
 
 > **Correction to the framing handed to this synthesis.** The brief said seven
 > fixture binaries with four CI-named. Three of the seven are named:
 > `shm_failure_modes`, `lifecycle`, and `shm_soak` (partially). The four-count
 > comes from lens B, which correctly reports "4 of those 8 are named in CI" while
-> counting the **eight** binaries that touch `client.rs` at all — that is, the
+> counting the **eight** binaries that touch `client.rs` at all - that is, the
 > seven fixtures plus the subject binary `client.rs` itself. Both statements are
 > true of different denominators. Stated in full because the difference is
 > whether the fixture layer or the dedicated layer carries the CI coverage, and
@@ -330,11 +330,11 @@ Doc references without a file are `docs/host-wire-protocol.md`.
 
 | # | Statement | Why it no longer describes this code |
 | --- | --- | --- |
-| 1 | `client.rs:44` — "Deadline for a frame after its first header byte. Idle header waits are unbounded." | The client has no first header byte. `ring_reader_loop` receives an already-decoded `(EnvelopeHeader, Vec<u8>, ByteCharge)` triple from the bridge (`:1977`) with no timeout at all. `CLIENT_FRAME_TIMEOUT` (`:45`) survives as a real 30-second bound, but its only production uses are the writer's per-frame publication deadline (`:1353`) and the await on it (`:1960`), so it bounds outbound publication rather than inbound frame completion |
-| 2 | `:738` — "frame completion after first header byte \| one 30 s absolute deadline; idle first-header wait is unbounded" | The same mechanism, stated normatively for both managed clients. Neither managed client reads a byte stream any more, and the "unbounded idle wait" half now describes an unbounded `read.recv().await` that has no header/body distinction to be unbounded between |
-| 3 | `:724` — "malformed framing / EOF \| no terminal possible \| classify pending writes from byte evidence; invalidate generation" | There is no byte evidence on the ring path. A ring write either completes or does not, and the surviving classifier is the three-state `publish` atomic (`client.rs:1939-1967`, `:2215-2231`). The classification obligation survives and is discharged by a **stronger** mechanism than byte evidence; only the evidence the sentence names is gone |
-| 4 | `:852` (conformance vector V14) — "Partial header/body EOF \| Close as corruption; pending write outcomes use byte evidence" | The same, as a conformance vector. A partial header or body EOF is not constructible against the ring, because `:294` says "A published ring descriptor names one complete header and body" |
-| 5 | `:296` — the client-side retirement list still contains "truncated declared frame" | Printed in full: the other items on that list are live on the ring path (unexpected setup-socket EOF, invalid ring descriptor, unsupported version, unknown type, invalid flags, nonzero channel-0 epoch, zero epoch on a routed channel, pure-header body, body declaration above 64 MiB). A truncated declared frame is unreachable for the reason `:294` gives, so this is a partially inherited list. Counted once |
+| 1 | `client.rs:44` - "Deadline for a frame after its first header byte. Idle header waits are unbounded." | The client has no first header byte. `ring_reader_loop` receives an already-decoded `(EnvelopeHeader, Vec<u8>, ByteCharge)` triple from the bridge (`:1977`) with no timeout at all. `CLIENT_FRAME_TIMEOUT` (`:45`) survives as a real 30-second bound, but its only production uses are the writer's per-frame publication deadline (`:1353`) and the await on it (`:1960`), so it bounds outbound publication rather than inbound frame completion |
+| 2 | `:738` - "frame completion after first header byte \| one 30 s absolute deadline; idle first-header wait is unbounded" | The same mechanism, stated normatively for both managed clients. Neither managed client reads a byte stream any more, and the "unbounded idle wait" half now describes an unbounded `read.recv().await` that has no header/body distinction to be unbounded between |
+| 3 | `:724` - "malformed framing / EOF \| no terminal possible \| classify pending writes from byte evidence; invalidate generation" | There is no byte evidence on the ring path. A ring write either completes or does not, and the surviving classifier is the three-state `publish` atomic (`client.rs:1939-1967`, `:2215-2231`). The classification obligation survives and is discharged by a **stronger** mechanism than byte evidence; only the evidence the sentence names is gone |
+| 4 | `:852` (conformance vector V14) - "Partial header/body EOF \| Close as corruption; pending write outcomes use byte evidence" | The same, as a conformance vector. A partial header or body EOF is not constructible against the ring, because `:294` says "A published ring descriptor names one complete header and body" |
+| 5 | `:296` - the client-side retirement list still contains "truncated declared frame" | Printed in full: the other items on that list are live on the ring path (unexpected setup-socket EOF, invalid ring descriptor, unsupported version, unknown type, invalid flags, nonzero channel-0 epoch, zero epoch on a routed channel, pure-header body, body declaration above 64 MiB). A truncated declared frame is unreachable for the reason `:294` gives, so this is a partially inherited list. Counted once |
 
 **Checked and clear, so a later pass does not double-count.** The document's
 transport-selector, provider-registration, and alternate-backend statements are
@@ -348,7 +348,7 @@ branch."
 
 **One residual of the opposite shape.** `:762-764` diagrams a client `Recovering`
 state with "bounded backoff, reread file" (`:764`), and `client.rs` has no
-reconnect path — but no reconnect path was deleted either. A `git diff` of
+reconnect path - but no reconnect path was deleted either. A `git diff` of
 `ed487e11` shows no removed reconnect function, so this is a contract gap rather
 than a deleted-mechanism finding. Recovery lives in
 `crates/daemon/src/historian_producer.rs:699`, outside this sub-part.
@@ -416,8 +416,8 @@ case.
    `:1895`), and the file has no other reference to it. It owns three things
    nothing else can reach: the ring attach (`:1855`), the completion signal every
    outbound frame waits on (`:1872`), and the setup-socket departure the host reads
-   as its peer-death discriminator (`:1890-1893`). No in-crate test constructs it —
-   zero hits for `start_ring_bridge` in `mod tests` — and none of the six
+   as its peer-death discriminator (`:1890-1893`). No in-crate test constructs it -
+   zero hits for `start_ring_bridge` in `mod tests` - and none of the six
    `tests/client.rs` tests inspects the setup socket or thread state.
 
    **Correction applied during disposition: the original claim that it is
@@ -441,10 +441,10 @@ case.
    which of the five `break`s fired, whether `:1891` wrote anything, whether the
    goodbye's content distinguished the cause, and the 50-microsecond busy-poll
    (`:1886`, roughly 20 kHz per idle connection). Of the three normative claims
-   that depend on this thread, one now has partial evidence — connection close as a
+   that depend on this thread, one now has partial evidence - connection close as a
    bounded joined teardown (`:691`, `:741`) is contradicted rather than unchecked,
    since `join_tasks_until` demonstrably does not join this thread while the tests
-   above show it does eventually exit — and two remain unchecked at that seam: that
+   above show it does eventually exit - and two remain unchecked at that seam: that
    a clean `Goodbye` and an unexpected setup-socket loss are distinct (`:296`,
    `:691`), and that Ping/Pong is owned independently of application waits
    (`:683`). Owned by
@@ -462,10 +462,10 @@ case.
    (`:1979`) differ by which side broke the contract. The observation window is
    `settle_all`'s loop (`:1654-1664`): a caller pending at that instant learns the
    cause, one arriving an instruction later cannot. What makes this quiet rather
-   than merely absent is that two tests assert the two *constants* —
+   than merely absent is that two tests assert the two *constants* -
    `close_wins_against_admission_blocked_on_pending` (`:2365`) asserts
    `connection_retired` at `:2408`, and another asserts `generation_retired` at
-   `:2556` and `:3043` — so the suite ratifies the erasure. Nothing asserts what a
+   `:2556` and `:3043` - so the suite ratifies the erasure. Nothing asserts what a
    late caller can learn about the cause. Owned by
    [client-a-a-retired-generation-forgets-why-it-retired](catalog.md#client-a-a-retired-generation-forgets-why-it-retired)
    and
@@ -479,7 +479,7 @@ case.
    `:1058`, and `:658` lists routes alongside both. Compounding it, `routes` is a
    `HashSet<RouteHandle>` (`:944`), so a duplicate host bind merges two callers
    onto one entry, and `release_stranded_route`'s already-cached early return
-   (`:1576-1578`) — which is correct for the §8.2 case — means a genuine duplicate
+   (`:1576-1578`) - which is correct for the §8.2 case - means a genuine duplicate
    is never released either. Nothing tests either the growth or the merge. The two
    route tests that exist (`:3503`, `:3587`) cover the late-bind path, and neither
    runs in CI. Owned by

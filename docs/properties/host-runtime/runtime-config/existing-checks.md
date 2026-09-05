@@ -33,8 +33,8 @@ owns none.
 | `harness_closure.rs` | no test module | all 1,122 | **0** | n/a |
 | `lib.rs` | no test module | all 87 | **0** | n/a |
 | `file_mode.rs` | no test module | all 19 | **0** | n/a |
-| Four integration binaries | `tests/` | — | **52** | **No** |
-| Doctests | none exist anywhere in the five files | — | **0** | n/a |
+| Four integration binaries | `tests/` | - | **52** | **No** |
+| Doctests | none exist anywhere in the five files | - | **0** | n/a |
 
 The reason none of the 11 runs is structural, and this pass re-derived it. Every
 `-p host-runtime` test invocation in `ci.yml` carries a `--test <name>` filter, which
@@ -120,8 +120,8 @@ purposes, at 11 sites (`:159`, `:182`, `:253`, `:277`, `:325`, `:414`, `:447`,
 doctests has exactly one test binary, and CI does not run it.
 
 `tests/handler_contract.rs` is 2e's binary by subject but supplies four fixtures
-this sub-part's records name — `:302-320` (a declaration sum near a limit),
-`:323`, `:375`, `:408`, `:437`, and `:378-388`, `:636` — and it is also unnamed.
+this sub-part's records name - `:302-320` (a declaration sum near a limit),
+`:323`, `:375`, `:408`, `:437`, and `:378-388`, `:636` - and it is also unnamed.
 
 ## Doctests
 
@@ -148,7 +148,7 @@ from each file's production half only.
 
 | Cluster | Sites | Labels |
 | --- | --- | --- |
-| Startup and abandon cleanup guards | 7 | `runtime.rs:348`, `:359`, `:361`, `:369`, `:370`, `:385` — `"armed startup cleanup"` / `"started startup cleanup"`; `:409`, `:415` — `"armed abandon guard"` |
+| Startup and abandon cleanup guards | 7 | `runtime.rs:348`, `:359`, `:361`, `:369`, `:370`, `:385` - `"armed startup cleanup"` / `"started startup cleanup"`; `:409`, `:415` - `"armed abandon guard"` |
 | Mutex and lock invariants | 6 | `runtime.rs:79`, `:88` `"fatal lock"`; `:152`, `:215` `"abort lock"`; `:428`, `:1179` `"connections lock"` |
 | Infallible serialization | 2 | `config.rs:320` `"fixed auth shape serializes"`, `:331` `"fixed publication shape serializes"` |
 | Validated-above contracts | 2 | `harness_closure.rs:218` `"key was collected from this object"`, `:400` `"launch and dependency roots were checked above"` |
@@ -279,7 +279,7 @@ forward reference to unbuilt work and that was wrong**; the correction is applie
 rather than footnoted, because register row 11 and the catalog's construction
 conditionality map both leaned on it.
 
-1. `runtime.rs:3-5` — signal acquisition "stays outside this crate" and "future
+1. `runtime.rs:3-5` - signal acquisition "stays outside this crate" and "future
    production wiring in the source module-host work will map SIGINT/SIGTERM, while tests
    inject deterministic shutdown". The first clause is true. The second is
    **stale, not forward-looking**: `serve.rs:617-622` already installs both a
@@ -288,7 +288,7 @@ conditionality map both leaned on it.
    with `serve.rs:604-616` explaining why that ordering is mandatory. So the crate
    comment describes as future a mapping its sole production caller performs
    today. Register row 11, reclassified there.
-2. `config.rs:5-6` — CLI and config-file exposure "belongs to the spawn/doctor
+2. `config.rs:5-6` - CLI and config-file exposure "belongs to the spawn/doctor
    integration (the source daemon-lifecycle work), not this crate." A genuine forward
    reference, and it stands. Register row 2, and the reason the configuration
    contract is doc comments.
@@ -299,9 +299,9 @@ Six, each held by discipline rather than by a build step.
 
 1. **Every host timing default is a literal restated in a normative table with no
    parser on either side.** `config.rs:220-232` against protocol `:735-743`.
-   Three of the pairs disagree today — shutdown 10 s versus the client's 5 s,
+   Three of the pairs disagree today - shutdown 10 s versus the client's 5 s,
    authentication 2 s against a client 2 s that spans four stages, and transport
-   setup 2 s against the same client budget — and the disagreement is invisible to
+   setup 2 s against the same client budget - and the disagreement is invisible to
    every gate in the repository. `frame_deadline` is the control case at 30 s on
    both sides.
 2. **`MIN_RESIDENT_BYTES`' three-way composition is a comment plus an
@@ -342,10 +342,10 @@ promoted to a record. `config.rs:325` sizes the published connection file using 
 **placeholder** socket path, `setup_socket: "/tmp/eidnara-host.sock"`, 17 bytes, while
 the real value is `guard.dir_path().join("setup.sock")` (`runtime.rs:834`),
 derived from an operator-settable and unvalidated `data_dir`. It is currently
-safe for two independent reasons — `MAX_AUTH_MESSAGE_LEN` is 4,096 and binds long
+safe for two independent reasons - `MAX_AUTH_MESSAGE_LEN` is 4,096 and binds long
 before `MAX_CONNECTION_FILE_LEN`'s 65,536 (`connection_file.rs:30`), and the
 socket path is bounded by `AF_UNIX` `sun_path` at roughly 108 bytes, enforced by
-`bind_owner_only` failing — and neither reason is stated at `config.rs:322-332`.
+`bind_owner_only` failing - and neither reason is stated at `config.rs:322-332`.
 `MAX_CONNECTION_FILE_LEN` is enforced only on the read path
 (`connection_file.rs:187-197`), never on the write.
 
@@ -425,7 +425,7 @@ The fourth was added by a disposition pass; the first three are as synthesized.
    graceful drain, no connection Goodbyes, no `shutdown_deadline`, and no bound of
    any kind. It is checked by nothing: zero in-crate tests, and no CI-named binary
    drops a `run` future. The evidence that this path is a live concern rather than
-   a theoretical one is inside the crate — `run_handler_shutdown`'s once-latch
+   a theoretical one is inside the crate - `run_handler_shutdown`'s once-latch
    comment at `:1260-1264` describes exactly this interleaving, "the abandon-path
    cleanup can fire after a `run` future was dropped mid-shutdown-sequence". No
    record owns it; it is queued as a gap in

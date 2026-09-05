@@ -25,19 +25,19 @@ counter, log line, or frame that never appears.
   message, drained at `runtime.rs:917`. No rejection path trips it.
 - **The three discard sites.** All are in `crates/host-runtime/src/connection.rs`,
   inside `run_connection`:
-  1. *Authentication failure* — `:158-160`. `authenticate_server` is called at
+  1. *Authentication failure* - `:158-160`. `authenticate_server` is called at
      `:148-155` and the result is tested as `if auth.is_err() { return; }`. The
      `AuthError` is never bound to a name, so the failure stage is discarded with
      it. The peer sees only a clean FIN:
      `crates/host-runtime/src/auth.rs:226-228` calls `teardown_failed_handshake`, which
      at `:207-212` does nothing but `stream.shutdown()` under the remaining
      deadline. No error frame, no counter.
-  2. *Connection capacity exhaustion* — `:165-167`.
+  2. *Connection capacity exhaustion* - `:165-167`.
      `shared.connection_permits.clone().try_acquire_owned()` fails and the body is
      a bare `return`. This is post-authentication, so a client that proved its
      credentials is dropped with no frame. The comment at `:162-164` describes the
      linearization point and not the rejection.
-  3. *Post-authentication drain refusal* — `:285-287`. Inside the connections-lock
+  3. *Post-authentication drain refusal* - `:285-287`. Inside the connections-lock
      block, `if shared.draining.load(Ordering::SeqCst) || shared.shutdown.is_cancelled()
      { return None; }`. The generation is never registered and the caller unwinds
      with no terminal.
@@ -54,7 +54,7 @@ counter, log line, or frame that never appears.
   later at `:177`, and `authenticate_server` borrows it as `&mut`. So
   `stream.peer_addr()` is in scope at the auth-failure return. **Refinement of the
   catalog:** the address is not "already dropped" in the sense of being
-  unreachable — the accepted value is discarded and the socket-derived address is
+  unreachable - the accepted value is discarded and the socket-derived address is
   never asked for.
 - Existing checks assert the close, never a record.
   `crates/host-runtime/tests/lifecycle.rs:237`
@@ -67,8 +67,8 @@ counter, log line, or frame that never appears.
 
 1. A client with a wrong or absent key connects repeatedly. Each attempt reaches
    `connection.rs:148`, fails, and returns at `:159`.
-2. Nothing increments, nothing is written, and the `AuthError` variant — which
-   distinguishes a malformed hello from a bad proof from a deadline expiry — is
+2. Nothing increments, nothing is written, and the `AuthError` variant - which
+   distinguishes a malformed hello from a bad proof from a deadline expiry - is
    dropped at the `is_err()` test.
 3. From the host's outside surface the run is identical to a run with no such
    client at all. A credential-probing campaign, a misconfigured deploy pushing a
@@ -100,7 +100,7 @@ is the negative: assert that no counter, no stderr line, and no frame distinguis
 the rejected run from a run without the rejected client, which fixes the current
 behaviour as a documented fact rather than an accident. A positive form needs an
 observable to exist first, so the test shape is determined by whichever channel is
-chosen — a counter readable through `host.status`
+chosen - a counter readable through `host.status`
 (`crates/host-runtime/src/control.rs:640`), a `FatalCell`-style latch, or stderr. The
 auth case additionally needs a check that the recorded identifier is derivable at
 `connection.rs:158`, since the accepted address is gone by then and only
@@ -117,8 +117,8 @@ auth case additionally needs a check that the recorded identifier is derivable a
   `SocketAddr` or calls `peer_addr`. But `run_connection` owns the concrete
   `TcpStream` through `:176`, and the auth test at `:158` precedes the
   `into_split()` at `:177`, so the address is one method call away. The stronger
-  claim in the catalog — that the address is dropped at accept and therefore
-  unavailable — holds for the accepted value only.
+  claim in the catalog - that the address is dropped at accept and therefore
+  unavailable - holds for the accepted value only.
 - Missing evidence: no comment explains the `_addr` discard, so whether the
   address was deliberately not retained or simply unused is not determinable from
   the source.

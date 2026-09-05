@@ -17,7 +17,7 @@ used has that requirement.
 - The primitive is `tokio::sync::Notify` (`crates/host-runtime/src/lifecycle.rs:1186`),
   woken through `notify_waiters()` at `lifecycle.rs:1237` and `:1243`. The doc
   comment at `:1246-1250` repeats the enable-before-recheck claim.
-- **Correction to the catalog's mechanism.** `notify_waiters` stores no permit —
+- **Correction to the catalog's mechanism.** `notify_waiters` stores no permit -
   tokio 1.53.1 `src/sync/notify.rs:710-714` says so explicitly, and
   `inner_notify_waiters` transitions the state to `EMPTY` at `:758` rather than
   `NOTIFIED`. That half of the catalog is right. But "wakes only enabled or
@@ -71,7 +71,7 @@ The property holds. The excluded scenario needs the notification to be missed:
    notification is discarded. The second requester then parks on a future that
    nothing will ever complete.
 4. The latch sits at `Open` with no owner. The host never stops, the requester
-   never answers, and its pending permit is never released — until its own
+   never answers, and its pending permit is never released - until its own
    generation retires and the `select!` arm at `dispatch.rs:676` returns.
 5. The real code survives this because the future was created at `:650`, before
    the `try_own()` at `:653`, and `notify_waiters` bumps a counter the future
@@ -114,7 +114,7 @@ discarded after enqueue, and assert the second settles rather than hanging.
   the end of `:1242`, so the described asymmetry does not exist. The code and the
   comments are safe but overstate their own requirement, which means the comment
   at `dispatch.rs:647-649` would not warn a future editor about the case it
-  actually protects against — moving `changed()` below `try_own()`.
+  actually protects against - moving `changed()` below `try_own()`.
 - Missing evidence: nothing in the crate records which of the two orderings is
   load-bearing, and no test distinguishes them, so the distinction rests on the
   tokio version pinned in `Cargo.lock` (1.53.1). A future tokio that weakened the

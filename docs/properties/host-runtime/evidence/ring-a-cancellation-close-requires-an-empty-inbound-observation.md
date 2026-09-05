@@ -122,7 +122,7 @@ empty:
    which happens when the connection task drops the receiver it got in
    `PreparedRing` (`:97`). So once the host stops reading, the next received
    frame ends the loop. That bounds the window at one frame, not at the peer's
-   quiescence — but only once the receiver is actually dropped.
+   quiescence - but only once the receiver is actually dropped.
 2. Backpressure through the bounded inbound channel.
    `mpsc::channel(queue_frames)` (`:230`). If the read loop stops draining
    without dropping the receiver, `inbound.send(..).await` at `:551-556`
@@ -150,8 +150,8 @@ close = crate::setup_socket::observe_peer(&mut stream) => {
 
 `peer_gen.token` is the ring's `root`, so a peer whose setup socket dies while
 its ring still holds committed frames cancels both tokens, and the endpoint
-thread keeps draining those frames. That is arguably correct — the frames were
-committed before the close and the drain contract says to deliver them — but
+thread keeps draining those frames. That is arguably correct - the frames were
+committed before the close and the drain contract says to deliver them - but
 it means the peer-death path and the drain path are the same path, and a peer
 that dies with a full ring extends its own teardown.
 
@@ -188,14 +188,14 @@ failures are on the sparse-signal path rather than in the drain itself.
   and none exists in `host-runtime`.
 - *Lost wake, consequence bounded by the cancellation path.* If a doorbell
   signal were lost anyway, an uncancelled connection would stall on committed
-  frames until the next publication — a liveness failure belonging to the
+  frames until the next publication - a liveness failure belonging to the
   transport's wake protocol (Part 1 territory post-#131). For *this* record
   the exposure is narrower: the `Cancelled` report does not depend on the
   doorbell at all, because `read_cancel.cancelled()` is a `CancellationToken`
   arm and the post-cancellation drain calls `try_receive` directly. So a lost
   wake cannot defer the cancellation report, but it can mean frames committed
   before the cancellation edge sat undelivered until the cancellation forced
-  the re-entry — a drain-contract violation a fault-free campaign should
+  the re-entry - a drain-contract violation a fault-free campaign should
   witness against the frame-count bound.
 
 ## Timing windows and dependencies
@@ -205,7 +205,7 @@ whichever comes first:
 
 - at most `N + 1` further `receive_one` invocations, where `N` is the number
   of frames committed before the cancellation edge, once the peer stops
-  publishing — a frame-count bound, since there is no periodic sleep left to
+  publishing - a frame-count bound, since there is no periodic sleep left to
   count against;
 - one further received frame once the inbound receiver is dropped;
 - `frame_deadline` if the charge wait is entered, since `:527-532` exits on
@@ -242,7 +242,7 @@ stop the pressure, poll until stable within an explicit bound, then check.
    `Ok(true)` on every pass. Eight descriptor slots (profile-pinned; asserted
    at `:903`) and a peer that republishes as leases release is sufficient.
 3. Cancel `root` or `read_cancel` while the traffic continues.
-4. Assert the thread has **not** exited while traffic continues — that is the
+4. Assert the thread has **not** exited while traffic continues - that is the
    preconditions half, and it is what makes the test fire on a correct
    implementation rather than only on a defect.
 5. Stop the peer's publication. Poll until the endpoint thread has exited,
@@ -293,7 +293,7 @@ traffic, and no `host-runtime` inline test runs in CI.
   `:551-556`), so the unresolved no-bound residual carries over verbatim.
 - Missing evidence: none for the mechanics; the `read_loop` question below is
   still the open half.
-- Conclusion: resolved with answer — the record's guarantee, check semantics,
+- Conclusion: resolved with answer - the record's guarantee, check semantics,
   and frame-count bound survive the rewrite; the mechanism description and
   every line citation were replaced; a lost-wake/wake-race failure mode was
   added to the failure scenario. History: the pre-#131 version of this file
@@ -334,8 +334,8 @@ traffic, and no `host-runtime` inline test runs in CI.
   and close frames while host-to-peer capacity is free". `:449-453` justifies
   the drain-then-report design. Adding a `root.is_cancelled()` check to the
   fast branch would bound the teardown but would drop frames the drain design
-  deliberately delivers, and it would do so for `root` specifically — the
-  generation token, cancelled on peer death — so the frames dropped would be
+  deliberately delivers, and it would do so for `root` specifically - the
+  generation token, cancelled on peer death - so the frames dropped would be
   exactly the ones a dying peer committed before its socket closed.
 - Missing evidence: whether delivering post-cancellation committed frames is a
   protocol obligation or a courtesy. I found nothing stating an inbound drain

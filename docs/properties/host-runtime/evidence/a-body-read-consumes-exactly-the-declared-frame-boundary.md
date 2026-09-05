@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `frame_read.rs:63-68` documents the cap as load-bearing: "`take` caps the read
-at the frame boundary even when the allocated capacity exceeds `len` — without
+at the frame boundary even when the allocated capacity exceeds `len` - without
 that cap a pipelined next header would be read as this frame's body." The module
 doc repeats it at `:12-14`. Reading the loop next to the cap shows the two are
 measured in different units.

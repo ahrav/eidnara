@@ -76,7 +76,7 @@ The re-scope's two carried leads were also verified.
 19 claims, ordered by consequence. `Where stated` is the claim source; `Implementing
 code` is where the obligation is discharged, or `NOT FOUND`.
 
-### C1 — the ring is the only application transport, and no selector survives
+### C1 - the ring is the only application transport, and no selector survives
 
 Where stated: `docs/shm-transport.md:5` ("The fixed ring is the only
 application transport"), `:7` ("There is no runtime transport selector, alternate
@@ -87,7 +87,7 @@ frame channel"), and `frame_channel/contract_tests.rs:5-7` ("The sole
 instantiation below uses the production ring transport").
 
 Implementing code: `frame_channel/contract_tests.rs:524`,
-`frame_channel_contract_suite!(RingFactory)` — one registration, no second
+`frame_channel_contract_suite!(RingFactory)` - one registration, no second
 factory. `ring_transport.rs:350-361` is the sole `impl FrameReceiver`.
 `lib.rs:21` exports `ring_transport` as the only transport module.
 
@@ -95,7 +95,7 @@ Mechanical enforcement: the `mandatory-ring-architecture` job (`ci.yml:41`,
 `:55`, `:58`) running `scripts/check-shm-architecture.ts`. See
 "Conventionally-enforced-only" for what that gate can and cannot see.
 
-### C2 — one dedicated OS thread creates and owns both `!Send` ring endpoints
+### C2 - one dedicated OS thread creates and owns both `!Send` ring endpoints
 
 Where stated: `ring_transport.rs:3-4`, the module's load-bearing design claim.
 
@@ -108,7 +108,7 @@ receives `rings` by value at `:365`. Nothing else takes a reference to
 Existing check: none. No test asserts thread confinement; the two `compile_fail`
 doctests cover `ReceiveLease`, not the ring endpoints.
 
-### C3 — a transport failure is terminal for the affected connection and replays nothing
+### C3 - a transport failure is terminal for the affected connection and replays nothing
 
 Where stated: `docs/shm-transport.md:7` ("A transport failure is
 terminal for the affected connection"), `:47`,
@@ -125,7 +125,7 @@ Existing check: `contract_failure_after_publication_begins_retires_without_repla
 (`contract_tests.rs:436-439` via the macro, body at `:267`). In-crate, never runs
 in CI.
 
-### C4 — active and quarantined charges are reported separately
+### C4 - active and quarantined charges are reported separately
 
 Where stated: `docs/shm-transport.md:21` ("Active and quarantined
 charges are reported separately"), `:65` ("active and quarantined accounting"),
@@ -138,7 +138,7 @@ The *producing* half is **NOT FOUND**: no `host-runtime` call site reaches
 Existing check: `ring_transport.rs:774` and `:800` assert the quarantined charge
 is `ZERO`, which is what a never-called quarantine path produces. Both in-crate.
 
-### C5 — inbound structural validation happens on the header alone, before body admission
+### C5 - inbound structural validation happens on the header alone, before body admission
 
 Where stated: `frame_channel.rs:50-57`, explicitly: "Classification uses the
 header alone, BEFORE any body admission: a role-invalid type with a large
@@ -152,7 +152,7 @@ and before `lease.to_vec()` at `:519-521`. The ordering discharges the claim.
 Existing check: none direct. No test drives a role-invalid type with a large
 declared `len` and asserts that no budget was held.
 
-### C6 — the ingress-budget wait services queued outbound frames
+### C6 - the ingress-budget wait services queued outbound frames
 
 Where stated: `ring_transport.rs:501-503` and `:410-414`, and
 `contract_tests.rs:107-109` ("Concurrent sends and receives both make
@@ -167,14 +167,14 @@ re-scope flagged as transferring directly onto the new file
 (`scope-map-and-risk-ranking.md:262-265`); the citation fix it names
 (`POLL_INTERVAL` now `ring_transport.rs:33`) is confirmed.
 
-### C7 — the doctor reports either healthy or one of five terminal classes
+### C7 - the doctor reports either healthy or one of five terminal classes
 
 Where stated: `docs/shm-transport.md:53-59` (the five: `missing_addon`,
 `identity_mismatch`, `setup_failure`, `peer_death`, `resource_exhaustion`) and
 `:71` ("Client diagnostics use the same terminal-class set").
 
 Implementing code: split across languages, and unevenly. The Rust host can emit
-exactly one of the five — `"setup_failure"` at `ring_transport.rs:187` is the
+exactly one of the five - `"setup_failure"` at `ring_transport.rs:187` is the
 only occurrence of any of the five string literals anywhere under `crates/`. The
 other four exist only in TypeScript: `types.ts:69-73` declares the closed set,
 `shared-memory-failure.ts:10-30` produces four of them, `client.ts:1588-1592`
@@ -186,7 +186,7 @@ error-to-class mappings and runs in CI (`ci.yml:211`). The Rust side has
 `ring_transport.rs:788`, which asserts `error_class` is `Null` on the healthy
 path only.
 
-### C8 — a healthy report includes only bounded, aggregate data, and never secrets
+### C8 - a healthy report includes only bounded, aggregate data, and never secrets
 
 Where stated: `docs/shm-transport.md:61-69` (the seven permitted
 fields) and `:73` (the never-included list: setup-socket paths, native handles,
@@ -204,9 +204,9 @@ encoded output for seven forbidden substrings (`:807-818`). In-crate, never runs
 in CI. Note the negative check is a substring scan over field *names*, so it
 would not catch a grant value emitted under an innocuous key.
 
-### C9 — the fixed profile charges both directions with the stated numbers
+### C9 - the fixed profile charges both directions with the stated numbers
 
-Where stated: `docs/shm-transport.md:77` — "16 descriptors, 128 MiB of
+Where stated: `docs/shm-transport.md:77` - "16 descriptors, 128 MiB of
 arena storage, 16 receive leases, two mappings, two mapping file descriptors,
 one endpoint worker, one client instance, and no pinned workers".
 
@@ -224,7 +224,7 @@ Existing check: `ring_profile_pins_per_connection_grant_geometry`
 (`ring_transport.rs:822`) pins depth, leases and arena bytes but not the derived
 charge vector. In-crate.
 
-### C10 — process bounds multiply the profile with checked arithmetic
+### C10 - process bounds multiply the profile with checked arithmetic
 
 Where stated: `docs/shm-transport.md:77` ("checked arithmetic"), `:21`
 ("Every configured limit is finite and validated at startup").
@@ -234,15 +234,15 @@ Implementing code: `process_limits` (`ring_transport.rs:75-88`), eight
 
 Existing check: none in this sub-part. Nothing exercises the overflow return.
 
-### C11 — a conforming implementation accepts one valid maximum-size frame
+### C11 - a conforming implementation accepts one valid maximum-size frame
 
-Where stated: `docs/host-wire-protocol.md:290` (§6.3) — "MUST be able to
+Where stated: `docs/host-wire-protocol.md:290` (§6.3) - "MUST be able to
 accept one otherwise valid maximum-size frame on an admitted authenticated
 connection", and "MUST NOT advertise v2 conformance while rejecting an otherwise
 valid frame solely because its declared length is at or below 64 MiB".
 
 Implementing code: `MAX_BODY_LEN` is `MAX_FRAME_BODY_LEN` (`wire.rs:371`) and
-the arena is exactly 64 MiB per direction, so a 64 MiB body fits — with zero
+the arena is exactly 64 MiB per direction, so a 64 MiB body fits - with zero
 bytes to spare. `validate_inbound_header` rejects only `> MAX_BODY_LEN`
 (`frame_channel.rs:59-61`).
 
@@ -251,22 +251,22 @@ Existing check: `exact_commit_covers_empty_boundary_segmented_and_maximum_bodies
 `ProducerReservation` over synthetic spans, not through a real ring. No check
 publishes a 64 MiB frame through `DuplexRing`. See quiet area Q3.
 
-### C12 — an oversize channel-0 control request is rejected, not closed
+### C12 - an oversize channel-0 control request is rejected, not closed
 
 Where stated: `wire.rs:373` ("Profile cap for a channel-0 control body (protocol
 §7.1)") and `docs/host-wire-protocol.md:296-298` (aggregate limits take
 effect after framing accepts the body).
 
-Implementing code: `ring_transport.rs:474-485` — releases the lease, sends
+Implementing code: `ring_transport.rs:474-485` - releases the lease, sends
 `InboundEvent::Rejected` carrying only `corr`, and returns `Ok(true)`. The cap
 is `MAX_CONTROL_BODY_LEN = 65_536` (`wire.rs:374`).
 
 Existing check: none in this sub-part. No in-crate or contract-suite test drives
 the rejection branch.
 
-### C13 — decode never panics on malformed input
+### C13 - decode never panics on malformed input
 
-Where stated: `wire.rs:305` — "Never panics on malformed input — returns a typed
+Where stated: `wire.rs:305` - "Never panics on malformed input - returns a typed
 [`DecodeError`]".
 
 Implementing code: `decode_header` (`wire.rs:299` onward) with
@@ -278,9 +278,9 @@ densest coverage in the sub-part, and `tests/protocol_vectors.rs` (15 tests)
 pins committed byte vectors. The re-scope carries four lens-A records over this
 surface unchanged (`scope-map-and-risk-ranking.md:188-192`).
 
-### C14 — the frozen prefix keeps fixed meaning and position in every version
+### C14 - the frozen prefix keeps fixed meaning and position in every version
 
-Where stated: `wire.rs:16-18` — "**Frozen prefix:** `len` (u32 @ 0) and `ver`
+Where stated: `wire.rs:16-18` - "**Frozen prefix:** `len` (u32 @ 0) and `ver`
 (u8 @ 4) keep fixed meaning and position in every future version;
 `decode_header` enforces that discipline", and
 `docs/host-wire-protocol.md:242-244`.
@@ -295,7 +295,7 @@ the re-scope's finding that the record on this surface names "the production TCP
 reader" as its consumer, which no longer exists
 (`scope-map-and-risk-ranking.md:244-249`).
 
-### C15 — one permit is one byte, charges travel with moves, and a failed split creates no permits
+### C15 - one permit is one byte, charges travel with moves, and a failed split creates no permits
 
 Where stated: `wire.rs:376-384` (the `ByteBudget` contract, including "Tokio's
 semaphore is FIFO, so a queued maximum-size acquisition cannot be starved by
@@ -310,10 +310,10 @@ budget return to 100. `inbound_materialization_cannot_exceed_its_byte_budget`
 (`ring_transport.rs:839`) drives a synthetic charge closure through
 `try_recv_with`. Both in-crate. The FIFO no-starvation claim has no check.
 
-### C16 — a committed body always owns its charge, and charge return is an ownership property
+### C16 - a committed body always owns its charge, and charge return is an ownership property
 
-Where stated: `frame_channel.rs:110-115` — "This makes charge return an
-ownership property instead of a caller convention" — and `:228-230`.
+Where stated: `frame_channel.rs:110-115` - "This makes charge return an
+ownership property instead of a caller convention" - and `:228-230`.
 
 Implementing code: `ProducerReservation` (`frame_channel.rs:110-227`) and
 `ProducedBody` (`:228-289`), with the `.expect("a committed body always owns its
@@ -323,7 +323,7 @@ Existing check: `producer_failures_never_publish_and_return_each_charge_once`
 (`contract_tests.rs:689`) covers underfill, overflow, double-drop and abort.
 In-crate.
 
-### C17 — receive bytes are visible only through a lexical, `!Send`, non-`'static` lease
+### C17 - receive bytes are visible only through a lexical, `!Send`, non-`'static` lease
 
 Where stated: `frame_channel.rs:8-10` and `:290-295`.
 
@@ -337,7 +337,7 @@ sub-part CI executes** (`ci.yml:190`). Also
 `close_with_active_lease_quarantines_and_never_reopens_storage` (`:689`),
 both in-crate.
 
-### C18 — one explicit copy per flattened body, zero on direct and leased paths
+### C18 - one explicit copy per flattened body, zero on direct and leased paths
 
 Where stated: `frame_channel.rs:78-81` and `:368-369` ("One call records one
 body copy even when the body is empty").
@@ -349,7 +349,7 @@ Existing check: `copied_control_frame_records_one_host_adapter_copy`
 (`ring_transport.rs:882`) and `owned_adapter_copies_once_...`
 (`contract_tests.rs:673`). Both in-crate.
 
-### C19 — in-band Goodbye is a complete frame; transport loss is never reclassified as orderly shutdown
+### C19 - in-band Goodbye is a complete frame; transport loss is never reclassified as orderly shutdown
 
 Where stated: `contract_tests.rs:384-386`,
 `docs/host-wire-protocol.md:294` ("Clean `Goodbye` followed by joined
@@ -357,7 +357,7 @@ teardown is orderly connection close"), `docs/shm-transport.md:49`
 ("Clean `Goodbye` and unexpected setup-socket closure are distinct").
 
 Implementing code: on the ring side, `ShmReceiver::recv` maps a closed inbound
-channel to `Err(ReadClose::CleanEof)` (`ring_transport.rs:359`) — which is the
+channel to `Err(ReadClose::CleanEof)` (`ring_transport.rs:359`) - which is the
 *same* classification a clean in-band Goodbye reaches through
 `connection.rs:401-404`. The distinction the doc claims is carried by
 `observe_peer` on the setup socket, which is 2c scope. See lead L4.
@@ -369,19 +369,19 @@ Existing check: `contract_goodbye_at_a_frame_boundary_is_delivered`
 
 Recorded with both sides cited, not resolved. Four leads.
 
-**L1 — quarantined accounting is documented as a live signal and is structurally
+**L1 - quarantined accounting is documented as a live signal and is structurally
 zero.** Three documentation lines present it as operational
 (`docs/shm-transport.md:21`, `:65`, `:79`), the diagnostics reporter
 emits the field (`ring_transport.rs:182`), and no `host-runtime` code path can make it
 nonzero because `Admission::quarantine`
 (`shm-transport/src/profile.rs:568`) has no `host-runtime` caller. The doc is the
 claim source, so the finding is a contract-versus-code disagreement, not a dead
-field. Note that `:79`'s promise — "quarantined charges remain within the
-configured process bound" — is satisfied vacuously, which is the shape that
+field. Note that `:79`'s promise - "quarantined charges remain within the
+configured process bound" - is satisfied vacuously, which is the shape that
 makes this hard to notice from the test side: the two assertions that touch it
 (`ring_transport.rs:774`, `:800`) assert `ZERO` and pass.
 
-**L2 — the host fails closed on ring unavailability while `diagnostics()` still
+**L2 - the host fails closed on ring unavailability while `diagnostics()` still
 says `healthy`.** `prepare` has five `Err(RingUnavailable)` returns:
 admission rejection (`ring_transport.rs:239-242`), runtime-or-ring creation
 failure (`:264-270`), descriptor marshalling failure (`:271-275`), thread-spawn
@@ -392,7 +392,7 @@ that has refused every connection for four of the five reasons reports
 `state: "healthy"`, `error_class: null`, and all-zero counters. Sibling lens A
 raised the same disagreement from the fail-closed side.
 
-**L3 — the five-class terminal contract is asserted as one set and implemented in
+**L3 - the five-class terminal contract is asserted as one set and implemented in
 two languages with a 1:4 split.** `docs/shm-transport.md:53-59` states
 the set without naming an owner, and `:71` says client diagnostics "use the same
 terminal-class set". In code, `crates/` contains exactly one of the five literals
@@ -405,7 +405,7 @@ for auditability, that producer classifies by regular expression over error
 (`packages/shm-native/src/setup.rs:360`, `:366`, `:373`). Nothing ties the two
 sides. Listed again under conventionally-enforced-only.
 
-**L4 — the attachment and activation counters can never differ, but the doctor
+**L4 - the attachment and activation counters can never differ, but the doctor
 reports them as two facts.** `docs/shm-transport.md:66` promises
 "completed attachment and activation counts" as separate report fields, and
 `diagnostics()` emits them separately (`ring_transport.rs:201-202`). Their only
@@ -447,8 +447,8 @@ file *paths* and `:29` matches `provider_recovery` in source text over
 
 **One residual, and it is the opposite shape.** `contract_tests.rs:53-55` still
 describes the `PeerDriver` trait's purpose as keeping the suite honest across
-implementations — "Implementations must encode and decode independently of the
-channel so the suite never uses the implementation to verify itself" — and
+implementations - "Implementations must encode and decode independently of the
+channel so the suite never uses the implementation to verify itself" - and
 `:72-74` says "Each provider supplies one factory". The plural framing survives a
 world with one factory (`:524`). This is not a deleted *mechanism*; it is a
 rationale whose premise the deletion removed, which the re-scope already
@@ -561,10 +561,10 @@ datapath. 4 are named in CI; 6 are not.**
 
 | Binary | Tests | CI status |
 | --- | --- | --- |
-| `client.rs` | 6 | **named** — `ci.yml:132`, `:179`, `:187` |
-| `lifecycle.rs` | 35 | **named** — `ci.yml:179`, `:187` |
-| `shm_failure_modes.rs` | 6 | **named** — `ci.yml:133`, `--test-threads=1` |
-| `shm_soak.rs` | 2 | **partial** — `ci.yml:134-135` names `short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` with `--exact`; `release_eight_hour_source_tree_soak` (`:123`) additionally carries `#[ignore = "eight-hour source-tree resource soak"]` (`:122`) |
+| `client.rs` | 6 | **named** - `ci.yml:132`, `:179`, `:187` |
+| `lifecycle.rs` | 35 | **named** - `ci.yml:179`, `:187` |
+| `shm_failure_modes.rs` | 6 | **named** - `ci.yml:133`, `--test-threads=1` |
+| `shm_soak.rs` | 2 | **partial** - `ci.yml:134-135` names `short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` with `--exact`; `release_eight_hour_source_tree_soak` (`:123`) additionally carries `#[ignore = "eight-hour source-tree resource soak"]` (`:122`) |
 | `protocol_vectors.rs` | 15 | unnamed |
 | `dispatch.rs` | 20 | unnamed |
 | `routing.rs` | 12 | unnamed |
@@ -639,7 +639,7 @@ files is inside a `#[cfg(test)]` module.
 **`catch_unwind`: 2, both load-bearing and both on the endpoint thread.**
 `ring_transport.rs:279-290` wraps the whole `run_endpoint` future, so an endpoint
 panic falls through to `admission.release()` (`:291`) and
-`done_tx.send(())` (`:292`) — a panicking worker is reported to the host as
+`done_tx.send(())` (`:292`) - a panicking worker is reported to the host as
 orderly completion. `:560-563` wraps one publication, converting a panic into
 `Err(())` and thus into channel retirement (`:447-451`). Sibling lens A's
 `ring-a-endpoint-thread-panic-is-reported-as-orderly-completion` owns the first.
@@ -699,7 +699,7 @@ Ranked by the gap between what the code decides and what any check proves.
 
 4. **The oversize channel-0 rejection path has no test at all.**
    `ring_transport.rs:474-485` releases the lease, synthesizes
-   `InboundEvent::Rejected` and continues the generation — the one inbound branch
+   `InboundEvent::Rejected` and continues the generation - the one inbound branch
    that neither delivers a frame nor closes the connection. `MAX_CONTROL_BODY_LEN`
    (`wire.rs:374`) appears in no test in the sub-part. The re-scope predicted this
    mechanism differs from the drain it replaced
@@ -712,7 +712,7 @@ Ranked by the gap between what the code decides and what any check proves.
    descriptor names one complete header and body
    (`docs/host-wire-protocol.md:292`). Sibling lens A's
    `ring-a-rejected-drain-failure-close-has-no-producer` owns the producer half.
-   `ReadClose::Io` (`:45`) is similar in shape — consumed at
+   `ReadClose::Io` (`:45`) is similar in shape - consumed at
    `connection.rs:403`, produced nowhere. Both survive only because of the
    `allow` at `frame_channel.rs:32`.
 
@@ -731,8 +731,8 @@ Ranked by the gap between what the code decides and what any check proves.
    Eight `checked_mul` calls (`ring_transport.rs:75-88`) implement the
    "checked arithmetic" the doc promises (`docs/shm-transport.md:77`).
    Nothing calls `process_limits` with a connection count large enough to
-   overflow, so the `None` path — which a caller must translate into a startup
-   refusal — is never observed.
+   overflow, so the `None` path - which a caller must translate into a startup
+   refusal - is never observed.
 
 8. **`macos-15-intel` builds this code and runs none of its tests.** The
    `shm-source-build` matrix (`ci.yml:137-145`) includes three targets, but the

@@ -36,7 +36,7 @@ exist, both in tests: `routing.rs:498` uses 4 and `runtime.rs:1319` uses 1.)
 The exhaustion arm does two things, and the second one is the finding.
 `gen.token.cancel()` retires the generation. `gen.writer.discard()`
 (`frame_channel.rs:701-703`) flips the writer's discard token, which drops every
-frame already queued — including terminals belonging to *other* correlations that
+frame already queued - including terminals belonging to *other* correlations that
 were settled successfully and are merely waiting for egress.
 
 The comment at `:630-636` is explicit about the reasoning and about the cost:
@@ -60,8 +60,8 @@ Callers of `emit_rejection`, all on the pre-dispatch path:
 | `connection.rs:626` | control pending permit exhausted | `server_busy` |
 
 The read loop has a parallel bound for oversize-control rejections at
-`connection.rs:430-434`, which on exhaustion does the same thing — cancel,
-discard, and return `ReadExit::Peer` — with the comment at `:426-429` giving the
+`connection.rs:430-434`, which on exhaustion does the same thing - cancel,
+discard, and return `ReadExit::Peer` - with the comment at `:426-429` giving the
 same reasoning.
 
 ## Failure scenario
@@ -69,7 +69,7 @@ same reasoning.
 1. A client saturates the egress byte budget, which
    `tests/dispatch.rs:788` (`egress_budget_deadline_retires_the_generation`)
    shows is reachable.
-2. The client sends 33 or more requests that fail admission — trivially arranged
+2. The client sends 33 or more requests that fail admission - trivially arranged
    by targeting a channel it has closed, which takes gate 4 at
    `dispatch.rs:861`.
 3. The first 32 spawn rejection tasks, all blocked in
@@ -110,7 +110,7 @@ scope.
 3. Pipeline 33 or more requests on the closed route without reading the socket,
    so the rejections cannot drain.
 4. Assert either that a `server_busy` or `unknown_channel` terminal is queued for
-   each correlation, or that the generation is cancelled — the disjunction.
+   each correlation, or that the generation is cancelled - the disjunction.
 5. The blast-radius arm: settle one *unrelated* request successfully just before
    the 33rd rejection, and assert its terminal is lost when `discard()` runs.
 
@@ -130,7 +130,7 @@ workflow.
   oversize bodies would otherwise accumulate tasks, oneshots, and captured
   Arcs".
 - Missing evidence: none.
-- Conclusion: resolved with answer — the bound genuinely caps task creation, not
+- Conclusion: resolved with answer - the bound genuinely caps task creation, not
   merely concurrent emission.
 
 ### Q: Does `discard()` really drop already-queued frames for other correlations?
@@ -158,9 +158,9 @@ workflow.
   and §8.3's finite-limits paragraph.
 - Findings: §10.2 states "yes; host proves no handler dispatch (limit exhaustion
   before dispatch, Section 8.3)" without qualification. §8.3 adds "Rejection MUST
-  NOT silently queue without a deadline", which the code honours — it does not
+  NOT silently queue without a deadline", which the code honours - it does not
   queue at all past the bound. So the letter of §8.3 is satisfied while §10.2's
   unconditional terminal promise is not.
 - Missing evidence: none.
-- Conclusion: resolved with answer — a contract-versus-code disagreement,
+- Conclusion: resolved with answer - a contract-versus-code disagreement,
   recorded as lead 2 in the lens file. Not resolved in the doc's favour.

@@ -72,7 +72,7 @@ frame.with_lease(|lease| match lease.contiguous_bytes() {
 `contiguous_bytes` (`frame_channel.rs:364-366`) returns `Some` exactly when
 `second.is_none()`, which `ReceiveLease::contiguous` (`:317-319`) always
 arranges. So the `None` arm never runs, and the doc comment above it
-(`connection.rs:577-579` — "A body that wraps the ring arena end flattens
+(`connection.rs:577-579` - "A body that wraps the ring arena end flattens
 through the explicit copying adapter first") describes a path that cannot be
 taken, because the flattening already happened one layer down.
 
@@ -121,7 +121,7 @@ The consequences are about what is not tested and what a reader will believe.
 
 First, the zero-copy design the module doc describes is not the design in use.
 `frame_channel.rs:8-10` says receive bytes are "visible only through a lexical
-`ReceiveLease`" — true of the *type*, false of the *storage*: the lease the
+`ReceiveLease`" - true of the *type*, false of the *storage*: the lease the
 engine sees borrows the host's own `Vec`, so its `!Send` and non-`'static`
 bounds (enforced by the two compile-fail doctests at `:296-308`) protect against
 escaping a copy, not against escaping shared memory. The protection that matters,
@@ -131,8 +131,8 @@ not holding a reference into peer-writable storage, is Part 1's
 
 Second, the wrap-around case is untested end to end at the host boundary. A body
 straddling the arena wrap produces two spans in the transport, and the host's
-only handling is `to_vec`'s loop. If that loop were wrong — say it mis-ordered the
-spans — the host would deliver a corrupted body and nothing in `host-runtime` would
+only handling is `to_vec`'s loop. If that loop were wrong - say it mis-ordered the
+spans - the host would deliver a corrupted body and nothing in `host-runtime` would
 notice, because the only assertion on segment structure is
 `contract_tests.rs:141`, on a hand-built frame:
 
@@ -200,7 +200,7 @@ contract-test blocks at `contract_tests.rs:527-700`.
   `connection.rs:577-587`; `contract_tests.rs:527-700` (the
   `ownership_contract` module).
 - Findings: the three dormant abstractions form a coherent design that a
-  *different* backend would have used — one that hands the host raw spans and lets
+  *different* backend would have used - one that hands the host raw spans and lets
   the host own the reservation and the lease bookkeeping. The ring backend does
   not: it owns its own reservation type and its own lease, and it copies at the
   boundary. `LeaseTracker::close`'s doc at `:415-417` even names the constraint

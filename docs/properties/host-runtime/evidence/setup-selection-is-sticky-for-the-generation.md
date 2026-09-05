@@ -17,9 +17,9 @@ resource handle.
 `setup.state` is written in exactly two places in the whole crate, confirmed by
 grep over `crates/host-runtime/src/connection.rs`:
 
-- `:960` — `setup.state = TransportState::TcpCommitted;` immediately before
+- `:960` - `setup.state = TransportState::TcpCommitted;` immediately before
   `respond_tcp` at `:961`.
-- `:1103` — `setup.state = TransportState::CandidateSetup;` in `grant_candidate`,
+- `:1103` - `setup.state = TransportState::CandidateSetup;` in `grant_candidate`,
   immediately before `setup.handoff = Some(handoff)` at `:1104`.
 
 The two constructors set an initial state rather than transition:

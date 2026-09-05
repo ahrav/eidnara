@@ -43,7 +43,7 @@ overlap admission.
   `:246-247`, then takes the instance lock at `:248`. The comment at
   `:241-245` gives the reason: the lifetime fence lives outside the replaceable
   `eidnara` subtree. `probe_lifecycle`'s own comment at `:925-928` states the
-  matching teardown order — fence taken before the runtime lock at start and
+  matching teardown order - fence taken before the runtime lock at start and
   released after it at teardown.
 - The absorbing grace is `LOCK_DISAGREEMENT_GRACE = 2` (`:929`) with
   `GRACE_DELAY = Duration::from_millis(25)` (`:930`), applied at `:999-1003`.
@@ -114,12 +114,12 @@ flock itself.
   header at `:1300-1302`; the test-function index across `:1324-2499`.
 - Findings: **Correction.** The test module carries no platform gate, and the
   only Linux-gated items are the `within` helper at `:2013` and the two FIFO
-  hang tests at `:2040` and `:2081`. The tests bearing on this property —
+  hang tests at `:2040` and `:2081`. The tests bearing on this property -
   `probe_reports_stopped_on_an_empty_root_without_creating_anything` (`:1489`),
   `free_lock_with_stale_publication_is_stopped_and_untouched` (`:1626`),
   `concurrent_probes_never_resurrect_stale_evidence_as_live` (`:2135`),
   `a_replaced_eidnara_subtree_is_not_reported_stopped_while_the_daemon_lives`
-  (`:2275`), and `lifetime_and_runtime_lock_disagreement_is_wedged` (`:2400`) —
+  (`:2275`), and `lifetime_and_runtime_lock_disagreement_is_wedged` (`:2400`) -
   are not Linux-gated and run on any unix.
 - Missing evidence: none.
 - Conclusion: the catalog's "all Linux-only" qualifier is wrong for this

@@ -5,7 +5,7 @@
 The task named the pattern to hunt: Parts 4c and 4d found handlers returning
 success without writing, and six error paths presenting as success. Those live in
 `daemon`, on the other side of this boundary. The question here is what this
-layer does with a handler result — does it validate it, and can a handler failure
+layer does with a handler result - does it validate it, and can a handler failure
 reach the client as a success.
 
 ## Evidence trail
@@ -41,7 +41,7 @@ and in neither case does it compare the two.
 A handler can reach the accepted arm with zero bytes written. `reserve_output`
 (`handler.rs:466-468`) delegates to `StreamSink::reserve`
 (`dispatch.rs:515-543`), which returns a buffer with
-`body: Vec::with_capacity(max_len + HEADER_LEN)` at `:538` — capacity, not
+`body: Vec::with_capacity(max_len + HEADER_LEN)` at `:538` - capacity, not
 length. `OutputBuffer::extend_from_slice` and `resize` (`handler.rs:381-396`)
 refuse to exceed `max_len` but nothing obliges the handler to call either. So
 `RequestOutcome::Response { body: <reserved, unwritten>, binary: false }` is a
@@ -130,7 +130,7 @@ covers only the ceiling, and it is not in CI. Nothing covers the floor.
   decoding both accept it.
 - Missing evidence: whether `tests/protocol_vectors.rs` pins a golden vector that
   would catch this. I did not read it.
-- Conclusion: resolved with answer — legal on the wire. The remaining question is
+- Conclusion: resolved with answer - legal on the wire. The remaining question is
   client behaviour, below.
 
 ### Q: Does any client treat an empty-body `Response` as a violation?
@@ -149,10 +149,10 @@ covers only the ceiling, and it is not in CI. Nothing covers the floor.
   (`OutputBuffer` docs), protocol §9.1 ("Transport never parses routed
   application bodies").
 - Findings: §9.1 forbids the host from parsing the body, so a semantic check is
-  out. But a *structural* check — written length equals reserved length, or at
-  least nonzero — needs no parsing, and the type system already tracks both
+  out. But a *structural* check - written length equals reserved length, or at
+  least nonzero - needs no parsing, and the type system already tracks both
   numbers (`body.len()` and `max_len`, both fields of `OutputBuffer`).
 - Missing evidence: whether any legitimate handler returns a deliberately empty
   unary success, which would make a nonzero-length rule wrong.
-- Conclusion: needs human input — whether an empty unary success is a legitimate
+- Conclusion: needs human input - whether an empty unary success is a legitimate
   application outcome determines which structural check is admissible.

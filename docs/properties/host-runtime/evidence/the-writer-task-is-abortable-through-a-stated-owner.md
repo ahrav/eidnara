@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 The forced shutdown path is `shared.abort_all()` at `runtime.rs:1182` and again
-at `:1192`, and it iterates `abort_handles` — the registry that only
+at `:1192`, and it iterates `abort_handles` - the registry that only
 `spawn_tracked` writes (`runtime.rs:151-154`). Checking which connection-path
 tasks are missing from that registry found the writer: it is the one task on the
 default TCP path that the forced sweep cannot abort directly, while the tracker
@@ -20,8 +20,8 @@ The spawn form is unambiguous. `connection.rs:187`:
 `spawn_tracked` (`runtime.rs:146-155`) calls `self.tracker.spawn(future)` and
 then pushes `handle.abort_handle()` into `abort_handles`; `spawn_lifecycle`
 (`runtime.rs:162-168`) calls `self.tracker.spawn(future)` and stops. Site `:187`
-takes neither helper, so it lands in the same state as `spawn_lifecycle` —
-tracked, no abort handle — but without `spawn_lifecycle`'s documented
+takes neither helper, so it lands in the same state as `spawn_lifecycle` -
+tracked, no abort handle - but without `spawn_lifecycle`'s documented
 abort-exempt rationale. The promoted arm repeats the shape at `:210`, re-wrapping
 the candidate I/O handle that `:1081` created; that one *is* in `abort_handles`,
 because `:1081` uses `spawn_tracked`.
@@ -63,7 +63,7 @@ failure is the same: `run` holds the instance lock past the deadline.
 Existing check: none for the forced path, confirmed. The in-crate writer tests
 `tcp_frame_channel.rs:1062` `stalled_consumer_write_retires_generation_and_frees_charges`
 and `:1130` `writer_failure_retires_generation` both drive
-writer-*initiated* retirement — the writer decides to stop — not an external
+writer-*initiated* retirement - the writer decides to stop - not an external
 abort arriving through the chain. They also use the `#[cfg(test)]`
 `spawn_writer` helper (`tcp_frame_channel.rs:409-421`), whose `tokio::spawn` at
 `:419` bypasses both the tracker and the abort registry, so they cannot observe
@@ -83,7 +83,7 @@ the chain at all.
    completes.
 5. If either link were broken, `:1191` would instead time out into the
    lifecycle-chain wait at `:1201`, and on a second expiry trip the fatal latch
-   at `:1211-1214` and return false — with the instance lock still held, so a
+   at `:1211-1214` and return false - with the instance lock still held, so a
    successor incarnation observes `AlreadyRunning`.
 
 ## Timing windows and dependencies
@@ -103,7 +103,7 @@ terminates shutdown.
 A peer that completes authentication and then never reads, plus enough queued
 frames that the writer parks inside `write_all`. Then a graceful shutdown whose
 deadline is short enough to miss, so the forced branch runs. The oracle is that
-the host tracker's wait completes and `run` returns — the catalog's phrasing,
+the host tracker's wait completes and `run` returns - the catalog's phrasing,
 "assert the host tracker's wait completes." Two negative controls make the test
 prove the chain rather than incidental timing: assert that the *graceful* result
 is non-graceful (so the forced branch really ran), and assert the fatal latch

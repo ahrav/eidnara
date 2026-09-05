@@ -12,29 +12,29 @@ negative or out-of-range value. Nothing names that conjunction.
 
 The gates, in order, all verified at `e447c927`:
 
-1. `config.rs:147-193` `HostLimits::validate` — nonzero and
+1. `config.rs:147-193` `HostLimits::validate` - nonzero and
    `<= Semaphore::MAX_PERMITS` for the six count limits (`:156-167`),
    `max_routes <= u16::MAX` (`:168-174`), `max_resident_bytes` within
    `[MIN_RESIDENT_BYTES, min(Semaphore::MAX_PERMITS, u32::MAX)]`
    (`:175-191`).
-2. `runtime.rs:500-509` — manifest count in `1..=3`, declaration count equal.
-3. `runtime.rs:519-529` — canonical module id, no duplicate id.
-4. `runtime.rs:535-554` — `route_class` and reserved counts must agree in both
+2. `runtime.rs:500-509` - manifest count in `1..=3`, declaration count equal.
+3. `runtime.rs:519-529` - canonical module id, no duplicate id.
+4. `runtime.rs:535-554` - `route_class` and reserved counts must agree in both
    directions.
-5. `runtime.rs:555-578` — four `checked_add` sums: `pending`, `tasks`,
+5. `runtime.rs:555-578` - four `checked_add` sums: `pending`, `tasks`,
    `general_task_holds`, `retained_bytes`. Each overflow is `InitFailed`.
-6. `runtime.rs:693-702` — `reservations.pending < max_pending_requests` and
+6. `runtime.rs:693-702` - `reservations.pending < max_pending_requests` and
    `reservations.tasks < max_handler_tasks`, strict, so a general slot survives.
-7. `runtime.rs:707-715` — `general_task_holds < max_handler_tasks - tasks`.
-8. `runtime.rs:733-740` — `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog + retained`,
+7. `runtime.rs:707-715` - `general_task_holds < max_handler_tasks - tasks`.
+8. `runtime.rs:733-740` - `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog + retained`,
    built with `saturating_add` so a saturating sum rejects rather than wraps.
 
 The consumers those gates protect, all in the `HostShared` literal:
 
-- `runtime.rs:896-902` `ingress_budget` — four chained subtractions, unchecked.
-- `runtime.rs:905-907` `pending_permits` — `max_pending_requests - reservations.pending`.
-- `runtime.rs:908-910` `task_permits` — `max_handler_tasks - reservations.tasks`.
-- `runtime.rs:913-914` — `Semaphore::new` on `max_handshakes` and
+- `runtime.rs:896-902` `ingress_budget` - four chained subtractions, unchecked.
+- `runtime.rs:905-907` `pending_permits` - `max_pending_requests - reservations.pending`.
+- `runtime.rs:908-910` `task_permits` - `max_handler_tasks - reservations.tasks`.
+- `runtime.rs:913-914` - `Semaphore::new` on `max_handshakes` and
   `max_connections`, both validated against `MAX_PERMITS`.
 
 `ByteBudget::new` (`wire.rs:394-400`) casts `u64` to `usize` and calls
@@ -103,7 +103,7 @@ violation.
   `max_resident_bytes` at `min(Semaphore::MAX_PERMITS, u32::MAX)`, a saturated
   floor always exceeds it, so the branch rejects.
 - Missing evidence: none.
-- Conclusion: resolved with answer — it fails closed. `saturating_add` is the
+- Conclusion: resolved with answer - it fails closed. `saturating_add` is the
   correct choice here precisely because the comparison is a lower bound.
 
 ### Q: is `Semaphore::MAX_PERMITS` ever the binding cap rather than `u32::MAX`?

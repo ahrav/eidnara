@@ -1,6 +1,6 @@
 # current-profile-never-names-an-unvalidatable-generation
 
-Scope note: "generation" here is the payload generation — a content-addressed
+Scope note: "generation" here is the payload generation - a content-addressed
 on-disk directory under `generations/`, named by the SHA-256 of its canonical
 manifest bytes. It is not the connection generation of `connection.rs`, which is
 an in-process `u64` lifecycle id. Nothing in this record involves async code.
@@ -31,7 +31,7 @@ directory (`:872-875`); on success `generations_fd` is fsynced (`:883`) before
 returning. Only then does `replace_profile` (`:914-932`) write the profile temp
 (`:922`, fsynced at `:1187`), rename it over `current-profile.json` (`:923-929`),
 and fsync the root (`:930`). So the ordering is: temp contents durable, digest
-entry durable, profile durable — never inverted.
+entry durable, profile durable - never inverted.
 
 Two forward guards keep the profile from naming something unreadable. Staging
 refuses a manifest above `MAX_MANIFEST_BYTES` *before* writing it (`:851-853`),
@@ -102,7 +102,7 @@ inertness of residue, not crash recovery.
   (`eidnara-host.rs:813-847`), `resolve_generation` (`:952-1010`),
   `serve::run` (`serve.rs:538-547`).
 - Findings: the crash outcome itself is decidable and safe, for the reason given
-  above — same digest string, exchanged content, temp removed by prune. The
+  above - same digest string, exchanged content, temp removed by prune. The
   observability half is not. `read_current` and `validate` take no lock
   internally, so exclusion is the caller's. Both launcher readers are under the
   held lock: `preflight_generation`'s comment at `eidnara-host.rs:830` says the

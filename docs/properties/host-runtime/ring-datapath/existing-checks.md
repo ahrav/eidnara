@@ -125,10 +125,10 @@ testing each of the 24 binaries individually at `HEAD`.
 
 | Binary | Tests | CI status |
 | --- | --- | --- |
-| `client.rs` | 6 | **named** — `ci.yml:132`, `:179`, `:187` |
-| `lifecycle.rs` | 35 | **named** — `ci.yml:179`, `:187` |
-| `shm_failure_modes.rs` | 6 | **named** — `ci.yml:133`, with `--test-threads=1` |
-| `shm_soak.rs` | 2 | **partial** — `ci.yml:134-135` names `short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` with `--exact`, so one of the two runs. The other, `release_eight_hour_source_tree_soak` (`:123`), carries `#[ignore = "eight-hour source-tree resource soak"]` (`:122`) |
+| `client.rs` | 6 | **named** - `ci.yml:132`, `:179`, `:187` |
+| `lifecycle.rs` | 35 | **named** - `ci.yml:179`, `:187` |
+| `shm_failure_modes.rs` | 6 | **named** - `ci.yml:133`, with `--test-threads=1` |
+| `shm_soak.rs` | 2 | **partial** - `ci.yml:134-135` names `short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` with `--exact`, so one of the two runs. The other, `release_eight_hour_source_tree_soak` (`:123`), carries `#[ignore = "eight-hour source-tree resource soak"]` (`:122`) |
 | `protocol_vectors.rs` | 15 | unnamed |
 | `dispatch.rs` | 20 | unnamed |
 | `routing.rs` | 12 | unnamed |
@@ -449,7 +449,7 @@ directory, which is outside them.
 Recorded here because it is a fidelity observation about the check inventory
 rather than about a record. `wire::encode_frame` carries `#[cfg(test)]` at
 `wire.rs:541`, and its only two callers are
-`frame_channel/contract_tests.rs:93` and `:163` — both already counted in the
+`frame_channel/contract_tests.rs:93` and `:163` - both already counted in the
 14-test `contract_tests.rs` entry above. So the semantic contract suite builds
 its frames with an encoder no production path uses, and the two differ on exactly
 the property the byte budget depends on: `encode_owned_frame` does exact-size

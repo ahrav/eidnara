@@ -138,9 +138,9 @@ files for each binary name.
 
 | Binary | Tests | Reaches | CI status |
 | --- | --- | --- | --- |
-| `tests/lifecycle.rs` | 35 | setup socket, auth, handshake capacity, lifecycle record | **named** — `ci.yml:179`, `:187` |
-| `tests/client.rs` | 6 | `activate_client`, full attach | **named** — `ci.yml:132`, `:179`, `:187` |
-| `tests/shm_failure_modes.rs` | 6 | auth, setup, peer death, capacity return | **named** — `ci.yml:133`, run with `--test-threads=1` |
+| `tests/lifecycle.rs` | 35 | setup socket, auth, handshake capacity, lifecycle record | **named** - `ci.yml:179`, `:187` |
+| `tests/client.rs` | 6 | `activate_client`, full attach | **named** - `ci.yml:132`, `:179`, `:187` |
+| `tests/shm_failure_modes.rs` | 6 | auth, setup, peer death, capacity return | **named** - `ci.yml:133`, run with `--test-threads=1` |
 | `tests/instance_security.rs` | 15 | publication, discovery, permissions, cleanup | **unnamed** |
 | `tests/host_roundtrip.rs` | 4 | credential rotation, concurrent clients | **unnamed** |
 | `tests/activation.rs` | 4 | bootstrap-before-publication ordering | **unnamed** |
@@ -353,7 +353,7 @@ own section: these are the only two places where a comment's stated enforcement
 mechanism no longer exists. Both are recorded per METHOD.md rule 3 with each side
 cited and neither resolved in the comment's favour.
 
-### D1 — `auth.rs:693-698` cites a TypeScript test file the refactor deleted
+### D1 - `auth.rs:693-698` cites a TypeScript test file the refactor deleted
 
 The comment, on `committed_wire_vectors_pin_the_proof_construction` at `:700`:
 
@@ -385,7 +385,7 @@ own vector test it **runs in CI** (`ci.yml:177`, `:184`). So the contract surviv
 and moved, and the comment now names the one location where it no longer lives.
 See quiet area 2.
 
-### D2 — `auth.rs:394-396` cites a test that exists nowhere
+### D2 - `auth.rs:394-396` cites a test that exists nowhere
 
 The comment, inside the 19-line mutation-coverage argument at `:385-403`:
 

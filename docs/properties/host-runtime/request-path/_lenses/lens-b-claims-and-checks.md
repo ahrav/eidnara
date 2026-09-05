@@ -361,7 +361,7 @@ lease non-escape".
 
 The crate-wide picture, derived by grepping every doc fence under
 `crates/host-runtime/src/`: **six compiled doctests exist in the whole library**,
-all `compile_fail` — these four plus `frame_channel.rs:296-301` and `:303-308`
+all `compile_fail` - these four plus `frame_channel.rs:296-301` and `:303-308`
 (2b scope). Two further fences are `text` and are not compiled
 (`wire.rs:4-14`, `generation.rs:6-11`). This extends the shared CI fact handed
 to this pass, which named only the two in `frame_channel.rs`.
@@ -386,7 +386,7 @@ the 34 are mutex-poisoning labels, not contracts.
 
 | Cluster | Sites | Label |
 | --- | --- | --- |
-| Registry and membership locks | 16 | `routing.rs:114`, `:163`, `:174`, `:192`, `:210`, `:237`, `:262`, `:277`, `:300`, `:331`, `:345`, `:361`, `:378`, `:399`, `:421`, `:437` — `"registry lock"` / `"membership lock"` |
+| Registry and membership locks | 16 | `routing.rs:114`, `:163`, `:174`, `:192`, `:210`, `:237`, `:262`, `:277`, `:300`, `:331`, `:345`, `:361`, `:378`, `:399`, `:421`, `:437` - `"registry lock"` / `"membership lock"` |
 | Pending, connections, and composite maps | 9 | `dispatch.rs:916`, `:1098`, `:1335`, `:1376`, `:1412`, `:1490`; `composite.rs:141`, `:268`, `:301` |
 | Infallible serialization | 6 | `dispatch.rs:235`, `:237`, `:241`, `:717`, `:1464`; `control.rs:261`, `:531`, `:604` |
 | Real stated contracts | 1 | `dispatch.rs:1126` `"validated route.open target is indexed"` |

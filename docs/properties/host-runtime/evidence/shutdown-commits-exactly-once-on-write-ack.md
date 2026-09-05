@@ -23,8 +23,8 @@ concurrent attempts is bounded only by the pending permit pool.
   exclusive per hook instance: a hook reopens or commits, never both.
 - `crates/host-runtime/src/dispatch.rs:685-688` constructs the hook before any
   fallible step, and the comment at `:683-684` states that intent. Each early
-  return after it — retired writer or cancelled token at `:690-692`, charge
-  failure at `:695-699`, encode failure at `:700-711` — drops the hook and
+  return after it - retired writer or cancelled token at `:690-692`, charge
+  failure at `:695-699`, encode failure at `:700-711` - drops the hook and
   reopens.
 - `dispatch.rs:720-733` installs the hook as the frame's `written` callback;
   `commit.acknowledge()` is at `:731`.
@@ -64,7 +64,7 @@ The property holds as written; the excluded scenario is a double stop.
 
 The exclusion window is the interval between `try_own` returning `Owner` and the
 hook running or dropping, which spans a charge acquisition, an encode, a queue
-admission, and a full-frame write — all bounded by the same absolute deadline
+admission, and a full-frame write - all bounded by the same absolute deadline
 taken at `dispatch.rs:693`. Two requesters must overlap inside it. Nothing here
 needs a fault to be reachable, but reaching the reopen-then-recommit sequence
 needs a pre-acknowledgement failure on the first owner (fault class H8 or H3 in
@@ -79,8 +79,8 @@ both `host.shutdown` requests enter `handle_host_shutdown` before either
 completes its write. Assert each correlation settles exactly once with a
 parseable success, that no correlation receives two responses, and that the
 handler observes exactly one `Shutdown` event. A second case must fail the first
-owner before acknowledgement — discard its writer after enqueue, as
-`lifecycle.rs:1940` does in-crate — then assert the second requester becomes
+owner before acknowledgement - discard its writer after enqueue, as
+`lifecycle.rs:1940` does in-crate - then assert the second requester becomes
 owner and commits, and that the first requester received no response or exactly
 one non-committing response. A third case should pipeline a request behind an
 already-committed response on one connection to exercise the `Committed` arm.
@@ -95,7 +95,7 @@ already-committed response on one connection to exercise the `Committed` arm.
   acknowledged, and `acknowledge` takes `self` by value, so the same instance
   cannot later run. A dropped hook is gone with the frame, and the writer calls
   `written` only for a frame that passed `begin_publication` at `:336` and wrote
-  fully. The dangerous ordering the catalog names — a late commit after a reopen —
+  fully. The dangerous ordering the catalog names - a late commit after a reopen -
   therefore has no producer, which is why the guard asymmetry between `commit`
   and `reopen` is safe rather than merely convenient.
 - Missing evidence: no test drives a reopen and a successor commit concurrently;

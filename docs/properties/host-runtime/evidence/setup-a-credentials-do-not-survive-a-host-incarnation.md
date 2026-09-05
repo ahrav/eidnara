@@ -25,7 +25,7 @@ on the length.
 
 Ordering is deliberate and documented in the function's own doc comment at
 `instance.rs:222-231`: "Takes the stable lifetime fence, secures the runtime
-directory, acquires the runtime-directory lock, and mints fresh credentials — in
+directory, acquires the runtime-directory lock, and mints fresh credentials - in
 that order, so credentials never exist for an incarnation that lost a lock race."
 The code matches: `LifetimeLock::acquire` at `:247`, `secure_runtime_dir` at
 `:248`, `lock_instance` at `:249`, then the three `getrandom` calls.

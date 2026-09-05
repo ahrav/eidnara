@@ -19,7 +19,7 @@ that produce header bytes, not two and not three production ones:
 
 | Function | Line | Gate | Production? |
 | --- | --- | --- | --- |
-| `encode_frame` | `:542-569` | `body.len() > MAX_BODY_LEN` at `:548` | **No — `#[cfg(test)]` at `:541`** |
+| `encode_frame` | `:542-569` | `body.len() > MAX_BODY_LEN` at `:548` | **No - `#[cfg(test)]` at `:541`** |
 | `encode_owned_frame` | `:571-602` | `body.len() > MAX_BODY_LEN` at `:577` | Yes |
 | `encode_split_frame` | `:608-633` | `body_len > MAX_BODY_LEN` at `:618` | Yes |
 
@@ -29,8 +29,8 @@ its guarantee spoke of "the production encoders", counting three. `encode_frame`
 carries `#[cfg(test)]` at `:541`, and a repository-wide grep for `encode_frame(`
 excluding the other two names and the declaration returns exactly two call sites:
 `crates/host-runtime/src/frame_channel/contract_tests.rs:93` and `:163`. So the
-guarantee is over two production encoders. The finding is unaffected — the cap at
-`:577` and `:618` is still the only rejection either performs — but the count and
+guarantee is over two production encoders. The finding is unaffected - the cap at
+`:577` and `:618` is still the only rejection either performs - but the count and
 the `:548` citation were wrong and are repaired.
 
 `encode_split_frame` delegates bodies below `SPLIT_WRITE_MIN_BODY` (16 KiB,
@@ -76,13 +76,13 @@ allocation was not read in this lens" and set `Confidence:` to "high on the gap,
 medium on reachability" because of it. Route allocation was read at carry time.
 `RouteRegistry::reserve` is `routing.rs:113-156`:
 
-- `:120-121` — the scan starts from `inner.cursor`, initialized to 1 at `:102`.
-- `:122` — `loop {`.
-- `:123` — `if candidate != 0`, so channel 0 is never allocated.
-- `:124-127` — a fresh slot is inserted with `last_epoch: 0` at `:125`.
-- `:128` — `if slot.occupant.is_none() && slot.last_epoch < u32::MAX`.
-- `:129-130` — `let epoch = slot.last_epoch + 1; slot.last_epoch = epoch;`.
-- `:145-148` — `return Some(RouteHandle { channel: candidate, epoch })`.
+- `:120-121` - the scan starts from `inner.cursor`, initialized to 1 at `:102`.
+- `:122` - `loop {`.
+- `:123` - `if candidate != 0`, so channel 0 is never allocated.
+- `:124-127` - a fresh slot is inserted with `last_epoch: 0` at `:125`.
+- `:128` - `if slot.occupant.is_none() && slot.last_epoch < u32::MAX`.
+- `:129-130` - `let epoch = slot.last_epoch + 1; slot.last_epoch = epoch;`.
+- `:145-148` - `return Some(RouteHandle { channel: candidate, epoch })`.
 
 So the least epoch the registry can mint is 1, and it can never mint channel 0.
 That is pinned by an existing in-crate test,
@@ -109,7 +109,7 @@ reachability`.
 closest, `round_trip_request` (`:680-690`) and `round_trip_all_frame_types`
 (`:693-700`), both construct `EnvelopeHeader` directly rather than through an
 encoder, and both build their fixture with `hdr` (`:650-652`), which derives the
-epoch as `u32::from(channel != 0)` — a legal pairing by construction. So they
+epoch as `u32::from(channel != 0)` - a legal pairing by construction. So they
 cannot reach the illegal region even in principle.
 
 `tests/protocol_vectors.rs:143`
@@ -159,7 +159,7 @@ peer's side of the wire, with the offending bytes already discarded.
 
 Hole 4 has a sharper version. A `RouteHandle` with a nonzero channel and epoch 0
 cannot come from the allocator, so if one appears it came from code that
-constructed it by hand — a test helper promoted to production, a deserialization
+constructed it by hand - a test helper promoted to production, a deserialization
 path, a repair routine. `FrameId::routed` copies it unexamined and the emitted
 frame is refused. The routing registry on the host side would meanwhile treat the
 same handle as unmatched, so the two sides fail differently for the same value.
@@ -266,7 +266,7 @@ it under `R0`.
   private (a breaking change to `pub mod wire`), splitting a body-free encoder for
   the four pure-header types, and either making `RouteHandle`'s fields private or
   giving `FrameId::routed` a fallible signature. The third of those interacts with
-  the resolution above — the allocator already guarantees the invariant, so
+  the resolution above - the allocator already guarantees the invariant, so
   private fields would make `FrameId::routed` infallible by construction, which is
   the cleanest end state and the largest change.
 - Missing evidence: whether `wire` and `handler` are intended as stable public
@@ -293,7 +293,7 @@ it under `R0`.
   `encode_frame` has no such constraint because it allocates fresh. So the two
   differ precisely on the property the byte budget depends on.
 - Missing evidence: whether the contract tests would still pass if rewritten
-  against `encode_owned_frame`. Not attempted — this catalog does not edit tests
+  against `encode_owned_frame`. Not attempted - this catalog does not edit tests
   (METHOD rule 6).
 - Conclusion: needs human input. Flagged as a lead rather than a defect: the gate
   is not wrong, but the fidelity gap between the test-only and production

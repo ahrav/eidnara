@@ -189,7 +189,7 @@ precedence rule itself is test-only.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/transport_negotiation.rs:906-949` covers four
+Exercised: partial - `tests/transport_negotiation.rs:906-949` covers four
 channel-0 control operations, one routed request, and one oversize control
 declaration before negotiation. `Cancel`, routed `Goodbye`, and `Pong` before
 negotiation are uncovered, and no case asserts the absence of an emitted terminal.
@@ -197,7 +197,7 @@ Guarantee: while the setup state is `BootstrapTcp` or `CandidateSetup`, no route
 request is dispatched, no cancel is applied, no routed goodbye begins a close, no
 non-negotiate channel-0 control action is admitted, and no oversize-rejection
 terminal is emitted; the generation retires instead.
-Check: `always` — for every inbound frame, assert that
+Check: `always` - for every inbound frame, assert that
 `transport_ready(setup) == false` implies the read loop returned `ReadExit::Peer`
 without reaching `dispatch_request` (`connection.rs:486`), `handle_cancel`
 (`:498`), `begin_close_owned` (`:566`), the control admission block (`:659`
@@ -217,7 +217,7 @@ fault injection: `TestHost::start` plus `setup_client`
 (`tests/support/mod.rs:688`) is sufficient. Reaching the `CandidateSetup` half of
 the state predicate additionally needs an injected provider, which is test-only;
 the `BootstrapTcp` half is the default path.
-Confidence: high — [evidence](evidence/negotiation-precedes-every-gated-frame-kind.md). All five gate sites and all
+Confidence: high - [evidence](evidence/negotiation-precedes-every-gated-frame-kind.md). All five gate sites and all
 fourteen frame-kind arms enumerated against `connection.rs:417-598` and
 `:626-647`.
 Existing check: `tests/transport_negotiation.rs:906` covers six of the eight
@@ -239,14 +239,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/transport_negotiation.rs:962-980` covers a repeated
+Exercised: partial - `tests/transport_negotiation.rs:962-980` covers a repeated
 negotiation after a negotiated TCP selection. Negotiation during
 `CandidateSetup`, negotiation on a promoted `ProviderActive` generation, and the
 at-most-one-candidate claim are uncovered.
 Guarantee: at most one negotiation commits per generation. Once the state leaves
 `BootstrapTcp` it never returns, at most one candidate handoff is ever recorded,
 and any later or repeated negotiation retires the generation.
-Check: `always` — instrument the two `setup.state` writes (`connection.rs:960`,
+Check: `always` - instrument the two `setup.state` writes (`connection.rs:960`,
 `:1103`) and the `setup.handoff` write (`:1104`); assert at most one of each per
 `ConnectionSetup`, assert no write whose prior state is not `BootstrapTcp`, and
 assert every `handle_negotiate` entry with a non-`BootstrapTcp` state returns
@@ -263,7 +263,7 @@ Required faults and enabling state: a raw client that negotiates twice. The
 and `ProviderActive` arcs need an injected provider, which is test-only; that is
 why this record is labelled by its default-reachable arc and the provider arcs
 are named explicitly.
-Confidence: high — [evidence](evidence/setup-selection-is-sticky-for-the-generation.md). `setup.state` has exactly two
+Confidence: high - [evidence](evidence/setup-selection-is-sticky-for-the-generation.md). `setup.state` has exactly two
 write sites and `setup.handoff` exactly one, all enumerated by grep over
 `connection.rs`.
 Existing check: `tests/transport_negotiation.rs:962`
@@ -280,12 +280,12 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test reads the setup state directly, and no lint or test
+Exercised: not yet - no test reads the setup state directly, and no lint or test
 asserts that the two predicate copies agree.
 Guarantee: exactly one definition decides whether a generation may carry
 non-setup traffic, and every frame-kind gate consults that one definition, so a
 new setup state cannot be ready for one frame class and not another.
-Check: `always` — assert that the set of `TransportState` variants accepted by
+Check: `always` - assert that the set of `TransportState` variants accepted by
 `transport_ready` (`connection.rs:832-837`) equals the set accepted by the inline
 `matches!` in `handle_control` (`:642-645`), and that no third readiness test
 exists. Enforceable as a test over an extracted predicate, or mechanically by
@@ -299,7 +299,7 @@ the property. To make the check meaningful, add a fifth `TransportState` variant
 in a test fixture, or assert both predicates over all variants; the `matches!`
 shape means a new variant is refused by both copies unless a author adds it,
 which is the fail-closed direction.
-Confidence: high — [evidence](evidence/setup-readiness-is-decided-by-one-predicate.md). Both predicate bodies read at
+Confidence: high - [evidence](evidence/setup-readiness-is-decided-by-one-predicate.md). Both predicate bodies read at
 HEAD and confirmed textually identical over the same field; the four
 `transport_ready` call sites and the one inline site enumerated.
 Existing check: none.
@@ -316,7 +316,7 @@ Open questions:
 Type: reachability
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet — no test sends a `Pong` before negotiation, and no test runs
+Exercised: not yet - no test sends a `Pong` before negotiation, and no test runs
 a configured liveness policy against a generation that has not yet negotiated.
 Guarantee: contested. `docs/host-wire-protocol.md:562` states that a `Pong`
 retires the setup generation. `connection.rs:500-540` implements no readiness
@@ -325,7 +325,7 @@ before the read loop is awaited at `:304`, so with liveness configured the host
 demands a `Pong` in exactly the window the document says a `Pong` must retire.
 This record catalogues the contradiction with both sides cited and does not
 choose between them.
-Check: `sometimes` — assert that a campaign produces at least one interval in
+Check: `sometimes` - assert that a campaign produces at least one interval in
 which the setup state is `BootstrapTcp` or `CandidateSetup`, a host Ping is
 outstanding in `gen.pings`, and a matching `Pong` is delivered to the read loop.
 Marker `SETUP_PONG_WINDOW_OBSERVED`. `sometimes` and not `always`, because
@@ -348,7 +348,7 @@ is not a shipped configuration in this tree; the default is `None`
 that an *unsolicited* `Pong` before negotiation is silently ignored rather than
 retiring the generation, needs no liveness at all and is default-production; it is
 a strictly smaller claim and is recorded in the evidence file.
-Confidence: high — [evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md). Both sides read at HEAD: the
+Confidence: high - [evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md). Both sides read at HEAD: the
 document sentence, the ungated `Pong` arm, the liveness start point, and the
 grant path's own comment explaining that bootstrap probing is live during setup.
 Existing check: none. `pong-preanswer-rejected-in-every-mutex-order` in this
@@ -370,7 +370,7 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: partial — `tests/transport_negotiation.rs:876-905` covers capability
+Exercised: partial - `tests/transport_negotiation.rs:876-905` covers capability
 mismatch falling back and version mismatch retiring; `:851-874` covers an
 unprovided non-TCP offer selecting reasonless TCP. No test produces
 `DynamicallyUnavailable`, and no test pairs it with a mismatched sibling to
@@ -379,7 +379,7 @@ Guarantee: when both conditions are present across the evaluated offers,
 `unavailable` outranks `capability_version_mismatch`; a permanently absent
 provider and a panicking preflight both contribute no reason and select reasonless
 TCP.
-Check: `always-or-unreached` — whenever a reason is computed
+Check: `always-or-unreached` - whenever a reason is computed
 (`connection.rs:953-959`), assert `dynamically_unavailable` implies the emitted
 reason is `Unavailable` regardless of `capability_mismatch`, and that a
 `StaticallyOmitted` or panicking preflight contributes no reason. These semantics
@@ -402,7 +402,7 @@ providers are test-only: `TransportProviders::default()` is empty
 test-injected (`:1-13`), and `HostConfig::default` installs the empty registry
 (`config.rs:297`). Verified consequence: in every shipped configuration the reason
 is always `None`.
-Confidence: high — [evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md). Precedence block, preflight
+Confidence: high - [evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md). Precedence block, preflight
 default, panic mapping, and the `serves_transport` gate all read at HEAD; the
 empty-registry conclusion traced from `HostConfig::default` to
 `TransportProviders::default`.

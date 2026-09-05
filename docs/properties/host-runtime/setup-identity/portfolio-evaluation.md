@@ -120,7 +120,7 @@ allowed either. Splitting was chosen because the two clauses have different
 is safety, and "it always yields to `read_cancel`" is an obligation that something
 eventually completes, which is liveness. METHOD.md's schema gives each record
 exactly one `Type` field, so a record carrying both is mislabelled whichever label
-it wears — and the consequence was concrete rather than cosmetic: because the
+it wears - and the consequence was concrete rather than cosmetic: because the
 clause lived inside a safety record, **it carried no bound at all**, which is the
 defect the liveness rule exists to prevent. It now has one, and it is not a
 duration: `connection.rs:196-206` is `tokio::select!` with `biased` and
@@ -128,7 +128,7 @@ duration: `connection.rs:196-206` is `tokio::select!` with `biased` and
 cancellation edge plus one poll of that select, with the test's poll cap stated as
 an explicit attempt count. The two records also have different existing coverage
 (the cap has none; the cancellation path has none either, but for a different
-reason — `setup_socket.rs:810-825` reaches `observe_peer` only through peer-driven
+reason - `setup_socket.rs:810-825` reaches `observe_peer` only through peer-driven
 outcomes) and different constructions, so nothing is duplicated by separating them.
 
 **Premise sharpening.** The evaluation cited `setup_socket.rs:246-284` for the
@@ -171,7 +171,7 @@ field is easy; forcing the timeout is not.
 `timeout_at(Instant::now() + shared.timing.transport_setup_deadline, prepared)`
 (`connection.rs:157-164`) races a timer against a `spawn_blocking` task that may
 have finished already, so a fast `prepare` wins the race, the connection proceeds
-normally, and a test written this way exercises the wrong path while passing — and
+normally, and a test written this way exercises the wrong path while passing - and
 flakes in both directions on a loaded machine. Reachable and deterministically
 reachable are different claims, and the artifacts had collapsed them. Deterministic
 reach needs injected slowness inside `prepare`, which is 2b's R1 and has no seam,
@@ -196,7 +196,7 @@ export (`packages/shm-native/src/lib.rs:490-491`) surfaced to JavaScript as
 `NativeChannel.attach` (`index.ts:526-529`), with no `#[cfg(test)]` and no
 `#[doc(hidden)]`. A property universally quantified over the callers of a published
 API cannot be established by running anything: no campaign observes the callers it
-does not contain. Worse, as a universal claim it is **false** — an embedder may call
+does not contain. Worse, as a universal claim it is **false** - an embedder may call
 `NativeChannel.attach` deliberately and correctly, and `create_test_pair`
 (`lib.rs:631`) suggests the addon's authors expected exactly that kind of caller.
 
@@ -228,19 +228,19 @@ the line is opened, and then read as consequences nobody wrote down", and closin
 the paragraph with "A peer that never echoes has already been paid." Someone did
 write it down, twice, in normative language. `docs/host-wire-protocol.md:27`:
 "The 32-byte connection key is a bearer capability. Possession grants every
-direct-profile operation — including host-global `host.shutdown` (Section 7.6) — and
+direct-profile operation - including host-global `host.shutdown` (Section 7.6) - and
 permits any `BindIdentity`. Client `role`, `consumer_identity`, `project_root`,
 `harness`, and `session` are claims or scoping metadata; none grants authority."
 And `auth.rs:70-81`, the doc comment on a deliberately empty `Authenticated`
 struct: "WHAT THIS PROVES: the peer possesses the connection key, and (client side)
 that the daemon does too. Nothing more", with `ClientHello.role` "parsed and then
-discarded — any peer holding the key can claim any role, so it must never decide
+discarded - any peer holding the key can claim any role, so it must never decide
 admission, capacity, or privilege."
 
 So there is no second factor to bypass, and the record is not reporting one. It is
 kept as a **regression property**, which is the right category and a real one: the
 relationship between key possession and mapping authority is currently exactly
-one-to-one, and a refactor could break it in either direction — by introducing a
+one-to-one, and a refactor could break it in either direction - by introducing a
 token check that appears to gate mapping but runs after the descriptors are gone,
 or by admitting a peer that never proved key possession. The forward-looking
 caution the record already carried, that a future design treating the token as a
@@ -318,7 +318,7 @@ Recorded, not mined.
 
 | # | Gap | Evidence |
 | --- | --- | --- |
-| G1 | **The manifest-and-checksum production loading branch is inventory-only: five of the nine startup reasons have no record and no reachable producer.** `requireAddon` (`packages/shm-native/index.ts:189-210`) prefers the local addon — `existsSync(localPath)` at `:194-196` short-circuits and `packageAddonPath` (`:151-187`) runs only in the `else` at `:197` — and `ci.yml:193` runs `build:source` to create exactly that file before all four native and plugin steps, removing it only afterwards at `:219-223`. So the packaged path, which is the path a **shipped** install takes, never executes in CI, and five of the nine reasons in the closed set at `:22-31` are never produced by the loader. The four that any test touches are constructed as `new NativeStartupError(...)` in `shm-frame-channel.test.ts`, not produced. This is the gate `793a973e` ("build(shm): require packaged native transport") was added for, and this catalog holds **no record over it at all**: the manifest checks, the checksum comparison, and the platform and debug-build refusals are named in `fault-map.md`'s S6 row as a capability and nowhere as a property. It connects directly to 2b's rewritten doctor record, whose `missing_addon` class is the one terminal class no campaign can currently reach, for exactly this reason. Mining it needs a decision the evaluation did not make and this disposition will not either: whether a five-reason refusal taxonomy is one record with five situations or five records, and whether the CI ordering change (running one native step before `build:source`) is in scope for a properties pass. |
+| G1 | **The manifest-and-checksum production loading branch is inventory-only: five of the nine startup reasons have no record and no reachable producer.** `requireAddon` (`packages/shm-native/index.ts:189-210`) prefers the local addon - `existsSync(localPath)` at `:194-196` short-circuits and `packageAddonPath` (`:151-187`) runs only in the `else` at `:197` - and `ci.yml:193` runs `build:source` to create exactly that file before all four native and plugin steps, removing it only afterwards at `:219-223`. So the packaged path, which is the path a **shipped** install takes, never executes in CI, and five of the nine reasons in the closed set at `:22-31` are never produced by the loader. The four that any test touches are constructed as `new NativeStartupError(...)` in `shm-frame-channel.test.ts`, not produced. This is the gate `793a973e` ("build(shm): require packaged native transport") was added for, and this catalog holds **no record over it at all**: the manifest checks, the checksum comparison, and the platform and debug-build refusals are named in `fault-map.md`'s S6 row as a capability and nowhere as a property. It connects directly to 2b's rewritten doctor record, whose `missing_addon` class is the one terminal class no campaign can currently reach, for exactly this reason. Mining it needs a decision the evaluation did not make and this disposition will not either: whether a five-reason refusal taxonomy is one record with five situations or five records, and whether the CI ordering change (running one native step before `build:source`) is in scope for a properties pass. |
 
 ## Biases requiring human judgment
 
@@ -343,7 +343,7 @@ into 2c and neither can be settled here.
    pre-attempt value" after every abandoned setup. That assertion is written against
    the current unconditional release at `ring_transport.rs:291`. If a human decides
    a condemned ring's charge should be retained as quarantined rather than released,
-   this record needs an exception it does not have — the same inconsistency 2b
+   this record needs an exception it does not have - the same inconsistency 2b
    records between its own two charge records. The abandoned-setup path is unlikely
    to involve a condemned ring in practice, so the exposure is small, but the record
    as written admits no exception at all and should not be read as having considered
@@ -353,7 +353,7 @@ into 2c and neither can be settled here.
 
 The evaluator's verdict was **REFUTED**. After applying all four refinements plus
 the two shared ones, the honest verdict is that the refutation was correct and the
-portfolio is materially better, and it is still not ready — but for the first time
+portfolio is materially better, and it is still not ready - but for the first time
 across these parts, not because of its own internal contradictions.
 
 What improved concretely. The part has liveness coverage where it had argued
@@ -388,7 +388,7 @@ has no property at all, and it is structurally unreachable in CI as configured. 
 bias 1 governs whether one record here survives in its current form. And above all
 of it sits the fact none of these corrections touches: **49 of the 51 in-crate tests
 in this scope execute in no job, and three of the six integration binaries that
-reach this boundary are named in no workflow** — so S0 at the top of the leverage
+reach this boundary are named in no workflow** - so S0 at the top of the leverage
 ranking still unblocks zero records while protecting 72 test functions, and every
 `Exercised:` line here is written against a suite that mostly does not run.
 
@@ -415,8 +415,8 @@ error with the same root, and the root is worth stating in the more general form
 **this part twice reasoned from its own artifacts instead of from its sources.**
 
 C1 is the clearest case and it is nearly self-refuting. The relationship map
-rejected a liveness record by quoting METHOD.md's liveness rule — "not an attempt
-count or an explicit interval the code reasons about" — while omitting the middle
+rejected a liveness record by quoting METHOD.md's liveness rule - "not an attempt
+count or an explicit interval the code reasons about" - while omitting the middle
 of the rule's own three-item list, which is "deadlines". The rule is 8 lines long
 and lives in a file every agent is instructed to read first. The failure was not a
 misjudgment about the code; it was a paraphrase of a checklist that dropped the item
@@ -435,7 +435,7 @@ search.
 Two smaller patterns are worth one line each. **A correction recorded but not
 applied is not a correction** (S2): six line numbers sat in a provenance note
 attached to the records whose check lines still carried the wrong values, deferred on
-a reason — "carried verbatim from lens A" — that METHOD.md does not recognize. 4c
+a reason - "carried verbatim from lens A" - that METHOD.md does not recognize. 4c
 observed that precision does not propagate sideways; here it did not propagate from
 a paragraph to the records that paragraph was about. And **a correction can overshoot
 in the optimistic direction too** (C2): both artifacts corrected lens A's

@@ -55,7 +55,7 @@ Semantics distribution **12 `always`, 0 `always-or-unreached`, 1 `sometimes`,
 0 `reachable`, 1 `unreachable`**, against 11/1/1/0/1 before. The single move is
 D1's: the sub-part's only `always-or-unreached` became `always` once its optional
 branch was proved impossible rather than merely unreached. That is the correct
-outcome rather than a loss of nuance — `always-or-unreached` exists for a path that
+outcome rather than a loss of nuance - `always-or-unreached` exists for a path that
 *may* never run, and this path *cannot* run, so the semantics were describing
 uncertainty that does not exist.
 
@@ -129,8 +129,8 @@ answered. That is falsifiable, it is `always` over a total disjunction, and it i
 not what the original record said. Second, invalidating would have discarded the
 one part of the original that survives intact: the `let _ =` at `:1390` is real and
 it is the reason the teardown is unattributed. Third, the reframed record has an
-*existing partial fixture* — `control_exhaustion_retires_and_releases_all_queued_bytes`
-(`:3196`) already drives the charge branch to retirement from a different caller —
+*existing partial fixture* - `control_exhaustion_retires_and_releases_all_queued_bytes`
+(`:3196`) already drives the charge branch to retirement from a different caller -
 so it moves from the fault map's blocked column to constructible, which
 invalidation would have thrown away.
 
@@ -165,7 +165,7 @@ whose ring collapsed "departs looking clean", so the host skips `record_peer_dea
 The *attempt* is unconditional and that part holds: `:1890-1893` sits outside every
 `break`. But `:1890` is `if let Ok(goodbye)` and `:1891` is
 `let _ = setup.write_all(&goodbye)`, so neither the encode nor the write is proved
-to have happened — the result is discarded, which `existing-checks.md` already
+to have happened - the result is discarded, which `existing-checks.md` already
 recorded in its `let _ =` cluster without connecting it to this record. And the
 host's watcher is a `biased` select whose *first* arm is
 `peer_read_cancel.cancelled()` (`connection.rs:196-198`); a generation already
@@ -192,7 +192,7 @@ close-before-write case "does not create an abrupt EOF, because the bridge still
 owns the socket and close already sends a ring goodbye". Both halves are correct
 and the second is stronger than stated: it is not merely that close sends a ring
 goodbye, it is that close *waits for it to be published* before cancelling. That
-matters because it closes the remaining doubt — one might otherwise ask whether a
+matters because it closes the remaining doubt - one might otherwise ask whether a
 goodbye enqueued but unpublished leaves the host's watcher armed. It does not, on
 the `Ok` path. The record's new second open question records the one residual: the
 `close` that times out waiting for its goodbye returns `Err`, so it does not
@@ -214,7 +214,7 @@ are corrected.
 
 **The arithmetic.** The totals paragraph said "six of them need no fault at all".
 Counting the rows is unambiguous: of the eight rows that carried `Yes`, every
-single one opens with the words "No fault" —
+single one opens with the words "No fault" -
 `client-a-a-retired-generation-forgets-why-it-retired`, the ring-failure departure
 record, both in-flight-work records, the route-bound record, the `host_shutdown`
 predicate, and both inbound-classification records. Eight, not six. Counting the
@@ -231,8 +231,8 @@ was right, and the map row was wrong. The mechanism already exists in the suite:
 `an_abandoned_control_open_releases_a_late_bound_route` (`client.rs:3503-3584`)
 hand-builds `{"op":"route.open","route_channel":9,"route_epoch":3}` at `:3547-3552`
 and feeds it to `inner.dispatch` at `:3553-3565`. Two `open_route` futures over a
-`Client` built on a synthetic `Inner` — the struct literal at `:431` is reachable
-from `mod tests`, which is a child module — plus two such forged responses carrying
+`Client` built on a synthetic `Inner` - the struct literal at `:431` is reachable
+from `mod tests`, which is a child module - plus two such forged responses carrying
 one `(channel, epoch)` produces the state. No fake host, no ring.
 
 This is the same failure mode Part 4c's evaluation named: **precision does not
@@ -315,7 +315,7 @@ handler bind" at `routing.rs:112`), and `module_reloading` is a handler bind
 rejection (`synapse/mod.rs:960-963`) that takes the `Reject` arm.
 
 **The finding that survives is sharper than the one it replaces.** `module_timeout`
-— the code the whole original recipe was built on — has **no producer anywhere in
+- the code the whole original recipe was built on - has **no producer anywhere in
 the tree**. `rg 'module_timeout' crates/` returns one hit, and it is the client's
 own allowlist at `client.rs:518`. So the client retries on a code its own host
 cannot send. That is a concrete, cheap, enumerable defect on this side of the
@@ -343,7 +343,7 @@ Recorded, not mined. Verified for this disposition.
 1. **Whether a Byzantine host is in scope, because several records demand the
    client defend itself against a lying host and that conflates two different
    obligations.** The evaluator raised this as a framing bias and judged that the
-   framing "does surface real teardown defects", so the frame is not worthless —
+   framing "does surface real teardown defects", so the frame is not worthless -
    that assessment is recorded here rather than paraphrased away, because it is the
    reason this is a bias and not a refutation. Four records rest on a host that
    violates the protocol:
@@ -362,9 +362,9 @@ Recorded, not mined. Verified for this disposition.
    defect in this crate or a missing conformance vector against a hypothetical
    peer, and whether the `Cancel` strictness at `validate_inbound:2067` is a
    feature or a bug. *Judgment required:* declare the threat model. If a
-   non-conforming host is in scope — which is defensible, since `daemon`
+   non-conforming host is in scope - which is defensible, since `daemon`
    connects to a host it did not build and protocol `:296` already enumerates
-   client-side retirement causes — then these four records stand, the fake host is
+   client-side retirement causes - then these four records stand, the fake host is
    a conformance harness, and the client's strictness is correct by construction.
    If it is not in scope, then the host-conformance halves belong in a
    host-conformance artifact and what remains here is only the teardown material,
@@ -388,7 +388,7 @@ existing fixture behind it. Two records no longer assert consequences the code
 prevents: the peer-death signal is now recorded as under-reporting *conditionally*
 and over-reporting *not at all*, which is one direction rather than two. One
 record's premise was resolved against the current host, raising its confidence and
-turning a suspected host defect into a concrete client-side one — the
+turning a suspected host defect into a concrete client-side one - the
 `module_timeout` allowlist entry with no producer anywhere in the tree. Two
 accounting errors are fixed: eight rows need no fault rather than six, and the
 duplicate-bind clause is constructible today by a mechanism the same file's own
@@ -463,9 +463,9 @@ The second lesson is Part 4c's, recurring unchanged in D3 and D4, and it is now
 seen three parts in a row: the correction was already inside the artifact. The
 fault map's leverage item 5 contradicted the fault map's own table. The
 existing-checks fixture table listed the two binaries whose bodies refute the
-existing-checks quiet area. Part 4c prescribed a cross-reference pass — for each
+existing-checks quiet area. Part 4c prescribed a cross-reference pass - for each
 record, grep the other artifacts for its slug and its identifiers, and read what
-comes back — and this part shows the pass is still not being run. D3 and D4 would
+comes back - and this part shows the pass is still not being run. D3 and D4 would
 both have been caught by it.
 
 ## Re-evaluation trigger

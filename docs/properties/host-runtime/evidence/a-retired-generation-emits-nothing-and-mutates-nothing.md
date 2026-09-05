@@ -16,7 +16,7 @@ grep result, not a guarantee.
 
 ## Evidence trail
 
-- `dispatch.rs:143-168` `charge_frame_or_cancel` — the single-sourced gate. Its
+- `dispatch.rs:143-168` `charge_frame_or_cancel` - the single-sourced gate. Its
   doc comment at `:138-142` states why: "five call sites ... each encoded this
   interaction by hand. A correctness fix applied to one and missed in another would
   leave those five paths with different cancellation semantics." The `biased`
@@ -37,8 +37,8 @@ grep result, not a guarantee.
   `() = gen.token.cancelled() => return` in the latch wait, and `:748-755`, the
   shutdown watchdog whose biased select ends on the generation token at `:751`.
 - The queued-but-not-begun case is decided by the writer, not by admission.
-  `frame_channel.rs:718-730` `begin_publication` is the boundary — a
-  `compare_exchange(QUEUED, PUBLISHED, AcqRel, Acquire)` — and
+  `frame_channel.rs:718-730` `begin_publication` is the boundary - a
+  `compare_exchange(QUEUED, PUBLISHED, AcqRel, Acquire)` - and
   `tcp_frame_channel.rs:320-333` puts `:322` `() = discard.cancelled() => break`
   ahead of `queue.recv()` at `:329`. So a frame already in the queue is dropped
   with the receiver at `:400-402` rather than published.
@@ -47,19 +47,19 @@ grep result, not a guarantee.
   `gen.writer.discard();`. That pairing is what makes a corrupt-frame close silent
   even mid-shutdown, per the comment at `:323-327`.
 - Existing checks, confirmed: `tests/transport_negotiation.rs:907`
-  `application_before_negotiation_retires_without_side_effects` covers one shape —
+  `application_before_negotiation_retires_without_side_effects` covers one shape -
   it iterates `catalog.list`, `host.shutdown`, and `route.open` bodies sent before
   negotiation. `connection.rs:1598-1600` and `:1604-1606`
   (`shutdown_fence_queues_started_catalog_before_goodbye` and
-  `..._capacity_rejection_before_goodbye`) pin the *positive* fence — a started
-  producer precedes Goodbye — which is the drain direction, not this one.
+  `..._capacity_rejection_before_goodbye`) pin the *positive* fence - a started
+  producer precedes Goodbye - which is the drain direction, not this one.
 
 ## Failure scenario
 
 The uncovered interleaving is a frame that is past every check and in the queue,
 with the close decision landing between admission and dequeue:
 
-1. An off-reader emission — a capacity rejection or a handler's response terminal —
+1. An off-reader emission - a capacity rejection or a handler's response terminal -
    passes its precheck at `dispatch.rs:311`, wins its charge through
    `charge_frame_or_cancel` before the token is cancelled, and reaches
    `frame_channel.rs:814`. Admission tests `retired` only, so the frame enters the
@@ -68,7 +68,7 @@ with the close decision landing between admission and dequeue:
    token. Every *later* emit now fails closed; this frame is already past that
    point.
 3. The writer, parked at `tcp_frame_channel.rs:329`, wakes on the queue rather
-   than on `discard` — because `connection.rs:330` has not run yet — dequeues,
+   than on `discard` - because `connection.rs:330` has not run yet - dequeues,
    and `begin_publication` at `:336` CASes `QUEUED → PUBLISHED`.
 4. Consequence: bytes reach a peer after the close decision, and no state records
    that it happened: the ticket's `PUBLISHED` state is indistinguishable from a
@@ -80,8 +80,8 @@ The "mutates nothing" half is stronger than the "emits nothing" half. A retired
 generation can still be mutated: `handle_cancel` at `dispatch.rs:1456-1463` takes
 the `pending` lock and cancels entries with no token check, and the `pings` map is
 mutated by the read loop at `connection.rs:504-537` before any token test. Both are
-benign — cancelling an entry on a dying generation and recording a Pong arrival are
-idempotent and unobservable to the peer — but they are mutations, so the property's
+benign - cancelling an entry on a dying generation and recording a Pong arrival are
+idempotent and unobservable to the peer - but they are mutations, so the property's
 "mutates nothing" must be read as its Check states it: no *charge* is newly
 acquired. That narrower reading is what the code enforces.
 
@@ -92,7 +92,7 @@ The window is between `frame_channel.rs:814` (admission succeeds) and
 the non-atomic pair at `connection.rs:329-330`: the token is cancelled one
 statement before the discard, so for that gap the fail-closed rule is enforced by
 neither. It cannot be reached on a current-thread runtime, since the writer task
-and the producer never interleave mid-statement there — every test in scope is
+and the producer never interleave mid-statement there - every test in scope is
 current-thread while production is multi-thread (fault class H1). A larger
 `writer_queue_frames` (`connection.rs:181`) makes it likelier the writer is parked
 at `recv()` with room to accept, and a larger `frame_deadline` (`:182`) widens the
@@ -119,7 +119,7 @@ writer. Three oracles, asserted separately because they fail independently:
   socket. Read the peer to EOF and compare the full byte stream, since a
   frame-count assertion passes if the wrong frame went out.
 - Queue: for a frame queued before the cancel, assert `begin_publication` returned
-  false — that is, the ticket ends `QUEUED` and is dropped, never `PUBLISHED`.
+  false - that is, the ticket ends `QUEUED` and is dropped, never `PUBLISHED`.
 
 Coverage checks to emit: `host_emission_queued_at_cancel_instant`,
 `host_charge_refused_after_cancel`, and `host_writer_broke_before_publication`.
@@ -145,7 +145,7 @@ line: "every emit path routes through a charge helper or an explicit
   `:195`, `:266-267`, `:311`, or `:690`; the stream paths add the settlement race
   and, notably, *re-check after their awaits* at `:519-521` and `:550-552`, which
   is the part a hand-written check usually gets wrong. The one exception is
-  `send_connection_goodbye` (`:1434-1452`), which has no token check at all — that
+  `send_connection_goodbye` (`:1434-1452`), which has no token check at all - that
   is deliberate, since it is called only from the drain
   (`runtime.rs:1167-1169`) where the token is still live, but it means the set is
   "every path except the drain's own", not "every path".
@@ -158,7 +158,7 @@ line: "every emit path routes through a charge helper or an explicit
   no failpoint after `frame_channel.rs:814` and no multi-thread test in scope, so
   the one interleaving that distinguishes "fail closed" from "usually fails closed"
   is unreachable today.
-- Conclusion: resolved with answer — the emit gating is complete at admission and
+- Conclusion: resolved with answer - the emit gating is complete at admission and
   the charge guarantee is enforced by a single-sourced helper; the "mutates
   nothing" phrasing overstates what the code enforces and should be read as the
   Check's narrower charge claim; and the load-bearing interleaving needs H1.

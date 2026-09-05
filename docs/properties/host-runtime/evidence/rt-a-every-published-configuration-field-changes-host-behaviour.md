@@ -48,13 +48,13 @@ let init = std::mem::take(&mut config.init);
 
 with the reason at `:748-750`: "Taken, not cloned: the storage descriptor can be
 arbitrarily large and must not stay owned by `config` for the incarnation,
-outside every byte budget — the handler consumes the only copy." It is handed to
+outside every byte budget - the handler consumes the only copy." It is handed to
 `initialize` at `:753`. So a handler implemented outside this repository could
 read `host_capabilities`, and `lib.rs:57` exports `HostInit` publicly.
 
 Contrast with `storage`, the sibling field. `storage` is also never read by the
-host — `config.rs:252-253` says so explicitly, "The handler deserializes it; the
-host never reads it" — but it is a documented pass-through with a stated
+host - `config.rs:252-253` says so explicitly, "The handler deserializes it; the
+host never reads it" - but it is a documented pass-through with a stated
 consumer, and the `Debug` impl at `:259-264` deliberately reduces it to a
 presence bit because "The storage descriptor can carry credentials or deployment
 secrets". So `storage` is a designed pass-through; `host_capabilities` is a
@@ -84,13 +84,13 @@ than here because they are not inertness:
 
 An embedder integrating `host-runtime` reads `lib.rs:57`, finds `HostInit` exported,
 and populates `host_capabilities` with the capability strings its deployment
-should advertise — which is what the name and `config.rs:246-247`'s "Host-owned
+should advertise - which is what the name and `config.rs:246-247`'s "Host-owned
 synthetic initialization payload" invite.
 
 Nothing happens. No capability is advertised, no error is returned, and
 `HostConfig`'s derived `Debug` shows the strings present, so a diagnostic dump
-confirms the embedder's belief. Whatever consumer they expected — the published
-catalog, the auth exchange, `host.status` — does not read it. The catalog is
+confirms the embedder's belief. Whatever consumer they expected - the published
+catalog, the auth exchange, `host.status` - does not read it. The catalog is
 built from `handler.manifests()` (`runtime.rs:686`, `:718-724`), entirely
 independently.
 
@@ -105,9 +105,9 @@ field.
 The dependency worth naming is the handler boundary. `HostInit` crosses out of
 this crate at `runtime.rs:753`, so "no consumer" is a claim about this repository
 only. `HostHandler::initialize` takes the payload, and any handler could read
-it. The three in-repository handlers — the composite at `composite.rs`, the
+it. The three in-repository handlers - the composite at `composite.rs`, the
 adapter in `daemon/tests/host_adapter.rs`, and the example at
-`daemon/examples/direct_host_fixture.rs` — do not.
+`daemon/examples/direct_host_fixture.rs` - do not.
 
 That is why the record's reachability label is `explicit-config-only` rather than
 `default-production`: the field's default is `Vec::new()` and only an explicit
@@ -126,7 +126,7 @@ reflection for this, so the practical forms are:
    that observes its effect.
 3. For the pass-through fields specifically, a behavioural assertion: set
    `host_capabilities` to a non-empty value and assert *some* observable differs.
-   Today none does, so this test would fail, which is the point — it converts a
+   Today none does, so this test would fail, which is the point - it converts a
    silent gap into a failing check.
 
 Form 3 is the only one that is genuinely mechanical. It asserts the precondition
@@ -149,7 +149,7 @@ that a settable field is observable, not the defect.
   pending correlations, capability/catalog caches") but those are populated from
   the catalog, which comes from `handler.manifests()`.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the field has no counterpart in the wire
+- Conclusion: resolved with answer - the field has no counterpart in the wire
   contract. Whatever it was for is not in the specification.
 
 ### Q: is it a placeholder for scheduled work?
@@ -172,9 +172,9 @@ that a settable field is observable, not the defect.
 
 - Sources examined: the per-field grep results for all 21 fields.
 - Findings: none. Every consumer found is in non-test code. `liveness` is the
-  closest case — its consumer at `connection.rs:279` is production code, but the
+  closest case - its consumer at `connection.rs:279` is production code, but the
   only configurations that make it `Some` are tests, which is a reachability
   question rather than an inertness one and is recorded separately as
   `rt-a-the-default-configuration-arms-no-liveness-probe`.
 - Missing evidence: none.
-- Conclusion: resolved with answer — one inert field, no test-only consumers.
+- Conclusion: resolved with answer - one inert field, no test-only consumers.

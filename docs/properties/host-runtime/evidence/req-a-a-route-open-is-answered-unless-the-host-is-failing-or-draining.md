@@ -38,7 +38,7 @@ Err(_) => {
 }
 ```
 
-`Ok(None)` — the third case folded into exit 3 — comes from the bind task's own
+`Ok(None)` - the third case folded into exit 3 - comes from the bind task's own
 inner watchdog at `dispatch.rs:1151-1157`, which trips the same latch before
 returning `None`. So all three variants of exit 3 and exit 4 leave the host
 fatal, and `fatal.trip` takes `&self.shutdown`, so the host's shutdown token is
@@ -140,7 +140,7 @@ is exit 2, and `tests/handler_contract.rs:229`
   watchdog trips it at `:1152-1155` before returning `None`; `lifecycle_join`
   trips it at `runtime.rs:192-193` and `:204-205`.
 - Missing evidence: none.
-- Conclusion: resolved with answer — yes, both exits imply a tripped fatal latch.
+- Conclusion: resolved with answer - yes, both exits imply a tripped fatal latch.
 
 ### Q: Is exit 6 reachable on a generation that stays live afterwards?
 
@@ -154,7 +154,7 @@ is exit 2, and `tests/handler_contract.rs:229`
 - Findings: the `close_generation` route implies the generation is already
   cancelled. The `settle_route` route implies host shutdown is in progress. A
   client-originated route `Goodbye` cannot reach a mid-bind route, because the
-  client does not yet know the handle — protocol §8.2 says exactly this, and
+  client does not yet know the handle - protocol §8.2 says exactly this, and
   `connection.rs:541` requires a `RouteHandle` from the frame header.
 - Missing evidence: the full caller list for `settle_route`, which lives in
   `harness_closure.rs` (sub-part 2f, 1,122 lines, not in this scope).
@@ -166,11 +166,11 @@ is exit 2, and `tests/handler_contract.rs:229`
 
 - Sources examined: §8.2's sequence diagram and the paragraph following it.
 - Findings: the diagram has exactly two bind outcomes and both emit a frame. The
-  following paragraph does anticipate an abandoned `route.open` — "a caller that
-  drops or times out after the request is written" — and gives the client a
+  following paragraph does anticipate an abandoned `route.open` - "a caller that
+  drops or times out after the request is written" - and gives the client a
   remedy: treat an unmatched control `Response` that names a route as a late bind
   it cannot own. That remedy is keyed on *receiving a frame*. On exits 3, 4, and
   6 there is no frame, so the remedy never triggers.
 - Missing evidence: none.
-- Conclusion: resolved with answer — §8.2 covers the abandoned-caller direction
+- Conclusion: resolved with answer - §8.2 covers the abandoned-caller direction
   and not the unanswered-request direction. Recorded as lead 5 in the lens file.

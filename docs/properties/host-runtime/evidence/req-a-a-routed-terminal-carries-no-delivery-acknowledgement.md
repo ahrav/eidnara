@@ -117,7 +117,7 @@ one-to-one correlation contract cannot.
   `frame_channel.rs:715-723` shows discards the ticket (`.map(drop)`). So no
   routed settlement path holds the state handle.
 - Missing evidence: none.
-- Conclusion: resolved with answer — no host-side delivery record exists for a
+- Conclusion: resolved with answer - no host-side delivery record exists for a
   routed terminal.
 
 ### Q: Would attaching a hook be free?
@@ -129,5 +129,5 @@ one-to-one correlation contract cannot.
   plausible reason for the current choice.
 - Missing evidence: no benchmark or design note in the crate stating this as the
   reason.
-- Conclusion: needs human input — whether the metering value justifies a boxed
+- Conclusion: needs human input - whether the metering value justifies a boxed
   closure per routed terminal is a design decision, not a code fact.

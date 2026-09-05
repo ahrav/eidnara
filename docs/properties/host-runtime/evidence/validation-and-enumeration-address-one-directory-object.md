@@ -1,6 +1,6 @@
 # validation-and-enumeration-address-one-directory-object
 
-Scope note: the directory objects here are payload generations — content-addressed
+Scope note: the directory objects here are payload generations - content-addressed
 on-disk directories under `generations/`, named by the SHA-256 of their canonical
 manifest bytes. Nothing in this record concerns the connection generations of
 `connection.rs`, which have no filesystem identity at all.
@@ -33,7 +33,7 @@ unredirectable.
 
 Inside `generation.rs`, no third instance of that shape exists. Every
 directory-relative operation in production code resolves against a pinned
-descriptor — `root_fd`, `generations_fd`, `temp_fd`, or a `dir`/`parent`
+descriptor - `root_fd`, `generations_fd`, `temp_fd`, or a `dir`/`parent`
 argument. The only non-descriptor filesystem call in production code is
 `std::fs::symlink_metadata(&spec.source)` at `:738`, and its subject is a staging
 *source*, not a store object; it feeds capacity sizing only, and
@@ -50,9 +50,9 @@ to perform its own validation. One consumer honours the descriptor:
 `crates/daemon/src/bin/eidnara_host/serve.rs:509` and `:529` hand
 `generation.path().join(BUNDLE_DIR)` and `generation.path().join(ORT_LIBRARY)`
 downstream as pathnames. The comment at `serve.rs:510-517` states the hazard in
-the property's own terms — "a directory replaced after validation could serve
+the property's own terms - "a directory replaced after validation could serve
 different embedding bytes under a generation the daemon still reported as valid"
-— and mitigates it by forwarding the manifest's SHA-256 so the loader verifies
+- and mitigates it by forwarding the manifest's SHA-256 so the loader verifies
 content. So two store objects are addressed by re-resolved pathname, guarded by
 content hash rather than by descriptor pinning.
 
@@ -70,7 +70,7 @@ alone even though the hash check opened that file separately at `:662`.
 These are not the fixed shape: the parent is identical in each, so nothing at the
 `generations` name can redirect them, and `open_child_dir` re-applies the
 owner-only predicate on every open (`:1259-1266`). What they share with the class
-is exactly what the property statement names — the read, walk, or removal does not
+is exactly what the property statement names - the read, walk, or removal does not
 go through a descriptor the operation pinned for that entry. One limit is
 structural: `remove_tree`'s final `unlinkat(parent, name, AtFlags::REMOVEDIR)`
 (`:1357`) has no fd-based equivalent, so a fully descriptor-relative removal is
@@ -82,7 +82,7 @@ Both shipped instances turned a validation or a deletion into a decision about a
 directory other than the one the operation was holding. The prune instance is the
 worse of the two, because `0827dbc8` notes the consequence is unrecoverable: "the
 later namespace-anchor failure cannot bring those bytes back." The surviving
-`serve.rs` form fails differently — a replaced bundle directory is caught by the
+`serve.rs` form fails differently - a replaced bundle directory is caught by the
 forwarded hash, so the failure is a rejected start rather than served bytes,
 provided the loader actually verifies.
 
@@ -97,7 +97,7 @@ resolves the pathname, in a process that holds `lifetime.lock` rather than
 ## What a test must construct
 
 For the in-store shape, a replacement directory planted at the operation's name
-between the pin and the walk or removal — Linux-gated, and the two fixed
+between the pin and the walk or removal - Linux-gated, and the two fixed
 instances have regressions. For the `serve.rs` shape, a bundle directory replaced
 after `validate` returns and before the loader reads it, asserting that the
 forwarded SHA-256 rejects it. Nothing constructs the second today, and nothing
@@ -124,6 +124,6 @@ prevents a fourth instance appearing at the `path()` boundary.
   three entry-level resolutions is reachable by a writer that is not excluded by
   `transaction.lock`.
 - Conclusion: the sweep is done for `generation.rs` and answers the question
-  there — no third instance. It does not close the property, because the class
+  there - no third instance. It does not close the property, because the class
   reappears at the `path()` boundary in a different crate under a different
   mitigation, and that boundary has no regression test.

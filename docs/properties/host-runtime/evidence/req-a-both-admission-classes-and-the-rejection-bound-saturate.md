@@ -43,8 +43,8 @@ differs per state:
 coverage, `sometimes` is situation coverage, and a campaign can execute a branch's
 lines while never producing the operational state the branch represents. Here that
 distinction is sharp. Sites 1 and 2 are the *same two lines* for general and
-reserved classes — the pool is selected by the match at `:873-879` and the
-acquisition code is shared — so line coverage of `:884` and `:896` says nothing
+reserved classes - the pool is selected by the match at `:873-879` and the
+acquisition code is shared - so line coverage of `:884` and `:896` says nothing
 about which class saturated. And `busy_rejects` exhaustion requires not just the
 counter reaching zero but the 32 emissions being genuinely stuck, which requires a
 contended egress budget as well.
@@ -74,7 +74,7 @@ internal timeout produces (see
 `req-a-a-handler-outliving-every-host-deadline-is-reached`). If it is never
 constructed, the assertion that task exhaustion rejects rather than queues rests
 on reading `try_acquire_owned` rather than on evidence, and a future refactor to
-`acquire_owned` — one character's difference in intent — would convert every
+`acquire_owned` - one character's difference in intent - would convert every
 capacity rejection into an unbounded queue on the read loop, which is exactly what
 the comment at `:881-883` warns against, with no test to catch it.
 
@@ -121,18 +121,18 @@ mutator, so shrinking is available.
 One campaign observing all five, with a marker per state. Marker names must be
 constant and globally unique per METHOD's coverage rules, so:
 
-1. `admission_general_pending_saturated` — shrink `max_pending_requests`, park
+1. `admission_general_pending_saturated` - shrink `max_pending_requests`, park
    handlers, assert `server_busy` with unchanged `dispatch_count()`. Exists as
    `tests/dispatch.rs:295`.
-2. `admission_general_task_saturated` — shrink `max_handler_tasks` below
+2. `admission_general_task_saturated` - shrink `max_handler_tasks` below
    `max_pending_requests` so the task pool binds first, park that many handlers,
    assert `server_busy` and that the message is "handler task capacity exhausted"
    rather than the pending one, distinguishing state 2 from state 1.
-3. `admission_reserved_pending_saturated` — exists as `tests/dispatch.rs:976`.
-4. `admission_reserved_task_saturated` — shrink Broca's effective task reserve,
+3. `admission_reserved_pending_saturated` - exists as `tests/dispatch.rs:976`.
+4. `admission_reserved_task_saturated` - shrink Broca's effective task reserve,
    park that many Broca-route requests, assert `server_busy` on a Broca route
    while a general route still dispatches.
-5. `rejection_bound_saturated` — tight egress budget, closed route, pipeline 33+
+5. `rejection_bound_saturated` - tight egress budget, closed route, pipeline 33+
    requests without reading, assert the generation retires and a previously
    settled unrelated terminal is lost.
 
@@ -151,7 +151,7 @@ entered.
   `handler_contract.rs` only in startup-validation tests. `busy_rejects` appears in
   no test file at all.
 - Missing evidence: none.
-- Conclusion: resolved with answer — three of five states are unconstructed.
+- Conclusion: resolved with answer - three of five states are unconstructed.
 
 ### Q: Do states 1 and 2 produce distinguishable client-visible evidence?
 
@@ -163,12 +163,12 @@ entered.
   it. The two states are therefore indistinguishable to a conforming client, and a
   test must use the message or host-side instrumentation to tell them apart.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the test must assert on the message or on
+- Conclusion: resolved with answer - the test must assert on the message or on
   host state, and must not treat message-matching as a client-side capability.
 
 ### Q: Is state 4 reachable without modifying Broca?
 
-- Sources examined: `broca/config.rs:183-188` (constants, not limits — the comment
+- Sources examined: `broca/config.rs:183-188` (constants, not limits - the comment
   at `broca/mod.rs:169-170` says "Constants rather than limits so a test-shrunken
   supervisor still declares the product contract"), `runtime.rs:537-560`
   (declaration validation), `handler.rs:565-567` (the trait default).
@@ -176,7 +176,7 @@ entered.
   configurable. So reaching state 4 with the real Broca requires 96 concurrently
   parked Broca-route requests. The alternative is a test composite with a
   reserved-class child declaring a small reserve, which is how
-  `tests/dispatch.rs:976` reaches state 3 — worth checking whether it uses the
+  `tests/dispatch.rs:976` reaches state 3 - worth checking whether it uses the
   real Broca or a substitute.
 - Missing evidence: whether `tests/dispatch.rs:976`'s fixture uses
   `tests/support/broca.rs`'s substitute (which `tests/support/broca.rs:184`

@@ -100,7 +100,7 @@ An operator investigates a host that is serving nothing.
   `state` is `"healthy"`. The operator has one true number and one misleading
   verdict.
 - If the cause is any of the other four `RingUnavailable` producers
-  (`ring_transport.rs:242-255`, `:256-259`, `:279-281`, `:282` — see
+  (`ring_transport.rs:242-255`, `:256-259`, `:279-281`, `:282` - see
   `ring-a-ring-unavailability-fails-closed-without-a-classified-reason`), every
   counter is zero and `state` is `"healthy"`. The operator has nothing.
 - If the cause is a lost endpoint thread from a hook panic (see
@@ -168,7 +168,7 @@ arm and covers the terminal arm not at all. It does not run in CI.
 - Findings: the doc is genuinely ambiguous and the two readings cut differently.
   `:53` attributes the taxonomy to `eidnara daemon doctor`, which is
   host-side, and `:61-69` then lists the healthy report's contents as exactly the
-  eight fields `diagnostics()` emits — so the healthy half of the doc describes
+  eight fields `diagnostics()` emits - so the healthy half of the doc describes
   the host's output precisely. But `:71` says "Client diagnostics use the same
   terminal-class set", which implies the host has a set for the client to
   match. And the client's implementation classifies errors it saw itself
@@ -194,7 +194,7 @@ arm and covers the terminal arm not at all. It does not run in CI.
   Admission exhaustion is not terminal for the host: it is ordinary backpressure
   when `max_connections` live rings exist, and the next disconnect frees a slot.
   So mapping a non-zero `exhaustions` count to `state: "terminal"` would be
-  wrong. What is missing is a middle state — the doc's binary healthy-or-terminal
+  wrong. What is missing is a middle state - the doc's binary healthy-or-terminal
   shape has no room for "saturated". Note that `runtime.rs` initializes the
   host's own `HealthReport` with `HealthStatus::Degraded`
   (`runtime.rs`; pre-#131 citation `:889-891` not re-swept), so a three-valued

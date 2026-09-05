@@ -25,7 +25,7 @@ The branch, `client.rs:1970-1973`:
 The claim, `client.rs:1965-1969`: "The reservation covers the framing maximum and
 belongs to the reader alone, so a valid frame is never refused because a consumer
 is holding queued bytes. A refusal here therefore means the header declared more
-than the framing maximum, which `validate_inbound` has already rejected — it
+than the framing maximum, which `validate_inbound` has already rejected - it
 survives only as the structural guard for that invariant."
 
 Four steps, each verified:
@@ -125,8 +125,8 @@ never observed. `client.rs:4031` and `:4089` already take direct charges from
 Note what such a test would reveal, and it is the record's open question: the
 realignment is discarded. `read_active_frame` returns `Err(())` at `:1972`, and
 `reader_loop` breaks at `:1897-1900` after `inner.retire("protocol_violation")`.
-So the drain's stated purpose at `client.rs:2010-2011` — "so the failure is
-reported against a stream still aligned on a header boundary" — is a promise no
+So the drain's stated purpose at `client.rs:2010-2011` - "so the failure is
+reported against a stream still aligned on a header boundary" - is a promise no
 code consumes.
 
 ## Investigation log

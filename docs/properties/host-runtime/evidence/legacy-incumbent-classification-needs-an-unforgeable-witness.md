@@ -18,7 +18,7 @@ repair relaxed it, and the question is what the relaxed predicate still proves.
   wedged on every routine upgrade."
 - The diff widens the disagreement check. Before, `classify` had `if lock_free !=
   lifetime_free { return wedged("lifetime and runtime locks disagree", record); }`
-  — every single-fence shape was a fault. After, the same commit adds the
+  - every single-fence shape was a fault. After, the same commit adds the
   predicate and an exemption:
 
       let incumbent = !lock_free && lifetime_free && legacy_record.is_some();
@@ -50,7 +50,7 @@ repair relaxed it, and the question is what the relaxed predicate still proves.
 Files an attacker must write under the same-user model, and what the runtime lock
 does about each:
 
-1. **`host-lifecycle.json`** (`lifecycle.rs:26`) in the runtime directory —
+1. **`host-lifecycle.json`** (`lifecycle.rs:26`) in the runtime directory -
    schema 1, `phase` one of the three strings (`:303-309`), `launch_id` and
    `daemon_id` each 32 lowercase hex characters (`:337-338`, `:371-375`),
    `payload_manifest_digest` exactly empty, `written_at_ms` within 60 s of now
@@ -58,7 +58,7 @@ does about each:
    file: it is an advisory flock on the directory, it guards no write to any name
    inside, and in this scenario the attacker is the holder.
 2. **`connection.json`** (`instance.rs:22`) in the same directory, needed
-   only for a `Running` verdict — must parse as `ConnectionInfo`, pass
+   only for a `Running` verdict - must parse as `ConnectionInfo`, pass
    `info.validate()`, and satisfy `publication_summary` (`lifecycle.rs:887-905`):
    first endpoint host `127.0.0.1`, nonzero port, nonempty `daemon_ver`, key
    length exactly `KEY_LEN = 32` (`connection_file.rs:28`), and `daemon_id`
@@ -96,7 +96,7 @@ needs no fresh timestamp at all, since the running arm never calls
 `timestamp_fresh`; a `starting` or `stopping` claim needs the timestamp refreshed
 within the 60 s window (`:773`) but needs no publication. This record depends on
 the fence semantics that `probe-never-reports-stopped-while-either-fence-is-held`
-establishes — specifically that `incumbent` is the one exempted single-fence
+establishes - specifically that `incumbent` is the one exempted single-fence
 shape.
 
 ## What a test must construct
@@ -105,7 +105,7 @@ For a legacy-shaped record beside a matching publication, assert the `running`
 verdict requires a witness not writable by whoever wrote the record. There is no
 such witness today, so the test fails by construction, which is the point. The
 adversarial half already exists as
-`a_pre_coordination_incumbent_classifies_by_its_record` (`:2435`) — it plants
+`a_pre_coordination_incumbent_classifies_by_its_record` (`:2435`) - it plants
 exactly the forgery and asserts the current permissive outcome, so a property
 test can reuse its setup verbatim and invert the assertion. Two variants are
 worth adding: a `starting`-phase legacy record with **no** publication at all,
@@ -136,8 +136,8 @@ which reaches `Starting` through `:1138` on strictly less evidence, and a
 - Sources examined: `lifecycle.rs:26`, `:337-338`, `:356-398`, `:887-905`;
   `instance.rs:22`, `:787-793`; `connection_file.rs:28`; the regression test
   `lifecycle.rs:2435-2492`.
-- Findings: two files — the lifecycle record always, the publication only for a
-  `running` claim — both subject to `is_secure_regular`, all of whose checks a
+- Findings: two files - the lifecycle record always, the publication only for a
+  `running` claim - both subject to `is_secure_regular`, all of whose checks a
   same-user writer satisfies. The runtime-directory flock protects neither: it is
   advisory, it gates no write to any name in the directory, and the attacker is
   its holder in this scenario.
@@ -149,8 +149,8 @@ which reaches `Starting` through `:1138` on strictly less evidence, and a
 
 - Sources examined: the commit message's stated intent; the `RecordDecode`
   doc comment at `:340-347`; the `incumbent` comment at `:1084-1090`.
-- Findings: all three explain the compatibility motive — a routine upgrade must
-  see a stoppable incumbent rather than an alarm — and none states a trust
+- Findings: all three explain the compatibility motive - a routine upgrade must
+  see a stoppable incumbent rather than an alarm - and none states a trust
   assumption about who may write the legacy shape.
 - Missing evidence: no design note on the trust model for pre-coordination
   releases.

@@ -17,18 +17,18 @@ at `:1466`; `runtime.rs` has no test module.
 
 `connection.rs`:
 
-- `:187` `AbortOnDropHandle::new(shared.tracker.spawn(channel_io))` — the
+- `:187` `AbortOnDropHandle::new(shared.tracker.spawn(channel_io))` - the
   bootstrap writer. Owned-by-AbortOnDropHandle, tracked, **no** abort handle.
-- `:210` `AbortOnDropHandle::new(io_task.expect(...))` — re-wrap of the handle
+- `:210` `AbortOnDropHandle::new(io_task.expect(...))` - re-wrap of the handle
   minted at `:1081`. Owned-by-AbortOnDropHandle.
-- `:296` `spawn_tracked(gen.read_tasks.track_future(liveness_loop(..)))` —
+- `:296` `spawn_tracked(gen.read_tasks.track_future(liveness_loop(..)))` -
   tracked-in-read-tasks and tracked-with-abort-handle.
-- `:452`, `:573`, `:687`, `:705`, `:724`, `:732`, `:983`, `:1094` — same
+- `:452`, `:573`, `:687`, `:705`, `:724`, `:732`, `:983`, `:1094` - same
   `spawn_tracked(gen.read_tasks.track_future(..))` shape; both sets.
-- `:761` `spawn_lifecycle(gen.read_tasks.track_future(..))` — the `route.open`
+- `:761` `spawn_lifecycle(gen.read_tasks.track_future(..))` - the `route.open`
   wrapper. Tracked-in-read-tasks; **no** abort handle, deliberately
   (`runtime.rs:157-161`).
-- `:1081` `spawn_tracked(io)` — candidate I/O. Tracked-with-abort-handle; the
+- `:1081` `spawn_tracked(io)` - candidate I/O. Tracked-with-abort-handle; the
   handle moves into `handoff.io` (`:1087`) and is re-wrapped at `:210`.
 
 `connection.rs:276-278` also registers `read_loop` into `read_tasks`, but it is
@@ -36,28 +36,28 @@ awaited inline at `:304`, not spawned.
 
 `dispatch.rs`:
 
-- `:612` `spawn_tracked(gen.read_tasks.track_future(..))` — both sets.
-- `:747` `tokio::spawn(async move { .. })` — **bare**. The only one.
+- `:612` `spawn_tracked(gen.read_tasks.track_future(..))` - both sets.
+- `:747` `tokio::spawn(async move { .. })` - **bare**. The only one.
 - `:909` `spawn_tracked(route_tracker.track_future(..))` and `:962`
-  `spawn_tracked(handler_fence.track_future(..))` — tracked-with-abort-handle,
+  `spawn_tracked(handler_fence.track_future(..))` - tracked-with-abort-handle,
   registered in the *route* tracker, not `read_tasks`; `:962`'s handle is
   wrapped at `:974`.
-- `:1123`, `:1239` `spawn_lifecycle(..)` — tracked, no abort handle,
+- `:1123`, `:1239` `spawn_lifecycle(..)` - tracked, no abort handle,
   abort-exempt by contract.
-- `:1381`, `:1402` `JoinSet::spawn` — owned by a local `JoinSet` that its
+- `:1381`, `:1402` `JoinSet::spawn` - owned by a local `JoinSet` that its
   caller drains (`:1385`, and `force_close_all_routes`).
 
 `runtime.rs`: `:151` and `:167` are the helper bodies themselves. `:951`,
 `:1017`, `:1053` are `spawn_tracked`; `:959`, `:1066`, `:1240` are
 `spawn_lifecycle`; `:740` is owned-by-AbortOnDropHandle. `:259`, `:301`,
 `:321`, `:387`, `:449` are bare, and all five are teardown or lock-retention
-tasks holding `InstanceGuard` and/or `Arc<HostShared>` — none holds an
+tasks holding `InstanceGuard` and/or `Arc<HostShared>` - none holds an
 `Arc<GenerationCore>`. `:449` can reach generations transitively through
 `shared.connections`, which is why the claim is scoped to the connection path
 rather than to generation reachability.
 
 Test-module spawns, excluded: `connection.rs:1510`, `:1535`, `:1567`, `:1615`.
-`dispatch.rs` has none — every one of its spawn sites precedes `:1466`.
+`dispatch.rs` has none - every one of its spawn sites precedes `:1466`.
 
 What `dispatch.rs:747-756` holds and for how long: a `CancellationToken` clone
 of `shared.shutdown` (`:745`) and `gen_watch: Arc<GenerationCore>` (`:746`). It
@@ -74,7 +74,7 @@ deadline past its own registration, and its only effect is
 1. A client sends an authenticated `host.shutdown`. `handle_host_shutdown`
    wins the latch, admits the response to the writer queue, and spawns the
    watchdog at `:747`.
-2. The generation retires for an unrelated reason — peer EOF, a corrupt frame,
+2. The generation retires for an unrelated reason - peer EOF, a corrupt frame,
    a liveness invalidation. `serve_generation` runs `close_generation`, which
    removes the registry entry (`dispatch.rs:1397-1401`).
 3. The watchdog is still parked on its `sleep_until`. It is not in
@@ -83,7 +83,7 @@ deadline past its own registration, and its only effect is
    cannot reach it.
 4. It wakes and calls `token.cancel()` on a generation already gone from the
    registry. Cancelling an already-cancelled token is idempotent, so nothing
-   observable happens — which is why this is a completeness defect rather than
+   observable happens - which is why this is a completeness defect rather than
    a live bug.
 5. The cost is that `shared.tracker.wait()` at `runtime.rs:1191` does not cover
    it either, because `tokio::spawn` does not enter the tracker. A shutdown can
@@ -98,7 +98,7 @@ acquire the egress charge at `:695`, and reach `send_before` at `:712`. A
 contender that takes the `Committed` arm at `:655` returns at `:671` and spawns
 nothing. So at most one watchdog exists per committed attempt, plus one per
 earlier attempt that reopened the latch. The interesting case named in the
-catalog — a second shutdown on a generation the first watchdog still holds — is
+catalog - a second shutdown on a generation the first watchdog still holds - is
 reachable because the latch reopens when the hook drops unrun, so a successor
 requester on a different generation spawns a second watchdog while the first is
 still parked.
@@ -111,7 +111,7 @@ and `runtime.rs` outside a test module is one of the four classified forms, with
 `dispatch.rs:747` either listed as a declared exception or moved into a tracked
 set. The behavioural one drives an authenticated `host.shutdown` to write
 completion, retires the generation before the deadline, and asserts the host
-tracker's wait does not complete while the watchdog is parked — that is the
+tracker's wait does not complete while the watchdog is parked - that is the
 observable the record actually protects. The second requires
 `start_paused = true` to make a 30-second deadline testable, and a
 multi-thread runtime is not needed because the watchdog's only await is a

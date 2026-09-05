@@ -48,7 +48,7 @@ Concretely, with `window_ms = 60_000` and a genuine record whose
   `written_at_ms <= 0 + 60_000`, i.e. `1.7e12 <= 60_000`, which is **false**, so
   the conjunction is false. Age-side would have passed (`0 - 1.7e12` saturates to
   `0`, and `0 <= 60_000`). The verdict flips to `Wedged` with reason `"starting
-  record expired"` (`:1141`) or `"stopping record expired"` (`:1165`) — but the
+  record expired"` (`:1141`) or `"stopping record expired"` (`:1165`) - but the
   rejection actually came from the *future* bound, so the emitted reason
   misdescribes the cause.
 - **Collapse to maximum.** `now = u64::MAX`. Future-side becomes
@@ -66,8 +66,8 @@ admitting a dead host as live.
 
 1. An incarnation writes a `starting` or `stopping` record; `written_at_ms` is a
    normal epoch count (`lifecycle.rs:427`).
-2. The wall clock moves — an NTP step, a manual `date` correction, a VM suspend
-   and resume, or a clock set before 1970 — by more than 60 s in either
+2. The wall clock moves - an NTP step, a manual `date` correction, a VM suspend
+   and resume, or a clock set before 1970 - by more than 60 s in either
    direction, or far enough to trigger one of the two collapses.
 3. A probe calls `timestamp_fresh` at `:1138` or `:1162`. Whichever conjunct the
    step or collapse violates, the result is `false`.
@@ -93,7 +93,7 @@ A live coherent incarnation whose probe verdict is invariant to wall-clock
 adjustments larger than the window. That needs a clock seam, which the code does
 not have: `now_ms` reads `SystemTime::now()` directly at `:401`. Without one,
 the reachable substitutes are an injected `written_at_ms` at each collapse value
-— `0` and `u64::MAX` — which exercises the same two conjuncts from the record
+- `0` and `u64::MAX` - which exercises the same two conjuncts from the record
 side, and a container or namespace whose clock can be stepped. The existing tests
 cover neither: `expired_starting_and_stopping_evidence_is_wedged`
 (`lifecycle.rs:1537-1551`) shrinks the *window* to `Duration::ZERO`, and
@@ -108,7 +108,7 @@ distinguishes a forged record from a stepped clock.
 - Sources examined: `lifecycle.rs:400-405` in full; `timestamp_fresh`
   `:1029-1033`; the two call sites `:1138` and `:1162`; `ProbeFreshness`
   `:765-776`; `eidnara-host.rs:402`.
-- Findings: both collapses confirmed — `unwrap_or(0)` at `:404` for a pre-epoch
+- Findings: both collapses confirmed - `unwrap_or(0)` at `:404` for a pre-epoch
   clock and `unwrap_or(u64::MAX)` at `:403` for an unrepresentable count.
   Against a real `written_at_ms`, zero fails the future-side conjunct while the
   age-side would pass; maximum fails the age-side conjunct while the future-side

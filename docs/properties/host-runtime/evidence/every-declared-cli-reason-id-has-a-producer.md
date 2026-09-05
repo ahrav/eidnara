@@ -68,7 +68,7 @@ The atomic exchange is the first. On Linux and macOS
 `RENAME_SWAP` all become `NativePayloadInvalid`. On any other platform the cfg
 arm at `:1200-1205` returns
 `invalid("atomic digest-target exchange is unsupported on this platform")`,
-which is the same class — though `unsupported_platform` fires earlier there, so
+which is the same class - though `unsupported_platform` fires earlier there, so
 that arm is unlikely to be the observed reason.
 
 The portable rename fallback is the second. `rename_no_replace` (`:1216-1242`)
@@ -102,8 +102,8 @@ promotion path.
 
 ## What a test must construct
 
-A data root on a filesystem without `RENAME_EXCHANGE` — or an injected
-`EOPNOTSUPP` at `exchange_dirs` — plus a corrupt unprotected occupant at the
+A data root on a filesystem without `RENAME_EXCHANGE` - or an injected
+`EOPNOTSUPP` at `exchange_dirs` - plus a corrupt unprotected occupant at the
 digest name, asserting the emitted reason is not `native_payload_invalid`. Nothing
 constructs it. The one adjacent test,
 `remediation_mapping_matches_release_contract` (`eidnara-host.rs:1753-1785`), pins

@@ -53,7 +53,7 @@ match declaration.route_class {
 Its rationale, `:530-534`: "a general-class module holding reserved permits would
 shrink the general pools without anything ever drawing on the carve-out, and a
 reserved-class module with a zero reservation could dispatch only through another
-module's permits — both are impossible accounting, refused at startup."
+module's permits - both are impossible accounting, refused at startup."
 
 So the implication chain is: `reservations.pending == 0` implies no module
 declared a reservation, which implies (by the `Reserved` arm) no module is
@@ -82,11 +82,11 @@ so each general pool retains at least one permit.
 Existing coverage:
 
 - `handler_contract.rs:636` `zero_reservation_handlers_keep_single_pool_admission`
-  — the no-declaration case from the admission side.
-- `handler_contract.rs:375` `class_and_reservation_mismatches_fail_startup` — the
+  - the no-declaration case from the admission side.
+- `handler_contract.rs:375` `class_and_reservation_mismatches_fail_startup` - the
   gate itself, with both directions constructed at `:378-388`.
 - `handler_contract.rs:323` `reservations_must_leave_one_general_slot_in_each_pool`
-  — the strict comparisons at `:693` and `:698`.
+  - the strict comparisons at `:693` and `:698`.
 
 None asserts the no-entry half directly, because an acquisition against the
 reserved pool is internal to `dispatch.rs` and has no observable at the wire.
@@ -95,7 +95,7 @@ reserved pool is internal to `dispatch.rs` and has no observable at the wire.
 
 A future module is added with `route_class: RouteClass::Reserved` and non-zero
 reserved counts, so the gate passes and the pools are non-empty. Then a routing
-change makes a *general*-class route reach the reserved acquisition — a mis-set
+change makes a *general*-class route reach the reserved acquisition - a mis-set
 class on a new target kind, a defaulted `RouteClass` in a new code path, or a
 route whose class is derived from something other than `TargetIndex`.
 
@@ -119,7 +119,7 @@ The runtime window is the acquisition itself, which is unbounded on a zero-permi
 semaphore. Whether the parked task is cancellable depends on how dispatch races
 the acquisition against the generation token and the frame deadline, which is
 `dispatch.rs` and belongs to sub-part 2e. This record deliberately asserts the
-precondition — that no general route reaches the reserved pool — rather than the
+precondition - that no general route reaches the reserved pool - rather than the
 consequence, because the consequence's containment is someone else's property.
 
 Dependency: the whole guarantee rests on `TargetIndex` being the single authority
@@ -164,7 +164,7 @@ primary one and this is only a screen.
   `Err(AcquireError)`, which is why `wire.rs:418` can `expect`. Nothing closes the
   reserved semaphores.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the failure mode is a hang, not an error.
+- Conclusion: resolved with answer - the failure mode is a hang, not an error.
   That is what makes the no-entry half load-bearing: there is no error path to
   observe.
 

@@ -79,7 +79,7 @@ to work with: `composite.rs:334-348` builds one map entry per component, and
 An operator deploys with `health_interval` raised to 5 minutes to reduce probe
 load on a host whose components are expensive to interrogate. One component's
 storage lease is held by a draining predecessor, so it reports
-`storage_state: "starting"` — which
+`storage_state: "starting"` - which
 `docs/host-wire-protocol.md:685` explicitly sanctions: "Waiting for a
 predecessor's storage lease reports `degraded` without making transport
 unready."
@@ -131,8 +131,8 @@ Three pieces, none of which exists.
 
 The production-side guard is a counter of consecutive fast-cadence iterations,
 exposed so a campaign can assert an explicit bound. Per the coverage rules, the
-assertion is on the precondition — that the predicate's inputs came from a
-component report — not on the override itself.
+assertion is on the precondition - that the predicate's inputs came from a
+component report - not on the override itself.
 
 ## Investigation log
 
@@ -146,7 +146,7 @@ component report — not on the override itself.
   `lifecycle_callback_deadline.saturating_mul(2)` at `:1223` *derives* from a
   configured value rather than replacing it, and is recorded separately.
 - Missing evidence: none.
-- Conclusion: resolved with answer — `:1130` is the only site where a fixed
+- Conclusion: resolved with answer - `:1130` is the only site where a fixed
   literal substitutes for a configured value.
 
 ### Q: is `health_interval` read anywhere else, so that the override is partial?
@@ -156,7 +156,7 @@ component report — not on the override itself.
   default. `runtime.rs:1132` is the only read. `tests/lifecycle.rs:165` writes
   it.
 - Missing evidence: none.
-- Conclusion: resolved with answer — the override is total for the duration of
+- Conclusion: resolved with answer - the override is total for the duration of
   the window.
 
 ### Q: should the fast cadence be bounded, or is the unbounded form intended?

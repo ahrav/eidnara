@@ -70,7 +70,7 @@ bound. The doc's clearest statement is at `:658`:
 
 > Limit exhaustion before dispatch of a routed or control request returns terminal
 > `server_busy` for that correlation; `target_unavailable` is reserved for route
-> admission — `route.open` failures such as channel exhaustion (Section 8.2) — so
+> admission - `route.open` failures such as channel exhaustion (Section 8.2) - so
 > each code keeps exactly one recovery rule in Section 10.2.
 
 `target_unavailable` is described as a route-admission failure, which implies no

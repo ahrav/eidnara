@@ -51,7 +51,7 @@ returns `ProducedBody`, not `ReleaseIdentity`.
 
 The only in-tree code that constructs a `ReleaseIdentity` and hands it to
 `Ring::release` directly is `crates/shm-transport/tests/ring.rs:153`, `:161`,
-and `:169` — all transport-crate tests, deliberately probing
+and `:169` - all transport-crate tests, deliberately probing
 stale, duplicate, and quarantined release. (Pre-#131 there were five such
 sites; the rewritten test file has three.)
 
@@ -134,7 +134,7 @@ Neither exists.
 ### Q: Is the producer-side `ReleaseIdentity` return value intended to stay unused?
 
 - Sources examined: `ring.rs:1769` (`commit` signature and its doc,
-  "Publishes exact committed length after cursor equality check" — no mention of
+  "Publishes exact committed length after cursor equality check" - no mention of
   the return value's purpose), `ring.rs:1594` (mint site), the whole
   `shm-transport` public surface for a producer-side release protocol.
 - Findings: nothing in the tree uses it, and nothing documents a use.

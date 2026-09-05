@@ -84,14 +84,14 @@ appears and treats `degraded` as "do not send traffic yet" or, worse, as
 "restart".
 
 The host is healthy. Its handler's first `health` callback is slow, because it is
-interrogating a store that is itself opening — the exact case
+interrogating a store that is itself opening - the exact case
 `docs/host-wire-protocol.md:685` sanctions. The supervisor reads the seeded
 `Degraded`, concludes the host is unhealthy, and withholds traffic or cycles the
 process. Cycling makes it worse: the successor pays the same slow first probe,
 and `AlreadyRunning` from the lock retry loop (`runtime.rs:667-671`, four
 attempts over 75 ms) may add a start failure on top.
 
-The signal that would prevent this — `components` being empty — requires the
+The signal that would prevent this - `components` being empty - requires the
 supervisor to know that a never-probed host emits an empty map, which is stated
 nowhere.
 
@@ -164,7 +164,7 @@ freshness from an empty map. Deciding that is not this pass's business.
   entry per component, including a `panicked` placeholder at `:313-317` for a
   component whose callback panicked, which still occupies a key.
 - Missing evidence: none.
-- Conclusion: resolved with answer — a real report is never empty, so
+- Conclusion: resolved with answer - a real report is never empty, so
   `components: {}` uniquely identifies the seed today. It is an emergent property
   of two unrelated code paths and is asserted by neither.
 
@@ -178,6 +178,6 @@ freshness from an empty map. Deciding that is not this pass's business.
   frame, which is slower in the common case. So with a fast handler the window is
   narrow.
 - Missing evidence: none.
-- Conclusion: resolved with answer — reachable but narrow by default, and wide
+- Conclusion: resolved with answer - reachable but narrow by default, and wide
   exactly when it matters, which is a slow or blocked first probe. That is why the
   record's required enabling state is a blocking `health` rather than a race.
