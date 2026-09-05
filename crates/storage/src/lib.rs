@@ -646,12 +646,33 @@ mod sqlite_backend {
         }
     }
 
-    /// Enumerating individual pragma names cannot be complete: `ignore_check_constraints`
-    /// disables the fence table's constraint, `defer_foreign_keys` and `writable_schema`
-    /// reach schema invariants, and pragma names are case-insensitive. Denying the whole
-    /// capability class avoids that race. A pragma read carries no value and stays
-    /// allowed, as do the ordinary statements a callback exists to run. The argumentless
-    /// pragmas that still perform work are denied by name.
+    /// Pragmas whose argument names a schema object to describe rather than a value to set.
+    /// Every other pragma carrying an argument is treated as a write.
+    const SCHEMA_INTROSPECTION_PRAGMAS: &[&str] = &[
+        "table_info",
+        "table_xinfo",
+        "table_list",
+        "index_list",
+        "index_info",
+        "index_xinfo",
+        "foreign_key_list",
+    ];
+
+    /// SQLite pragma names are case-insensitive, so the allowlist compares them that way.
+    fn is_schema_introspection_pragma(pragma_name: &str) -> bool {
+        SCHEMA_INTROSPECTION_PRAGMAS
+            .iter()
+            .any(|allowed| pragma_name.eq_ignore_ascii_case(allowed))
+    }
+
+    /// Denies value-carrying pragmas except the introspection allowlist.
+    ///
+    /// A denylist cannot cover every state-changing pragma.
+    /// `ignore_check_constraints` disables the fence table constraint.
+    /// Pragma names are case-insensitive.
+    /// The allowlisted pragmas read schema metadata and cannot change connection state.
+    /// Pragma reads and statements that do not target infrastructure tables stay allowed.
+    /// The argumentless pragmas that still perform work are denied by name.
     ///
     /// Main-schema DDL is denied whatever it targets: the file's schema is the baseline
     /// the next open compares against, so a committed `CREATE`, `ALTER`, or `DROP` would
@@ -677,6 +698,13 @@ mod sqlite_backend {
                 trigger_name,
                 table_name,
             } if shadows(trigger_name) || shadows(table_name) => Authorization::Deny,
+            // Both `PRAGMA table_info(t)` and `pragma_table_info('t')` are read-only.
+            // Both forms report the table name as the pragma value.
+            // The statement form reports the pragma name as the caller spelled it.
+            AuthAction::Pragma {
+                pragma_name,
+                pragma_value: Some(_),
+            } if is_schema_introspection_pragma(pragma_name) => Authorization::Allow,
             AuthAction::Pragma {
                 pragma_value: Some(_),
                 ..
@@ -3690,6 +3718,75 @@ mod tests {
             .with_conn(|c| c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0)))
             .expect("next callback sees the commit");
         assert_eq!(after, "2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn guarded_callbacks_cannot_attach_or_detach_databases() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let r = store.with_conn(|c| c.execute("ATTACH DATABASE ':memory:' AS side", []));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "ATTACH must be denied by the read callback scope, got {r:?}"
+        );
+        let r = store.with_conn_fenced(|tx| tx.execute("ATTACH DATABASE ':memory:' AS side", []));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "ATTACH must be denied by the fenced callback scope, got {r:?}"
+        );
+        store
+            .with_conn_unfenced(|c| c.execute_batch("ATTACH DATABASE ':memory:' AS side"))
+            .expect("attach through the maintenance path");
+        let r = store.with_conn(|c| c.execute("DETACH DATABASE side", []));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "DETACH must be denied by the read callback scope, got {r:?}"
+        );
+        store
+            .with_conn_unfenced(|c| c.execute_batch("DETACH DATABASE side"))
+            .expect("detach through the maintenance path");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn schema_introspection_pragmas_pass_the_callback_scope_while_setting_pragmas_does_not() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let has_k: bool = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('kv') WHERE name = 'k')",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("table-valued introspection is a read");
+        assert!(has_k);
+        let columns: i64 = store
+            .with_conn_fenced(|tx| {
+                let mut statement = tx.prepare("PRAGMA table_info(kv)")?;
+                let rows = statement.query_map([], |_| Ok(()))?;
+                Ok(rows.count() as i64)
+            })
+            .expect("statement-form introspection inside a fenced write");
+        assert_eq!(columns, 2);
+        // The statement form hands the authorizer the caller's spelling.
+        for spelling in ["PRAGMA TABLE_INFO(kv)", "PRAGMA Table_Info(kv)"] {
+            let columns: i64 = store
+                .with_conn(|c| {
+                    let mut statement = c.prepare(spelling)?;
+                    let rows = statement.query_map([], |_| Ok(()))?;
+                    Ok(rows.count() as i64)
+                })
+                .unwrap_or_else(|e| panic!("{spelling} must pass the read scope: {e:?}"));
+            assert_eq!(columns, 2, "{spelling}");
+        }
+        let r = store.with_conn(|c| c.execute("PRAGMA journal_size_limit = 1", []));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "a pragma that sets a value stays denied, got {r:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
