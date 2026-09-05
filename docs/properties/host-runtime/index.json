@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "02788be0ba3389a8584575e6add5b9a9435d4ebe7c4f33d08e0e28123ea24c95",
+  "source_sha256": "cf677bab09849954054fa25a053598e117e8103ac336032dbfcc5358ff92725e",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -168,7 +168,7 @@
       "slug": "disconnect-releases-every-resource-keyed-to-the-connection",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the draining early return is on the default connection path (`crates/host-runtime/src/connection.rs:273-276`). Note that the promoted-versus-unpromoted asymmetry this record's fault angle describes is gone: that return now takes one arm, `discard_unregistered_generation`, which cancels the root (`:350-354`).",
+      "reachability_note": "the draining early return is on the default connection path (`crates/host-runtime/src/connection.rs:256-258`, re-verified): under the connections lock, if `draining` is set or the shutdown token is cancelled, `discard_unregistered_generation` (`:319-323`) cancels `read_cancel`, cancels the root `token`, and discards the writer before returning. The promoted-versus-unpromoted asymmetry the source catalog described was removed with transport negotiation; one arm remains.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -177,18 +177,18 @@
       "guarantee": "When a connection ends, every permit, charge, map entry, task, and cancellation root created for it is released, including on the early-return path taken while the host is draining.",
       "check": {
         "semantics": "always",
-        "condition": "after the connection task returns, both permits are released, the registry holds neither generation id, every owned route is finalized, and the candidate's root token is cancelled."
+        "condition": "after the connection task returns, both permits are released, the registry holds neither generation id, every owned route is finalized, and the generation's root token is cancelled, on the normal path and on the draining early return at `connection.rs:256-258`."
       },
-      "fault_timing": "the gap is the promoted branch. `serve_generation` can return early when draining is observed under the connections lock, before the read loop runs. For the promoted generation `gen.token` *is* the candidate's root, and that early return never cancels it, while the un-promoted arm explicitly discards the sender and cancels the root. Release then depends on the abort-on-drop handle rather than on the root the provider contract is written against.",
-      "required_faults": "a committed shutdown landing between the candidate's commit completion and the promoted generation's registration.",
+      "fault_timing": "the window is a committed shutdown landing after setup completes and before the generation is registered under the connections lock. The early return at `connection.rs:256-258` handles it with one arm that cancels the root directly, so release no longer depends on the abort-on-drop handle. What is unverified is the rest of the guarantee on that arm: whether the setup-phase permits and charges taken before `:256` are released by the discard or only by task exit.",
+      "required_faults": "a committed shutdown landing between setup completion and the generation's registration at `connection.rs:260`.",
       "confidence": {
         "level": "medium",
-        "evidence": "[evidence](evidence/disconnect-releases-every-resource-keyed-to-the-connection.md). the asymmetry and the early return are certain; what is not established is whether any shipped provider's release depends on the root rather than on task abort."
+        "evidence": "[evidence](evidence/disconnect-releases-every-resource-keyed-to-the-connection.md). The early return and the discard are read directly at HEAD; the source catalog's candidate-specific fault is recorded in the evidence file as history. What is not established is which permits the early return releases."
       },
-      "existing_check": "`tests/lifecycle.rs:1722` covers shutdown before promotion; `tests/transport_negotiation.rs:1522` covers the failure path. Neither lands in this window.",
-      "impact": "a candidate transport whose root is never cancelled, released only incidentally.",
+      "existing_check": "`tests/lifecycle.rs` covers shutdown before a connection registers; nothing lands shutdown in the post-setup, pre-registration window. The source catalog's `tests/transport_negotiation.rs` reference was removed with that file.",
+      "impact": "a connection retired during shutdown that leaks a permit or charge until the host exits.",
       "open_questions": [
-        "Does any provider's release depend on root cancellation? That decides whether this leaks today. (needs human input)"
+        "Which of the setup-phase permits and charges does the `:256-258` early return release directly, and which only through task exit? (needs human input)"
       ],
       "extra": {}
     },
@@ -580,9 +580,9 @@
       "guarantee": "The commit point either applies all three effects - draining, frozen route admission, latch commit plus token cancellation - or none.",
       "check": {
         "semantics": "always",
-        "condition": "for every prefix of the hook body, if draining is set then the shutdown token is cancelled, or a successor requester can still commit and reach that state."
+        "condition": "for every prefix of the hook body at which a panic is injected, after the hook has unwound either all three effects are applied (draining set, admission frozen, latch committed with the token cancelled) or none is observable or retained (draining false, admission open, latch reopened and not acknowledged). A partial state, in particular draining set with the latch reopened, or the acknowledged flag set without a commit, fails the check; recovery by a later successor does not make a partial state pass."
       },
-      "fault_timing": "the hook runs three effects in sequence inside the writer task. Corrected after portfolio evaluation: a tokio **abort cannot** split it, because the hook body is a synchronous closure with no await point, and tokio cancels only at await points. Only a panic can, and there are two distinct prefixes with different severities. A panic in the freeze leaves draining true while the dropped hook reopens the latch, which is recoverable by a successor requester. A panic inside the acknowledgement is worse: the acknowledged flag is set *before* the commit, so the drop declines to reopen and the latch is stuck in the in-flight phase with no possible successor. That second prefix is the wedge.",
+      "fault_timing": "the hook runs three effects in sequence inside the writer task. Corrected after portfolio evaluation: a tokio **abort cannot** split it, because the hook body is a synchronous closure with no await point, and tokio cancels only at await points. Only a panic can, and there are two distinct prefixes with different severities. A panic in the freeze leaves draining true while the dropped hook reopens the latch, which is recoverable by a successor requester. A panic inside the acknowledgement is worse: the acknowledged flag is set *before* the commit, so the drop declines to reopen and the latch is stuck in the in-flight phase with no possible successor. That second prefix is the wedge. Under the check as stated, the freeze-prefix panic is a predicted violation, not a recoverable pass: it leaves draining set with the latch reopened. The record keeps the guarantee unconditional because the code's own contract is all-or-nothing; a campaign that constructs the prefix should expect the check to fail until the hook restores draining on unwind.",
       "required_faults": "an authenticated shutdown that reaches write completion, plus a panic at one of the two prefixes.",
       "confidence": {
         "level": "medium",
@@ -1806,7 +1806,7 @@
       "guarantee": "After the generation is cancelled and the peer stops publishing, the endpoint thread reports `ReadClose::Cancelled` and exits within a bounded number of further inbound frames, provided the connection task is still draining the inbound channel.",
       "check": {
         "semantics": "always",
-        "condition": "evaluated at the end of an explicit bounded window: run sustained inbound traffic, cancel `read_cancel`, **stop the peer's publication and let the peer-to-host ring drain**, then poll until the endpoint thread has exited. Assert two bounds, both counted in frames rather than in wall-clock time. First, the thread performs at most `N + 1` further `receive_one` invocations, where `N` is the number of frames the peer committed before the cancellation edge: each committed frame costs one `Ok(true)` pass through `:415-421`, and the first empty observation returns `Ok(false)` and reaches the `read_cancel` check at `:400`, which takes the `inbound` sender (`:401`) and sends `Cancelled` (`:402`). Second, no frame committed *after* the cancellation edge is forwarded on the inbound channel. `always` rather than `sometimes` because the assertion is a bound that must hold every time the window closes, not a state to reach. **Re-derived 2026-08-31 against the eventfd transport (PR #131), which removed `POLL_INTERVAL`.** The polling-era record had already withdrawn its invented wall-clock bound; the rewrite makes the frame-count unit the only honest one left, because the empty-ring wait is now event-driven rather than periodic. `frame_deadline` still bounds exactly one thing inside `receive_one`, now the charge wait: `let deadline = Instant::now() + frame_deadline` at `:519` is consumed by the `sleep_until` arm at `:527-532`, exiting `Overloaded` at `:531`. It bounds nothing else in the loop. The cancellation report itself is still an unbounded await: `:402` does `inbound.send(Err(ReadClose::Cancelled)).await` on a bounded `mpsc` channel of `queue_frames` capacity (`:230`), and if the connection task is not draining, that send parks with no deadline. The rejection and frame-delivery sends at `:510-515` and `:551-556` have the same shape. So the residual wall-clock question is unchanged by the rewrite and stays recorded as unresolved in the open questions."
+        "condition": "evaluated at the end of an explicit bounded window: run sustained inbound traffic, cancel `read_cancel`, **stop the peer's publication and let the peer-to-host ring drain**, then poll until the endpoint thread has exited. Assert two bounds, both counted in frames rather than in wall-clock time. First, the thread performs at most `N + 1` further `receive_one` invocations, where `N` is the number of frames the peer committed before it stopped publishing, snapshotted at the publication stop rather than at the cancellation edge: the loop at `ring_transport.rs:384-409` calls `receive_one` before it checks `read_cancel`, so a frame committed after the edge but before the stop is forwarded on its `Ok(true)` pass and counts toward `N`. The first empty observation returns `Ok(false)` and reaches the `read_cancel` check (`:399`), which takes the `inbound` sender (`:400`) and sends `Cancelled` (`:402`). Second, nothing is forwarded on the inbound channel after `Cancelled` is sent. `always` rather than `sometimes` because the assertion is a bound that must hold every time the window closes, not a state to reach. **Re-derived 2026-08-31 against the eventfd transport (PR #131), which removed `POLL_INTERVAL`.** The polling-era record had already withdrawn its invented wall-clock bound; the rewrite makes the frame-count unit the only honest one left, because the empty-ring wait is now event-driven rather than periodic. `frame_deadline` still bounds exactly one thing inside `receive_one`, now the charge wait: `let deadline = Instant::now() + frame_deadline` at `:519` is consumed by the `sleep_until` arm at `:527-532`, exiting `Overloaded` at `:531`. It bounds nothing else in the loop. The cancellation report itself is still an unbounded await: `:402` does `inbound.send(Err(ReadClose::Cancelled)).await` on a bounded `mpsc` channel of `queue_frames` capacity (`:230`), and if the connection task is not draining, that send parks with no deadline. The rejection and frame-delivery sends at `:510-515` and `:551-556` have the same shape. So the residual wall-clock question is unchanged by the rewrite and stays recorded as unresolved in the open questions."
       },
       "fault_timing": "the drain-before-report design survived the rewrite. The `received == true` branch (`:415-421`) checks neither `discard`, `finish`, `root`, nor `read_cancel`; `read_cancel` is observed in exactly three places: the `Ok(false)` branch (`:400-404`), the biased `select!` arm at `:448-454` (whose comment restates the intent: re-enter the receive path once, drain frames committed before the cancellation edge, then report `Cancelled` \"after the first empty observation\"), and the charge wait inside `receive_one` (`:525`). The consequence is unchanged: a peer that keeps the peer-to-host ring non-empty defers the cancellation report for as long as it keeps publishing. What the rewrite changed is the empty-ring wait. Instead of sleeping `POLL_INTERVAL`, the loop arms the transport's wake protocol (`rings.second.arm_data_wait()` at `:429`, `ring.rs:828-854`) and parks on the duplicated doorbell descriptor (`duplicate_data_ready` wrapped in an `AsyncFd` at `:371-380`; the `readiness.readable()` arm at `:459-471` clears readiness and calls `complete_data_wait`). The wake protocol is the new timing surface: `arm_data_wait` publishes a parked epoch and re-checks data availability before returning `true`, and the producer's `signal_wake` (`ring.rs:1418-1432`) rings the doorbell only when a parked epoch is visible, so a frame committed between the host's arm and its park is delivered by the doorbell rather than lost. A lost or racing wake would not defer the cancellation *report* - the `read_cancel.cancelled()` arm is a `CancellationToken`, not an eventfd, and the post-cancellation drain calls `try_receive` directly (`:496-498`) - but it would strand committed pre-cancellation frames the drain contract says to deliver. That failure mode is new with #131 and is covered in the evidence file's failure scenario.",
       "required_faults": "an attached peer publishing continuously, enough ingress budget that each `charge` future (`:520-521`) resolves immediately, and a cancellation of `root` or `read_cancel` from the host side while that traffic continues. `connection.rs:183-189`'s peer-death handler is one natural trigger, since it cancels `peer_gen.token` - the ring's `root` - while frames may still be queued in the ring. Closing the window additionally needs the peer to stop publishing, which is a fixture choice, and the connection task to keep draining, which is the assumption the bound is conditional on.",
@@ -3085,7 +3085,7 @@
       "slug": "req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "for the general-class pair, which every routed request through `host_runtime::run` takes; the reserved-class pair is declared only by `BrocaComponent::resources` (`broca/mod.rs:151`), whose constructors have only test callers in this tree, so the reserved half of the bound is exercised only in tests until a production composition declares a reservation.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3136,8 +3136,8 @@
     {
       "slug": "req-a-both-admission-classes-and-the-rejection-bound-saturate",
       "type": "reachability",
-      "reachability": "default-production",
-      "reachability_note": "",
+      "reachability": "test-only",
+      "reachability_note": "the reserved class exists only when a composed component declares it, and the only declarer in this tree is `BrocaComponent::resources` (`crates/host-runtime/src/broca/mod.rs:151`), whose constructors are called only from `crates/host-runtime/tests/`. Reserved-pending and reserved-task saturation are therefore reachable only in tests here; reclassify when a production composition declares a reservation.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4030,7 +4030,7 @@
       "guarantee": "Job admission is exact at the count and queued-byte boundaries, never evicts live work, evicts completed jobs oldest first under count pressure, and reports expired jobs as `module_restarted`.",
       "check": {
         "semantics": "always",
-        "condition": "the boundary-plus-one request is rejected and the boundary request admitted, no live job is evicted, and charges return on completion; every clause is an invariant over every admission and completion, so one `always` covers the conjunction."
+        "condition": "the boundary-plus-one request is rejected and the boundary request admitted; no live job is evicted; under count pressure the completed job evicted is the one with the oldest `completed_at`; an expired job is reported as `module_restarted` (`jobs.rs:624`, exact `>=` on retention); and charges return on completion. Every clause is an invariant over every admission, eviction, expiry, and completion, so one `always` covers the conjunction."
       },
       "fault_timing": "Off-by-one at the boundary or eviction of live work loses a caller's result.",
       "required_faults": "Boundary-sized admission; completion under count pressure; expiry.",
