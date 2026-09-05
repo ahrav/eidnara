@@ -597,6 +597,10 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
                 if created {
                     rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))
                         .map_err(|e| io_err("fchmod_component", &walked, e))?;
+                    // Only the parent's fsync makes the new component's dirent durable; stores
+                    // under this directory fsync their own contents but never their ancestors.
+                    let parent = walked.parent().map(Path::to_path_buf).unwrap_or_default();
+                    fsync(&current).map_err(|e| io_err("fsync_parent", &parent, e))?;
                 }
                 fd
             }
@@ -783,7 +787,6 @@ pub(crate) const S_IFMT: u32 = 0o170000;
 const S_ISVTX: u32 = 0o1000;
 pub(crate) const S_IFDIR: u32 = 0o040000;
 pub(crate) const S_IFREG: u32 = 0o100000;
-#[allow(dead_code)] // U1: used by harness_closure (U2)
 pub(crate) const S_IFLNK: u32 = 0o120000;
 const S_IFSOCK: u32 = 0o140000;
 
@@ -794,7 +797,6 @@ pub(crate) fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64) {
     (stat.st_dev as u64, stat.st_ino as u64)
 }
 
-#[allow(dead_code)] // U1: used by harness_closure (U2)
 pub(crate) fn owner_uid() -> u32 {
     rustix::process::geteuid().as_raw()
 }

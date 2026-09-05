@@ -18,6 +18,7 @@ use rustix::{
 use serde::{Deserialize, Serialize};
 use shm_transport::setup_auth::DAEMON_VER_PREFIX;
 
+use crate::store_fs::same_snapshot;
 use crate::{
     instance::{S_IFDIR, S_IFMT, is_safe_ancestor, is_secure_regular, mode_bits, read_all_fd},
     wire::PROTOCOL_VERSION,
@@ -324,16 +325,6 @@ fn checked_stat(fd: &OwnedFd, path: &Path) -> Result<rustix::fs::Stat, Connectio
         });
     }
     Ok(stat)
-}
-
-fn same_snapshot(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
-    left.st_dev == right.st_dev
-        && left.st_ino == right.st_ino
-        && left.st_size == right.st_size
-        && left.st_mtime == right.st_mtime
-        && left.st_mtime_nsec == right.st_mtime_nsec
-        && left.st_ctime == right.st_ctime
-        && left.st_ctime_nsec == right.st_ctime_nsec
 }
 
 fn io_error(op: &'static str, path: &Path, source: io::Error) -> ConnectionFileError {
