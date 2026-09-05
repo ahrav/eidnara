@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "5d7f06afdf61146ec4ad11500f7f9591b7b591ac064c579ea26d6c36c37405d8",
+      "destination_sha256": "02788be0ba3389a8584575e6add5b9a9435d4ebe7c4f33d08e0e28123ea24c95",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "bbbda2add5f66a1360f37eb9c544c9c2999bd162a6f2acff06c525a1a9cca4fe",
+      "destination_sha256": "3a1f098b7523334a915cd955d8d031a45f95f578103df5a735e85165cbfc317a",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3913,7 +3913,7 @@
         "blob_sha": "860b408ad11395579d8f05de0c8a67b8c2459f6e"
       },
       "destination": "docs/properties/host-runtime/evidence/reserved-encodings-and-identity-pairings-reject-at-decode.md",
-      "destination_sha256": "51072343b81fc2966b843d5009ee89782ca0f1dd1f5260c4c6cbd94bfbed9268",
+      "destination_sha256": "3b681ad0588be2789831bc7ae9e2931c6d4c3e097d8384757c77120bd01cd985",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4459,7 +4459,7 @@
         "blob_sha": "613d267de59c4dd43c889a094668d2a4f6025d7e"
       },
       "destination": "docs/properties/host-runtime/evidence/composite-panic-containment-covers-only-optional-health-and-shutdown.md",
-      "destination_sha256": "2fd579ed8f3f22314cef8baca774879286e2c0c91208537a076b66e5e0583125",
+      "destination_sha256": "b2b080e9533347a50ba4c9020897d82a9a8a163b88cde03dea652deb289d90b7",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
