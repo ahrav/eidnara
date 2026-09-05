@@ -208,6 +208,29 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
 }
 
 /// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
+/// The served-vector contract every engine must meet: `dims` finite components with an L2 norm within `UNIT_NORM_TOLERANCE` of 1.
+/// Accumulating in f64 keeps summation roundoff below the tolerance at `MAX_DIMS`; an f32 sum can drift past it and fail a correctly normalized vector.
+pub(crate) fn validate_unit_vector(dims: usize, vector: &[f32]) -> Result<(), String> {
+    if vector.len() != dims {
+        return Err(format!(
+            "vector has {} dimensions, manifest requires {dims}",
+            vector.len()
+        ));
+    }
+    if vector.iter().any(|v| !v.is_finite()) {
+        return Err("vector contains a non-finite component".to_owned());
+    }
+    let norm = vector
+        .iter()
+        .map(|v| f64::from(*v).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    if (norm - 1.0).abs() > super::bundle::UNIT_NORM_TOLERANCE {
+        return Err("vector is not L2-normalized".to_owned());
+    }
+    Ok(())
+}
+
 pub struct Backend {
     model: Mutex<TextEmbedding>,
     dims: usize,
@@ -350,30 +373,7 @@ impl Backend {
     }
 
     fn validate_vector(&self, vector: &[f32]) -> Result<(), InferenceError> {
-        if vector.len() != self.dims {
-            return Err(InferenceError::Invariant(format!(
-                "vector has {} dimensions, manifest requires {}",
-                vector.len(),
-                self.dims
-            )));
-        }
-        if vector.iter().any(|v| !v.is_finite()) {
-            return Err(InferenceError::Invariant(
-                "vector contains a non-finite component".to_owned(),
-            ));
-        }
-        // Accumulating in f64 keeps summation roundoff below the tolerance at `MAX_DIMS`; an f32 sum can drift past it and fail a correctly normalized vector.
-        let norm = vector
-            .iter()
-            .map(|v| f64::from(*v).powi(2))
-            .sum::<f64>()
-            .sqrt();
-        if (norm - 1.0).abs() > super::bundle::UNIT_NORM_TOLERANCE {
-            return Err(InferenceError::Invariant(
-                "vector is not L2-normalized".to_owned(),
-            ));
-        }
-        Ok(())
+        validate_unit_vector(self.dims, vector).map_err(InferenceError::Invariant)
     }
 
     fn structural_probe(&self) -> Result<(), InferenceError> {
@@ -416,9 +416,30 @@ impl Backend {
                 ));
             }
         }
-        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so a multi-row call is certified too, with every row attributed to its item. Rows cycle through the corpus so a one-item corpus still yields a real multi-row batch.
-        let batch: Vec<&CorpusItem> = (0..batch_rows.max(1))
-            .map(|row| &corpus.items[row % corpus.items.len()])
+        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so a multi-row call is certified too, with every row attributed to its item.
+        // The first two rows are a pair with different expectations (corpus parsing guarantees one exists), so a permuted output cannot match; the rest cycle through the corpus to fill the batch.
+        let first = &corpus.items[0];
+        let second = corpus
+            .items
+            .iter()
+            .find(|item| {
+                super::bundle::expectations_differ(
+                    &first.expected,
+                    &item.expected,
+                    corpus.tolerance,
+                )
+            })
+            .unwrap_or(first);
+        let batch: Vec<&CorpusItem> = [first, second]
+            .into_iter()
+            .chain(
+                corpus
+                    .items
+                    .iter()
+                    .cycle()
+                    .take(batch_rows.max(1).saturating_sub(2)),
+            )
+            .take(batch_rows.max(1))
             .collect();
         let texts: Vec<&str> = batch.iter().map(|item| item.text.as_str()).collect();
         let rows = self.embed(&texts)?;

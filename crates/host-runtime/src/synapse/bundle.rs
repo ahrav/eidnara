@@ -873,10 +873,29 @@ fn parse_corpus(bytes: &[u8], dims: usize) -> Result<Corpus, BundleError> {
             expected: item.expected,
         });
     }
+    // Multi-row certification detects a row-permuting graph only when the batch holds two rows with different expectations; identical expectations would pass in any order.
+    let distinct_pair_exists = items.iter().enumerate().any(|(index, first)| {
+        items[index + 1..]
+            .iter()
+            .any(|second| expectations_differ(&first.expected, &second.expected, raw.tolerance))
+    });
+    if !distinct_pair_exists {
+        return Err(err(
+            "corpus needs two items whose expected vectors differ beyond the tolerance",
+        ));
+    }
     Ok(Corpus {
         tolerance: raw.tolerance,
         items,
     })
+}
+
+/// Two expectations are distinct for certification when some component differs by more than the corpus tolerance.
+pub(crate) fn expectations_differ(first: &[f32], second: &[f32], tolerance: f32) -> bool {
+    first
+        .iter()
+        .zip(second)
+        .any(|(a, b)| (a - b).abs() > tolerance)
 }
 
 #[cfg(test)]

@@ -2037,6 +2037,11 @@ async fn run(
             .map(|request| request.polls)
             .collect(),
     );
+    let writer_wait_max_ns = ctx.wire.writer_wait_max_ns();
+    let overdeadline_writes = ctx.wire.overdeadline_writes();
+    drop(ctx);
+    // Shutdown joins every started native call, so a call that outlived its caller's deadline has appended its sample before the snapshot below; snapshotting first would drop the longest service observations.
+    host.shutdown()?;
     let mut service_samples = service.lock().expect("service samples").clone();
     for sample in &mut service_samples {
         sample.window = window.classify(sample.started_ns);
@@ -2072,7 +2077,7 @@ async fn run(
         service_measured_samples: service_measured.len() as u64,
         service_excluded_samples: (service_samples.len() - service_measured.len()) as u64,
         send_lag_max_ns,
-        writer_wait_max_ns: ctx.wire.writer_wait_max_ns(),
+        writer_wait_max_ns,
         missed_slots,
         hold_window_start_ns: window.start_ns,
         warmup_end_ns: window.warmup_end_ns,
@@ -2102,11 +2107,9 @@ async fn run(
         task_window_start_ns: task_window.as_ref().map(|window| window.observed_start_ns),
         task_window_end_ns: task_window.as_ref().map(|window| window.observed_end_ns),
         connection_loss_errors,
-        overdeadline_writes: ctx.wire.overdeadline_writes(),
+        overdeadline_writes,
         fatal_errors,
     };
-    drop(ctx);
-    host.shutdown()?;
     Ok((logical, attempts, service_samples, summary))
 }
 

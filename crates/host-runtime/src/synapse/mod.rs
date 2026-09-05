@@ -392,6 +392,22 @@ const BUSY_REASON: &str = "the synapse lane is busy";
 
 const SHUT_DOWN_REASON: &str = "the synapse lane is shut down";
 
+/// Engines supplied through `ready_with_engine` bypass `Backend`'s own output checks, so the served-vector contract is enforced here for every engine; a violation quarantines the lane like any other invariant failure.
+fn check_engine_vectors(
+    inner: &SynapseInner,
+    dims: usize,
+    vectors: &[Vec<f32>],
+) -> Result<(), String> {
+    if let Some(reason) = vectors
+        .iter()
+        .find_map(|vector| inference::validate_unit_vector(dims, vector).err())
+    {
+        mark_failing(inner, reason.clone());
+        return Err(reason);
+    }
+    Ok(())
+}
+
 /// A backend panic caught on the synchronous path; it settles like a panicked blocking task.
 struct PanickedBackend;
 
@@ -646,6 +662,9 @@ impl SynapseComponent {
                     mark_failing(&self.inner, reason.clone());
                     return app_error("artifact_invalid", &reason);
                 };
+                if let Err(reason) = check_engine_vectors(&self.inner, lane.lane.dims, &vectors) {
+                    return app_error("artifact_invalid", &reason);
+                }
                 // The CPU lane is idle once the verdict arrives, so the handler's admission slot can be released before response reservation waits on egress. The returned vector then lives outside the slot's bound, so it is charged to the resident pool first; when that charge is unavailable the slot stays held as the bound instead. The worker's copy still covers a native call that outlives its receiver.
                 let vector_bytes = vector.len().saturating_mul(std::mem::size_of::<f32>());
                 let _vector_charge = match ctx.try_reserve_resident(vector_bytes) {
@@ -774,7 +793,14 @@ impl SynapseComponent {
             })
             .await;
             match settle_inference(&inner, joined) {
-                Ok(vectors) => inner.jobs.publish_ready(seq, vectors),
+                Ok(vectors) => match check_engine_vectors(&inner, lane.lane.dims, &vectors) {
+                    Ok(()) => inner.jobs.publish_ready(seq, vectors),
+                    Err(reason) => {
+                        inner
+                            .jobs
+                            .publish_failed(seq, "artifact_invalid".to_owned(), reason);
+                    }
+                },
                 Err(InferenceError::Input(reason)) => {
                     inner
                         .jobs
