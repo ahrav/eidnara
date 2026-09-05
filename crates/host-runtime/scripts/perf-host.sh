@@ -201,6 +201,15 @@ budget-preflight)
     EIDNARA_IPC_BUDGET_WARMUP_BATCHES=2 EIDNARA_IPC_BUDGET_BATCHES=5 EIDNARA_IPC_BUDGET_EXCHANGES=1000
   budget_collect ring-serial same-l3 1 \
     EIDNARA_IPC_BUDGET_WARMUP_OPS=200 EIDNARA_IPC_BUDGET_MEASURED_OPS=1000
+  # The same-L3 arms are the experiment's primary measurements; the bench
+  # finalizes a structured skip with exit 0 when no valid pair exists, so the
+  # collection log is inspected rather than trusting the exit status alone.
+  if grep -q '^SKIPPED ' "$BUDGET_OUT/collection.log"; then
+    grep '^SKIPPED ' "$BUDGET_OUT/collection.log" >&2
+    echo "preflight failed: a required same-L3 arm was skipped" >&2
+    rm -rf "$BUDGET_OUT"
+    exit 1
+  fi
   if [[ -n "${BUDGET_CROSS_PAIR:-}" ]]; then
     # An explicit cross pair must fail preflight, not the final run: an
     # invalid pair finalizes a failed attempt and exits nonzero here.

@@ -132,6 +132,7 @@ pub struct CallError {
     outcome: SendOutcome,
     code: String,
     message: String,
+    retry_after: Option<Duration>,
 }
 
 impl CallError {
@@ -140,6 +141,7 @@ impl CallError {
             outcome,
             code: bounded_code(&code.into()),
             message: bounded_text(&message.into(), MAX_ERROR_MESSAGE_BYTES),
+            retry_after: None,
         }
     }
 
@@ -153,14 +155,22 @@ impl CallError {
         let value = serde_json::from_slice::<Value>(body).ok()?;
         let code = value.get("code")?.as_str()?;
         value.get("message")?.as_str()?;
+        // `retry_after_ms` is an optional unsigned integer (§7.4); any other shape is an unknown member and is ignored.
+        let retry_after = value
+            .get("retry_after_ms")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis);
         // Raw terminal messages may contain request, credential, or identity data.
         // `CallError` retains the bounded terminal code and discards the raw terminal message.
         // `host.` identifies host-supplied codes.
-        Some(Self::new(
-            SendOutcome::Terminal,
-            format!("host.{}", bounded_code(code)),
-            "host returned a terminal error (message redacted)",
-        ))
+        Some(Self {
+            retry_after,
+            ..Self::new(
+                SendOutcome::Terminal,
+                format!("host.{}", bounded_code(code)),
+                "host returned a terminal error (message redacted)",
+            )
+        })
     }
 
     /// Send classification.
@@ -177,6 +187,12 @@ impl CallError {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// The host's advisory backoff from a terminal `retry_after_ms`, when it sent one.
+    /// It is neither a lease nor an admission guarantee.
+    pub const fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
 }
 
 impl fmt::Debug for CallError {
@@ -185,6 +201,7 @@ impl fmt::Debug for CallError {
             .field("outcome", &self.outcome)
             .field("code", &self.code)
             .field("message", &self.message)
+            .field("retry_after", &self.retry_after)
             .finish()
     }
 }
@@ -422,7 +439,7 @@ impl Client {
             close_lock: tokio::sync::Mutex::new(()),
             reader: tokio::sync::Mutex::new(None),
             writer: tokio::sync::Mutex::new(None),
-            bridge: Mutex::new(Some(bridge)),
+            bridge: Mutex::new(BridgeJoin::Thread(bridge)),
             bridge_wake,
         });
         let writer_inner = Arc::clone(&inner);
@@ -961,6 +978,14 @@ struct PendingState {
     kind: PendingKind,
 }
 
+/// The bridge thread's join state across `close` attempts.
+enum BridgeJoin {
+    Thread(std::thread::JoinHandle<()>),
+    /// A blocking join task that outlived one shutdown deadline; the next `close` awaits it.
+    Joining(JoinHandle<()>),
+    Done,
+}
+
 /// Who held the channel-0 response handed to `release_stranded_route`.
 #[derive(Clone, Copy)]
 enum BindOwner {
@@ -1038,7 +1063,9 @@ struct Inner {
     reader: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     writer: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     /// The ring bridge thread, joined by `join_tasks_until` after the writer and reader.
-    bridge: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// A join that misses the shutdown deadline leaves its blocking task here so a later
+    /// `close` waits on the same join instead of reporting success early.
+    bridge: Mutex<BridgeJoin>,
     /// The bridge's poll eventfd. `retire` signals it so a drop-only teardown
     /// does not depend on the writer task being polled again to wake the bridge.
     /// `Weak` so the fd still closes with the writer and bridge, not with `Inner`.
@@ -1886,18 +1913,17 @@ impl Inner {
         // its `blocking_send`, and a capacity wait re-checks cancellation every
         // `BRIDGE_RESERVE_SLICE`. Joining it here keeps the setup socket and
         // mappings from outliving a successful `close`.
-        let bridge = lock_unpoisoned(&self.bridge).take();
-        if let Some(bridge) = bridge
-            && tokio::time::timeout_at(
-                deadline,
-                tokio::task::spawn_blocking(move || {
+        let mut join =
+            match std::mem::replace(&mut *lock_unpoisoned(&self.bridge), BridgeJoin::Done) {
+                BridgeJoin::Done => return within_deadline,
+                BridgeJoin::Thread(bridge) => tokio::task::spawn_blocking(move || {
                     let _ = bridge.join();
                 }),
-            )
-            .await
-            .is_err()
-        {
+                BridgeJoin::Joining(join) => join,
+            };
+        if tokio::time::timeout_at(deadline, &mut join).await.is_err() {
             within_deadline = false;
+            *lock_unpoisoned(&self.bridge) = BridgeJoin::Joining(join);
         }
         within_deadline
     }
@@ -2801,7 +2827,7 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
     use crate::control::{
         MAX_ADMISSION_FACTS_BYTES, MAX_ADMISSION_FACTS_DEPTH, MAX_CAPABILITIES, MAX_CAPABILITY_LEN,
         MAX_CREDENTIAL_FINGERPRINTS, MAX_HARNESS_LEN, MAX_LAUNCH_NONCE_LEN, MAX_MODULE_ID_LEN,
-        MAX_PROJECT_ROOT_LEN, MAX_SESSION_LEN, check_string, value_depth,
+        MAX_PROJECT_ROOT_LEN, MAX_SESSION_LEN, check_string,
     };
     let invalid = |_: String| {
         CallError::local(
@@ -2847,13 +2873,42 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
         check_string("consumer capability", capability, MAX_CAPABILITY_LEN, false)
             .map_err(invalid)?;
     }
+    for (provider, fingerprint) in &identity.credential_fingerprints {
+        // The host accepts exactly these providers and 64 lowercase hex characters.
+        if !matches!(provider.as_str(), "anthropic" | "google" | "openai")
+            || fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid(String::new()));
+        }
+    }
     if identity.admission_facts.as_ref().is_some_and(|facts| {
-        value_depth(facts) > MAX_ADMISSION_FACTS_DEPTH
+        exceeds_depth(facts, MAX_ADMISSION_FACTS_DEPTH)
             || !compact_json_fits(facts, MAX_ADMISSION_FACTS_BYTES)
     }) {
         return Err(invalid(String::new()));
     }
     Ok(())
+}
+
+/// Whether `value` nests deeper than `limit`. The walk is iterative and stops at the
+/// first container below `limit`, so a caller-built value cannot exhaust the stack.
+fn exceeds_depth(value: &Value, limit: usize) -> bool {
+    let mut frontier: Vec<(&Value, usize)> = vec![(value, 0)];
+    while let Some((node, depth)) = frontier.pop() {
+        let children: Box<dyn Iterator<Item = &Value>> = match node {
+            Value::Array(items) => Box::new(items.iter()),
+            Value::Object(map) => Box::new(map.values()),
+            _ => continue,
+        };
+        if depth + 1 > limit {
+            return true;
+        }
+        frontier.extend(children.map(|child| (child, depth + 1)));
+    }
+    false
 }
 
 /// Whether `value`'s compact encoding is at most `cap` bytes, measured by a counting
@@ -3110,7 +3165,7 @@ mod tests {
                 close_lock: tokio::sync::Mutex::new(()),
                 reader: tokio::sync::Mutex::new(None),
                 writer: tokio::sync::Mutex::new(None),
-                bridge: Mutex::new(None),
+                bridge: Mutex::new(BridgeJoin::Done),
                 bridge_wake: Weak::new(),
             }),
             data_rx,
@@ -4379,6 +4434,65 @@ mod tests {
         let mut identity = identity_fixture();
         identity.admission_facts = Some(serde_json::json!({"blob": "x".repeat(64)}));
         route_open_body(&target, &identity).expect("small facts encode");
+
+        // The depth walk stops at the limit: it visits no deeper than `limit + 1` containers.
+        // (Building or dropping a `Value` far deeper than this recurses inside serde_json itself,
+        // so the walk is exercised on a value the test thread can hold safely.)
+        let mut identity = identity_fixture();
+        let mut deep = serde_json::json!(1);
+        for _ in 0..200 {
+            deep = serde_json::json!([deep]);
+        }
+        assert!(exceeds_depth(
+            &deep,
+            crate::control::MAX_ADMISSION_FACTS_DEPTH
+        ));
+        assert!(!exceeds_depth(&deep, 200));
+        assert!(exceeds_depth(&deep, 199));
+        identity.admission_facts = Some(deep);
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("very deep facts")
+                .code(),
+            "invalid_identity"
+        );
+
+        let mut identity = identity_fixture();
+        identity
+            .credential_fingerprints
+            .insert("anthropic".to_owned(), "x".repeat(1 << 20));
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("oversized fingerprint")
+                .code(),
+            "invalid_identity"
+        );
+        let mut identity = identity_fixture();
+        identity
+            .credential_fingerprints
+            .insert("other".to_owned(), "a".repeat(64));
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("unknown provider")
+                .code(),
+            "invalid_identity"
+        );
+    }
+
+    #[test]
+    fn a_host_terminal_carries_its_retry_delay() {
+        let error =
+            CallError::host_terminal(br#"{"code":"queue_full","message":"m","retry_after_ms":50}"#)
+                .expect("canonical body");
+        assert_eq!(error.retry_after(), Some(Duration::from_millis(50)));
+        let error = CallError::host_terminal(br#"{"code":"queue_full","message":"m"}"#)
+            .expect("canonical body");
+        assert_eq!(error.retry_after(), None);
+        let error = CallError::host_terminal(
+            br#"{"code":"queue_full","message":"m","retry_after_ms":"soon"}"#,
+        )
+        .expect("an unknown-shaped member is ignored");
+        assert_eq!(error.retry_after(), None);
     }
 
     #[tokio::test]
