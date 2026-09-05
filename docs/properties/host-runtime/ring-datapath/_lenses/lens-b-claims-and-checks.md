@@ -4,7 +4,7 @@ Attention focus: what the sub-part *promises*, and what mechanically holds each
 promise. Claim sources are the doc comments in the four scope files, the error
 and close-reason strings they emit, and the two normative documents
 `docs/shm-transport.md` and `docs/host-wire-protocol.md`. No property
-records; no evidence files. Method contract in [../../METHOD.md](../../METHOD.md).
+records; no evidence files. Method contract in [../../METHOD.md](../../../METHOD.md).
 
 Scope: `crates/host-runtime/src/ring_transport.rs` (966), `wire.rs` (973),
 `frame_channel.rs` (807), `frame_channel/contract_tests.rs` (701). 3,447 lines,

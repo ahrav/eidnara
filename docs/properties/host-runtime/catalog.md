@@ -102,7 +102,7 @@ lens-relative `../evidence/` to the catalog-relative `evidence/`, one
 cross-reference written as `../catalog.md#...` in a lens file became an intra-file
 anchor, and field paragraphs were rewrapped to about 80 columns, with content
 equality checked token by token afterwards. The six Group J records additionally
-carry `Status: superseded-by-refactor` in place of `active`, because
+carry `Status: invalidated` in place of `active`, because
 `ed487e11` removed `frame_read.rs` from the module tree; the group preamble states
 what that leaves outstanding. The index table already held all 55 rows in this
 order, so no row was added, and none of the 38 surviving records was touched.
@@ -226,9 +226,14 @@ Required faults and enabling state: a committed non-TCP grant, plus a shutdown o
 signal drain landing in the transfer window.
 Confidence: high on the exclusion; medium that the neither-registered window is
 harmless, since the lock ordering was traced but not tested.
-Existing check: `tests/lifecycle.rs:1722`
-`shutdown_during_candidate_setup_reaps_both_channels` covers drain during setup,
-not during the transfer. Status unaudited - and that file runs in no CI job.
+Existing check: none at HEAD. The cited `tests/lifecycle.rs:1722`
+`shutdown_during_candidate_setup_reaps_both_channels` covered drain during
+candidate setup, not during the transfer; the mandatory-ring refactor
+(`ed487e11`) removed the candidate-handoff path and that test with it, and
+`tests/lifecycle.rs` at HEAD declares no test by that name. The surviving
+drain-time half of the guarantee (a generation minted while draining is never
+registered) has no dedicated check; `tests/lifecycle.rs` shutdown cases execute
+`run_connection` under drain incidentally and assert nothing about registration.
 Impact: shutdown, route ownership, and Goodbye delivery all enumerate the
 registry assuming one live owner per socket.
 Open questions:
@@ -1414,8 +1419,14 @@ provider that can set a reason.
 ### negotiation-precedes-every-gated-frame-kind
 
 Type: safety
-Reachability: default-production
-Status: active
+Reachability: default-production when live - at `ed487e11^` every accepted
+connection began in `BootstrapTcp` and the gate ran on every inbound frame.
+Superseded rather than live: the mandatory-ring refactor removed transport
+negotiation and the setup state machine, so no generation is ever in a
+not-ready setup state at HEAD and the subject of this record is unreachable by
+any configuration.
+Status: invalidated
+Invalidated: the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: partial - `tests/transport_negotiation.rs:906-949` covers four
 channel-0 control operations, one routed request, and one oversize control
 declaration before negotiation. `Cancel`, routed `Goodbye`, and `Pong` before
@@ -1466,8 +1477,13 @@ Open questions:
 ### setup-selection-is-sticky-for-the-generation
 
 Type: safety
-Reachability: default-production
-Status: active
+Reachability: default-production when live - at `ed487e11^` the `TcpCommitted`
+arc needed no provider and no configuration. Superseded rather than live: the
+mandatory-ring refactor removed negotiation and the `setup.state` and
+`setup.handoff` writes it guarded, so no selection is ever made at HEAD and the
+subject of this record is unreachable by any configuration.
+Status: invalidated
+Invalidated: the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: partial - `tests/transport_negotiation.rs:962-980` covers a repeated
 negotiation after a negotiated TCP selection. Negotiation during
 `CandidateSetup`, negotiation on a promoted `ProviderActive` generation, and
@@ -1509,8 +1525,13 @@ Open questions: None.
 ### setup-readiness-is-decided-by-one-predicate
 
 Type: safety
-Reachability: default-production
-Status: active
+Reachability: default-production when live - at `ed487e11^` both predicate
+copies ran on every frame. Superseded rather than live: the mandatory-ring
+refactor removed `TransportState` and both readiness predicates, so there is no
+readiness definition to agree on at HEAD and the subject of this record is
+unreachable by any configuration.
+Status: invalidated
+Invalidated: the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: not yet - no test reads the setup state directly, and no lint or
 test asserts that the two predicate copies agree.
 Guarantee: exactly one definition decides whether a generation may carry
@@ -1547,8 +1568,13 @@ Open questions:
 ### a-setup-pong-is-required-and-forbidden-in-the-same-window
 
 Type: reachability
-Reachability: explicit-config-only
-Status: active
+Reachability: explicit-config-only when live - at `ed487e11^` the window needed
+`liveness: Some(..)` in `HostConfig`. Superseded rather than live: the
+mandatory-ring refactor removed the `BootstrapTcp` and `CandidateSetup` setup
+states that defined the window, so the window cannot open at HEAD and the
+subject of this record is unreachable by any configuration.
+Status: invalidated
+Invalidated: the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: not yet - no test sends a `Pong` before negotiation, and no test
 runs a configured liveness policy against a generation that has not yet
 negotiated.
@@ -1607,8 +1633,13 @@ Open questions:
 ### fallback-reason-precedence-survives-a-silent-preflight
 
 Type: safety
-Reachability: test-only
-Status: active
+Reachability: test-only when live - at `ed487e11^` reaching the precedence block
+needed injected providers. Superseded rather than live: the mandatory-ring
+refactor removed transport negotiation, TCP fallback, and `TransportProviders`,
+so no fallback reason is ever computed at HEAD and the subject of this record is
+unreachable by any configuration.
+Status: invalidated
+Invalidated: the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, TCP fallback reasons, `TransportProviders`, `transport_provider.rs`, and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: partial - `tests/transport_negotiation.rs:876-905` covers capability
 mismatch falling back and version mismatch retiring; `:851-874` covers an
 unprovided non-TCP offer selecting reasonless TCP. No test produces
@@ -1668,7 +1699,7 @@ all. **The ring-transport refactor has since removed that file from the module
 tree**: `ed487e11 refactor(host): make ring transport mandatory` deleted
 `frame_read.rs`, so every line reference in this group resolves only at the
 commit the lens pass read and the records carry `Status:
-superseded-by-refactor` rather than `active`. They are retained because the three
+invalidated` rather than `active`. They are retained because the three
 obligations did not disappear with the file. **Each must be re-derived against
 the new read path** before it is treated as closed, and the two that were findings
 rather than guarantees, the budget-free oversize drain and the unreachable
@@ -1678,7 +1709,9 @@ gone.
 ### cancellation-preempts-every-bounded-frame-read
 
 Type: safety
-Reachability: default-production
+Reachability: default-production when live - at `ed487e11^` `frame_read.rs` sat on the
+unconditional host and client read paths. Superseded rather than live: the mandatory-ring
+refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.
 Status: invalidated
 Invalidated: the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: not yet - no in-crate test cancels a token while any `frame_read`
@@ -1725,7 +1758,9 @@ Open questions: None.
 ### a-body-read-consumes-exactly-the-declared-frame-boundary
 
 Type: safety
-Reachability: default-production
+Reachability: default-production when live - at `ed487e11^` `frame_read.rs` sat on the
+unconditional host and client read paths. Superseded rather than live: the mandatory-ring
+refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.
 Status: invalidated
 Invalidated: the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: not yet - no test passes a non-empty buffer, and no test asserts the
@@ -1774,7 +1809,9 @@ Open questions:
 ### a-zero-length-read-ends-the-read-instead-of-looping
 
 Type: safety
-Reachability: default-production
+Reachability: default-production when live - at `ed487e11^` `frame_read.rs` sat on the
+unconditional host and client read paths. Superseded rather than live: the mandatory-ring
+refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.
 Status: invalidated
 Invalidated: the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: partial - `read_body`'s EOF is proven by an exact-string assertion,
@@ -1825,7 +1862,9 @@ Open questions:
 ### no-framed-read-resumes-after-a-read-stop
 
 Type: safety
-Reachability: default-production
+Reachability: default-production when live - at `ed487e11^` `frame_read.rs` sat on the
+unconditional host and client read paths. Superseded rather than live: the mandatory-ring
+refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.
 Status: invalidated
 Invalidated: the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: partial - the host's obligation is structurally enforced by an
@@ -1872,7 +1911,9 @@ Open questions:
 ### oversize-control-drain-work-is-bounded-without-ingress-budget
 
 Type: safety
-Reachability: default-production
+Reachability: default-production when live - at `ed487e11^` `frame_read.rs` sat on the
+unconditional host and client read paths. Superseded rather than live: the mandatory-ring
+refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.
 Status: invalidated
 Invalidated: the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: partial - the zero-budget property is asserted, its cost bound is
@@ -1934,7 +1975,9 @@ Open questions:
 ### the-client-body-budget-refusal-drain-is-never-entered
 
 Type: reachability
-Reachability: default-production
+Reachability: default-production when live - at `ed487e11^` `frame_read.rs` sat on the
+unconditional host and client read paths. Superseded rather than live: the mandatory-ring
+refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.
 Status: invalidated
 Invalidated: the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration.
 Exercised: not yet - nothing observes the branch, so it could start firing
@@ -4867,9 +4910,10 @@ implementations, and the native side short-circuits them into one `if` with
 `ct_eq` on the proof and the daemon id (`setup.rs:200-205`).
 Existing check: `auth.rs:1022-1073` `rejected_server_sends_no_client_auth`,
 driven by `:1074-1081` `invalid_server_proof_sends_no_client_auth` and
-`:1082-1089` `daemon_id_mismatch_sends_no_client_auth`. `auth.rs:394-395` also
-names `foreign_server_reused_port_never_receives_client_auth` as the always-true
-guard for the comparison. The `daemon_ver` mismatch case is not visibly covered
+`:1082-1089` `daemon_id_mismatch_sends_no_client_auth`. The always-true guard
+on the comparison is unnamed in `auth.rs`; the source catalog cited a
+`foreign_server_reused_port_never_receives_client_auth` identifier that no file
+under `crates/` declares. The `daemon_ver` mismatch case is not visibly covered
 by the two named tests. Status unaudited.
 Impact: this is the only thing standing between a same-uid squatter and a peer's
 `ClientAuth`, because neither peer checks the socket's ownership or mode before
@@ -5930,7 +5974,7 @@ and [client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production](#c
 the record text is preserved verbatim from lens A and this correction is carried
 here rather than edited into it.
 
-## Reachability
+## Reachability: client peer
 
 **All fourteen records are `default-production`, and no record here is
 `test-only`.** The label rests on four verified facts rather than on a blanket
@@ -7212,7 +7256,7 @@ are carried in [existing-checks.md](existing-checks.md).
    panic-family sites in `routing.rs`'s production half, and `:506-507`'s two
    `panic!` calls are inside the test module.
 
-## Reachability
+## Reachability: admission and dispatch
 
 **All fourteen records are `default-production`, and no record here is
 `test-only` or `explicit-config-only`.** The label rests on three verified facts
@@ -8175,7 +8219,7 @@ than inherited.** The production binary is
 attributes**, verified by grep, so no part of the file is gated. That is a
 stronger statement than the equivalent for most files in this sub-part, and it is
 consistent with the check inventory's note that `composite.rs` has no test module.
-Fact 1 of the [Reachability](#reachability) section establishes the routed path
+Fact 1 of the [Reachability](#reachability-admission-and-dispatch) section establishes the routed path
 that reaches `handle` and `route_gone`. The one asymmetry worth naming is inside
 the surface rather than at its edge, and it is the second record's subject: the
 primary child's `health` at `:312` is *not* wrapped, while the two optional
@@ -8187,7 +8231,7 @@ Type: safety
 Reachability: default-production - the composite is constructed at
 `serve.rs:575` and handed to `host_runtime::run` at `:632`. Its `bind`, `handle` and
 `route_gone` are the composite's leg of the routed path Fact 1 of
-[Reachability](#reachability) establishes, and the route map they share
+[Reachability](#reachability-admission-and-dispatch) establishes, and the route map they share
 (`composite.rs:112`, initialized at `:134`) is plain `Mutex<HashMap<..>>` state
 with no gate. `composite.rs` has zero `#[cfg]` attributes.
 Status: active
@@ -8952,7 +8996,7 @@ shutdown-is-unconditional row was refuted. Carried in full in
    path and `shutdown_sequence` from both running the handler callback. Full
    entry in [existing-checks.md](existing-checks.md).
 
-## Reachability
+## Reachability: runtime and configuration
 
 **Thirteen records are `default-production` and one is `explicit-config-only`.**
 No record here is `test-only`. The labels rest on the construction conditionality

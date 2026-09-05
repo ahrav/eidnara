@@ -8,7 +8,7 @@ existing-check inventory belong to a sibling lens and are not built here.
 Provenance: code read from `the `host` source checkout, branch
 `feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`. Every line
 reference below was printed from that tree before being written. Method contract
-in [../../METHOD.md](../../METHOD.md). File list taken verbatim from
+in [../../METHOD.md](../../../METHOD.md). File list taken verbatim from
 [../../part-2-rescope/scope-map-and-risk-ranking.md](../../part-2-rescope/scope-map-and-risk-ranking.md):
 `ring_transport.rs` (966), `wire.rs` (973), `frame_channel.rs` (807),
 `frame_channel/contract_tests.rs` (701).
@@ -363,7 +363,7 @@ through an `unsafe` block would not be caught. `#![deny(unsafe_code)]`
 Required faults and enabling state: none for the structural check. For a
 runtime check, an active connection with both directions carrying traffic, so
 that a second thread would actually contend.
-Confidence: high - [evidence](../evidence/ring-a-endpoint-thread-solely-owns-both-ring-endpoints.md).
+Confidence: high - [evidence](../../evidence/ring-a-endpoint-thread-solely-owns-both-ring-endpoints.md).
 Verified by inspection: `DuplexRing::create` at `ring_transport.rs:263` is
 inside the thread closure opened at `:256`; `rings` is moved into
 `run_endpoint` by value at `:280`; `PreparedRing` (`:103-111`) has seven fields
@@ -405,7 +405,7 @@ still holds a lease on.
 Required faults and enabling state: none. The check is a call-graph assertion,
 optionally backed by a `#[cfg(debug_assertions)]` counter on the
 producer-identity path.
-Confidence: high - [evidence](../evidence/ring-a-no-producer-retains-a-committed-release-identity.md).
+Confidence: high - [evidence](../../evidence/ring-a-no-producer-retains-a-committed-release-identity.md).
 Verified by enumerating every `.commit(` call in the tree: the three non-test
 producers are `ring_transport.rs:591`, `:604`, `:670`, all of which apply
 `map_err(..)?` and discard the `Ok` value; the inline tests `:856`, `:906`,
@@ -459,7 +459,7 @@ failure needs shared-memory object creation to fail, reachable by exhausting
 `admit`'s guard leaves the caller, so it needs the guard's `Drop` on the
 `prepare` side. A panic inside `run_endpoint` needs the `catch_unwind` at `:279`
 to still reach `:291`.
-Confidence: high - [evidence](../evidence/ring-a-admission-charge-releases-on-every-endpoint-thread-exit.md).
+Confidence: high - [evidence](../../evidence/ring-a-admission-charge-releases-on-every-endpoint-thread-exit.md).
 Verified by inspection: `Admission` carries an `AdmissionState`
 (`profile.rs:544-557`) and its `Drop` releases when `Active`
 (`profile.rs:583-589`); the explicit `release()` at `ring_transport.rs:291` is
@@ -508,7 +508,7 @@ them is condemned.
 Required faults and enabling state: a descriptor-validation failure on the
 peer-to-host direction, which needs a peer that publishes a malformed
 descriptor, plus an inspection of `accounting().quarantined` afterwards.
-Confidence: high - [evidence](../evidence/ring-a-host-never-quarantines-an-admission-charge.md).
+Confidence: high - [evidence](../../evidence/ring-a-host-never-quarantines-an-admission-charge.md).
 Verified by enumerating `.quarantine()` calls in the tree: the only two are
 `crates/shm-transport/tests/contract.rs:368` and `:479`. `host-runtime` never
 calls it, and `RingTransport` holds no `Admission` value after `prepare` returns
@@ -563,7 +563,7 @@ mechanisms reach it: reservation deadline expiry under a full host-to-peer ring
 caught at `:560-563`, and `ReservationWriter` exhaustion (`:612-617`). The
 cheapest to construct is a peer that attaches and then never receives, filling
 the host-to-peer ring until `reserve_until` hits its deadline.
-Confidence: high - [evidence](../evidence/ring-a-publish-failure-is-reported-as-a-clean-peer-close.md).
+Confidence: high - [evidence](../../evidence/ring-a-publish-failure-is-reported-as-a-clean-peer-close.md).
 Verified by inspection: `publish_one` returns `Result<(), ()>` (`:541`), so
 every distinct cause is erased to a unit before `run_endpoint` sees it; the
 `:447-451` block sends nothing; `:359` is the only `CleanEof` producer in the
@@ -619,7 +619,7 @@ production one; `dispatch.rs` supplies it through `OutboundFrame::written`
 (`frame_channel.rs:630`). Part 2a owns writer-hook panics on the writer task
 (`no-writer-hook-panic-poisons-a-generation-lock`); this is the ring thread, a
 different owner, and the panic there has no boundary at all.
-Confidence: high - [evidence](../evidence/ring-a-endpoint-thread-panic-is-reported-as-orderly-completion.md).
+Confidence: high - [evidence](../../evidence/ring-a-endpoint-thread-panic-is-reported-as-orderly-completion.md).
 Verified by inspection: `:279` discards the `catch_unwind` result; the inner
 `catch_unwind` closes at `:563`; `:567` stores `COMPLETE` before the hooks run
 at `:568-575`; `panic_boundary::redact_sync` wraps only the direct serializer
@@ -671,7 +671,7 @@ needs shared-memory creation to fail. `worker_descriptor` failure needs
 `initialized_rx.recv` failure needs the endpoint thread to die between spawn and
 handshake. The timeout path needs `prepare` to exceed
 `transport_setup_deadline`.
-Confidence: high - [evidence](../evidence/ring-a-ring-unavailability-fails-closed-without-a-classified-reason.md).
+Confidence: high - [evidence](../../evidence/ring-a-ring-unavailability-fails-closed-without-a-classified-reason.md).
 Verified by inspection: `RingUnavailable` (`:113-122`) is a unit struct with a
 fixed `Display` string and no cause field; only `:240` increments a counter;
 `connection.rs:149-164`'s `else` branch is a bare `return` that emits no
@@ -726,7 +726,7 @@ release
 descriptor on a *later* sequence, `try_receive` quarantines, and a lease taken
 earlier then fails to release. Constructing that needs two frames in flight and
 a lease held across the ingress-budget wait.
-Confidence: high - [evidence](../evidence/ring-a-lease-release-failure-is-observable-only-on-the-success-path.md).
+Confidence: high - [evidence](../../evidence/ring-a-lease-release-failure-is-observable-only-on-the-success-path.md).
 Verified by inspection: `receive_one`'s five return points that follow a
 successful `try_receive` are `:477`, `:484`, `:493`, `:499`, `:513`, `:521`,
 `:524`, `:532`, `:533`; of those, only `:477` and `:524` route a release error;
@@ -788,7 +788,7 @@ Required faults and enabling state: a connection that reaches
 `serve_generation` and finds `shared.draining` already set or
 `shared.shutdown` already cancelled - that is, a connection accepted and
 authenticated during the shutdown sequence.
-Confidence: high - [evidence](../evidence/ring-a-reclamation-count-does-not-witness-charge-release.md).
+Confidence: high - [evidence](../../evidence/ring-a-reclamation-count-does-not-witness-charge-release.md).
 Verified by inspection: `connection.rs:208-209` places `record_reclamation`
 after the `serve_generation` await, and an inner `return` at `:275` still
 returns there; `AbortOnDropHandle` aborts on drop; `ring_transport.rs:291-292`
@@ -825,7 +825,7 @@ Required faults and enabling state: for the one existing producer, a poisoned
 accounting mutex, since `AdmissionController::snapshot` returns `Err` only on
 `Mutex` poisoning (`profile.rs:501-505`). That needs a panic while the
 accounting lock is held, which no host path takes.
-Confidence: high - [evidence](../evidence/ring-a-host-doctor-emits-one-of-five-declared-terminal-classes.md).
+Confidence: high - [evidence](../../evidence/ring-a-host-doctor-emits-one-of-five-declared-terminal-classes.md).
 Verified by grepping the five literals across `crates` and `packages`:
 `"setup_failure"` appears in Rust only at `ring_transport.rs:187`; the other
 four appear only in TypeScript, at
@@ -869,7 +869,7 @@ transport would have to emit `ReadClose::RejectedDrainFailed` after an
 oversize channel-0 rejection whose realignment failed. On the ring there is no
 realignment: a frame is one descriptor, and `receive_one:475-477` releases the
 lease and returns `Ok(true)` with no drain step.
-Confidence: high - [evidence](../evidence/ring-a-rejected-drain-failure-close-has-no-producer.md).
+Confidence: high - [evidence](../../evidence/ring-a-rejected-drain-failure-close-has-no-producer.md).
 Verified by grepping both variants: `ReadClose::RejectedDrainFailed` appears at
 `frame_channel.rs:47` (declaration) and `connection.rs:391` (consumer) and
 nowhere else; `ReadClose::Io` appears at `frame_channel.rs:45` and
@@ -916,7 +916,7 @@ body whose descriptor spans two arena ranges, which the transport produces when
 `span_count == 2` (`ring.rs:816-823`). That is reachable: it needs a body that
 straddles the arena wrap point. But `receive_one` collapses it with
 `lease.to_vec()` (`:519`) before the host ever sees the span structure.
-Confidence: high - [evidence](../evidence/ring-a-segmented-inbound-body-has-no-production-producer.md).
+Confidence: high - [evidence](../../evidence/ring-a-segmented-inbound-body-has-no-production-producer.md).
 Verified by grepping: `InboundFrame::segmented` has zero call sites in the
 tree, including tests. `ReceiveBody::Segmented` (`frame_channel.rs:448`) is
 therefore unconstructible, so `with_lease` (`:506-513`) always takes the
@@ -982,7 +982,7 @@ cancellation of `root` or `read_cancel` from the host side while that traffic
 continues. `connection.rs:199-204`'s peer-death handler is one natural trigger,
 since it cancels `peer_gen.token` - which is `root` - while frames may still be
 queued in the ring.
-Confidence: medium - [evidence](../evidence/ring-a-cancellation-close-requires-an-empty-inbound-observation.md).
+Confidence: medium - [evidence](../../evidence/ring-a-cancellation-close-requires-an-empty-inbound-observation.md).
 The code structure is verified by inspection and the intent is stated in the
 comment at `:429-435`. What I did not verify is the exact behaviour of
 `read_loop` under cancellation, so I cannot state whether the host reliably
@@ -1042,7 +1042,7 @@ Required faults and enabling state: an ingress budget too small for the frame in
 hand, so `try_charge` fails at least once; and at least one queued outbound
 frame at the moment the loop polls, so `:504-509` runs. A second iteration with
 an empty queue additionally covers the `POLL_INTERVAL` sleep at `:514`.
-Confidence: high - [evidence](../evidence/ring-a-ingress-wait-holds-a-lease-while-servicing-egress.md).
+Confidence: high - [evidence](../../evidence/ring-a-ingress-wait-holds-a-lease-while-servicing-egress.md).
 Verified by inspection: the lease is bound at `:464` and not released until
 `:524`, so it is live for the whole `:488-518` loop; the publish-from-wait
 branch is `:504-509`; the deadline exit is `:495-500`; `run_endpoint` calls

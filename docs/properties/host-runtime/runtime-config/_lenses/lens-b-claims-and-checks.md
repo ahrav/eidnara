@@ -10,7 +10,7 @@ configuration.
 Provenance: code read from `the `host` source checkout, `HEAD` =
 `e447c927`, branch `feat/shared-memory-release-gate-audit`. Every line
 reference below was printed at that commit before being written. Method
-contract in [../../METHOD.md](../../METHOD.md).
+contract in [../../METHOD.md](../../../METHOD.md).
 
 **The finding that frames this whole file, and it was verified rather than
 inherited: there is no configuration reference document.** The sibling lens

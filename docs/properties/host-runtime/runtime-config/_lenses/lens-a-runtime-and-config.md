@@ -303,7 +303,7 @@ Guarantee: If `run` reaches `HostShared` construction, every permit count and by
 Check: `always` - at `runtime.rs:882`, assert `max_pending_requests > reservations.pending`, `max_handler_tasks > reservations.tasks`, `general_task_holds < max_handler_tasks - reservations.tasks`, and `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog_resident + retained_bytes`. `always` rather than `always-or-unreached` because this construction is on every successful startup path with no condition, per the map above.
 Fault/timing angle: none. Startup is single-threaded here and the inputs are fixed by the time the gates run.
 Required faults and enabling state: a handler whose `resource_declarations` sum approaches or exceeds a configured limit. `handler_contract.rs:302-320` already builds one.
-Confidence: high - [evidence](../evidence/rt-a-startup-refuses-every-configuration-it-cannot-fund.md). I traced all eight gates and verified each line, and computed the byte arithmetic independently.
+Confidence: high - [evidence](../../evidence/rt-a-startup-refuses-every-configuration-it-cannot-fund.md). I traced all eight gates and verified each line, and computed the byte arithmetic independently.
 Existing check: four tests, each covering one gate; none asserts the conjunction at the use site. Status `unaudited`.
 Impact: a wrapped subtraction at `runtime.rs:896-912` reaching `Semaphore::new` or `ByteBudget::new` panics during `HostShared` construction, after the transport is published, so a client can discover a dead endpoint.
 Open questions: None.
@@ -318,7 +318,7 @@ Guarantee: The unchecked subtraction that derives `ingress_budget` never underfl
 Check: `always` - immediately before `runtime.rs:896`, assert `max_resident_bytes >= EGRESS_RESERVED_BYTES + SCRATCH_RESERVED_BYTES + catalog_resident + retained_bytes + MAX_BODY_LEN`. `always` because the subtraction is unconditional; the guard being 160 lines earlier is exactly why the assertion belongs at the consumer.
 Fault/timing angle: none, but the coupling is a maintenance window rather than a runtime one: any independent edit to `MIN_RESIDENT_BYTES` or to the subtrahend list breaks it silently in release builds.
 Required faults and enabling state: a `max_resident_bytes` exactly at the handler-dependent floor, plus a non-zero `retained_resident_bytes` declaration and a non-trivial catalog. `handler_contract.rs:437` constructs the floor case.
-Confidence: high - [evidence](../evidence/rt-a-the-ingress-pool-derivation-cannot-underflow.md). Verified the gate, the constant's definition, and the arithmetic; confirmed `ByteBudget::new` casts and would panic.
+Confidence: high - [evidence](../../evidence/rt-a-the-ingress-pool-derivation-cannot-underflow.md). Verified the gate, the constant's definition, and the arithmetic; confirmed `ByteBudget::new` casts and would panic.
 Existing check: `config.rs:520-548` `the_resident_cap_splits_into_three_non_overlapping_pools` covers the constant decomposition only. Status `unaudited`.
 Impact: release-mode `u64` wrap producing a near-`u64::MAX` budget, then a panic inside `Semaphore::new` after publication.
 Open questions: None.
@@ -333,7 +333,7 @@ Guarantee: An out-of-range limit or duration is rejected with an error naming th
 Check: `always` - for every field of `HostLimits`, `HostTiming`, and `LivenessPolicy`, set it one step outside its bound and assert `validate` returns `Err` whose `Display` names that field, and that no accepted `HostConfig` differs from the submitted one in any field. `always` because it must hold on every validation.
 Fault/timing angle: none.
 Required faults and enabling state: none. Pure function of a constructed `HostConfig`.
-Confidence: high - [evidence](../evidence/rt-a-no-configured-limit-is-silently-clamped.md). Read every branch of both validators and every `Display` arm. The one silent narrowing found is `file_mode.rs:18`, outside `HostConfig`.
+Confidence: high - [evidence](../../evidence/rt-a-no-configured-limit-is-silently-clamped.md). Read every branch of both validators and every `Display` arm. The one silent narrowing found is `file_mode.rs:18`, outside `HostConfig`.
 Existing check: seven unit tests in `config.rs`, per key, not exhaustive over fields. Status `unaudited`.
 Impact: an operator who sets a value and gets a different one silently loses the ability to reason about the host's capacity, which is the premise of `config.rs:87-88`.
 Open questions:
@@ -349,7 +349,7 @@ Guarantee: With `liveness` unset, the host arms no Ping timer, sends no Ping, an
 Check: `always` - whenever `shared.liveness.is_none()`, assert no `liveness_loop` task was spawned for any generation, and no frame of type `Ping` was ever enqueued. `always` because the absence must hold for the whole incarnation, not merely at one observation.
 Fault/timing angle: the window is the whole incarnation. A default host cannot detect a silently wedged peer through Ping at all; peer death is discovered only by the ring's own path.
 Required faults and enabling state: a default `HostConfig`. That is the production configuration.
-Confidence: high - [evidence](../evidence/rt-a-the-default-configuration-arms-no-liveness-probe.md). Verified `config.rs:294`, the single spawn condition at `connection.rs:279`, and that `serve.rs:582-593` reaches `HostConfig::default` for this field.
+Confidence: high - [evidence](../../evidence/rt-a-the-default-configuration-arms-no-liveness-probe.md). Verified `config.rs:294`, the single spawn condition at `connection.rs:279`, and that `serve.rs:582-593` reaches `HostConfig::default` for this field.
 Existing check: `tests/lifecycle.rs:496`. Status `unaudited`.
 Impact: this is the reachability label for every liveness property in the catalog. Any record whose enabling state is a `LivenessPolicy` is reachable only from `tests/lifecycle.rs:402` or `tests/client.rs:64`, never from production.
 Open questions:
@@ -365,7 +365,7 @@ Guarantee: The health probe cadence is either the configured `health_interval` o
 Check: `always` - at `runtime.rs:1129`, assert that the selected interval equals `health_interval` whenever `activation_in_progress` is false, and record the number of consecutive iterations that selected 50 ms so a campaign can bound it. `always` because the selection happens on every loop iteration.
 Fault/timing angle: the window is unbounded. The predicate at `:1051-1074` is driven entirely by handler-authored strings in the previous report's metrics, so nothing in the host limits how long the fixed cadence persists. A handler that never leaves `starting` holds it forever.
 Required faults and enabling state: a handler whose `health` report carries `metrics.components.<id>.metrics.storage_state == "starting"` or `synapse_state == "starting"`, plus a `health_interval` distinguishable from 50 ms. `tests/lifecycle.rs:165` must change its value to make the two branches separable.
-Confidence: high - [evidence](../evidence/rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval.md). Verified the branch, the predicate, the single `health_interval` consumer, and that `MAX_CONFIG_DURATION` admits 365 days.
+Confidence: high - [evidence](../../evidence/rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval.md). Verified the branch, the predicate, the single `health_interval` consumer, and that `MAX_CONFIG_DURATION` admits 365 days.
 Existing check: none that separates the branches. Status `unaudited`.
 Impact: an operator who raises `health_interval` to reduce probe load gets no relief while any component reports `starting`, and 20 handler callbacks per second continue. This is Part 2a's hardcoded-60-second shape in the same direction.
 Open questions:
@@ -381,7 +381,7 @@ Guarantee: The host's total pre-service budget for one accepted socket is a stat
 Check: `always` - measure wall-clock from `run_connection` entry (`connection.rs:115`) to the return of `activate_server` (`:177`) on a peer that stalls maximally at each stage, and assert the total is at most `auth_deadline + 2 * transport_setup_deadline`. `always` because the bound must hold on every accepted socket.
 Fault/timing angle: three serial windows: `auth_deadline` at `:125`, `transport_setup_deadline` at `:158` for `prepare`, and `transport_setup_deadline` again at `:177` for `activate_server`. At defaults that is 6 s against a documented client budget of 2 s.
 Required faults and enabling state: a peer that stalls inside authentication, then inside descriptor transfer. 2c's `fault-map.md:52` describes the fixture and notes it does not exist.
-Confidence: high - [evidence](../evidence/rt-a-the-serial-setup-budget-triples-the-configured-transport-deadline.md). Verified all three sites and confirmed `HostConfig::validate` performs no cross-field check.
+Confidence: high - [evidence](../../evidence/rt-a-the-serial-setup-budget-triples-the-configured-transport-deadline.md). Verified all three sites and confirmed `HostConfig::validate` performs no cross-field check.
 Existing check: none. Part 2c's `existing-checks.md:569-575` records the coupling as a documentation gap with the figure 4 s. Status `unaudited`.
 Impact: a client conforming to the documented 2 s handshake deadline abandons a host that is still inside a budget the host considers valid, producing an `outcome_unknown` class the specification's coupling note was written to prevent.
 Open questions: None.
@@ -396,7 +396,7 @@ Guarantee: `run` returns within a stated function of the configured deadlines, a
 Check: `always` - from the shutdown token's cancellation to `run`'s return on the forced path, assert elapsed time is at most `shutdown_deadline + 2 * lifecycle_callback_deadline`. `always` because it must hold on every forced shutdown, and stated in the units the code bounds (`runtime.rs:1148` and `:1223`).
 Fault/timing angle: `:1214` fails, then `:1224` awaits a second, fresh budget computed at `:1223` as `lifecycle_callback_deadline.saturating_mul(2)`. At defaults, 60 s added after a 10 s deadline expired. `saturating_mul` means a `lifecycle_callback_deadline` above half of `MAX_CONFIG_DURATION` yields a budget the validator would itself reject.
 Required faults and enabling state: a tracked task that survives the shutdown deadline. `tests/lifecycle.rs:678` and `:714` build the non-yielding-callback shape.
-Confidence: high - [evidence](../evidence/rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline.md). Verified both deadline sites and read the justifying comment at `:1217-1222`.
+Confidence: high - [evidence](../../evidence/rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline.md). Verified both deadline sites and read the justifying comment at `:1217-1222`.
 Existing check: none bounding the total. Status `unaudited`.
 Impact: a supervisor that budgets `shutdown_deadline` for a stop, plus the documented client 5 s, kills the host during a cleanup phase the host considers in-budget, which is precisely the window `:1217-1222` says must not be interrupted.
 Open questions:
@@ -412,7 +412,7 @@ Guarantee: An authenticated `host.status` served before any health probe has com
 Check: `always` - whenever the `host.status` response reports `degraded`, assert that either `metrics.components` is non-empty or an explicit not-yet-probed marker is present. `always` because a client may read the snapshot at any moment, including the first.
 Fault/timing angle: the window opens at `runtime.rs:933`, when the health task is spawned, and closes when the first probe stores a report at `:1120-1123`. `accept_loop` starts one line later at `:934`, so the window is genuinely client-visible, and it lasts up to `lifecycle_callback_deadline` (30 s at defaults) under a slow `handler.health`.
 Required faults and enabling state: a handler whose first `health` call blocks, plus a client that authenticates and issues `host.status` inside that window. `tests/lifecycle.rs:579` already builds a slow-callback handler.
-Confidence: high - [evidence](../evidence/rt-a-an-unprobed-health-snapshot-is-distinguishable-from-a-degraded-one.md). Verified the seed, the reader, the spawn ordering, and that a real report always carries at least one component.
+Confidence: high - [evidence](../../evidence/rt-a-an-unprobed-health-snapshot-is-distinguishable-from-a-degraded-one.md). Verified the seed, the reader, the spawn ordering, and that a real report always carries at least one component.
 Existing check: none. Status `unaudited`.
 Impact: a supervisor gating traffic on `host.status` reads `degraded` from a healthy host and may withhold traffic or restart it. The distinguishing signal exists but is incidental and unasserted, so a change to either the seed or the composite's report shape removes it silently.
 Open questions: None.
@@ -427,7 +427,7 @@ Guarantee: When no linked module declares a reserved allocation, the reserved ad
 Check: `always-or-unreached` - assert that an acquisition against `reserved_pending_permits` or `reserved_task_permits` occurs only for a route whose class is `Reserved`, and that no such route exists when `reservations.pending == 0`. `always-or-unreached` rather than `unreachable`, because the pools are legitimately entered on a host that does declare a reservation; the obligation is that entry is safe and correctly gated, not that the code is dead.
 Fault/timing angle: an acquisition against a zero-permit `Semaphore` blocks forever rather than failing, so the failure mode is a permanently parked dispatch task rather than an error. The gate is `build_target_index`'s class/reservation agreement check at `runtime.rs:535-554`.
 Required faults and enabling state: a manifest set whose declared `route_class` disagrees with its reserved counts. `handler_contract.rs:378-388` constructs both directions.
-Confidence: high - [evidence](../evidence/rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration.md). Verified both construction sites, the agreement gate, and the doc comment at `runtime.rs:117-121` that states the claim.
+Confidence: high - [evidence](../../evidence/rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration.md). Verified both construction sites, the agreement gate, and the doc comment at `runtime.rs:117-121` that states the claim.
 Existing check: two tests from the admission side; neither asserts the no-entry half directly. Status `unaudited`.
 Impact: a route that reaches a zero-permit pool parks indefinitely with no error frame, which presents as a hung request rather than a refusal.
 Open questions: None.
@@ -442,7 +442,7 @@ Guarantee: Every field an embedder can set on `HostConfig`, `HostLimits`, `HostT
 Check: `always` - for each public configuration field, assert at least one read site outside `config.rs` and outside a `Debug` implementation. `always` because it is a property of the surface, evaluated once per field.
 Fault/timing angle: none. This is a static property of the wiring.
 Required faults and enabling state: none. The check is an enumeration, best expressed as a test that names each field and its consumer, or as a review gate.
-Confidence: high - [evidence](../evidence/rt-a-every-published-configuration-field-changes-host-behaviour.md). Grepped each of the 21 fields across the whole repository. One violator: `HostInit::host_capabilities` (`config.rs:250`), read nowhere, written as `Vec::new()` at all four construction sites.
+Confidence: high - [evidence](../../evidence/rt-a-every-published-configuration-field-changes-host-behaviour.md). Grepped each of the 21 fields across the whole repository. One violator: `HostInit::host_capabilities` (`config.rs:250`), read nowhere, written as `Vec::new()` at all four construction sites.
 Existing check: none. Status `unaudited`.
 Impact: an embedder who populates `host_capabilities` believes it advertises capabilities and it does nothing. Its `Debug` appearance at `config.rs:262` makes it look load-bearing in diagnostics.
 Open questions:
@@ -458,7 +458,7 @@ Guarantee: No configured limit, deadline, or policy changes value between `HostS
 Check: `always` - capture `shared.limits`, `shared.timing`, and `shared.liveness` immediately after `runtime.rs:927` and assert equality at `run`'s return, and assert no interior mutability exists on those fields. `always` because every config-dependent property in the catalog depends on it holding continuously.
 Fault/timing angle: none by construction. `limits`, `timing`, and `liveness` are plain owned values on `HostShared` (`runtime.rs:96-98`), not behind a lock or atomic, and `HostShared` is shared as `Arc` without interior mutability on those fields.
 Required faults and enabling state: none. The property is structural; the check is a compile-time or review-level assertion rather than a runtime one.
-Confidence: high - [evidence](../evidence/rt-a-configuration-is-frozen-for-the-incarnation.md). Verified the clone sites, the moved `init`, and that no read of `config` follows `:926`.
+Confidence: high - [evidence](../../evidence/rt-a-configuration-is-frozen-for-the-incarnation.md). Verified the clone sites, the moved `init`, and that no read of `config` follows `:926`.
 Existing check: none. Status `unaudited`.
 Impact: if a reload path were ever added, every sibling record that treats a limit as constant would need re-verification. Recording it now fixes the assumption explicitly instead of leaving it implicit in 55-plus records across the catalog.
 Open questions: None.
@@ -473,7 +473,7 @@ Guarantee: A failure to open the harness closure store is reported with its dist
 Check: `always` - whenever `HarnessClosureStore::open` returns `Err`, assert that the resulting host startup carries a classified unavailability reason naming that cause. `always` because every open failure must be classified; the store's absence is a legitimate state, but an indistinguishable one is not.
 Fault/timing angle: none timing-related. The window is startup. `open` fails on a symlinked or non-owner-only ancestor, a wrong mode, a non-directory, or a creation failure, each with a distinct `&'static str` (`harness_closure.rs:1044`, `:1052`, `:1067`, `:1074`, `:1076`, and `verify_owned_directory` at `:923`).
 Required faults and enabling state: a `${dataDir}/eidnara/harness-closures` path that is a symlink, group-writable, or owned by another uid. `tests/instance_security.rs` already builds hostile-path fixtures for the sibling walk in `instance.rs`.
-Confidence: medium - [evidence](../evidence/rt-a-a-closure-store-open-failure-is-classified-not-swallowed.md). The `.ok()` at both sites and the distinct error strings are verified. Medium because the two call sites are in `crates/daemon/src/bin/eidnara_host/serve.rs`, outside this sub-part's footprint, so I read only their immediate context and did not trace what the downstream backend selection ultimately reports to an operator.
+Confidence: medium - [evidence](../../evidence/rt-a-a-closure-store-open-failure-is-classified-not-swallowed.md). The `.ok()` at both sites and the distinct error strings are verified. Medium because the two call sites are in `crates/daemon/src/bin/eidnara_host/serve.rs`, outside this sub-part's footprint, so I read only their immediate context and did not trace what the downstream backend selection ultimately reports to an operator.
 Existing check: none on the failure path. Status `unaudited`.
 Impact: a permissions or symlink problem on the closure root presents as "no harness available" rather than "the closure store is insecure", so an operator investigates the wrong subsystem. This is Part 4f's silent-degradation shape.
 Open questions:
@@ -489,7 +489,7 @@ Guarantee: The activation-in-progress fast probe cadence is entered at least onc
 Check: `sometimes` - a marker at `runtime.rs:1130`, fired when the fixed interval is selected. `sometimes` and not `reachable` because this is situation coverage: a campaign can execute the health loop thousands of times, and even execute the `if` at `:1129`, while never producing the operational state the branch represents, which is a component that has published `starting` in its health metrics. Line coverage of the conditional does not witness that state.
 Fault/timing angle: the situation requires a real post-publication activation window. `spawn_activation_task` (`:932`) runs `handler.activate()` with deliberately no lifecycle deadline (`:981-983`), so the window's length is component-determined.
 Required faults and enabling state: a handler or composite whose `health` reports a component with `metrics.storage_state == "starting"`, observed by the probe at `:1092` before activation completes. `tests/activation.rs` is the natural host for the fixture.
-Confidence: high - [evidence](../evidence/rt-a-the-activation-fast-probe-interval-is-entered.md). Verified the predicate, both metric keys, the branch, and that a real composite report populates `components`.
+Confidence: high - [evidence](../../evidence/rt-a-the-activation-fast-probe-interval-is-entered.md). Verified the predicate, both metric keys, the branch, and that a real composite report populates `components`.
 Existing check: none. Status `unaudited`.
 Impact: if the situation is never produced, the 50 ms path and the predicate that selects it ship unexercised, and the override in `rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval` cannot be measured at all.
 Open questions: None.
@@ -504,7 +504,7 @@ Guarantee: The state in which a handler completed initialization and then draine
 Check: `sometimes` - a marker inside `PrePublicationCleanup::finish` (`runtime.rs:351`), fired only when initialization had returned `Ok`. `sometimes` and not `reachable` because `finish` is also reached from the initialization-failure arms at `:789` and `:803`, so a campaign can cover the function's lines while never producing the operational state that matters: a *successfully* initialized handler being drained with nothing published. That distinction is exactly what `:821-825` says the grouping exists to protect.
 Fault/timing angle: three entries. `bind_owner_only` failing at `:836`; `publish` failing at `:843`; and the shutdown token already cancelled at `:831`, which returns `Ok(None)` and drains through `:856`. The third is the cheapest to construct.
 Required faults and enabling state: for the cheapest form, cancel the shutdown token between the return of `initialize` and the `is_cancelled` check at `:831`. For the bind form, occupy or make unwritable the `setup.sock` path inside the guard's directory. For the publish form, a connection-file write failure.
-Confidence: high - [evidence](../evidence/rt-a-an-initialized-handler-drains-without-publishing.md). Verified all three entries, the shared `finish` path, and that `finish` demotes the phase at `:355-357` before the drain.
+Confidence: high - [evidence](../../evidence/rt-a-an-initialized-handler-drains-without-publishing.md). Verified all three entries, the shared `finish` path, and that `finish` demotes the phase at `:355-357` before the drain.
 Existing check: none. Status `unaudited`.
 Impact: this path runs the handler shutdown callback for a handler that never served a request, while the instance lock is still held. If the callback assumes publication occurred, or assumes at least one connection existed, the failure surfaces only here. It is also the path that decides whether a failed startup leaves a lock behind.
 Open questions: None.

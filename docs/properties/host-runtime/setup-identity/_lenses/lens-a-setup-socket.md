@@ -213,7 +213,7 @@ handshake silently opens the gate.
 Required faults and enabling state: a peer that connects and then presents a
 malformed `ClientHello`, a short nonce, a wrong `ClientAuth`, or nothing at all,
 while the send site is instrumented.
-Confidence: high - [evidence](../evidence/setup-a-no-descriptor-leaves-the-host-without-a-verified-client-proof.md).
+Confidence: high - [evidence](../../evidence/setup-a-no-descriptor-leaves-the-host-without-a-verified-client-proof.md).
 Verified: `authenticate_server` is called at `connection.rs:120-129` and its
 error return exits at `:130-133`; `activate_server` is reached only at `:170`;
 `send_grant` is `activate_server`'s first statement (`setup_socket.rs:249`).
@@ -251,7 +251,7 @@ one peer round trip wide and is bounded only by `transport_setup_deadline`,
 Required faults and enabling state: a peer that completes authentication, calls
 `receive_grant`, and then diverges from the protocol. `shm_failure_modes.rs:44-58`
 already builds it; the missing part is mapping the received fds and writing.
-Confidence: high - [evidence](../evidence/setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token.md).
+Confidence: high - [evidence](../../evidence/setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token.md).
 Verified: `activate_server` sends before it reads (`setup_socket.rs:249-261`);
 the token is minted by the host (`connection.rs:165`, `:216-226`) and travels
 inside the same message as the descriptors (`setup_socket.rs:254`).
@@ -291,7 +291,7 @@ server nonce carries the whole burden.
 Required faults and enabling state: a passive observer of one handshake. On a
 Unix socket that means a same-uid process able to trace the peer, so this is a
 defence-in-depth property under the stated trust model.
-Confidence: high - [evidence](../evidence/setup-a-a-captured-client-proof-never-authenticates-twice.md).
+Confidence: high - [evidence](../../evidence/setup-a-a-captured-client-proof-never-authenticates-twice.md).
 Verified: `random_nonce` at `auth.rs:379-383` is a direct `getrandom` per call,
 called once per `authenticate_server_inner` at `:245`; nothing caches or reuses
 it.
@@ -327,7 +327,7 @@ a cached `ConnectionInfo`. The client is not required to re-read the file, so
 this is the realistic path into the property rather than an attack.
 Required faults and enabling state: two host incarnations in the same data
 directory, plus a peer that reuses the earlier snapshot.
-Confidence: high - [evidence](../evidence/setup-a-credentials-do-not-survive-a-host-incarnation.md).
+Confidence: high - [evidence](../../evidence/setup-a-credentials-do-not-survive-a-host-incarnation.md).
 Verified: key and daemon id are each a fresh `getrandom` inside `acquire`
 (`instance.rs:263-266`), the ordering comment at `:222-231` states credentials
 are minted after the lock is won, and `ConnectionInfo` carries both by value
@@ -364,7 +364,7 @@ Fault/timing angle: two setups overlapping inside the same
 rather than a rare one.
 Required faults and enabling state: two peers that both authenticate and then
 swap the tokens they received.
-Confidence: high - [evidence](../evidence/setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it.md).
+Confidence: high - [evidence](../../evidence/setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it.md).
 Verified: the token is drawn per `run_connection` at `connection.rs:165` from a
 32-byte `getrandom` (`:216-226`), compared with `subtle::ConstantTimeEq` at
 `setup_socket.rs:267-272`, and `activate_server` reads exactly one message in the
@@ -407,7 +407,7 @@ Required faults and enabling state: a permissive umask in the host's process, an
 an observer sampling the mode. Demonstrating actual cross-uid connectability
 additionally needs a second uid, which may be unconstructible in CI and should be
 recorded as such rather than skipped silently.
-Confidence: high - [evidence](../evidence/setup-a-the-setup-socket-is-never-connectable-outside-the-owning-uid.md).
+Confidence: high - [evidence](../../evidence/setup-a-the-setup-socket-is-never-connectable-outside-the-owning-uid.md).
 Verified: the bind-then-chmod order at `setup_socket.rs:44-48`, the failure
 rollback that unlinks on a failed chmod at `:45-47`, and the parent's
 unconditional `fchmod(0o700)` at `instance.rs:560-573`.
@@ -449,7 +449,7 @@ not an impersonation.
 Required faults and enabling state: filesystem state planted at the socket path
 before the host starts. Four of the six shapes are constructible unprivileged in
 a temporary directory. The wrong-owner case needs a second uid.
-Confidence: high - [evidence](../evidence/setup-a-a-hostile-occupant-of-the-socket-path-fails-closed.md).
+Confidence: high - [evidence](../../evidence/setup-a-a-hostile-occupant-of-the-socket-path-fails-closed.md).
 Verified: `symlink_metadata` and not `metadata`, so a symlink is classified as a
 symlink and fails the `is_socket()` clause (`setup_socket.rs:28-32`); the three
 clauses are one conjunction at `:30-32`; the refusal at `:33-38` precedes the
@@ -487,7 +487,7 @@ Fault/timing angle: none. The peer performs all three checks
 that ordering not regressing.
 Required faults and enabling state: an impostor listener. Constructible in-process
 with `UnixStream::pair`, which is what the existing tests do.
-Confidence: high - [evidence](../evidence/setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof.md).
+Confidence: high - [evidence](../../evidence/setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof.md).
 Verified: all three peer checks precede the `ClientAuth` write in both
 implementations, and the native side short-circuits them into one `if` with
 `ct_eq` on the proof and the daemon id (`setup.rs:200-205`).
@@ -531,7 +531,7 @@ transfer, bounded by `transport_setup_deadline` at 2 seconds
 Required faults and enabling state: a squatter that authenticates and stalls, and
 a squatter that never speaks; both already exist in the test support
 (`tests/support/raw_client.rs:878`).
-Confidence: high - [evidence](../evidence/setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released.md).
+Confidence: high - [evidence](../../evidence/setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released.md).
 Verified: `try_acquire_owned` before spawn at `runtime.rs:1037-1040`, the
 `drop(stream)` on failure at `:1038`, and the two pre-swap exits in
 `connection.rs`.
@@ -573,7 +573,7 @@ Required faults and enabling state: a `transport_setup_deadline` short enough fo
 `ring.prepare` to miss it, which needs either a configured near-zero deadline or
 injected slowness in `prepare`. The other three exits need a peer that stalls
 after `receive_grant`, which `shm_failure_modes.rs:44-58` already builds.
-Confidence: medium - [evidence](../evidence/setup-a-an-abandoned-setup-strands-no-ring-charge.md).
+Confidence: medium - [evidence](../../evidence/setup-a-an-abandoned-setup-strands-no-ring-charge.md).
 Verified by inspection: the discard-and-cancel pairs at `connection.rs:166-169`
 and `:180-185`, and their absence at `:157-164`. Not verified: whether dropping a
 `PreparedRing` releases the charge. Part 1's
@@ -616,7 +616,7 @@ behaviour, and it resolves the re-scope open question at
 Required faults and enabling state: a peer that completes commit and then sends a
 huge length prefix, and separately one that sends a partial prefix and stalls
 while the connection is cancelled.
-Confidence: high - [evidence](../evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md).
+Confidence: high - [evidence](../../evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md).
 Verified: the cap at `setup_socket.rs:361-363` precedes the `vec![0u8; len]` at
 `:364`, and the `select!` at `connection.rs:196-206` is `biased` with
 `read_cancel` first.
@@ -656,7 +656,7 @@ independently maintained validation lists.
 Required faults and enabling state: a host, or a stand-in, that emits a grant
 naming two identical grant strings, or a second concurrent attach of the same
 grant in one process.
-Confidence: high - [evidence](../evidence/setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection.md).
+Confidence: high - [evidence](../../evidence/setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection.md).
 Verified: two divergences. First, `ring_transport.rs:646-650` compares
 `from_host_grant.geometry() != to_host_grant.geometry()` and rejects on
 *inequality*, whereas native `setup.rs:122` and `lib.rs:582-584` reject on grant
@@ -701,7 +701,7 @@ METHOD's rule for a forbidden state with no dedicated detection point is
 Fault/timing angle: none. This is a call-graph property.
 Required faults and enabling state: none beyond running the shipped wrapper with
 both sites instrumented.
-Confidence: high - [evidence](../evidence/setup-a-only-an-authenticated-grant-enters-the-native-channel-registry.md).
+Confidence: high - [evidence](../../evidence/setup-a-only-an-authenticated-grant-enters-the-native-channel-registry.md).
 Verified: `attach` at `lib.rs:491` reads `hostToPeerFd` and `peerToHostFd` as
 caller-supplied integers (`:510-513`) and never touches a socket;
 `connect_setup` at `:571` calls `setup::connect` which performs the three-message
@@ -749,7 +749,7 @@ concurrent setups overlap. With `max_handshakes = 1` they cannot.
 Required faults and enabling state: `max_handshakes` and `max_connections` both
 above 1, more concurrent dialers than `max_handshakes`, and at least one dialer
 that authenticates and then delays its `Activate` inside the setup deadline.
-Confidence: high - [evidence](../evidence/setup-a-concurrent-setup-saturation-is-reached.md).
+Confidence: high - [evidence](../../evidence/setup-a-concurrent-setup-saturation-is-reached.md).
 Verified: the two existing saturation tests set `max_handshakes` to 1
 (`tests/lifecycle.rs:239`) and 4 (`:339`) and both use squatters that never
 speak (`:243-244`, `:355-357`), so neither can populate the second clause.

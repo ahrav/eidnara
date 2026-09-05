@@ -217,7 +217,7 @@ fault injection: `TestHost::start` plus `setup_client`
 (`tests/support/mod.rs:688`) is sufficient. Reaching the `CandidateSetup` half of
 the state predicate additionally needs an injected provider, which is test-only;
 the `BootstrapTcp` half is the default path.
-Confidence: high - [evidence](evidence/negotiation-precedes-every-gated-frame-kind.md). All five gate sites and all
+Confidence: high - [evidence](../../evidence/negotiation-precedes-every-gated-frame-kind.md). All five gate sites and all
 fourteen frame-kind arms enumerated against `connection.rs:417-598` and
 `:626-647`.
 Existing check: `tests/transport_negotiation.rs:906` covers six of the eight
@@ -263,7 +263,7 @@ Required faults and enabling state: a raw client that negotiates twice. The
 and `ProviderActive` arcs need an injected provider, which is test-only; that is
 why this record is labelled by its default-reachable arc and the provider arcs
 are named explicitly.
-Confidence: high - [evidence](evidence/setup-selection-is-sticky-for-the-generation.md). `setup.state` has exactly two
+Confidence: high - [evidence](../../evidence/setup-selection-is-sticky-for-the-generation.md). `setup.state` has exactly two
 write sites and `setup.handoff` exactly one, all enumerated by grep over
 `connection.rs`.
 Existing check: `tests/transport_negotiation.rs:962`
@@ -299,7 +299,7 @@ the property. To make the check meaningful, add a fifth `TransportState` variant
 in a test fixture, or assert both predicates over all variants; the `matches!`
 shape means a new variant is refused by both copies unless a author adds it,
 which is the fail-closed direction.
-Confidence: high - [evidence](evidence/setup-readiness-is-decided-by-one-predicate.md). Both predicate bodies read at
+Confidence: high - [evidence](../../evidence/setup-readiness-is-decided-by-one-predicate.md). Both predicate bodies read at
 HEAD and confirmed textually identical over the same field; the four
 `transport_ready` call sites and the one inline site enumerated.
 Existing check: none.
@@ -348,7 +348,7 @@ is not a shipped configuration in this tree; the default is `None`
 that an *unsolicited* `Pong` before negotiation is silently ignored rather than
 retiring the generation, needs no liveness at all and is default-production; it is
 a strictly smaller claim and is recorded in the evidence file.
-Confidence: high - [evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md). Both sides read at HEAD: the
+Confidence: high - [evidence](../../evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md). Both sides read at HEAD: the
 document sentence, the ungated `Pong` arm, the liveness start point, and the
 grant path's own comment explaining that bootstrap probing is live during setup.
 Existing check: none. `pong-preanswer-rejected-in-every-mutex-order` in this
@@ -402,7 +402,7 @@ providers are test-only: `TransportProviders::default()` is empty
 test-injected (`:1-13`), and `HostConfig::default` installs the empty registry
 (`config.rs:297`). Verified consequence: in every shipped configuration the reason
 is always `None`.
-Confidence: high - [evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md). Precedence block, preflight
+Confidence: high - [evidence](../../evidence/fallback-reason-precedence-survives-a-silent-preflight.md). Precedence block, preflight
 default, panic mapping, and the `serves_transport` gate all read at HEAD; the
 empty-registry conclusion traced from `HostConfig::default` to
 `TransportProviders::default`.

@@ -5,7 +5,7 @@ mechanically holds each promise. Claim sources are the doc comments in
 `crates/host-runtime/src/client.rs`, the error and close-reason strings it emits, and
 `docs/host-wire-protocol.md`, which is the normative peer contract and the
 primary claim source here. No property records; no evidence files. Method
-contract in [../../METHOD.md](../../METHOD.md).
+contract in [../../METHOD.md](../../../METHOD.md).
 
 Scope: `crates/host-runtime/src/client.rs` (3,998 lines), re-derived with `wc -l` at
 `HEAD`. Production is `1-2264`; `#[cfg(test)] mod tests` runs `2266-3998`, which

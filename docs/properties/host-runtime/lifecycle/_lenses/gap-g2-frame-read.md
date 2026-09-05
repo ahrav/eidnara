@@ -75,7 +75,7 @@ would then win about half the time, consume bytes, and let the loop continue -
 so a cancelled `read_exact` could still return `Ok(())`, and the host would
 admit and charge a frame on a generation that is already retiring. That is the
 failure the bias prevents, and it is adjacent to but not covered by
-[a-retired-generation-emits-nothing-and-mutates-nothing](../catalog.md#a-retired-generation-emits-nothing-and-mutates-nothing),
+[a-retired-generation-emits-nothing-and-mutates-nothing](../../catalog.md#a-retired-generation-emits-nothing-and-mutates-nothing),
 which is about the emit and charge paths after cancel, not about the read loop
 that feeds them.
 
@@ -353,7 +353,7 @@ tripwire for step 4 breaking.
 ## Records
 
 Six records, in the METHOD.md schema, ready for synthesis into `catalog.md`.
-Their `[evidence](evidence/<slug>.md)` links are written catalog-relative, so
+Their `[evidence](../../evidence/<slug>.md)` links are written catalog-relative, so
 they resolve once transplanted to `catalog.md` at the part root; from this file
 they need one `../`. Every evidence file exists at
 `../evidence/<slug>.md` today.
@@ -386,7 +386,7 @@ Required faults and enabling state: a reader with bytes buffered and ready, plus
 a token cancelled before the poll. Both are constructible with
 `tokio::io::duplex`: write the bytes, cancel the token, then call the helper. No
 scheduler control is needed because the ordering is established before the call.
-Confidence: high - [evidence](evidence/cancellation-preempts-every-bounded-frame-read.md).
+Confidence: high - [evidence](../../evidence/cancellation-preempts-every-bounded-frame-read.md).
 Verified the `biased;` keyword and branch order at `frame_read.rs:47-49`,
 `:81-83`, `:111-113`; the production cancellation sources at `connection.rs:305`,
 `runtime.rs:1160`, and `runtime.rs:431`; and by exhaustive `awk` over both test
@@ -397,7 +397,7 @@ Existing check: none. The 24 tests in `tcp_frame_channel.rs:512-1155` and the tw
 Impact: a retiring generation keeps consuming frames. Each completed read admits
 a frame and charges the ingress budget on a generation the host has already
 decided to stop, which contradicts
-[a-retired-generation-emits-nothing-and-mutates-nothing](../catalog.md#a-retired-generation-emits-nothing-and-mutates-nothing)
+[a-retired-generation-emits-nothing-and-mutates-nothing](../../catalog.md#a-retired-generation-emits-nothing-and-mutates-nothing)
 on the read side, and delays shutdown by up to one frame deadline per admitted
 frame.
 Open questions: None.
@@ -431,7 +431,7 @@ Required faults and enabling state: no fault. Call `read_body` directly with a
 buffer pre-filled with `k` bytes, `0 < k < len`, and a reader holding `len` body
 bytes followed by a valid header. The observable is that the header no longer
 parses on the next read.
-Confidence: high - [evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md).
+Confidence: high - [evidence](../../evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md).
 The cap and the loop condition were read at `frame_read.rs:79-80`; the
 freshness of both callers' buffers was verified at `tcp_frame_channel.rs:217`
 and `client.rs:2003`; the `take` semantics were confirmed against tokio 1.53.1.
@@ -476,7 +476,7 @@ Required faults and enabling state: a mid-target peer close, three times: after
 one header byte (`read_exact`), after a partial declared body (`read_body`), and
 after a partial drained body (`drain`). All three are one `drop(client)` on a
 `tokio::io::duplex` pair.
-Confidence: high - [evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md).
+Confidence: high - [evidence](../../evidence/a-zero-length-read-ends-the-read-instead-of-looping.md).
 Read the three `if read == 0` sites at `frame_read.rs:55-57`, `:89-91`,
 `:119-121`, and verified the non-empty-target guards at `:46`, `:109-110`. The
 `read_body` case needed dependency evidence, since `read_buf` has two other
@@ -525,7 +525,7 @@ would read body bytes as a header with no pending drain left.
 Required faults and enabling state: any stop class, then an attempted second
 read. Cheapest construction: a truncated declared body for EOF, a paused clock
 for the deadline, a cancelled token for cancellation.
-Confidence: high - [evidence](evidence/no-framed-read-resumes-after-a-read-stop.md).
+Confidence: high - [evidence](../../evidence/no-framed-read-resumes-after-a-read-stop.md).
 Verified that no helper retains an offset (`frame_read.rs:45`, `:79`, `:108`),
 and that both callers stop: the host's four exhaustive `Err` arms at
 `connection.rs:400`, `:401-410`, `:411-414`, and the client's `break` at
@@ -576,7 +576,7 @@ with strictly increasing correlations (`connection.rs:426-429`) declaring
 `len > MAX_CONTROL_BODY_LEN`, each followed by the declared bytes, repeated. To
 observe the aggregate, run `max_connections` of them.
 Confidence: high on the mechanism, medium on whether the cost is a defect -
-[evidence](evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md).
+[evidence](../../evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md).
 Verified that the oversize branch at `tcp_frame_channel.rs:198-202` precedes the
 budget charge at `:204-215`; that the ceiling is `MAX_BODY_LEN` and not the
 control cap, because `validate_inbound_header` (`frame_channel.rs:58-61`) runs
@@ -628,7 +628,7 @@ borrows the read charge instead of `retained_budget` (`:1523`).
 Required faults and enabling state: to *prove* unreachability, none: it follows
 from the four verified steps in the evidence. To detect a regression, instrument
 the arm and run the ordinary inbound suite.
-Confidence: high - [evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md).
+Confidence: high - [evidence](../../evidence/the-client-body-budget-refusal-drain-is-never-entered.md).
 Verified all four steps the claim rests on: the cap equals the framing maximum
 (`client.rs:88`, `:403`); `validate_inbound` rejects a larger `len` first
 (`:2040`, called at `:1957`); `ByteCounter::charge` refuses only when

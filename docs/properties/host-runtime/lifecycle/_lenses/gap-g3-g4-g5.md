@@ -413,7 +413,7 @@ shipped configuration supplies. For (a) a cooperative peer, which the in-crate
 duplex harness at `connection.rs:1480` onward already provides. For (b) a peer
 that reads but never sends a Pong, plus `invalidate_on_missed: true`. Paused
 tokio time for both. No adversary and no concurrency campaign.
-Confidence: high - [evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). Every bound was read at HEAD and the two `sent` anchors were
+Confidence: high - [evidence](../../evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). Every bound was read at HEAD and the two `sent` anchors were
 traced through both writers of the field.
 Existing check: partial. `tests/client.rs:97-145` covers direction (a) with an
 indirect oracle, and is the only place in the crate where a full client answers a
@@ -480,7 +480,7 @@ stops reading is retired by the write deadline on its own, which
 `config.rs:204-206` documents as intended. Paused time makes the 30 second window
 cheap. The second marker needs only a Ping enqueued behind at least one unwritten
 frame plus a prompt Pong.
-Confidence: high - [evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md). The admission path was traced from the Ping send through the
+Confidence: high - [evidence](../../evidence/slow-egress-alone-does-not-retire-a-probed-generation.md). The admission path was traced from the Ping send through the
 cancel calls, and the absence of a host-side control lane was confirmed by
 reading the whole `FrameSender` and its constructor.
 Existing check: none. `tests/client.rs:97-145` is named
@@ -538,7 +538,7 @@ bytes.
 Required faults and enabling state: none. The check is a pure unit test with no
 store, no filesystem, and no fault injection. It is the cheapest record in this
 pass.
-Confidence: high - [evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). Both structs, both encoding functions, and the existing
+Confidence: high - [evidence](../../evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). Both structs, both encoding functions, and the existing
 fixture were read at HEAD, and the three blind spots were each confirmed by
 reasoning from the fixture's literal contents.
 Existing check: `generation.rs:1395-1412`
@@ -589,7 +589,7 @@ content-addressed deduplication stops deduplicating without any error at all.
 Required faults and enabling state: none at runtime. Constructing the check needs
 a fixture manifest whose bytes encode an older field order, which is a string
 literal, plus a staged directory whose files match it. No fault injection.
-Confidence: high - [evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md). Both equality checks were read at HEAD, and the
+Confidence: high - [evidence](../../evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md). Both equality checks were read at HEAD, and the
 fail-closed conclusion was derived from them rather than assumed; the prompt's
 "silently change every retained generation's digest" is corrected in the evidence
 file.
@@ -642,7 +642,7 @@ occupying the digest target, plus a restage of the same digest. The existing tes
 (`generation.rs:1689`) already builds that fixture, so the fault is available; the
 missing element is executing it on macOS. On the stub platforms the check is a
 compile-and-call assertion.
-Confidence: high - [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms, the call site, and the whole macOS CI job were
+Confidence: high - [evidence](../../evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms, the call site, and the whole macOS CI job were
 read at HEAD; the claim that no macOS lifecycle or generation test executes is
 derived from the four host-runtime steps in that job rather than asserted.
 Existing check: partial, Linux only. `generation.rs:1689`
@@ -703,7 +703,7 @@ fallback on Linux at all needs a filesystem that rejects `renameat2` flags;
 running it as the default needs macOS.
 Confidence: high on the mechanism, medium on severity, since the transaction lock
 does exclude the in-model actors and no out-of-model writer is demonstrated -
-[evidence](evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md). Both branches, the caller's contract, and the lock references
+[evidence](../../evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md). Both branches, the caller's contract, and the lock references
 were read at HEAD.
 Existing check: none. No test drives the portable fallback on any platform, and
 no test plants an empty directory at a digest target.

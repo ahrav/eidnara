@@ -7,7 +7,7 @@ close-reason strings they emit, `docs/shm-transport.md`,
 `packages/shm-native/src/setup.rs` and its TypeScript wrapper
 `packages/shm-native/index.ts`, mined for claims about the boundary itself.
 No property records; no evidence files. Method contract in
-[../../METHOD.md](../../METHOD.md).
+[../../METHOD.md](../../../METHOD.md).
 
 Scope: `crates/host-runtime/src/setup_socket.rs` (826), `auth.rs` (1,112),
 `instance.rs` (1,423), `connection_file.rs` (471), plus

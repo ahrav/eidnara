@@ -10,7 +10,7 @@ which Section 1 makes the normative contract.
 Provenance: code read from `the `host` source checkout, `HEAD` =
 `e447c927`, branch `feat/shared-memory-release-gate-audit`. Every line
 reference below was printed at that commit before being written. Method
-contract in [../../METHOD.md](../../METHOD.md).
+contract in [../../METHOD.md](../../../METHOD.md).
 
 METHOD rule 3 governs this file. A documented guarantee is a claim under test.
 Where the document and the code disagree, both sides are cited and neither is

@@ -368,7 +368,7 @@ Required faults and enabling state: A live route with a handler that both
 streams and returns a unary `Response`, plus a client `Cancel` and a route
 `Goodbye` delivered inside the handler's execution window. Three settlement
 claimants must be in flight at once.
-Confidence: high - [evidence](evidence/req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame.md).
+Confidence: high - [evidence](../../evidence/req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame.md).
 Verified the `swap` is the only mutator of `won`, that all five emission sites
 take the order lock, and that the `streamed` store precedes lock release.
 Existing check: `tests/dispatch.rs:358` `cancel_and_completion_settle_exactly_once`,
@@ -403,7 +403,7 @@ inside the endpoint thread (`ring_transport.rs:536-578`).
 Required faults and enabling state: A generation whose writer queue holds a
 settled terminal when the generation is cancelled or the publication fails. The
 settlement is already recorded; the frame never leaves.
-Confidence: high - [evidence](evidence/req-a-a-routed-terminal-carries-no-delivery-acknowledgement.md).
+Confidence: high - [evidence](../../evidence/req-a-a-routed-terminal-carries-no-delivery-acknowledgement.md).
 Enumerated every `written:` construction in the sub-part: three hooks exist, all
 on control or teardown frames, none on a routed terminal.
 Existing check: none.
@@ -440,7 +440,7 @@ Required faults and enabling state: A handler that calls
 match, or a ring reservation that fails under contention.
 `reservation.commit(body_len)` then returns `ProducerError::Underfill`
 (`shm-transport/src/backend/ring.rs:1363-1367`).
-Confidence: high - [evidence](evidence/req-a-a-response-publication-failure-never-reaches-the-settling-path.md).
+Confidence: high - [evidence](../../evidence/req-a-a-response-publication-failure-never-reaches-the-settling-path.md).
 Traced the direct-output path from `dispatch.rs:332-349` through
 `ring_transport.rs:580-593` into `commit`, and confirmed `publish_one` discards
 the `written` hook on failure without touching the settlement.
@@ -478,7 +478,7 @@ Required faults and enabling state: A handler that reserves an `OutputBuffer`,
 takes an early error return without writing, and still returns
 `RequestOutcome::Response`. Parts 4c and 4d found handlers returning success
 without writing, on the other side of this boundary.
-Confidence: high - [evidence](evidence/req-a-a-handler-response-is-length-checked-and-never-content-checked.md).
+Confidence: high - [evidence](../../evidence/req-a-a-handler-response-is-length-checked-and-never-content-checked.md).
 Confirmed `encode_owned_frame` (`wire.rs:571-602`) accepts an empty body and
 that `decode`'s pure-header rule (`wire.rs:340`) covers only Cancel, Ping,
 Pong, and Goodbye, so a zero-length `Response` is a well-formed frame.
@@ -514,7 +514,7 @@ Required faults and enabling state: A saturated egress byte budget plus a client
 pipelining more than 32 requests that fail admission. Both are reachable: the
 budget saturates in `tests/dispatch.rs:788`, and admission failure needs only a
 closed route or an exhausted permit pool.
-Confidence: high - [evidence](evidence/req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired.md).
+Confidence: high - [evidence](../../evidence/req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired.md).
 Verified the permit is acquired before the spawn on both call paths and that the
 exhaustion arm cancels and discards rather than awaiting inline.
 Existing check: `tests/dispatch.rs:271` `an_unknown_route_is_refused_with_zero_dispatch`,
@@ -553,7 +553,7 @@ panics or blocks. Parts 4c and 4d found handler panics, so this is not
 hypothetical. For the third, a generation teardown or forced drain concurrent
 with an in-flight bind; `routing.rs:408-413` marks mid-bind routes
 close-requested rather than draining them.
-Confidence: high - [evidence](evidence/req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining.md).
+Confidence: high - [evidence](../../evidence/req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining.md).
 Enumerated all seven exits, and confirmed via `runtime.rs:186-207` that both
 lifecycle-failure variants trip the fatal latch before returning.
 Existing check: `tests/routing.rs:396` `rejected_bind_never_publishes_and_still_reports_route_gone`,
@@ -595,7 +595,7 @@ commit point and the fence coincide.
 Required faults and enabling state: An authenticated `host.shutdown`, or an
 external shutdown signal, with a client pipelining both a routed request and a
 `route.open` behind it.
-Confidence: high - [evidence](evidence/req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes.md).
+Confidence: high - [evidence](../../evidence/req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes.md).
 Both call sites read; protocol §10.2's two retry rows compared.
 Existing check: none.
 Impact: Protocol §10.2 tells a client to retry `target_unavailable` "with new
@@ -634,7 +634,7 @@ Required faults and enabling state: A handler whose `handle` blocks on an
 external dependency with no internal timeout. Protocol §11 assigns the
 30-second request deadline to the *client*, so a client that dies without
 sending `Cancel` leaves the host holding the permits indefinitely.
-Confidence: high - [evidence](evidence/req-a-a-handler-outliving-every-host-deadline-is-reached.md).
+Confidence: high - [evidence](../../evidence/req-a-a-handler-outliving-every-host-deadline-is-reached.md).
 Read all seven `HostTiming` fields and every `timeout`/`timeout_at` call in
 `dispatch.rs`; none wraps the handler callback.
 Existing check: `tests/dispatch.rs:295` constructs the state incidentally.
@@ -676,7 +676,7 @@ free-standing root, not a child of the generation token
 Required faults and enabling state: A handler that completes while its
 generation is being torn down, with the terminal's byte charge acquired before
 the cancellation and consumed after it.
-Confidence: high - [evidence](evidence/req-a-no-emission-reaches-a-retired-generation-or-a-settled-correlation.md).
+Confidence: high - [evidence](../../evidence/req-a-no-emission-reaches-a-retired-generation-or-a-settled-correlation.md).
 Verified all four entry points recheck, and that `StreamSink::reserve` rechecks
 on both sides of the await so a charge granted before cancellation cannot be
 used after it.
@@ -715,7 +715,7 @@ capacity.
 Required faults and enabling state: A client pipelining more requests than
 `max_handler_tasks` on one route, plus a slow-reading peer so terminals queue
 and the pending count exceeds the task count.
-Confidence: high - [evidence](evidence/req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs.md).
+Confidence: high - [evidence](../../evidence/req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs.md).
 Verified pool construction at `runtime.rs:905-912`, class selection at
 `dispatch.rs:873-879` from `route_tracker`'s stored class, and Broca's live
 96/96 reserved declaration.
@@ -755,7 +755,7 @@ never removed their own pending entries". `force_close_all_routes`
 Required faults and enabling state: A forced shutdown past the drain deadline
 with requests in flight, so `force_close_all_routes` aborts outer tasks whose
 keys no `settle_route_work` collected.
-Confidence: medium - [evidence](evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md).
+Confidence: medium - [evidence](../../evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md).
 The sweep asymmetry is verified by reading both functions. What I could not
 verify is whether the forced path is always followed by the whole
 `GenerationCore` being dropped, which would make the leak unobservable; that
@@ -797,7 +797,7 @@ close (`connection.rs:391-400`).
 Required faults and enabling state: Concurrent floods of malformed control
 bodies, oversize control bodies, and requests past the pending-permit bound on
 one generation.
-Confidence: high - [evidence](evidence/req-a-three-control-rejection-paths-carry-three-different-bounds.md).
+Confidence: high - [evidence](../../evidence/req-a-three-control-rejection-paths-carry-three-different-bounds.md).
 All three call sites and both bounding counters read; `MAX_INFLIGHT_BUSY_REJECTS`
 confirmed as 32 at `connection.rs:42` and used at `:244`.
 Existing check: `tests/routing.rs:98` `unsupported_operations_leave_the_generation_usable`,
@@ -837,7 +837,7 @@ for up to `max_routes` concurrent binds.
 Required faults and enabling state: A handler returning a multi-megabyte error
 message, at pending-pool or route-pool saturation, with a slow-reading peer so
 the terminals queue.
-Confidence: high - [evidence](evidence/req-a-handler-authored-diagnostics-are-capped-before-any-egress-wait.md).
+Confidence: high - [evidence](../../evidence/req-a-handler-authored-diagnostics-are-capped-before-any-egress-wait.md).
 Both capping sites read and their limits compared: same constants, different
 substitute messages, and the bind path re-implements the comparison by hand
 instead of calling `bounded_terminal_error`.
@@ -874,7 +874,7 @@ Required faults and enabling state: A shrunk configuration (`max_handler_tasks`
 and `max_pending_requests` lowered, as `tests/dispatch.rs:295` already does for
 pending), a parked handler, a saturated egress budget, and a client pipelining
 past each bound.
-Confidence: high - [evidence](evidence/req-a-both-admission-classes-and-the-rejection-bound-saturate.md).
+Confidence: high - [evidence](../../evidence/req-a-both-admission-classes-and-the-rejection-bound-saturate.md).
 Enumerated the five `try_acquire_owned` sites and confirmed which existing tests
 reach which.
 Existing check: `tests/dispatch.rs:295`, `:976`, `:1074` for pending in both

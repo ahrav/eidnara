@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "dd69a1310cc1467b4208ae6904a2e7da6d9fa6df13e7d994d42f248fc0a3dd51",
+  "source_sha256": "58421af6975eefe8c88d9418a91deb82b502f2ed0ffc0ed63b4c1a193273b893",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -51,7 +51,7 @@
         "level": "high",
         "evidence": "on the exclusion; medium that the neither-registered window is harmless, since the lock ordering was traced but not tested."
       },
-      "existing_check": "`tests/lifecycle.rs:1722` `shutdown_during_candidate_setup_reaps_both_channels` covers drain during setup, not during the transfer. Status unaudited - and that file runs in no CI job.",
+      "existing_check": "none at HEAD. The cited `tests/lifecycle.rs:1722` `shutdown_during_candidate_setup_reaps_both_channels` covered drain during candidate setup, not during the transfer; the mandatory-ring refactor (`ed487e11`) removed the candidate-handoff path and that test with it, and `tests/lifecycle.rs` at HEAD declares no test by that name. The surviving drain-time half of the guarantee (a generation minted while draining is never registered) has no dedicated check; `tests/lifecycle.rs` shutdown cases execute `run_connection` under drain incidentally and assert nothing about registration.",
       "impact": "shutdown, route ownership, and Goodbye delivery all enumerate the registry assuming one live owner per socket.",
       "open_questions": [
         "Should the promoted generation receive a connection Goodbye when the host drains in the transfer window? Today it gets neither a Goodbye nor a reap. (needs human input)"
@@ -1029,8 +1029,8 @@
       "slug": "negotiation-precedes-every-gated-frame-kind",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
-      "status": "active",
+      "reachability_note": "when live - at `ed487e11^` every accepted connection began in `BootstrapTcp` and the gate ran on every inbound frame.",
+      "status": "invalidated",
       "exercised": {
         "state": "partial",
         "note": "`tests/transport_negotiation.rs:906-949` covers four channel-0 control operations, one routed request, and one oversize control declaration before negotiation. `Cancel`, routed `Goodbye`, and `Pong` before negotiation are uncovered, and no case asserts the absence of an emitted terminal."
@@ -1051,14 +1051,17 @@
       "open_questions": [
         "Should a premature oversize control declaration receive the section 7.1 authoritative terminal before retiring, or does the setup gate correctly outrank it? The code chooses the gate (`:430` refuses before any emission), while the malformed-negotiate path chooses the terminal (`:849-875`). The document specifies both rules and does not order them. (needs human input)"
       ],
-      "extra": {}
+      "extra": {
+        "Superseded rather than live": "the mandatory-ring refactor removed transport negotiation and the setup state machine, so no generation is ever in a not-ready setup state at HEAD and the subject of this record is unreachable by any configuration."
+      },
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "setup-selection-is-sticky-for-the-generation",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
-      "status": "active",
+      "reachability_note": "when live - at `ed487e11^` the `TcpCommitted` arc needed no provider and no configuration. Superseded rather than live: the mandatory-ring refactor removed negotiation and the `setup.state` and `setup.handoff` writes it guarded, so no selection is ever made at HEAD and the subject of this record is unreachable by any configuration.",
+      "status": "invalidated",
       "exercised": {
         "state": "partial",
         "note": "`tests/transport_negotiation.rs:962-980` covers a repeated negotiation after a negotiated TCP selection. Negotiation during `CandidateSetup`, negotiation on a promoted `ProviderActive` generation, and the at-most-one-candidate claim are uncovered."
@@ -1077,14 +1080,15 @@
       "existing_check": "`tests/transport_negotiation.rs:962` `repeated_negotiation_after_negotiated_tcp_selection_retires` covers the `TcpCommitted` arc only. Status `unaudited`.",
       "impact": "a second accepted negotiation would prepare a second candidate, overwrite `setup.handoff` at `:1104`, and leak the first candidate's sender, cancellation root, and I/O task, because the setup owner reaps only what the slot still holds (`:201-234`).",
       "open_questions": [],
-      "extra": {}
+      "extra": {},
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "setup-readiness-is-decided-by-one-predicate",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
-      "status": "active",
+      "reachability_note": "when live - at `ed487e11^` both predicate copies ran on every frame. Superseded rather than live: the mandatory-ring refactor removed `TransportState` and both readiness predicates, so there is no readiness definition to agree on at HEAD and the subject of this record is unreachable by any configuration.",
+      "status": "invalidated",
       "exercised": {
         "state": "not-yet",
         "note": "no test reads the setup state directly, and no lint or test asserts that the two predicate copies agree."
@@ -1105,14 +1109,15 @@
       "open_questions": [
         "Is the inline copy at `:642-645` deliberate, for example to keep `handle_control` independent of a `connection.rs`-private helper, or is it incidental duplication? (needs human input)"
       ],
-      "extra": {}
+      "extra": {},
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "a-setup-pong-is-required-and-forbidden-in-the-same-window",
       "type": "reachability",
       "reachability": "explicit-config-only",
-      "reachability_note": "",
-      "status": "active",
+      "reachability_note": "when live - at `ed487e11^` the window needed `liveness: Some(..)` in `HostConfig`. Superseded rather than live: the mandatory-ring refactor removed the `BootstrapTcp` and `CandidateSetup` setup states that defined the window, so the window cannot open at HEAD and the subject of this record is unreachable by any configuration.",
+      "status": "invalidated",
       "exercised": {
         "state": "not-yet",
         "note": "no test sends a `Pong` before negotiation, and no test runs a configured liveness policy against a generation that has not yet negotiated."
@@ -1136,14 +1141,15 @@
       ],
       "extra": {
         "Both sides read at HEAD": "the document sentence, the ungated `Pong` arm, the liveness start point, and the grant path's own comment explaining that bootstrap probing is live during setup."
-      }
+      },
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "fallback-reason-precedence-survives-a-silent-preflight",
       "type": "safety",
       "reachability": "test-only",
-      "reachability_note": "",
-      "status": "active",
+      "reachability_note": "when live - at `ed487e11^` reaching the precedence block needed injected providers. Superseded rather than live: the mandatory-ring refactor removed transport negotiation, TCP fallback, and `TransportProviders`, so no fallback reason is ever computed at HEAD and the subject of this record is unreachable by any configuration.",
+      "status": "invalidated",
       "exercised": {
         "state": "partial",
         "note": "`tests/transport_negotiation.rs:876-905` covers capability mismatch falling back and version mismatch retiring; `:851-874` covers an unprovided non-TCP offer selecting reasonless TCP. No test produces `DynamicallyUnavailable`, and no test pairs it with a mismatched sibling to exercise the precedence."
@@ -1164,13 +1170,14 @@
       "open_questions": [
         "Should a panicking preflight be observably different from permanent absence, for example through a host-side event, given that the wire reason must stay reasonless per the KTD6 comment at `:906`? (needs human input)"
       ],
-      "extra": {}
+      "extra": {},
+      "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, TCP fallback reasons, `TransportProviders`, `transport_provider.rs`, and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "cancellation-preempts-every-bounded-frame-read",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "when live - at `ed487e11^` `frame_read.rs` sat on the unconditional host and client read paths. Superseded rather than live: the mandatory-ring refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.",
       "status": "invalidated",
       "exercised": {
         "state": "not-yet",
@@ -1197,7 +1204,7 @@
       "slug": "a-body-read-consumes-exactly-the-declared-frame-boundary",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "when live - at `ed487e11^` `frame_read.rs` sat on the unconditional host and client read paths. Superseded rather than live: the mandatory-ring refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.",
       "status": "invalidated",
       "exercised": {
         "state": "not-yet",
@@ -1226,7 +1233,7 @@
       "slug": "a-zero-length-read-ends-the-read-instead-of-looping",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "when live - at `ed487e11^` `frame_read.rs` sat on the unconditional host and client read paths. Superseded rather than live: the mandatory-ring refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.",
       "status": "invalidated",
       "exercised": {
         "state": "partial",
@@ -1255,7 +1262,7 @@
       "slug": "no-framed-read-resumes-after-a-read-stop",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "when live - at `ed487e11^` `frame_read.rs` sat on the unconditional host and client read paths. Superseded rather than live: the mandatory-ring refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.",
       "status": "invalidated",
       "exercised": {
         "state": "partial",
@@ -1284,7 +1291,7 @@
       "slug": "oversize-control-drain-work-is-bounded-without-ingress-budget",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "when live - at `ed487e11^` `frame_read.rs` sat on the unconditional host and client read paths. Superseded rather than live: the mandatory-ring refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.",
       "status": "invalidated",
       "exercised": {
         "state": "partial",
@@ -1316,7 +1323,7 @@
       "slug": "the-client-body-budget-refusal-drain-is-never-entered",
       "type": "reachability",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "when live - at `ed487e11^` `frame_read.rs` sat on the unconditional host and client read paths. Superseded rather than live: the mandatory-ring refactor deleted `frame_read.rs`, so the subject of this record is unreachable at HEAD.",
       "status": "invalidated",
       "exercised": {
         "state": "not-yet",
@@ -2171,7 +2178,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof.md)."
       },
-      "existing_check": "`auth.rs:1022-1073` `rejected_server_sends_no_client_auth`, driven by `:1074-1081` `invalid_server_proof_sends_no_client_auth` and `:1082-1089` `daemon_id_mismatch_sends_no_client_auth`. `auth.rs:394-395` also names `foreign_server_reused_port_never_receives_client_auth` as the always-true guard for the comparison. The `daemon_ver` mismatch case is not visibly covered by the two named tests. Status unaudited.",
+      "existing_check": "`auth.rs:1022-1073` `rejected_server_sends_no_client_auth`, driven by `:1074-1081` `invalid_server_proof_sends_no_client_auth` and `:1082-1089` `daemon_id_mismatch_sends_no_client_auth`. The always-true guard on the comparison is unnamed in `auth.rs`; the source catalog cited a `foreign_server_reused_port_never_receives_client_auth` identifier that no file under `crates/` declares. The `daemon_ver` mismatch case is not visibly covered by the two named tests. Status unaudited.",
       "impact": "this is the only thing standing between a same-uid squatter and a peer's `ClientAuth`, because neither peer checks the socket's ownership or mode before connecting. A leaked `ClientAuth` is not directly a credential, since it is nonce-bound, but it is an oracle on the key.",
       "open_questions": [
         "Should the peer stat the socket for owner and mode before connecting, as the connection-file reader already does for the file (`connection_file.rs:267-287`)? It would be defence in depth over a check the mutual proof already carries. (needs human input)"
@@ -3236,7 +3243,7 @@
       "slug": "composite-route-entry-is-removed-by-exactly-one-route-gone",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the composite is constructed at `serve.rs:575` and handed to `host_runtime::run` at `:632`. Its `bind`, `handle` and `route_gone` are the composite's leg of the routed path Fact 1 of [Reachability](#reachability) establishes, and the route map they share (`composite.rs:112`, initialized at `:134`) is plain `Mutex<HashMap<..>>` state with no gate. `composite.rs` has zero `#[cfg]` attributes.",
+      "reachability_note": "the composite is constructed at `serve.rs:575` and handed to `host_runtime::run` at `:632`. Its `bind`, `handle` and `route_gone` are the composite's leg of the routed path Fact 1 of [Reachability](#reachability-admission-and-dispatch) establishes, and the route map they share (`composite.rs:112`, initialized at `:134`) is plain `Mutex<HashMap<..>>` state with no gate. `composite.rs` has zero `#[cfg]` attributes.",
       "status": "active",
       "exercised": {
         "state": "partial",
