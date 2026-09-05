@@ -4869,16 +4869,16 @@
       "strategy_decision": "Golden-vector tests on both sides of the committed tuple plus a campaign that calls the production `compute_proof` and the test-local `raw_client::proof` on the same perturbed tuples, daemon-version lengths, and key lengths for both domains and asserts equality and distinctness; vectors regenerated once at U3 for the renamed domains.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
-      "evidence_digest": "0a3939e196473c1df427e447923156408910de40dc271a1ab0a6c402cb2ea2d9",
+      "evidence_digest": "793b88ed01f67b1b830ba01523a4b1ad0271a0eda2e535c56636d9ba5ea48f21",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#committed_auth_proof_vectors_pin_the_construction",
-      "check_hash": "c3990fd883551e9affa2cda5ce5a2731129b9513c25bd0f45125888491ac3710",
-      "code_hash": "d7cd646b6e3a3779f4612507444e4b0b233080d0f92df7716091584ac8c30090",
+      "check_hash": "0b1faa84446e48966650d15511d430fb3014bafec68e86813903a97508b71339",
+      "code_hash": "4b5b1c86548f9d8993f05614f3288f1680746b84d544a06219c50dce15da3086",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "0a3939e196473c1df427e447923156408910de40dc271a1ab0a6c402cb2ea2d9",
+        "digest": "793b88ed01f67b1b830ba01523a4b1ad0271a0eda2e535c56636d9ba5ea48f21",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -4963,8 +4963,8 @@
       "evidence_pointer": "docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md",
       "evidence_digest": "024438be0a5f62a6ddb31c326593de5e5c6ebf6fbaee8c1fbf2c12f4bd968f9b",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#canonical_route_open_body_is_167_bytes",
-      "check_hash": "c3990fd883551e9affa2cda5ce5a2731129b9513c25bd0f45125888491ac3710",
-      "code_hash": "28cc8748c292a461107a58a55bfcb380027dcfc5188590ba046f734a7a0a3652",
+      "check_hash": "0b1faa84446e48966650d15511d430fb3014bafec68e86813903a97508b71339",
+      "code_hash": "fc5022541248227939adf98f2ec250a47b4a343095af633385f94c135d1f812a",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -4992,16 +4992,16 @@
       "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), a key-reordering test over the fixture text, a per-field mutation campaign, and an isolated launch-root test; regenerated once at U3 for the renamed schema id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "evidence_digest": "f76d77e9dac6b6429393eaa085c3615b120fcb65d0bf1735017a80d852c3b87f",
+      "evidence_digest": "bb8677a1660a42bd0b97ea2d6e1cccbb84ad40bdb082c2c32be553ae0a69596e",
       "check_pointer": "crates/host-runtime/tests/harness_closure.rs#canonical_manifest_digest_is_pinned",
-      "check_hash": "9883592c3622b5ef86d7b933ba3772ee5a9712f0eda55197773def83d4b407bf",
-      "code_hash": "bcbc97471d0f9ed45ff001cbda387d8083417259206c99e7421207fe468632a2",
+      "check_hash": "7c7797437b7b5cdd0872f09099b455152317a235a86d77e0cffaf3532c4ade13",
+      "code_hash": "c906084aad9e52b5fd480b7d0f2c3454af3bf0731424fa302eda42d76d7dc92b",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "f76d77e9dac6b6429393eaa085c3615b120fcb65d0bf1735017a80d852c3b87f",
+        "digest": "bb8677a1660a42bd0b97ea2d6e1cccbb84ad40bdb082c2c32be553ae0a69596e",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5022,16 +5022,16 @@
       "strategy_decision": "Golden-vector unit test against a digest produced outside the crate (Python HMAC derivation) plus a campaign comparing generated rows with an in-test implementation of the documented derivation; regenerated once at U3 for the renamed domain; mirrors the check in the harness = false integration binary, which the checker cannot anchor into.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
-      "evidence_digest": "39663d0fb9760032ecbc72b31efb1fb43938c5a1281b336324e19ea24424020e",
+      "evidence_digest": "09110eca57cb1ccbcece9019adcf87dfda204cc52a257716e5d22cf1052f1dcd",
       "check_pointer": "crates/host-runtime/src/broca/subprocess.rs#credential_fingerprint_matches_the_committed_vector",
-      "check_hash": "88ba49bf01f5697061eed1c9c66e54ecd48a47863c1a20f17d2782a3ddb0417a",
-      "code_hash": "c5f4c9db8664b9b21c1b1f81fb6540bde20320b325e5ba863c4890d0331a217a",
+      "check_hash": "f3f8311af3de4ef745f779d4485a39dfde770af15e60eba331a05ebea987adcc",
+      "code_hash": "3adc385c89fed40ddc16c23563e0a0dfe257db329f27421d0e3f82b512b911fb",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "39663d0fb9760032ecbc72b31efb1fb43938c5a1281b336324e19ea24424020e",
+        "digest": "09110eca57cb1ccbcece9019adcf87dfda204cc52a257716e5d22cf1052f1dcd",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },

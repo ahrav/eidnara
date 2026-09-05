@@ -112,11 +112,14 @@ documented derivation independently of `credential_fingerprint` and compares
 the two over three connection keys, eight harness-and-provider pairs
 including both Pi aliases (`openai-codex`, `google-antigravity`) that
 canonicalize onto shared provider names, and
-seven value shapes: five chosen to collide under naive concatenation (a
+nine value shapes: five chosen to collide under naive concatenation (a
 colon that mimics the field separator, a digit run that mimics a length
-prefix, one byte), the longest admitted value, and a multibyte value
+prefix, one byte), the longest admitted value, a multibyte value
 (`sécrét`, 8 bytes, 6 characters) whose length prefix differs between byte
-and character counting. It asserts every distinct
+and character counting, and two non-UTF-8 values (`0x80`, `0x81`) that a
+lossy conversion maps to the same replacement character. The transcript
+carries the raw OS bytes of the name and value, so the two raw values
+fingerprint apart. It asserts every distinct
 `(key, harness, canonical provider, variable, value)` row yields a distinct
 fingerprint, that an empty value is refused as `CredentialMissing`, and that
 a value over `CREDENTIAL_VALUE_CAP_BYTES` is refused as

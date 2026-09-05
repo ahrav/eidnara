@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "2f4bfa144001a2ae48e64bf01bb78e8ca86572eff58c7a0488beb4ed050a7088",
+  "source_sha256": "682c2bf667cfa2723e4945f56c00ed4d66c58807a26d89dad3c2b28a09b7f406",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -3874,7 +3874,7 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes including a multibyte value agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows."
+        "note": "the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes including a multibyte value and two non-UTF-8 byte values agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows."
       },
       "guarantee": "The credential fingerprint is `HMAC(derive(connection_key, \"eidnara-broca-credential-v1\"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.",
       "check": {

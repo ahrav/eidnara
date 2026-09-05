@@ -111,6 +111,13 @@ The record's check has three parts, each with a test in
   and asserts the digest moves and no two mutations collide. A foreign
   `schema` and a `mode` that disagrees with its `kind` are shown to be
   refused before hashing, since the validator fixes both.
+- `manifest_digest_matches_an_external_canonicalization_of_the_fixture_text`
+  reproduces the digest from the fixture's JSON text with a test-local key
+  sort, independent of the crate's `Serialize` impl, and counts each node
+  path in the canonical text. The validator requires every node to be
+  referenced by a launch root, an extension, or a dependency edge, so no
+  in-crate mutation can move a node path alone; the external comparison is
+  what catches a canonical form that dropped one.
 - `launch_roots_participate_in_the_digest_on_their_own` builds a manifest
   with an alternate interpreter node and an alternate entrypoint node, both
   reachable through the extension root, and changes `interpreter` and

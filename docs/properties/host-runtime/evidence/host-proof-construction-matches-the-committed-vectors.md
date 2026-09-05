@@ -109,8 +109,9 @@ another nonce, identity, or version passes both. The vector tests, the
 perturbation test, and the production-versus-oracle campaign together form the
 check: the committed tuple is pinned on both sides, and
 `compute_proof(...) == raw_client::proof(...)` is compared directly over
-perturbed tuples and daemon-version lengths, with distinct inputs required to
-give distinct proofs. One gap remains: no test reads the JSON examples in
+perturbed tuples and daemon-version lengths, including a multibyte version
+whose byte length differs from its character count, with distinct inputs
+required to give distinct proofs. One gap remains: no test reads the JSON examples in
 `docs/host-wire-protocol.md` section 5.2 and compares them to
 `shm_transport::setup_auth::vectors`, so documentation drift of the kind the
 second question found would be caught by review rather than by a test.
