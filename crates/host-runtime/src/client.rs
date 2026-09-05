@@ -1073,8 +1073,9 @@ enum BridgeJoin {
 enum BindOwner {
     /// The response's caller dropped it, or it could not be retained; the bind is unowned.
     Abandoned,
-    /// No pending entry matched; a duplicate terminal for a bind another caller owns must be dropped.
-    None,
+    /// No pending entry matched the response carrying this correlation; a duplicate terminal
+    /// for a bind another caller owns must be dropped, a distinct bind reusing the handle must not.
+    None { correlation: u64 },
 }
 
 /// A route `Goodbye` can arrive after the bind response has woken `open_route`
@@ -1086,6 +1087,10 @@ enum BindOwner {
 struct BindTracking {
     publishing: HashSet<RouteHandle>,
     torn_down: HashSet<RouteHandle>,
+    /// The correlation whose response delivered each live or in-flight handle. An unmatched
+    /// response for the same handle is a duplicate terminal only if it carries this
+    /// correlation; any other correlation is a distinct bind that reused the handle.
+    delivered_by: HashMap<RouteHandle, u64>,
 }
 
 /// A unary response held for its caller. `_charge` returns the body's bytes to
@@ -1626,7 +1631,12 @@ impl Inner {
                     // An abandoned `open_route` on identity 0/0 cannot withdraw its bind because §6.2 permits no `Cancel`.
                     if header.ty == FrameType::Response && header.channel == 0 {
                         drop(charge);
-                        self.release_stranded_route(&body, BindOwner::None);
+                        self.release_stranded_route(
+                            &body,
+                            BindOwner::None {
+                                correlation: header.corr,
+                            },
+                        );
                     }
                     return;
                 };
@@ -1671,7 +1681,9 @@ impl Inner {
                                         // that lands before the insert must be remembered. The
                                         // channel scan above makes this insert's failure unreachable.
                                         if let Some(handle) = bound {
-                                            lock_unpoisoned(&self.binds).publishing.insert(handle);
+                                            let mut binds = lock_unpoisoned(&self.binds);
+                                            binds.publishing.insert(handle);
+                                            binds.delivered_by.insert(handle, header.corr);
                                         }
                                         Ok(RetainedResponse {
                                             response: Response {
@@ -1865,14 +1877,25 @@ impl Inner {
             let same_channel_other_epoch =
                 |other: &RouteHandle| other.channel == route.channel && other.epoch != route.epoch;
             match owner {
-                // A duplicate terminal for a route that is live or still being published is dropped (§6.2).
-                BindOwner::None if routes.contains(&route) || binds.publishing.contains(&route) => {
+                // A duplicate terminal for a route that is live or still being published is
+                // dropped (§6.2) only when it repeats the correlation that delivered the handle.
+                // A different correlation is a distinct bind that reused the handle: the host
+                // replaced the route and the retained handle can no longer be trusted.
+                BindOwner::None { correlation }
+                    if routes.contains(&route) || binds.publishing.contains(&route) =>
+                {
+                    if binds.delivered_by.get(&route) == Some(&correlation) {
+                        return;
+                    }
+                    drop(binds);
+                    drop(routes);
+                    self.retire("invalid_route_response");
                     return;
                 }
                 // A bind for a channel that already carries a live or in-flight route at another
                 // epoch means the host replaced that route; §6.2 permits channel reuse only after
                 // cleanup, so the retained handle can no longer be trusted.
-                BindOwner::None
+                BindOwner::None { .. }
                     if routes.iter().any(same_channel_other_epoch)
                         || binds.publishing.iter().any(same_channel_other_epoch) =>
                 {
@@ -1881,7 +1904,7 @@ impl Inner {
                     self.retire("invalid_route_response");
                     return;
                 }
-                BindOwner::None => {}
+                BindOwner::None { .. } => {}
                 // The response's own caller is gone, so its tracking ends here.
                 BindOwner::Abandoned => {
                     if routes.contains(&route) {
@@ -1889,6 +1912,7 @@ impl Inner {
                     }
                     binds.publishing.remove(&route);
                     binds.torn_down.remove(&route);
+                    binds.delivered_by.remove(&route);
                 }
             }
         }
@@ -1953,6 +1977,7 @@ impl Inner {
                 }
                 return false;
             }
+            lock_unpoisoned(&self.binds).delivered_by.remove(&route);
             drop(routes);
             let keys: Vec<_> = pending
                 .keys()
@@ -3264,7 +3289,9 @@ impl ErrorBodyFields {
                             if code.is_some() {
                                 return Ok(None);
                             }
-                            let Ok(value) = map.next_value::<String>() else {
+                            // Retained only up to the bound; a longer code is nonconforming
+                            // and is never copied in full.
+                            let Ok(BoundedCode(value)) = map.next_value::<BoundedCode>() else {
                                 return Ok(None);
                             };
                             code = Some(value);
@@ -3322,6 +3349,30 @@ impl ErrorBodyFields {
         let fields = Seed.deserialize(&mut deserializer).ok()??;
         deserializer.end().ok()?;
         Some(fields)
+    }
+}
+
+/// A host error code, retained in full only up to `MAX_ERROR_CODE_BYTES`; a longer string
+/// decodes as one nonconforming placeholder byte past the bound rather than a full copy.
+struct BoundedCode(String);
+
+impl<'de> serde::Deserialize<'de> for BoundedCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = BoundedCode;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an error code")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<BoundedCode, E> {
+                if v.len() <= MAX_ERROR_CODE_BYTES {
+                    Ok(BoundedCode(v.to_owned()))
+                } else {
+                    Ok(BoundedCode(" ".repeat(MAX_ERROR_CODE_BYTES + 1)))
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
     }
 }
 
@@ -4263,14 +4314,19 @@ mod tests {
         inner.dispatch(header(key.corr), body.clone(), ByteCharge::none());
         assert!(lock_unpoisoned(&inner.binds).publishing.contains(&bound));
         // The duplicate arrives before `open_route` inserts the handle.
-        inner.dispatch(header(key.corr), body, ByteCharge::none());
+        inner.dispatch(header(key.corr), body.clone(), ByteCharge::none());
         assert!(
             control_rx.try_recv().is_err(),
             "a duplicate terminal for a bind being published sends no Goodbye"
         );
         assert!(lock_unpoisoned(&inner.binds).publishing.contains(&bound));
         assert!(!inner.retired.load(Ordering::Acquire));
-        inner.retire("test_done");
+        // The same handle from a different correlation is a distinct bind that reused it.
+        inner.dispatch(header(key.corr + 1), body, ByteCharge::none());
+        assert!(
+            inner.retired.load(Ordering::Acquire),
+            "a reused handle from another correlation retires"
+        );
     }
 
     #[test]
@@ -4783,6 +4839,15 @@ mod tests {
         assert_eq!(error.code(), format!("host.{code}"));
         let over = "c".repeat(MAX_ERROR_CODE_BYTES + 1);
         let body = serde_json::to_vec(&serde_json::json!({"code": over, "message": "m"})).unwrap();
+        assert_eq!(
+            CallError::host_terminal(&body)
+                .expect("canonical body")
+                .code(),
+            "host.remote_error"
+        );
+        // A frame-sized code is bounded during the scan rather than copied.
+        let huge = "c".repeat(1 << 20);
+        let body = serde_json::to_vec(&serde_json::json!({"code": huge, "message": "m"})).unwrap();
         assert_eq!(
             CallError::host_terminal(&body)
                 .expect("canonical body")
@@ -6410,6 +6475,10 @@ mod tests {
             lock_unpoisoned(&inner.routes).contains(&owned),
             "the fixture owns this route"
         );
+        // The fixture's route was delivered by this correlation; a repeat of it is a duplicate.
+        lock_unpoisoned(&inner.binds)
+            .delivered_by
+            .insert(owned, FIRST_APPLICATION_CORRELATION);
         let body = serde_json::to_vec(&serde_json::json!({
             "op": "route.open",
             "route_channel": owned.channel,
