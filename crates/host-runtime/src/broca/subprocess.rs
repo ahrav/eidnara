@@ -15,7 +15,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use hmac::{Hmac, Mac};
@@ -314,6 +314,10 @@ pub async fn run(
         inherit_fds,
         state_root,
     } = spec;
+    // The budget is anchored before spawn and registration: a slow crash-record publication
+    // consumes this run's budget rather than granting the child a stale full remainder measured
+    // by the caller before `run` was called. commentlint: allow(JUDGE)
+    let run_deadline = tokio::time::Instant::now() + limits.run_timeout;
     let mut command = tokio::process::Command::new(&executable);
     command
         .args(&args)
@@ -328,9 +332,10 @@ pub async fn run(
         // Ordinary paths reap explicitly; `Drop` is only a backstop.
         .kill_on_drop(true);
     // On Linux, `pdeathsig` (`PR_SET_PDEATHSIG`) asks the kernel to SIGKILL the leader when the
-    // *thread* that forked it exits, not merely the parent process. `command.spawn()` below must
-    // therefore run on a long-lived runtime worker thread; moving it onto `spawn_blocking` would
-    // SIGKILL live leaders when the blocking thread retires.
+    // *thread* that forked it exits, not merely the parent process. `spawn_from_dedicated_thread`
+    // forks from a thread that remains alive for the leader's lifetime; a retired
+    // `spawn_blocking` thread would SIGKILL the leader, and forking on a runtime worker would
+    // block that worker for the whole exec-barrier handshake.
     // Drop cleanup does not run after SIGKILL.
     // `pdeathsig` applies only to the leader.
     // The startup sweep in [`group_registry`] handles descendants that survive the leader.
@@ -433,9 +438,8 @@ pub async fn run(
         Some(record)
     });
 
-    let spawned = command.spawn();
-    // Dropping `command` and `env` releases their environment-sized allocations before concurrent runs continue.
-    drop(command);
+    let spawned = spawn_from_dedicated_thread(command).await;
+    // Dropping `env` releases its environment-sized allocation before concurrent runs continue. commentlint: allow(JUDGE)
     drop(env);
     // Dropping the parent's pipe ends lets the registrar observe EOF when no child reported a pid.
     drop(pid_report_write);
@@ -511,6 +515,7 @@ pub async fn run(
     // Concurrent prompt delivery and output draining prevent a child that fills stdout before reading stdin from deadlocking the host.
     // Prompt delivery drops stdin after writing so print-mode reads receive EOF.
     // Cancellation wins races with prompt delivery, preventing writes after cancellation; a prompt delivered to an already-cancelled run could otherwise start a provider request. commentlint: allow(JUDGE)
+    // The run deadline bounds delivery the same way so a budget exhausted during registration cannot admit provider work. commentlint: allow(JUDGE)
     // The abandoned write reports non-delivery.
     let writer_cancel = cancel.clone();
     let mut stdin_pipe = child.stdin.take();
@@ -521,6 +526,7 @@ pub async fn run(
         tokio::select! {
             biased;
             () = writer_cancel.cancelled() => false,
+            () = tokio::time::sleep_until(run_deadline) => false,
             delivered = async {
                 let written = stdin.write_all(&prompt).await.is_ok();
                 stdin.shutdown().await.is_ok() && written
@@ -537,7 +543,6 @@ pub async fn run(
     let mut stdout_chunk = [0u8; 8192];
     let mut stderr_chunk = [0u8; 8192];
     // `run_deadline` preserves the original timeout budget when provisional arming is revoked.
-    let run_deadline = tokio::time::Instant::now() + limits.run_timeout;
     let deadline = tokio::time::sleep_until(run_deadline);
     tokio::pin!(deadline);
     let mut terminal_seen = false;
@@ -781,6 +786,48 @@ pub(crate) async fn off_runtime<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
+}
+
+/// Forks harness children from one immortal OS thread.
+///
+/// `pdeathsig` SIGKILLs a leader when its forking thread exits, so a retiring `spawn_blocking` thread may not fork. commentlint: allow(JUDGE)
+/// The spawn blocks its thread for the whole exec-barrier handshake, so forking on runtime workers would let concurrent runs occupy every worker and stall request handling, cancellation, and shutdown. commentlint: allow(JUDGE)
+async fn spawn_from_dedicated_thread(
+    command: tokio::process::Command,
+) -> io::Result<tokio::process::Child> {
+    struct SpawnJob {
+        command: tokio::process::Command,
+        reply: tokio::sync::oneshot::Sender<io::Result<tokio::process::Child>>,
+        handle: tokio::runtime::Handle,
+    }
+    static SPAWNER: OnceLock<std::sync::mpsc::Sender<SpawnJob>> = OnceLock::new();
+    let sender = SPAWNER.get_or_init(|| {
+        let (sender, jobs) = std::sync::mpsc::channel::<SpawnJob>();
+        std::thread::Builder::new()
+            .name("broca-spawner".to_owned())
+            .spawn(move || {
+                // The static sender keeps the channel open, so this loop never ends and the thread outlives every leader it forks. commentlint: allow(JUDGE)
+                while let Ok(mut job) = jobs.recv() {
+                    // `tokio::process::Command::spawn` registers `SIGCHLD` interest and needs the caller's runtime entered on this thread. commentlint: allow(JUDGE)
+                    let _guard = job.handle.enter();
+                    let _ = job.reply.send(job.command.spawn());
+                }
+            })
+            .expect("spawn the broca-spawner thread");
+        sender
+    });
+    let (reply, spawned) = tokio::sync::oneshot::channel();
+    sender
+        .send(SpawnJob {
+            command,
+            reply,
+            handle: tokio::runtime::Handle::current(),
+        })
+        .map_err(|_| io::Error::other("the broca-spawner thread is gone"))?;
+    // `kill_on_drop` reaps the child if this task is dropped before the reply arrives. commentlint: allow(JUDGE)
+    spawned
+        .await
+        .map_err(|_| io::Error::other("the broca-spawner thread dropped a spawn reply"))?
 }
 
 /// Each poll walks all of `/proc`; the backoff bounds how many walks a lingering member costs.
