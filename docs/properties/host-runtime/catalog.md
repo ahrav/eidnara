@@ -16,6 +16,14 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   re-verified against this tree, the record says so. This tree has no `migration/waves/U3/` ledger: each record's
   `Status` and `Reachability` fields are the coverage authority for this catalog, and the wave-level
   `core`/`carried-forward`/`invalidated` classification is recorded when the U3 `property-impact.json` lands.
+- `default-production` in this catalog means "on the default path of `host_runtime::run`
+  with no composition-dependent or configuration-dependent state". In this tree `run` itself is
+  reached only from `crates/host-runtime/examples/` and a bench; the daemon that will call it in
+  production is scheduled for U4 (`../README.md`). Records whose reachability depends on a
+  composed component (Broca, Synapse, the reserved route class), on the host's own `Client`, or
+  on the daemon's probe and CLI paths are `test-only` here and say which caller reclassifies
+  them. Whether the `run`-default records should also move until the daemon lands is bias B1 in
+  [discovered-at-u3/portfolio-evaluation.md](discovered-at-u3/portfolio-evaluation.md).
 - Discovery at U3 for code the source catalogs did not cover (`broca/`, `synapse/`, `harness_closure.rs`, `wire.rs`)
   is in the trailing "Discovered at U3" section; those records carry the status observed at discovery.
 
@@ -136,7 +144,7 @@ order, so no row was added, and none of the 38 surviving records was touched.
 | [latch-wake-cannot-be-lost](#latch-wake-cannot-be-lost) | liveness | high |
 | [probe-never-reports-stopped-while-either-fence-is-held](#probe-never-reports-stopped-while-either-fence-is-held) | safety | high |
 | [stopping-precedes-unpublication-on-every-path](#stopping-precedes-unpublication-on-every-path) | safety | high |
-| [phase-evidence-outlives-a-long-phase](#phase-evidence-outlives-a-long-phase) | liveness | high |
+| [phase-evidence-outlives-a-long-phase](#phase-evidence-outlives-a-long-phase) | safety | high |
 | [clock-anomalies-do-not-invalidate-live-evidence](#clock-anomalies-do-not-invalidate-live-evidence) | safety | high |
 | [legacy-incumbent-classification-needs-an-unforgeable-witness](#legacy-incumbent-classification-needs-an-unforgeable-witness) | safety | high |
 | [an-observed-wedge-cause-reaches-the-operator](#an-observed-wedge-cause-reaches-the-operator) | reachability | high |
@@ -206,40 +214,18 @@ Open questions: None.
 ### at-most-one-registered-generation-per-connection
 
 Type: safety
-Reachability: default-production - every accepted setup socket runs
-`run_connection` unconditionally (`crates/host-runtime/src/runtime.rs:1043`); no
-configuration gates this path.
+Reachability: default-production - every accepted setup socket runs `run_connection` unconditionally (`crates/host-runtime/src/runtime.rs:893`, re-verified); no configuration gates this path.
 Status: active
-Exercised: not yet - no test drives drain during the bootstrap-to-promoted
-transfer.
-Guarantee: One accepted socket never has two generations registered in
-`shared.connections` simultaneously, and a generation minted while draining is
-never registered.
-Check: `always` - for each connection task, at most one of its minted ids is in
-the registry at any observation point; and when `draining` is true at the
-registration check, no insert occurs.
-Fault/timing angle: the bootstrap is removed inside `close_generation` and the
-promoted generation is inserted afterwards, so a window exists where neither is
-registered. The registration check and the shutdown snapshot share the
-`connections` mutex, which is what makes the interleaving safe.
-Required faults and enabling state: a committed non-TCP grant, plus a shutdown or
-signal drain landing in the transfer window.
-Confidence: high - [evidence](evidence/at-most-one-registered-generation-per-connection.md). On the exclusion; medium that the neither-registered window is
-harmless, since the lock ordering was traced but not tested.
-Existing check: none at HEAD. The cited `tests/lifecycle.rs:1722`
-`shutdown_during_candidate_setup_reaps_both_channels` covered drain during
-candidate setup, not during the transfer; the mandatory-ring refactor
-(`ed487e11`) removed the candidate-handoff path and that test with it, and
-`tests/lifecycle.rs` at HEAD declares no test by that name. The surviving
-drain-time half of the guarantee (a generation minted while draining is never
-registered) has no dedicated check; `tests/lifecycle.rs` shutdown cases execute
-`run_connection` under drain incidentally and assert nothing about registration.
-Impact: shutdown, route ownership, and Goodbye delivery all enumerate the
-registry assuming one live owner per socket.
+Exercised: not yet - no test lands a drain between setup completion and the registration at `connection.rs:260` and asserts that no insert occurs.
+Guarantee: One accepted socket never has two generations registered in `shared.connections` simultaneously, and a generation minted while draining or after the shutdown token is cancelled is never registered.
+Check: `always` - for each connection task, at most one of its minted ids is in the registry at any observation point; and when `draining` is true or `shutdown.is_cancelled()` at the registration check (`connection.rs:256`), no insert occurs at `:260`.
+Fault/timing angle: `run_connection` constructs one `GenerationCore` and the registry has a single insertion at `connection.rs:260`, taken under the `connections` mutex that the shutdown snapshot also holds; that shared lock is what makes the drain-time interleaving safe. The bootstrap-to-promoted transfer window the source catalog described, with its neither-registered gap, was removed with transport negotiation (`ed487e11`) and is recorded in the evidence file as history.
+Required faults and enabling state: a shutdown or signal drain landing between setup completion and the registration check at `connection.rs:256`.
+Confidence: high - [evidence](evidence/at-most-one-registered-generation-per-connection.md). The single insertion and its lock are read directly at HEAD; the exclusion is structural now that only one generation exists per connection.
+Existing check: none at HEAD. The source catalog's `shutdown_during_candidate_setup_reaps_both_channels` was removed with the candidate-handoff path (`ed487e11`); `tests/lifecycle.rs` shutdown cases execute `run_connection` under drain incidentally and assert nothing about registration.
+Impact: shutdown, route ownership, and Goodbye delivery all enumerate the registry assuming one live owner per socket; a generation registered after the drain snapshot is never told to stop.
 Open questions:
-- Should the promoted generation receive a connection Goodbye when the host
-  drains in the transfer window? Today it gets neither a Goodbye nor a reap.
-  (needs human input)
+- Should a generation discarded by the `:256-258` early return receive a connection Goodbye? Today it is cancelled and its writer discarded without one. (needs human input)
 
 ### close-disposition-is-a-total-function-of-the-read-exit-cause
 
@@ -969,7 +955,7 @@ Open questions:
 
 ### phase-evidence-outlives-a-long-phase
 
-Type: liveness
+Type: safety
 Reachability: test-only - the lifecycle record this probe reads is written on
 every host start (`crates/host-runtime/src/runtime.rs:587` for `Starting`, `:715`
 for `Running`, re-verified) and on teardown (`lifecycle.rs:384`), but the reader
@@ -2833,7 +2819,6 @@ control page, which the transport's `try_receive` would surface as descriptor
 validation failure and quarantine at best, and as torn payload delivery at
 worst.
 Open questions:
-
 - Should `PreparedRing` carry a negative marker, or a compile-fail doctest like
   the two on `frame_channel::ReceiveLease` (`frame_channel.rs:296-308`), so the
   confinement is enforced rather than reviewed?
@@ -2899,7 +2884,6 @@ of those callers, and they still discard it. So Part 1's
 producer side, and no re-anchoring of the verdict is needed - only of the line
 numbers, from `shm_provider.rs:365` to `ring_transport.rs:615`/`:628`.
 Open questions:
-
 - Is the producer-side `ReleaseIdentity` return value intended to stay unused?
   If so, `#[must_use]` on `commit` is currently misleading, and the simpler
   contract would be for `commit` to return `()` and for identities to exist
@@ -2976,7 +2960,6 @@ slot, and the failure presents much later as `RingUnavailable` on an unrelated
 connect with `state: "healthy"` in diagnostics (see
 `ring-a-host-doctor-emits-one-of-five-declared-terminal-classes`).
 Open questions:
-
 - `AdmissionController::release` swallows a `checked_sub` underflow
   (`profile.rs:516-519`). Is a double release meant to be silent, or should it
   be a detectable accounting fault?
@@ -3059,7 +3042,6 @@ this record and
 can both be right, because one requires the charge to come back on every exit
 and the other asks whether a condemned ring is an exception.
 Open questions:
-
 - Was host-side quarantine accounting deliberately dropped with
   `provider_recovery.rs`, or lost? Part 1's
   `quarantine-charge-transition-is-atomic` cited
@@ -3129,7 +3111,6 @@ queued frames (`connection.rs:315-318`), which is the correct handling for a
 peer-caused close but means a host-caused close also produces no terminal, so
 every pending correlation becomes `outcome_unknown` with no recorded reason.
 Open questions:
-
 - Should `publish_one` carry a cause enum rather than `()`? The information
   exists at each of the four failure sites and is discarded at `:588-590`.
 - Is the asymmetry between `:535-537` (`Corrupt`) and `:479-484` (`CleanEof`)
@@ -3190,7 +3171,6 @@ deadline, so the connection degrades over `frame_deadline` per frame rather than
 retiring, and diagnostics records nothing at all: no `peer_death`, no
 `exhaustion`, and `state: "healthy"`.
 Open questions:
-
 - Should `:591`'s `COMPLETE` store move after the hooks, or should the hooks
   move inside the inner `catch_unwind`? The two answers differ on whether a
   hook panic should retire the connection.
@@ -3251,7 +3231,6 @@ all refuses every connection while reporting `state: "healthy"` with all five
 counters at zero, and the client sees only `setup_failed`. That is a silent
 total outage of the only datapath.
 Open questions:
-
 - Should `RingUnavailable` carry a closed cause class matching the doctor's
   five terminal classes (`docs/shm-transport.md:53-59`)?
 - On the `prepare` timeout path, should the connection task cancel the ring it
@@ -3323,7 +3302,6 @@ Impact: the exact metric a release gate would read as proof that charges came
 back can be incremented before they did. The gate would pass on a host that is
 in fact still holding the charge.
 Open questions:
-
 - Should `record_reclamation` move onto the endpoint thread, immediately after
   `admission.release()`, so the counter is release-witnessed by construction?
 
@@ -3422,7 +3400,6 @@ classifier only ever sees a terminal condition when its *own* call fails. A host
 that is unhealthy but still answering produces no terminal class from either
 side.
 Open questions:
-
 - The five-class taxonomy is the client's, and the doc attributes it to
   `eidnara daemon doctor`. Should the host's `diagnostics()` also derive a
   class from its own counters, so an unhealthy-but-answering host is
@@ -3520,7 +3497,6 @@ the ring was quarantined rather than merely overloaded, and that matters because
 `ReadExit::Peer`, so the gap is latent and becomes live only if that taxonomy is
 split.
 Open questions:
-
 - Should the `Overloaded` and `Cancelled` paths release explicitly and upgrade a
   release failure to `Corrupt`? Investigation found this buys nothing until
   `connection.rs:401-404` stops collapsing the two causes into one `ReadExit`,
@@ -3640,7 +3616,6 @@ the window in which a retiring connection still holds its full admission
 charge, which is exactly the pressure that turns an ordinary retirement into
 `RingUnavailable` for the next connect.
 Open questions:
-
 - Does `read_loop` stop draining the inbound channel promptly on
   `read_cancel`, closing the channel and bounding this window? That is in
   Part 2a's `connection.rs` scope and I did not resolve it. Until it is resolved,
@@ -3736,7 +3711,6 @@ observing the `Corrupt`-versus-`CleanEof` asymmetry in
 `ring-a-publish-failure-is-reported-as-a-clean-peer-close`, so leaving it
 unreached leaves both unfalsifiable.
 Open questions:
-
 - Should `receive_one` distinguish "ring empty" from "leases saturated"? Both
   arrive as `Ok(None)` from `try_receive` (`ring.rs:1063-1068`, `:1073-1074`)
   and both collapse to `Ok(false)` at `:500-501`. Investigation found this is
@@ -3801,7 +3775,6 @@ promise is satisfied vacuously, since there is no separate body to truncate,
 but the engine still carries the machinery that would have honoured it. The
 risk is not a current defect; it is that the dead arm looks like coverage.
 Open questions:
-
 - Should `RejectedDrainFailed` and `Io` be removed, or retained for a future
   transport? Removing them would make Part 2a's drain records genuinely closed
   rather than superseded.
@@ -3854,7 +3827,6 @@ descriptor and header before exposing a scoped lease", which is true of the
 transport but not of the host boundary: the host exposes a lease over its own
 copy.
 Open questions:
-
 - Is the segmented path intended to return, or should
   `InboundFrame::segmented`, `ReceiveBody::Segmented`, and
   `frame_channel::LeaseTracker` be deleted together? `LeaseTracker`
@@ -4128,7 +4100,6 @@ variable-length slice - a coalescing reader, a batched shared-memory descriptor,
 a future version with a shorter header - the constant indexes become the only
 thing between a peer and a panic in the read loop.
 Open questions:
-
 - Should `header_len_for_version` be required to return at least the largest
   constant index used by the parse body, so a future version cannot silently
   make the parse out of bounds? (needs human input)
@@ -4187,7 +4158,6 @@ independently written codec can interoperate. A drifted offset that still
 satisfies the eleven gates produces a frame both sides accept and interpret
 differently.
 Open questions:
-
 - Should `encode` and `decode_header` be generated from one offset table so a
   transposition is impossible by construction? (needs human input)
 
@@ -4347,7 +4317,6 @@ The document shrank from 1,031 lines to 936 and that sentence was rewritten;
 both its clean-close and its retirement clauses now sit in `:296`. `:293` is
 blank at `HEAD`.
 Open questions:
-
 - Should the encoders validate, or should the illegal region be made
   unconstructible by removing the public field from `Flags` and by giving
   pure-header types a body-free encoder? (needs human input)
@@ -5275,8 +5244,7 @@ Status: active
 Exercised: partial - the two `PeerClose` outcomes are tested; the cap is not.
 Guarantee: The post-commit sentinel read never allocates more than
 `MAX_SETUP_MESSAGE_LEN`, whatever length the peer declares.
-Check: `always` - declare a length of `u32::MAX` and assert
-`SetupError::MessageTooLarge` with no allocation of that size. `always` because it
+Check: `always` - for declared lengths of exactly `MAX_SETUP_MESSAGE_LEN` (16 KiB, `setup_socket.rs:25`), `MAX_SETUP_MESSAGE_LEN + 1`, and `u32::MAX`, the exact-cap read is accepted and both over-cap reads return `SetupError::MessageTooLarge` before any body allocation; and across every sentinel read the maximum attempted allocation is at most `MAX_SETUP_MESSAGE_LEN` bytes (observed through the allocator or a counting wrapper), so the check protects the boundary rather than one 4 GiB refusal. `always` because it must hold on every sentinel read.
 must hold on every sentinel read.
 **This record was split under the portfolio disposition.** It previously carried a
 second clause, "and it always yields to `read_cancel`", which is a liveness
@@ -7556,7 +7524,6 @@ three exits there is no frame at all, so that remedy never triggers and the
 client burns its full 30-second route deadline. Repeated bind panics therefore
 cost one route deadline each.
 Open questions:
-
 - Is the `CloseWins` silent exit reachable on a generation that stays live
   afterwards, or does every producer of that decision also retire the
   generation? `settle_route` is called from host shutdown, so the host is at
@@ -7613,7 +7580,6 @@ unbounded growth. The consequence is a stale `PendingEntry` holding a
 generation, which makes `handle_cancel` for that key a live no-op against an
 already-dead task.
 Open questions:
-
 - Does the forced path always drop the `GenerationCore` immediately afterwards?
   `close_generation` removes the connection at `dispatch.rs:1409-1413`, but
   `force_close_all_routes` does not call it. (unresolved, needs sub-part 2f)
@@ -7682,7 +7648,6 @@ answered. Protocol §10.1 makes an unobserved terminal `outcome_unknown` on the
 client side; the host has no matching classification, so the two ends cannot be
 reconciled after a close.
 Open questions:
-
 - Should routed terminals carry a `written` hook for metering, given the hook
   is a boxed closure per frame? (needs human input)
 
@@ -7723,7 +7688,6 @@ nothing was answered. Combined with Part 2d's finding that a clean host close
 and a transport failure share one code, the client cannot attribute the loss,
 and any effect the handler already applied is invisible to it.
 Open questions:
-
 - Does any production handler use `output_from_writer` with a computed
   `exact_len` that could disagree with its serializer? That is `daemon`'s
   side of the boundary. (unresolved, needs an `daemon` audit)
@@ -7781,7 +7745,6 @@ at publication with `ProducerError::Underfill` rather than at this gate, which i
 territory. The gap here is specifically the owned path, where declared and written
 are the same field and zero is legal.
 Open questions:
-
 - Is a zero-length `Response` a defect or a supported outcome?
   `handler.rs:220-235` does not state the intent, and
   `OutputBuffer::is_empty()` (`:368-370`) exists as public API, which weakly
@@ -7845,7 +7808,6 @@ Impact: All four pools are host-global, so one connection can hold every general
 permit. Per-connection fairness is not provided at this layer; if it is
 required, it is required somewhere else and nothing here supplies it.
 Open questions:
-
 - Is per-connection handler-capacity fairness owned anywhere? `connection_permits`
   bounds connection count but not per-connection dispatch share. (unresolved,
   needs sub-part 2f's `runtime.rs` and `config.rs` pass)
@@ -7900,7 +7862,6 @@ Impact: Handler-task capacity is reclaimed only by handler cooperation, client
 timeout can hold all 256 general task permits, at which point every other
 route's traffic gets `server_busy` while the host reports itself healthy.
 Open questions:
-
 - Should the host own a request deadline at all, given protocol §11's rule that
   each operation owns exactly one absolute deadline and it assigns the request
   deadline to the client? Adding one would create the multiplied timer §11
@@ -8002,7 +7963,6 @@ the clients it is trying to shed, while backing off their routed traffic. The
 divergence is not merely unchecked, it is **pinned by a CI-executed test**, so it
 is current intended behaviour unless someone changes both the code and that test.
 Open questions:
-
 - Which code does the protocol intend for a `route.open` during shutdown? §12
   step 1 names `server_busy` for routed requests and is silent on `route.open`;
   §8.3 reserves `target_unavailable` for route admission failures such as
@@ -8045,7 +8005,6 @@ requests, so malformed control traffic degrades application throughput on every
 connection, while a capacity-rejection flood is contained per generation. The
 two attack surfaces have different blast radii for the same client behaviour.
 Open questions:
-
 - Protocol §8.3 says a control request is "one consumer request against the
   global unsettled bound", which the semantic path honours. Is charging
   malformed traffic to the *global* pool rather than a per-generation one the
@@ -8299,7 +8258,6 @@ Impact: a bind path that never yields `route_gone` leaks one map entry per
 connection for the host's lifetime, and the leaked entry keeps routing a reused
 handle to a stale child.
 Open questions:
-
 - Does the host guarantee `route_gone` after a panicking `bind`, or only after
   `Reject` and close? The comment claims all three; the runtime side is outside
   this lens. **Resolved at carry time, and the answer is yes.** The runtime side
@@ -9025,7 +8983,7 @@ shutdown-is-unconditional row was refuted. Carried in full in
 
 ## Reachability: runtime and configuration
 
-**Thirteen records are `default-production` and one is `explicit-config-only`.**
+**Thirteen records are `default-production` under the convention below, and one is `explicit-config-only`.**
 No record here is `test-only`. The labels rest on the construction conditionality
 map above plus three facts, per METHOD rule 4. **The map was rebuilt after an
 independent evaluation refuted two of its rows and one of its conclusions, and
@@ -9034,12 +8992,16 @@ rather than carried forward. None moved.** The reasoning is recorded in full at
 the end of the map, under "Which dependent labels this rebuild puts back in
 question".
 
-1. **`runtime::run` is production and has exactly one non-test caller.**
-   `crates/daemon/src/bin/eidnara_host/serve.rs` builds the composite at `:575`
-   and calls `host_runtime::run` at `:632`, and that binary is described by its own
-   manifest as the production lifecycle and serve executable. It also installs the
-   `SIGINT` and `SIGTERM` handlers that cancel the token `run` receives
-   (`:617-631`), so operator-initiated shutdown is a production event.
+1. **`runtime::run` is the library's entry, and the path it takes by default is
+   what `default-production` names here.** The source catalog cited
+   `crates/daemon/src/bin/eidnara_host/serve.rs` as `run`'s one non-test caller,
+   with `SIGINT`/`SIGTERM` handlers cancelling the token `run` receives. That crate
+   is not in this tree (scheduled for U4, `docs/properties/README.md:52`); here
+   `run` (`runtime.rs:541`) is reached from `examples/` and a bench. These thirteen
+   records describe what `run` does on every start with no composition-dependent
+   state, so they keep the label under the convention stated in the provenance
+   section, and the question of `run`'s own callers is bias B1 in
+   [discovered-at-u3/portfolio-evaluation.md](discovered-at-u3/portfolio-evaluation.md).
 2. **Nothing in the sequence is `cfg`-gated.** The map's conditional steps are
    `set_publish_hook` (test-only, reachable only through the `#[doc(hidden)]`
    `run_with_publish_hook`), the setup-socket bind and publish pair (skipped on an
@@ -9143,13 +9105,7 @@ joint postcondition at the construction site is unasserted
 Guarantee: If `run` reaches `HostShared` construction, every permit count and
 byte quantity it computes is non-negative, within `Semaphore::MAX_PERMITS`, and
 leaves at least one maximum request body of ingress headroom.
-Check: `always` - at `runtime.rs:882`, assert
-`max_pending_requests > reservations.pending`,
-`max_handler_tasks > reservations.tasks`,
-`general_task_holds < max_handler_tasks - reservations.tasks`, and
-`max_resident_bytes >= MIN_RESIDENT_BYTES + catalog_resident + retained_bytes`.
-`always` rather than `always-or-unreached` because this construction is on every
-successful startup path with no condition, per the map above.
+Check: `always` - at `HostShared` construction (`runtime.rs:748`, re-verified; the source catalog cited `:882`), assert `max_pending_requests > reservations.pending`, `max_handler_tasks > reservations.tasks`, `general_task_holds < max_handler_tasks - reservations.tasks`, `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog_resident + retained_bytes`, and, for every count passed to `Semaphore::new` at `:771-779` (pending, task, reserved pending, reserved task, handshake), that the count is at most `Semaphore::MAX_PERMITS`, and for every quantity passed to `ByteBudget::new` at `:762-770` that it is within the budget type's range. `always` rather than `always-or-unreached` because this construction is on every successful startup path with no condition, per the map above.
 Fault/timing angle: none. Startup is single-threaded here and the inputs are
 fixed by the time the gates run.
 Required faults and enabling state: a handler whose `resource_declarations` sum
@@ -9252,7 +9208,7 @@ Guarantee: The health probe cadence is either the configured `health_interval` o
 the fixed 50 ms activation cadence, and which one applies is a stated function of
 the component-reported activation state rather than an unbounded override of
 operator configuration.
-Check: `always` - over one of two conjuncts, and the split is the point.
+Check: `always` - over two assertable conjuncts and one measurement, and the split is the point. **Conjunct 0:** at `runtime.rs:972-973` (re-verified), whenever `activation_in_progress` is true the selected interval equals `Duration::from_millis(50)` exactly, and whenever it is false the selected interval equals `shared.timing.health_interval`; both branches are unconditional within the loop, so `always` holds on every iteration. The remaining text names the source catalog's conjuncts.
 **Conjunct 1, which carries the `always` semantics:** at `runtime.rs:1129`,
 whenever `activation_in_progress` is false the selected interval equals
 `shared.timing.health_interval` exactly. That is a pass/fail bound, it holds on
@@ -9267,14 +9223,12 @@ candidate bounds a campaign could assert instead are stated here so the decision
 is a choice between named options rather than an open-ended design question, and
 neither can be adopted without the open question below being answered, because
 both invent a limit the code does not contain:
-
 - **A count bound**, `consecutive_fast_probes <= K`, which needs a `K`. Nothing
   in `HostTiming` supplies one and no constant in `runtime.rs` is a candidate.
 - **A duration bound**, `time_in_fast_cadence <= lifecycle_callback_deadline` or
   some other configured span, which needs a decision about which existing knob
   ought to govern activation, and there is no reading of `config.rs:216-232`
   under which any of them does.
-
 Until one is chosen, the honest oracle is conjunct 1 plus an instrumented count
 reported as a **measurement**, not asserted. Recording that distinction is what
 keeps this record from shipping a check that can only pass.
@@ -9358,7 +9312,6 @@ wherever `shutdown_deadline` is described.
 Check: `always`, per exit, because `shutdown_sequence` has three and they do
 different amounts of work. From the shutdown token's cancellation to `run`'s
 return, assert elapsed time is at most:
-
 - `shutdown_deadline + lifecycle_callback_deadline` on the graceful exit at
   `runtime.rs:1243`, where the drain or the tracker wait finished inside
   `deadline` and `run_handler_shutdown` then ran under its own budget (`:1276`);
@@ -9368,14 +9321,12 @@ return, assert elapsed time is at most:
 - `shutdown_deadline + 3 * lifecycle_callback_deadline` on the forced exit at
   `:1241`, which pays the drain (`:1148`, `:1200`), the doubled chain (`:1223`,
   `:1224`), **and** the handler callback (`:1240`, bounded at `:1276`).
-
 Each bound also admits the two `force_close_all_routes` calls at `:1206` and
 `:1216`, which no `timeout` wraps and which are internally bounded at 30 s
 (`dispatch.rs:1434`) plus 30 s in `run_route_gone`; an oracle should either
 measure them separately or state that its bound is the sum plus those.
 `always` because each bound must hold on every shutdown that takes its exit, and
 the bounds are in the units the code bounds.
-
 **Every bound above is conditional, and the condition is not a detail.** These
 are `tokio::time::timeout` and `timeout_at` budgets over awaited futures, and a
 timeout cannot preempt a future that never yields. A handler whose `shutdown()`
