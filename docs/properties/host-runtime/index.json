@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "58421af6975eefe8c88d9418a91deb82b502f2ed0ffc0ed63b4c1a193273b893",
+  "source_sha256": "aeb4eb0222e69e89c250e028d01dbf19599faf3b9c14bad172f139312f4e7c28",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -3759,7 +3759,7 @@
       "guarantee": "The canonical compact `route.open` request targeting module `context` is 167 UTF-8 bytes, and the committed control header `a7 00 00 00 02 00 02 00 00 00 00 00 00 01 00 ...` declares exactly that length with version 2, request type, interactive flags, channel 0, epoch 0, correlation 1.",
       "check": {
         "semantics": "always",
-        "condition": "`canonical.len() == 167` and `raw_client::header(167, ...) == committed bytes`, decoded by the test-local decoder."
+        "condition": "`canonical.len() == 167`, `raw_client::decode_header(committed).len == canonical.len()`, and `raw_client::header(167, ...) == committed bytes`, decoded by the test-local decoder."
       },
       "fault_timing": "A header that declares the wrong length desynchronizes framing on the first request.",
       "required_faults": "None; literal comparison against the documented vector.",

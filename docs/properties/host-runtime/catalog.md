@@ -9899,7 +9899,7 @@ Reachability: default-production - every `route.open` carries a header whose dec
 Status: active
 Exercised: yes - the canonical body's byte length and the committed header bytes are asserted against literals.
 Guarantee: The canonical compact `route.open` request targeting module `context` is 167 UTF-8 bytes, and the committed control header `a7 00 00 00 02 00 02 00 00 00 00 00 00 01 00 ...` declares exactly that length with version 2, request type, interactive flags, channel 0, epoch 0, correlation 1.
-Check: `always` - `canonical.len() == 167` and `raw_client::header(167, ...) == committed bytes`, decoded by the test-local decoder.
+Check: `always` - `canonical.len() == 167`, `raw_client::decode_header(committed).len == canonical.len()`, and `raw_client::header(167, ...) == committed bytes`, decoded by the test-local decoder.
 Fault/timing angle: A header that declares the wrong length desynchronizes framing on the first request.
 Required faults and enabling state: None; literal comparison against the documented vector.
 Confidence: high - [evidence](evidence/canonical-route-open-declares-its-exact-body-length.md). The module id `context` is a renamed identity, so the canonical body shrank from the predecessor's length and the vector was regenerated once; `docs/host-wire-protocol.md` section 6.4 carries the same bytes.

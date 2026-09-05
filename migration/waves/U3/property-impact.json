@@ -4870,8 +4870,8 @@
       "evidence_pointer": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
       "evidence_digest": "beb56db493a76f773db71a6102c7fb41462954bb13749b7b7365f8e3ee616020",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#committed_auth_proof_vectors_pin_the_construction",
-      "check_hash": "54cb4044dd96cda50a9feae25630da0e1cab686751469cab7d1e0fb0026a2216",
-      "code_hash": "ac85a1a02e6c59e6c380589ffebc46607f06cfad4d9b8a1f6c3f529f3ce761bd",
+      "check_hash": "e17ea9c1b5faacdfacbd6e9ed3bfc43efd8db9b45349e94d32c9f6a6af703938",
+      "code_hash": "3cff13bd2a32a56175810526e4beb1f88306625a1f01199df6a364ee9806e298",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -4957,19 +4957,19 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Golden-vector test: literal body length and committed header bytes decoded and re-encoded by the test-local codec; regenerated once at U3 for the renamed module id.",
+      "strategy_decision": "Golden-vector test: literal body length, the committed header decoded by the test-local codec and its length field compared with the body's own length, and the header re-encoded from its documented fields; regenerated once at U3 for the renamed module id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md",
-      "evidence_digest": "f4ab68867c1d24a166f2539ae865c9215f16c9193b80feda5e5524b2605ac9e5",
+      "evidence_digest": "80488a406ab4e90d9a1ad25229ac232061505537e0c362ad84869c9f0f96ab41",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#canonical_route_open_body_is_167_bytes",
-      "check_hash": "54cb4044dd96cda50a9feae25630da0e1cab686751469cab7d1e0fb0026a2216",
-      "code_hash": "9d0b929dcf3fa2acd517e007da6264a58acd2c2f64a23a77b7df4fabca3fba0d",
+      "check_hash": "e17ea9c1b5faacdfacbd6e9ed3bfc43efd8db9b45349e94d32c9f6a6af703938",
+      "code_hash": "33b75212177521607b4ae22310d3f91922f93a25e2cfc24445f4422d8c29d6db",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "f4ab68867c1d24a166f2539ae865c9215f16c9193b80feda5e5524b2605ac9e5",
+        "digest": "80488a406ab4e90d9a1ad25229ac232061505537e0c362ad84869c9f0f96ab41",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5478,13 +5478,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "packages/shm-native/index.ts",
       "evidence_pointer": "docs/properties/shm-transport/evidence/readiness-redispatch-is-bounded-under-persistent-arm-failure.md"
