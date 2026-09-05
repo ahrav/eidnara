@@ -10,6 +10,29 @@ use support::synapse::{
     open_synapse_route, ready_component, request_key, test_lane,
 };
 
+/// Retries `embed.batch` until admission reopens or `BUDGET` expires.
+/// A `queue_full` rejection creates no state, so each retry is a fresh admission attempt rather than a duplicate.
+async fn batch_until_admitted(
+    client: &mut support::raw_client::RawClient,
+    channel: u16,
+    epoch: u32,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    loop {
+        let frame = call(client, channel, epoch, "embed.batch", params.clone()).await;
+        let body = frame.json();
+        if body["code"] != "queue_full" {
+            return body;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "admission never reopened"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn wait_ready(
     client: &mut support::raw_client::RawClient,
     channel: u16,
@@ -74,16 +97,14 @@ async fn admission_count_boundary_is_exact_and_never_evicts_live_work() {
     assert_eq!(frame.error_code(), "queue_full");
 
     // Once the backlog drains, admission reopens.
-    tokio::time::sleep(Duration::from_millis(900)).await;
-    let frame = call(
+    let body = batch_until_admitted(
         &mut client,
         channel,
         epoch,
-        "embed.batch",
         batch_params(&lane, &items(&[("c", "job three")])),
     )
     .await;
-    assert!(frame.json()["result"]["job_id"].is_string());
+    assert!(body["result"]["job_id"].is_string(), "{body}");
 
     host.shutdown().await.expect("graceful shutdown");
 }
@@ -163,16 +184,14 @@ async fn queued_byte_boundary_is_exact_and_releases_on_completion() {
     assert_eq!(frame.error_code(), "queue_full");
 
     // Results replace inputs, releasing the queued bytes.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let frame = call(
+    let body = batch_until_admitted(
         &mut client,
         channel,
         epoch,
-        "embed.batch",
         batch_params(&lane, &items(&[("b", "x")])),
     )
     .await;
-    assert!(frame.json()["result"]["job_id"].is_string());
+    assert!(body["result"]["job_id"].is_string(), "{body}");
 
     host.shutdown().await.expect("graceful shutdown");
 }

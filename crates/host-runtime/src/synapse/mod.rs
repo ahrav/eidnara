@@ -355,6 +355,10 @@ impl SynapseComponent {
             .cpu
             .try_acquire()
             .map_err(|_| InferenceError::Artifact(BUSY_REASON.to_owned()))?;
+        // A concurrent holder can mark the lane failing between the state read and this acquisition; the captured backend must not run after that transition.
+        if let Some(reason) = lane_failure_reason(&self.inner) {
+            return Err(InferenceError::Artifact(reason));
+        }
         embed_via(&self.inner, &lane, texts)
     }
 }
@@ -558,10 +562,9 @@ impl SynapseComponent {
                 );
             }
         };
-        // The handler's `ByteCharge` copy remains held until response serialization completes.
-        // The worker's `ByteCharge` copy remains held through native calls that can outlive request deadlines.
-        let _query_permit = Arc::new(query_permit);
-        let worker_query_permit = Arc::clone(&_query_permit);
+        // The handler's copy of the admission permit is released once the verdict arrives; the worker's copy remains held through native calls that can outlive request deadlines.
+        let handler_query_permit = Arc::new(query_permit);
+        let worker_query_permit = Arc::clone(&handler_query_permit);
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(
                 deadline_ms.unwrap_or(protocol::DEFAULT_DEADLINE_MS),
@@ -621,6 +624,8 @@ impl SynapseComponent {
         {
             return expired_query();
         }
+        // The CPU lane is idle once the verdict arrives, so the handler's admission slot is released before response reservation can wait on egress; the worker's copy still covers a native call that outlives its receiver.
+        drop(handler_query_permit);
         match result {
             Ok(vectors) => match vectors.first() {
                 Some(vector) => {

@@ -1,7 +1,10 @@
+//! Smoke host that publishes a Synapse lane and waits for a signal.
 //!
 //! Usage:
 //!
-//! (degraded-lane smoke).
+//! `synapse_host <data-dir> <bundle-dir|-> [<ort-library> <ort-library-sha256>]`
+//!
+//! Pass `-` as `<bundle-dir>` to run without a bundle (degraded-lane smoke); the ORT arguments are then unused and may be omitted.
 
 use std::time::Duration;
 
@@ -104,6 +107,8 @@ impl SecondaryComponent for PlaceholderBroca {
     }
 }
 
+const STARTUP_BUDGET: Duration = Duration::from_secs(10);
+
 /// `(device, inode, mtime)` of the connection file, or `None` while it is absent.
 /// The mtime guards against an unlinked inode number being reused by the new publication.
 fn publication_identity(
@@ -117,17 +122,17 @@ fn publication_identity(
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
-    let usage = "usage: synapse_host <data-dir> <bundle-dir|-> <ort-library> <ort-library-sha256>";
+    let usage =
+        "usage: synapse_host <data-dir> <bundle-dir|-> [<ort-library> <ort-library-sha256>]";
     let data_dir = std::path::PathBuf::from(args.next().expect(usage));
     let bundle_dir = args.next().expect(usage);
-    let ort_library = std::path::PathBuf::from(args.next().expect(usage));
-    let ort_library_sha256 = args.next().expect(usage);
 
+    // The ORT arguments only matter when a bundle is loaded; the degraded-lane smoke runs without them.
     let synapse_config = (bundle_dir != "-").then(|| SynapseConfig {
         bundle_dir: std::path::PathBuf::from(bundle_dir),
         bundle_manifest_sha256: None,
-        ort_library,
-        ort_library_sha256,
+        ort_library: std::path::PathBuf::from(args.next().expect(usage)),
+        ort_library_sha256: args.next().expect(usage),
         limits: SynapseLimits::default(),
     });
     let synapse = SynapseComponent::new(synapse_config);
@@ -148,10 +153,16 @@ async fn main() {
     let shutdown = CancellationToken::new();
     let host = tokio::spawn(host_runtime::run(composite, config, shutdown.clone()));
 
+    // A host that stays alive without publishing must fail the smoke run instead of hanging it.
+    let startup_deadline = tokio::time::Instant::now() + STARTUP_BUDGET;
     loop {
         if host.is_finished() {
             let result = host.await;
             eprintln!("host exited before publishing: {result:?}");
+            std::process::exit(1);
+        }
+        if tokio::time::Instant::now() >= startup_deadline {
+            eprintln!("host did not publish within {STARTUP_BUDGET:?}");
             std::process::exit(1);
         }
         if let Some(current) = publication_identity(&publication)

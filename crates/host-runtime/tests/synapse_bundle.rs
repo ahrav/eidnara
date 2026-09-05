@@ -318,7 +318,7 @@ async fn unlisted_extra_file_disables_the_lane() {
 #[tokio::test]
 async fn symlinked_artifact_disables_the_lane() {
     // The listed entry set makes this test reach symlink rejection before unlisted-entry rejection.
-    // validator uses symlink_metadata, so the target never has to exist.
+    // Artifacts open with `O_NOFOLLOW`, so the symlink fails with `ELOOP` and its target never has to exist.
     expect_disabled_with(
         |dir| {
             let real = dir.join("model.onnx");

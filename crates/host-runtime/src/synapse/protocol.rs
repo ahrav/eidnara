@@ -792,6 +792,17 @@ fn check_constraints(
     Ok(())
 }
 
+/// Embedding text is application content bounded only by byte length, so U+0000 is legal in it; `check_string` rejects NUL because it also guards identifiers.
+fn check_text(field: &str, value: &str, max_bytes: usize) -> Result<(), RequestError> {
+    if value.is_empty() {
+        return Err(schema(format!("{field} must be nonempty")));
+    }
+    if value.len() > max_bytes {
+        return Err(schema(format!("{field} exceeds {max_bytes} bytes")));
+    }
+    Ok(())
+}
+
 fn parse_query(
     params: QueryParams<'_>,
     lane: &LaneInfo,
@@ -805,7 +816,7 @@ fn parse_query(
         params.accept_declared,
         lane,
     )?;
-    check_string("text", &params.text, limits.max_text_bytes, true).map_err(schema)?;
+    check_text("text", &params.text, limits.max_text_bytes)?;
     if let Some(ms) = params.deadline_ms
         && (ms == 0 || ms > MAX_DEADLINE_MS)
     {
@@ -846,7 +857,7 @@ fn parse_batch(
             return Err(schema("aggregate item text exceeds the batch cap"));
         }
         check_string("item id", &raw.0.id, MAX_ITEM_ID_BYTES, true).map_err(schema)?;
-        check_string("item text", &raw.0.text, limits.max_text_bytes, true).map_err(schema)?;
+        check_text("item text", &raw.0.text, limits.max_text_bytes)?;
         let actual = sha256_hex(raw.0.text.as_bytes());
         if raw.0.content_sha256 != actual {
             return Err(schema("item content_sha256 does not match its text"));
@@ -1332,6 +1343,44 @@ mod tests {
     }
 
     #[test]
+    fn embedding_text_may_contain_nul_while_identifiers_may_not() {
+        let limits = SynapseLimits::default();
+        let lane = lane();
+        let text = "nul\u{0}inside";
+        let query = format!(
+            concat!(
+                "{{\"method\":\"embed.query\",\"params\":{{",
+                "\"model\":\"{}\",\"required_fingerprint\":\"{}\",",
+                "\"required_epoch\":{},\"allow_equivalent\":false,",
+                "\"accept_declared\":false,\"text\":\"nul\\u0000inside\"}}}}"
+            ),
+            lane.model, lane.fingerprint, lane.table_epoch
+        )
+        .into_bytes();
+        match parse_request_unreserved(&query, false, &lane, &limits).expect("NUL text parses") {
+            Request::EmbedQuery { text: parsed, .. } => assert_eq!(parsed, text),
+            _ => panic!("query request expected"),
+        }
+
+        let items_json = format!(
+            "[{{\"id\":\"a\",\"text\":\"nul\\u0000inside\",\"content_sha256\":\"{}\"}}]",
+            sha256_hex(text.as_bytes())
+        );
+        let key = canonical_request_key(&lane, &[item("a", text)]);
+        let body = String::from_utf8(batch_body(&lane, &items_json))
+            .expect("utf8")
+            .replace(&"0".repeat(64), &key)
+            .into_bytes();
+        parse_request_unreserved(&body, false, &lane, &limits).expect("NUL item text parses");
+
+        let nul_id = format!("[{}]", item_json("a\\u0000b", "one"));
+        let error = parse_request_unreserved(&batch_body(&lane, &nul_id), false, &lane, &limits)
+            .expect_err("a NUL in an identifier is refused");
+        assert_eq!(error.code, "schema_violation");
+        assert!(error.message.contains("item id"), "{}", error.message);
+    }
+
+    #[test]
     fn duplicate_item_ids_are_rejected() {
         let lane = lane();
         let dup = format!("[{},{}]", item_json("a", "one"), item_json("a", "two"));
@@ -1467,15 +1516,22 @@ mod tests {
             }];
             let mut lane = lane();
             lane.dims = dims;
-            let cursor = "0123456789abcdef-18446744073709551615:18446744073709551615";
-            let reservation = vector_body_reservation(&lane, &views, Some(cursor));
-            let mut body = Vec::new();
-            write_vector_body(&mut body, &lane, &views, false, Some(cursor)).expect("serializes");
-            assert!(
-                body.len() <= reservation,
-                "dims {dims}: body {} bytes exceeds reservation {reservation}",
-                body.len()
-            );
+            // The second cursor is never host-issued; it exercises the escaped-length charge this public function must honor.
+            let escaped_cursor = "\"\\\n\u{1}".repeat(MAX_CURSOR_BYTES / 4);
+            for cursor in [
+                "0123456789abcdef-18446744073709551615:18446744073709551615",
+                escaped_cursor.as_str(),
+            ] {
+                let reservation = vector_body_reservation(&lane, &views, Some(cursor));
+                let mut body = Vec::new();
+                write_vector_body(&mut body, &lane, &views, false, Some(cursor))
+                    .expect("serializes");
+                assert!(
+                    body.len() <= reservation,
+                    "dims {dims}: body {} bytes exceeds reservation {reservation}",
+                    body.len()
+                );
+            }
         }
     }
 

@@ -412,6 +412,7 @@ impl HostThread {
         }
     }
 
+    /// A drain that outlives `DRAIN_BUDGET` is reported without joining the host thread: the host is wedged, so a join would hang the harness for as long as the host does, and the caller exits the process on this error, which tears the detached thread down.
     fn shutdown(mut self) -> Result<(), String> {
         self.shutdown.cancel();
         let result = self
@@ -1359,6 +1360,29 @@ async fn execute_batch(
     }
 }
 
+/// The delayed engine returns this vector for every text; a completed request must carry exactly it.
+const GOLDEN_VECTOR: [f64; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+/// Every component is compared, so corruption in any dimension is a validation failure rather than a completed request.
+/// A component that is not a JSON number fails the comparison the same way.
+fn validate_golden_vector(id: &str, item: &serde_json::Value) -> Result<(), String> {
+    let vector = item["vector"]
+        .as_array()
+        .ok_or_else(|| format!("vector {id} omitted its payload: {item}"))?;
+    let matches = vector.len() == GOLDEN_VECTOR.len()
+        && vector
+            .iter()
+            .zip(GOLDEN_VECTOR)
+            .all(|(value, want)| value.as_f64() == Some(want));
+    if !matches {
+        return Err(format!(
+            "vector {id} payload is not the golden vector: {item}"
+        ));
+    }
+    Ok(())
+}
+
+/// A query response carries one item attributed to the query itself; a wrong `id` or hash is an attribution regression, not a completed request.
 fn validate_vectors(json: &serde_json::Value, expected: usize) -> Result<(), String> {
     let result = &json["result"];
     let vectors = result["vectors"]
@@ -1370,13 +1394,17 @@ fn validate_vectors(json: &serde_json::Value, expected: usize) -> Result<(), Str
         || result["table_epoch"] != 1
         || result["dims"] != 8
         || vectors.len() != expected
-        || vectors.iter().any(|item| {
-            item["vector"]
-                .as_array()
-                .is_none_or(|vector| vector.len() != 8 || vector[0].as_f64() != Some(1.0))
-        })
     {
         return Err(format!("invalid vector response: {json}"));
+    }
+    let query_sha = perf_measurement::sha256_hex(QUERY_TEXT.as_bytes());
+    for item in vectors {
+        if item["id"] != "query" || item["content_sha256"] != query_sha.as_str() {
+            return Err(format!(
+                "query response is not attributed to the query: {json}"
+            ));
+        }
+        validate_golden_vector("query", item)?;
     }
     Ok(())
 }
@@ -1419,20 +1447,7 @@ fn validate_batch_page(
             }
             Some(_) => {}
         }
-        let vector = item["vector"]
-            .as_array()
-            .ok_or_else(|| format!("vector {id} omitted its payload: {json}"))?;
-        if vector.len() != 8 || vector[0].as_f64() != Some(1.0) {
-            return Err(format!(
-                "vector {id} payload is not the golden vector: {json}"
-            ));
-        }
-        // Values that are neither integral nor floating-point never reach the ledger.
-        if vector.iter().any(|value| value.as_f64().is_none()) {
-            return Err(format!(
-                "vector {id} carries a non-finite component: {json}"
-            ));
-        }
+        validate_golden_vector(id, item)?;
     }
     Ok(())
 }
