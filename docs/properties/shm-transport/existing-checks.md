@@ -98,7 +98,7 @@ assertion. Rows that a catalog record already cites are marked with the record.
 
 | Test | Claim asserted (from the name) | Status |
 | --- | --- | --- |
-| `syscall_counters_track_only_actual_ring_syscalls` (`:2973`) | Syscall counters track only actual ring syscalls | unaudited |
+| `syscall_counters_track_only_actual_ring_syscalls` (`:2973`) | Syscall counters track only actual ring syscalls | unaudited; also cited by `trim-removes-only-dead-pages-below-the-write-cursor` |
 | `doorbell_attachment_requires_connected_unix_stream_socket` (`:3021`) | Doorbell attachment requires connected unix stream socket | unaudited; cited by `attach-validates-doorbell-sockets` |
 | `doorbell_never_blocks_after_either_end_clears_nonblock` (`:3062`) | Doorbell never blocks after either end clears nonblock | unaudited; cited by `attach-validates-doorbell-sockets` |
 | `closed_peer_doorbell_fails_instead_of_blocking` (`:3088`) | Closed peer doorbell fails instead of blocking | unaudited; cited by `attach-validates-doorbell-sockets` |
@@ -153,7 +153,7 @@ assertion. Rows that a catalog record already cites are marked with the record.
 | `trim_preserves_bytes_of_an_uncommitted_reservation` (`:4183`) | Trim preserves bytes of an uncommitted reservation | unaudited; cited by `trim-removes-only-dead-pages-below-the-write-cursor` |
 | `outstanding_reservation_is_refused_without_parking` (`:4211`) | Outstanding reservation is refused without parking | unaudited |
 | `page_removal_failure_quarantines_before_capacity_publication` (`:4236`) | Page removal failure quarantines before capacity publication | unaudited |
-| `quarantine_survives_peer_clearing_shared_flag` (`:4257`) | Quarantine survives peer clearing shared flag | unaudited; cited by `quarantine-authority-survives-peer-writes` |
+| `quarantine_survives_peer_clearing_shared_flag` (`:4257`) | Quarantine survives peer clearing shared flag | unaudited; cited by `quarantine-authority-survives-peer-writes`; also cited by `trim-removes-only-dead-pages-below-the-write-cursor` |
 | `impossible_slot_state_quarantines_the_receiver` (`:4274`) | Impossible slot state quarantines the receiver | unaudited |
 | `forged_reclaim_length_quarantines_the_producer` (`:4292`) | Forged reclaim length quarantines the producer | unaudited |
 | `wrapped_errors_preserve_sources` (`:4313`) | Wrapped errors preserve sources | unaudited |
@@ -241,19 +241,19 @@ the host's header validation.
 | File | Claims asserted | Status |
 | --- | --- | --- |
 | `packages/shm-native/tests/capability.ts` | Channel count is zero before and after the probe; if capable, a test pair opens two channels and closes to zero; if not, construction throws and the count stays zero | unaudited — both branches print and exit 0; CI does not parse stdout |
-| `packages/shm-native/tests/mechanism.ts` | Runtime mechanism gate or clean omission; cleanup hook runs at exit with empty stderr; six raw-descriptor boundary suites covering non-objects, unsafe numerics, malformed grant text, throwing accessors, wrong profile, and an unresolvable descriptor; per-test rows below | unaudited — six suites self-skip when the addon is absent or the platform is not Linux; per-test rows below |
+| `packages/shm-native/tests/mechanism.ts` | Runtime mechanism gate or clean omission; cleanup hook runs at exit with empty stderr; six raw-descriptor boundary suites covering non-objects, unsafe numerics, malformed grant text, throwing accessors, wrong profile, and an unresolvable descriptor; per-test rows below | unaudited — six suites self-skip when the addon is absent; the raw-descriptor suites run on Linux and Darwin and skip elsewhere; per-test rows below |
 | `packages/shm-native/tests/runtime.ts` | Producer aliases detached before publish; receive segment has exact bounds; transfer refused; post-release reads are zeroed; double release throws; a throwing fill publishes nothing; descriptor and arena exhaustion recover; an external-view failpoint leaves the channel usable; leaked leases survive a forced GC | unaudited |
 
 ### `packages/shm-native/tests/mechanism.ts` - 11 tests
 
-Every test self-skips when the addon is absent; the raw-descriptor suites also
-run on Darwin.
+Every test self-skips when the addon is absent; the raw-descriptor suites run on
+Linux and Darwin and skip on every other platform.
 
 | Test | Claim asserted | Status |
 | --- | --- | --- |
 | `proves every required runtime mechanism or omits capability` (`:20`) | `probeCapabilities` reports available only when every mechanism proves, otherwise a closed omission reason | unaudited; cited by `capability-probe-gates-every-advertised-mechanism` |
 | `environment cleanup hook runs at runtime exit when addon loads` (`:38`) | The cleanup hook runs at exit with empty stderr | unaudited |
-| `one channel handler failure does not starve later channels` (`:168`) | A throwing readiness handler does not prevent later handlers in the same batch from running | unaudited |
+| `one channel handler failure does not starve later channels` (`:168`) | A throwing readiness handler does not prevent later handlers in the same batch from running | unaudited; also cited by `each-channel-wake-survives-a-shared-acknowledgement` |
 | `readiness acknowledgement preserves a frame published during callback` (`:211`) | A frame published while a callback is in flight is delivered by the next callback, with exactly two callbacks | unaudited; cited by `wake-published-during-readiness-callback-is-not-lost`, `reactor-callback-is-one-in-flight`, `each-channel-wake-survives-a-shared-acknowledgement` |
 | `releasing a lease returns its slot; an unreleased ring fills` (`:336`) | Unreleased receive leases fill the ring until publish fails with `ring is full`; releasing one returns its slot; a stale token is refused | unaudited; cited by `lease-saturation-is-reached-then-drains` |
 | `rejects non-object and structurally hostile arguments` (`:401`) | Raw `attach` rejects non-objects and hostile shapes with the fixed descriptor error and no counter change | unaudited; cited by `raw-native-attach-rejects-hostile-descriptors-without-effects` |

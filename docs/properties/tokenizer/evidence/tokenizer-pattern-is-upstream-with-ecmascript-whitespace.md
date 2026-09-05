@@ -53,19 +53,25 @@ membership table for the class; already present as the two tests.
 ### Q: Is the class asserted as a complete set or as a sample?
 
 - Sources examined: `lib.rs:192-210`.
-- Findings: sixteen positive and four negative code points are enumerated; the
-  U+2001 through U+2009 range is covered by construction of the class but only
-  its endpoints are asserted.
-- Missing evidence: none needed for the guarantee as stated (the record names
-  the enumerated points, not the full range).
-- Conclusion: the check is written against the enumerated points.
+- Findings: the macro expands to 25 code points (U+0009 through U+000D, U+0020,
+  U+00A0, U+1680, U+2000 through U+200A, U+2028, U+2029, U+202F, U+205F, U+3000,
+  U+FEFF); the test enumerates 16 positives and four negatives, so U+2001
+  through U+2009 are asserted by nothing. The derivation test expands the same
+  macro on both sides (`lib.rs:181` and `:65-75`), so it is invariant under
+  edits to the macro body.
+- Missing evidence: a literal-set assertion over all 25 members, queued in
+  `fault-map.md`.
+- Conclusion: Exercised is partial; the Check names the full set as a literal.
 
 ### Q: Would parity catch a drift on U+0085?
 
 - Sources examined: `tests/token_golden.rs:101`, `gen/gen-token-golden.ts:97-100`,
   and `testdata/token-golden.json`.
-- Findings: U+FEFF is in the corpus through the BOM test; U+0085 is in the
-  corpus through the `nel-after-space` and `nel-runs` cases, both committed in
-  the golden fixture.
-- Missing evidence: none.
-- Conclusion: a class drift on either code point fails parity; no open question.
+- Findings: U+FEFF is in the corpus through the BOM test and the `zero-width`,
+  `bom-leading`, and `bom-between-punct` golden cases (`gen-token-golden.ts:76`,
+  `:101-102`); U+0085 through `nel-after-space` and `nel-runs`. U+1680 and
+  U+2000 through U+200A appear in no golden case.
+- Missing evidence: golden cases carrying the Zs-block members.
+- Conclusion: a drift on U+FEFF or U+0085 fails parity; a drift on the twelve
+  Zs-block members fails parity nowhere, and on the nine interior members fails
+  nothing in the tree.

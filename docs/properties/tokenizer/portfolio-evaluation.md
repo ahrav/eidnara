@@ -139,3 +139,53 @@ records. Two records over-claimed and are now corrected. For a crate with no
 production caller the set is a starting point: gaps 1, 3, 4, and 5 were cheap,
 orphan existing tests, and are closed above; gap 2, Unicode-table skew, remains
 queued and needs a human decision on the authoritative Unicode version.
+
+## Evaluation of the four 2026-09-05 additions (fresh context)
+
+A fresh-context evaluator that had not read this file or the evidence directory
+evaluated `tokenizer-pattern-is-upstream-with-ecmascript-whitespace`,
+`tokenizer-bom-is-its-own-token`,
+`tokenizer-encoding-is-deterministic-across-calls-and-threads`, and
+`tokenizer-encoding-is-total-over-valid-utf8` against HEAD. Every citation
+resolved; four anchors are tightened (`:108-110`, `:139`, `:70-72`, 51 spaces).
+Ten refinements were returned and all are applied:
+
+- The pattern derivation test expands the same macro on both sides, so it is
+  invariant under macro edits; the class has 25 members and the unit test
+  asserts 16, leaving U+2001 through U+2009 guarded by nothing; U+FEFF is in
+  three more golden cases and U+1680, U+2000 through U+200A are in none.
+- The BOM Impact was false: `bom-leading` carries the BOM token, so the
+  divergence fires only when the BOM shares a whitespace piece with a following
+  whitespace character; a renumbered rank is already caught by parity; the
+  stock oracle's `[92, 203]` is asserted only in docs.
+- The pattern `OnceLock` initialises only for over-cap inputs, the thread test
+  is not a reliable cold-start race, never encodes an over-cap input, and one
+  Check conjunct holds by construction.
+- Every over-cap input passes through the `expect`; the guarantee is that none
+  observes an `Err`; the backtrack limit is 1,000,000 by default and the
+  lookahead forces the backtracking engine.
+
+### Gaps queued
+
+1. No decode round-trip record: for every `t`, the bytes of
+   `encode_ordinary(t)` concatenate to `t.as_bytes()`. Input-general,
+   fixture-free, and the only proposed check that reaches the 64,389 ranks the
+   corpus does not. Queued in `fault-map.md` item 5 and ranked third.
+2. `char_chunks` (`lib.rs:120-127`) loops forever when `max_bytes` is smaller
+   than the widest character; unreachable at `MAX_PIECE_BYTES == 4096`, so the
+   right record is `always-or-unreached` on `max_bytes >= 4`.
+3. U+2001 through U+2009 are guarded by nothing; queued as `fault-map.md` item 4.
+4. No floor on `MAX_PIECE_BYTES` keeps gap 2 unreached.
+5. The two whitespace alternatives in the pattern split differently at end of
+   text and mid-text; no record states the intended boundary.
+
+### Biases requiring human judgment
+
+1. Self-referential oracles are under-flagged: three of the four new records
+   lean on at least one assertion that compares the crate to itself.
+2. Constant-and-shape bias: no new record adds an input-general behavioural
+   oracle; the portfolio still has exactly one, the 46-case golden.
+3. Blanket reachability: the records assumed all seven reclassify together when
+   a caller lands; the relationship map now says they need not.
+4. Totality was read as "no panic" only; non-termination and unbounded
+   accumulation in `encode_bounded` were not considered.

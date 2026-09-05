@@ -62,3 +62,16 @@ increments at each step and the shape stays closed.
   counted inside `prepare`; the test bypasses `connection.rs`.
 - Missing evidence: a test that reaches the `connection.rs` call sites.
 - Conclusion: `default-production` for the surface; `partial` for exercise.
+
+### Q: Does the test pin the closed key set?
+
+- Sources examined: `ring_transport.rs:862-901`.
+- Findings: the assertions cover `state`, `error_class`, three `artifact` keys,
+  `bounds.arena_bytes` (`:881`), one `accounting` field per side (`:882-883`),
+  and the four counts; the seven-name absence check at `:889-900` is by key
+  name, not by planted value. No assertion says the key set is exactly the
+  closed set.
+- Missing evidence: a test that drives the events through `connection.rs` and
+  a value-level redaction check on the report.
+- Conclusion: Exercised covers the counter-to-key mapping and part of the shape;
+  the Check drives the events through the connection path.

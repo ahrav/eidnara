@@ -657,3 +657,74 @@ re-anchor last. The
 four missing property areas (`trim`, diagnostics, quarantine wake, redaction)
 now have records; with the back-link triage still queued, the set is a solid
 basis for a campaign but not a finished one.
+
+## Evaluation of the seven 2026-09-05 additions (fresh context)
+
+A fresh-context evaluator that had not read this file or the evidence directory
+evaluated the seven records added after the whole-portfolio pass
+(`trim-removes-only-dead-pages-below-the-write-cursor`,
+`quarantine-wakes-a-parked-waiter`,
+`raw-native-attach-rejects-hostile-descriptors-without-effects`,
+`diagnostics-report-lifecycle-counts-in-a-fixed-shape`,
+`transport-debug-output-redacts-every-sentinel`,
+`readiness-redispatch-is-bounded-under-persistent-arm-failure`,
+`each-channel-wake-survives-a-shared-acknowledgement`) against HEAD and the
+other 71 records. Of about 68 citations, two resolved wrongly (`index.ts:524`
+for the self-requeue, `tests/capability.ts` as two watched channels); both are
+corrected. Eighteen refinements were returned and all are applied:
+
+- `trim`: the dead range is `[punched, arena_reclaimed)` with partial pages
+  removable under `everything`, the protective bound is the producer-local
+  `reserved_end`, not `arena_write`, two more existing checks (the
+  `Quarantined` refusal and the `page_removals == 1` witness) are cited, and
+  the Check now requires a released frame so it cannot pass with no removal.
+- `quarantine-wakes`: the first test leaves a token for a later waiter rather
+  than releasing a sleeping one, the third event returns `DoorbellFailed`, not
+  `Quarantined`, and `enter_quarantine` rings both doorbells, which closes
+  the open question by code.
+- `raw-native-attach`: two of the six suites expect their own messages, the
+  suites run on Darwin as well as Linux, and every suite is vacuous without a
+  built addon, now an enabling situation.
+- `diagnostics`: the test pins the counter-to-key mapping and part of the
+  shape, not the closed key set, and the Check now drives the events through
+  `connection.rs` so a forgotten `record_*` call is inside the oracle.
+- `transport-debug`: eight of thirteen macro types are formatted by a test,
+  `SamplePrefix` was missing from the guarantee's list, and the Check is a
+  set-coverage oracle because the rendering holds by construction.
+- `readiness-redispatch`: `Reactor::register` unregisters on a failed first
+  arm, so only a ring quarantined after registration enters the loop; the
+  guarantee states that HEAD does not meet it.
+- `each-channel-wake`: a two-channel suite exists (`mechanism.ts:168-205`),
+  so Exercised is partial, and at the wrapper level the single-channel record
+  dominates this one; the raw addon is the undominated residue.
+
+### Gaps queued
+
+1. `watch`'s callback argument is honoured only for the first channel
+   (`packages/shm-native/src/lib.rs:1126-1128`); the reactor holds one
+   callback and the wrapper hides it by keying handlers in a JS map. Known to
+   `mechanism.ts:309-314`, uncatalogued. The raw-path half of
+   `each-channel-wake`.
+2. A dropped acknowledgement parks the shared reactor for every channel:
+   `readiness_handled` returns `false` without `reactor.handled()` when the
+   registry is borrowed or the reactor is absent (`lib.rs:1146-1151`). The
+   inverse of the redispatch record; no test.
+3. The host diagnostics report has no value-level redaction oracle
+   (`ring_transport.rs:889-900` asserts seven key names only); the join the
+   relationship map asserts between the diagnostics and redaction records is
+   checked by neither.
+4. A failed `native.close` strips readiness while leaving the channel open
+   (`index.ts:644-648`, `lib.rs:1323`, `:1330-1338`); the runtime tests
+   cover the mapping-retention half only.
+
+### Biases requiring human judgment
+
+1. `trim`'s intended owner: with no non-test caller the record is either a
+   regression contract for a future idle path or an argument for `cfg(test)`.
+2. Whether `readiness-redispatch` is a defect record or a property record; the
+   catalog has no convention for a property the code fails today.
+3. Raw-addon boundary scope: six of the seven records treat the directly
+   requirable addon as a production surface while
+   `test-only-surface-absent-from-the-shipped-addon` says the same surface
+   ships fault injectors ungated. Both positions cannot stand.
+4. Darwin execution of the raw-descriptor suites against a Linux-only product.

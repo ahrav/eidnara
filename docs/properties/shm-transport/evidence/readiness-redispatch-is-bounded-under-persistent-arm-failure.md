@@ -21,8 +21,11 @@ forever.
   `Err(RingError::Quarantined)` when `is_quarantined()`; `Ok(false)` when
   `data_available()`.
 - Unregistration sites: `lib.rs:1323` inside `close` and `:1350` inside
-  `force_close`; `scheduling.rs:246` inside the reactor's own registration
-  failure path. No path unregisters on quarantine.
+  `force_close`; `scheduling.rs:242-252` inside `Reactor::register`, which
+  unregisters and fails registration when the first `arm_data_wait` errs. So a
+  ring quarantined before `watch` never enters the loop; a ring quarantined
+  after a successful registration is never unregistered by the acknowledgement
+  walk.
 - Node semantics: a microtask that requeues itself runs before any pending
   macrotask, so the loop starves timers and I/O for the whole process.
 

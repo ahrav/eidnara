@@ -16,6 +16,18 @@ page-removal pass only, while `Ring::trim`
   `arena_write` and `arena_reclaimed` from `verified_producer_cursors()`, and calls
   `self.punch_dead_pages(arena_reclaimed, arena_write, true)`. Both fallible
   reads map their error through `quarantine_with`.
+- `punch_dead_pages` (`:2172-2260`): the dead range is `[punched, reclaimed)`
+  (`:2172`); `everything` counts partially covered pages as dead once no live
+  bytes remain (`:2173`, `:2235-2238`); the function returns early when
+  `punched == reclaimed` (`:2185-2187`), so a ring with nothing released
+  removes nothing. `live_end` (`:2163-2165`) returns the producer-local
+  `reserved_end` when a reservation is open, which is what keeps an uncommitted
+  reservation's page out of the dead range; the shared `arena_write` cursor
+  excludes that reservation (`:2256-2258`), which is why `trim` is producer-only.
+- `quarantine_survives_peer_clearing_shared_flag` (`:4257`) asserts
+  `ring.trim()` returns `Err(RingError::Quarantined)` at `:4270`; the
+  syscall-counter test asserts `page_removals == 1` after one `trim`
+  (`:3004-3005`).
 - The comment at `:2266-2267` states the reason for the reclaim call: releases
   become reclaimed capacity only through that pass, which otherwise runs inside
   `try_reserve`, so an idle ring would keep newly dead pages resident without it.
@@ -78,5 +90,8 @@ the same ring. Assert residency, byte survival, and the role error.
 - Missing evidence: the exact trailing-page rule inside `punch_dead_pages` was
   not re-derived here; it is covered by the reclamation record's `removal_ranges`
   analysis.
-- Conclusion: the guarantee is stated against `[arena_reclaimed, arena_write)`
-  with the trailing-page exception delegated to the shared helper.
+- Conclusion: the guarantee is stated against the dead range
+  `[punched, arena_reclaimed)` with partial pages removable under `everything`;
+  the protective bound for reserved bytes is `live_end()`'s `reserved_end`, not
+  `arena_write`, and the Check requires a released frame so the removal path is
+  actually taken.

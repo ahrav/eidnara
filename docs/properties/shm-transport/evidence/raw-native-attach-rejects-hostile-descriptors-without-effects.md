@@ -72,3 +72,17 @@ the raw addon with the leak counters snapshotted around the call.
   both producers.
 - Missing evidence: whether any caller can present swapped lane fields.
 - Conclusion: carried as this record's open question.
+
+### Q: Do all six suites expect the same message, and where do they run?
+
+- Sources examined: `tests/mechanism.ts:403`, `:426`, `:448`, `:478`, `:511`,
+  `:515`, `:521`, `:525`; `packages/shm-native/src/lib.rs:539`, `:689`, `:694`.
+- Findings: the four shape suites expect `invalid shared-memory descriptor`;
+  the wrong-profile suite expects `shared-memory profile is unavailable`
+  (`:515`, emitted at `lib.rs:539`) and the unresolvable-descriptor suite expects
+  `shared-memory attachment failed` (`:525`, emitted at `lib.rs:689` and
+  `:694`). Every suite returns before any assertion unless the addon loaded and
+  the platform is Linux or Darwin.
+- Missing evidence: none.
+- Conclusion: the single-message claim holds for four of six; the no-effects
+  half spans all six; the Exercised label is conditional on a built addon.

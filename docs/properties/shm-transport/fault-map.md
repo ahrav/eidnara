@@ -287,7 +287,7 @@ preconditions, and both are legal on a correct system.
 | Coverage check | Situation it witnesses | Why it is safe |
 | --- | --- | --- |
 | `shm_publish_during_readiness_callback` | A commit landed while `pending` was true in the reactor | Both events are legal; the marker does not claim the wake was lost |
-| `shm_queued_writes_exceed_one_per_wake` | The bridge's write queue held two or more entries at one eventfd drain | Ordinary burst behavior |
+| `shm_queued_writes_exceed_one_per_wake` | The bridge's write queue held two or more entries at one drain of the bridge's own write-queue eventfd (`crates/host-runtime/src/client.rs:1800-1803`, signalled by `RingWriteSender::try_send` at `:1764-1768`); this is the host-side queue wake, not the transport's socketpair doorbells | Ordinary burst behavior |
 | `shm_read_budget_exhausted_with_parked_bridge` | `read_budget.used == capacity` at the moment a further frame is published, followed by bounded resumption after one `ByteCharge` drop | Backpressure is a legal state; pairs with the release that ends it |
 | `shm_capacity_signal_hit_parked_epoch` | Block-then-wake coverage: `signal_wake` swapped a nonzero parked epoch on the capacity page (fires on every ordinary mid-block wake; F16's arm window has no constructible runtime marker) | The signal side of the handshake working as designed |
 | `shm_partial_page_shared_with_live_lease` | A reclaim ran while a live lease held bytes on a page the released run touched | The exact shape the rounding protects; legal and expected |

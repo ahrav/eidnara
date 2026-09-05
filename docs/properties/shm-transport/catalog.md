@@ -1944,9 +1944,12 @@ and the four counters it reports are bumped on the shipped connection path:
 (`ring_transport.rs:221`).
 Status: active
 Exercised: partial - `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts`
-(`ring_transport.rs:862`) calls the three `record_*` methods directly and then
-asserts every key of the report, so it pins the shape and the counter-to-key
-mapping; no test drives a real activation, peer death, or reclamation through
+(`ring_transport.rs:862-901`) calls the three `record_*` methods directly
+(`:865-867`) and asserts `state`, `error_class`, three `artifact` keys, one of
+the `bounds` fields (`arena_bytes`, `:881`), one `accounting` field per side
+(`:882-883`), and the four counts, so it pins the counter-to-key mapping and part
+of the shape; it does not assert that no key outside the closed set is present,
+and no test drives a real activation, peer death, or reclamation through
 `connection.rs` and reads the count back.
 Guarantee: The status report is a closed JSON shape: `state`, `error_class`,
 `artifact` (profile identity), `bounds` (the admitted limits), `accounting`
@@ -1954,11 +1957,14 @@ Guarantee: The status report is a closed JSON shape: `state`, `error_class`,
 `peer_death.observed`, `reclamation.completed`, and `exhaustion.observed`
 counts, each of which increments exactly once per corresponding lifecycle
 event and never decrements.
-Check: `always` - after one activation, one observed peer death, and one
-reclamation, the report carries `1` under each of those keys and `0` under
-`exhaustion.observed`; `bounds` equals the admitted limits; no key outside the
-closed set is present; and every count is non-decreasing across successive
-reports on the same transport.
+Check: `always` - drive one activation, one observed peer death, and one
+reclamation through the connection path (`connection.rs:172`, `:185`, `:193`)
+rather than by calling `record_*`, then read the report: `1` under each of
+those keys and `0` under `exhaustion.observed`; `bounds` equal to the admitted
+limits; the key set equal to the closed set and nothing else; and every count
+non-decreasing across successive reports on the same transport. Calling
+`record_*` directly, as the existing test does, cannot witness the "exactly
+once per lifecycle event" half of the guarantee.
 Fault/timing angle: the counters are `AtomicU64` with `Relaxed` increments
 (`:195-221`) read with `Acquire` at report time (`:187-190`), so a report
 concurrent with an event may lag by one but can never go backwards; the hazard
@@ -1993,23 +1999,30 @@ but no shipped formatter reaches them: no `{:?}` site in
 transport descriptor, profile, admission, lease, or sample type. The label moves
 to `default-production` the day a host or addon log line formats one of them.
 Status: active
-Exercised: yes, in-crate - `debug_and_errors_redact_every_sentinel`
-(`crates/shm-transport/tests/contract.rs:446`) and
-`sample_errors_redact_every_sentinel` (`:714`) format the descriptor,
-incarnation, release-identity, frame, and sample types and their error variants
-and assert the output carries neither the sentinel bytes, the literal
-`SENTINEL`, nor a `0x` prefix; `debug_redacts_profile_admission_and_quarantine_record`
-(`tests/profile.rs:22`) does the same for `TargetProfile`, `Admission`, and
-`QuarantineRecord`.
+Exercised: partial - 8 of the 13 macro types are formatted by a test.
+`debug_and_errors_redact_every_sentinel` (`crates/shm-transport/tests/contract.rs:446`)
+covers `TransportDescriptor`, `Incarnation`, `ReleaseIdentity`, and
+`FrameDescriptor` plus `DescriptorError` variants, asserting the output carries
+neither the sentinel bytes, the literal `SENTINEL`, nor a `0x` prefix;
+`sample_errors_redact_every_sentinel` (`:714`) covers `SamplePrefix` and the
+sample errors; `debug_redacts_profile_admission_and_quarantine_record`
+(`tests/profile.rs:22-47`) covers `TargetProfile`, `Admission`, and
+`QuarantineRecord`, asserting the exact `TypeName(<redacted>)` string but not
+the `0x` clause. `HardwareProfileId`, `ValidatedFrame`, `ValidatedSample`,
+`ArenaSpan`, and `SpanPlan` are formatted by no test.
 Guarantee: Formatting any transport type that carries a peer-echoed sentinel
 (incarnations, release identities, hardware profile ids, transport and frame
-descriptors, validated frames and samples, arena spans and plans, target
-profiles, admissions, quarantine records) with `Debug`, directly or through an
-error that embeds it, yields only the type name and `(<redacted>)`; no sentinel
-byte, hex rendering, or field value appears.
-Check: `always` - for each type in the `redacted_debug!` list, `format!("{:?}")`
-equals `TypeName(<redacted>)`, and for each error variant that embeds one of
-them the rendering contains no substring of the embedded value.
+descriptors, sample prefixes, validated frames and samples, arena spans and
+plans, target profiles, admissions, quarantine records) with `Debug`, directly
+or through an error that embeds it, yields only the type name and
+`(<redacted>)`; no sentinel byte, hex rendering, or field value appears.
+Check: `always` - a set-coverage oracle, not a rendering one: enumerate every
+type in the crate whose fields carry a peer-echoed sentinel (incarnation, release
+identity, hardware profile id, grant or frame bytes, span offsets) and every
+error variant that embeds one, and assert each routes through `redacted_debug!`
+or otherwise renders none of the embedded value. The rendering itself,
+`TypeName(<redacted>)`, holds by construction of the macro (`lib.rs:13-21`) and
+is a screen, not evidence.
 Fault/timing angle: not a race. The hazard is additive: a new field type or a
 new error variant that derives `Debug` instead of going through the macro
 renders its payload, and nothing but the two contract tests, which enumerate
@@ -2018,11 +2031,13 @@ Required faults and enabling state: none; a static formatting check over the
 type list.
 Confidence: high - [evidence](evidence/transport-debug-output-redacts-every-sentinel.md).
 The macro and all thirteen invocation sites were read; the three tests were
-read and their negative assertions match the guarantee.
-Existing check: the three tests named above, unaudited. `docs/shm-transport.md:84`
-states the host-level consequence (reports never include grants, activation
-tokens, keys, or proofs), but that claim also depends on the host's own report
-builder, which is a separate surface.
+read and cover eight of the thirteen types.
+Existing check: the three tests named above, unaudited, covering eight of the
+thirteen types. `docs/shm-transport.md:84` states the host-level consequence
+(reports never include grants, activation tokens, keys, or proofs), but that
+claim also depends on the host's own report builder, which is a separate
+surface; its test (`ring_transport.rs:889-900`) asserts only the absence of
+seven key names, not of a planted sentinel value.
 Impact: a sentinel in a log line is a replayable credential for whoever reads
 the log; the transport's defence is this macro, and its type list is
 maintained by hand.
@@ -3322,24 +3337,32 @@ validator; `NativeChannel.attach` (`packages/shm-native/index.ts:537-540`)
 forwards the caller's object unchanged, and the addon is directly requirable
 without the wrapper.
 Status: active
-Exercised: yes - six suites in `packages/shm-native/tests/mechanism.ts` drive
-the raw addon: non-object and structurally hostile arguments (`:401`), every
-unsafe numeric representation before narrowing (`:424`), malformed, non-ASCII,
-and aliased grant text (`:446`), accessor objects and proxies (`:476`), a wrong
-profile refused before any attachment effect (`:509`), and a well-formed but
-unresolvable descriptor (`:519`). Each goes through
-`expectRejectedWithoutEffects` (`:387`), which asserts the error
-pattern and that `activeChannelCount`, `activeExternalRefCount`, and
-`nativeLeakDiagnostics` are unchanged afterwards. All self-skip when the addon is
-absent or the platform is not Linux.
+Exercised: yes when the addon is built - six suites in
+`packages/shm-native/tests/mechanism.ts` drive the raw addon: non-object and
+structurally hostile arguments (`:401`), every unsafe numeric representation
+before narrowing (`:424`), malformed, non-ASCII, and aliased grant text (`:446`),
+accessor objects and proxies (`:476`), a wrong profile refused before any
+attachment effect (`:509`), and a well-formed but unresolvable descriptor
+(`:519`). Each goes through `expectRejectedWithoutEffects` (`:387`), which
+asserts the error pattern and that `activeChannelCount`,
+`activeExternalRefCount`, and `nativeLeakDiagnostics` are unchanged afterwards.
+Every suite returns with zero assertions when `loadRawAddon()` finds no addon or
+the platform is neither Linux nor Darwin (`:403`, `:426`, and each sibling), so
+the label depends on a built addon; enabling situation `shm_raw_addon_loaded`.
 Guarantee: A descriptor that is not a plain object, carries a field in an
 unsafe numeric representation, carries malformed or aliased grant text, or
 observes its own reads through accessors or a proxy is rejected by the raw
 native `attach` with the single fixed message `invalid shared-memory descriptor`
-(`DESCRIPTOR_ERROR`, `lib.rs:32`; `descriptor_error`, `:150`), and the
-rejection retains no channel, external reference, or native allocation.
-Check: `always` - for each hostile shape, `attach` throws the fixed message and
-the three leak counters are equal before and after the call.
+(`DESCRIPTOR_ERROR`, `lib.rs:32`; `descriptor_error`, `:150`); a descriptor
+naming a profile the addon does not have is rejected with
+`shared-memory profile is unavailable` (`:539`) and a well-formed descriptor
+whose handles do not resolve with `shared-memory attachment failed` (`:689`,
+`:694`); and in all six cases the rejection retains no channel, external
+reference, or native allocation.
+Check: `always` - for each of the four hostile shapes, `attach` throws exactly
+`invalid shared-memory descriptor`; for the wrong-profile and unresolvable cases
+it throws its own bounded message named above; and for all six the three leak
+counters are equal before and after the call.
 Fault/timing angle: not a race. The hazard is a validation step that reads a
 field twice, once to check and once to use, through an accessor or proxy that
 returns different values, or an early return that leaks a partially registered
@@ -3347,8 +3370,8 @@ channel; the accessor and proxy suites exist because both were plausible.
 Required faults and enabling state: a caller that bypasses the wrapper or
 builds the descriptor object itself; no host cooperation needed.
 Confidence: high - [evidence](evidence/raw-native-attach-rejects-hostile-descriptors-without-effects.md).
-The `attach` entry, the fixed error constructors, the wrapper forwarding, and
-the four suites with their shared helper were read directly.
+The `attach` entry, the three error constructors, the wrapper forwarding, and
+the six suites with their shared helper were read directly.
 Existing check: the six suites named above, unaudited; inventoried per test in
 `existing-checks.md`.
 Impact: this is the inner, directly-requirable boundary; an admitted hostile
@@ -4245,42 +4268,54 @@ Open questions:
 Type: safety
 Reachability: test-only - `Ring::trim` (`crates/shm-transport/src/backend/ring.rs:2259`)
 has no caller outside the transport crate's own tests (`ring.rs:3004`, `:3155`,
-`:3159`, `:3282`, `:4151`, `:4160`, `:4176`, `:4270`, and the
+`:3159`, `:3282`, `:4151`, `:4160`, `:4176`, `:4199`, `:4270`, and the
 uncommitted-reservation test at `:4183`); neither
 `crates/host-runtime` nor `packages/shm-native` invokes it, so the idle-ring
 page-removal pass is not on the shipped path.
 Status: active
 Exercised: yes, in-crate - `only_a_producer_handle_may_trim` (`:3150`) pins the
-role gate, `trim_reclaims_pending_releases_before_punching` (`:3276`) pins the
-reclaim-before-punch order against `resident_arena_pages()` (`:1857`), and
-`trim_preserves_bytes_of_an_uncommitted_reservation` (`:4183`) pins the upper
-bound at `arena_write`.
+role gate; `trim_reclaims_pending_releases_before_punching` (`:3276`) pins the
+reclaim-before-punch order against `resident_arena_pages()` (`:1857`);
+`trim_preserves_bytes_of_an_uncommitted_reservation` (`:4183`, the `trim` call
+at `:4199`) pins that the producer-local `reserved_end` bound protects an
+uncommitted reservation; `quarantine_survives_peer_clearing_shared_flag`
+(`:4257`, assertion at `:4270`) pins the `Quarantined` refusal; and the
+syscall-counter test (`:3004-3005`) pins `page_removals == 1` after one
+`trim`, which is the witness that a removal happened at all.
 Guarantee: An explicit `trim` is refused for a consumer handle (`RoleMismatch`)
 and for a quarantined ring (`Quarantined`); when it runs it first turns pending
 releases into reclaimed capacity (`reclaim_completed`, `:2073`) and then removes
-only whole pages inside `[arena_reclaimed, arena_write)`, so no byte of a live
-lease, and no byte of a reservation taken but not yet committed, is punched.
-Check: `always` - after `trim` on a ring holding one live lease and one
-uncommitted reservation, the lease's bytes and the reservation's bytes read back
-unchanged, `resident_arena_pages()` counts only pages that intersect live or
-reserved bytes, and a consumer handle's `trim` returns `RoleMismatch` without
-changing residency.
+pages only in the dead range `[punched, arena_reclaimed)` (`punch_dead_pages`,
+`:2172`, `:2235-2238`), including the partial trailing page once no live bytes
+remain in it, so no byte of a live lease and no byte of an uncommitted
+reservation is punched.
+Check: `always` - on a ring with one released frame occupying at least one whole
+page, one live lease, and one uncommitted reservation whose start lies in the
+trailing dead page: after `trim`, `page_removals` has increased, the lease's
+bytes and the reservation's bytes read back unchanged, `resident_arena_pages()`
+counts only pages that intersect live or reserved bytes, and a consumer handle's
+`trim` on the same ring returns `RoleMismatch` without changing residency. The
+released frame is what makes the check non-vacuous: without it
+`punched == reclaimed` and `punch_dead_pages` returns before removing anything
+(`:2185-2187`).
 Fault/timing angle: `trim` shares `punch_dead_pages` (`:2178`) with the
-reclaim-time pass but runs with the trailing-page flag set (`:2276`), so the
-partial page just below `arena_write` is removable when nothing live remains in
-it; the bound that protects reserved bytes is `arena_write` itself, read through
-`verified_producer_cursors()` after the reclaim pass. A removal failure
-quarantines (`quarantine_with`, `:2277`) rather than returning an error the
-caller could retry.
+reclaim-time pass but passes `everything = true` (`:2256`), so the partial page
+just below the reclaim cursor is removable. What protects reserved bytes is not
+the shared `arena_write` cursor, which excludes an uncommitted reservation
+(`:2256-2258`), but `live_end()` returning the producer-local `reserved_end`
+(`:2163-2165`); that is why the pass is producer-only, since any other handle
+would treat the page a reservation is being written into as dead. A removal
+failure quarantines (`quarantine_with`, `:2277`) rather than returning an error
+the caller could retry.
 Required faults and enabling state: a released frame on an otherwise idle ring,
 so that only `trim` can reclaim it; a reservation taken but not committed whose
 start lies inside the page `trim` would otherwise treat as fully dead; a
 consumer handle on the same ring.
 Confidence: high - [evidence](evidence/trim-removes-only-dead-pages-below-the-write-cursor.md).
-The role and quarantine gates, the reclaim call, and the punch bounds were read
-directly at `:2259-2278`; the three tests were read and their assertions match
-the guarantee.
-Existing check: the three tests named above, all unaudited.
+The role and quarantine gates, the reclaim call, `punch_dead_pages`'s dead range
+and `everything` branch, and `live_end` were read directly at `:2163-2165` and
+`:2172-2260`; the five tests were read and their assertions match the guarantee.
+Existing check: the five tests named above, all unaudited.
 Impact: a wrong upper bound zeroes the bytes of a frame the producer is still
 writing, which the receiver later decodes as a valid frame of zeros; a missing
 role gate lets the consumer punch pages under the producer's reservation.
@@ -4301,28 +4336,33 @@ Reachability: default-production - the host parks on the ring doorbell through
 shipped ring by any verification failure or peer death, so a waiter parked at
 the moment its peer dies or quarantines is an ordinary production state.
 Status: active
-Exercised: yes, in-crate - `quarantine_wakes_a_parked_peer`
-(`crates/shm-transport/src/backend/ring.rs:3116`) parks the attached side in
-`wait_until` under a 5 s deadline, enters quarantine on the other side, and
-asserts the wait returns and `is_quarantined()` holds;
+Exercised: partial - `quarantine_wakes_a_parked_peer`
+(`crates/shm-transport/src/backend/ring.rs:3116-3131`) sets `parked = 1` by hand
+(`:3121`), calls `enter_quarantine()` (`:3122`), and only then calls
+`wait_until` under a 5 s deadline (`:3124-3127`), so it proves a token is left
+for a waiter that arrives after the quarantine, not that a sleeping waiter was
+released, and it does not assert `parked == 0`;
 `armed_wait_recheck_sees_a_quarantine_that_sent_no_token` (`:3294`) arms a wait,
 quarantines without ringing, and asserts `armed_wait_holds` reports the
 quarantine with `parked == 0`;
 `peer_closing_its_doorbell_quarantines_the_waiting_side` (`:3314`) drops the
-attached peer and asserts `wait_for_data` returns a quarantine result, the local
-side is quarantined, and `parked == 0`.
+attached peer and asserts `wait_for_data` returns `Err(DoorbellFailed)`
+(`:3318-3321`), the local side is quarantined, and `parked == 0`. The
+parked-then-quarantined interleaving itself is unexercised.
 Guarantee: A waiter parked on the data doorbell is released, within its own
 deadline, by any of three events: the ring entering quarantine
-(`enter_quarantine`, `:1889`, which rings the doorbell the peer waits on), a
-quarantine that raced the arm and delivered no token (the armed re-check,
-`armed_wait_holds`, `:1097`, observes the state), and the peer closing its
-doorbell end (which `wait_for_data`, `:1409`, surfaces as quarantine of the
+(`enter_quarantine`, `:1889`, which rings both the data and the capacity
+doorbell, `:1895-1896`), a quarantine that raced the arm and delivered no token
+(the armed re-check, `armed_wait_holds`, `:1097`, observes the state), and the
+peer closing its doorbell end (which `wait_for_data`, `:1409`, surfaces as
+`DoorbellFailed` through `quarantine_with`, `:1426-1431`, quarantining the
 waiting side). In every case `parked` returns to `0`, so no waiter sleeps to its
 deadline on a dead ring and no stale parked flag survives to swallow a later
 wake.
 Check: `always` - with a waiter parked, each of the three events causes the wait
-to return before its deadline with a quarantine result, `is_quarantined()` true
-on the waiting side, and `parked == 0` afterwards.
+to return before its deadline: `Err(Quarantined)` for the first two and
+`Err(DoorbellFailed)` for the third, with `is_quarantined()` true on the waiting
+side and `parked == 0` afterwards in all three.
 Fault/timing angle: the socketpair doorbell delivers a token only when `signal`
 (`:596`) runs; a quarantine entered between `arm_data_wait` (`:1066`) and the
 park has no token to deliver, which is the case the armed re-check covers. The
@@ -4334,15 +4374,19 @@ verification failure), quarantine entry between arm and park, or the peer's
 doorbell end closing (F1).
 Confidence: high - [evidence](evidence/quarantine-wakes-a-parked-waiter.md).
 The three tests were read against `signal`, `wait_until`, `arm_data_wait`,
-`armed_wait_holds`, `wait_for_data`, and `enter_quarantine` at HEAD.
+`armed_wait_holds`, `wait_for_data`, `quarantine_with`, and `enter_quarantine`
+at HEAD, including the two `signal_wake` calls at `:1895-1896`.
 Existing check: the three tests named above, unaudited.
 Impact: a lost wake here is the difference between a dead peer being reported
 within one poll and a connection hanging for its full deadline, which the host
 then classifies as a timeout rather than a peer death.
 Open questions:
-- Does `enter_quarantine` ring the capacity doorbell as well as the data
-  doorbell, so a producer parked on capacity is released too? Only the
-  data-side wake is pinned. (needs human input)
+- `enter_quarantine` rings the capacity doorbell too (`:1895-1896`), and
+  `ring.rs:3327-3340` shows a producer blocked in `reserve_until` fail with
+  `DoorbellFailed` when the peer drops; no test pins a producer parked on
+  capacity being released by a peer-side `enter_quarantine`, nor the
+  parked-then-quarantined data-side interleaving. Both are tests to write, not
+  decisions.
 
 ---
 
@@ -4482,7 +4526,13 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   `readiness-redispatch-is-bounded-under-persistent-arm-failure` say what one
   batch must and must not do for each channel. The first two can hold while any
   of the last three fails, because sequential callbacks are compatible with a
-  dropped channel and with an unbounded run of them.
+  dropped channel and with an unbounded run of them. At the wrapper level
+  `wake-published-during-readiness-callback-is-not-lost` dominates
+  `each-channel-wake-survives-a-shared-acknowledgement`: one boolean over all
+  channels (`lib.rs:1152-1162`) plus a dispatcher that runs every handler on
+  re-entry (`index.ts:517`) gives the second channel's delivery for free. The
+  undominated residue is the raw addon, whose reactor holds a single callback
+  (`lib.rs:1126-1128`).
 
 ## Discovered at U3
 
@@ -4554,7 +4604,7 @@ Open questions: None.
 
 Type: liveness
 Reachability: default-production - the addon is the shipped client and
-`dispatchReadiness` (`packages/shm-native/index.ts:515-525`) is the readiness
+`dispatchReadiness` (`packages/shm-native/index.ts:515-527`) is the readiness
 path of every watched channel; a quarantined ring is an ordinary outcome of peer
 death or a verification failure, so a registered channel whose re-arm fails
 persistently is a production state.
@@ -4562,28 +4612,35 @@ Status: active
 Exercised: not yet - the readiness suites in `tests/mechanism.ts` cover the
 acknowledged-wake path on a healthy ring; nothing registers a channel, quarantines
 its ring, leaves it registered, and counts dispatches.
-Guarantee: When a watched channel's `complete_data_wait` or `arm_data_wait`
-fails on every acknowledgement (a quarantined ring returns `Err(Quarantined)`
-from `arm_data_wait`, `crates/shm-transport/src/backend/ring.rs:1067-1068`),
-the redispatch loop terminates within a bounded number of microtasks: the
-failing channel is unregistered or reported, and `dispatchReadiness` is not
-requeued on every acknowledgement for as long as the caller leaves the channel
-open.
+Guarantee: A requirement the current tree does not meet, recorded so the check
+reads as a known failure rather than a passing regression contract. When a
+watched channel's `complete_data_wait` or `arm_data_wait` fails on every
+acknowledgement (a quarantined ring returns `Err(Quarantined)` from
+`arm_data_wait`, `crates/shm-transport/src/backend/ring.rs:1067-1068`), the
+redispatch loop terminates within a bounded number of microtasks: the failing
+channel is unregistered or reported, and `dispatchReadiness` is not requeued on
+every acknowledgement for as long as the caller leaves the channel open.
 Check: `always` - with one registered channel quarantined and its handler not
 closing it, the count of `dispatchReadiness` invocations after the quarantine is
 bounded, and a queued macrotask (a timer or I/O callback) runs.
 Fault/timing angle: `readiness_handled` (`packages/shm-native/src/lib.rs:1143-1166`)
 sets `redispatch = true` for any registered channel whose `complete_data_wait`
-errs or whose `arm_data_wait` returns `Ok(false)` or `Err(_)`, and the
-dispatcher's `finally` requeues itself whenever that returns true
-(`index.ts:524`). `Ok(false)` means data is already visible and a redispatch is
+errs or whose `arm_data_wait` returns `Ok(false)` or `Err(_)` (`:1160`), and
+the dispatcher's `finally` requeues itself whenever that returns true
+(`index.ts:525`). `Ok(false)` means data is already visible and a redispatch is
 correct; `Err` means the ring cannot be armed at all, and redispatching it makes
-the same call fail again. The only unregistration paths are `close` (`lib.rs:1323`)
-and `force_close` (`:1350`), both caller-driven, so until the caller closes, a
-self-requeuing microtask runs ahead of every macrotask on the event loop.
-Required faults and enabling state: a watched channel whose ring is quarantined
-(F1 peer death or any verification failure) and a handler that does not close it
-within the same tick.
+the same call fail again. `Reactor::register` unregisters a channel whose first
+`arm_data_wait` fails (`packages/shm-native/src/scheduling.rs:242-252`), so a
+ring quarantined before `watch` never enters the loop; the acknowledgement walk
+itself never unregisters, and after a successful registration only `close`
+(`lib.rs:1323`) and `force_close` (`:1350`), both caller-driven, remove the
+channel, so until the caller closes, a self-requeuing microtask runs ahead of
+every macrotask on the event loop.
+Required faults and enabling state: a channel registered while healthy whose
+ring is quarantined afterwards (F1 peer death or any verification failure) and a
+handler that does not close it within the same tick. A ring quarantined before
+`watch` does not construct the state, because registration fails and
+unregisters.
 Confidence: high - [evidence](evidence/readiness-redispatch-is-bounded-under-persistent-arm-failure.md).
 The acknowledgement walk, the two return values it conflates, the dispatcher's
 `finally`, and both unregistration sites were read directly.
@@ -4605,11 +4662,16 @@ Type: liveness
 Reachability: default-production - one reactor serves every watched channel in
 the process (`packages/shm-native/src/lib.rs:1152-1163` re-arms all registered
 channels in one walk), and a client with more than one channel is the shipped
-topology whenever it opens a second connection (`tests/capability.ts` opens two).
+topology whenever it opens a second connection (`tests/mechanism.ts:170-183`
+watches two).
 Status: active
-Exercised: not yet - `readiness acknowledgement preserves a frame published
-during callback` (`tests/mechanism.ts:211-334`) proves the single-channel case;
-no test lands edges from two channels inside one pending window.
+Exercised: partial - `one channel handler failure does not starve later channels`
+(`tests/mechanism.ts:168-205`) registers two channels through `startReadiness`
+(`:174`, `:178`), makes the first handler throw, publishes to the second
+(`:192`), and asserts delivery within one second, which is two-channel delivery
+under a shared acknowledgement; `readiness acknowledgement preserves a frame
+published during callback` (`:211-334`) proves the single-channel window. No
+test lands the second channel's edge inside the first channel's pending window.
 Guarantee: With two or more registered channels, an edge on channel B that
 arrives while the batch raised by channel A is pending, before
 `readinessHandled()`, results in B's handler observing B's frame within the
@@ -4633,7 +4695,8 @@ to the second timed inside the first's pending window; enabling situation
 Confidence: high - [evidence](evidence/each-channel-wake-survives-a-shared-acknowledgement.md).
 The re-arm walk, `arm_data_wait`'s `Ok(false)` contract, and the dispatcher
 were read directly; the property is unexercised, not unverified.
-Existing check: none for two channels; the single-channel suite named above is
+Existing check: partial for two channels: the two-channel suite at
+`mechanism.ts:168-205` and the single-channel suite at `:211-334`, both
 unaudited.
 Impact: one channel stalls until its next unrelated edge while the process looks
 healthy; with a request/response protocol on that channel, the stall is a hang.

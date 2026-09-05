@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "tokenizer",
   "source": "catalog.md",
-  "source_sha256": "e46f31ae1fdc57884b0fc21e9ef3efbcd00d0cf364f691572b41b2ca5370145c",
+  "source_sha256": "38ae29fb7a1ade7cb1061769244948ebdb5f4d5e786ecde2d59f13db2a5ecf16",
   "records": [
     {
       "slug": "tokenizer-encoding-matches-the-independent-oracle",
@@ -91,13 +91,13 @@
       "reachability_note": "`CLAUDE_PAT_STR` (`crates/tokenizer/src/lib.rs:65-75`) is compiled into every build and is the pre-tokenizer for every `encode_ordinary` call, but no workspace crate depends on `tokenizer`, so only the crate's tests reach it; the label moves with the other three records when a production caller lands.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "`pattern_is_upstream_with_ecmascript_whitespace` (`lib.rs:179`) derives the constant from `assets/claude.pat` by substituting the ECMAScript class for `\\s` and `\\S` and asserts equality plus the absence of any unexpanded `\\s` or `\\S`; `whitespace_class_matches_ecmascript_not_unicode_white_space` (`:192`) asserts the class matches the sixteen code points it enumerates, U+FEFF among them, and rejects U+0085, U+200B, U+180E, and `a`."
+        "state": "partial",
+        "note": "`pattern_is_upstream_with_ecmascript_whitespace` (`lib.rs:179`) derives the constant from `assets/claude.pat` by substituting `ecmascript_whitespace!()` for `\\s` and `\\S` (`:181-185`) and asserts equality plus the absence of any unexpanded `\\s` or `\\S`; because `CLAUDE_PAT_STR` (`:65-75`) expands the same macro, that assertion is invariant under every edit to the macro body and detects only edits to the asset or to the `concat!` structure. The class contents are guarded only by `whitespace_class_matches_ecmascript_not_unicode_white_space` (`:192`), which asserts 16 of the class's 25 code points (U+FEFF among them) and rejects U+0085, U+200B, U+180E, and `a`; U+2001 through U+2009 are asserted by nothing."
       },
       "guarantee": "The runtime pre-tokenizer pattern equals upstream `pat_str` with `\\s` and `\\S` replaced by the ECMAScript whitespace class, and that class follows the ECMAScript definition (U+FEFF included, U+0085 excluded), so piece boundaries match the JavaScript reference rather than the `regex` crate's Unicode `White_Space` definition (`lib.rs:10-13`).",
       "check": {
         "semantics": "always",
-        "condition": "the derived pattern equals `CLAUDE_PAT_STR`; the constant contains no `\\s` or `\\S`; the class matches each enumerated ECMAScript code point and none of U+0085, U+200B, U+180E."
+        "condition": "the derived pattern equals `CLAUDE_PAT_STR`; the constant contains no `\\s` or `\\S`; and the class matches exactly the 25 ECMAScript WhiteSpace and LineTerminator code points (U+0009, U+000A, U+000B, U+000C, U+000D, U+0020, U+00A0, U+1680, U+2000 through U+200A, U+2028, U+2029, U+202F, U+205F, U+3000, U+FEFF), stated as a literal set independent of the macro, and none of U+0085, U+200B, U+180E."
       },
       "fault_timing": "An edit to `assets/claude.pat`, to `ecmascript_whitespace!`, or a change in the `regex` crate's class semantics moves piece boundaries and therefore ids while counts stay plausible; the difference surfaces only on inputs containing the code points where the two definitions disagree.",
       "required_faults": "None; static checks over the constant and the class.",
@@ -106,8 +106,10 @@
         "evidence": "[evidence](evidence/tokenizer-pattern-is-upstream-with-ecmascript-whitespace.md). The constant, the crate docs at `lib.rs:10-13`, and both tests were read directly."
       },
       "existing_check": "The two tests named above; unaudited.",
-      "impact": "A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`tests/token_golden.rs:101`) and U+0085 by the `nel-after-space` and `nel-runs` golden cases (`gen/gen-token-golden.ts:99-100`, present in `testdata/token-golden.json`), so a class drift on either code point also fails parity.",
-      "open_questions": [],
+      "impact": "A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`tests/token_golden.rs:101`) and by the `zero-width`, `bom-leading`, and `bom-between-punct` golden cases (`gen/gen-token-golden.ts:76`, `:101-102`); U+0085 by `nel-after-space` and `nel-runs` (`:99-100`). U+1680 and U+2000 through U+200A appear in no golden case, so a drift on any of those twelve fails parity nowhere, and the nine interior members U+2001 through U+2009 fail no check in the tree at all.",
+      "open_questions": [
+        "None; the nine unasserted members are a coverage gap queued in `fault-map.md`, not a decision."
+      ],
       "extra": {}
     },
     {
@@ -120,7 +122,7 @@
         "state": "partial",
         "note": "`bom_before_newline_is_preserved` (`tests/token_golden.rs:101-109`) encodes `\"x\"`, `\"\\u{feff}\"`, and `\"\\n\"` separately and asserts the composite equals their concatenation, so it proves the BOM is one standalone piece but derives every expected id from `encode_ordinary` itself; a vocabulary edit that moves the BOM's rank passes it."
       },
-      "guarantee": "`encode_ordinary(\"x\\u{feff}\\n\")` is `[92, 57538, 203]`: U+FEFF (`EF BB BF`, base64 `77u/`) is a standalone token whose id is its asset rank (`assets/claude.tiktoken:57534`), between `x` (`eA==`, rank 92, `:88`) and `\\n` (`Cg==`, rank 203, `:199`). The stock oracle's `[92, 203]` is the documented divergence, not the target.",
+      "guarantee": "`encode_ordinary(\"x\\u{feff}\\n\")` is `[92, 57538, 203]`: U+FEFF (`EF BB BF`, base64 `77u/`) is a standalone token whose id is its asset rank (`assets/claude.tiktoken:57534`), between `x` (`eA==`, rank 92, `:88`) and `\\n` (`Cg==`, rank 203, `:199`). The stock oracle's `[92, 203]` output for this input is the documented divergence, asserted only in crate and test docs (`lib.rs:25-28`, `tests/token_golden.rs:97-99`); no fixture in the tree pins it.",
       "check": {
         "semantics": "always",
         "condition": "the three ids equal the ranks read from the asset independently of `encode_ordinary`, and the count is three."
@@ -131,8 +133,8 @@
         "level": "high",
         "evidence": "[evidence](evidence/tokenizer-bom-is-its-own-token.md). The test, the crate docs on the divergence, and the three asset rows were read directly."
       },
-      "existing_check": "`bom_before_newline_is_preserved`; unaudited; its oracle is circular, which is the gap this record closes.",
-      "impact": "Files that begin with a BOM count one token short or encode a different id; the parity record does not cover this input because the oracle is wrong on it.",
+      "existing_check": "`bom_before_newline_is_preserved`; unaudited. Its oracle is circular, which matters for the piece shape only: a renumbered `EF BB BF` row is already caught by `encode_ordinary_matches_ai_tokenizer_ids` on the three BOM golden cases, where id 57538 is pinned against the oracle.",
+      "impact": "The divergence fires only when the BOM shares one whitespace pre-token piece with a following whitespace character, as in `\"x\\u{feff}\\n\"`, where the stock oracle scores the whole piece `EF BB BF 0A` as `\"\\n\"`. A leading BOM followed by a non-whitespace character is unaffected: the oracle-produced `bom-leading` golden case (`gen/gen-token-golden.ts:101`, ids `[57538, 2666, 679, 284, 355, 31]`) carries the BOM token, as do `zero-width` (`:76`) and `bom-between-punct` (`:102`). The record's residue is therefore the BOM-plus-adjacent-whitespace piece shape, which parity cannot cover because the oracle is wrong on exactly that input.",
       "open_questions": [
         "Should the golden generator pin `[92, 57538, 203]` through a patched oracle, as it already does for prototype-name inputs, so the divergence is asserted in the corpus rather than in a hand-written test? (needs human input)"
       ],
@@ -142,16 +144,16 @@
       "slug": "tokenizer-encoding-is-deterministic-across-calls-and-threads",
       "type": "safety",
       "reachability": "test-only",
-      "reachability_note": "the `OnceLock` initialisation of the tokenizer (`crates/tokenizer/src/lib.rs:82-84`) and the pattern (`:108-109`) runs for every caller, but no workspace crate depends on `tokenizer`; the label moves with the other records when a production caller lands.",
+      "reachability_note": "the `OnceLock` initialisation of the tokenizer (`crates/tokenizer/src/lib.rs:82-84`) runs for every caller, and the pattern's (`:108-110`) only for callers whose text exceeds `MAX_PIECE_BYTES` (the early return at `:134-136` skips it), but no workspace crate depends on `tokenizer`; the label moves when a production caller lands.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "`deterministic_across_calls` (`tests/token_golden.rs:64`) repeats `estimate_tokens` a thousand times on one input; `deterministic_across_threads` (`:73`) has eight scoped threads encode every golden case, compares thread 0 to the golden ids and counts, and compares every other thread to thread 0, so concurrent first callers race the lazy initialisation."
+        "state": "partial",
+        "note": "`deterministic_across_calls` (`tests/token_golden.rs:64`) repeats `estimate_tokens` a thousand times on one input; `deterministic_across_threads` (`:73`) has eight scoped threads encode every golden case, compares thread 0 to the golden ids and counts, and compares every other thread to thread 0, which covers shared-state safety after initialisation. The cold-start race is schedule-dependent: the eight tests in `token_golden.rs` run concurrently in one binary, any sibling (the three over-long tests at `:116`, `:134`, `:150` included) can initialise `TOKENIZER` first, and `load_golden()` (`:74`) parses the fixture before the threads spawn. The pattern `OnceLock` is never raced at all, because the largest golden text is 3,242 bytes and every call takes the early return at `lib.rs:134-136`."
       },
       "guarantee": "`encode_ordinary` and `estimate_tokens` are pure functions of their input: repeated calls, and concurrent calls including ones that race the first initialisation, return identical ids and counts, and `estimate_tokens(t) == encode_ordinary(t).len()` holds on every call.",
       "check": {
         "semantics": "always",
-        "condition": "for any input, N sequential calls agree, and K concurrent first callers agree with each other and with a later sequential call."
+        "condition": "in an isolated cold process, K concurrent first callers whose inputs include one above `MAX_PIECE_BYTES` agree with each other and with a later sequential call, and N sequential calls on any input agree. The conjunct `estimate_tokens(t) == encode_ordinary(t).len()` holds by construction (`lib.rs:158-169`, both return through `encode_bounded`) and is a screen, not evidence."
       },
       "fault_timing": "The hazard is a cache or lazy value initialised outside `OnceLock`, or an initialisation that can observe a half-built table; `OnceLock` runs the initialiser once and blocks other callers, so the current shape holds by construction and the record guards a future cache.",
       "required_faults": "None; concurrent first callers on a cold process.",
@@ -172,18 +174,18 @@
       "status": "active",
       "exercised": {
         "state": "not-yet",
-        "note": "the over-long tests (`tests/token_golden.rs:116`, `:134`, `:150`) use letter and CJK runs and assert chunking; nothing drives an input shaped to exhaust `fancy_regex`'s backtrack limit, and the corpus's longest whitespace run is 50 spaces."
+        "note": "the over-long tests (`tests/token_golden.rs:116`, `:134`, `:150`) use letter and CJK runs and assert chunking; nothing drives an input shaped to exhaust `fancy_regex`'s backtrack limit, and the corpus's longest whitespace run is 51 spaces (`gen-token-golden.ts:79` repeats 50 after a literal separator)."
       },
-      "guarantee": "`encode_ordinary` and `estimate_tokens` return for every `&str` without panicking. In particular an input longer than `MAX_PIECE_BYTES` (`lib.rs:80`, 4096) never reaches the `expect` at `lib.rs:140`, which aborts on a `fancy_regex` backtrack-limit error before chunking runs.",
+      "guarantee": "`encode_ordinary` and `estimate_tokens` return for every `&str` without panicking. In particular every input longer than `MAX_PIECE_BYTES` (`lib.rs:80`, 4096) passes through the `expect` at `lib.rs:140` once per pattern match, and none of those matches is ever an `Err` from a `fancy_regex` backtrack-limit error.",
       "check": {
         "semantics": "always",
-        "condition": "a fuzz or adversarial-whitespace oracle over inputs above the cap, including long alternations of whitespace and non-whitespace that exercise the negative lookahead in the pattern (`lib.rs:70-71`), asserts no panic and `estimate_tokens(t) == encode_ordinary(t).len()`."
+        "condition": "a fuzz or adversarial-whitespace oracle over inputs above the cap, including long alternations of whitespace and non-whitespace that exercise the negative lookahead in the pattern (`lib.rs:70-72`), asserts no panic and `estimate_tokens(t) == encode_ordinary(t).len()`."
       },
-      "fault_timing": "The pattern's `[ws]+(?![^ws])` needs the backtracking engine, and `encode_bounded` iterates `find_iter` over the whole over-cap text (`lib.rs:138-139`) before any chunking; a match error there is unwrapped with `expect`, so the count aborts the caller's thread instead of returning. Inputs at or below the cap go to `CoreBPE::encode_ordinary` whole (`:133-135`), whose own regex path is outside this record.",
+      "fault_timing": "The pattern's `[ws]+(?![^ws])` needs the backtracking engine, and `encode_bounded` iterates `find_iter` over the whole over-cap text (`lib.rs:139`) before any chunking; a match error there is unwrapped with `expect`, so the count aborts the caller's thread instead of returning. Inputs at or below the cap go to `CoreBPE::encode_ordinary` whole (`:134-136`), whose own regex path is outside this record.",
       "required_faults": "None; an input above 4096 bytes shaped to backtrack.",
       "confidence": {
         "level": "medium",
-        "evidence": "[evidence](evidence/tokenizer-encoding-is-total-over-valid-utf8.md). The panic site and the pattern were read directly; whether any input reaches the default backtrack limit under this pattern is not established."
+        "evidence": "[evidence](evidence/tokenizer-encoding-is-total-over-valid-utf8.md). The panic site and the pattern were read directly; `fancy-regex` 0.17 defaults `backtrack_limit` to 1,000,000 and the `(?!...)` at `lib.rs:70-72` forces its backtracking engine, so the `expect` is reachable in principle; whether any input reaches the limit is not established."
       },
       "existing_check": "None on the error path; the over-long tests cover chunking only.",
       "impact": "One adversarial or unlucky input aborts token counting in the caller's process rather than returning a count.",

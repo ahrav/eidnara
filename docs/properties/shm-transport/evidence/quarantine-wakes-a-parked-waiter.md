@@ -67,3 +67,21 @@ quarantine result, and `parked == 0`.
 - Missing evidence: a test or read confirming a producer parked on capacity is
   released by quarantine.
 - Conclusion: recorded as the open question.
+
+### Q: Do the three tests exercise what the record first said they did?
+
+- Sources examined: `ring.rs:3116-3131`, `:3294-3312`, `:3314-3325`, `:1889-1897`,
+  `:1426-1431`.
+- Findings: `quarantine_wakes_a_parked_peer` writes `parked = 1` by hand at
+  `:3121`, quarantines at `:3122`, and only then waits (`:3124-3127`), so it
+  proves a token is left for a later waiter, not that a sleeping waiter was
+  released; it does not assert `parked == 0`. The peer-closing test asserts
+  `Err(RingError::DoorbellFailed)` (`:3318-3321`), which `wait_for_data`
+  returns through `quarantine_with` (`:1426-1431`) after quarantining.
+  `enter_quarantine` rings both doorbells (`:1895-1896`).
+- Missing evidence: a test that parks first and quarantines second on the data
+  side; a test of a capacity-parked producer released by a peer-side
+  `enter_quarantine` (`:3327-3340` covers the peer-drop case only).
+- Conclusion: Exercised is partial; the Check names `DoorbellFailed` for the
+  third event; the capacity-side question is answered by code and only the test
+  is missing.

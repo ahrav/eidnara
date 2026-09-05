@@ -89,10 +89,12 @@ only meaningful once every input is known to terminate in accept or reject.
 ## What a test must construct
 
 No fault injection. Three additions to what exists. First, a length sweep over
-`0..=2 * width` for each decoder rather than the ten sampled lengths at
-`tests/contract.rs:743-768`, with several fill patterns and with structured
-mutation of an accepted seed — the current sweep uses only `0x00` and `0xff`,
-and neither reaches the arithmetic guards. Second, static assertions binding
+`0..=2 * width` for each decoder. The source tree had a ten-length, two-fill
+sweep at `tests/contract.rs:743-768`; this tree does not (the file ends at line
+735 and no decoder sweep exists anywhere in it), so the record's statement that
+arbitrary-length coverage is absent here is the baseline. The new sweep needs
+several fill patterns and structured mutation of an accepted seed — a `0x00` and
+`0xff` fill alone reaches none of the arithmetic guards. Second, static assertions binding
 each width constant to the sum of its field widths, so a narrowed field is a
 compile error rather than a runtime index panic. Third, an allocation oracle:
 assert that no accepted decode causes an allocation larger than

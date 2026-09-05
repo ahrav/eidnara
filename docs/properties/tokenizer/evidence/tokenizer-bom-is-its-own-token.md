@@ -46,3 +46,19 @@ from `encode_ordinary`.
 - Findings: the three ranks are 92, 203, 57538.
 - Missing evidence: none.
 - Conclusion: the guarantee is stated against those ranks.
+
+### Q: Is the divergence about any BOM, or about one piece shape?
+
+- Sources examined: `gen/gen-token-golden.ts:34-38`, `:76`, `:101-102`;
+  `testdata/token-golden.json` entries `zero-width`, `bom-leading`,
+  `bom-between-punct`; `lib.rs:25-28`.
+- Findings: the oracle-produced `bom-leading` case has ids
+  `[57538, 2666, 679, 284, 355, 31]`, BOM token included, so a leading BOM
+  before a non-whitespace character is encoded correctly by the stock oracle;
+  the defect fires only when the BOM shares a whitespace piece with a following
+  whitespace character. A renumbered `EF BB BF` row already fails parity on
+  the three BOM cases. The `[92, 203]` output is asserted only in docs.
+- Missing evidence: a fixture pinning the stock oracle's output for
+  `"x\u{feff}\n"`.
+- Conclusion: the record's residue is the BOM-plus-adjacent-whitespace piece
+  shape; the Impact and Existing check are narrowed accordingly.

@@ -44,8 +44,27 @@ not timing or process faults.
    checked against the committed asset rather than trusted from the generator.
 2. A bounded-time assertion or Criterion benchmark for a run of
    `MAX_PIECE_BYTES * 8` letters, so T5 has an oracle beyond structure.
+3. An adversarial no-panic oracle for `tokenizer-encoding-is-total-over-valid-utf8`:
+   a fuzz target or generator over inputs above `MAX_PIECE_BYTES` built from
+   long alternations of whitespace and non-whitespace, asserting no panic and
+   `estimate_tokens(t) == encode_ordinary(t).len()`, so the `expect` at
+   `lib.rs:140` has a check that can fail. The letter-run benchmark in item 2
+   never reaches the backtracking path.
+4. A literal-set assertion for the whitespace class: every one of the 25
+   ECMAScript code points, written out rather than derived from
+   `ecmascript_whitespace!`, so U+2001 through U+2009 stop being guarded by
+   nothing.
+5. A decode round-trip oracle: for every input, the byte sequences of
+   `encode_ordinary(t)` concatenate to `t.as_bytes()`. Input-general, needs no
+   fixture, and covers the ranks the golden corpus never reaches.
 
 ## Ranking by cheapest valid oracle
 
 1. The asset test (T2): cheapest, closes the only record with no Rust check.
+2. The whitespace literal set (item 4): one assertion, closes a guard-by-nothing
+   hole in the pattern record.
+3. The decode round-trip oracle (item 5): the first input-general behavioural
+   check in the crate; a candidate record, not only a test.
+4. The adversarial no-panic oracle (item 3): the only action that can make the
+   totality record non-vacuous.
 2. The latency bound (T5): needs a benchmark harness and a chosen budget.

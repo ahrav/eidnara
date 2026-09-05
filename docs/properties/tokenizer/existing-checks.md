@@ -16,7 +16,7 @@ is a link, not a verdict.
 | `estimate_tokens_matches_golden_counts` (`:47`) | For all golden cases, `estimate_tokens(text) == golden.ids.len()` | unaudited; cited by same record |
 | `empty_text_is_zero` (`:59`) | `estimate_tokens("") == 0` | unaudited |
 | `deterministic_across_calls` (`:64`) | Repeated calls on one input return identical token counts (`estimate_tokens`) | unaudited; cited by `tokenizer-encoding-is-deterministic-across-calls-and-threads` |
-| `deterministic_across_threads` (`:73`) | Concurrent callers on one input return identical ids; the `OnceLock` tokenizer is shared safely | unaudited; cited by `tokenizer-encoding-is-deterministic-across-calls-and-threads` |
+| `deterministic_across_threads` (`:73`) | Concurrent callers on the golden cases return identical ids; the `OnceLock` tokenizer is shared safely after initialisation (the cold-start race is schedule-dependent and no over-cap input is encoded) | unaudited; cited by `tokenizer-encoding-is-deterministic-across-calls-and-threads` |
 | `bom_before_newline_is_preserved` (`:101`) | `"x\u{feff}\n"` encodes to `[x, bom, newline]`, diverging from the stock oracle's BOM-stripping lookup | unaudited; cited by `tokenizer-bom-is-its-own-token` and the scope exception in `catalog.md` |
 | `over_long_piece_is_chunked_and_bounded` (`:116`) | A letter run above `MAX_PIECE_BYTES` encodes as the concatenation of its chunk encodings and the count matches | unaudited; cited by `tokenizer-over-long-pieces-are-chunked-and-bounded` |
 | `over_long_cjk_piece_keeps_char_boundaries` (`:134`) | A multi-byte run above the cap encodes without splitting a codepoint and yields a plausible count | unaudited; cited by same record |

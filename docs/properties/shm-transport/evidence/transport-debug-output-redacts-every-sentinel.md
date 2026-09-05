@@ -64,3 +64,17 @@ the sentinel.
   transport errors was not enumerated; if one exists and is logged, delegation to
   the redacted impl still holds, but the label would move.
 - Conclusion: `test-only`, with the label flip condition stated in the record.
+
+### Q: Which of the thirteen types do the tests format?
+
+- Sources examined: `tests/contract.rs:446-470`, `:714-735`;
+  `tests/profile.rs:22-47`.
+- Findings: `TransportDescriptor`, `Incarnation`, `ReleaseIdentity`,
+  `FrameDescriptor`, `SamplePrefix`, `TargetProfile`, `Admission`, and
+  `QuarantineRecord` are formatted (eight); `HardwareProfileId`,
+  `ValidatedFrame`, `ValidatedSample`, `ArenaSpan`, and `SpanPlan` are not.
+  `profile.rs` asserts the exact `TypeName(<redacted>)` string and no
+  `SENTINEL` but not the `0x` clause.
+- Missing evidence: a set-coverage check over every sentinel-bearing type.
+- Conclusion: Exercised is partial (8 of 13) and the Check is restated as a
+  coverage oracle, since the rendering holds by construction of the macro.

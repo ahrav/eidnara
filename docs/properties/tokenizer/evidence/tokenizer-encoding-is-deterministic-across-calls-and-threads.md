@@ -45,3 +45,18 @@ compared to each other and to a later sequential call.
 - Missing evidence: none.
 - Conclusion: the property holds by construction today; the record guards a
   future cache.
+
+### Q: Is the thread test a cold-start race, and is the pattern OnceLock raced?
+
+- Sources examined: `tests/token_golden.rs:64-95`, `:116`, `:134`, `:150`;
+  `lib.rs:82-84`, `:108-110`, `:134-136`; `testdata/token-golden.json` text
+  lengths.
+- Findings: the eight tests run concurrently in one binary, so any sibling can
+  initialise `TOKENIZER` before the thread test spawns, and `load_golden()`
+  (`:74`) parses the fixture first; the largest golden text is 3,242 bytes, so
+  every call in the thread test takes the early return at `lib.rs:134-136` and
+  `piece_regex` is never called there. Three other tests initialise
+  `piece_regex` with inputs of 12 KB and above.
+- Missing evidence: an isolated cold process with concurrent first callers whose
+  inputs include an over-cap string.
+- Conclusion: Exercised is partial; the Check names the isolated cold process.

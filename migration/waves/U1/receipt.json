@@ -34,7 +34,7 @@
     {
       "source": null,
       "destination": "package.json",
-      "destination_sha256": "5777b58feffa44eb9322f5ebe96f7139ab8e60088fccdd15b3d8f3050998776b",
+      "destination_sha256": "7309ebf4d942afd6f723837877708c2e8bdefc347211ec6d6518f356c3238e47",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

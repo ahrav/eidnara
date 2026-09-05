@@ -19,8 +19,11 @@ callback count. The per-channel progress claim had no owner.
   documented meaning "poll again instead of blocking".
 - `packages/shm-native/tests/mechanism.ts:211-278`: the single-channel suite
   cited by `wake-published-during-readiness-callback-is-not-lost`.
-- `packages/shm-native/tests/capability.ts`: the capability probe opens two
-  channels, so a two-channel client exists in the tree's own tests.
+- `packages/shm-native/tests/mechanism.ts:168-205`: two channels are watched
+  through `startReadiness` (`:174`, `:178`), the first handler throws, the
+  second channel is published to (`:192`), and delivery is asserted within one
+  second; this is two-channel delivery under the shared acknowledgement, without
+  the edge timed inside the first channel's pending window.
 
 ## Failure scenario
 

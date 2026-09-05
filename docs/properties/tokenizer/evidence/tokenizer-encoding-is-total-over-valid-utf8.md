@@ -21,8 +21,12 @@ inputs above the cap; no record owned totality.
 - `crates/tokenizer/tests/token_golden.rs:116`, `:134`, `:150`: the over-long
   tests use letter and CJK runs and assert chunk structure; none is shaped to
   stress backtracking.
-- The evaluation records the corpus's longest whitespace run as 50 spaces
-  (`gen-token-golden.ts:79`).
+- The corpus's longest whitespace run is 51 spaces: `gen-token-golden.ts:79`
+  repeats 50 after a literal space separator.
+- `fancy-regex` 0.17 defaults `backtrack_limit` to 1,000,000, and the
+  `(?!...)` at `lib.rs:70-72` forces its backtracking engine rather than
+  delegation to `regex`, so the `expect` at `:140` is reachable in principle;
+  every over-cap input passes through it once per match.
 
 ## Failure scenario
 
