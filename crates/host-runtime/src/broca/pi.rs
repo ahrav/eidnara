@@ -16,8 +16,10 @@ use super::backend::{
     self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
     EventSink, FinishReason, Harness, LlmExecutionBackend,
 };
+use super::config::MAX_PI_PROVIDER_EXTENSIONS;
+use super::subprocess::group_registry::StateRoot;
 use super::subprocess::{
-    self, EnvSnapshot, HarnessName, PrivateDir, ProbeSignal, SubprocessLimits, SubprocessSpec,
+    self, EnvSnapshot, PrivateDir, ProbeSignal, SubprocessLimits, SubprocessSpec,
 };
 use crate::harness_closure::ValidatedHarnessClosure;
 
@@ -54,16 +56,24 @@ pub struct PiBackend {
     thinking_level: Option<String>,
     limits: SubprocessLimits,
     env: EnvSnapshot,
+    state_root: StateRoot,
 }
 
 impl PiBackend {
-    pub fn new(descriptor: PiRuntimeDescriptor, env: EnvSnapshot) -> Self {
-        Self::with_limits(descriptor, env, None, SubprocessLimits::default())
+    pub fn new(descriptor: PiRuntimeDescriptor, env: EnvSnapshot, state_root: StateRoot) -> Self {
+        Self::with_limits(
+            descriptor,
+            env,
+            state_root,
+            None,
+            SubprocessLimits::default(),
+        )
     }
 
     pub fn with_limits(
         descriptor: PiRuntimeDescriptor,
         env: EnvSnapshot,
+        state_root: StateRoot,
         thinking_level: Option<String>,
         limits: SubprocessLimits,
     ) -> Self {
@@ -72,6 +82,7 @@ impl PiBackend {
             thinking_level,
             limits,
             env,
+            state_root,
         }
     }
 }
@@ -85,7 +96,6 @@ impl LlmExecutionBackend for PiBackend {
     ) -> BackendFuture {
         // A run bound to another harness must fail, not silently execute
         // PiBackend must not execute a non-Pi request with Pi provider aliases or credentials.
-        // credentials.
         if request.harness != Harness::Pi {
             let terminal = backend::harness_mismatch(Harness::Pi, request.harness);
             return Box::pin(async move { terminal });
@@ -101,15 +111,41 @@ impl LlmExecutionBackend for PiBackend {
         let thinking_level = self.thinking_level.clone();
         let limits = self.limits.clone();
         let env = self.env.clone();
+        let state_root = self.state_root.clone();
         Box::pin(run_pi_with_provider_fallback(
-            descriptor,
-            thinking_level,
-            limits,
-            env,
+            PiRun {
+                descriptor,
+                thinking_level,
+                limits,
+                env,
+                state_root,
+                deadline: None,
+            },
             request,
             events,
             cancel,
         ))
+    }
+
+    /// Resolving every node `run_pi` needs re-proves the same closure invariants, so a rejected send and a failed run report the same subreason.
+    fn unavailable_reason(&self, harness: Harness) -> Option<&'static str> {
+        if harness != Harness::Pi {
+            return None;
+        }
+        // `run_pi` holds every resolved extension descriptor at once, so an oversized set fails the run; a rejected send must report the same subreason.
+        if self.descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
+            return Some("extension_budget_exceeded");
+        }
+        let closure = &self.descriptor.closure;
+        let mut required = [
+            &self.descriptor.interpreter_node,
+            &self.descriptor.entrypoint_node,
+        ]
+        .into_iter()
+        .chain(self.descriptor.provider_extension_nodes.iter());
+        required
+            .any(|node| closure.resolve_node_descriptor(node).is_err())
+            .then_some("closure_incomplete")
     }
 }
 
@@ -124,17 +160,25 @@ pub fn pi_model_ref(provider: &str, model: &str) -> String {
     format!("{pi_provider}/{model}")
 }
 
-/// Pi tries the aliased provider first and retries the canonical provider once after a credential failure.
-/// Direct `openai` and `google` API-key users lack credentials under subscription-extension aliases.
-/// Pi tries each provider at most once.
-/// Both attempts share one wall-clock budget; the retry receives only the remainder.
-/// first attempt whose private-directory cleanup failed forfeits the retry,
-/// A first-attempt cleanup failure blocks the retry so retry success cannot mask disk residue.
-async fn run_pi_with_provider_fallback(
+/// The backend-owned inputs one Pi child invocation needs, separate from the per-request values.
+#[derive(Clone)]
+struct PiRun {
     descriptor: PiRuntimeDescriptor,
     thinking_level: Option<String>,
     limits: SubprocessLimits,
     env: EnvSnapshot,
+    state_root: StateRoot,
+    /// The retry shares the first attempt's wall-clock budget, so it carries an absolute end instant rather than a duration that setup time would escape.
+    deadline: Option<tokio::time::Instant>,
+}
+
+/// Pi tries the aliased provider first and retries the canonical provider once after a credential failure.
+/// Direct `openai` and `google` API-key users lack credentials under subscription-extension aliases.
+/// Pi tries each provider at most once.
+/// Both attempts share one wall-clock budget; the retry receives only the remainder.
+/// A first-attempt cleanup failure or retained crash-ownership record blocks the retry so retry success cannot mask disk or registry residue.
+async fn run_pi_with_provider_fallback(
+    run: PiRun,
     request: BackendRequest,
     events: EventSink,
     cancel: CancellationToken,
@@ -144,24 +188,11 @@ async fn run_pi_with_provider_fallback(
     // Requests without an alias do not retry.
     // The no-alias path creates no clone, so it holds one prompt copy rather than two.
     if aliased == canonical {
-        return run_pi(
-            descriptor,
-            thinking_level,
-            limits,
-            env,
-            request,
-            events,
-            cancel,
-            aliased,
-        )
-        .await;
+        return run_pi(run, request, events, cancel, aliased).await;
     }
     let started = tokio::time::Instant::now();
     let first = run_pi(
-        descriptor.clone(),
-        thinking_level.clone(),
-        limits.clone(),
-        env.clone(),
+        run.clone(),
         request.clone(),
         events.clone(),
         cancel.clone(),
@@ -169,16 +200,18 @@ async fn run_pi_with_provider_fallback(
     )
     .await;
     // An attempt that left private prompt material on disk must surface its cleanup failure.
-    // A first-attempt cleanup failure blocks the retry.
+    // A retained crash-ownership record blocks retry: success would replace the terminal before
+    // the supervisor latches the record.
     let credential_failure = matches!(
         &first,
         BackendTerminal::Failed(error) if error.class == ErrorClass::AuthRequired
             && !error.message.contains(subprocess::CLEANUP_FAILURE_MARKER)
+            && !error.message.contains(subprocess::RECORD_RETAINED_MARKER)
     );
     if !credential_failure || cancel.is_cancelled() {
         return first;
     }
-    let Some(remaining) = limits.run_timeout.checked_sub(started.elapsed()) else {
+    let Some(remaining) = run.limits.run_timeout.checked_sub(started.elapsed()) else {
         return first;
     };
     if remaining.is_zero() {
@@ -186,128 +219,187 @@ async fn run_pi_with_provider_fallback(
     }
     // The retry drops `first` before retrying to keep concurrent capture buffers within the declared headroom.
     drop(first);
-    let mut retry_limits = limits;
-    retry_limits.run_timeout = remaining;
-    run_pi(
-        descriptor,
-        thinking_level,
-        retry_limits,
-        env,
-        request,
-        events,
-        cancel,
-        canonical,
-    )
-    .await
+    let budget_end = started + run.limits.run_timeout;
+    let mut retry = run;
+    retry.limits.run_timeout = remaining;
+    retry.deadline = Some(budget_end);
+    run_pi(retry, request, events, cancel, canonical).await
 }
 
-#[allow(clippy::too_many_arguments)] // One fully-specified child invocation; grouping would only rename the same set.
+/// Bounds cleanup so a stalled filesystem cannot wedge the setup-abort path; an elapsed bound reports the cleanup as unproven. commentlint: allow(JUDGE)
+async fn abort_setup_with_dir(
+    abort: subprocess::SetupAbort,
+    dir: PrivateDir,
+    grace: std::time::Duration,
+) -> BackendTerminal {
+    let cleanup = subprocess::bounded_cleanup(dir, grace).await;
+    subprocess::merge_cleanup(
+        subprocess::setup_aborted_terminal(Harness::Pi, abort),
+        cleanup,
+    )
+}
+
 async fn run_pi(
-    descriptor: PiRuntimeDescriptor,
-    thinking_level: Option<String>,
-    limits: SubprocessLimits,
-    env: EnvSnapshot,
+    run: PiRun,
     request: BackendRequest,
     events: EventSink,
     cancel: CancellationToken,
     model_ref: String,
 ) -> BackendTerminal {
+    let PiRun {
+        descriptor,
+        thinking_level,
+        mut limits,
+        env,
+        state_root,
+        deadline,
+    } = run;
     let mut child_env = match env.provider_row("pi", &request.provider) {
         Ok(row) => row,
         Err(error) => {
-            return subprocess::credential_failure(HarnessName::Pi, error);
+            return subprocess::credential_failure(Harness::Pi, error);
         }
     };
-    let dir = match PrivateDir::create("broca-pi") {
-        Ok(dir) => dir,
-        Err(err) => return subprocess::spawn_failure(HarnessName::Pi, &err),
+    // The bound is checked before resolution so an oversized descriptor set opens no files.
+    if descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
+        return subprocess::harness_unavailable_failure(Harness::Pi, "extension_budget_exceeded");
+    }
+    // Setup races cancellation and `setup_deadline` so stalled closure-store or directory I/O cannot block cancellation before spawning a child.
+    let setup_deadline =
+        deadline.unwrap_or_else(|| tokio::time::Instant::now() + limits.run_timeout);
+    // Closure resolution precedes the private directory so an unavailable harness never writes the caller-private system prompt to disk.
+    // Resolution opens and stats every node, so it runs on the blocking pool in one hop rather than on a runtime worker.
+    let closure = Arc::clone(&descriptor.closure);
+    let interpreter_node = descriptor.interpreter_node.clone();
+    let entrypoint_node = descriptor.entrypoint_node.clone();
+    let extension_nodes = descriptor.provider_extension_nodes.clone();
+    let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
+        let interpreter = closure.resolve_node_descriptor(&interpreter_node).ok()?;
+        let entrypoint = closure.resolve_node_descriptor(&entrypoint_node).ok()?;
+        let mut extensions = Vec::with_capacity(extension_nodes.len());
+        for node in &extension_nodes {
+            extensions.push(closure.resolve_node_descriptor(node).ok()?);
+        }
+        Some((interpreter, entrypoint, extensions))
+    }));
+    // An abandoned resolution only reads the closure store, so it leaves no residue. commentlint: allow(JUDGE)
+    let resolved = match subprocess::race_setup(&cancel, setup_deadline, &mut resolve).await {
+        Ok(resolved) => resolved,
+        Err(abort) => return subprocess::setup_aborted_terminal(Harness::Pi, abort),
     };
-    // `run_pi` writes the compiled-in hook bytes to a 0600 file in the per-run 0700 directory so no installed hook path can be swapped under the daemon.
-    let hook_path = match dir.write_private(PI_BROCA_EXTENSION_FILE, PI_BROCA_EXTENSION_BYTES) {
-        Ok(path) => path,
-        Err(err) => {
+    let (interpreter, entrypoint, resolved_extensions) = match resolved {
+        Ok(Some(resolved)) => resolved,
+        Ok(None) => {
+            return subprocess::harness_unavailable_failure(Harness::Pi, "closure_incomplete");
+        }
+        Err(err) => return subprocess::spawn_failure(Harness::Pi, &err),
+    };
+
+    let mut create = std::pin::pin!(PrivateDir::create_async(state_root.clone(), "broca-pi"));
+    let dir = match subprocess::race_setup(&cancel, setup_deadline, &mut create).await {
+        Ok(Ok(dir)) => dir,
+        Ok(Err(err)) => return subprocess::spawn_failure(Harness::Pi, &err),
+        Err(abort) => {
+            // The in-flight creation gets a grace period to return its directory for cleanup.
+            // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort. commentlint: allow(JUDGE)
+            let cleanup = match tokio::time::timeout(limits.termination_grace, &mut create).await {
+                Ok(Ok(dir)) => subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+                Ok(Err(_)) => Ok(()),
+                Err(_) => Err(subprocess::cleanup_unproven()),
+            };
             return subprocess::merge_cleanup(
-                subprocess::spawn_failure(HarnessName::Pi, &err),
-                dir.cleanup(),
+                subprocess::setup_aborted_terminal(Harness::Pi, abort),
+                cleanup,
             );
         }
     };
-    // `run_pi` writes caller-private system prompts to a private 0600 file instead of passing them through argv.
-    let system_prompt_path = match &request.system {
-        None => None,
-        Some(system) => match dir.write_private("system-prompt.txt", system.as_bytes()) {
-            Ok(path) => Some(path),
-            Err(err) => {
-                return subprocess::merge_cleanup(
-                    subprocess::spawn_failure(HarnessName::Pi, &err),
-                    dir.cleanup(),
-                );
+    // `run_pi` writes the compiled-in hook bytes to a 0600 file in the per-run 0700 directory so no installed hook path can be swapped under the daemon.
+    let hook_write = {
+        let mut write = std::pin::pin!(dir.write_private_async(
+            PI_BROCA_EXTENSION_FILE.to_owned(),
+            PI_BROCA_EXTENSION_BYTES.to_vec(),
+        ));
+        match subprocess::race_setup(&cancel, setup_deadline, &mut write).await {
+            Ok(written) => Ok(written),
+            Err(abort) => {
+                // The in-flight write gets a grace period to land inside the directory before that directory is removed. commentlint: allow(JUDGE)
+                let _ = tokio::time::timeout(limits.termination_grace, &mut write).await;
+                Err(abort)
             }
-        },
+        }
+    };
+    let hook_path = match hook_write {
+        Ok(Ok(path)) => path,
+        Ok(Err(err)) => {
+            return subprocess::merge_cleanup(
+                subprocess::spawn_failure(Harness::Pi, &err),
+                subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+            );
+        }
+        Err(abort) => return abort_setup_with_dir(abort, dir, limits.termination_grace).await,
+    };
+    // `run_pi` writes caller-private system prompts to a private 0600 file instead of passing them through argv.
+    let system_prompt_write = match &request.system {
+        None => Ok(None),
+        Some(system) => {
+            let mut write = std::pin::pin!(
+                dir.write_private_async("system-prompt.txt".to_owned(), system.as_bytes().to_vec())
+            );
+            match subprocess::race_setup(&cancel, setup_deadline, &mut write).await {
+                Ok(written) => Ok(Some(written)),
+                Err(abort) => {
+                    // The in-flight write gets a grace period to land inside the directory before that directory is removed. commentlint: allow(JUDGE)
+                    let _ = tokio::time::timeout(limits.termination_grace, &mut write).await;
+                    Err(abort)
+                }
+            }
+        }
+    };
+    let system_prompt_path = match system_prompt_write {
+        Ok(None) => None,
+        Ok(Some(Ok(path))) => Some(path),
+        Ok(Some(Err(err))) => {
+            return subprocess::merge_cleanup(
+                subprocess::spawn_failure(Harness::Pi, &err),
+                subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+            );
+        }
+        Err(abort) => return abort_setup_with_dir(abort, dir, limits.termination_grace).await,
     };
 
     // `request.prompt` travels only over stdin, so `run_pi` passes no positional message.
-    let mut args = vec![
-        "--print".to_owned(),
-        "--mode".to_owned(),
-        "json".to_owned(),
-        "--no-session".to_owned(),
-        "--no-skills".to_owned(),
-        "--no-prompt-templates".to_owned(),
-        "--no-context-files".to_owned(),
-        // The run exposes a closed tool surface: it maps the prompt to text.
-        // transform.
-        "--no-tools".to_owned(),
-        // `--no-approve` treats project-local settings and extensions as untrusted for the run.
-        "--no-approve".to_owned(),
-        "--no-extensions".to_owned(),
-    ];
-    let interpreter = match descriptor
-        .closure
-        .resolve_node_descriptor(&descriptor.interpreter_node)
-    {
-        Ok(path) => path,
-        Err(_) => {
-            return subprocess::harness_unavailable_failure(HarnessName::Pi, "closure_incomplete");
-        }
-    };
-    let entrypoint = match descriptor
-        .closure
-        .resolve_node_descriptor(&descriptor.entrypoint_node)
-    {
-        Ok(path) => path,
-        Err(_) => {
-            return subprocess::harness_unavailable_failure(HarnessName::Pi, "closure_incomplete");
-        }
-    };
     // Node resolves sibling modules relative to the entrypoint path, so the descriptor path must lead back to the closure tree.
-    args.insert(0, entrypoint.module_path().to_string_lossy().into_owned());
-    let mut resolved_extensions = Vec::with_capacity(descriptor.provider_extension_nodes.len());
-    for extension_node in &descriptor.provider_extension_nodes {
-        let extension = match descriptor.closure.resolve_node_descriptor(extension_node) {
-            Ok(path) => path,
-            Err(_) => {
-                return subprocess::harness_unavailable_failure(
-                    HarnessName::Pi,
-                    "closure_incomplete",
-                );
-            }
-        };
-        args.push("--extension".to_owned());
-        args.push(extension.module_path().to_string_lossy().into_owned());
-        resolved_extensions.push(extension);
+    // Path arguments stay `OsString` end to end: a lossy UTF-8 conversion would rename a non-UTF-8 path before the child resolves it.
+    let mut args: Vec<OsString> = vec![
+        entrypoint.module_path().as_os_str().to_owned(),
+        OsString::from("--print"),
+        OsString::from("--mode"),
+        OsString::from("json"),
+        OsString::from("--no-session"),
+        OsString::from("--no-skills"),
+        OsString::from("--no-prompt-templates"),
+        OsString::from("--no-context-files"),
+        // The run exposes a closed tool surface: it maps the prompt to text.
+        OsString::from("--no-tools"),
+        // `--no-approve` treats project-local settings and extensions as untrusted for the run.
+        OsString::from("--no-approve"),
+        OsString::from("--no-extensions"),
+    ];
+    for extension in &resolved_extensions {
+        args.push(OsString::from("--extension"));
+        args.push(extension.module_path().as_os_str().to_owned());
     }
-    args.push("--extension".to_owned());
-    args.push(hook_path.to_string_lossy().into_owned());
+    args.push(OsString::from("--extension"));
+    args.push(hook_path.into_os_string());
     if let Some(path) = &system_prompt_path {
-        args.push("--system-prompt".to_owned());
-        args.push(path.to_string_lossy().into_owned());
+        args.push(OsString::from("--system-prompt"));
+        args.push(path.as_os_str().to_owned());
     }
-    args.push("--model".to_owned());
-    args.push(model_ref);
+    args.push(OsString::from("--model"));
+    args.push(OsString::from(model_ref));
     if let Some(level) = &thinking_level {
-        args.push("--thinking".to_owned());
-        args.push(level.clone());
+        args.push(OsString::from("--thinking"));
+        args.push(OsString::from(level.clone()));
     }
 
     child_env.push((OsString::from(EIDNARA_PI_SUBAGENT_ENV), OsString::from("1")));
@@ -339,20 +431,32 @@ async fn run_pi(
                     .filter_map(|extension| extension.module_inherited_fd()),
             )
             .collect(),
+        state_root,
     };
+
+    // The subprocess receives only the budget remaining after setup, so setup plus execution stay within one attempt budget for first attempts and retries alike. commentlint: allow(JUDGE)
+    let remaining = setup_deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return subprocess::merge_cleanup(
+            subprocess::budget_exhausted_failure(Harness::Pi),
+            subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+        );
+    }
+    limits.run_timeout = remaining;
 
     let result = match subprocess::run(spec, &limits, &cancel, Some(pi_terminal_probe)).await {
         Ok(result) => result,
         Err(err) => {
             return subprocess::merge_cleanup(
-                subprocess::spawn_failure(HarnessName::Pi, &err),
-                dir.cleanup(),
+                subprocess::spawn_failure(Harness::Pi, &err),
+                subprocess::bounded_cleanup(dir, limits.termination_grace).await,
             );
         }
     };
 
     let parsed = subprocess::parse_clean_transcript(&result, &events, parse_pi_transcript);
-    subprocess::finalize(HarnessName::Pi, &result, parsed, &limits, dir.cleanup())
+    let cleanup = subprocess::bounded_cleanup(dir, limits.termination_grace).await;
+    subprocess::finalize(Harness::Pi, &result, parsed, &limits, cleanup)
 }
 
 /// The probe starts the drain grace after a terminal stdout event.

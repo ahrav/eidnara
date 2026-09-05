@@ -9,6 +9,7 @@
 //! Run state is process-local; after restart, every prior run ID resolves to `missing`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use sha2::{Digest, Sha256};
@@ -21,8 +22,11 @@ use super::backend::{
     BackendError, BackendEvent, BackendRequest, BackendTerminal, ErrorClass, EventSink, Harness,
     LlmExecutionBackend, SinkStatus,
 };
-use super::config::{BrocaLimits, TERMINAL_HEADROOM_BYTES};
+use super::config::{
+    BrocaLimits, KEY_META_OVERHEAD_BYTES, SESSION_IDENTITY_COPIES, TERMINAL_HEADROOM_BYTES,
+};
 use super::protocol::{self, RequestError, SendRequest};
+use super::subprocess;
 use crate::wire::{ByteBudget, ByteCharge};
 
 /// `SessionKey` scopes route claims and grants no authority beyond the authenticated host bearer.
@@ -44,14 +48,13 @@ impl std::fmt::Debug for SessionKey {
 }
 
 impl SessionKey {
-    /// `meta_bytes` charges each identity string three times because the session map, `Run`, and `BackendRequest` each retain a copy; tombstones remain overcharged to keep the budget a ceiling.
+    /// Tombstones remain overcharged to keep the budget a ceiling.
     fn meta_bytes(&self) -> usize {
-        const KEY_META_OVERHEAD_BYTES: usize = 128;
         self.project_root
             .as_os_str()
             .len()
             .saturating_add(self.session.len())
-            .saturating_mul(3)
+            .saturating_mul(SESSION_IDENTITY_COPIES)
             .saturating_add(KEY_META_OVERHEAD_BYTES)
     }
 }
@@ -112,6 +115,11 @@ struct RunState {
     /// `work_done` does not prove descendants stopped; they may still execute a billable request.
     /// Cancel and delete report failure if descendants may still execute a billable request.
     work_unresolved: bool,
+    /// `cleanup_unresolved` means the backend could not remove the run's private files; caller-private prompt material may remain on disk.
+    /// The latch survives the cancellation terminal replacing the backend terminal that carried the failure text.
+    cleanup_unresolved: bool,
+    /// `record_unresolved` means the backend could not remove the run's crash-ownership record, which outlives the run in the registry.
+    record_unresolved: bool,
     /// `purged` removes the run from both indices; subscribers detach instead of replaying its log.
     /// A subscriber-held frame retains its charge until the subscriber drops it.
     purged: bool,
@@ -212,6 +220,14 @@ struct Inner {
     retained: ByteBudget,
     tracker: TaskTracker,
     closing: CancellationToken,
+    /// Runs whose backend could not prove process-group teardown, counted once per run.
+    /// The count survives terminal-cap eviction and retention expiry so `shutdown` cannot lose a verdict the index no longer holds.
+    unresolved_runs: AtomicUsize,
+    /// Runs whose backend could not remove their private files, counted once per run.
+    /// The count survives terminal-cap eviction and retention expiry so shutdown reporting cannot lose the residue verdict.
+    cleanup_unresolved_runs: AtomicUsize,
+    /// Runs whose crash-ownership record could not be removed, counted once per run.
+    record_unresolved_runs: AtomicUsize,
 }
 
 /// Tests use this read-only capacity snapshot to prove every permit and byte charge returns exactly to baseline across all failure paths.
@@ -274,6 +290,9 @@ impl Supervisor {
                 retained: ByteBudget::new(limits.max_retained_bytes),
                 tracker: TaskTracker::new(),
                 closing: CancellationToken::new(),
+                unresolved_runs: AtomicUsize::new(0),
+                cleanup_unresolved_runs: AtomicUsize::new(0),
+                record_unresolved_runs: AtomicUsize::new(0),
                 limits,
             }),
         }
@@ -396,6 +415,8 @@ impl Supervisor {
                 subscriber_count: 0,
                 work_done: false,
                 work_unresolved: false,
+                cleanup_unresolved: false,
+                record_unresolved: false,
                 purged: false,
                 completed_at: None,
                 run_permit: Some(run_permit),
@@ -462,15 +483,15 @@ impl Supervisor {
             },
         );
         wait_work_done(&run).await;
-        Self::unresolved_teardown_error(&run)
+        Self::settlement_error(&run)
     }
 
     /// Cancels a live run, waits for its task, purges replay and charges, and installs a bounded tombstone.
     /// Delete installs a bounded tombstone; a second delete has no effect.
-    /// side-effect free.
+    /// A replacement run admitted before delete installs its tombstone belongs to the deleted session, so delete cancels it too.
     pub async fn delete(&self, key: &SessionKey) -> Result<(), RequestError> {
         let _command = self.command_permit()?;
-        let run = {
+        let mut run = {
             let mut released = Released::default();
             let mut index = lock_index(&self.inner);
             if index.closed {
@@ -483,86 +504,107 @@ impl Supervisor {
                 Some(SessionEntry::Tombstone(_)) | None => return Ok(()),
             }
         };
-        run.cancel.cancel();
-        finish(
-            &self.inner,
-            &run,
-            TerminalOutcome::Cancelled {
-                message: "session deleted",
-            },
-        );
         // Reserve tombstone capacity before waiting so eviction cannot consume the deletion guard's budget.
-        let reserved_tombstone = self.inner.retained.try_charge(key.meta_bytes());
-        wait_work_done(&run).await;
+        let mut reserved_tombstone = self.inner.retained.try_charge(key.meta_bytes());
+        let mut settlement = SettlementFlags::default();
+        // Each iteration needs a racing admission in the window between eviction and this lock reacquisition; the tombstone installed on exit closes that window.
+        loop {
+            run.cancel.cancel();
+            finish(
+                &self.inner,
+                &run,
+                TerminalOutcome::Cancelled {
+                    message: "session deleted",
+                },
+            );
+            wait_work_done(&run).await;
+            settlement.absorb(&run);
 
-        let mut released = Released::default();
-        let mut index = lock_index(&self.inner);
-        // Only the delete that still owns `run` purges it, preventing double release.
-        let same_run = matches!(
-            index.sessions.get(key),
-            Some(SessionEntry::Live(current)) if Arc::ptr_eq(current, &run)
-        );
-        if same_run {
-            if let Some(charge) = reserved_tombstone {
-                released.charges.push(charge);
+            let mut released = Released::default();
+            let mut index = lock_index(&self.inner);
+            // Shutdown may have drained the index during the wait; never publish state into a closed index.
+            // `reserved_tombstone` releases its bytes on drop.
+            if index.closed {
+                drop(index);
+                return Err(closed_error());
             }
-            index.sessions.remove(key);
-            index.runs.remove(&run.run_id);
-            let mut state = lock_run(&run);
-            state.purged = true;
-            // Splitting `state.base_charge` under the index lock prevents a budget gap while replacing the run with a tombstone.
-            let tombstone_charge = state.base_charge.split_or_take(key.meta_bytes());
-            released.charges.push(std::mem::replace(
-                &mut state.base_charge,
-                ByteCharge::none(),
-            ));
-            released.replays.push(std::mem::take(&mut state.replay));
-            drop(state);
-            index.sessions.insert(
-                key.clone(),
-                SessionEntry::Tombstone(Tombstone {
-                    created_at: Instant::now(),
-                    _charge: tombstone_charge,
-                }),
+            // Only the delete that still owns `run` purges it, preventing double release.
+            let same_run = matches!(
+                index.sessions.get(key),
+                Some(SessionEntry::Live(current)) if Arc::ptr_eq(current, &run)
             );
-            run.notify.notify_waiters();
-        } else if !index.sessions.contains_key(key) {
-            // Install a tombstone if `run` was removed during `wait_work_done` so the deletion guard remains present.
-            // Use the reservation taken before the wait because the removed run's charges have already been released.
-            // Install an uncharged tombstone if both charge attempts fail rather than omit the deletion guard.
-            // Do not replace a different live run; it was installed after this run was removed.
-            // tombstone.
-            let charge = reserved_tombstone
-                .or_else(|| self.inner.retained.try_charge(key.meta_bytes()))
-                .unwrap_or_else(ByteCharge::none);
-            index.sessions.insert(
-                key.clone(),
-                SessionEntry::Tombstone(Tombstone {
-                    created_at: Instant::now(),
-                    _charge: charge,
-                }),
-            );
-            // Run the terminal-session cap with the new tombstone protected so the cap cannot evict it.
-            enforce_terminal_cap(&self.inner, &mut index, "", Some(key), &mut released);
-        } else if let Some(charge) = reserved_tombstone {
-            released.charges.push(charge);
+            if same_run {
+                if let Some(charge) = reserved_tombstone.take() {
+                    released.charges.push(charge);
+                }
+                index.sessions.remove(key);
+                index.runs.remove(&run.run_id);
+                let mut state = lock_run(&run);
+                state.purged = true;
+                // Splitting `state.base_charge` under the index lock prevents a budget gap while replacing the run with a tombstone.
+                let tombstone_charge = state.base_charge.split_or_take(key.meta_bytes());
+                released.charges.push(std::mem::replace(
+                    &mut state.base_charge,
+                    ByteCharge::none(),
+                ));
+                released.replays.push(std::mem::take(&mut state.replay));
+                drop(state);
+                index.sessions.insert(
+                    key.clone(),
+                    SessionEntry::Tombstone(Tombstone {
+                        created_at: Instant::now(),
+                        _charge: tombstone_charge,
+                    }),
+                );
+                run.notify.notify_waiters();
+                drop(index);
+                break;
+            }
+            match index.sessions.get(key) {
+                None => {
+                    // Install a tombstone if `run` was removed during `wait_work_done` so the deletion guard remains present.
+                    // Use the reservation taken before the wait because the removed run's charges have already been released.
+                    // Install an uncharged tombstone if both charge attempts fail rather than omit the deletion guard.
+                    let charge = reserved_tombstone
+                        .take()
+                        .or_else(|| self.inner.retained.try_charge(key.meta_bytes()))
+                        .unwrap_or_else(ByteCharge::none);
+                    index.sessions.insert(
+                        key.clone(),
+                        SessionEntry::Tombstone(Tombstone {
+                            created_at: Instant::now(),
+                            _charge: charge,
+                        }),
+                    );
+                    // Run the terminal-session cap with the new tombstone protected so the cap cannot evict it.
+                    enforce_terminal_cap(&self.inner, &mut index, "", Some(key), &mut released);
+                    drop(index);
+                    break;
+                }
+                // A concurrent delete already installed the deletion guard.
+                Some(SessionEntry::Tombstone(_)) => {
+                    if let Some(charge) = reserved_tombstone.take() {
+                        released.charges.push(charge);
+                    }
+                    drop(index);
+                    break;
+                }
+                // A replacement admitted after eviction removed `run` during the wait belongs to the deleted session; cancel it too.
+                Some(SessionEntry::Live(replacement)) => {
+                    run = Arc::clone(replacement);
+                    drop(index);
+                }
+            }
         }
-        drop(index);
         // Retained bytes remain bounded whether tombstone charging succeeds or fails.
-        Self::unresolved_teardown_error(&run)
+        settlement.error()
     }
 
-    /// Return a teardown error when the backend cannot prove that its process tree stopped.
-    /// `work_done` proves only that the run task returned, not that the backend process tree stopped.
-    fn unresolved_teardown_error(run: &Arc<Run>) -> Result<(), RequestError> {
-        if lock_run(run).work_unresolved {
-            return Err(app(
-                "teardown_unconfirmed",
-                "the harness process group could not be confirmed stopped; \
-                 work may still be running",
-            ));
-        }
-        Ok(())
+    /// `work_done` proves only that the run task returned, not that the backend process tree stopped or its private files were removed.
+    fn settlement_error(run: &Arc<Run>) -> Result<(), RequestError> {
+        let mut flags = SettlementFlags::default();
+        flags.absorb(run);
+        flags.error()
     }
 
     /// Dropping `Subscription` does not cancel the run.
@@ -586,7 +628,6 @@ impl Supervisor {
         let mut state = lock_run(&run);
         if state.subscriber_count >= self.inner.limits.max_subscribers_per_run {
             // The total permit drops after the guards, so rejecting a run cannot leak a total slot.
-            // The total permit drops after the guards, so rejecting a run cannot leak a total slot.
             return Err(app(
                 "queue_full",
                 "per-run subscriber capacity is exhausted",
@@ -606,12 +647,10 @@ impl Supervisor {
     /// Drains everything:
     /// Shutdown cancels queued and running backend work, waits for all run tasks, wakes every subscriber, and releases retained state.
     /// After shutdown, the metrics snapshot equals the construction baseline.
-    /// After shutdown, the metrics snapshot equals the construction baseline.
     ///
     /// Returns the number of runs with unproven process-group teardown in `work_unresolved`.
     /// Local state is released even when process-group teardown is unproven.
     /// A drained supervisor does not prove that harness process trees stopped.
-    /// The component must not report a clean shutdown while provider work may still be running.
     /// The component must not report a clean shutdown while provider work may still be running.
     pub async fn shutdown(&self) -> usize {
         let inner = &self.inner;
@@ -627,11 +666,8 @@ impl Supervisor {
         inner.tracker.close();
         inner.tracker.wait().await;
         // Read after the tracker drain because every backend task has returned and each run's teardown verdict is final.
-        // Every backend task has returned, so each run's teardown verdict is final.
-        let unresolved = runs
-            .iter()
-            .filter(|run| lock_run(run).work_unresolved)
-            .count();
+        // The counter, not the index, is authoritative: a run evicted by the terminal cap or expired by retention keeps its verdict here.
+        let unresolved = inner.unresolved_runs.load(Ordering::Relaxed);
         let mut released = Released::default();
         let mut index = lock_index(inner);
         let sessions: Vec<SessionKey> = index.sessions.keys().cloned().collect();
@@ -641,6 +677,18 @@ impl Supervisor {
         debug_assert!(index.runs.is_empty(), "every run is session-owned");
         index.runs.clear();
         unresolved
+    }
+
+    /// Counts runs whose private files could not be removed, once per run.
+    /// The counter is final only after `shutdown` drains the task tracker; the component reads it to refuse a clean shutdown while caller-private prompt material may remain on disk.
+    pub fn cleanup_unresolved_runs(&self) -> usize {
+        self.inner.cleanup_unresolved_runs.load(Ordering::Relaxed)
+    }
+
+    /// Counts runs whose crash-ownership record could not be removed, once per run.
+    /// The counter is final only after `shutdown` drains the task tracker.
+    pub fn record_unresolved_runs(&self) -> usize {
+        self.inner.record_unresolved_runs.load(Ordering::Relaxed)
     }
 
     /// The sweep releases expired retained entries so their charges cannot wedge the budget.
@@ -756,7 +804,9 @@ impl Supervisor {
                     } else {
                         "backend task was aborted"
                     };
-                    BackendTerminal::Failed(BackendError {
+                    // Unwinding drops the child, and `kill_on_drop` signals only the leader; descendants keep the process group.
+                    // The retained registry record cannot be swept while this host is live, so teardown stays unproven.
+                    BackendTerminal::FailedUnresolved(BackendError {
                         class: ErrorClass::Permanent,
                         message: message.to_owned(),
                         retry_after_secs: None,
@@ -768,7 +818,16 @@ impl Supervisor {
             // After another terminal commits, `finish` cannot record `FailedUnresolved`.
             // `wait_work_done` must observe `work_unresolved` after backend exit.
             if matches!(terminal, BackendTerminal::FailedUnresolved(_)) {
-                lock_run(&run).work_unresolved = true;
+                mark_unresolved(&inner, &mut lock_run(&run));
+            }
+            // A committed cancellation terminal replaces the backend terminal below, so a cleanup failure it carries must latch first.
+            // Cancel, delete, and shutdown reporting read this latch.
+            if subprocess::terminal_reports_cleanup_residue(&terminal) {
+                mark_cleanup_unresolved(&inner, &mut lock_run(&run));
+            }
+            // A retained crash-ownership record outlives the run, so the same arbitration applies.
+            if subprocess::terminal_reports_record_residue(&terminal) {
+                mark_record_unresolved(&inner, &mut lock_run(&run));
             }
             // Cancellation must produce a `Cancelled` terminal even if the backend returns another terminal.
             let outcome = if run.cancel.is_cancelled() {
@@ -781,6 +840,76 @@ impl Supervisor {
             finish(&inner, &run, outcome);
             // `_backend_permit` drops here: the permit is held through reap.
         });
+    }
+}
+
+/// A settlement operation can touch several runs for one session, so it accumulates their verdicts before ranking them.
+#[derive(Default)]
+struct SettlementFlags {
+    work_unresolved: bool,
+    cleanup_unresolved: bool,
+    record_unresolved: bool,
+}
+
+impl SettlementFlags {
+    fn absorb(&mut self, run: &Arc<Run>) {
+        let state = lock_run(run);
+        self.work_unresolved |= state.work_unresolved;
+        self.cleanup_unresolved |= state.cleanup_unresolved;
+        self.record_unresolved |= state.record_unresolved;
+    }
+
+    /// Unproven teardown outranks cleanup residue because live descendants can keep executing a billable request.
+    /// Cleanup residue outranks a retained record because caller-private material is more sensitive than coordination state.
+    /// Ranking runs after every verdict is absorbed, so one run's cleanup residue cannot hide another's unproven teardown.
+    fn error(&self) -> Result<(), RequestError> {
+        if self.work_unresolved {
+            return Err(app(
+                "teardown_unconfirmed",
+                "the harness process group could not be confirmed stopped; \
+                 work may still be running",
+            ));
+        }
+        if self.cleanup_unresolved {
+            return Err(app(
+                "cleanup_unconfirmed",
+                "the run's private files could not be removed; \
+                 caller-private prompt material may remain on disk",
+            ));
+        }
+        if self.record_unresolved {
+            return Err(app(
+                "record_unconfirmed",
+                "the run's crash-ownership record could not be removed; \
+                 it remains in the registry for a later sweep",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Latches `work_unresolved` and counts the run once, so both the backend-return path and `finish` can report the same verdict without double counting.
+fn mark_unresolved(inner: &Inner, state: &mut RunState) {
+    if !state.work_unresolved {
+        state.work_unresolved = true;
+        inner.unresolved_runs.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Latches `cleanup_unresolved` and counts the run once; the counter keeps the residue verdict after the index drops the run.
+fn mark_cleanup_unresolved(inner: &Inner, state: &mut RunState) {
+    if !state.cleanup_unresolved {
+        state.cleanup_unresolved = true;
+        inner
+            .cleanup_unresolved_runs
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn mark_record_unresolved(inner: &Inner, state: &mut RunState) {
+    if !state.record_unresolved {
+        state.record_unresolved = true;
+        inner.record_unresolved_runs.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -963,7 +1092,7 @@ fn finish(inner: &Arc<Inner>, run: &Arc<Run>, outcome: TerminalOutcome) {
             }
             // `work_unresolved` prevents cancel and delete from reporting success while backend work may still run.
             TerminalOutcome::Backend(BackendTerminal::FailedUnresolved(error)) => {
-                state.work_unresolved = true;
+                mark_unresolved(inner, &mut state);
                 (protocol::error_unit(&run.run_id, error), Status::Failed)
             }
             TerminalOutcome::Cancelled { message } => (
@@ -1027,10 +1156,10 @@ fn enforce_terminal_cap(
                     if !state.terminal_appended {
                         continue;
                     }
-                    // A terminal run with unresolved backend work is not evictable.
-                    // Eviction would make later cancel and delete take the unknown-run success path without observing `work_unresolved`.
-                    // Eviction would also release charges for state still held by the backend task.
+                    // A terminal run whose task has not returned is not evictable.
+                    // Eviction would release charges for state still held by the backend task.
                     // Backend permits bound the number of transiently unevictable runs.
+                    // A returned run with `work_unresolved` is evictable; `Inner::unresolved_runs` keeps its verdict for `shutdown`.
                     (
                         state.completed_at,
                         state.work_done && state.subscriber_count == 0 && run.run_id != keep_run_id,

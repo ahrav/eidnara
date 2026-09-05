@@ -10,7 +10,7 @@ use std::time::Duration;
 use host_runtime::CompositeComponent;
 use host_runtime::broca::BrocaComponent;
 use host_runtime::broca::backend::{BackendError, BackendTerminal, ErrorClass, Harness};
-use host_runtime::broca::config::{BrocaLimits, TERMINAL_RETENTION};
+use host_runtime::broca::config::{self, BrocaLimits, TERMINAL_RETENTION};
 use host_runtime::broca::protocol::SendRequest;
 use host_runtime::broca::supervisor::{SessionKey, Subscription, Supervisor, SupervisorMetrics};
 
@@ -105,20 +105,41 @@ fn default_limits_and_resource_declaration_match_the_fixed_caps() {
     assert_eq!(limits.terminal_retention, Duration::from_secs(15 * 60));
     assert_eq!(host_runtime::broca::config::MAX_SEND_BODY_BYTES, 512 * 1024);
 
-    let component = BrocaComponent::new(ScriptedBackend::completing("out"));
+    let component = BrocaComponent::new(
+        ScriptedBackend::completing("out"),
+        support::broca::state_root(),
+    );
     let resources = component.resources();
     assert_eq!(resources.reserved_pending_requests, 96);
     assert_eq!(resources.reserved_handler_tasks, 96);
     // `Supervisor` charges its 64 MiB retention budget only for retained run data; route metadata, backend capture, tombstones, environment snapshots, and adapter-owned spawn variables are outside that budget.
+    // Each term reads its owner (`SubprocessLimits::default`, the identity bounds, the key overhead) so a change to any owner changes the expected value here.
+    let capture = host_runtime::broca::subprocess::SubprocessLimits::default();
+    let identity_bytes =
+        (config::MAX_ROUTE_PROJECT_ROOT_BYTES + config::MAX_ROUTE_SESSION_BYTES) as u64;
     assert_eq!(
         resources.retained_resident_bytes,
-        64 * 1024 * 1024
-            + 1024 * (4096 + 256 + 3 * (16 + 64) + 1024)
-            + 8 * ((4 * 1024 * 1024 + 64 * 1024) * 5 + 512 * 1024)
-            + 256 * ((4096 + 256) * 3 + 128)
-            + (1 + 3 * 8) * 1536 * 1024
-            + 3 * 8 * (96 * 1024 + 8 * 1024)
+        limits.max_retained_bytes
+            + config::MAX_BOUND_ROUTES as u64
+                * (identity_bytes
+                    + config::MAX_ROUTE_CREDENTIAL_FINGERPRINTS as u64 * (16 + 64)
+                    + 1024)
+            + limits.max_backend_processes as u64
+                * ((capture.max_stdout_bytes + capture.max_stderr_bytes) as u64 * 5
+                    + config::MAX_SEND_BODY_BYTES as u64)
+            + limits.max_terminal_sessions as u64
+                * (identity_bytes * config::SESSION_IDENTITY_COPIES as u64
+                    + config::KEY_META_OVERHEAD_BYTES as u64)
+            + (1 + 3 * limits.max_backend_processes as u64) * config::MAX_ENV_SNAPSHOT_BYTES as u64
+            + 3 * limits.max_backend_processes as u64
+                * (config::MAX_OPENCODE_CONFIG_BYTES as u64 + 8 * 1024)
     );
+    assert_eq!(capture.max_stdout_bytes, 4 * 1024 * 1024);
+    assert_eq!(capture.max_stderr_bytes, 64 * 1024);
+    assert_eq!(config::MAX_ROUTE_PROJECT_ROOT_BYTES, 4096);
+    assert_eq!(config::MAX_ROUTE_SESSION_BYTES, 256);
+    assert_eq!(config::MAX_ROUTE_CREDENTIAL_FINGERPRINTS, 3);
+    assert_eq!(resources.retained_resident_bytes, 292_700_160);
     assert_eq!(resources.route_class, host_runtime::RouteClass::Reserved);
 }
 
@@ -765,6 +786,164 @@ async fn cancellation_winning_the_terminal_still_reports_unproven_teardown() {
     assert_eq!(deleted.code, "teardown_unconfirmed");
 }
 
+/// A committed cancellation terminal replaces the backend terminal, so the cleanup failure it carries must stay observable from cancel and delete.
+#[tokio::test]
+async fn cancellation_winning_the_terminal_still_reports_cleanup_residue() {
+    let backend = ScriptedBackend::with_behavior(|_request, _events, cancel| {
+        Box::pin(async move {
+            cancel.cancelled().await;
+            // The message mirrors `merge_cleanup` output for a cancelled run whose private-directory removal failed.
+            BackendTerminal::Failed(BackendError {
+                class: ErrorClass::Permanent,
+                message: "pi run stopped; additionally sensitive temp cleanup failed \
+                          (PermissionDenied)"
+                    .to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        })
+    });
+    let supervisor = Supervisor::new(backend as Arc<_>);
+
+    let run_id = send(&supervisor, "s-cancel-residue", "p1");
+    until(
+        || supervisor.status(&key("s-cancel-residue"), &run_id) == Ok("running"),
+        "the backend starts before the cancel races it",
+    )
+    .await;
+
+    let cancelled = supervisor
+        .cancel(&key("s-cancel-residue"), &run_id)
+        .await
+        .expect_err("cancel cannot report success while private files may remain");
+    assert_eq!(cancelled.code, "cleanup_unconfirmed");
+    assert_eq!(
+        supervisor.status(&key("s-cancel-residue"), &run_id),
+        Ok("cancelled")
+    );
+
+    let deleted = supervisor
+        .delete(&key("s-cancel-residue"))
+        .await
+        .expect_err("delete reports the same cleanup residue");
+    assert_eq!(deleted.code, "cleanup_unconfirmed");
+
+    // The counter, not the index, keeps the verdict for shutdown reporting.
+    assert_eq!(supervisor.cleanup_unresolved_runs(), 1);
+}
+
+/// Unproven teardown outranks cleanup residue: live descendants can still bill a request, so that verdict must not be hidden.
+#[tokio::test]
+async fn unproven_teardown_outranks_cleanup_residue() {
+    let backend = ScriptedBackend::with_behavior(|_request, _events, _cancel| {
+        Box::pin(async {
+            // One terminal reports both failures, as `merge_cleanup` produces for an unresolved teardown whose cleanup also failed.
+            BackendTerminal::FailedUnresolved(BackendError {
+                class: ErrorClass::Transient,
+                message: "process group teardown was not confirmed; additionally sensitive \
+                          temp cleanup failed (PermissionDenied)"
+                    .to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        })
+    });
+    let supervisor = Supervisor::new(backend as Arc<_>);
+
+    let run_id = send(&supervisor, "s-both", "p1");
+    until(
+        || supervisor.status(&key("s-both"), &run_id) == Ok("failed"),
+        "the run commits its failed terminal",
+    )
+    .await;
+
+    let cancelled = supervisor
+        .cancel(&key("s-both"), &run_id)
+        .await
+        .expect_err("cancel reports the ranking verdict");
+    assert_eq!(cancelled.code, "teardown_unconfirmed");
+    let deleted = supervisor
+        .delete(&key("s-both"))
+        .await
+        .expect_err("delete reports the ranking verdict");
+    assert_eq!(deleted.code, "teardown_unconfirmed");
+    // Both latches are set; only the ranking changes which one is reported.
+    assert_eq!(supervisor.cleanup_unresolved_runs(), 1);
+}
+
+/// A retained crash-ownership record must survive cancellation arbitration the same way private-file residue does.
+#[tokio::test]
+async fn cancellation_winning_the_terminal_still_reports_record_residue() {
+    let backend = ScriptedBackend::with_behavior(|_request, _events, cancel| {
+        Box::pin(async move {
+            cancel.cancelled().await;
+            // The message mirrors `merge_record_retained` output for a run whose record removal failed.
+            BackendTerminal::Failed(BackendError {
+                class: ErrorClass::Transient,
+                message: "pi backend could not remove its crash-ownership record".to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        })
+    });
+    let supervisor = Supervisor::new(backend as Arc<_>);
+
+    let run_id = send(&supervisor, "s-cancel-record", "p1");
+    until(
+        || supervisor.status(&key("s-cancel-record"), &run_id) == Ok("running"),
+        "the backend starts before the cancel races it",
+    )
+    .await;
+
+    let cancelled = supervisor
+        .cancel(&key("s-cancel-record"), &run_id)
+        .await
+        .expect_err("cancel cannot report success while a record remains");
+    assert_eq!(cancelled.code, "record_unconfirmed");
+    assert_eq!(
+        supervisor.status(&key("s-cancel-record"), &run_id),
+        Ok("cancelled")
+    );
+    let deleted = supervisor
+        .delete(&key("s-cancel-record"))
+        .await
+        .expect_err("delete reports the same record residue");
+    assert_eq!(deleted.code, "record_unconfirmed");
+    assert_eq!(supervisor.record_unresolved_runs(), 1);
+}
+
+/// A panicking backend leaves its process group unproven: unwinding kills only the leader, so settlement must not report success.
+#[tokio::test]
+async fn backend_panic_reports_unconfirmed_teardown() {
+    let backend = ScriptedBackend::with_behavior(|_request, _events, _cancel| {
+        Box::pin(async { panic!("backend bug") })
+    });
+    let supervisor = Supervisor::new(backend as Arc<_>);
+
+    let run_id = send(&supervisor, "s-panic-teardown", "p1");
+    until(
+        || supervisor.status(&key("s-panic-teardown"), &run_id) == Ok("failed"),
+        "the panicked run commits its failed terminal",
+    )
+    .await;
+
+    let cancelled = supervisor
+        .cancel(&key("s-panic-teardown"), &run_id)
+        .await
+        .expect_err("cancel cannot claim a teardown the panic left unproven");
+    assert_eq!(cancelled.code, "teardown_unconfirmed");
+    let deleted = supervisor
+        .delete(&key("s-panic-teardown"))
+        .await
+        .expect_err("delete reports the same unproven teardown");
+    assert_eq!(deleted.code, "teardown_unconfirmed");
+    assert_eq!(
+        supervisor.shutdown().await,
+        1,
+        "shutdown must surface the panicked run's unproven teardown"
+    );
+}
+
 /// `shutdown` reports runs with unproven teardown.
 #[tokio::test]
 async fn shutdown_counts_runs_with_unproven_teardown() {
@@ -791,6 +970,56 @@ async fn shutdown_counts_runs_with_unproven_teardown() {
         supervisor.shutdown().await,
         1,
         "shutdown must surface the run whose teardown was never proven"
+    );
+}
+
+/// The unproven-teardown verdict is counted when the backend returns, so evicting the run from the index later cannot make shutdown report a clean stop.
+#[tokio::test]
+async fn shutdown_counts_unproven_teardown_after_terminal_cap_eviction() {
+    let backend = ScriptedBackend::with_behavior(|request, _events, _cancel| {
+        Box::pin(async move {
+            if request.session == "s-unproven" {
+                return BackendTerminal::FailedUnresolved(BackendError {
+                    class: ErrorClass::Transient,
+                    message: "process group teardown was not confirmed".to_owned(),
+                    retry_after_secs: None,
+                    provider_code: None,
+                });
+            }
+            BackendTerminal::Completed {
+                finish_reason: host_runtime::broca::backend::FinishReason::Completed,
+            }
+        })
+    });
+    let limits = BrocaLimits {
+        max_terminal_sessions: 1,
+        ..BrocaLimits::default()
+    };
+    let supervisor = Supervisor::with_limits(backend as Arc<_>, limits);
+
+    let unproven = send(&supervisor, "s-unproven", "p1");
+    until(
+        || supervisor.status(&key("s-unproven"), &unproven) == Ok("failed"),
+        "the unproven run commits its terminal",
+    )
+    .await;
+    // A second terminal session exceeds the one-session cap and evicts the older unproven run.
+    let evictor = send(&supervisor, "s-evictor", "p2");
+    until(
+        || supervisor.status(&key("s-evictor"), &evictor) == Ok("completed"),
+        "the evicting run commits its terminal",
+    )
+    .await;
+    until(
+        || supervisor.status(&key("s-unproven"), &unproven) == Ok("missing"),
+        "the terminal cap evicts the unproven run",
+    )
+    .await;
+
+    assert_eq!(
+        supervisor.shutdown().await,
+        1,
+        "eviction must not erase the unproven-teardown verdict"
     );
 }
 
@@ -1098,7 +1327,8 @@ async fn shutdown_refuses_new_work_stops_backends_and_wakes_subscribers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transport_detach_paths_leave_the_run_untouched() {
     let (backend, gate) = ScriptedBackend::gated("survivor output");
-    let component = BrocaComponent::new(Arc::clone(&backend) as Arc<_>);
+    let component =
+        BrocaComponent::new(Arc::clone(&backend) as Arc<_>, support::broca::state_root());
     let supervisor = component.supervisor();
     let host = start_broca_host(component).await;
 
@@ -1245,7 +1475,8 @@ async fn transport_detach_paths_leave_the_run_untouched() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_shutdown_drains_the_supervisor_to_zero_state() {
     let (backend, _gate) = ScriptedBackend::gated("out");
-    let component = BrocaComponent::new(Arc::clone(&backend) as Arc<_>);
+    let component =
+        BrocaComponent::new(Arc::clone(&backend) as Arc<_>, support::broca::state_root());
     let supervisor = component.supervisor();
     let host = start_broca_host(component).await;
 

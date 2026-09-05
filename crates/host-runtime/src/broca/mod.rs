@@ -22,6 +22,7 @@ use subtle::ConstantTimeEq;
 use backend::{Harness, LlmExecutionBackend};
 use protocol::{Request, RequestError};
 use subprocess::EnvSnapshot;
+use subprocess::group_registry::StateRoot;
 use supervisor::{SessionKey, Supervisor};
 
 pub const BROCA_MODULE_ID: &str = "broca";
@@ -33,6 +34,8 @@ pub struct BrocaComponent {
     routes: Arc<Mutex<HashMap<RouteHandle, SessionKey>>>,
     route_fingerprints: Arc<Mutex<HashMap<RouteHandle, BTreeMap<String, String>>>>,
     credential_verifier: Option<Arc<CredentialVerifier>>,
+    /// The same root the backends write crash-ownership records to; `initialize` sweeps it.
+    state_root: StateRoot,
 }
 
 struct CredentialVerifier {
@@ -48,15 +51,11 @@ impl CredentialVerifier {
         presented: &BTreeMap<String, String>,
     ) -> Result<(), &'static str> {
         let key = self.key.get().ok_or("credential_snapshot_mismatch")?;
-        let harness_name = match harness {
-            Harness::OpenCode => "opencode",
-            Harness::Pi => "pi",
-        };
-        let canonical = subprocess::canonical_provider(harness_name, provider)
+        let canonical = subprocess::canonical_provider(harness.as_str(), provider)
             .map_err(|error| error.subreason())?;
         let expected = self
             .env
-            .credential_fingerprint(key, harness_name, provider)
+            .credential_fingerprint(key, harness.as_str(), provider)
             .map_err(|error| error.subreason())?;
         let actual = presented
             .get(canonical)
@@ -70,16 +69,21 @@ impl CredentialVerifier {
 }
 
 impl BrocaComponent {
-    pub fn new(backend: Arc<dyn LlmExecutionBackend>) -> Self {
+    pub fn new(backend: Arc<dyn LlmExecutionBackend>, state_root: StateRoot) -> Self {
         Self {
             supervisor: Arc::new(Supervisor::new(backend)),
             routes: Arc::new(Mutex::new(HashMap::new())),
             route_fingerprints: Arc::new(Mutex::new(HashMap::new())),
             credential_verifier: None,
+            state_root,
         }
     }
 
-    pub fn new_with_credentials(backend: Arc<dyn LlmExecutionBackend>, env: EnvSnapshot) -> Self {
+    pub fn new_with_credentials(
+        backend: Arc<dyn LlmExecutionBackend>,
+        env: EnvSnapshot,
+        state_root: StateRoot,
+    ) -> Self {
         Self {
             supervisor: Arc::new(Supervisor::new(backend)),
             routes: Arc::new(Mutex::new(HashMap::new())),
@@ -88,6 +92,7 @@ impl BrocaComponent {
                 env,
                 key: OnceLock::new(),
             })),
+            state_root,
         }
     }
 
@@ -204,7 +209,7 @@ impl CompositeComponent for BrocaComponent {
             return app_error("internal_error", "route is not bound to a broca session");
         };
         // The handler reserves `ctx.body.len() + 512` bytes before parsing so parser allocations count against resident capacity.
-        let Some(_scratch) = ctx.try_reserve_resident(ctx.body.len() + 512) else {
+        let Some(scratch) = ctx.try_reserve_resident(ctx.body.len() + 512) else {
             return app_error(
                 "queue_full",
                 "resident capacity for request handling is exhausted",
@@ -251,6 +256,10 @@ impl CompositeComponent for BrocaComponent {
                 Err(error) => request_error(error),
             },
             Request::Subscribe => {
+                // `Subscribe` carries no parsed payload, and its streaming loop can hold this
+                // request open for minutes; releasing the parse reservation here keeps resident
+                // capacity scaled to in-flight parses rather than live subscriptions.
+                drop(scratch);
                 let mut subscription = match self.supervisor.subscribe(&key) {
                     Ok(subscription) => subscription,
                     Err(error) => return request_error(error),
@@ -295,6 +304,19 @@ impl CompositeComponent for BrocaComponent {
     }
 
     async fn health(&self) -> HealthReport {
+        // The wire contract admits `ready | unavailable`; `unavailable` means no supported harness can run.
+        let unavailable = [Harness::OpenCode, Harness::Pi].into_iter().all(|harness| {
+            self.supervisor
+                .harness_unavailable_reason(harness)
+                .is_some()
+        });
+        if unavailable {
+            return HealthReport {
+                status: HealthStatus::Degraded,
+                detail: None,
+                metrics: Some(serde_json::json!({"broca_state": "unavailable"})),
+            };
+        }
         HealthReport {
             status: HealthStatus::Ok,
             detail: None,
@@ -303,6 +325,8 @@ impl CompositeComponent for BrocaComponent {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
+        // One run can leave several residue classes at once; suppressing any of them would hide
+        // caller-private material or registry state, so all are aggregated into one error.
         let unresolved = self.supervisor.shutdown().await;
         self.routes
             .lock()
@@ -312,16 +336,35 @@ impl CompositeComponent for BrocaComponent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
-        // Shutdown fails when process-group teardown is unproven because a provider descendant may remain alive.
-        // Shutdown fails when process-group teardown is unproven.
-        // stopped.
+        let mut failures = Vec::new();
+        // Teardown failures lead because a provider descendant may still be running.
         if unresolved > 0 {
-            return Err(ShutdownError(format!(
+            failures.push(format!(
                 "{unresolved} run(s) ended without confirming harness \
                  process-group teardown; provider work may still be running"
-            )));
+            ));
         }
-        Ok(())
+        // Cleanup residue outranks a clean report: caller-private prompt material may remain on disk.
+        let residue = self.supervisor.cleanup_unresolved_runs();
+        if residue > 0 {
+            failures.push(format!(
+                "{residue} run(s) could not remove their private run files; \
+                 caller-private prompt material may remain on disk"
+            ));
+        }
+        // A retained crash-ownership record remains in the registry for a successor to sweep.
+        let records = self.supervisor.record_unresolved_runs();
+        if records > 0 {
+            failures.push(format!(
+                "{records} run(s) could not remove their crash-ownership records; \
+                 the registry retains them for a later sweep"
+            ));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ShutdownError(failures.join("; ")))
+        }
     }
 }
 
@@ -336,18 +379,27 @@ impl SecondaryComponent for BrocaComponent {
                     .to_owned(),
             ));
         }
-        //
-        //
-        subprocess::group_registry::sweep_orphaned_groups().map_err(|err| {
-            InitError(format!(
-                "broca could not sweep crash-orphaned process groups: {err}"
-            ))
-        })?;
-        subprocess::group_registry::sweep_orphaned_run_dirs().map_err(|err| {
-            InitError(format!(
-                "broca could not sweep crash-orphaned run directories: {err}"
-            ))
-        })?;
-        Ok(())
+        // Both sweeps walk `/proc` and may block for the member grace; the composite initializes siblings concurrently on one task, so the sweeps run on the blocking pool.
+        let state_root = self.state_root.clone();
+        let swept = tokio::task::spawn_blocking(move || {
+            subprocess::group_registry::sweep_orphaned_groups(&state_root).map_err(|err| {
+                InitError(format!(
+                    "broca could not sweep crash-orphaned process groups: {err}"
+                ))
+            })?;
+            subprocess::group_registry::sweep_orphaned_run_dirs(&state_root).map_err(|err| {
+                InitError(format!(
+                    "broca could not sweep crash-orphaned run directories: {err}"
+                ))
+            })?;
+            Ok(())
+        })
+        .await;
+        match swept {
+            Ok(result) => result,
+            Err(join) => Err(InitError(format!(
+                "broca crash-orphan sweep did not complete: {join}"
+            ))),
+        }
     }
 }

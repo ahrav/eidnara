@@ -122,7 +122,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "38a5480b8dbffe1cf28198098e738d124654dedeba4ffed39195e2bb5331a5ba",
+      "destination_sha256": "a18dc599322758cb23f358c8622109848c70f7dfa2d8f76fac85a22fc5a8be1e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

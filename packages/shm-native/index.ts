@@ -8,6 +8,19 @@ import { markAsUntransferable } from "node:worker_threads";
 export const QUALIFIED_TEST_PROFILE = "host-test-ring-v1";
 export const DESCRIPTOR_SCHEMA_VERSION = 3;
 
+/** The addon's own values for the two constants above, or `null` when it cannot load. */
+export function nativeWireConstants(): {
+    descriptorSchemaVersion: number;
+    qualifiedTestProfile: string;
+} | null {
+    const native = addon();
+    if (!native) return null;
+    return {
+        descriptorSchemaVersion: native.descriptorSchemaVersion(),
+        qualifiedTestProfile: native.qualifiedTestProfile(),
+    };
+}
+
 export interface NativeCapabilities {
     available: boolean;
     napiVersion: number | null;
@@ -69,9 +82,12 @@ interface NativeAddon {
     napiVersion(): number;
     buildProfile(): string;
     buildTarget(): string;
+    descriptorSchemaVersion(): number;
+    qualifiedTestProfile(): string;
     createExternalProbe(length: number): Uint8Array;
     detachArrayBuffer(buffer: ArrayBuffer): boolean;
     registerCleanupProbe(path: string): void;
+    probeCleanupHooks(): void;
     nativeLeakDiagnostics(): number;
     activeExternalRefCount(): number;
     setExternalViewFailpoint(call: number): void;
@@ -118,6 +134,7 @@ interface NativeAddon {
         ) => void,
     ): boolean;
     watch(channel: number, callback: () => void): void;
+    isWatching(channel: number): boolean;
     readinessHandled(): boolean;
     release(channel: number, token: number): void;
     close(channel: number): void;
@@ -140,14 +157,27 @@ const ADDON_PAYLOAD_PATH = "payload/native/shm_native.node";
 
 type PlatformPackage = (typeof PLATFORM_PACKAGES)[keyof typeof PLATFORM_PACKAGES];
 
-export function supportsNativePlatform(platform: string, arch: string): boolean {
-    return `${platform}-${arch}` in PLATFORM_PACKAGES;
+/**
+ * `process.platform` and `process.arch` cannot distinguish glibc from musl. `PLATFORM_PACKAGES`
+ * requires glibc; Node and Bun omit `glibcVersionRuntime` on musl.
+ */
+function isMuslLinux(): boolean {
+    if (process.platform !== "linux") return false;
+    const report = (process as { report?: { getReport?: () => unknown } }).report;
+    const header = (report?.getReport?.() as { header?: { glibcVersionRuntime?: unknown } } | undefined)
+        ?.header;
+    return typeof header?.glibcVersionRuntime !== "string";
+}
+
+export function supportsNativePlatform(platform: string, arch: string, musl = false): boolean {
+    return !musl && `${platform}-${arch}` in PLATFORM_PACKAGES;
 }
 
 function platformPackage(): PlatformPackage {
-    const platform = PLATFORM_PACKAGES[`${process.platform}-${process.arch}` as keyof typeof PLATFORM_PACKAGES];
-    if (!platform) throw new NativeStartupError("unsupported_platform");
-    return platform;
+    if (!supportsNativePlatform(process.platform, process.arch, isMuslLinux())) {
+        throw new NativeStartupError("unsupported_platform");
+    }
+    return PLATFORM_PACKAGES[`${process.platform}-${process.arch}` as keyof typeof PLATFORM_PACKAGES];
 }
 
 function packageAddonPath(platform: PlatformPackage): string {
@@ -239,6 +269,25 @@ function protect(segments: readonly Uint8Array[]): void {
     }
 }
 
+/**
+ * N-API converts JavaScript numbers to `u32` with ToUint32 semantics, silently wrapping
+ * negative and oversized values.
+ */
+export function assertUint32Argument(name: string, value: number): number {
+    if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+        throw new RangeError(`${name} must be an integer in [0, 4294967295]`);
+    }
+    return value;
+}
+
+/**
+ * Byte arguments are copied because a `SharedArrayBuffer` view can change while the addon
+ * borrows its Rust slice.
+ */
+export function privateBytes(bytes: Uint8Array): Uint8Array {
+    return new Uint8Array(bytes);
+}
+
 export function probeCapabilities(): NativeCapabilities {
     const base = {
         napiVersion: null,
@@ -248,12 +297,14 @@ export function probeCapabilities(): NativeCapabilities {
         transferPrevention: false,
         cleanupHooks: false,
     };
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
-        return { available: false, ...base, reason: "node_detachment_unavailable" };
-    }
+    // Load the addon before the Bun check so an unavailable addon does not report as a Node
+    // detachment failure.
     const native = addon();
     if (!native)
         return { available: false, ...base, reason: "addon_unavailable" };
+    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
+        return { available: false, ...base, reason: "node_detachment_unavailable" };
+    }
     try {
         const napiVersion = native.napiVersion();
         if (napiVersion < 8) {
@@ -326,7 +377,14 @@ export function probeCapabilities(): NativeCapabilities {
                 reason: "detachment_unavailable",
             };
         }
-        if (typeof native.registerCleanupProbe !== "function") {
+        let cleanupHooks = false;
+        try {
+            native.probeCleanupHooks();
+            cleanupHooks = true;
+        } catch {
+            cleanupHooks = false;
+        }
+        if (!cleanupHooks) {
             return {
                 available: false,
                 ...base,
@@ -440,20 +498,23 @@ export class NativeProducerReservation {
         beforePublish?: () => void,
     ): void {
         this.assertActive();
-        this.active = false;
+        assertUint32Argument("written", written);
+        // The handle stays active until the addon accepts the call: a rejected commit (for
+        // example a re-entrant call while the channel is busy) must remain abortable.
         this.native.commitReservation(
             this.channel,
             this.token,
-            header,
+            privateBytes(header),
             written,
             beforePublish ?? (() => {}),
         );
+        this.active = false;
     }
 
     abort(): void {
         if (!this.active) return;
-        this.active = false;
         this.native.abortReservation(this.channel, this.token);
+        this.active = false;
     }
 
     private assertActive(): void {
@@ -496,8 +557,8 @@ export class NativeReceiveLease {
 
     release(): void {
         if (this.released) throw new Error("receive lease is already released");
-        this.released = true;
         this.native.release(this.channel, this.token);
+        this.released = true;
     }
 
     [Symbol.dispose](): void {
@@ -512,9 +573,29 @@ export class NativeReceiveLease {
 
 const readinessHandlers = new Map<number, () => void>();
 
+const REDISPATCH_MICROTASK_BUDGET = 16;
+let consecutiveMicrotaskRedispatches = 0;
+
+// Microtasks run ahead of timers and I/O; an unbounded chain under sustained traffic would
+// starve everything else on the event loop.
+function scheduleRedispatch(): void {
+    if (consecutiveMicrotaskRedispatches < REDISPATCH_MICROTASK_BUDGET) {
+        consecutiveMicrotaskRedispatches += 1;
+        queueMicrotask(dispatchReadiness);
+    } else {
+        consecutiveMicrotaskRedispatches = 0;
+        setImmediate(dispatchReadiness);
+    }
+}
+
 function dispatchReadiness(): void {
     try {
-        for (const handler of [...readinessHandlers.values()]) {
+        for (const [id, handler] of [...readinessHandlers]) {
+            // Handlers for unwatched channels are removed so unrelated wakes do not invoke them.
+            if (loaded?.isWatching(id) === false) {
+                readinessHandlers.delete(id);
+                continue;
+            }
             try {
                 handler();
             } catch {
@@ -522,7 +603,11 @@ function dispatchReadiness(): void {
             }
         }
     } finally {
-        if (loaded?.readinessHandled()) queueMicrotask(dispatchReadiness);
+        if (loaded?.readinessHandled()) {
+            scheduleRedispatch();
+        } else {
+            consecutiveMicrotaskRedispatches = 0;
+        }
     }
 }
 
@@ -541,7 +626,12 @@ export class NativeChannel {
 
     static async connectSetup(options: NativeSetupOptions): Promise<NativeChannel> {
         const native = capableAddon();
-        const pending = await native.connectSetup(options);
+        assertUint32Argument("timeoutMs", options.timeoutMs);
+        const pending = await native.connectSetup({
+            ...options,
+            key: privateBytes(options.key),
+            daemonId: privateBytes(options.daemonId),
+        });
         return new NativeChannel(native, await native.finishSetup(pending));
     }
 
@@ -564,9 +654,11 @@ export class NativeChannel {
         timeoutMs = 0,
     ): void {
         this.assertOpen();
+        assertUint32Argument("capacity", capacity);
+        assertUint32Argument("timeoutMs", timeoutMs);
         this.native.produce(
             this.id,
-            header,
+            privateBytes(header),
             capacity,
             timeoutMs,
             (segments) => {
@@ -583,6 +675,8 @@ export class NativeChannel {
 
     reserve(capacity: number, timeoutMs = 0): NativeProducerReservation {
         this.assertOpen();
+        assertUint32Argument("capacity", capacity);
+        assertUint32Argument("timeoutMs", timeoutMs);
         let token: number | undefined;
         let segments: Uint8Array[] | undefined;
         this.native.reserve(
@@ -643,15 +737,15 @@ export class NativeChannel {
 
     close(): void {
         if (this.closed) return;
-        readinessHandlers.delete(this.id);
         this.native.close(this.id);
+        readinessHandlers.delete(this.id);
         this.closed = true;
     }
 
     forceClose(): void {
         if (this.closed) return;
-        readinessHandlers.delete(this.id);
         this.native.forceClose(this.id);
+        readinessHandlers.delete(this.id);
         this.closed = true;
     }
 

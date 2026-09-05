@@ -7,7 +7,10 @@ mod support;
 use std::sync::Arc;
 use std::{ffi::OsString, time::Duration};
 
-use host_runtime::broca::backend::Harness;
+use host_runtime::CancellationToken;
+use host_runtime::broca::backend::{
+    BackendFuture, BackendRequest, EventSink, Harness, LlmExecutionBackend,
+};
 use host_runtime::broca::protocol::{self, Request};
 use host_runtime::broca::subprocess::EnvSnapshot;
 use host_runtime::broca::{BrocaComponent, config};
@@ -254,6 +257,12 @@ fn every_malformed_shape_is_rejected_with_schema_violation() {
             false,
         ),
         (
+            // `-0.0` passes the inclusive `0.0..=2.0` check under IEEE 754 but serializes as `"-0"`, which providers reject as a negative temperature.
+            "temperature negative zero",
+            mutate(&ok_text, "\"temperature\":0.1", "\"temperature\":-0.0"),
+            false,
+        ),
+        (
             "temperature as string",
             mutate(&ok_text, "\"temperature\":0.1", "\"temperature\":\"0.1\""),
             false,
@@ -368,9 +377,59 @@ fn error_unit_stays_within_terminal_headroom_after_json_escaping() {
     );
 }
 
+/// `broca_state` follows backend availability: `ready` while any harness can run, `unavailable` when none can.
+#[tokio::test]
+async fn health_reports_unavailable_when_no_harness_can_run() {
+    struct Unavailable {
+        harnesses: &'static [Harness],
+    }
+    impl LlmExecutionBackend for Unavailable {
+        fn execute(
+            &self,
+            _request: BackendRequest,
+            _events: EventSink,
+            _cancel: CancellationToken,
+        ) -> BackendFuture {
+            unreachable!("health never executes a run")
+        }
+        fn unavailable_reason(&self, harness: Harness) -> Option<&'static str> {
+            self.harnesses
+                .contains(&harness)
+                .then_some("closure_incomplete")
+        }
+    }
+    let state = |harnesses: &'static [Harness]| async move {
+        let component = BrocaComponent::new(
+            Arc::new(Unavailable { harnesses }),
+            support::broca::state_root(),
+        );
+        let report = component.health().await;
+        (
+            report.status,
+            report.metrics.expect("broca reports metrics")["broca_state"].clone(),
+        )
+    };
+    assert_eq!(
+        state(&[]).await,
+        (host_runtime::HealthStatus::Ok, "ready".into())
+    );
+    assert_eq!(
+        state(&[Harness::Pi]).await,
+        (host_runtime::HealthStatus::Ok, "ready".into()),
+        "one runnable harness keeps Broca ready"
+    );
+    assert_eq!(
+        state(&[Harness::OpenCode, Harness::Pi]).await,
+        (host_runtime::HealthStatus::Degraded, "unavailable".into())
+    );
+}
+
 #[tokio::test]
 async fn bind_requires_absolute_root_nonempty_session_and_supported_harness() {
-    let component = BrocaComponent::new(ScriptedBackend::completing("out"));
+    let component = BrocaComponent::new(
+        ScriptedBackend::completing("out"),
+        support::broca::state_root(),
+    );
     let identity = |root: &str, harness: &str, session: &str| RouteIdentity {
         project_root: root.into(),
         harness: harness.to_owned(),
@@ -439,8 +498,11 @@ async fn credential_snapshot_must_match_before_backend_spawn() {
     )])
     .expect("credential snapshot");
     let backend = ScriptedBackend::completing("out");
-    let component =
-        BrocaComponent::new_with_credentials(Arc::clone(&backend) as Arc<_>, env.clone());
+    let component = BrocaComponent::new_with_credentials(
+        Arc::clone(&backend) as Arc<_>,
+        env.clone(),
+        support::broca::state_root(),
+    );
     let host = start_broca_host(component).await;
     let mut client = host.client().await;
 
@@ -498,7 +560,8 @@ async fn credential_snapshot_must_match_before_backend_spawn() {
 #[tokio::test]
 async fn five_operation_round_trip_matches_the_consumed_wire_shapes() {
     let backend = ScriptedBackend::completing("historian output");
-    let component = BrocaComponent::new(Arc::clone(&backend) as Arc<_>);
+    let component =
+        BrocaComponent::new(Arc::clone(&backend) as Arc<_>, support::broca::state_root());
     let supervisor = component.supervisor();
     let host = start_broca_host(component).await;
     let mut client = host.client().await;
@@ -673,7 +736,8 @@ async fn five_operation_round_trip_matches_the_consumed_wire_shapes() {
 #[tokio::test]
 async fn malformed_requests_over_the_host_create_no_run_state() {
     let backend = ScriptedBackend::completing("out");
-    let component = BrocaComponent::new(Arc::clone(&backend) as Arc<_>);
+    let component =
+        BrocaComponent::new(Arc::clone(&backend) as Arc<_>, support::broca::state_root());
     let supervisor = component.supervisor();
     let host = start_broca_host(component).await;
     let mut client = host.client().await;

@@ -7,11 +7,10 @@ mod setup;
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use napi::bindgen_prelude::{AsyncTask, Buffer, FnArgs, Function, Object};
@@ -79,6 +78,9 @@ struct Channel {
     from_host: Box<Ring>,
     next_producer: u32,
     next_lease: u32,
+    // `next_lease` as of the previous readiness evaluation. A handler that took no frame since
+    // then is not consuming, so visible data does not earn another redispatch.
+    dispatched_lease: u32,
     closed: bool,
     setup: Option<UnixStream>,
     // Held for its Drop: releasing the process-wide claim exactly when the
@@ -94,7 +96,6 @@ struct Channel {
 /// active on any thread is a concurrently duplicated descriptor on all of
 /// them.
 static ACTIVE_GRANTS: Mutex<BTreeSet<Vec<u8>>> = Mutex::new(BTreeSet::new());
-static NEXT_ENVIRONMENT: AtomicU64 = AtomicU64::new(1);
 
 struct GrantReservation {
     grants: [Vec<u8>; 2],
@@ -130,7 +131,6 @@ impl Drop for GrantReservation {
 
 #[derive(Default)]
 struct Registry {
-    environment_generation: u64,
     next_channel: u32,
     next_pending: u32,
     channels: HashMap<u32, Channel>,
@@ -252,24 +252,39 @@ fn strict_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
     Some(bytes)
 }
 
-fn attach_ring(fds: [i32; 3], grant: RingGrant) -> Result<Ring> {
+/// `Ring::attach` validates a grant against its own mapping, not against `PROFILE`, so two
+/// self-consistent grants with different geometry would otherwise attach as one channel.
+pub(crate) fn grant_matches_profile(grant: RingGrant) -> bool {
+    let Ok(profile) = host_test_ring_profile() else {
+        return false;
+    };
+    let geometry = grant.geometry();
+    let matches = |actual: u64, expected: usize| u64::try_from(expected) == Ok(actual);
+    matches(geometry.descriptor_depth, profile.descriptor_depth())
+        && matches(geometry.arena_bytes, profile.arena_bytes())
+        && matches(geometry.max_leases, profile.max_leases())
+}
+
+/// Duplicates caller-supplied descriptor numbers with `fcntl`, which reports `EBADF` for
+/// closed descriptors. A `BorrowedFd` would assert a validity JavaScript cannot guarantee.
+fn clone_descriptors(fds: [i32; 3]) -> Result<[OwnedFd; 3]> {
     let mut descriptors = Vec::with_capacity(3);
     for fd in fds {
-        // SAFETY: N-API caller retains each descriptor through this synchronous clone.
-        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-        descriptors.push(
-            borrowed
-                .try_clone_to_owned()
-                .map_err(|_| error("shared-memory attachment failed"))?,
-        );
+        // SAFETY: `fcntl` accepts arbitrary descriptor numbers; a negative result is handled below.
+        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicate < 0 {
+            return Err(error("shared-memory attachment failed"));
+        }
+        // SAFETY: a non-negative `F_DUPFD_CLOEXEC` result is a fresh descriptor this process owns.
+        descriptors.push(unsafe { OwnedFd::from_raw_fd(duplicate) });
     }
-    Ring::attach(
-        descriptors
-            .try_into()
-            .map_err(|_| error("shared-memory attachment failed"))?,
-        grant,
-    )
-    .map_err(|_| error("shared-memory attachment failed"))
+    descriptors
+        .try_into()
+        .map_err(|_| error("shared-memory attachment failed"))
+}
+
+fn attach_ring(descriptors: [OwnedFd; 3], grant: RingGrant) -> Result<Ring> {
+    Ring::attach(descriptors, grant).map_err(|_| error("shared-memory attachment failed"))
 }
 
 fn cleanup_created_refs(
@@ -358,21 +373,36 @@ fn detach_producer(
     Ok(active.reservation)
 }
 
+/// Detaches every alias the channel still holds. A failure does not stop the sweep: the
+/// remaining producers, leases, and stranded views are still detached, and the first
+/// failure is returned once every alias has been processed.
+fn detach_all_aliases(env: &Env, channel: &mut Channel, complete_leases: bool) -> Result<()> {
+    let mut first_failure = None;
+    let mut record = |result: Result<()>| {
+        if let Err(failure) = result
+            && first_failure.is_none()
+        {
+            first_failure = Some(failure);
+        }
+    };
+    let producer_tokens: Vec<u32> = channel.producers.keys().copied().collect();
+    for token in producer_tokens {
+        record(detach_producer(env, channel, token).map(ProducerReservation::abort));
+    }
+    let tokens: Vec<u32> = channel.active.keys().copied().collect();
+    for token in tokens {
+        record(detach_active(env, channel, token, complete_leases));
+    }
+    record(detach_stranded(env, channel));
+    first_failure.map_or(Ok(()), Err)
+}
+
 fn close_channel(env: &Env, channel: &mut Channel) -> Result<()> {
     channel.closed = true;
     if let Some(mut setup) = channel.setup.take() {
         setup::goodbye(&mut setup);
     }
-    let producer_tokens: Vec<u32> = channel.producers.keys().copied().collect();
-    for token in producer_tokens {
-        detach_producer(env, channel, token)?.abort();
-    }
-    let tokens: Vec<u32> = channel.active.keys().copied().collect();
-    for token in tokens {
-        detach_active(env, channel, token, true)?;
-    }
-    detach_stranded(env, channel)?;
-    Ok(())
+    detach_all_aliases(env, channel, true)
 }
 
 fn quarantine_channel(env: &Env, channel: &mut Channel) -> Result<()> {
@@ -383,26 +413,29 @@ fn quarantine_channel(env: &Env, channel: &mut Channel) -> Result<()> {
     }
     channel.to_host.enter_quarantine();
     channel.from_host.enter_quarantine();
-    let producer_tokens: Vec<u32> = channel.producers.keys().copied().collect();
-    for token in producer_tokens {
-        detach_producer(env, channel, token)?.abort();
-    }
-    let tokens: Vec<u32> = channel.active.keys().copied().collect();
-    for token in tokens {
-        detach_active(env, channel, token, false)?;
-    }
-    detach_stranded(env, channel)?;
-    Ok(())
+    detach_all_aliases(env, channel, false)
 }
 
 fn insert_channel(registry: &mut Registry, channel: Channel) -> Result<u32> {
-    registry.next_channel = registry
-        .next_channel
-        .checked_add(1)
+    let id = allocate_token(&mut registry.next_channel, &registry.channels)
         .ok_or_else(|| error("native channel identity exhausted"))?;
-    let id = registry.next_channel;
     registry.channels.insert(id, channel);
     Ok(id)
+}
+
+/// Wrapping permits token reuse after `u32` exhaustion; `in_use` prevents collisions with
+/// outstanding tokens.
+fn allocate_token<T>(next: &mut u32, in_use: &HashMap<u32, T>) -> Option<u32> {
+    // Among any `len + 2` consecutive values at most `len` are in use and at most one is
+    // zero, so that many attempts always reach a free token.
+    let attempts = in_use.len().saturating_add(2);
+    for _ in 0..attempts {
+        *next = next.wrapping_add(1);
+        if *next != 0 && !in_use.contains_key(next) {
+            return Some(*next);
+        }
+    }
+    None
 }
 
 fn cleanup_env(raw_env: usize) {
@@ -439,7 +472,6 @@ fn ensure_cleanup(env: &Env, registry: &mut Registry) -> Result<()> {
     if registry.cleanup_registered {
         return Ok(());
     }
-    registry.environment_generation = NEXT_ENVIRONMENT.fetch_add(1, Ordering::Relaxed);
     let raw = env.raw() as usize;
     env.add_async_cleanup_hook(raw, cleanup_env)?;
     registry.cleanup_registered = true;
@@ -473,6 +505,16 @@ pub fn build_target() -> String {
 }
 
 #[napi]
+pub fn descriptor_schema_version() -> u32 {
+    u32::from(shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION)
+}
+
+#[napi]
+pub fn qualified_test_profile() -> &'static str {
+    PROFILE
+}
+
+#[napi]
 pub fn create_external_probe<'env>(env: &'env Env, length: u32) -> Result<Unknown<'env>> {
     napi_buffers::create_owned_probe(env, length as usize)
 }
@@ -485,6 +527,24 @@ pub fn detach_array_buffer(env: &Env, buffer: Unknown<'_>) -> Result<bool> {
 #[napi]
 pub fn register_cleanup_probe(env: &Env, path: String) -> Result<()> {
     lifecycle::register_cleanup_marker(env, PathBuf::from(path))
+}
+
+#[napi]
+pub fn probe_cleanup_hooks(env: &Env) -> Result<()> {
+    lifecycle::probe_async_cleanup_hooks(env)
+}
+
+/// False once the reactor has dropped the channel, including after a dead peer.
+#[napi]
+pub fn is_watching(channel_id: u32) -> bool {
+    REGISTRY.with(|registry| {
+        registry.try_borrow().is_ok_and(|registry| {
+            registry
+                .reactor
+                .as_ref()
+                .is_some_and(|reactor| reactor.is_registered(channel_id))
+        })
+    })
 }
 
 #[napi]
@@ -525,10 +585,8 @@ pub fn active_channel_count() -> Result<u32> {
 pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
     {
         const GRANT_HEX_LEN: usize = RingGrant::encoded_len() * 2;
-        // The argument is decoded as a RAW value — before any bindgen
-        // numeric narrowing or property coercion — and every check below
-        // runs before the first fd open, mapping, page touch, or registry
-        // insertion, so a rejected descriptor has zero side effects.
+        // The raw descriptor is checked before bindgen narrowing or coercion.
+        // Rejected descriptors produce no side effects.
         if descriptor.get_type().map_err(|_| descriptor_error())? != ValueType::Object {
             return Err(descriptor_error());
         }
@@ -598,9 +656,30 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
             .into_iter()
             .chain(peer_to_host_fds)
             .collect::<BTreeSet<_>>();
-        if distinct.len() != 6 || host_to_peer_grant == peer_to_host_grant {
+        if distinct.len() != 6
+            || host_to_peer_grant == peer_to_host_grant
+            || !grant_matches_profile(host_to_peer_grant)
+            || !grant_matches_profile(peer_to_host_grant)
+        {
             return Err(descriptor_error());
         }
+        // Duplicating is the first descriptor operation: an unopened number fails here as a
+        // resolution failure. The distinct-number check cannot detect `dup` aliases, so the
+        // duplicates are compared as open files before any mapping or registry insertion.
+        let host_to_peer = clone_descriptors(host_to_peer_fds)?;
+        let peer_to_host = clone_descriptors(peer_to_host_fds)?;
+        let files: Vec<BorrowedFd<'_>> = host_to_peer
+            .iter()
+            .chain(&peer_to_host)
+            .map(AsFd::as_fd)
+            .collect();
+        setup::reject_aliased_files(&files).map_err(|failure| {
+            if failure.kind() == std::io::ErrorKind::InvalidData {
+                descriptor_error()
+            } else {
+                error("shared-memory attachment failed")
+            }
+        })?;
         // Exclusive active attachment: a grant already backing a live
         // channel anywhere in this process is a replayed or concurrently
         // duplicated descriptor. The claim is process-wide because worker
@@ -609,8 +688,8 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
             host_to_peer_grant.encode().to_vec(),
             peer_to_host_grant.encode().to_vec(),
         )?;
-        let from_host = attach_ring(host_to_peer_fds, host_to_peer_grant)?;
-        let to_host = attach_ring(peer_to_host_fds, peer_to_host_grant)?;
+        let from_host = attach_ring(host_to_peer, host_to_peer_grant)?;
+        let to_host = attach_ring(peer_to_host, peer_to_host_grant)?;
         REGISTRY.with(|registry| {
             let mut registry = registry
                 .try_borrow_mut()
@@ -626,6 +705,7 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
                     from_host: Box::new(from_host),
                     next_producer: 0,
                     next_lease: 0,
+                    dispatched_lease: 0,
                     closed: false,
                     setup: None,
                     _reservation: Some(reservation),
@@ -636,7 +716,7 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
 }
 
 fn setup_error(failure: std::io::Error) -> Error {
-    if failure.kind() == std::io::ErrorKind::PermissionDenied {
+    if setup::is_identity_mismatch(&failure) {
         error("shared-memory identity mismatch")
     } else {
         error("shared-memory setup failed")
@@ -697,11 +777,9 @@ impl Task for BeginSetupTask {
                 .try_borrow_mut()
                 .map_err(|_| error("native channel is busy"))?;
             ensure_cleanup(&env, &mut registry)?;
-            registry.next_pending = registry
-                .next_pending
-                .checked_add(1)
+            let registry = &mut *registry;
+            let id = allocate_token(&mut registry.next_pending, &registry.pending)
                 .ok_or_else(|| error("native setup identity exhausted"))?;
-            let id = registry.next_pending;
             registry.pending.insert(
                 id,
                 PendingChannel {
@@ -752,6 +830,7 @@ impl Task for FinishSetupTask {
                     from_host: pending.from_host,
                     next_producer: 0,
                     next_lease: 0,
+                    dispatched_lease: 0,
                     closed: false,
                     setup: Some(stream),
                     _reservation: Some(pending.reservation),
@@ -830,6 +909,7 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                     from_host: Box::new(first_from_second),
                     next_producer: 0,
                     next_lease: 0,
+                    dispatched_lease: 0,
                     closed: false,
                     setup: None,
                     // Test pairs attach freshly created local rings, never a
@@ -847,6 +927,7 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                     from_host: Box::new(second_from_first),
                     next_producer: 0,
                     next_lease: 0,
+                    dispatched_lease: 0,
                     closed: false,
                     setup: None,
                     _reservation: None,
@@ -992,11 +1073,8 @@ pub fn reserve(
             cleanup_created_refs(env, &channel.to_host, &mut channel.stranded, refs)?;
             return Err(build_error);
         }
-        channel.next_producer = channel
-            .next_producer
-            .checked_add(1)
+        let token = allocate_token(&mut channel.next_producer, &channel.producers)
             .ok_or_else(|| error("producer reservation identity exhausted"))?;
-        let token = channel.next_producer;
         channel.producers.insert(
             token,
             ActiveProducer {
@@ -1039,11 +1117,13 @@ pub fn commit_reservation(
             .channels
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
-        let mut reservation = detach_producer(env, channel, token)?;
+        // The header is validated before detaching the producer token, so an invalid
+        // length leaves the token's reservation retryable.
         let header: [u8; WIRE_V2_HEADER_BYTES] = header
             .as_ref()
             .try_into()
             .map_err(|_| error("wire header has invalid length"))?;
+        let mut reservation = detach_producer(env, channel, token)?;
         reservation
             .set_wire_header(header)
             .and_then(|()| reservation.advance(written as usize))
@@ -1066,6 +1146,10 @@ pub fn abort_reservation(env: &Env, channel_id: u32, token: u32) -> Result<()> {
             .channels
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
+        // Abort is idempotent: an absent producer requires no cleanup.
+        if !channel.producers.contains_key(&token) {
+            return Ok(());
+        }
         detach_producer(env, channel, token)?.abort();
         Ok(())
     })
@@ -1074,6 +1158,42 @@ pub fn abort_reservation(env: &Env, channel_id: u32, token: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_allocation_wraps_and_skips_outstanding_tokens() {
+        let mut in_use: HashMap<u32, ()> = HashMap::new();
+        in_use.insert(u32::MAX, ());
+        in_use.insert(1, ());
+        let mut next = u32::MAX - 1;
+        // MAX is outstanding, 0 is never issued, 1 is outstanding: 2 is the first free token.
+        assert_eq!(allocate_token(&mut next, &in_use), Some(2));
+        assert_eq!(next, 2);
+        assert_eq!(allocate_token(&mut next, &in_use), Some(3));
+
+        let mut fresh = 0;
+        assert_eq!(
+            allocate_token(&mut fresh, &HashMap::<u32, ()>::new()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn profile_geometry_admits_the_test_profile_and_rejects_another_depth() {
+        let profile = host_test_ring_profile().expect("profile");
+        let ring = Ring::create(&profile, 1).expect("ring");
+        let grant = ring.attachment().expect("attachment").grant();
+        assert!(grant_matches_profile(grant));
+
+        let other = shm_transport::profile::ring_profile(
+            shm_transport::descriptor::HardwareProfileId::new("other-geometry-v1")
+                .expect("profile id"),
+        )
+        .expect("other profile");
+        assert_ne!(other.descriptor_depth(), profile.descriptor_depth());
+        let other_ring = Ring::create(&other, 1).expect("ring");
+        let other_grant = other_ring.attachment().expect("attachment").grant();
+        assert!(!grant_matches_profile(other_grant));
+    }
 
     #[test]
     fn channel_drops_borrowing_reservations_before_the_ring() {
@@ -1107,6 +1227,7 @@ mod tests {
             from_host: Box::new(from_host),
             next_producer: 1,
             next_lease: 0,
+            dispatched_lease: 0,
             closed: false,
             setup: None,
             _reservation: None,
@@ -1120,7 +1241,11 @@ pub fn watch(channel_id: u32, callback: Function<(), ()>) -> Result<()> {
         let mut registry = registry
             .try_borrow_mut()
             .map_err(|_| error("native channel is busy"))?;
-        if !registry.channels.contains_key(&channel_id) {
+        if registry
+            .channels
+            .get(&channel_id)
+            .is_none_or(|channel| channel.closed)
+        {
             return Err(error("native channel is closed"));
         }
         if registry.reactor.is_none() {
@@ -1143,21 +1268,38 @@ pub fn watch(channel_id: u32, callback: Function<(), ()>) -> Result<()> {
 #[napi]
 pub fn readiness_handled() -> bool {
     REGISTRY.with(|registry| {
-        let Ok(registry) = registry.try_borrow() else {
+        let Ok(mut registry) = registry.try_borrow_mut() else {
             return false;
         };
-        let Some(reactor) = registry.reactor.as_ref() else {
+        let Registry {
+            channels, reactor, ..
+        } = &mut *registry;
+        let Some(reactor) = reactor.as_mut() else {
             return false;
         };
         let mut redispatch = false;
-        for (channel_id, channel) in &registry.channels {
-            if !reactor.is_registered(*channel_id) {
+        for channel_id in reactor.take_ready() {
+            if !reactor.is_registered(channel_id) {
                 continue;
             }
-            redispatch |= channel.from_host.complete_data_wait().is_err();
-            match channel.from_host.arm_data_wait() {
-                Ok(true) => {}
-                Ok(false) | Err(_) => redispatch = true,
+            let Some(channel) = channels.get_mut(&channel_id) else {
+                reactor.unregister(channel_id);
+                continue;
+            };
+            let progressed = channel.next_lease != channel.dispatched_lease;
+            channel.dispatched_lease = channel.next_lease;
+            let completed = channel.from_host.complete_data_wait().is_ok();
+            match (completed, channel.from_host.arm_data_wait()) {
+                (true, Ok(true)) => {}
+                // A lease advanced while data remains ready, so re-queue the channel.
+                (true, Ok(false)) if progressed => {
+                    reactor.mark_ready(channel_id);
+                    redispatch = true;
+                }
+                // `Ring::signal_wake` wakes only parked consumers; `poll` arms the channel
+                // once the ring is empty.
+                (true, Ok(false)) => {}
+                (false, _) | (true, Err(_)) => reactor.unregister(channel_id),
             }
         }
         reactor.handled();
@@ -1182,6 +1324,9 @@ pub fn poll(
             .channels
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
+        if channel.closed {
+            return Err(error("native channel is closed"));
+        }
         let ring_ptr: *const Ring = channel.from_host.as_ref();
         // SAFETY: `from_host` is boxed, so moving `Channel` does not move the
         // ring. `active` is declared before `from_host`, so every stored lease
@@ -1193,11 +1338,8 @@ pub fn poll(
         else {
             return Ok::<Option<(u32, Buffer, Vec<Unknown<'_>>)>, Error>(None);
         };
-        channel.next_lease = channel
-            .next_lease
-            .checked_add(1)
+        let token = allocate_token(&mut channel.next_lease, &channel.active)
             .ok_or_else(|| error("receive lease identity exhausted"))?;
-        let token = channel.next_lease;
         let header = Buffer::from(lease.wire_header().to_vec());
         let mut views = Vec::with_capacity(lease.segment_count());
         let mut refs = Vec::with_capacity(lease.segment_count());
@@ -1240,7 +1382,7 @@ pub fn poll(
                 .arm_data_wait()
                 .map_err(|_| error("shared-memory receive failed"))?;
             if !should_block && let Some(reactor) = registry.reactor.as_ref() {
-                reactor.kick();
+                reactor.kick(channel_id);
             }
             Ok::<(), Error>(())
         })?;
@@ -1306,10 +1448,14 @@ pub fn peer_closed(channel_id: u32) -> Result<bool> {
             .channels
             .get(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
-        Ok(match channel.setup.as_ref() {
-            Some(stream) => setup::peer_closed(stream),
-            None => false,
-        })
+        // A quarantined consumer ring is also a dead peer: the doorbell drain saw the
+        // peer's end close, or the peer rewrote a slot under a live lease.
+        Ok(channel.from_host.is_quarantined()
+            || registry
+                .reactor
+                .as_ref()
+                .is_some_and(|reactor| reactor.peer_closed(channel_id))
+            || channel.setup.as_ref().is_some_and(setup::peer_closed))
     })
 }
 
@@ -1327,17 +1473,19 @@ pub fn close(env: &Env, channel_id: u32) -> Result<()> {
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
         let result = close_channel(env, channel);
-        // The entry is removed once no tracked alias remains, even if
-        // reference deletion or release reporting failed. A detach failure
-        // leaves its token or stranded alias behind, and the entry must then
-        // stay registered so the mapping outlives the still-attached JS
-        // views; a later close retries the detachment.
-        if channel.producers.is_empty() && channel.active.is_empty() && channel.stranded.is_empty()
-        {
-            registry.channels.remove(&channel_id);
-        }
-        result
+        finish_close(&mut registry, channel_id, result)
     })
+}
+
+fn finish_close(registry: &mut Registry, channel_id: u32, result: Result<()>) -> Result<()> {
+    let retained = registry.channels.get(&channel_id).is_some_and(|channel| {
+        !(channel.producers.is_empty() && channel.active.is_empty() && channel.stranded.is_empty())
+    });
+    if retained {
+        return result;
+    }
+    registry.channels.remove(&channel_id);
+    Ok(())
 }
 
 #[napi]
@@ -1354,12 +1502,6 @@ pub fn force_close(env: &Env, channel_id: u32) -> Result<()> {
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
         let result = quarantine_channel(env, channel);
-        // Same retention rule as close: only alias-free channels may drop
-        // their mapping.
-        if channel.producers.is_empty() && channel.active.is_empty() && channel.stranded.is_empty()
-        {
-            registry.channels.remove(&channel_id);
-        }
-        result
+        finish_close(&mut registry, channel_id, result)
     })
 }

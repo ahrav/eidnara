@@ -66,7 +66,6 @@ impl std::fmt::Debug for BackendRequest {
 pub enum FinishReason {
     Completed,
     Length,
-    MaxOutputTokens,
 }
 
 impl FinishReason {
@@ -74,7 +73,6 @@ impl FinishReason {
         match self {
             Self::Completed => "completed",
             Self::Length => "length",
-            Self::MaxOutputTokens => "max_output_tokens",
         }
     }
 }

@@ -11,7 +11,15 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { NativeChannel, probeCapabilities } from "../index.ts";
+import {
+    assertUint32Argument,
+    DESCRIPTOR_SCHEMA_VERSION,
+    NativeChannel,
+    nativeWireConstants,
+    privateBytes,
+    probeCapabilities,
+    QUALIFIED_TEST_PROFILE,
+} from "../index.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "shm-native-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -33,6 +41,18 @@ describe("native mechanism gate", () => {
             expect(typeof result.reason).toBe("string");
             expect(result.reason?.length).toBeGreaterThan(0);
         }
+    });
+
+    test("exported wire constants match the addon", () => {
+        const constants = nativeWireConstants();
+        if (constants === null) {
+            if (process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1") {
+                throw new Error("claimed native addon is missing");
+            }
+            return;
+        }
+        expect(constants.descriptorSchemaVersion).toBe(DESCRIPTOR_SCHEMA_VERSION);
+        expect(constants.qualifiedTestProfile).toBe(QUALIFIED_TEST_PROFILE);
     });
 
     test("environment cleanup hook runs at runtime exit when addon loads", () => {
@@ -152,7 +172,7 @@ function testGrantHex(lane: number, incarnation: number): string {
 
 function validRawDescriptor(): Record<string, unknown> {
     return {
-        profile: "host-test-ring-v1",
+        profile: QUALIFIED_TEST_PROFILE,
         hostToPeerFd: 10,
         hostToPeerDataReadyFd: 11,
         hostToPeerCapacityReadyFd: 12,
@@ -165,6 +185,40 @@ function validRawDescriptor(): Record<string, unknown> {
 }
 
 describe("readiness dispatch", () => {
+    test("a dead peer ends dispatch for its channel and reports peerClosed", async () => {
+        if (!probeCapabilities().available) return;
+        const pair = NativeChannel.createTestPair();
+        let dispatches = 0;
+        let receiveErrors = 0;
+        pair.second.startReadiness(() => {
+            dispatches += 1;
+            try {
+                while (pair.second.drainOne((lease) => lease.release())) {}
+            } catch {
+                receiveErrors += 1;
+            }
+        });
+        try {
+            expect(pair.second.peerClosed()).toBe(false);
+            // Closing `pair.first` closes `pair.second`'s doorbell peer end.
+            pair.first.close();
+            const deadline = Date.now() + 1_000;
+            while (!pair.second.peerClosed() && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 1));
+            }
+            expect(pair.second.peerClosed()).toBe(true);
+            const settled = dispatches;
+            // No further dispatch arrives after peer closure while timers still run.
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            expect(dispatches).toBe(settled);
+            expect(receiveErrors).toBeGreaterThan(0);
+            expect(() => pair.second.drainOne(() => {})).toThrow(/receive failed/);
+        } finally {
+            pair.second.close();
+        }
+        expect(pair.second.peerClosed()).toBe(true);
+    });
+
     test("one channel handler failure does not starve later channels", async () => {
         if (!probeCapabilities().available) return;
         const first = NativeChannel.createTestPair();
@@ -203,10 +257,270 @@ describe("readiness dispatch", () => {
             second.second.close();
         }
     });
+
+    test("out-of-range u32 arguments are rejected before reaching the addon", () => {
+        for (const value of [-1, 0.5, 2 ** 32, Number.NaN, Number.POSITIVE_INFINITY]) {
+            expect(() => assertUint32Argument("timeoutMs", value)).toThrow(RangeError);
+        }
+        for (const value of [0, 1, 0xffff_ffff]) {
+            expect(assertUint32Argument("timeoutMs", value)).toBe(value);
+        }
+    });
+
+    test("byte arguments cross into the addon as private non-shared copies", () => {
+        const shared = new Uint8Array(new SharedArrayBuffer(4));
+        shared.set([1, 2, 3, 4]);
+        const copy = privateBytes(shared);
+        expect(copy.buffer instanceof SharedArrayBuffer).toBe(false);
+        expect(copy.buffer instanceof ArrayBuffer).toBe(true);
+        expect([...copy]).toEqual([1, 2, 3, 4]);
+        shared[0] = 9;
+        expect(copy[0]).toBe(1);
+        // Node's Buffer.slice aliases; the copy must not.
+        const nodeBuffer = Buffer.from([7, 8]);
+        const bufferCopy = privateBytes(nodeBuffer);
+        nodeBuffer[0] = 0;
+        expect(bufferCopy[0]).toBe(7);
+    });
 });
 
 describe("raw N-API descriptor boundary", () => {
     const DESCRIPTOR_ERROR = /invalid shared-memory descriptor/;
+
+    test("a dead peer leaves the reactor instead of redispatching forever", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        // Runs in a child so this process's shared reactor (which keeps its first callback)
+        // is not the one under test, and so a livelock surfaces as a timeout, not a hang.
+        const script = join(scratch, "dead-peer.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const pair = addon.createTestPair();\n` +
+                `let dispatches = 0;\n` +
+                `let receiveErrors = 0;\n` +
+                `const onReady = () => {\n` +
+                `  dispatches += 1;\n` +
+                `  try { while (addon.poll(pair.second, (token) => addon.release(pair.second, token))) {} }\n` +
+                `  catch { receiveErrors += 1; }\n` +
+                `  if (addon.readinessHandled()) queueMicrotask(onReady);\n` +
+                `};\n` +
+                `addon.watch(pair.second, onReady);\n` +
+                `const before = addon.peerClosed(pair.second);\n` +
+                `addon.close(pair.first);\n` +
+                `const deadline = Date.now() + 2000;\n` +
+                `while (!addon.peerClosed(pair.second) && Date.now() < deadline) {\n` +
+                `  await new Promise((resolve) => setTimeout(resolve, 1));\n` +
+                `}\n` +
+                `const settled = dispatches;\n` +
+                `await new Promise((resolve) => setTimeout(resolve, 100));\n` +
+                `console.log(JSON.stringify({ before, after: addon.peerClosed(pair.second), settled, dispatches, receiveErrors }));\n` +
+                `addon.close(pair.second);\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            before: boolean;
+            after: boolean;
+            settled: number;
+            dispatches: number;
+            receiveErrors: number;
+        };
+        expect(report.before).toBe(false);
+        expect(report.after).toBe(true);
+        expect(report.dispatches).toBe(report.settled);
+        expect(report.receiveErrors).toBeGreaterThan(0);
+    });
+
+    test("a handler that throws over an undrained frame does not liveloop the event loop", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        // Runs in a child so event-loop starvation surfaces as the child timing out.
+        const script = join(scratch, "throwing-handler.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const pair = addon.createTestPair();\n` +
+                `let dispatches = 0;\n` +
+                `const onReady = () => {\n` +
+                `  try { dispatches += 1; throw new Error("handler failed before draining"); }\n` +
+                `  catch {}\n` +
+                `  finally { if (addon.readinessHandled()) queueMicrotask(onReady); }\n` +
+                `};\n` +
+                `addon.watch(pair.second, onReady);\n` +
+                `const header = new Uint8Array(21);\n` +
+                `const view = new DataView(header.buffer);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 2); view.setUint8(5, 3);\n` +
+                `view.setUint16(7, 1, true); view.setUint32(9, 1, true); view.setBigUint64(13, 7n, true);\n` +
+                `addon.produce(pair.first, header, 1, 0, (segments) => { segments[0][0] = 7; return 1; }, () => {});\n` +
+                `const deadline = Date.now() + 2000;\n` +
+                `while (dispatches === 0 && Date.now() < deadline) {\n` +
+                `  await new Promise((resolve) => setTimeout(resolve, 1));\n` +
+                `}\n` +
+                `const settled = dispatches;\n` +
+                `const timerFired = await new Promise((resolve) => setTimeout(() => resolve(true), 100));\n` +
+                `let drained = false;\n` +
+                `addon.poll(pair.second, (token) => { drained = true; addon.release(pair.second, token); });\n` +
+                `console.log(JSON.stringify({ settled, dispatches, timerFired, drained }));\n` +
+                `addon.close(pair.first);\n` +
+                `addon.close(pair.second);\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            settled: number;
+            dispatches: number;
+            timerFired: boolean;
+            drained: boolean;
+        };
+        expect(report.settled).toBeGreaterThan(0);
+        expect(report.settled).toBeLessThanOrEqual(2);
+        expect(report.dispatches).toBe(report.settled);
+        expect(report.timerFired).toBe(true);
+        expect(report.drained).toBe(true);
+    });
+
+    test("a dead channel's handler is pruned once the reactor drops it", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        const script = join(scratch, "pruned-handler.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const dead = addon.createTestPair();\n` +
+                `const live = addon.createTestPair();\n` +
+                `const handlers = new Map();\n` +
+                `let deadCalls = 0; let liveDrained = 0;\n` +
+                `const dispatch = () => {\n` +
+                `  try {\n` +
+                `    for (const [id, handler] of [...handlers]) {\n` +
+                `      if (addon.isWatching(id) === false) { handlers.delete(id); continue; }\n` +
+                `      try { handler(); } catch {}\n` +
+                `    }\n` +
+                `  } finally { if (addon.readinessHandled()) queueMicrotask(dispatch); }\n` +
+                `};\n` +
+                `handlers.set(dead.second, () => { deadCalls += 1; while (addon.poll(dead.second, (t) => addon.release(dead.second, t))) {} });\n` +
+                `handlers.set(live.second, () => { while (addon.poll(live.second, (t) => { liveDrained += 1; addon.release(live.second, t); })) {} });\n` +
+                `addon.watch(dead.second, dispatch);\n` +
+                `addon.watch(live.second, dispatch);\n` +
+                `const header = new Uint8Array(21);\n` +
+                `const view = new DataView(header.buffer);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 2); view.setUint8(5, 3);\n` +
+                `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
+                `const publish = (channel, value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(channel, header, 1, 0, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
+                `addon.close(dead.first);\n` +
+                `await until(() => !addon.isWatching(dead.second));\n` +
+                `const deadCallsAfterDeath = deadCalls;\n` +
+                `for (let value = 1; value <= 3; value += 1) { publish(live.first, value); await until(() => liveDrained >= value); }\n` +
+                `console.log(JSON.stringify({ unwatched: !addon.isWatching(dead.second), deadCallsAfterDeath, deadCalls, liveDrained, handlers: handlers.size, deadPeerClosed: addon.peerClosed(dead.second) }));\n` +
+                `addon.close(dead.second); addon.close(live.first); addon.close(live.second);\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            unwatched: boolean;
+            deadCallsAfterDeath: number;
+            deadCalls: number;
+            liveDrained: number;
+            handlers: number;
+            deadPeerClosed: boolean;
+        };
+        expect(report.unwatched).toBe(true);
+        expect(report.deadPeerClosed).toBe(true);
+        expect(report.liveDrained).toBe(3);
+        // Three live wakes ran after the dead channel left the reactor; none reached its handler.
+        expect(report.deadCalls).toBe(report.deadCallsAfterDeath);
+        expect(report.handlers).toBe(1);
+    });
+
+    test("a handler that takes one frame per callback is redispatched until the ring is empty", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        const script = join(scratch, "one-per-callback.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const pair = addon.createTestPair();\n` +
+                `const received = []; let callbacks = 0; let closed = false;\n` +
+                `const onReady = () => {\n` +
+                `  if (closed) { addon.readinessHandled(); return; }\n` +
+                `  callbacks += 1;\n` +
+                `  try { addon.poll(pair.second, (token, _h, segments) => { received.push(segments[0][0]); addon.release(pair.second, token); }); }\n` +
+                `  finally { if (addon.readinessHandled()) queueMicrotask(onReady); }\n` +
+                `};\n` +
+                `addon.watch(pair.second, onReady);\n` +
+                `const header = new Uint8Array(21);\n` +
+                `const view = new DataView(header.buffer);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 2); view.setUint8(5, 3);\n` +
+                `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
+                `const publish = (value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(pair.first, header, 1, 0, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
+                `publish(1); publish(2); publish(3);\n` +
+                `await until(() => received.length >= 3);\n` +
+                `const firstBatch = [...received]; const firstCallbacks = callbacks;\n` +
+                `// The ring is empty and armed again: a later publish must wake the handler on its own.\n` +
+                `publish(4);\n` +
+                `await until(() => received.length >= 4);\n` +
+                `console.log(JSON.stringify({ firstBatch, firstCallbacks, received, callbacks, stillArmed: addon.poll(pair.second, () => {}) === false }));\n` +
+                `closed = true; addon.close(pair.first); addon.close(pair.second);\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            firstBatch: number[];
+            firstCallbacks: number;
+            received: number[];
+            callbacks: number;
+            stillArmed: boolean;
+        };
+        expect(report.firstBatch).toEqual([1, 2, 3]);
+        // Three frames need three deliveries plus one empty poll that re-arms; no spin beyond that.
+        expect(report.firstCallbacks).toBeGreaterThanOrEqual(3);
+        expect(report.firstCallbacks).toBeLessThanOrEqual(4);
+        expect(report.received).toEqual([1, 2, 3, 4]);
+        expect(report.stillArmed).toBe(true);
+    });
 
     test("readiness acknowledgement preserves a frame published during callback", async () => {
         const addon = loadRawAddon();
@@ -381,6 +695,63 @@ describe("raw N-API descriptor boundary", () => {
             addon.close(released.second);
             addon.close(held.first);
             addon.close(held.second);
+        }
+    });
+
+    test("a rejected commit leaves the reservation retryable and abort is idempotent", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const raw = addon as RawAttachAddon & {
+            reserve(
+                channel: number,
+                capacity: number,
+                timeoutMs: number,
+                deliver: (token: number, segments: Uint8Array[]) => void,
+            ): void;
+            commitReservation(
+                channel: number,
+                token: number,
+                header: Uint8Array,
+                written: number,
+                beforePublish: () => void,
+            ): void;
+            abortReservation(channel: number, token: number): void;
+        };
+        const pair = raw.createTestPair();
+        try {
+            let token = -1;
+            raw.reserve(pair.first, 1, 0, (reserved, segments) => {
+                token = reserved;
+                segments[0]![0] = 5;
+            });
+            expect(token).toBeGreaterThan(0);
+            // A header of the wrong length is rejected before the token is consumed.
+            expect(() =>
+                raw.commitReservation(pair.first, token, new Uint8Array(3), 1, () => {}),
+            ).toThrow(/wire header has invalid length/);
+            const header = new Uint8Array(21);
+            const view = new DataView(header.buffer);
+            view.setUint32(0, 1, true);
+            view.setUint8(4, 2);
+            view.setUint8(5, 3);
+            view.setUint16(7, 1, true);
+            view.setUint32(9, 1, true);
+            view.setBigUint64(13, 5n, true);
+            raw.commitReservation(pair.first, token, header, 1, () => {});
+            let delivered = -1;
+            expect(
+                raw.poll(pair.second, (lease, _h, segments) => {
+                    delivered = segments[0]![0] ?? -1;
+                    addon.release(pair.second, lease);
+                }),
+            ).toBe(true);
+            expect(delivered).toBe(5);
+            // The committed token is gone; aborting it again is a no-op, not an error.
+            raw.abortReservation(pair.first, token);
+            raw.abortReservation(pair.first, 999);
+        } finally {
+            addon.close(pair.first);
+            addon.close(pair.second);
         }
     });
 

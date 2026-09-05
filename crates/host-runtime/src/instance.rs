@@ -457,6 +457,7 @@ pub(crate) fn open_secure_dir_existing(dir_path: &Path) -> Result<Option<OwnedFd
 
 /// `secure_runtime_dir` traverses and validates `dir_path` without following symlinks.
 /// `secure_runtime_dir` normalizes newly created components to mode 0700.
+/// `secure_runtime_dir` rejects a pre-existing final directory that group or other principals could write; repair is reserved for umask damage on directories this call created.
 /// `secure_runtime_dir` returns a pinned descriptor for the final directory after validating its ownership and mode.
 pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceError> {
     let flags = HARDENED_DIR_FLAGS;
@@ -541,6 +542,15 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
     if !is_dir || !owner_ok {
         return Err(InstanceError::Insecure {
             what: "runtime directory",
+            path: dir_path.to_path_buf(),
+        });
+    }
+    // A directory writable by another principal may contain planted files; changing its mode
+    // cannot make it safe. Freshly created components were already forced to `0700` above (with
+    // failures propagated), so a legitimate creation never trips this rejection.
+    if (mode & 0o022) != 0 {
+        return Err(InstanceError::Insecure {
+            what: "runtime directory was writable by other principals",
             path: dir_path.to_path_buf(),
         });
     }
@@ -961,10 +971,32 @@ mod tests {
         let root = temp_root();
         let dir = runtime_dir_path(Some(root.path())).expect("resolve");
         std::fs::create_dir_all(&dir).expect("create dir");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("loosen dir");
+        // Group/other read and execute leak no write access, so repair is safe.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("loosen dir");
 
         let guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
         assert_eq!(mode_of(guard.dir_path()), 0o700);
+    }
+
+    #[test]
+    fn pre_existing_other_writable_dir_is_rejected() {
+        let root = temp_root();
+        let dir = runtime_dir_path(Some(root.path())).expect("resolve");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        // A directory another principal could write may already hold planted files; tightening now cannot repair that.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("loosen dir");
+
+        let err = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect_err("must refuse");
+        assert!(
+            matches!(
+                err,
+                InstanceError::Insecure {
+                    what: "runtime directory was writable by other principals",
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

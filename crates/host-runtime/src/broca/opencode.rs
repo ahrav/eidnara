@@ -11,8 +11,9 @@ use super::backend::{
     EventSink, FinishReason, Harness, LlmExecutionBackend,
 };
 use super::config::MAX_OPENCODE_CONFIG_BYTES;
+use super::subprocess::group_registry::StateRoot;
 use super::subprocess::{
-    self, EnvSnapshot, HarnessName, PrivateDir, SubprocessLimits, SubprocessSpec, commit_terminal,
+    self, EnvSnapshot, PrivateDir, SubprocessLimits, SubprocessSpec, commit_terminal,
 };
 use crate::harness_closure::ValidatedHarnessClosure;
 
@@ -33,22 +34,25 @@ pub struct OpenCodeBackend {
     runtime: OpenCodeRuntime,
     limits: SubprocessLimits,
     env: EnvSnapshot,
+    state_root: StateRoot,
 }
 
 impl OpenCodeBackend {
-    pub fn new(runtime: OpenCodeRuntime, env: EnvSnapshot) -> Self {
-        Self::with_limits(runtime, env, SubprocessLimits::default())
+    pub fn new(runtime: OpenCodeRuntime, env: EnvSnapshot, state_root: StateRoot) -> Self {
+        Self::with_limits(runtime, env, state_root, SubprocessLimits::default())
     }
 
     pub fn with_limits(
         runtime: OpenCodeRuntime,
         env: EnvSnapshot,
+        state_root: StateRoot,
         limits: SubprocessLimits,
     ) -> Self {
         Self {
             runtime,
             limits,
             env,
+            state_root,
         }
     }
 }
@@ -61,7 +65,6 @@ impl LlmExecutionBackend for OpenCodeBackend {
         cancel: CancellationToken,
     ) -> BackendFuture {
         // A harness mismatch must fail rather than run under OpenCode with OpenCode-specific provider aliases and credentials.
-        // credentials.
         if request.harness != Harness::OpenCode {
             let terminal = backend::harness_mismatch(Harness::OpenCode, request.harness);
             return Box::pin(async move { terminal });
@@ -76,7 +79,22 @@ impl LlmExecutionBackend for OpenCodeBackend {
         let runtime = self.runtime.clone();
         let limits = self.limits.clone();
         let env = self.env.clone();
-        Box::pin(run_opencode(runtime, limits, env, request, events, cancel))
+        let state_root = self.state_root.clone();
+        Box::pin(run_opencode(
+            runtime, limits, env, state_root, request, events, cancel,
+        ))
+    }
+
+    /// Resolving the executable node re-proves the same closure invariants `run_opencode` requires, so a rejected send and a failed run report the same subreason.
+    fn unavailable_reason(&self, harness: Harness) -> Option<&'static str> {
+        if harness != Harness::OpenCode {
+            return None;
+        }
+        self.runtime
+            .closure
+            .resolve_node_descriptor(&self.runtime.executable_node)
+            .is_err()
+            .then_some("closure_incomplete")
     }
 }
 
@@ -102,13 +120,19 @@ fn inline_config(request: &BackendRequest) -> String {
             },
         },
     });
-    serde_json::to_string(&config).expect("inline config serializes")
+    let serialized = serde_json::to_string(&config).expect("inline config serializes");
+    // Neutralize OpenCode's `{env:..}`/`{file:..}` config substitution tokens in caller text. commentlint: allow(JUDGE)
+    // `\u007b` decodes back to a literal `{`; structural `{` from serde is followed by `"` or `}`, never by these tokens.
+    serialized
+        .replace("{env:", "\\u007benv:")
+        .replace("{file:", "\\u007bfile:")
 }
 
 async fn run_opencode(
     runtime: OpenCodeRuntime,
-    limits: SubprocessLimits,
+    mut limits: SubprocessLimits,
     env: EnvSnapshot,
+    state_root: StateRoot,
     request: BackendRequest,
     events: EventSink,
     cancel: CancellationToken,
@@ -116,7 +140,7 @@ async fn run_opencode(
     let mut child_env = match env.provider_row("opencode", &request.provider) {
         Ok(row) => row,
         Err(error) => {
-            return subprocess::credential_failure(HarnessName::OpenCode, error);
+            return subprocess::credential_failure(Harness::OpenCode, error);
         }
     };
     let config_content = inline_config(&request);
@@ -133,33 +157,69 @@ async fn run_opencode(
             provider_code: None,
         });
     }
-    let dir = match PrivateDir::create("broca-opencode") {
-        Ok(dir) => dir,
-        Err(err) => return subprocess::spawn_failure(HarnessName::OpenCode, &err),
-    };
-
-    let args = vec![
-        "run".to_owned(),
-        "--model".to_owned(),
-        // `OpenCodeBackend` passes the canonical `provider/model` to OpenCode unchanged and performs no alias mapping.
-        format!("{}/{}", request.provider, request.model),
-        "--agent".to_owned(),
-        OPENCODE_BROCA_AGENT.to_owned(),
-        "--format".to_owned(),
-        "json".to_owned(),
-    ];
-    let executable_node = match runtime
-        .closure
-        .resolve_node_descriptor(&runtime.executable_node)
+    // Setup races cancellation and `setup_deadline` so stalled closure-store or directory I/O cannot block cancellation before spawning a child.
+    let setup_deadline = tokio::time::Instant::now() + limits.run_timeout;
+    // Closure resolution precedes the private directory so an unavailable harness creates no on-disk state.
+    // Resolution opens and stats the node, so it runs on the blocking pool rather than on a runtime worker.
+    let closure = Arc::clone(&runtime.closure);
+    let executable = runtime.executable_node.clone();
+    let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
+        closure.resolve_node_descriptor(&executable).ok()
+    }));
+    // An abandoned resolution only reads the closure store, so it leaves no residue. commentlint: allow(JUDGE)
+    let executable_node = match subprocess::race_setup(&cancel, setup_deadline, &mut resolve).await
     {
-        Ok(path) => path,
-        Err(_) => {
+        Ok(Ok(Some(node))) => node,
+        Ok(Ok(None)) => {
             return subprocess::harness_unavailable_failure(
-                HarnessName::OpenCode,
+                Harness::OpenCode,
                 "closure_incomplete",
             );
         }
+        Ok(Err(err)) => return subprocess::spawn_failure(Harness::OpenCode, &err),
+        Err(abort) => return subprocess::setup_aborted_terminal(Harness::OpenCode, abort),
     };
+    let mut create = std::pin::pin!(PrivateDir::create_async(
+        state_root.clone(),
+        "broca-opencode"
+    ));
+    let dir = match subprocess::race_setup(&cancel, setup_deadline, &mut create).await {
+        Ok(Ok(dir)) => dir,
+        Ok(Err(err)) => return subprocess::spawn_failure(Harness::OpenCode, &err),
+        Err(abort) => {
+            // The in-flight creation gets a grace period to return its directory for cleanup.
+            // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort. commentlint: allow(JUDGE)
+            let cleanup = match tokio::time::timeout(limits.termination_grace, &mut create).await {
+                Ok(Ok(dir)) => subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+                Ok(Err(_)) => Ok(()),
+                Err(_) => Err(subprocess::cleanup_unproven()),
+            };
+            return subprocess::merge_cleanup(
+                subprocess::setup_aborted_terminal(Harness::OpenCode, abort),
+                cleanup,
+            );
+        }
+    };
+    // The subprocess receives only the budget remaining after setup, so setup plus execution stay within one `run_timeout`. commentlint: allow(JUDGE)
+    let remaining = setup_deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return subprocess::merge_cleanup(
+            subprocess::budget_exhausted_failure(Harness::OpenCode),
+            subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+        );
+    }
+    limits.run_timeout = remaining;
+
+    let args = vec![
+        OsString::from("run"),
+        OsString::from("--model"),
+        // `OpenCodeBackend` passes the canonical `provider/model` to OpenCode unchanged and performs no alias mapping.
+        OsString::from(format!("{}/{}", request.provider, request.model)),
+        OsString::from("--agent"),
+        OsString::from(OPENCODE_BROCA_AGENT),
+        OsString::from("--format"),
+        OsString::from("json"),
+    ];
 
     child_env.push((
         OsString::from("OPENCODE_DB"),
@@ -170,7 +230,6 @@ async fn run_opencode(
         OsString::from(config_content),
     ));
     // `OpenCodeBackend` never reads project configuration, `.opencode/` directories, or local rule files.
-    // behavior.
     child_env.push((
         OsString::from("OPENCODE_DISABLE_PROJECT_CONFIG"),
         OsString::from("1"),
@@ -186,36 +245,27 @@ async fn run_opencode(
         stdin: request.prompt.clone().into_bytes(),
         // The closure directory descriptor is absent because no argument references it.
         // The harness receives a rename-immune handle for writing into the validated closure tree.
-        // The harness receives a rename-immune handle for writing into the validated closure tree.
         inherit_fds: vec![executable_node.inherited_fd()],
+        state_root,
     };
 
-    // The OpenCode CLI closes its streams and exits when the run finishes, so EOF and the drain grace bound the tail without a terminal probe.
     // The OpenCode CLI closes its streams and exits when the run finishes, so EOF and the drain grace bound the tail without a terminal probe.
     let result = match subprocess::run(spec, &limits, &cancel, None).await {
         Ok(result) => result,
         Err(err) => {
             return subprocess::merge_cleanup(
-                subprocess::spawn_failure(HarnessName::OpenCode, &err),
-                dir.cleanup(),
+                subprocess::spawn_failure(Harness::OpenCode, &err),
+                subprocess::bounded_cleanup(dir, limits.termination_grace).await,
             );
         }
     };
 
     // `finalize` trusts a transcript only after a clean end and maps every abnormal end to one canonical failure regardless of printed output.
-    // `finalize` trusts a transcript only after a clean end and maps every abnormal end to one canonical failure regardless of printed output.
     let parsed = subprocess::parse_clean_transcript(&result, &events, parse_opencode_transcript);
-    subprocess::finalize(
-        HarnessName::OpenCode,
-        &result,
-        parsed,
-        &limits,
-        dir.cleanup(),
-    )
+    let cleanup = subprocess::bounded_cleanup(dir, limits.termination_grace).await;
+    subprocess::finalize(Harness::OpenCode, &result, parsed, &limits, cleanup)
 }
 
-/// The parser accepts only `step_start`, `text`, `step_finish`, and `error`; it rejects `tool_use` because a tool invocation violates the zero-tool contract.
-/// The parser accepts only `step_start`, `text`, `step_finish`, and `error`; it rejects `tool_use` because a tool invocation violates the zero-tool contract.
 /// The parser accepts only `step_start`, `text`, `step_finish`, and `error`; it rejects `tool_use` because a tool invocation violates the zero-tool contract.
 /// The parser reports structural rejection details without quoting the input line.
 fn parse_opencode_transcript(
@@ -232,7 +282,6 @@ fn parse_opencode_transcript(
             return Err(format!("non-utf8 output at line {line_no}"));
         };
         // The parser bounds the scan before constructing the DOM because an unbounded node graph would escape the charged capture budget.
-        // The parser bounds the scan before constructing the DOM because an unbounded node graph would escape the charged capture budget.
         if !subprocess::json_nodes_within_bound(text) {
             return Err(format!("json structure too large at line {line_no}"));
         }
@@ -245,14 +294,12 @@ fn parse_opencode_transcript(
         match event_type {
             "step_start" => {}
             // A tool invocation violates the zero-tool contract, so the transform must not publish its text.
-            // A tool invocation violates the zero-tool contract, so the transform must not publish its text.
             "tool_use" => {
                 return Err(format!(
                     "tool_use event in a tool-less run at line {line_no}"
                 ));
             }
             "text" => {
-                // The transcript rejects content after a terminal because completed or failed runs cannot grow their answer.
                 // The transcript rejects content after a terminal because completed or failed runs cannot grow their answer.
                 if terminal.is_some() {
                     return Err(format!("text event after the terminal at line {line_no}"));
@@ -347,4 +394,33 @@ fn error_terminal(value: &serde_json::Value) -> BackendTerminal {
         retry_after_secs,
         provider_code: name.and_then(subprocess::sanitized_provider_code),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_config_neutralizes_opencode_substitution_tokens() {
+        let request = BackendRequest {
+            prompt: String::new(),
+            system: Some("leak {env:HOME} and {file:/etc/passwd}".into()),
+            provider: "{env:P}".into(),
+            model: "{file:/x}".into(),
+            max_output_tokens: 1,
+            temperature: 0.0,
+            harness: Harness::OpenCode,
+            session: String::new(),
+            run_id: String::new(),
+        };
+        let raw = inline_config(&request);
+        assert!(!raw.contains("{env:") && !raw.contains("{file:"), "{raw}");
+        // The escape is JSON-transparent: decoding restores the caller text verbatim.
+        let decoded: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        assert_eq!(
+            decoded["agent"][OPENCODE_BROCA_AGENT]["prompt"],
+            "leak {env:HOME} and {file:/etc/passwd}"
+        );
+        assert!(decoded["provider"]["{env:P}"]["models"]["{file:/x}"].is_object());
+    }
 }

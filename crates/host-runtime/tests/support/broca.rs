@@ -12,6 +12,7 @@ use host_runtime::broca::backend::{
     BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
     EventSink, FinishReason, LlmExecutionBackend,
 };
+use host_runtime::broca::subprocess::group_registry::StateRoot;
 use host_runtime::broca::{BROCA_MODULE_ID, BrocaComponent};
 use host_runtime::{CancellationToken, StaticComposite};
 
@@ -19,6 +20,13 @@ use super::raw_client::{self, RawFrame};
 
 pub const ROOT: &str = "/workspace/project";
 pub const BUDGET: Duration = Duration::from_secs(5);
+
+/// One data root per test process; the crash sweep leaves live-owner entries alone, so tests can share it.
+pub fn state_root() -> StateRoot {
+    static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let data_dir = ROOT.get_or_init(|| tempfile::tempdir().expect("broca state root").keep());
+    StateRoot::resolve(Some(data_dir)).expect("broca state root resolves")
+}
 
 type RunFn = dyn Fn(BackendRequest, EventSink, CancellationToken) -> BackendFuture + Send + Sync;
 

@@ -266,9 +266,20 @@ pub(crate) fn create_owned_probe<'env>(env: &'env Env, len: usize) -> Result<Unk
 }
 
 pub(crate) fn detach_value(env: &Env, value: Unknown<'_>) -> Result<bool> {
-    // SAFETY: value is provided by JavaScript in env.
     let raw = value.raw();
-    // SAFETY: runtime validates that raw is an ArrayBuffer.
+    let mut is_arraybuffer = false;
+    // SAFETY: raw is a live value in env for the duration of this call.
+    check(
+        unsafe { sys::napi_is_arraybuffer(env.raw(), raw, &mut is_arraybuffer) },
+        "ArrayBuffer type probe failed",
+    )?;
+    if !is_arraybuffer {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "detachment requires an ArrayBuffer",
+        ));
+    }
+    // SAFETY: raw was verified to be an ArrayBuffer above.
     check(
         unsafe { sys::napi_detach_arraybuffer(env.raw(), raw) },
         "ArrayBuffer detachment failed",
