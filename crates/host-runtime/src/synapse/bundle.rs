@@ -968,7 +968,7 @@ mod tests {
             }),
             ("corpus", |m, h| m.corpus.sha256 = h.to_owned()),
             ("pooling", |m, _| m.pooling = "cls".to_owned()),
-            ("quantization", |m, _| m.quantization = "int8".to_owned()),
+            ("quantization", |m, _| m.quantization = "static".to_owned()),
             ("output.name", |m, _| {
                 m.output.name = Some("sentence_embedding".to_owned())
             }),
@@ -988,6 +988,10 @@ mod tests {
         for (name, mutate) in fields {
             let mut manifest = baseline.clone();
             mutate(&mut manifest, &replacement);
+            // Every mutated manifest is a loadable bundle, so the campaign speaks only
+            // about values the loader admits.
+            validate_manifest(&manifest)
+                .unwrap_or_else(|error| panic!("{name} left the manifest invalid: {error:?}"));
             let after = canonical_fingerprint(&manifest);
             assert_ne!(
                 before, after,
