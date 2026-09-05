@@ -312,12 +312,14 @@ async fn run_open_loop_inner(
             }
             continue;
         }
-        let issue_ns = start.elapsed().as_nanos() as u64;
         if measured {
             measured_inflight += 1;
         }
         let task_client = Arc::clone(&client);
         requests.spawn(async move {
+            // Taken when the task first runs, so the runtime's task-queue delay lands in
+            // scheduler lag rather than in the request's own latency.
+            let issue_ns = start.elapsed().as_nanos() as u64;
             let outcome = classify(&request(task_client, route).await);
             Completion {
                 scheduled_ns,

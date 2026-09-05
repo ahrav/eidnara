@@ -153,9 +153,12 @@ impl CallError {
     /// with string `code` and `message`, and an unsigned `retry_after_ms` when present.
     /// Unknown members are permitted.
     fn host_terminal(body: &[u8]) -> Option<Self> {
-        // Duplicate keys would let the last occurrence win silently; the host's own control
-        // decoding rejects them, so the same strict parser applies to its error bodies.
-        let value = crate::control::strict_json::parse(body).ok()?;
+        // A repeated recognized member would let the last occurrence win silently, so it is
+        // malformed; repeated unknown members are ignored like any other unknown member (§7.4).
+        if !error_body_recognized_keys_are_unique(body) {
+            return None;
+        }
+        let value = serde_json::from_slice::<Value>(body).ok()?;
         let code = value.get("code")?.as_str()?;
         value.get("message")?.as_str()?;
         let retry_after = match value.get("retry_after_ms") {
@@ -2622,13 +2625,25 @@ async fn writer_loop(
             None => std::future::pending().await,
         }
     }
+    // `Cancel` and `Goodbye` taken from `control_rx` while only the `Pong` slot is free
+    // wait here, in order, for a data slot; they never consume the liveness reservation.
+    // Bounded by the control channel's capacity, since each entry came out of it.
+    let mut held: VecDeque<QueuedFrame> = VecDeque::new();
     loop {
         let in_flight = data_window.len() + control_window.len();
-        // One window slot is reserved for controls so a `Pong` is never stuck behind a full data backlog.
-        let room_for_control = in_flight < WRITER_WINDOW;
+        // One window slot is reserved for `Pong` so liveness is never stuck behind a full
+        // backlog; `Cancel` and `Goodbye` share the data lane and its slots.
+        let room_for_pong = in_flight < WRITER_WINDOW;
         let room_for_data = in_flight + 1 < WRITER_WINDOW;
-        let next = if room_for_control && let Ok(frame) = control_rx.try_recv() {
+        let next = if room_for_data && let Some(frame) = held.pop_front() {
             Some(frame)
+        } else if room_for_pong && let Ok(frame) = control_rx.try_recv() {
+            if frame.header.ty == FrameType::Pong {
+                Some(frame)
+            } else {
+                held.push_back(frame);
+                continue;
+            }
         } else if room_for_data && let Ok(frame) = data_rx.try_recv() {
             Some(frame)
         } else if in_flight == 0 {
@@ -2668,15 +2683,19 @@ async fn writer_loop(
                 () = inner.cancel.cancelled() => break,
                 result = await_head(control_head) => Step::Control(result),
                 result = await_head(data_head) => Step::Data(result),
-                // A control arriving while both heads are blocked still gets its reserved slot.
-                frame = control_rx.recv(), if room_for_control => Step::Intake(frame),
+                // A control arriving while both heads are blocked still gets the `Pong` slot.
+                frame = control_rx.recv(), if room_for_pong => Step::Intake(frame),
             }
         };
         let (head, written) = match step {
             Step::Intake(Some(frame)) => {
-                if hand(&write, &mut data_window, &mut control_window, frame).is_err() {
-                    fail(&inner, None);
-                    break;
+                if frame.header.ty == FrameType::Pong {
+                    if hand(&write, &mut data_window, &mut control_window, frame).is_err() {
+                        fail(&inner, None);
+                        break;
+                    }
+                } else {
+                    held.push_back(frame);
                 }
                 continue;
             }
@@ -2881,14 +2900,18 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
         )
     })?;
     check_string("project_root", project_root, MAX_PROJECT_ROOT_LEN, true).map_err(invalid)?;
+    if !project_root.starts_with('/') {
+        return Err(invalid(String::new()));
+    }
     check_string("harness", &identity.harness, MAX_HARNESS_LEN, true).map_err(invalid)?;
     check_string("session", &identity.session, MAX_SESSION_LEN, true).map_err(invalid)?;
+    // Present optional strings must be nonempty, as the host requires.
     if let Some(module) = &identity.consumer_module_id {
         check_string(
             "consumer_identity.module_id",
             module,
             MAX_MODULE_ID_LEN,
-            false,
+            true,
         )
         .map_err(invalid)?;
     }
@@ -2897,7 +2920,7 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
             "consumer_identity.launch_nonce",
             nonce,
             MAX_LAUNCH_NONCE_LEN,
-            false,
+            true,
         )
         .map_err(invalid)?;
     }
@@ -2907,7 +2930,7 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
         return Err(invalid(String::new()));
     }
     for capability in &identity.consumer_capabilities {
-        check_string("consumer capability", capability, MAX_CAPABILITY_LEN, false)
+        check_string("consumer capability", capability, MAX_CAPABILITY_LEN, true)
             .map_err(invalid)?;
     }
     for (provider, fingerprint) in &identity.credential_fingerprints {
@@ -2921,12 +2944,37 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
             return Err(invalid(String::new()));
         }
     }
+    // The lower-bound walk refuses oversized values after bounded work; a value that passes
+    // it has at most `MAX_ADMISSION_FACTS_BYTES` raw bytes, so the exact encoding that the
+    // host measures can then be computed at bounded cost (escapes expand a byte at most sixfold).
     if identity.admission_facts.as_ref().is_some_and(|facts| {
         !json_within_bounds(facts, MAX_ADMISSION_FACTS_BYTES, MAX_ADMISSION_FACTS_DEPTH)
+            || !compact_json_fits(facts, MAX_ADMISSION_FACTS_BYTES)
     }) {
         return Err(invalid(String::new()));
     }
     Ok(())
+}
+
+/// Whether `value`'s compact encoding is at most `cap` bytes; the counting writer stops the
+/// serializer as soon as the cap is exceeded.
+fn compact_json_fits(value: &Value, cap: usize) -> bool {
+    struct Remaining(usize);
+    impl std::io::Write for Remaining {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            match self.0.checked_sub(buf.len()) {
+                Some(remaining) => {
+                    self.0 = remaining;
+                    Ok(buf.len())
+                }
+                None => Err(std::io::Error::other("cap exceeded")),
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Remaining(cap), value).is_ok()
 }
 
 /// Whether `value` nests no deeper than `max_depth` and its compact encoding is at most
@@ -3051,6 +3099,46 @@ fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec
         ));
     }
     Ok(body)
+}
+
+/// Whether each of `code`, `message`, and `retry_after_ms` appears at most once at the top
+/// level of `body`. Nested objects are skipped; a body that is not an object fails the
+/// caller's shape check anyway.
+fn error_body_recognized_keys_are_unique(body: &[u8]) -> bool {
+    use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
+    struct TopLevel;
+    impl<'de> Visitor<'de> for TopLevel {
+        type Value = bool;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            let (mut code, mut message, mut retry) = (0u8, 0u8, 0u8);
+            while let Some(key) = map.next_key::<String>()? {
+                map.next_value::<IgnoredAny>()?;
+                let seen = match key.as_str() {
+                    "code" => &mut code,
+                    "message" => &mut message,
+                    "retry_after_ms" => &mut retry,
+                    _ => continue,
+                };
+                *seen += 1;
+                if *seen > 1 {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    }
+    struct Seed;
+    impl<'de> DeserializeSeed<'de> for Seed {
+        type Value = bool;
+        fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
+            deserializer.deserialize_map(TopLevel)
+        }
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    Seed.deserialize(&mut deserializer).unwrap_or(false)
 }
 
 fn names_route_open(body: &[u8]) -> bool {
@@ -3865,6 +3953,21 @@ mod tests {
         })
         .await
         .expect("bridge receive task");
+        let (held, writes) = held;
+        // A causal control queued first must not take the liveness slot.
+        inner
+            .send_control(
+                FrameType::Goodbye,
+                pure_header_flags(),
+                FrameId::routed(route(2), 0),
+                None,
+            )
+            .expect("goodbye admitted");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            writes.try_recv().is_err(),
+            "a Goodbye waits for a data slot rather than taking the Pong slot"
+        );
         inner
             .send_control(
                 FrameType::Pong,
@@ -3897,6 +4000,21 @@ mod tests {
         })
         .await
         .expect("a completed control releases its charge behind a blocked data head");
+        // Completing one data frame frees a slot; the held Goodbye is handed on the data lane.
+        let mut held = held;
+        let first = held.remove(0);
+        first
+            .completed
+            .send(Ok(Publication::Published))
+            .expect("writer awaits the data completion");
+        let goodbye = tokio::task::spawn_blocking(move || {
+            writes
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the held Goodbye follows once a data slot opens")
+        })
+        .await
+        .expect("bridge receive task");
+        assert_eq!(goodbye.header.ty, FrameType::Goodbye);
         inner.retire("test_done");
         drop(held);
         writer.await.expect("writer exits on cancel");
@@ -4613,6 +4731,50 @@ mod tests {
                 .is_none()
         );
         assert!(CallError::host_terminal(br#"{"code":"c","message":"a","message":"b"}"#).is_none());
+        // Unknown members, even repeated, are ignored (§7.4).
+        assert!(CallError::host_terminal(br#"{"code":"c","message":"m","x":1,"x":2}"#).is_some());
+    }
+
+    #[test]
+    fn preflight_mirrors_the_host_identity_rules() {
+        let target = RouteTarget {
+            kind: TargetKind::ToolProvider,
+            module_id: "context".to_owned(),
+        };
+        let mut identity = identity_fixture();
+        identity.project_root = std::path::PathBuf::from("relative/root");
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("relative root")
+                .code(),
+            "invalid_identity"
+        );
+        let mut identity = identity_fixture();
+        identity.consumer_capabilities = vec![String::new()];
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("empty capability")
+                .code(),
+            "invalid_identity"
+        );
+        let mut identity = identity_fixture();
+        identity.consumer_module_id = Some(String::new());
+        identity.consumer_launch_nonce = Some("n".to_owned());
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("empty module id")
+                .code(),
+            "invalid_identity"
+        );
+        // Escapes count toward the exact facts bound the host applies.
+        let mut identity = identity_fixture();
+        identity.admission_facts = Some(Value::String("\n".repeat(5_000)));
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("escaped encoding exceeds the facts cap")
+                .code(),
+            "invalid_identity"
+        );
     }
 
     #[test]
