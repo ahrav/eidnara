@@ -2,13 +2,13 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "a36194622a11327e3cc5f2326352816dca7aada973e0b7980586f37bd143fc48",
+  "source_sha256": "1da8f94d6064479efdb153b04804081d3e325e5c77ef6d42f8513d737911b91c",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "the generation counter is seeded once per incarnation (`crates/host-runtime/src/runtime.rs:922`) and every accepted connection mints from it (`crates/host-runtime/src/connection.rs:235`).",
+      "reachability_note": "the generation counter is seeded once per incarnation (`gen_counter: AtomicU64::new(1)` at `crates/host-runtime/src/runtime.rs:788`, re-verified) and every accepted connection mints from it (`shared.gen_counter.fetch_add(1, ..)` in `new_generation`, `crates/host-runtime/src/connection.rs:219`, re-verified).",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3667,7 +3667,7 @@
       "guarantee": "When no linked module declares a reserved allocation, the reserved admission pools hold zero permits and no route ever attempts to acquire from them.",
       "check": {
         "semantics": "always-or-unreached",
-        "condition": "assert that an acquisition against `reserved_pending_permits` or `reserved_task_permits` occurs only for a route whose class is `Reserved`, and that no such route exists when `reservations.pending == 0`. `always-or-unreached` rather than `unreachable`, because the pools are legitimately entered on a host that does declare a reservation; the obligation is that entry is safe and correctly gated, not that the code is dead."
+        "condition": "assert that an acquisition against `reserved_pending_permits` or `reserved_task_permits` occurs only for a route whose class is `Reserved`, and that no such route exists when `reservations.pending == 0`; and, after `HostShared` construction, that `reserved_pending_permits.available_permits() == reservations.pending` and `reserved_task_permits.available_permits() == reservations.tasks` (constructed at `runtime.rs:777-778`), so the undeclared case requires both pools to hold zero permits rather than only that no route acquires from them. `always-or-unreached` rather than `unreachable`, because the pools are legitimately entered on a host that does declare a reservation; the obligation is that entry is safe and correctly gated, not that the code is dead."
       },
       "fault_timing": "an acquisition against a zero-permit `Semaphore` blocks forever rather than failing, so the failure mode is a permanently parked dispatch task rather than an error. The gate is `build_target_index`'s class/reservation agreement check at `runtime.rs:535-554`.",
       "required_faults": "a manifest set whose declared `route_class` disagrees with its reserved counts. `handler_contract.rs:378-388` constructs both directions.",

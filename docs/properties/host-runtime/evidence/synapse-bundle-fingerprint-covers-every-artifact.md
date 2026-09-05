@@ -122,7 +122,10 @@ the function against its Python mirror:
   `table_epoch`), and asserts `canonical_fingerprint` changes and
   that no two mutations produce the same fingerprint. An input added to
   `BundleManifest` but omitted from the pre-image fails the test once its
-  mutation is listed.
+  mutation is listed. `fingerprint_binds_initializer_names_to_their_hashes`
+  covers the remaining structural case: a swap of two initializer names with
+  every hash held fixed (the pre-image binds `name.len():name:sha256`,
+  `bundle.rs:585-594`).
 - `the_committed_fixture_carries_its_canonical_fingerprint` pins the literal
   `2bba4ff1399076304377c063fbccac0709daf89d183ab90e712a36c06ae42b5f`, so a
   regenerated fixture whose pre-image changed fails against the literal, not

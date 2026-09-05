@@ -84,19 +84,19 @@ remover keys on the id).
 
 ## What a test must construct
 
-Concurrency is the only interesting constructor, and no test in scope produces it:
-every existing test hand-builds `id: 1` (fault class H1, unavailable - the tests
-are current-thread while production is multi-thread). Concretely: a multi-thread
-runtime, `max_connections` accepts driven in parallel, each socket completing a
-non-TCP grant so both mint paths run, and an instrumented `new_generation` that
-records `(observation order, id)`. The oracle is not "all ids distinct" - that is
-too weak, since it passes for a non-monotonic sequence. Assert two things
-separately: the multiset of minted ids has no repeat, and the sequence read under
-the `connections` lock is strictly increasing. Add a negative assertion that
-`connections.insert` at `:288` never returns `Some(_)`, which turns a duplicate
-into a test failure at the moment of collision rather than at its consequence.
-Coverage checks to emit: `host_two_generations_minted_for_one_socket` and
-`host_concurrent_mints_observed`.
+Wraparound is the constructor, not concurrency. The allocator is one
+sequentially-consistent `fetch_add` at `connection.rs:219`, so concurrent mints
+receive distinct values by construction, and an observation-order assertion would
+fail merely because threads resume out of fetch order. Concretely: build a
+`HostShared` (or seed the counter through a test-only accessor) with `gen_counter`
+at `u64::MAX - 1`, accept three connections in sequence, and assert the third
+mint either refuses or retires rather than producing an id equal to an earlier
+one; at `HEAD` the counter wraps to `0` and then `1`, which is the predicted
+failure. Assert two things separately: the multiset of minted ids has no repeat,
+and the ids read in mint order are strictly increasing. Add a negative assertion
+that `connections.insert` at `connection.rs:260` never returns `Some(_)`, which
+turns a duplicate into a test failure at the moment of collision rather than at its
+consequence. Coverage check to emit: `host_generation_counter_boundary_reached`.
 
 ## Investigation log
 

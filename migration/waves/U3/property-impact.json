@@ -5053,7 +5053,7 @@
       "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint), the committed fingerprint pinned as a literal, a structural test that changes each artifact hash and each embedding-space scalar alone and asserts the fingerprint moves, plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "evidence_digest": "3c1316529cfb77e4a420168fccfeacbee20894b9c11d5e24fd1c96c6cc9603bc",
+      "evidence_digest": "ddf61527879c38ad8c6ad57a8fdb405e5bb2dc6889ae1256c57dbc380425523f",
       "check_pointer": "crates/host-runtime/tests/synapse_bundle.rs#the_committed_fixture_carries_its_canonical_fingerprint",
       "check_hash": "2bd1119b04d575d60614e2e51fd6ca2e8b256dc8f5a27d17fb8e47cb428f9e88",
       "code_hash": "12e0efb343aa20f431719ccc9cb58204b809cbebd6b14aac80682d14027e9817",
@@ -5062,7 +5062,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "3c1316529cfb77e4a420168fccfeacbee20894b9c11d5e24fd1c96c6cc9603bc",
+        "digest": "ddf61527879c38ad8c6ad57a8fdb405e5bb2dc6889ae1256c57dbc380425523f",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },

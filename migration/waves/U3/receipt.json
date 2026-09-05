@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "a36194622a11327e3cc5f2326352816dca7aada973e0b7980586f37bd143fc48",
+      "destination_sha256": "1da8f94d6064479efdb153b04804081d3e325e5c77ef6d42f8513d737911b91c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "cd843f4084158eda901c5935022c5c35f20858e41f8b1b7a21ae3bbad3b009a6",
+      "destination_sha256": "048fc25cafc9c3990843d23f5c15d05cff980f692623684f85de45bd1f5f2582",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3302,7 +3302,7 @@
         "blob_sha": "52faadd08f0bdf1743e868d9149206e3ad2f4dee"
       },
       "destination": "docs/properties/host-runtime/evidence/at-most-one-registered-generation-per-connection.md",
-      "destination_sha256": "a8b81e234ec9a0d7407e53f5d681b6ae448bd86309e1507a02ba16ff07467b7e",
+      "destination_sha256": "c9918973b9296061eddfa73fe2abd4a1bd409a38dc9a6a6086a61cc62ebcc84c",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3445,7 +3445,7 @@
         "blob_sha": "02b2e48fa6d57df00a297c4f4d2cb3173d09f50b"
       },
       "destination": "docs/properties/host-runtime/evidence/generation-id-strictly-increases-and-is-never-reused.md",
-      "destination_sha256": "98dac592c7ff524808280bbd86c9026493b6f376299b733ed8749e1962c1635b",
+      "destination_sha256": "0f8c40849f5fea215568f01520f003d112dd2a98fe9880341c184ffe75c82f69",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4912,7 +4912,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "destination_sha256": "3c1316529cfb77e4a420168fccfeacbee20894b9c11d5e24fd1c96c6cc9603bc",
+      "destination_sha256": "ddf61527879c38ad8c6ad57a8fdb405e5bb2dc6889ae1256c57dbc380425523f",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "76c1e4d51234e2106d6ab86ebdc15d3fc713795f0dad7b57d6aeb761ac1699ea",
+      "destination_sha256": "aaf40b1cc53f55f5ddace48e136e507c43fb965110f7815e015e144b36ebe83e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
