@@ -523,11 +523,27 @@ fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "shared-memory setup failed")
 }
 
+/// Payload that marks a failed authentication proof. The kind alone cannot: `connect(2)` on a
+/// socket the process may not open also reports `PermissionDenied`.
+#[derive(Debug)]
+pub(crate) struct IdentityMismatch;
+
+impl std::fmt::Display for IdentityMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("shared-memory identity mismatch")
+    }
+}
+
+impl std::error::Error for IdentityMismatch {}
+
 fn identity_mismatch() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "shared-memory identity mismatch",
-    )
+    io::Error::new(io::ErrorKind::PermissionDenied, IdentityMismatch)
+}
+
+pub(crate) fn is_identity_mismatch(failure: &io::Error) -> bool {
+    failure
+        .get_ref()
+        .is_some_and(|inner| inner.is::<IdentityMismatch>())
 }
 
 fn timed_out() -> io::Error {
@@ -682,6 +698,18 @@ mod tests {
         if let Some(same) = super::same_open_file(first.as_fd(), dup.as_fd()).expect("kcmp") {
             assert!(same, "kcmp must identify a dup");
         }
+    }
+
+    #[test]
+    fn identity_mismatch_is_distinguished_from_socket_permission_errors() {
+        let mismatch = super::identity_mismatch();
+        assert_eq!(mismatch.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(super::is_identity_mismatch(&mismatch));
+        assert_eq!(mismatch.to_string(), "shared-memory identity mismatch");
+
+        let denied_socket = std::io::Error::from_raw_os_error(libc::EACCES);
+        assert_eq!(denied_socket.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!super::is_identity_mismatch(&denied_socket));
     }
 
     #[test]

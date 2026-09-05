@@ -716,7 +716,7 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
 }
 
 fn setup_error(failure: std::io::Error) -> Error {
-    if failure.kind() == std::io::ErrorKind::PermissionDenied {
+    if setup::is_identity_mismatch(&failure) {
         error("shared-memory identity mismatch")
     } else {
         error("shared-memory setup failed")

@@ -573,6 +573,21 @@ export class NativeReceiveLease {
 
 const readinessHandlers = new Map<number, () => void>();
 
+const REDISPATCH_MICROTASK_BUDGET = 16;
+let consecutiveMicrotaskRedispatches = 0;
+
+// Microtasks run ahead of timers and I/O; an unbounded chain under sustained traffic would
+// starve everything else on the event loop.
+function scheduleRedispatch(): void {
+    if (consecutiveMicrotaskRedispatches < REDISPATCH_MICROTASK_BUDGET) {
+        consecutiveMicrotaskRedispatches += 1;
+        queueMicrotask(dispatchReadiness);
+    } else {
+        consecutiveMicrotaskRedispatches = 0;
+        setImmediate(dispatchReadiness);
+    }
+}
+
 function dispatchReadiness(): void {
     try {
         for (const [id, handler] of [...readinessHandlers]) {
@@ -588,7 +603,11 @@ function dispatchReadiness(): void {
             }
         }
     } finally {
-        if (loaded?.readinessHandled()) queueMicrotask(dispatchReadiness);
+        if (loaded?.readinessHandled()) {
+            scheduleRedispatch();
+        } else {
+            consecutiveMicrotaskRedispatches = 0;
+        }
     }
 }
 
@@ -718,15 +737,15 @@ export class NativeChannel {
 
     close(): void {
         if (this.closed) return;
-        readinessHandlers.delete(this.id);
         this.native.close(this.id);
+        readinessHandlers.delete(this.id);
         this.closed = true;
     }
 
     forceClose(): void {
         if (this.closed) return;
-        readinessHandlers.delete(this.id);
         this.native.forceClose(this.id);
+        readinessHandlers.delete(this.id);
         this.closed = true;
     }
 
