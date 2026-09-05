@@ -118,6 +118,7 @@ impl LlmExecutionBackend for PiBackend {
                 limits,
                 env,
                 state_root,
+                deadline: None,
             },
             request,
             events,
@@ -162,6 +163,8 @@ struct PiRun {
     limits: SubprocessLimits,
     env: EnvSnapshot,
     state_root: StateRoot,
+    /// The retry shares the first attempt's wall-clock budget, so it carries an absolute end instant rather than a duration that setup time would escape.
+    deadline: Option<tokio::time::Instant>,
 }
 
 /// Pi tries the aliased provider first and retries the canonical provider once after a credential failure.
@@ -209,8 +212,10 @@ async fn run_pi_with_provider_fallback(
     }
     // The retry drops `first` before retrying to keep concurrent capture buffers within the declared headroom.
     drop(first);
+    let budget_end = started + run.limits.run_timeout;
     let mut retry = run;
     retry.limits.run_timeout = remaining;
+    retry.deadline = Some(budget_end);
     run_pi(retry, request, events, cancel, canonical).await
 }
 
@@ -224,9 +229,10 @@ async fn run_pi(
     let PiRun {
         descriptor,
         thinking_level,
-        limits,
+        mut limits,
         env,
         state_root,
+        deadline,
     } = run;
     let mut child_env = match env.provider_row("pi", &request.provider) {
         Ok(row) => row,
@@ -366,6 +372,18 @@ async fn run_pi(
             .collect(),
         state_root,
     };
+
+    // The subprocess receives the deadline remaining after attempt setup.
+    if let Some(deadline) = deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return subprocess::merge_cleanup(
+                subprocess::budget_exhausted_failure(Harness::Pi),
+                dir.cleanup_async().await,
+            );
+        }
+        limits.run_timeout = remaining;
+    }
 
     let result = match subprocess::run(spec, &limits, &cancel, Some(pi_terminal_probe)).await {
         Ok(result) => result,

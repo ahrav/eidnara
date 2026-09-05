@@ -53,6 +53,7 @@ const RETRY_PAUSE_MS_ENV: &str = "EIDNARA_FIXTURE_RETRY_PAUSE_MS";
 const RETRY_ANNOUNCE_MS_ENV: &str = "EIDNARA_FIXTURE_RETRY_ANNOUNCE_MS";
 const SECRET_ENV: &str = "EIDNARA_FIXTURE_SECRET";
 const SABOTAGE_ENV: &str = "EIDNARA_FIXTURE_SABOTAGE_CLEANUP";
+const SABOTAGE_RECORD_ENV: &str = "EIDNARA_FIXTURE_SABOTAGE_RECORD";
 const GROUP_PID_ENV: &str = "EIDNARA_FIXTURE_GROUP_PID";
 /// The re-executed `record_group` fixture must write into the same registry the test sweeps.
 const STATE_ROOT_ENV: &str = "EIDNARA_FIXTURE_STATE_ROOT";
@@ -203,6 +204,10 @@ fn main() {
             private_paths_forced_modes_under_umask,
         ),
         ("private_dir_contract", private_dir_contract),
+        (
+            "retained_crash_record_withholds_success",
+            retained_crash_record_withholds_success,
+        ),
         (
             "cleanup_failure_never_unqualified_success",
             cleanup_failure_never_unqualified_success,
@@ -446,6 +451,22 @@ mod fixture {
         }
     }
 
+    /// The fixture removes the owner write bit from the registry directory holding crash-ownership records.
+    /// Removing a file needs write permission on its directory, so the host's record removal fails while the record stays readable.
+    fn sabotage_record(args: &[String]) {
+        let Some(private_file) = flag_value(args, "--system-prompt") else {
+            return;
+        };
+        // `<registry>/runs/<run dir>/system-prompt.txt` -> `<registry>`.
+        if let Some(registry) = private_file
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        {
+            let _ = fs::set_permissions(registry, fs::Permissions::from_mode(0o555));
+        }
+    }
+
     fn print_transcript_and_exit() -> ! {
         if let Some(path) = std::env::var_os(TRANSCRIPT_FILE_ENV) {
             let bytes = fs::read(path).expect("read transcript");
@@ -668,6 +689,9 @@ mod fixture {
         }
         if std::env::var_os(SABOTAGE_ENV).is_some() {
             sabotage_cleanup(&argv());
+        }
+        if std::env::var_os(SABOTAGE_RECORD_ENV).is_some() {
+            sabotage_record(&argv());
         }
         match std::env::var(BEHAVIOR_ENV).as_deref() {
             Ok("flood_stdout") => {
@@ -2737,6 +2761,71 @@ fn private_paths_forced_modes_under_umask() {
     }
 }
 
+/// A retained crash-ownership record makes a completed run fail with a transient error.
+fn retained_crash_record_withholds_success() {
+    let setup = RunSetup::new();
+    let transcript = write_transcript(
+        setup.scratch.path(),
+        "success.ndjson",
+        &pi_success_lines("hi", "stop"),
+    );
+    let backend = pi_backend(
+        &setup,
+        &[
+            (TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy()),
+            (SABOTAGE_RECORD_ENV, "1"),
+        ],
+        Vec::new(),
+        None,
+    );
+    let request = request(
+        setup.project.path(),
+        Harness::Pi,
+        "anthropic/m",
+        Some(SYSTEM_SENTINEL),
+    );
+    let (terminal, _) = execute(&backend, request);
+
+    // Repair before asserting so a failed assertion cannot leave the shared registry read-only.
+    let registry = state_root().path().to_path_buf();
+    let _ = fs::set_permissions(&registry, fs::Permissions::from_mode(0o700));
+    let leftovers: Vec<PathBuf> = fs::read_dir(&registry)
+        .expect("read registry")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .collect();
+    for record in &leftovers {
+        let _ = fs::remove_file(record);
+    }
+
+    assert_eq!(
+        leftovers.len(),
+        1,
+        "the sabotaged removal must leave exactly one record"
+    );
+    let error = failed(&terminal);
+    assert_eq!(error.class, ErrorClass::Transient);
+    assert!(
+        error.message.contains("run completed"),
+        "{:?}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains("could not remove its crash-ownership record"),
+        "{:?}",
+        error.message
+    );
+    // Cleanup of the private run directory is unaffected, so no prompt residue is reported.
+    assert!(
+        !error.message.contains("cleanup failed"),
+        "{:?}",
+        error.message
+    );
+    assert!(!error.message.contains(SYSTEM_SENTINEL));
+}
+
 fn private_dir_contract() {
     let dir = PrivateDir::create(&state_root(), "broca-test").expect("create");
     let dir_meta = fs::symlink_metadata(dir.path()).expect("dir meta");
@@ -3211,7 +3300,7 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
         "the sweep must not touch a live host's group"
     );
 
-    survivor_record.remove();
+    survivor_record.remove().expect("remove survivor record");
     let _ = survivor.kill();
     let _ = survivor.wait();
 
@@ -3325,6 +3414,6 @@ fn group_record_mode_forced_under_umask() {
         assert_eq!(mode, 0o600, "record mode under umask {mask:o}");
         let body = fs::read_to_string(&record_path).expect("record readable");
         assert!(body.starts_with("v1\n"), "record is complete when visible");
-        record.remove();
+        record.remove().expect("remove record");
     }
 }

@@ -290,6 +290,8 @@ pub struct SubprocessResult {
     pub end: SubprocessEnd,
     /// prompt_delivered is true only when the whole prompt reached the child's stdin before it closed; parsers reject transcripts otherwise, even after a clean end state.
     pub prompt_delivered: bool,
+    /// `record_retained` is true when the group is proven gone but its crash-ownership record could not be removed, so a successor's startup sweep will encounter it.
+    pub record_retained: bool,
 }
 
 /// Returns after the leader is reaped on every path, including timeout, cancellation, and overflow, so lifecycle completion upstream can never observe a live child.
@@ -552,9 +554,12 @@ pub async fn run(
         }
     };
     // The record is removed only once the group is proven gone; otherwise the host retains it for a later sweep.
+    let mut record_retained = false;
     let end = if group_gone {
-        if let Some(record) = group_record.take() {
-            record.remove();
+        if let Some(record) = group_record.take()
+            && record.remove().is_err()
+        {
+            record_retained = true;
         }
         end
     } else {
@@ -577,6 +582,7 @@ pub async fn run(
         stderr,
         end,
         prompt_delivered,
+        record_retained,
     })
 }
 
@@ -928,6 +934,20 @@ impl std::fmt::Display for RegistrationTeardownUnproven {
 }
 
 impl std::error::Error for RegistrationTeardownUnproven {}
+
+/// A shared wall-clock budget can elapse during setup, before a child exists to time out.
+/// A later attempt can still fit the budget, so the class is transient.
+pub(crate) fn budget_exhausted_failure(harness: Harness) -> BackendTerminal {
+    BackendTerminal::Failed(BackendError {
+        class: ErrorClass::Transient,
+        message: format!(
+            "{} backend exhausted its run budget before the child started",
+            harness.as_str()
+        ),
+        retry_after_secs: None,
+        provider_code: None,
+    })
+}
 
 pub(crate) fn spawn_failure(harness: Harness, err: &io::Error) -> BackendTerminal {
     if err
@@ -1304,7 +1324,44 @@ pub(crate) fn finalize(
             Err(detail) => parse_failure(harness, &detail),
         },
     };
+    let terminal = merge_record_retained(harness, terminal, result.record_retained);
     merge_cleanup(terminal, cleanup)
+}
+
+/// A retained crash-ownership record withholds success because the run cannot report the coordination state as removed.
+/// Removal can succeed later, so the class is transient.
+fn merge_record_retained(
+    harness: Harness,
+    terminal: BackendTerminal,
+    retained: bool,
+) -> BackendTerminal {
+    if !retained {
+        return terminal;
+    }
+    let detail = format!(
+        "{} backend could not remove its crash-ownership record",
+        harness.as_str()
+    );
+    match terminal {
+        BackendTerminal::Completed { finish_reason } => BackendTerminal::Failed(BackendError {
+            class: ErrorClass::Transient,
+            message: format!(
+                "run completed ({}) but {detail}; success withheld",
+                finish_reason.as_wire_str()
+            ),
+            retry_after_secs: None,
+            provider_code: None,
+        }),
+        BackendTerminal::Failed(mut error) => {
+            error.message = format!("{}; additionally {detail}", error.message);
+            BackendTerminal::Failed(error)
+        }
+        // A retained record does not downgrade an unresolved teardown failure.
+        BackendTerminal::FailedUnresolved(mut error) => {
+            error.message = format!("{}; additionally {detail}", error.message);
+            BackendTerminal::FailedUnresolved(error)
+        }
+    }
 }
 
 /// The crash-orphan registry stores one file per live harness process group.
@@ -1557,8 +1614,14 @@ pub mod group_registry {
 
     impl GroupRecord {
         /// Remove the record after the group is proven to have exited.
-        pub fn remove(self) {
-            let _ = fs::remove_file(&self.path);
+        /// A retained record fails a successor's mandatory startup sweep, so the caller reports the failure rather than claiming the coordination state is gone.
+        /// `NotFound` counts as removed.
+        pub fn remove(self) -> io::Result<()> {
+            match fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(err),
+            }
         }
     }
 
