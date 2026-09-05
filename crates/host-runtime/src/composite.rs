@@ -143,26 +143,71 @@ fn severity(status: HealthStatus) -> u8 {
     }
 }
 
-/// `catch_child_panic` converts a panic while polling `future` into `Err(payload)`.
-/// A child callback panic is returned as `Err(payload)` instead of unwinding through `catch_child_panic`.
+/// `ChildPanic` marks a caught child panic. The payload never leaves `catch_child_panic`: it is
+/// destroyed inside `catch_unwind` by `discard_payload`, so a payload whose own `Drop` panics
+/// cannot unwind into the composite.
+#[derive(Debug, PartialEq, Eq)]
+struct ChildPanic;
+
+/// `discard_payload` drops a caught panic payload inside `catch_unwind`. A payload whose `Drop`
+/// panics is leaked, which bounds the regress at one level.
+fn discard_payload(payload: Box<dyn std::any::Any + Send + 'static>) -> ChildPanic {
+    if let Err(second) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        drop(payload);
+    })) {
+        std::mem::forget(second);
+    }
+    ChildPanic
+}
+
+/// `catch_child_panic` takes a thunk rather than a future so that a panic in the synchronous
+/// setup of a `fn -> impl Future` callback is caught as well as a panic while polling or
+/// dropping the future. Every panic during callback setup, polling, or future drop returns
+/// `Err(ChildPanic)`.
 async fn catch_child_panic<F: Future>(
-    future: F,
-) -> Result<F::Output, Box<dyn std::any::Any + Send + 'static>> {
-    let mut future = std::pin::pin!(future);
-    std::future::poll_fn(move |cx| {
+    callback: impl FnOnce() -> F,
+) -> Result<F::Output, ChildPanic> {
+    let future = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Box::pin(callback())))
+        .map_err(discard_payload)?;
+    let mut guard = ChildFuture(Some(future));
+    let output = std::future::poll_fn(|cx| {
+        let future = guard
+            .0
+            .as_mut()
+            .expect("child future is present until completion");
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
             Ok(poll) => poll.map(Ok),
-            Err(payload) => std::task::Poll::Ready(Err(payload)),
+            Err(payload) => std::task::Poll::Ready(Err(discard_payload(payload))),
         }
     })
-    .await
+    .await;
+    // Dropping the future runs child `Drop` impls, which are child code too.
+    let future = guard.0.take();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(future)))
+        .map_err(discard_payload)?;
+    output
+}
+
+/// `ChildFuture` owns a child future between polls so that dropping it while pending, as a
+/// cancelled `catch_child_panic` does, still runs the child's `Drop` inside `catch_unwind`.
+/// A panic there is swallowed: cancellation has no result to attach it to.
+struct ChildFuture<F>(Option<std::pin::Pin<Box<F>>>);
+
+impl<F> Drop for ChildFuture<F> {
+    fn drop(&mut self) {
+        if let Some(future) = self.0.take()
+            && let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(future)))
+        {
+            discard_payload(payload);
+        }
+    }
 }
 
 /// The composite records only the byte length of each returned shutdown error.
-/// Panic payloads are dropped entirely.
 fn shutdown_failure_note(
     id: &str,
-    outcome: Result<Result<(), ShutdownError>, Box<dyn std::any::Any + Send + 'static>>,
+    outcome: Result<Result<(), ShutdownError>, ChildPanic>,
 ) -> Option<String> {
     match outcome {
         Ok(Ok(())) => None,
@@ -170,7 +215,7 @@ fn shutdown_failure_note(
             "{id} shutdown failed ({} bytes of detail redacted)",
             err.0.len()
         )),
-        Err(_payload) => Some(format!("{id} shutdown panicked")),
+        Err(ChildPanic) => Some(format!("{id} shutdown panicked")),
     }
 }
 
@@ -241,6 +286,8 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
             };
         };
         // The map records the target child before `bind` so `route_gone` can dispatch if the route closes while `bind` is pending.
+        // The entry remains after a rejected bind because the host invokes `route_gone` for
+        // rejected handles (`docs/host-wire-protocol.md`), and that call must reach the rejecting child.
         self.routes
             .lock()
             .expect("composite route map")
@@ -280,25 +327,23 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
     }
 
     async fn health(&self) -> HealthReport {
-        let primary = self.primary.health().await;
         let panicked = |id: &str| HealthReport {
             status: HealthStatus::Failing,
             detail: Some(format!("{id} health check panicked")),
             metrics: None,
         };
-        let secondary = catch_child_panic(self.secondary.health())
+        let primary = catch_child_panic(|| self.primary.health())
             .await
-            .unwrap_or_else(|_payload| panicked(&self.secondary_id));
-        let tertiary = catch_child_panic(self.tertiary.health())
+            .unwrap_or_else(|ChildPanic| panicked(&self.primary_id));
+        let secondary = catch_child_panic(|| self.secondary.health())
             .await
-            .unwrap_or_else(|_payload| panicked(&self.tertiary_id));
+            .unwrap_or_else(|ChildPanic| panicked(&self.secondary_id));
+        let tertiary = catch_child_panic(|| self.tertiary.health())
+            .await
+            .unwrap_or_else(|ChildPanic| panicked(&self.tertiary_id));
         // `Ok < Degraded < Failing`; equal severities use catalog order: primary, secondary, then tertiary.
         // child.
-        let component_status = |report: &HealthReport| match report.status {
-            HealthStatus::Ok => "ok",
-            HealthStatus::Degraded => "degraded",
-            HealthStatus::Failing => "failing",
-        };
+        let component_status = |report: &HealthReport| report.status.as_str();
         let mut components = serde_json::Map::new();
         for (id, report) in [
             (self.primary_id.as_ref(), &primary),
@@ -331,20 +376,326 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
         let outcomes = [
             shutdown_failure_note(
                 &self.tertiary_id,
-                catch_child_panic(self.tertiary.shutdown()).await,
+                catch_child_panic(|| self.tertiary.shutdown()).await,
             ),
             shutdown_failure_note(
                 &self.secondary_id,
-                catch_child_panic(self.secondary.shutdown()).await,
+                catch_child_panic(|| self.secondary.shutdown()).await,
             ),
             shutdown_failure_note(
                 &self.primary_id,
-                catch_child_panic(self.primary.shutdown()).await,
+                catch_child_panic(|| self.primary.shutdown()).await,
             ),
         ];
         failures.extend(outcomes.into_iter().flatten());
         if !failures.is_empty() {
             panic!("{}", failures.join("; "));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// `Fake` is a deterministic child whose `bind`, `health`, and `shutdown` behavior is fixed at
+    /// construction. `panic_before_future` panics in the synchronous part of a callback, before
+    /// any future exists, which models a component written as `fn -> impl Future`.
+    struct Fake {
+        id: &'static str,
+        reject_bind: bool,
+        panic_in_health: AtomicBool,
+        panic_before_future: bool,
+        shutdowns: AtomicUsize,
+    }
+
+    impl Fake {
+        fn new(id: &'static str) -> Self {
+            Self {
+                id,
+                reject_bind: false,
+                panic_in_health: AtomicBool::new(false),
+                panic_before_future: false,
+                shutdowns: AtomicUsize::new(0),
+            }
+        }
+
+        fn panicking_before_any_future(id: &'static str) -> Self {
+            Self {
+                panic_before_future: true,
+                ..Self::new(id)
+            }
+        }
+
+        fn rejecting(id: &'static str) -> Self {
+            Self {
+                reject_bind: true,
+                ..Self::new(id)
+            }
+        }
+
+        fn panicking_health(id: &'static str) -> Self {
+            Self {
+                panic_in_health: AtomicBool::new(true),
+                ..Self::new(id)
+            }
+        }
+    }
+
+    impl CompositeComponent for Fake {
+        fn manifest(&self) -> ManifestSnapshot {
+            ManifestSnapshot {
+                module_id: self.id.to_owned(),
+                module_version: "0".to_owned(),
+                provides: Vec::new(),
+                control_ops: Vec::new(),
+            }
+        }
+
+        async fn bind(&self, _route: RouteHandle, _identity: RouteIdentity) -> BindOutcome {
+            if self.reject_bind {
+                BindOutcome::Reject {
+                    code: "rejected".to_owned(),
+                    message: "fake rejects every bind".to_owned(),
+                }
+            } else {
+                BindOutcome::Accept
+            }
+        }
+
+        async fn handle(&self, _ctx: RequestCtx) -> RequestOutcome {
+            RequestOutcome::error("unused", "fake never handles requests")
+        }
+
+        async fn route_gone(&self, _route: RouteHandle) {}
+
+        fn health(&self) -> impl Future<Output = HealthReport> + Send {
+            if self.panic_before_future {
+                panic!("{} health panicked before returning a future", self.id);
+            }
+            let panic_while_polled = self.panic_in_health.load(Ordering::Relaxed);
+            let id = self.id;
+            async move {
+                if panic_while_polled {
+                    panic!("{id} health panicked");
+                }
+                HealthReport {
+                    status: HealthStatus::Ok,
+                    detail: None,
+                    metrics: None,
+                }
+            }
+        }
+
+        fn shutdown(&self) -> impl Future<Output = Result<(), ShutdownError>> + Send {
+            self.shutdowns.fetch_add(1, Ordering::Relaxed);
+            if self.panic_before_future {
+                panic!("{} shutdown panicked before returning a future", self.id);
+            }
+            async { Ok(()) }
+        }
+    }
+
+    impl PrimaryComponent for Fake {
+        async fn initialize(&self, _init: HostInit) -> Result<(), InitError> {
+            Ok(())
+        }
+    }
+
+    impl SecondaryComponent for Fake {
+        async fn initialize(&self) -> Result<(), InitError> {
+            Ok(())
+        }
+    }
+
+    fn identity() -> RouteIdentity {
+        RouteIdentity {
+            project_root: std::path::PathBuf::from("/"),
+            harness: "test".to_owned(),
+            session: "s".to_owned(),
+            consumer_module_id: None,
+            consumer_launch_nonce: None,
+            consumer_capabilities: Vec::new(),
+            admission_facts: None,
+            credential_fingerprints: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn target(module_id: &str) -> RouteTarget {
+        RouteTarget {
+            module_id: module_id.to_owned(),
+            kind: crate::handler::TargetKind::ManagementSurface,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_bind_keeps_its_route_until_the_host_sends_route_gone() {
+        let composite = StaticComposite::new(
+            Fake::new("primary"),
+            Fake::rejecting("secondary"),
+            Fake::new("tertiary"),
+        )
+        .expect("distinct ids");
+        let rejected = RouteHandle {
+            channel: 1,
+            epoch: 1,
+        };
+
+        let outcome = composite
+            .bind(rejected, target("secondary"), identity())
+            .await;
+        assert!(matches!(outcome, BindOutcome::Reject { .. }));
+        // The host still owes the rejecting child one `route_gone`, which needs the mapping.
+        assert_eq!(composite.child_of_route(rejected), Some(Child::Secondary));
+        composite.route_gone(rejected).await;
+        assert_eq!(composite.child_of_route(rejected), None);
+
+        let unknown = RouteHandle {
+            channel: 2,
+            epoch: 1,
+        };
+        let outcome = composite.bind(unknown, target("nobody"), identity()).await;
+        assert!(matches!(outcome, BindOutcome::Reject { .. }));
+        assert_eq!(composite.child_of_route(unknown), None);
+    }
+
+    #[tokio::test]
+    async fn a_primary_health_panic_is_reported_like_any_other_child_panic() {
+        let composite = StaticComposite::new(
+            Fake::panicking_health("primary"),
+            Fake::new("secondary"),
+            Fake::new("tertiary"),
+        )
+        .expect("distinct ids");
+
+        let report = composite.health().await;
+        assert_eq!(report.status, HealthStatus::Failing);
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("primary health check panicked")
+        );
+        let components = &report.metrics.expect("aggregate metrics")["components"];
+        assert_eq!(components["primary"]["status"], "failing");
+        assert_eq!(components["secondary"]["status"], "ok");
+        assert_eq!(components["tertiary"]["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn a_panic_before_the_health_future_exists_is_still_a_failing_report() {
+        let composite = StaticComposite::new(
+            Fake::panicking_before_any_future("primary"),
+            Fake::new("secondary"),
+            Fake::new("tertiary"),
+        )
+        .expect("distinct ids");
+
+        let report = composite.health().await;
+        assert_eq!(report.status, HealthStatus::Failing);
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("primary health check panicked")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panic_before_the_shutdown_future_exists_does_not_skip_later_drains() {
+        let primary = Fake::new("primary");
+        let secondary = Fake::panicking_before_any_future("secondary");
+        let tertiary = Fake::new("tertiary");
+        let composite = StaticComposite::new(primary, secondary, tertiary).expect("distinct ids");
+
+        // The composite's own failure-list panic is caught here so its message can be inspected.
+        let mut shutdown = Box::pin(composite.shutdown());
+        let payload = std::future::poll_fn(|cx| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                shutdown.as_mut().poll(cx)
+            })) {
+                Ok(poll) => poll.map(Ok),
+                Err(payload) => std::task::Poll::Ready(Err(payload)),
+            }
+        })
+        .await
+        .expect_err("one child panic surfaces after all drains");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("composite panics with a formatted failure list");
+        assert_eq!(message, "secondary shutdown panicked");
+        // Shutdown drains tertiary, secondary, then primary; the primary drain must still run.
+        assert_eq!(composite.primary.shutdowns.load(Ordering::Relaxed), 1);
+        assert_eq!(composite.tertiary.shutdowns.load(Ordering::Relaxed), 1);
+    }
+
+    /// `PanicsOnDrop` models child state whose destructor is itself faulty.
+    struct PanicsOnDrop;
+
+    impl Drop for PanicsOnDrop {
+        fn drop(&mut self) {
+            panic!("child drop panicked");
+        }
+    }
+
+    struct ReadyButPanicsOnDrop(PanicsOnDrop);
+
+    impl Future for ReadyButPanicsOnDrop {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            std::task::Poll::Ready(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_drop_panic_after_completion_is_reported_as_a_child_panic() {
+        let outcome = catch_child_panic(|| ReadyButPanicsOnDrop(PanicsOnDrop)).await;
+        assert_eq!(outcome, Err(ChildPanic));
+    }
+
+    #[tokio::test]
+    async fn a_payload_that_panics_on_drop_stays_inside_the_boundary() {
+        let outcome = catch_child_panic(|| async {
+            std::panic::panic_any(PanicsOnDrop);
+        })
+        .await;
+        assert_eq!(outcome, Err(ChildPanic));
+
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            catch_child_panic(|| async {
+                struct PanicsWithHostilePayloadOnDrop;
+                impl Drop for PanicsWithHostilePayloadOnDrop {
+                    fn drop(&mut self) {
+                        std::panic::panic_any(PanicsOnDrop);
+                    }
+                }
+                let _state = PanicsWithHostilePayloadOnDrop;
+                std::future::pending::<()>().await;
+            }),
+        )
+        .await;
+        assert!(cancelled.is_err(), "only the timeout can complete");
+    }
+
+    #[tokio::test]
+    async fn a_drop_panic_during_cancellation_does_not_escape() {
+        let child = || async {
+            let _state = PanicsOnDrop;
+            std::future::pending::<()>().await;
+        };
+        // Cancelling the boundary while the child is pending drops the child future from the
+        // timeout's teardown, not from `catch_child_panic`'s own code.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            catch_child_panic(child),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "the child never completes; only the timeout can"
+        );
     }
 }

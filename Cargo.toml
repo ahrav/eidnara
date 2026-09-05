@@ -19,13 +19,17 @@ license = "MIT"
 repository = "https://github.com/ahrav/eidnara"
 publish = false
 
+# Closure resolution re-hashes each launched node, and the Broca fixtures launch the ~100 MB debug test binary; unoptimized SHA-256 turns that into seconds per run. commentlint: allow(JUDGE)
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.dependencies]
 storage-types = { path = "crates/storage-types" }
 lease = { path = "crates/lease" }
 shm-transport = { path = "crates/shm-transport", default-features = false }
 rusqlite = { version = "0.39", features = ["bundled", "hooks"] }
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 tempfile = "3"
 thiserror = "2"
 sha2 = "0.10"

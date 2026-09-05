@@ -339,6 +339,37 @@ impl Supervisor {
     /// The spawned run task, not admission, waits for a backend permit.
     /// The stored fingerprint uses the exact request bytes in `body`.
     /// The stored fingerprint makes byte-identical retries idempotent.
+    /// Resolves a `send` whose outcome is already fixed by the session's existing state — a byte-identical resend of a live run, a conflicting live run, a deletion tombstone, or a closed index — without admitting anything. commentlint: allow(JUDGE)
+    /// These outcomes cannot create a new admission, so a caller must reach them even when the harness has become unavailable or the route's credential fingerprint is stale; availability and credential gates apply only to a genuinely new run. commentlint: allow(JUDGE)
+    pub fn existing_session_outcome(
+        &self,
+        key: &SessionKey,
+        body: &[u8],
+    ) -> Option<Result<String, RequestError>> {
+        let fingerprint: [u8; 32] = Sha256::digest(body).into();
+        // Declared before the lock so releases drop after it, matching `send`.
+        let mut released = Released::default();
+        let mut index = lock_index(&self.inner);
+        if index.closed {
+            return Some(Err(closed_error()));
+        }
+        self.sweep_expired(&mut index, &mut released);
+        match index.sessions.get(key) {
+            Some(SessionEntry::Live(run)) if run.fingerprint == fingerprint => {
+                Some(Ok(run.run_id.clone()))
+            }
+            Some(SessionEntry::Live(_)) => Some(Err(app(
+                "idempotency_conflict",
+                "the session already holds a different immutable run",
+            ))),
+            Some(SessionEntry::Tombstone(_)) => Some(Err(app(
+                "session_deleted",
+                "the session was deleted and cannot be reused yet",
+            ))),
+            None => None,
+        }
+    }
+
     pub fn send(
         &self,
         key: &SessionKey,

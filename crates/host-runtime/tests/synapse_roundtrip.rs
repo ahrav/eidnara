@@ -2,6 +2,8 @@
 //! These tests use the `synapse-tiny` bundle and certified FastEmbed backend.
 //!
 //! Vector-serving tests require a native ONNX Runtime library in `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY`.
+//! Those tests are `#[ignore]`d so a default `cargo test` reports them as ignored rather than passed.
+//! Run them with `cargo test -p host-runtime --test synapse_roundtrip -- --ignored` after setting the variable.
 //! The degraded-bundle path runs without an ONNX Runtime library.
 
 mod support;
@@ -12,6 +14,8 @@ use std::time::Duration;
 use host_runtime::synapse::{SynapseComponent, SynapseConfig, SynapseLimits};
 use sha2::{Digest, Sha256};
 use support::synapse::{BUDGET, ROOT, SynapseHost, call, open_synapse_route};
+
+const ORT_LIBRARY_ENV: &str = "EIDNARA_SYNAPSE_TEST_ORT_LIBRARY";
 
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synapse-tiny")
@@ -24,17 +28,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn ort_library() -> Option<(PathBuf, String)> {
-    let path = match std::env::var_os("EIDNARA_SYNAPSE_TEST_ORT_LIBRARY") {
-        Some(path) => PathBuf::from(path),
-        None => {
-            eprintln!("skipping: EIDNARA_SYNAPSE_TEST_ORT_LIBRARY is unset");
-            return None;
-        }
-    };
+/// An ignored vector-serving test fails loudly when run without the variable instead of passing vacuously.
+fn ort_library() -> (PathBuf, String) {
+    let path = std::env::var_os(ORT_LIBRARY_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("{ORT_LIBRARY_ENV} must name an ONNX Runtime shared library"));
     let bytes = std::fs::read(&path).expect("ORT library is readable");
     let hash = sha256_hex(&bytes);
-    Some((path, hash))
+    (path, hash)
 }
 
 fn fixture_manifest() -> serde_json::Value {
@@ -117,10 +118,9 @@ async fn corrupt_bundle_degrades_synapse_and_keeps_context_routable() {
 }
 
 #[tokio::test]
+#[ignore = "requires EIDNARA_SYNAPSE_TEST_ORT_LIBRARY; run with --ignored"]
 async fn all_four_operations_serve_certified_vectors_over_the_wire() {
-    let Some((ort_library, ort_hash)) = ort_library() else {
-        return;
-    };
+    let (ort_library, ort_hash) = ort_library();
     let component = SynapseComponent::new(Some(SynapseConfig {
         bundle_dir: fixture_dir(),
         bundle_manifest_sha256: None,

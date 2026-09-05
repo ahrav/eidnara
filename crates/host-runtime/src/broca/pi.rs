@@ -136,7 +136,10 @@ impl LlmExecutionBackend for PiBackend {
         if self.descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
             return Some("extension_budget_exceeded");
         }
-        let closure = &self.descriptor.closure;
+        // The probe re-verifies the whole closure exactly as `run_pi` does before launch, so a rejected send and a failed run report the same subreason. commentlint: allow(JUDGE)
+        let Ok(closure) = self.descriptor.closure.revalidate() else {
+            return Some("closure_incomplete");
+        };
         let mut required = [
             &self.descriptor.interpreter_node,
             &self.descriptor.entrypoint_node,
@@ -273,7 +276,9 @@ async fn run_pi(
     let interpreter_node = descriptor.interpreter_node.clone();
     let entrypoint_node = descriptor.entrypoint_node.clone();
     let extension_nodes = descriptor.provider_extension_nodes.clone();
+    // The whole closure is re-verified immediately before launch and every node resolved from that fresh handle; see `ValidatedHarnessClosure::revalidate`. commentlint: allow(JUDGE)
     let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
+        let closure = closure.revalidate().ok()?;
         let interpreter = closure.resolve_node_descriptor(&interpreter_node).ok()?;
         let entrypoint = closure.resolve_node_descriptor(&entrypoint_node).ok()?;
         let mut extensions = Vec::with_capacity(extension_nodes.len());
@@ -502,7 +507,9 @@ fn pi_line_probe_signal(line: &[u8]) -> ProbeSignal {
     let message = match value.get("type").and_then(serde_json::Value::as_str) {
         // `message_start` and `auto_retry_*` indicate that the run is not over.
         // `message_start` and `auto_retry_*` clear a preceding provisional terminal.
-        Some("message_start" | "auto_retry_start" | "auto_retry_end") => {
+        Some(
+            "agent_start" | "turn_start" | "message_start" | "auto_retry_start" | "auto_retry_end",
+        ) => {
             return ProbeSignal::Continues;
         }
         Some("message_end") => value.get("message"),
@@ -525,14 +532,12 @@ fn pi_line_probe_signal(line: &[u8]) -> ProbeSignal {
     if message_requests_tools(message) {
         return ProbeSignal::Quiet;
     }
-    let decisive = value.get("type").and_then(serde_json::Value::as_str) == Some("agent_end");
+    // Every Pi terminal arms provisionally: a compatibility transcript can resume with `message_start` or `auto_retry_*` after `agent_end`, and the parser then requires a later terminal, so the drain deadline must be revocable rather than kill the continuation. commentlint: allow(JUDGE)
     match message
         .get("stopReason")
         .and_then(serde_json::Value::as_str)
     {
-        Some("stop" | "length") => ProbeSignal::Decisive,
-        Some("error" | "aborted") if decisive => ProbeSignal::Decisive,
-        Some("error" | "aborted") => ProbeSignal::Provisional,
+        Some("stop" | "length" | "error" | "aborted") => ProbeSignal::Provisional,
         _ => ProbeSignal::Quiet,
     }
 }
@@ -576,8 +581,6 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
         };
         match event_type {
             "session"
-            | "agent_start"
-            | "turn_start"
             | "turn_end"
             | "message_update"
             | "compaction_start"
@@ -585,9 +588,11 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
             | "queue_update"
             | "session_info_changed"
             | "thinking_level_changed" => {}
-            // `message_start`, `auto_retry_start`, and `auto_retry_end` clear `provisional`; without a later terminal, parsing returns a missing-terminal error rather than a superseded result.
-            "message_start" | "auto_retry_start" | "auto_retry_end" => {
+            // Resumed lifecycle output invalidates every stored decision: without a later terminal, parsing returns a missing-terminal error rather than an answer the transcript itself moved past. commentlint: allow(JUDGE)
+            "agent_start" | "turn_start" | "message_start" | "auto_retry_start"
+            | "auto_retry_end" => {
                 provisional = None;
+                agent_end_final = None;
             }
             "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
                 return Err(format!(
@@ -608,16 +613,16 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
                 }
             }
             "agent_end" => {
-                if let Some(message) = value
-                    .get("messages")
-                    .and_then(serde_json::Value::as_array)
-                    .and_then(|messages| {
-                        messages.iter().rev().find(|message| {
-                            message.get("role").and_then(serde_json::Value::as_str)
-                                == Some("assistant")
-                        })
-                    })
-                {
+                // The authoritative final event must carry a well-formed `messages` array (an empty one is valid); a malformed one cannot be allowed to leave an earlier provisional answer standing. commentlint: allow(JUDGE)
+                let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array)
+                else {
+                    return Err(format!(
+                        "agent_end without a messages array at line {line_no}"
+                    ));
+                };
+                if let Some(message) = messages.iter().rev().find(|message| {
+                    message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                }) {
                     agent_end_final = Some((message.clone(), line_no));
                 }
             }
@@ -646,16 +651,16 @@ fn assistant_message_terminal(
     let stop_reason = message
         .get("stopReason")
         .and_then(serde_json::Value::as_str);
-    let text = assistant_text(message);
     let decision = match stop_reason {
         // This executor does not run tools.
         // The parser accepts `toolUse` as an intermediate stop-reason spelling.
         None | Some("toolUse") => None,
         // `stop` and `length` messages with tool requests are not terminal because this executor does not execute tools.
         Some("stop" | "length") if message_requests_tools(message) => None,
+        // A success message with a malformed `content` is a parse failure, not an empty answer: publishing it as completed would turn a schema change into a silently truncated result. commentlint: allow(JUDGE)
         Some("stop") => Some((
             Some(BackendEvent::AssistantText {
-                text,
+                text: assistant_text(message, line_no)?,
                 finish_reason: None,
             }),
             BackendTerminal::Completed {
@@ -664,7 +669,7 @@ fn assistant_message_terminal(
         )),
         Some("length") => Some((
             Some(BackendEvent::AssistantText {
-                text,
+                text: assistant_text(message, line_no)?,
                 finish_reason: Some(FinishReason::Length),
             }),
             BackendTerminal::Completed {
@@ -694,19 +699,27 @@ fn assistant_message_terminal(
     Ok(decision)
 }
 
-fn assistant_text(message: &serde_json::Value) -> String {
-    let Some(content) = message.get("content").and_then(serde_json::Value::as_array) else {
-        return String::new();
-    };
+/// `content` must be an array; an explicitly empty array is a valid empty answer. Each `text` block must carry a string `text`; other block kinds are skipped, since this executor never publishes them. commentlint: allow(JUDGE)
+fn assistant_text(message: &serde_json::Value, line_no: usize) -> Result<String, String> {
+    let content = message
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("assistant content is missing or not an array at line {line_no}"))?;
     let mut text = String::new();
     for block in content {
-        if block.get("type").and_then(serde_json::Value::as_str) == Some("text")
-            && let Some(part) = block.get("text").and_then(serde_json::Value::as_str)
-        {
+        let kind = block
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("assistant content block has no type at line {line_no}"))?;
+        if kind == "text" {
+            let part = block
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("assistant text block has no text at line {line_no}"))?;
             text.push_str(part);
         }
     }
-    text
+    Ok(text)
 }
 
 /// `stop` is non-terminal when `message_requests_tools(message)` is true because this executor does not execute tools.

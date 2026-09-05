@@ -1,17 +1,11 @@
-// This crate root must declare `file_mode` because `harness_closure.rs` uses `crate::file_mode`.
-#[path = "../src/file_mode.rs"]
-mod file_mode;
-#[path = "../src/harness_closure.rs"]
-mod harness_closure;
-
-use std::collections::BTreeMap;
-use std::io::Read;
+use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use harness_closure::{
+use host_runtime::harness_closure::{
     ClosureCandidate, ClosureDependency, ClosureManifest, ClosureNode, DependencyKind,
-    HarnessClosureStore, NodeKind, manifest_digest, validate_manifest,
+    HarnessClosureStore, NodeKind, STALE_TEMP_AFTER, manifest_digest, validate_manifest,
 };
 use sha2::{Digest, Sha256};
 
@@ -158,13 +152,14 @@ fn setup() -> (tempfile::TempDir, PathBuf, ClosureCandidate) {
 fn resolved_descriptor_is_rewound_after_verification() {
     let (temp, _source, candidate) = setup();
     let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
-    let closure = store.materialize(&candidate).expect("materialize");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
 
     let node = closure
         .resolve_node_descriptor("node_modules/pi/dist/helper.js")
         .expect("resolve node");
 
-    // A macOS child opening `/dev/fd/N` receives a duplicate descriptor with the original offset, so the handed-out descriptor must start at offset 0.
     // A macOS child opening `/dev/fd/N` receives a duplicate descriptor with the original offset, so the handed-out descriptor must start at offset 0.
     // SAFETY: `node` owns this descriptor for the duration of the borrow.
     let inherited = unsafe { std::os::fd::BorrowedFd::borrow_raw(node.inherited_fd()) };
@@ -174,11 +169,17 @@ fn resolved_descriptor_is_rewound_after_verification() {
         offset, 0,
         "a handed-out node descriptor must be positioned at the start of the file"
     );
-    let mut bytes = Vec::new();
-    std::fs::File::from(rustix::io::dup(inherited).expect("duplicate inherited descriptor"))
-        .read_to_end(&mut bytes)
-        .expect("read inherited descriptor");
-    assert_eq!(bytes, b"export const answer = 42");
+    // `pread` reads at an explicit offset without advancing the open file description's shared
+    // offset; a `dup` + `read` would advance `node.inherited_fd()` itself.
+    let mut bytes = vec![0u8; 64];
+    let count = rustix::io::pread(inherited, &mut bytes, 0).expect("pread inherited descriptor");
+    assert_eq!(&bytes[..count], b"export const answer = 42");
+    let offset_after = rustix::fs::seek(inherited, rustix::fs::SeekFrom::Current(0))
+        .expect("query descriptor offset after read");
+    assert_eq!(
+        offset_after, 0,
+        "reading the bytes must not move the shared offset"
+    );
 }
 
 #[test]
@@ -186,7 +187,9 @@ fn materialization_preserves_layout_and_security() {
     let (temp, _source, candidate) = setup();
     let store_root = temp.path().join("closures");
     let store = HarnessClosureStore::open(&store_root).expect("store");
-    let closure = store.materialize(&candidate).expect("materialize");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
 
     let entrypoint = closure
         .resolve_node_descriptor("node_modules/pi/dist/cli.js")
@@ -209,12 +212,14 @@ fn retained_closure_survives_source_deletion_and_deduplicates_by_digest() {
     let (temp, source, candidate) = setup();
     let store_root = temp.path().join("closures");
     let store = HarnessClosureStore::open(&store_root).expect("store");
-    let first = store.materialize(&candidate).expect("first materialize");
+    let first = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("first materialize");
     let digest = first.digest().to_owned();
     std::fs::remove_dir_all(source).expect("delete source");
 
     let second = store
-        .materialize(&candidate)
+        .materialize(&candidate, &BTreeSet::new())
         .expect("dedupe does not reopen deleted source");
     assert_eq!(second.digest(), digest);
     assert_eq!(
@@ -251,6 +256,14 @@ fn retained_closure_survives_source_deletion_and_deduplicates_by_digest() {
         std::fs::read(descriptor_path.path()).expect("read descriptor-rooted node"),
         b"export const answer = 42",
         "path replacement must not change the retained closure object"
+    );
+    assert_eq!(
+        second
+            .resolve_node_descriptor("node_modules/pi/dist/helper.js")
+            .err()
+            .map(|error| error.detail()),
+        Some("closure pathname no longer names the validated node"),
+        "a resolution after the swap must not hand out a pathname into the replacement"
     );
 }
 
@@ -301,10 +314,13 @@ fn retained_executable_loads_dependency_and_extension_after_source_deletion() {
     };
     let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
     let closure = store
-        .materialize(&ClosureCandidate {
-            manifest,
-            source_roots: BTreeMap::from([("install".to_owned(), source.clone())]),
-        })
+        .materialize(
+            &ClosureCandidate {
+                manifest,
+                source_roots: BTreeMap::from([("install".to_owned(), source.clone())]),
+            },
+            &BTreeSet::new(),
+        )
         .expect("materialize");
     std::fs::remove_dir_all(source).expect("delete source");
 
@@ -333,7 +349,7 @@ fn source_and_retained_hash_mismatches_fail_closed() {
     .expect("mutate source");
     assert_eq!(
         store
-            .materialize(&bad_source)
+            .materialize(&bad_source, &BTreeSet::new())
             .expect_err("source hash mismatch")
             .detail(),
         "source node bytes diverge from manifest"
@@ -344,7 +360,9 @@ fn source_and_retained_hash_mismatches_fail_closed() {
         b"export const answer = 42",
     )
     .expect("restore source");
-    let closure = store.materialize(&candidate).expect("materialize");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
     let retained = closure.path().join("files/node_modules/pi/dist/helper.js");
     std::fs::write(&retained, b"export const answer = 41").expect("mutate retained");
     assert_eq!(
@@ -353,6 +371,16 @@ fn source_and_retained_hash_mismatches_fail_closed() {
             .expect_err("retained hash mismatch")
             .detail(),
         "closure node hash diverges from manifest"
+    );
+    // The overwrite kept the length, mode, and link count, so only a rehash on the handed-out
+    // descriptor can catch it after the closure was already validated.
+    assert_eq!(
+        closure
+            .resolve_node_descriptor("node_modules/pi/dist/helper.js")
+            .err()
+            .map(|error| error.detail()),
+        Some("closure node hash diverges from manifest"),
+        "resolution must rehash the retained node"
     );
 }
 
@@ -375,7 +403,7 @@ fn traversal_and_symlink_sources_are_rejected() {
     let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
     assert_eq!(
         store
-            .materialize(&candidate)
+            .materialize(&candidate, &BTreeSet::new())
             .expect_err("symlink refused")
             .detail(),
         "source node is missing or insecure"
@@ -412,6 +440,22 @@ fn ordered_extensions_are_part_of_manifest_identity() {
     reordered.extensions.reverse();
     let second = manifest_digest(&reordered).expect("second digest");
     assert_ne!(first, second);
+}
+
+/// Every declared root is held open while staging, so the count is bounded to keep an
+/// otherwise valid manifest from failing on `RLIMIT_NOFILE`.
+#[test]
+fn a_manifest_declaring_too_many_source_roots_is_rejected() {
+    let (_temp, _source, candidate) = setup();
+    let mut crowded = candidate.manifest.clone();
+    crowded.source_roots = (0..65).map(|index| format!("root-{index:03}")).collect();
+    crowded.source_roots.sort();
+    assert_eq!(
+        validate_manifest(&crowded)
+            .expect_err("65 roots exceed the bound")
+            .detail(),
+        "manifest declares too many source roots"
+    );
 }
 
 #[test]
@@ -464,10 +508,16 @@ fn production_closures_from_environment_materialize() {
         HarnessClosureStore::open(&store_root.path().join("closures")).expect("open closure store");
 
     let opencode = store
-        .materialize(&ClosureCandidate {
-            manifest: read_manifest("opencode-linux-x64-1.18.22.json"),
-            source_roots: BTreeMap::from([("runtime".to_owned(), PathBuf::from(opencode_root))]),
-        })
+        .materialize(
+            &ClosureCandidate {
+                manifest: read_manifest("opencode-linux-x64-1.18.22.json"),
+                source_roots: BTreeMap::from([(
+                    "runtime".to_owned(),
+                    PathBuf::from(opencode_root),
+                )]),
+            },
+            &BTreeSet::new(),
+        )
         .expect("materialize OpenCode closure");
     assert!(
         opencode
@@ -478,13 +528,16 @@ fn production_closures_from_environment_materialize() {
     );
 
     let pi = store
-        .materialize(&ClosureCandidate {
-            manifest: read_manifest("pi-linux-x64-node-24.18.0.json"),
-            source_roots: BTreeMap::from([
-                ("pi-install".to_owned(), pi_install),
-                ("runtime".to_owned(), pi_runtime),
-            ]),
-        })
+        .materialize(
+            &ClosureCandidate {
+                manifest: read_manifest("pi-linux-x64-node-24.18.0.json"),
+                source_roots: BTreeMap::from([
+                    ("pi-install".to_owned(), pi_install),
+                    ("runtime".to_owned(), pi_runtime),
+                ]),
+            },
+            &BTreeSet::new(),
+        )
         .expect("materialize Pi closure");
     assert!(
         pi.resolve_node_descriptor("node_modules/@earendil-works/pi-coding-agent/dist/cli.js")
@@ -501,7 +554,7 @@ fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
     let extra_store =
         HarnessClosureStore::open(&extra_temp.path().join("closures")).expect("store");
     let extra = extra_store
-        .materialize(&extra_candidate)
+        .materialize(&extra_candidate, &BTreeSet::new())
         .expect("materialize");
     std::fs::write(extra.path().join("files/unlisted"), b"extra").expect("extra file");
     assert_eq!(
@@ -516,7 +569,7 @@ fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
     let missing_store =
         HarnessClosureStore::open(&missing_temp.path().join("closures")).expect("store");
     let missing = missing_store
-        .materialize(&missing_candidate)
+        .materialize(&missing_candidate, &BTreeSet::new())
         .expect("materialize");
     std::fs::remove_file(missing.path().join("files/node_modules/pi/dist/helper.js"))
         .expect("remove retained node");
@@ -531,7 +584,7 @@ fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
     let (mode_temp, _source, mode_candidate) = setup();
     let mode_store = HarnessClosureStore::open(&mode_temp.path().join("closures")).expect("store");
     let mode = mode_store
-        .materialize(&mode_candidate)
+        .materialize(&mode_candidate, &BTreeSet::new())
         .expect("materialize");
     let helper = mode.path().join("files/node_modules/pi/dist/helper.js");
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
@@ -545,42 +598,81 @@ fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
     );
 }
 
+/// The helper sets the entry's mtime to twice `STALE_TEMP_AFTER` ago so `prune` treats it as abandoned.
+fn age_past_stale_threshold(path: &Path) {
+    let old = std::time::SystemTime::now() - STALE_TEMP_AFTER * 2;
+    let secs = old
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    let stamp = rustix::fs::Timespec {
+        tv_sec: secs as _,
+        tv_nsec: 0,
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        path,
+        &rustix::fs::Timestamps {
+            last_access: stamp,
+            last_modification: stamp,
+        },
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .expect("age entry");
+}
+
 #[test]
 fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
     let (temp, _source, candidate) = setup();
     let store_root = temp.path().join("closures");
     let store = HarnessClosureStore::open(&store_root).expect("store");
-    let closure = store.materialize(&candidate).expect("materialize");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
     let digest = closure.digest().to_owned();
 
-    std::fs::create_dir(store_root.join(".tmp-deadbeefdeadbeef")).expect("stale temp");
-    std::fs::set_permissions(
-        store_root.join(".tmp-deadbeefdeadbeef"),
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .expect("temp mode");
+    // A stale temp inherits the ambient umask; `prune` must not require mode `0o700`.
+    let stale = store_root.join(".tmp-deadbeefdeadbeefdeadbeef");
+    std::fs::create_dir(&stale).expect("stale temp");
+    std::fs::write(stale.join("partial"), b"torn").expect("partial file");
+    age_past_stale_threshold(&stale);
+    let live = store_root.join(".tmp-0123456789abcdef01234567");
+    std::fs::create_dir(&live).expect("live temp");
     std::fs::create_dir(store_root.join("foreign-entry")).expect("foreign entry");
+    // Only the exact `.tmp-<24 hex>` shape is a store temp; a stale lookalike and a non-UTF-8
+    // name are foreign entries that must neither be removed nor abort the sweep.
+    let lookalike = store_root.join(".tmp-backup");
+    std::fs::create_dir(&lookalike).expect("lookalike temp");
+    age_past_stale_threshold(&lookalike);
+    let unnamed = store_root.join(std::ffi::OsStr::from_bytes(b"\xff\xfe-not-utf8"));
+    std::fs::create_dir(&unnamed).expect("non-utf8 entry");
 
-    let protected = std::collections::BTreeSet::from([digest.clone()]);
+    let protected = BTreeSet::from([digest.clone()]);
     store.prune(&protected).expect("prune with protection");
     assert!(
         store_root.join(&digest).is_dir(),
         "protected digest survives"
     );
+    assert!(!stale.exists(), "stale staging directory is reclaimed");
     assert!(
-        !store_root.join(".tmp-deadbeefdeadbeef").exists(),
-        "stale staging directory is reclaimed"
+        live.is_dir(),
+        "a young staging directory may belong to an in-flight materialize and survives"
     );
     assert!(
         store_root.join("foreign-entry").is_dir(),
         "entries the store did not create are left untouched"
     );
+    assert!(
+        lookalike.is_dir(),
+        "a stale .tmp- lookalike is not a store temp"
+    );
+    assert!(unnamed.is_dir(), "a non-UTF-8 name is preserved");
     store
         .validate(&digest)
         .expect("protected closure still validates");
 
     store
-        .prune(&std::collections::BTreeSet::new())
+        .prune(&BTreeSet::new())
         .expect("prune without protection");
     assert!(
         !store_root.join(&digest).is_dir(),
@@ -588,12 +680,304 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
     );
 }
 
+/// Writes through `root_fd` land in a detached tree after the store root is renamed and replaced, so `materialize` and `prune` must fail rather than report success.
+#[test]
+fn a_replaced_store_root_fails_materialize_and_prune() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("first materialize");
+
+    let detached = temp.path().join("closures-detached");
+    std::fs::rename(&store_root, &detached).expect("detach the store root");
+    std::fs::create_dir(&store_root).expect("replacement root");
+    std::fs::set_permissions(&store_root, std::fs::Permissions::from_mode(0o700)).expect("mode");
+
+    let mut second = candidate.clone();
+    second.manifest.version = "0.80.3".to_owned();
+    assert_eq!(
+        store
+            .materialize(&second, &BTreeSet::new())
+            .err()
+            .map(|error| error.detail()),
+        Some("closure store was replaced under the mutator")
+    );
+    assert_eq!(
+        store
+            .materialize(&candidate, &BTreeSet::new())
+            .err()
+            .map(|error| error.detail()),
+        Some("closure store was replaced under the mutator"),
+        "an already-valid occupant in the detached tree is not a success either"
+    );
+    assert_eq!(
+        store
+            .prune(&BTreeSet::new())
+            .expect_err("prune must not report success into a detached tree")
+            .detail(),
+        "closure store was replaced under the mutator"
+    );
+    assert!(
+        std::fs::read_dir(&store_root)
+            .expect("read replacement root")
+            .next()
+            .is_none(),
+        "nothing was written into the replacement root"
+    );
+}
+
+/// Opening an existing owned store root repairs mode `0o755` to `0o700` instead of refusing the store.
+#[test]
+fn an_existing_owned_store_root_is_repaired_to_owner_only() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    std::fs::create_dir(&store_root).expect("pre-created store root");
+    std::fs::set_permissions(&store_root, std::fs::Permissions::from_mode(0o755)).expect("mode");
+
+    let store = HarnessClosureStore::open(&store_root).expect("open repairs the mode");
+    assert_eq!(
+        std::fs::metadata(&store_root)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
+}
+
+/// One unremovable entry must not abort reclamation of the entries sorted after it.
+#[test]
+fn prune_continues_past_an_unremovable_entry() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let digest = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize")
+        .digest()
+        .to_owned();
+
+    // The `.tmp-*` entry sorts before the digest. Mode `0o000` prevents listing its child, so removal fails; `prune` must still reclaim the later digest.
+    let blocked = store_root.join(".tmp-000000000000000000000000");
+    std::fs::create_dir(&blocked).expect("blocked temp");
+    std::fs::write(blocked.join("child"), b"x").expect("child");
+    age_past_stale_threshold(&blocked);
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("mode");
+
+    let result = store.prune(&BTreeSet::new());
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).expect("restore");
+    assert!(result.is_err(), "the blocked entry is reported");
+    assert!(
+        !store_root.join(&digest).is_dir(),
+        "the digest sorted after the blocked entry is still reclaimed"
+    );
+}
+
+/// A crash between `rename_no_replace` and the store fsync can leave a promoted digest
+/// missing nested entries. Under `transaction.lock` nothing else owns it, so `materialize`
+/// removes the torn occupant and restages instead of wedging the digest.
+#[test]
+fn a_torn_digest_directory_is_repaired_by_materialize() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let digest = manifest_digest(&candidate.manifest).expect("digest");
+
+    let torn = store_root.join(&digest);
+    std::fs::create_dir_all(torn.join("files/bin")).expect("torn layout without bin/node");
+    std::fs::write(
+        torn.join("manifest.json"),
+        serde_json::to_vec_pretty(&serde_json::to_value(&candidate.manifest).expect("value"))
+            .expect("manifest bytes"),
+    )
+    .expect("valid manifest");
+    for path in [torn.clone(), torn.join("files"), torn.join("files/bin")] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    }
+    std::fs::set_permissions(
+        torn.join("manifest.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("mode");
+    assert_eq!(
+        store.validate(&digest).expect_err("torn").detail(),
+        "closure is missing a manifest-listed node"
+    );
+
+    // A restage that fails must leave the torn occupant untouched rather than unlink it first.
+    let mut unstageable = candidate.clone();
+    unstageable.source_roots.insert(
+        "install".to_owned(),
+        temp.path().join("missing-source-root"),
+    );
+    assert_eq!(
+        store
+            .materialize(&unstageable, &BTreeSet::new())
+            .expect_err("missing source root cannot stage")
+            .detail(),
+        "source root open failed"
+    );
+    assert!(
+        torn.join("manifest.json").is_file(),
+        "a failed restage must not remove the torn occupant"
+    );
+
+    // A protected digest names a tree a live harness may still open through; it is refused,
+    // not swapped out from under that harness.
+    assert_eq!(
+        store
+            .materialize(&candidate, &BTreeSet::from([digest.clone()]))
+            .err()
+            .map(|error| error.detail()),
+        Some("corrupt digest target is protected")
+    );
+    assert!(
+        torn.join("manifest.json").is_file(),
+        "a refused repair leaves the occupant in place"
+    );
+
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize repairs the torn digest");
+    assert_eq!(closure.digest(), digest);
+    store.validate(&digest).expect("repaired closure validates");
+    assert!(torn.join("files/bin/node").is_file());
+    let leftover_temps = std::fs::read_dir(&store_root)
+        .expect("read store")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+        .count();
+    assert_eq!(leftover_temps, 0, "the swapped-out torn tree is removed");
+}
+
+/// The child must see the node at the exact descriptor number `module_path` names, and only
+/// after `inherit_in_child` clears close-on-exec in the forked child.
+#[cfg(target_os = "linux")]
+#[test]
+fn inherit_in_child_exposes_the_node_at_its_descriptor_path() {
+    use std::os::unix::process::CommandExt;
+
+    let (temp, _source, candidate) = setup();
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
+    let node = closure
+        .resolve_node_descriptor("node_modules/pi/dist/helper.js")
+        .expect("resolve node");
+    let module_path = node.module_path().to_path_buf();
+    assert_eq!(
+        module_path,
+        Path::new("/proc/self/fd").join(node.inherited_fd().to_string())
+    );
+
+    // Without `inherit_in_child`, close-on-exec closes the descriptor before the child can read it.
+    let closed = std::process::Command::new("cat")
+        .arg(&module_path)
+        .env_clear()
+        .output()
+        .expect("run cat without inheritance");
+    assert!(
+        !closed.status.success(),
+        "a close-on-exec descriptor must not be visible to the child"
+    );
+
+    let mut command = std::process::Command::new("cat");
+    command.arg(&module_path).env_clear();
+    // SAFETY: `inherit_in_child` performs one `fcntl` and no allocation or locking between fork and exec.
+    unsafe {
+        command.pre_exec(move || node.inherit_in_child());
+    }
+    let output = command.output().expect("run cat with inheritance");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"export const answer = 42");
+}
+
+/// A shebang script launched through `path()` makes the kernel pass `/proc/self/fd/N` to the
+/// interpreter as its script argument; the interpreter reopens that name after exec, so the
+/// descriptor must survive exec via `inherit_in_child`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_shebang_executable_launches_through_its_descriptor_path() {
+    use std::os::unix::process::CommandExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(source.join("bin")).expect("bin");
+    let script = b"#!/bin/sh\nprintf '%s' launched\n";
+    std::fs::write(source.join("bin/run"), script).expect("script");
+    let manifest = ClosureManifest {
+        schema: "eidnara.host-harness-closure/v1".to_owned(),
+        harness: "sh".to_owned(),
+        package: "script".to_owned(),
+        version: "1".to_owned(),
+        argument_variant: "run".to_owned(),
+        source_roots: vec!["install".to_owned()],
+        executable: Some("bin/run".to_owned()),
+        interpreter: None,
+        entrypoint: None,
+        extensions: vec![],
+        nodes: vec![node(
+            "bin/run",
+            "bin/run",
+            NodeKind::Executable,
+            script,
+            vec![],
+        )],
+    };
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    let closure = store
+        .materialize(
+            &ClosureCandidate {
+                manifest,
+                source_roots: BTreeMap::from([("install".to_owned(), source)]),
+            },
+            &BTreeSet::new(),
+        )
+        .expect("materialize");
+    let node = closure
+        .resolve_node_descriptor("bin/run")
+        .expect("resolve executable");
+    let exec_path = node.path().to_path_buf();
+
+    let closed = std::process::Command::new(&exec_path)
+        .env_clear()
+        .output()
+        .expect("launch without inheritance");
+    assert!(
+        !closed.status.success(),
+        "the interpreter cannot reopen a descriptor path that exec closed"
+    );
+
+    let mut command = std::process::Command::new(&exec_path);
+    command.env_clear();
+    // SAFETY: `inherit_in_child` performs one `fcntl` and no allocation or locking between fork and exec.
+    unsafe {
+        command.pre_exec(move || node.inherit_in_child());
+    }
+    let output = command.output().expect("launch with inheritance");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"launched");
+}
+
 #[test]
 fn native_edges_and_native_addons_must_correspond_exactly() {
     let (_temp, _source, candidate) = setup();
 
     // Validation rejects a non-`Native` dependency edge to a `NativeAddon`.
-    // qualification-side biconditional.
     let mut static_edge = candidate.clone();
     static_edge.manifest.nodes[2].dependencies = vec![
         dependency("node_modules/pi/dist/addon.node", DependencyKind::Static),
@@ -606,28 +990,22 @@ fn native_edges_and_native_addons_must_correspond_exactly() {
         "native dependency kind must correspond exactly to a native addon target"
     );
 
-    // Validation rejects a `NativeAddon` with no inbound `Native` dependency even if graph traversal reaches it.
+    // Native edges are checked before reachability, so the missing edge is reported first.
     let mut unclaimed = candidate.clone();
-    unclaimed.manifest.nodes[2].dependencies = vec![
-        dependency(
-            "node_modules/pi/dist/addon.node",
-            DependencyKind::FiniteDynamic,
-        ),
-        dependency("node_modules/pi/dist/helper.js", DependencyKind::Static),
-    ];
+    unclaimed.manifest.nodes[2].dependencies = vec![dependency(
+        "node_modules/pi/dist/helper.js",
+        DependencyKind::Static,
+    )];
     assert_eq!(
         validate_manifest(&unclaimed.manifest)
-            .expect_err("finite_dynamic edge onto native addon")
+            .expect_err("native addon without an inbound native edge")
             .detail(),
-        "native dependency kind must correspond exactly to a native addon target"
+        "native addon lacks an explicit native dependency edge"
     );
 }
 
 /// Lexicographic path order can place `bin/node.dat` between `bin/node` and `bin/node/main.js`.
-/// Lexicographic path order can place `bin/node.dat` between `bin/node` and `bin/node/main.js`.
-/// Validation must reject a regular file that prefixes another manifest path.
 /// Validation must compare every path with its ancestor paths, not only the immediately preceding sorted entry.
-/// Validation rejects a regular file that prefixes another manifest path.
 /// Validation rejects a regular file that prefixes another manifest path.
 #[test]
 fn a_parent_file_collision_is_caught_across_an_intervening_sibling() {
@@ -678,9 +1056,6 @@ fn a_parent_file_collision_is_caught_across_an_intervening_sibling() {
 
 /// Validation rejects multiple dependencies that name the same target, regardless of `DependencyKind`.
 /// Dependencies with the same path but different kinds require explicit duplicate-path validation.
-/// Dependencies with the same path but different kinds require explicit duplicate-path validation.
-/// Duplicate dependency validation rejects dependencies with equal paths even when their `DependencyKind` values differ.
-/// Duplicate dependency validation rejects dependencies with equal paths even when their `DependencyKind` values differ.
 #[test]
 fn duplicate_dependency_targets_are_rejected_across_kinds() {
     let (_temp, _source, candidate) = setup();

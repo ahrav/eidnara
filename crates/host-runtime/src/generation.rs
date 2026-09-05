@@ -16,9 +16,9 @@
 //! This module validates persisted bytes but does not serialize mutations.
 
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, Mode, OFlags, fsync, mkdirat, openat, renameat, unlinkat};
@@ -28,9 +28,14 @@ use crate::file_mode::raw_mode;
 use crate::instance::{
     InstanceError, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, hex, io_err, is_safe_ancestor,
     is_secure_regular, mode_bits, open_secure_dir_existing, owner_uid, read_all_fd,
-    secure_runtime_dir, write_all_fd,
+    repair_owner_access, secure_runtime_dir,
 };
 use crate::lifecycle::{is_canonical_payload_digest, lifecycle_dir_path};
+use crate::store_fs::{
+    HARDENED_DIR_FLAGS, MAX_PATH_COMPONENTS, hash_copy, is_stale_mtime, is_temp_name,
+    open_created_dir, open_or_create_parents, open_rel_nofollow, path_names_descriptor,
+    read_dir_names, read_dir_names_partitioned, rename_no_replace, same_snapshot,
+};
 
 pub const GENERATIONS_DIR_NAME: &str = "generations";
 
@@ -39,8 +44,27 @@ pub const CURRENT_PROFILE_NAME: &str = "current-profile.json";
 /// The `files` array excludes `manifest.json` because its bytes produce the generation digest.
 pub const GENERATION_MANIFEST_NAME: &str = "manifest.json";
 
-/// Pruning removes incomplete staging directories whose names begin `tmp-`.
+/// Staging temps are `tmp-` followed by exactly 16 lowercase hex digits; `prune` removes only
+/// that exact shape, so a foreign name that merely starts with `tmp-` survives.
 pub const STAGING_TEMP_PREFIX: &str = "tmp-";
+
+/// `create_staging_temp` draws 8 random bytes, so the name carries 16 hex digits.
+const STAGING_TEMP_HEX_LEN: usize = 16;
+
+/// `prune` reclaims a leftover profile temp only once it is older than this.
+pub const STALE_PROFILE_TEMP_AFTER: Duration = crate::store_fs::STALE_TEMP_AFTER;
+
+const PROFILE_TEMP_PREFIX: &str = ".current-profile.json.";
+const PROFILE_TEMP_SUFFIX: &str = ".tmp";
+
+fn is_staging_temp_name(name: &str) -> bool {
+    is_temp_name(name, STAGING_TEMP_PREFIX, STAGING_TEMP_HEX_LEN)
+}
+
+fn is_profile_temp_name(name: &str) -> bool {
+    name.strip_suffix(PROFILE_TEMP_SUFFIX)
+        .is_some_and(|stem| is_temp_name(stem, PROFILE_TEMP_PREFIX, STAGING_TEMP_HEX_LEN))
+}
 
 /// Manifest and lifecycle-evidence readers each cap input at 1 MiB.
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
@@ -56,8 +80,14 @@ const CAPACITY_RESERVE_FLOOR_BYTES: u64 = 256 * 1024 * 1024;
 #[derive(Debug)]
 pub enum GenerationError {
     /// `InsufficientStorage` leaves trusted selectors unchanged and removes the owned temp after preflight failure or post-preflight `ENOSPC`.
+    ///
+    /// Exception: when the failure is the `fsync` after `replace_profile`'s rename, the selector
+    /// has been renamed but its durability is unproven. Retrying re-promotes the same digest.
     InsufficientStorage,
     /// `NativePayloadInvalid` leaves `current` unchanged and selects no other generation after validation, staging-identity, exchange-repair, or checked-arithmetic failure.
+    ///
+    /// Exception: a post-rename `fsync` failure in `replace_profile` or `promote_temp` reports
+    /// this variant after the namespace change; the renamed entry's durability is unproven.
     NativePayloadInvalid {
         detail: &'static str,
     },
@@ -213,53 +243,6 @@ pub struct StageMeta {
     pub source_payload_manifest_sha256: String,
 }
 
-/// `verify_sources` reads every source and verifies each declared size and SHA-256 identity.
-///
-/// For `restart`, `stage_and_promote` copies sources only after stopping the incumbent.
-/// `verify_sources` performs only reads, so callers must run it before stopping the incumbent.
-///
-/// `verify_sources` hashes only sources with declared identities; source enumeration verifies unqualified dev-tree existence and type.
-pub fn verify_sources(sources: &[SourceSpec]) -> Result<(), GenerationError> {
-    for spec in sources {
-        let fd = openat(
-            rustix::fs::CWD,
-            &*spec.source,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .map_err(|_| invalid("payload source open failed"))?;
-        let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("payload source stat failed"))?;
-        if (mode_bits(&stat) & S_IFMT) != S_IFREG {
-            return Err(invalid("payload source is not a regular file"));
-        }
-        if spec
-            .expected_size
-            .is_some_and(|size| size != stat.st_size as u64)
-        {
-            return Err(invalid("payload source size differs from payload manifest"));
-        }
-        let Some(expected) = spec.expected_sha256.as_deref() else {
-            continue;
-        };
-        let mut hasher = sha2::Sha256::new();
-        let mut reader = std::fs::File::from(fd);
-        let mut buf = vec![0u8; 128 * 1024];
-        loop {
-            let n = reader
-                .read(&mut buf)
-                .map_err(|_| invalid("payload source read failed"))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        if hex(&hasher.finalize()) != expected {
-            return Err(invalid("payload source hash differs from payload manifest"));
-        }
-    }
-    Ok(())
-}
-
 /// The retained directory descriptor pins the validated tree against pathname replacement.
 /// `manifest` contains the exact decoded canonical content.
 pub struct ValidatedGeneration {
@@ -270,6 +253,12 @@ pub struct ValidatedGeneration {
 
 impl ValidatedGeneration {
     /// In-process loaders may use the descriptor-rooted path only while `ValidatedGeneration` remains alive.
+    ///
+    /// The retained descriptor pins the validated directory inode against pathname replacement.
+    /// The retained descriptor does not re-prove file contents on later opens; same-UID writers
+    /// can modify owner-writable retained files in place after validation. Loaders that resolve
+    /// imports by pathname cannot rehash every opened file; callers needing content proof use
+    /// [`Self::open_verified_file`].
     ///
     /// `descriptor_root_path` supports directory traversal only on Linux.
     pub fn descriptor_root_path(&self) -> PathBuf {
@@ -284,7 +273,7 @@ impl ValidatedGeneration {
             .iter()
             .find(|file| file.path == rel_path)
             .ok_or_else(|| invalid("file is not named by the manifest"))?;
-        let fd = open_rel_nofollow(&self.dir, rel_path).ok_or_else(|| invalid("file missing"))?;
+        let fd = open_rel_file(&self.dir, rel_path).ok_or_else(|| invalid("file missing"))?;
         verify_file_against_entry(&fd, entry)?;
         Ok(fd)
     }
@@ -312,46 +301,17 @@ pub fn required_stage_bytes(sizes: &[u64]) -> Option<u64> {
     Some(total)
 }
 
-/// Opens `rel` under `dir` component by component with `O_NOFOLLOW`, so no
-/// intermediate or final symlink is followed. `None` means absent; hostile
-/// shapes surface as `None` too and fail the caller's stricter checks.
-///
-/// The final file open carries `O_NONBLOCK` deliberately: a planted FIFO
-/// passes `O_NOFOLLOW`, and without `NONBLOCK` opening it would block a probe
-/// uncancellably.
-fn open_rel_nofollow(dir: &OwnedFd, rel: &str) -> Option<OwnedFd> {
-    open_rel_walk(dir, rel, false)
-}
-
-/// Directory-only variant of [`open_rel_nofollow`]: every component, including
-/// the last, is opened as a directory without following links.
-fn open_rel_dir_nofollow(dir: &OwnedFd, rel: &str) -> Option<OwnedFd> {
-    open_rel_walk(dir, rel, true)
-}
-
-fn open_rel_walk(dir: &OwnedFd, rel: &str, final_is_dir: bool) -> Option<OwnedFd> {
-    let mut components = rel.split('/').peekable();
-    let mut current: Option<OwnedFd> = None;
-    while let Some(component) = components.next() {
-        if component.is_empty() || component == "." || component == ".." {
-            return None;
-        }
-        let at = current.as_ref().unwrap_or(dir);
-        let last = components.peek().is_none();
-        let flags = if last && !final_is_dir {
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK
-        } else {
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC
-        };
-        match openat(at, component, flags, Mode::empty()) {
-            Ok(fd) => current = Some(fd),
-            Err(_) => return None,
-        }
-    }
-    current
+/// `None` means absent; hostile shapes surface as `None` too and fail the caller's stricter checks.
+fn open_rel_file(dir: &OwnedFd, rel: &str) -> Option<OwnedFd> {
+    open_rel_nofollow(dir, rel, false).ok()
 }
 
 fn verify_file_against_entry(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), GenerationError> {
+    // The stager emits only `0o600` and `0o700`; a set-ID or sticky bit in a manifest names
+    // permission semantics no generation can legitimately carry.
+    if entry.mode & !0o777 != 0 {
+        return Err(invalid("manifest mode carries special permission bits"));
+    }
     let stat = rustix::fs::fstat(fd).map_err(|_| invalid("file stat failed"))?;
     let mode = mode_bits(&stat);
     if (mode & S_IFMT) != S_IFREG {
@@ -360,38 +320,25 @@ fn verify_file_against_entry(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), G
     if stat.st_uid != owner_uid() || stat.st_nlink != 1 || (mode & 0o077) != 0 {
         return Err(invalid("file is not owner-only single-link"));
     }
-    if (mode & 0o777) != entry.mode {
+    // Masking with `0o7777` keeps set-ID and sticky bits in the comparison, so a retained file
+    // that gained one diverges from its manifest mode.
+    if (mode & 0o7777) != entry.mode {
         return Err(invalid("file mode diverges from the manifest"));
     }
     if stat.st_size as u64 != entry.size {
         return Err(invalid("file size diverges from the manifest"));
     }
-    let mut hasher = sha2::Sha256::new();
-    let mut file = std::fs::File::from(
-        rustix::io::dup(fd).map_err(|_| invalid("file descriptor dup failed"))?,
-    );
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut total: u64 = 0;
-    loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|_| invalid("file read failed"))?;
-        if n == 0 {
-            break;
+    let (total, sha256) = hash_copy(fd, None, entry.size).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            invalid("file grew past its manifest size")
+        } else {
+            invalid("file read failed")
         }
-        total += n as u64;
-        if total > entry.size {
-            return Err(invalid("file grew past its manifest size"));
-        }
-        hasher.update(&buf[..n]);
-    }
-    if total != entry.size || hex(&hasher.finalize()) != entry.sha256 {
+    })?;
+    if total != entry.size || sha256 != entry.sha256 {
         return Err(invalid("file hash diverges from the manifest"));
     }
-    // The hash reads a duplicated descriptor that shares `fd`'s offset, so rewind `fd` before returning it to callers.
-    // The hash reads a duplicated descriptor that shares `fd`'s offset, so rewind `fd` before returning it to callers.
-    // The hash reads a duplicated descriptor that shares `fd`'s offset, so rewind `fd` before returning it to callers.
-    // The hash reads a duplicated descriptor that shares `fd`'s offset, so rewind `fd` before returning it to callers.
+    // The hash advanced `fd`'s offset, so rewind before returning it to callers.
     rustix::fs::seek(fd, rustix::fs::SeekFrom::Start(0))
         .map_err(|_| invalid("file rewind after verification failed"))?;
     Ok(())
@@ -415,6 +362,7 @@ impl std::fmt::Debug for GenerationStore {
 pub struct PruneReport {
     pub removed_generations: usize,
     pub removed_temps: usize,
+    pub removed_profile_temps: usize,
     pub quarantined: usize,
 }
 
@@ -422,9 +370,6 @@ impl GenerationStore {
     /// version-neutral `transaction.lock`.
     pub fn open(data_dir_override: Option<&Path>) -> Result<Self, GenerationError> {
         let root = lifecycle_dir_path(data_dir_override)?;
-        // `mkdir` can traverse a symlinked intermediate after `EEXIST`, allowing mutations outside the data root.
-        // `mkdir` can traverse a symlinked intermediate after `EEXIST`, allowing mutations outside the data root.
-        // `mkdir` can traverse a symlinked intermediate after `EEXIST`, allowing mutations outside the data root.
         // `mkdir` can traverse a symlinked intermediate after `EEXIST`, allowing mutations outside the data root.
         let root_fd = secure_runtime_dir(&root)?;
         validate_lifecycle_root_fd(&root_fd, &root)?;
@@ -434,27 +379,30 @@ impl GenerationStore {
             Err(e) => return Err(io_err("mkdir_generations", &root, e).into()),
         };
         // Because umask can clear owner bits, restore the requested mode before opening a newly created directory; never chmod an existing path.
-        // Because umask can clear owner bits, restore the requested mode before opening a newly created directory; never chmod an existing path.
-        // Because umask can clear owner bits, restore the requested mode before opening a newly created directory; never chmod an existing path.
-        // Because umask can clear owner bits, restore the requested mode before opening a newly created directory; never chmod an existing path.
-        // Because umask can clear owner bits, restore the requested mode before opening a newly created directory; never chmod an existing path.
         if created {
-            rustix::fs::chmodat(
-                &root_fd,
-                GENERATIONS_DIR_NAME,
-                Mode::from_raw_mode(0o700),
-                AtFlags::empty(),
-            )
-            .map_err(|e| io_err("chmod_generations", &root, e))?;
+            open_created_dir(&root_fd, GENERATIONS_DIR_NAME)
+                .map_err(|e| io_err("chmod_generations", &root, e))?;
+            // The parent's fsync makes the new entry durable; later store fsyncs cover only its contents.
+            fsync(&root_fd).map_err(|e| io_err("fsync_lifecycle_root", &root, e))?;
         }
-        let generations_fd = open_child_dir(&root_fd, GENERATIONS_DIR_NAME)
-            .ok_or_else(|| invalid("generations directory failed security checks"))?;
-        if created {
-            // `fchmod` uses the validated descriptor to avoid changing a replacement path.
-            // name.
-            rustix::fs::fchmod(&generations_fd, Mode::from_raw_mode(0o700))
-                .map_err(|e| io_err("fchmod_generations", &root, e))?;
-        }
+        let generations_fd = match open_child_dir(&root_fd, GENERATIONS_DIR_NAME) {
+            Some(fd) => fd,
+            // A crash between `mkdirat` and `chmodat` under a restrictive umask can leave an owner-owned directory inaccessible to its owner.
+            // `repair_owner_access` widens only an owner-only directory of the expected type, so a wider mode is still refused.
+            None => {
+                let repaired = repair_owner_access(
+                    &root_fd,
+                    std::ffi::OsStr::new(GENERATIONS_DIR_NAME),
+                    S_IFDIR,
+                    0o700,
+                )
+                .map_err(|e| io_err("repair_generations", &root, e))?;
+                repaired
+                    .then(|| open_child_dir(&root_fd, GENERATIONS_DIR_NAME))
+                    .flatten()
+                    .ok_or_else(|| invalid("generations directory failed security checks"))?
+            }
+        };
         Ok(Self {
             root,
             root_fd,
@@ -499,8 +447,13 @@ impl GenerationStore {
             Err(_) => return Err(invalid("current profile failed security checks")),
         };
         let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("current profile stat failed"))?;
-        if !is_secure_regular(&stat) {
+        if !is_secure_regular(&stat) || mode_bits(&stat) & 0o7777 != 0o600 {
             return Err(invalid("current profile failed security checks"));
+        }
+        // An oversized profile cannot be decoded to learn its schema, so it is quarantined rather
+        // than reported corrupt, matching the manifest cap in `validate_in_dir`.
+        if stat.st_size as u64 > MAX_MANIFEST_BYTES as u64 {
+            return Ok(CurrentProfile::Quarantined);
         }
         let bytes = read_all_fd(&fd, MAX_MANIFEST_BYTES)
             .map_err(|_| invalid("current profile read failed"))?;
@@ -537,14 +490,16 @@ impl GenerationStore {
         dir: &OwnedFd,
         digest: &str,
     ) -> Result<GenerationManifest, GenerationError> {
-        let manifest_fd = open_rel_nofollow(dir, GENERATION_MANIFEST_NAME)
+        let manifest_fd = open_rel_file(dir, GENERATION_MANIFEST_NAME)
             .ok_or_else(|| invalid("generation manifest is missing"))?;
         let stat = rustix::fs::fstat(&manifest_fd).map_err(|_| invalid("manifest stat failed"))?;
-        if (mode_bits(&stat) & S_IFMT) != S_IFREG
-            || stat.st_uid != owner_uid()
-            || stat.st_nlink != 1
-        {
+        // Payload files and directories require exact modes; the manifest is held to the same rule.
+        if !is_secure_regular(&stat) || mode_bits(&stat) & 0o7777 != 0o600 {
             return Err(invalid("generation manifest failed security checks"));
+        }
+        // Oversized manifests are preserved and never exchange-repaired, matching `is_quarantined_schema`.
+        if stat.st_size as u64 > MAX_MANIFEST_BYTES as u64 {
+            return Err(GenerationError::UnsupportedStateSchema);
         }
         let bytes = read_all_fd(&manifest_fd, MAX_MANIFEST_BYTES)
             .map_err(|_| invalid("generation manifest read failed"))?;
@@ -567,15 +522,17 @@ impl GenerationStore {
             return Err(invalid("manifest files are not sorted by path"));
         }
         for entry in &manifest.files {
+            // The same path rules the stager enforces bound length and depth before the walk.
+            validate_rel_path(&entry.path)?;
             if !expected.insert(entry.path.clone()) {
                 return Err(invalid("manifest lists a duplicate path"));
             }
-            let fd = open_rel_nofollow(dir, &entry.path)
+            let fd = open_rel_file(dir, &entry.path)
                 .ok_or_else(|| invalid("manifest-listed file is missing"))?;
             verify_file_against_entry(&fd, entry)?;
         }
         let mut found: BTreeSet<String> = BTreeSet::new();
-        walk_generation_tree(dir, "", &mut found)?;
+        walk_generation_tree(dir, "", &expected, &mut found)?;
         for path in &found {
             if path != GENERATION_MANIFEST_NAME && !expected.contains(path) {
                 return Err(invalid("generation contains an unlisted file"));
@@ -607,8 +564,7 @@ impl GenerationStore {
     ///
     /// The method returns `InsufficientStorage` before creating a temp directory or after post-preflight `ENOSPC`; it removes the temp directory and preserves selectors in the latter case.
     /// The method returns `UnsupportedStateSchema` when the existing profile is quarantined.
-    /// The method returns `NativePayloadInvalid` for identity and validation faults.
-    /// (profile unchanged).
+    /// The method returns `NativePayloadInvalid` for identity and validation faults, leaving the profile unchanged.
     pub fn stage_and_promote(
         &self,
         sources: &[SourceSpec],
@@ -619,14 +575,18 @@ impl GenerationStore {
         if self.read_current()? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
         }
+        self.verify_named_identity()?;
+        // The preflight records each source's absolute path and inode snapshot; the copy reopens by that path and rejects a changed snapshot, so only one descriptor is open at a time.
+        // One working directory is captured for the whole batch so a concurrent `chdir` cannot
+        // resolve two relative sources against different directories.
+        let cwd =
+            std::env::current_dir().map_err(|_| invalid("working directory is unavailable"))?;
+        let mut preflighted = Vec::with_capacity(sources.len());
         let mut sizes = Vec::with_capacity(sources.len());
         for spec in sources {
-            let meta = std::fs::symlink_metadata(&spec.source)
-                .map_err(|_| invalid("staging source is missing"))?;
-            if !meta.is_file() {
-                return Err(invalid("staging source is not a regular file"));
-            }
-            sizes.push(meta.len());
+            let source = preflight_source(spec, &cwd)?;
+            sizes.push(source.stat.st_size as u64);
+            preflighted.push(source);
         }
         let required =
             required_stage_bytes(&sizes).ok_or_else(|| invalid("manifest size overflow"))?;
@@ -638,7 +598,7 @@ impl GenerationStore {
         }
 
         let (temp_name, temp_fd) = self.create_staging_temp()?;
-        let result = self.stage_into_temp(&temp_fd, sources, meta);
+        let result = self.stage_into_temp(&temp_fd, sources, &preflighted, meta);
         let manifest = match result {
             Ok(manifest) => manifest,
             Err(err) => {
@@ -652,7 +612,22 @@ impl GenerationStore {
             return Err(err);
         }
         self.replace_profile(&digest)?;
+        self.verify_named_identity()?;
         Ok(digest)
+    }
+
+    /// The named `lifecycle` and `generations` directories must still resolve to the retained
+    /// descriptors; a store renamed and replaced after `open` holds only detached writes.
+    fn verify_named_identity(&self) -> Result<(), GenerationError> {
+        let root_ok = path_names_descriptor(&self.root, &self.root_fd)
+            .map_err(|_| invalid("lifecycle root identity check failed"))?;
+        let generations_ok =
+            path_names_descriptor(&self.root.join(GENERATIONS_DIR_NAME), &self.generations_fd)
+                .map_err(|_| invalid("generations directory identity check failed"))?;
+        if !root_ok || !generations_ok {
+            return Err(invalid("lifecycle store was replaced under the mutator"));
+        }
+        Ok(())
     }
 
     fn create_staging_temp(&self) -> Result<(String, OwnedFd), GenerationError> {
@@ -671,47 +646,42 @@ impl GenerationStore {
             }
             _ => invalid("staging temp creation failed"),
         })?;
-        // `mkdirat` applies the umask, so removing owner bits would prevent the owner from opening the directory and cause the subsequent security check to fail.
-        // `mkdirat` rejects `EEXIST`, so success proves this call created the entry and prevents pathname `chmod` from following a planted symlink.
-        rustix::fs::chmodat(
-            &self.generations_fd,
-            temp_name.as_str(),
-            Mode::from_raw_mode(0o700),
-            AtFlags::empty(),
-        )
-        .map_err(|_| invalid("staging temp chmod failed"))?;
-        let temp_fd = open_child_dir(&self.generations_fd, &temp_name)
-            .ok_or_else(|| invalid("staging temp failed security checks"))?;
-        rustix::fs::fchmod(&temp_fd, Mode::from_raw_mode(0o700))
-            .map_err(|_| invalid("staging temp chmod failed"))?;
-        Ok((temp_name, temp_fd))
+        // `mkdirat` rejects `EEXIST`, so success proves this call created the entry and the pathname `chmod` cannot follow a planted symlink.
+        // A failure after creation must remove the entry here, because the caller never learns
+        // the name and repeated attempts would otherwise accumulate `tmp-*` directories.
+        let opened = open_created_dir(&self.generations_fd, &temp_name)
+            .map_err(|_| invalid("staging temp chmod failed"))
+            .and_then(|temp_fd| {
+                open_child_dir(&self.generations_fd, &temp_name)
+                    .map(|_| temp_fd)
+                    .ok_or_else(|| invalid("staging temp failed security checks"))
+            });
+        match opened {
+            Ok(temp_fd) => Ok((temp_name, temp_fd)),
+            Err(err) => {
+                let _ = remove_tree(&self.generations_fd, &temp_name);
+                Err(err)
+            }
+        }
     }
 
     fn stage_into_temp(
         &self,
         temp_fd: &OwnedFd,
         sources: &[SourceSpec],
+        preflighted: &[PreflightSource],
         meta: &StageMeta,
     ) -> Result<GenerationManifest, GenerationError> {
         let mut files = Vec::with_capacity(sources.len());
         let mut seen = BTreeSet::new();
         // The code fsyncs each directory that receives an entry because fsyncing a file does not persist its parent entry.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
-        for spec in sources {
+        for (spec, source) in sources.iter().zip(preflighted) {
             validate_rel_path(&spec.rel_path)?;
             if !seen.insert(spec.rel_path.clone()) {
                 return Err(invalid("duplicate staged path"));
             }
-            let components: Vec<&str> = spec.rel_path.split('/').collect();
-            let mut walked = String::new();
-            for component in &components[..components.len() - 1] {
-                if !walked.is_empty() {
-                    walked.push('/');
-                }
-                walked.push_str(component);
-                dirs.insert(walked.clone());
-            }
-            let entry = copy_source_into(temp_fd, spec)?;
+            let entry = copy_source_into(temp_fd, spec, source, &mut dirs)?;
             files.push(entry);
         }
         files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -731,8 +701,8 @@ impl GenerationStore {
         write_new_file(temp_fd, GENERATION_MANIFEST_NAME, &bytes, 0o600)?;
         // The code fsyncs directories deepest-first so each directory's entries are durable before its entry in its parent.
         for rel in dirs.iter().rev() {
-            let dir = open_rel_dir_nofollow(temp_fd, rel)
-                .ok_or_else(|| invalid("staged directory reopen failed"))?;
+            let dir = open_rel_nofollow(temp_fd, rel, true)
+                .map_err(|_| invalid("staged directory reopen failed"))?;
             fsync_preserving_storage(&dir, "staged directory fsync failed")?;
         }
         fsync_preserving_storage(temp_fd, "staging temp fsync failed")?;
@@ -742,20 +712,35 @@ impl GenerationStore {
     /// For an invalid, unprotected target, `promote_temp` atomically exchanges the temp and revalidates the promoted target before deleting the exchanged orphan.
     ///
     /// `renameat` can replace an empty target directory, bypassing the protected-target check.
+    ///
+    /// A "generations fsync failed" error after a successful rename means the digest is named
+    /// by the store but its durability is unproven.
     fn promote_temp(
         &self,
         temp_name: &str,
         digest: &str,
         protected: &BTreeSet<String>,
     ) -> Result<(), GenerationError> {
-        if rename_no_replace(&self.generations_fd, temp_name, digest)? {
+        let result = match rename_no_replace(&self.generations_fd, temp_name, digest) {
+            Ok(renamed) => renamed,
+            Err(rustix::io::Errno::NOSPC) | Err(rustix::io::Errno::DQUOT) => {
+                return Err(GenerationError::InsufficientStorage);
+            }
+            Err(_) => return Err(invalid("generation rename failed")),
+        };
+        if result {
             fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+            // A same-UID writer can alter a staged file between its copy and this rename.
+            self.validate(digest)?;
             return Ok(());
         }
         match self.validate(digest) {
-            // A valid target occupant wins; cleanup attempts to remove the temp.
+            // A valid target occupant wins; cleanup attempts to remove the temp. A prior run may
+            // have crashed between its rename and fsync, so the occupant's dirent is made durable
+            // before the profile names it.
             Ok(_) => {
                 let _ = remove_tree(&self.generations_fd, temp_name);
+                fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
                 return Ok(());
             }
             // An unsupported manifest schema is quarantined because exchange would delete bytes that `prune` preserves.
@@ -774,32 +759,75 @@ impl GenerationStore {
         Ok(())
     }
 
+    /// A failed write or rename unlinks this attempt's temp; a crash leaves it for
+    /// `sweep_stale_profile_temps`. A failed post-rename `fsync` returns after the selector
+    /// has already been renamed; its durability is unproven.
     fn replace_profile(&self, digest: &str) -> Result<(), GenerationError> {
         let profile = WireProfile {
             schema: 1,
             current: digest.to_owned(),
         };
         let bytes = serde_json::to_vec(&profile).expect("profile serialization cannot fail");
-        let temp_name = format!(".{CURRENT_PROFILE_NAME}.{}.tmp", std::process::id());
-        let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
-        write_new_file(&self.root_fd, &temp_name, &bytes, 0o600)?;
-        renameat(
-            &self.root_fd,
-            temp_name.as_str(),
-            &self.root_fd,
-            CURRENT_PROFILE_NAME,
-        )
-        .map_err(|_| invalid("profile rename failed"))?;
+        let mut suffix = [0u8; 8];
+        getrandom::getrandom(&mut suffix)
+            .map_err(|_| GenerationError::Instance(InstanceError::Random))?;
+        let temp_name = format!("{PROFILE_TEMP_PREFIX}{}{PROFILE_TEMP_SUFFIX}", hex(&suffix));
+        let result = write_new_file(&self.root_fd, &temp_name, &bytes, 0o600).and_then(|()| {
+            renameat(
+                &self.root_fd,
+                temp_name.as_str(),
+                &self.root_fd,
+                CURRENT_PROFILE_NAME,
+            )
+            .map_err(|e| match e {
+                rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => {
+                    GenerationError::InsufficientStorage
+                }
+                _ => invalid("profile rename failed"),
+            })
+        });
+        if result.is_err() {
+            let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
+        }
+        result?;
         fsync_preserving_storage(&self.root_fd, "lifecycle root fsync failed")?;
         Ok(())
     }
 
+    fn sweep_stale_profile_temps(&self) -> Result<usize, GenerationError> {
+        let mut removed = 0;
+        // Non-UTF-8 names cannot be a profile temp; skipping them keeps the sweep going.
+        let (names, _) = read_dir_names_partitioned(&self.root_fd)
+            .map_err(|_| invalid("directory listing failed"))?;
+        for name in names {
+            if !is_profile_temp_name(&name) {
+                continue;
+            }
+            let Ok(stat) =
+                rustix::fs::statat(&self.root_fd, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+            else {
+                continue;
+            };
+            if (mode_bits(&stat) & S_IFMT) != S_IFREG || stat.st_uid != owner_uid() {
+                continue;
+            }
+            if is_stale_mtime(stat.st_mtime)
+                && unlinkat(&self.root_fd, name.as_str(), AtFlags::empty()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// `is_quarantined_schema` decodes only the manifest because every non-quarantined outcome is removable.
     fn is_quarantined_schema(&self, digest: &str) -> bool {
-        let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
+        // Only ownership gates this open: a future-schema generation with a directory mode the
+        // current schema rejects must still be recognized and preserved.
+        let Ok(dir) = crate::store_fs::open_dir_for_removal(&self.generations_fd, digest) else {
             return false;
         };
-        let Some(manifest_fd) = open_rel_nofollow(&dir, GENERATION_MANIFEST_NAME) else {
+        let Some(manifest_fd) = open_rel_file(&dir, GENERATION_MANIFEST_NAME) else {
             return false;
         };
         // The code quarantines manifests above the read cap because deletion could remove a future-format generation; other read failures are removable.
@@ -823,6 +851,8 @@ impl GenerationStore {
     /// The protected digests include the active candidate.
     /// `prune` preserves entries with unknown manifest schemas or foreign names.
     /// `prune` returns `UnsupportedStateSchema` when the current profile is quarantined.
+    /// One unremovable entry does not stop the sweep: every reclaimable entry is removed first,
+    /// then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<PruneReport, GenerationError> {
         let mut protected = protected.clone();
         match self.read_current()? {
@@ -833,13 +863,21 @@ impl GenerationStore {
             CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
         }
         let mut report = PruneReport::default();
+        let mut first_error = None;
         // `prune` enumerates `generations_fd` instead of its pathname so a replacement directory cannot select retained-store deletions.
         // `prune` removes through `generations_fd` so a replaced pathname cannot redirect deletions.
-        let entries = read_dir_names(&self.generations_fd)?;
+        // A non-UTF-8 name is neither a temp nor a digest; it is preserved like any foreign name.
+        let (entries, unnamed) = read_dir_names_partitioned(&self.generations_fd)
+            .map_err(|_| invalid("directory listing failed"))?;
+        report.quarantined += unnamed;
         for name in entries {
-            if let Some(_rest) = name.strip_prefix(STAGING_TEMP_PREFIX) {
-                remove_tree(&self.generations_fd, &name)?;
-                report.removed_temps += 1;
+            if is_staging_temp_name(&name) {
+                match remove_tree(&self.generations_fd, &name) {
+                    Ok(()) => report.removed_temps += 1,
+                    Err(err) => {
+                        first_error.get_or_insert(err);
+                    }
+                }
                 continue;
             }
             if !is_canonical_payload_digest(&name) {
@@ -853,18 +891,33 @@ impl GenerationStore {
             if self.is_quarantined_schema(&name) {
                 report.quarantined += 1;
             } else {
-                remove_tree(&self.generations_fd, &name)?;
-                report.removed_generations += 1;
+                match remove_tree(&self.generations_fd, &name) {
+                    Ok(()) => report.removed_generations += 1,
+                    Err(err) => {
+                        first_error.get_or_insert(err);
+                    }
+                }
             }
         }
         fsync(&self.generations_fd).map_err(|_| invalid("generations fsync failed"))?;
-        Ok(report)
+        report.removed_profile_temps = self.sweep_stale_profile_temps()?;
+        if report.removed_profile_temps > 0 {
+            fsync(&self.root_fd).map_err(|_| invalid("lifecycle root fsync failed"))?;
+        }
+        self.verify_named_identity()?;
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(report),
+        }
     }
 }
 
 fn validate_rel_path(rel: &str) -> Result<(), GenerationError> {
     if rel.is_empty() || rel.len() > 4096 {
         return Err(invalid("staged path length is invalid"));
+    }
+    if rel.split('/').count() > MAX_PATH_COMPONENTS {
+        return Err(invalid("staged path is too deep"));
     }
     for component in rel.split('/') {
         if component.is_empty() || component == "." || component == ".." {
@@ -877,57 +930,97 @@ fn validate_rel_path(rel: &str) -> Result<(), GenerationError> {
     Ok(())
 }
 
-/// The copy rejects symlink sources and fails if source identity changes before completion.
-fn copy_source_into(temp_fd: &OwnedFd, spec: &SourceSpec) -> Result<ManifestFile, GenerationError> {
-    let source_fd = openat(
+fn storage_or(e: std::io::Error, detail: &'static str) -> GenerationError {
+    if is_storage_exhausted(&e) {
+        GenerationError::InsufficientStorage
+    } else {
+        invalid(detail)
+    }
+}
+
+/// Opens or creates every parent of `rel_path` component by component and records each prefix
+/// in `dirs` so the caller can fsync it before promotion. Returns the pinned final parent and
+/// the basename to create under it.
+fn ensure_parent_dirs(
+    temp_fd: &OwnedFd,
+    rel_path: &str,
+    dirs: &mut BTreeSet<String>,
+) -> Result<(OwnedFd, String), GenerationError> {
+    let (parent, basename) = open_or_create_parents(temp_fd, rel_path).map_err(|e| match e {
+        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
+        rustix::io::Errno::PERM => invalid("staging directory failed security checks"),
+        _ => invalid("staging directory creation failed"),
+    })?;
+    let mut prefix = String::new();
+    for component in rel_path.split('/').take(rel_path.matches('/').count()) {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        dirs.insert(prefix.clone());
+    }
+    Ok((parent, basename))
+}
+
+struct PreflightSource {
+    /// Absolute at preflight time, so a later `chdir` cannot redirect the reopen.
+    path: PathBuf,
+    /// `fstat` snapshot taken through the preflight descriptor.
+    stat: rustix::fs::Stat,
+}
+
+/// Opens one source, checks it is a regular file whose size matches `expected_size` when
+/// specified, and returns its snapshot. The descriptor is closed on return so a generation with
+/// more files than the descriptor limit can still be preflighted.
+fn preflight_source(spec: &SourceSpec, cwd: &Path) -> Result<PreflightSource, GenerationError> {
+    let path = if spec.source.is_absolute() {
+        spec.source.clone()
+    } else {
+        cwd.join(&spec.source)
+    };
+    let (_, stat) = open_source_file(&path)?;
+    if spec
+        .expected_size
+        .is_some_and(|size| size != stat.st_size as u64)
+    {
+        return Err(invalid("staging source size differs from payload manifest"));
+    }
+    Ok(PreflightSource { path, stat })
+}
+
+fn open_source_file(path: &Path) -> Result<(OwnedFd, rustix::fs::Stat), GenerationError> {
+    let fd = openat(
         rustix::fs::CWD,
-        &*spec.source,
+        path,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| invalid("staging source open failed"))?;
-    let before = rustix::fs::fstat(&source_fd).map_err(|_| invalid("source stat failed"))?;
-    if (mode_bits(&before) & S_IFMT) != S_IFREG {
+    let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("source stat failed"))?;
+    if (mode_bits(&stat) & S_IFMT) != S_IFREG {
         return Err(invalid("staging source is not a regular file"));
     }
-    if spec
-        .expected_size
-        .is_some_and(|size| size != before.st_size as u64)
-    {
-        return Err(invalid("staging source size differs from payload manifest"));
-    }
+    Ok((fd, stat))
+}
 
-    let mut dir_path = String::new();
-    let components: Vec<&str> = spec.rel_path.split('/').collect();
-    for component in &components[..components.len() - 1] {
-        if !dir_path.is_empty() {
-            dir_path.push('/');
-        }
-        dir_path.push_str(component);
-        let created = match mkdirat(temp_fd, dir_path.as_str(), Mode::from_raw_mode(0o700)) {
-            Ok(()) => true,
-            Err(rustix::io::Errno::EXIST) => false,
-            Err(rustix::io::Errno::NOSPC) | Err(rustix::io::Errno::DQUOT) => {
-                return Err(GenerationError::InsufficientStorage);
-            }
-            Err(_) => return Err(invalid("staging directory creation failed")),
-        };
-        // mkdirat applies umask; chmod newly created components to 0700 so nested openat can traverse them.
-        // Chmod only components created by mkdirat so an existing pathname cannot redirect chmodat.
-        if created {
-            rustix::fs::chmodat(
-                temp_fd,
-                dir_path.as_str(),
-                Mode::from_raw_mode(0o700),
-                AtFlags::empty(),
-            )
-            .map_err(|_| invalid("staging directory chmod failed"))?;
-        }
+/// The copy reopens the preflighted path and fails if the source's identity or timestamps
+/// differ from the preflight snapshot or change before the copy completes.
+fn copy_source_into(
+    temp_fd: &OwnedFd,
+    spec: &SourceSpec,
+    source: &PreflightSource,
+    dirs: &mut BTreeSet<String>,
+) -> Result<ManifestFile, GenerationError> {
+    let (source_fd, before) = open_source_file(&source.path)?;
+    if !same_snapshot(&source.stat, &before) {
+        return Err(invalid("staging source changed since preflight"));
     }
+    let (source_fd, before) = (&source_fd, &before);
+    let (parent, basename) = ensure_parent_dirs(temp_fd, &spec.rel_path, dirs)?;
     let mode: u32 = if spec.executable { 0o700 } else { 0o600 };
     let dest_fd = openat(
-        temp_fd,
-        spec.rel_path.as_str(),
+        &parent,
+        basename.as_str(),
         OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(raw_mode(mode)),
     )
@@ -938,51 +1031,24 @@ fn copy_source_into(temp_fd: &OwnedFd, spec: &SourceSpec) -> Result<ManifestFile
     rustix::fs::fchmod(&dest_fd, Mode::from_raw_mode(raw_mode(mode)))
         .map_err(|_| invalid("staging output chmod failed"))?;
 
-    let mut hasher = sha2::Sha256::new();
-    let mut reader = std::fs::File::from(
-        rustix::io::dup(&source_fd).map_err(|_| invalid("source descriptor dup failed"))?,
-    );
-    let mut buf = vec![0u8; 128 * 1024];
-    let mut total: u64 = 0;
-    loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|_| invalid("staging source read failed"))?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        if total > before.st_size as u64 {
-            return Err(invalid("staging source grew during copy"));
-        }
-        hasher.update(&buf[..n]);
-        write_all_fd(&dest_fd, &buf[..n]).map_err(|e| {
-            if is_storage_exhausted(&e) {
-                GenerationError::InsufficientStorage
+    let (total, sha256) =
+        hash_copy(source_fd, Some(&dest_fd), before.st_size as u64).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                invalid("staging source grew during copy")
             } else {
-                invalid("staging output write failed")
+                storage_or(e, "staging output write failed")
             }
         })?;
-    }
     fsync_preserving_storage(&dest_fd, "staging output fsync failed")?;
 
-    // The before/after check requires the same device, inode, size, mtime, and mtime nanoseconds.
-    // The hash consumes the descriptor that the copy consumes.
-    let after = rustix::fs::fstat(&source_fd).map_err(|_| invalid("source stat failed"))?;
-    #[allow(clippy::unnecessary_cast)]
-    let same_identity = before.st_dev as u64 == after.st_dev as u64
-        && before.st_ino as u64 == after.st_ino as u64
-        && before.st_size == after.st_size
-        && before.st_mtime == after.st_mtime
-        && before.st_mtime_nsec == after.st_mtime_nsec;
-    if !same_identity || total != before.st_size as u64 {
+    let after = rustix::fs::fstat(source_fd).map_err(|_| invalid("source stat failed"))?;
+    if !same_snapshot(before, &after) || total != before.st_size as u64 {
         return Err(invalid("staging source mutated during copy"));
     }
     let dest_stat = rustix::fs::fstat(&dest_fd).map_err(|_| invalid("output stat failed"))?;
     if dest_stat.st_nlink != 1 || dest_stat.st_uid != owner_uid() {
         return Err(invalid("staging output is not owner-only single-link"));
     }
-    let sha256 = hex(&hasher.finalize());
     if spec
         .expected_sha256
         .as_deref()
@@ -1004,72 +1070,20 @@ fn write_new_file(
     bytes: &[u8],
     mode: u32,
 ) -> Result<(), GenerationError> {
-    let fd = openat(
-        dir,
-        name,
-        OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_raw_mode(raw_mode(mode)),
-    )
-    .map_err(|e| match e {
-        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
-        _ => invalid("file creation failed"),
-    })?;
-    rustix::fs::fchmod(&fd, Mode::from_raw_mode(raw_mode(mode)))
-        .map_err(|_| invalid("file chmod failed"))?;
-    write_all_fd(&fd, bytes).map_err(|e| {
-        if is_storage_exhausted(&e) {
-            GenerationError::InsufficientStorage
-        } else {
-            invalid("file write failed")
-        }
-    })?;
-    fsync_preserving_storage(&fd, "file fsync failed")?;
-    Ok(())
+    crate::store_fs::write_new_file(dir, name, bytes, mode)
+        .map(drop)
+        .map_err(|e| storage_or(e, "file write failed"))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), GenerationError> {
+    crate::store_fs::remove_tree(parent, name).map_err(|_| invalid("entry removal failed"))
+}
+
 fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> Result<(), GenerationError> {
-    rustix::fs::renameat_with(dir, a, dir, b, rustix::fs::RenameFlags::EXCHANGE)
-        .map_err(|_| invalid("atomic digest-target exchange failed"))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn exchange_dirs(_dir: &OwnedFd, _a: &str, _b: &str) -> Result<(), GenerationError> {
-    Err(invalid(
-        "atomic digest-target exchange is unsupported on this platform",
-    ))
-}
-
-/// `rename_noreplace` returns `Ok(true)` after renaming and `Ok(false)` when `to` is occupied.
-/// Callers decide how to handle an occupied target.
-///
-/// `RENAME_NOREPLACE` atomically rejects an occupied target on Linux.
-/// When renameat2 flags are unavailable, check occupancy while transaction.lock excludes trusted concurrent creators.
-/// Every mutating entry point holds `transaction.lock`, excluding trusted concurrent creators.
-fn rename_no_replace(dir: &OwnedFd, from: &str, to: &str) -> Result<bool, GenerationError> {
-    #[cfg(target_os = "linux")]
-    {
-        match rustix::fs::renameat_with(dir, from, dir, to, rustix::fs::RenameFlags::NOREPLACE) {
-            Ok(()) => return Ok(true),
-            Err(rustix::io::Errno::EXIST) | Err(rustix::io::Errno::NOTEMPTY) => return Ok(false),
-            Err(rustix::io::Errno::NOSPC) => return Err(GenerationError::InsufficientStorage),
-            Err(rustix::io::Errno::INVAL)
-            | Err(rustix::io::Errno::NOSYS)
-            | Err(rustix::io::Errno::OPNOTSUPP) => {}
-            Err(_) => return Err(invalid("generation rename failed")),
-        }
-    }
-    match rustix::fs::statat(dir, to, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(_) => return Ok(false),
-        Err(rustix::io::Errno::NOENT) => {}
-        Err(_) => return Err(invalid("generation target stat failed")),
-    }
-    match renameat(dir, from, dir, to) {
-        Ok(()) => Ok(true),
-        Err(rustix::io::Errno::EXIST) | Err(rustix::io::Errno::NOTEMPTY) => Ok(false),
-        Err(rustix::io::Errno::NOSPC) => Err(GenerationError::InsufficientStorage),
-        Err(_) => Err(invalid("generation rename failed")),
-    }
+    crate::store_fs::exchange_dirs(dir, a, b).map_err(|e| match e {
+        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
+        _ => invalid("atomic digest-target exchange failed"),
+    })
 }
 
 /// A lifecycle root is an owned directory whose ancestry cannot be replaced under the process.
@@ -1086,9 +1100,9 @@ fn validate_lifecycle_root_fd(fd: &OwnedFd, path: &Path) -> Result<(), Generatio
 }
 
 fn open_child_dir(parent: &OwnedFd, name: &str) -> Option<OwnedFd> {
-    let fd = open_child_dir_for_removal(parent, name)?;
+    let fd = crate::store_fs::open_dir_for_removal(parent, name).ok()?;
     let stat = rustix::fs::fstat(&fd).ok()?;
-    if (mode_bits(&stat) & 0o077) != 0 {
+    if (mode_bits(&stat) & 0o7777) != 0o700 {
         return None;
     }
     Some(fd)
@@ -1099,46 +1113,26 @@ fn open_child_dir_existing(
     parent: &OwnedFd,
     name: &str,
 ) -> Result<Option<OwnedFd>, GenerationError> {
-    let fd = match openat(
-        parent,
-        name,
-        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
+    match openat(parent, name, HARDENED_DIR_FLAGS, Mode::empty()) {
+        Ok(_) => {}
         Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(_) => return Err(invalid("generations directory failed security checks")),
-    };
-    let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("generations directory stat failed"))?;
-    let mode = mode_bits(&stat);
-    if (mode & S_IFMT) != S_IFDIR || stat.st_uid != owner_uid() || (mode & 0o077) != 0 {
-        return Err(invalid("generations directory failed security checks"));
     }
-    Ok(Some(fd))
+    open_child_dir(parent, name)
+        .map(Some)
+        .ok_or_else(|| invalid("generations directory failed security checks"))
 }
 
-fn open_child_dir_for_removal(parent: &OwnedFd, name: &str) -> Option<OwnedFd> {
-    let fd = openat(
-        parent,
-        name,
-        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .ok()?;
-    let stat = rustix::fs::fstat(&fd).ok()?;
-    let mode = mode_bits(&stat);
-    if (mode & S_IFMT) != S_IFDIR || stat.st_uid != owner_uid() {
-        return None;
-    }
-    Some(fd)
-}
-
+/// Every directory must be an ancestor of at least one manifest-listed file. Without that rule an
+/// extra empty directory would pass validation, and two trees with different observable layouts
+/// would share one content digest.
 fn walk_generation_tree(
     dir: &OwnedFd,
     prefix: &str,
+    expected: &BTreeSet<String>,
     found: &mut BTreeSet<String>,
 ) -> Result<(), GenerationError> {
-    let names = read_dir_names(dir)?;
+    let names = read_dir_names(dir).map_err(|_| invalid("directory listing failed"))?;
     for name in names {
         let rel = if prefix.is_empty() {
             name.clone()
@@ -1151,9 +1145,19 @@ fn walk_generation_tree(
         match mode_bits(&stat) & S_IFMT {
             S_IFLNK => return Err(invalid("generation contains a symlink")),
             S_IFDIR => {
+                let dir_prefix = format!("{rel}/");
+                // Keys sharing `dir_prefix` are contiguous in the sorted set, so the first key at
+                // or after it decides membership in O(log n).
+                let listed = expected
+                    .range(dir_prefix.clone()..)
+                    .next()
+                    .is_some_and(|path| path.starts_with(&dir_prefix));
+                if !listed {
+                    return Err(invalid("generation contains an unlisted directory"));
+                }
                 let child = open_child_dir(dir, &name)
                     .ok_or_else(|| invalid("generation subdirectory failed security checks"))?;
-                walk_generation_tree(&child, &rel, found)?;
+                walk_generation_tree(&child, &rel, expected, found)?;
             }
             S_IFREG => {
                 found.insert(rel);
@@ -1164,52 +1168,12 @@ fn walk_generation_tree(
     Ok(())
 }
 
-fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), GenerationError> {
-    match unlinkat(parent, name, AtFlags::empty()) {
-        Ok(()) => return Ok(()),
-        Err(rustix::io::Errno::NOENT) => return Ok(()),
-        Err(rustix::io::Errno::ISDIR) => {}
-        // Linux reports EPERM for unlink-on-directory in some filesystems.
-        Err(rustix::io::Errno::PERM) => {}
-        Err(_) => return Err(invalid("entry removal failed")),
-    }
-    let Some(dir) = open_child_dir_for_removal(parent, name) else {
-        return Err(invalid("removal target failed security checks"));
-    };
-    let names = read_dir_names(&dir)?;
-    for child in names {
-        remove_tree(&dir, &child)?;
-    }
-    unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|_| invalid("directory removal failed"))?;
-    Ok(())
-}
-
-///
-/// fdopendir enumerates the already-open directory, preventing pathname replacement from changing the listing.
-/// Unlike a `/proc/self/fd` round-trip, `fdopendir` needs no procfs.
-/// `fdopendir` uses the lifecycle root's validation path on every supported platform, not only Linux.
-/// `read_dir_names` excludes `.` and `..` so callers cannot delete the listed directory or its parent.
-fn read_dir_names(dir: &OwnedFd) -> Result<Vec<String>, GenerationError> {
-    let borrowed = rustix::fs::Dir::read_from(dir).map_err(|_| invalid("directory open failed"))?;
-    let mut names = Vec::new();
-    for entry in borrowed {
-        let entry = entry.map_err(|_| invalid("directory listing failed"))?;
-        let raw = entry.file_name().to_bytes();
-        if raw == b"." || raw == b".." {
-            continue;
-        }
-        let name = std::str::from_utf8(raw)
-            .map_err(|_| invalid("directory entry name is not unicode"))?
-            .to_owned();
-        names.push(name);
-    }
-    Ok(names)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
+    use std::time::SystemTime;
 
     fn store_at(root: &Path) -> GenerationStore {
         GenerationStore::open(Some(root)).expect("open store")
@@ -1307,6 +1271,110 @@ mod tests {
         assert_eq!(again, digest);
     }
 
+    /// A future-schema generation is preserved by `prune` even when its directory mode is
+    /// rejected by the current schema validator.
+    #[test]
+    fn a_quarantined_generation_with_a_foreign_directory_mode_is_still_preserved() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let gen_dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        let manifest_path = gen_dir.join(GENERATION_MANIFEST_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("read")).expect("json");
+        value["schema"] = 7.into();
+        std::fs::write(&manifest_path, serde_json::to_vec(&value).expect("encode")).expect("write");
+        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o500)).expect("mode");
+
+        store
+            .stage_and_promote(
+                &[SourceSpec {
+                    rel_path: "bin/eidnara-host".to_owned(),
+                    source: write_source(src.path(), "launcher-b", b"#successor-binary"),
+                    executable: true,
+                    expected_size: None,
+                    expected_sha256: None,
+                }],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .expect("stage successor");
+        let report = store.prune(&BTreeSet::new()).expect("prune");
+        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore");
+        assert_eq!(report.removed_generations, 0);
+        assert_eq!(report.quarantined, 1);
+        assert!(
+            manifest_path.is_file(),
+            "the unknown-schema generation survives"
+        );
+    }
+
+    #[test]
+    fn a_staged_path_deeper_than_the_component_bound_is_rejected() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let deep = vec!["d"; MAX_PATH_COMPONENTS].join("/") + "/leaf";
+        let spec = vec![SourceSpec {
+            rel_path: deep,
+            source: write_source(src.path(), "leaf", b"x"),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        assert!(matches!(
+            store.stage_and_promote(&spec, &meta(), &BTreeSet::new()),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "staged path is too deep"
+            })
+        ));
+    }
+
+    /// Writes through pinned descriptors land in a detached tree once `lifecycle` is renamed
+    /// and replaced, so mutators must fail rather than report success.
+    #[test]
+    fn a_replaced_lifecycle_tree_fails_the_mutation_rather_than_reporting_success() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+
+        let lifecycle = store.root().to_path_buf();
+        let detached = lifecycle.with_file_name("lifecycle-detached");
+        std::fs::rename(&lifecycle, &detached).expect("detach the lifecycle tree");
+        std::fs::create_dir_all(lifecycle.join(GENERATIONS_DIR_NAME)).expect("replacement tree");
+        for dir in [&lifecycle, &lifecycle.join(GENERATIONS_DIR_NAME)] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+
+        let successor = vec![SourceSpec {
+            rel_path: "bin/eidnara-host".to_owned(),
+            source: write_source(src.path(), "launcher-next", b"#next-binary"),
+            executable: true,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        assert!(matches!(
+            store.stage_and_promote(&successor, &meta(), &BTreeSet::new()),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "lifecycle store was replaced under the mutator"
+            })
+        ));
+        assert!(matches!(
+            store.prune(&BTreeSet::new()),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "lifecycle store was replaced under the mutator"
+            })
+        ));
+        assert!(
+            !lifecycle.join(CURRENT_PROFILE_NAME).exists(),
+            "the replacement tree gained no profile"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn descriptor_root_survives_generation_path_replacement() {
         let root = tempfile::tempdir().expect("root");
@@ -1390,9 +1458,86 @@ mod tests {
         expect_invalid(&store);
         std::fs::remove_file(gen_dir.join("extra")).expect("remove extra");
 
+        // An empty directory adds nothing to the found set, so only an explicit ancestor check
+        // can reject it; otherwise two trees with different layouts share one digest.
+        std::fs::create_dir(gen_dir.join("empty-dir")).expect("empty dir");
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "generation contains an unlisted directory"
+            })
+        ));
+        std::fs::remove_dir(gen_dir.join("empty-dir")).expect("remove empty dir");
+        std::fs::create_dir(gen_dir.join("bin/nested")).expect("nested empty dir");
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "generation contains an unlisted directory"
+            })
+        ));
+        std::fs::remove_dir(gen_dir.join("bin/nested")).expect("remove nested empty dir");
+        store
+            .validate(&digest)
+            .expect("generation validates once the extra directories are gone");
+
+        // Owner-only but not `0o700`: a read-only or sticky directory is still a different tree.
+        for mode in [0o500, 0o1700] {
+            std::fs::set_permissions(gen_dir.join("bin"), std::fs::Permissions::from_mode(mode))
+                .expect("dir mode");
+            assert!(
+                matches!(
+                    store.validate(&digest),
+                    Err(GenerationError::NativePayloadInvalid {
+                        detail: "generation subdirectory failed security checks"
+                    })
+                ),
+                "directory mode {mode:o} must not validate"
+            );
+        }
+        std::fs::set_permissions(gen_dir.join("bin"), std::fs::Permissions::from_mode(0o700))
+            .expect("restore dir mode");
+        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("root dir mode");
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "generation directory is missing or insecure"
+            })
+        ));
+        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore root dir mode");
+
+        let manifest_path = gen_dir.join(GENERATION_MANIFEST_NAME);
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o700))
+            .expect("manifest mode");
+        assert!(
+            matches!(
+                store.validate(&digest),
+                Err(GenerationError::NativePayloadInvalid {
+                    detail: "generation manifest failed security checks"
+                })
+            ),
+            "an owner-only manifest mode other than 0600 must not validate"
+        );
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restore manifest mode");
+        store
+            .validate(&digest)
+            .expect("generation validates again with the manifest mode restored");
+
         // Loose mode.
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
         expect_invalid(&store);
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("mode");
+
+        // A set-user-ID bit keeps the owner-only shape but is never a mode the stager emits.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o4700)).expect("mode");
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "file mode diverges from the manifest"
+            })
+        ));
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("mode");
 
         let alias = gen_dir.join("alias-link");
@@ -1466,6 +1611,190 @@ mod tests {
             std::fs::read(&profile_path).expect("reread profile"),
             profile_bytes
         );
+
+        // A profile past the read cap cannot reveal its schema; it is quarantined, not corrupt.
+        let oversized = vec![b' '; MAX_MANIFEST_BYTES + 1];
+        std::fs::write(&profile_path, &oversized).expect("write oversized profile");
+        assert_eq!(
+            store.read_current().expect("read oversized"),
+            CurrentProfile::Quarantined
+        );
+        assert!(matches!(
+            store.prune(&BTreeSet::new()),
+            Err(GenerationError::UnsupportedStateSchema)
+        ));
+        assert_eq!(
+            std::fs::read(&profile_path)
+                .expect("reread oversized profile")
+                .len(),
+            oversized.len()
+        );
+    }
+
+    /// Only the exact `tmp-<16 hex>` shape is a staging temp, and a name that is not UTF-8 is
+    /// neither a temp nor a digest. Both are preserved as foreign entries and neither aborts
+    /// the sweep.
+    #[test]
+    fn prune_preserves_lookalike_temps_and_non_utf8_names() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let obsolete = stage_default(&store, src.path());
+        store
+            .stage_and_promote(
+                &[SourceSpec {
+                    rel_path: "bin/eidnara-host".to_owned(),
+                    source: write_source(src.path(), "launcher-new", b"#successor-binary"),
+                    executable: true,
+                    expected_size: None,
+                    expected_sha256: None,
+                }],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .expect("stage successor");
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        let lookalike = generations.join("tmp-backup");
+        std::fs::create_dir(&lookalike).expect("lookalike temp");
+        std::fs::write(lookalike.join("keep"), b"operator state").expect("lookalike content");
+        let uppercase = generations.join("tmp-DEADBEEF00000000");
+        std::fs::create_dir(&uppercase).expect("uppercase lookalike");
+        let unnamed = generations.join(std::ffi::OsStr::from_bytes(b"\xff\xfe-not-utf8"));
+        std::fs::create_dir(&unnamed).expect("non-utf8 entry");
+
+        let report = store
+            .prune(&BTreeSet::new())
+            .expect("prune sweeps past foreign names");
+        assert_eq!(report.removed_temps, 0);
+        assert_eq!(report.removed_generations, 1);
+        assert_eq!(report.quarantined, 3);
+        assert!(
+            lookalike.join("keep").is_file(),
+            "a tmp- lookalike is preserved"
+        );
+        assert!(
+            uppercase.is_dir(),
+            "uppercase hex is not a store-created temp"
+        );
+        assert!(unnamed.is_dir(), "a non-UTF-8 name is preserved");
+        assert!(!generations.join(&obsolete).exists());
+    }
+
+    /// A crash between `mkdirat` and `chmodat` under a restrictive umask can leave the
+    /// `generations` directory itself without owner access; `open` must repair it rather than
+    /// fail on every restart, while a wider mode is still refused.
+    #[test]
+    fn a_crash_left_generations_directory_is_repaired_on_reopen() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        drop(store);
+
+        std::fs::set_permissions(&generations, std::fs::Permissions::from_mode(0o000))
+            .expect("mode 000");
+        let reopened = GenerationStore::open(Some(root.path())).expect("reopen repairs mode 000");
+        assert_eq!(
+            std::fs::metadata(&generations)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        reopened
+            .validate(&digest)
+            .expect("generation still validates");
+        drop(reopened);
+
+        std::fs::set_permissions(&generations, std::fs::Permissions::from_mode(0o755))
+            .expect("mode 755");
+        assert!(
+            matches!(
+                GenerationStore::open(Some(root.path())),
+                Err(GenerationError::NativePayloadInvalid { .. })
+            ),
+            "a group- or world-accessible generations directory is refused, not repaired"
+        );
+        std::fs::set_permissions(&generations, std::fs::Permissions::from_mode(0o700))
+            .expect("restore");
+    }
+
+    /// A manifest mode with set-ID bits passes owner and byte-equality checks when the file has
+    /// matching bits, so the manifest mode itself must be bounded to `0o777`.
+    #[test]
+    fn a_manifest_recording_special_permission_bits_is_rejected() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+
+        let bytes = std::fs::read(dir.join(GENERATION_MANIFEST_NAME)).expect("manifest");
+        let mut manifest: GenerationManifest = serde_json::from_slice(&bytes).expect("decode");
+        let bin = manifest
+            .files
+            .iter_mut()
+            .find(|file| file.path == "bin/eidnara-host")
+            .expect("launcher entry");
+        bin.mode = 0o4700;
+        let rewritten = manifest.canonical_bytes();
+        let renamed = manifest.digest();
+        std::fs::write(dir.join(GENERATION_MANIFEST_NAME), &rewritten).expect("write");
+        std::fs::set_permissions(
+            dir.join("bin/eidnara-host"),
+            std::fs::Permissions::from_mode(0o4700),
+        )
+        .expect("setuid mode");
+        let target = store.root().join(GENERATIONS_DIR_NAME).join(&renamed);
+        std::fs::rename(&dir, &target).expect("rename to the new byte hash");
+
+        assert!(matches!(
+            store.validate(&renamed),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "manifest mode carries special permission bits"
+            })
+        ));
+    }
+
+    /// A crash between `mkdirat` and `chmodat` under a restrictive umask leaves an empty
+    /// `tmp-*` directory that cannot be opened for traversal. `prune` must still reclaim it and
+    /// keep sweeping the entries sorted after it.
+    #[test]
+    fn an_unopenable_empty_staging_temp_is_still_pruned() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let obsolete = stage_default(&store, src.path());
+        let current = store
+            .stage_and_promote(
+                &[SourceSpec {
+                    rel_path: "bin/eidnara-host".to_owned(),
+                    source: write_source(src.path(), "launcher-new", b"#successor-binary"),
+                    executable: true,
+                    expected_size: None,
+                    expected_sha256: None,
+                }],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .expect("stage successor");
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        let blocked = generations.join("tmp-0000000000000000");
+        std::fs::create_dir(&blocked).expect("blocked temp");
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("mode");
+
+        let report = store
+            .prune(&BTreeSet::new())
+            .expect("prune reclaims the mode-000 temp");
+        assert_eq!(report.removed_temps, 1);
+        assert_eq!(report.removed_generations, 1);
+        assert!(!blocked.exists(), "the empty unopenable temp is removed");
+        assert!(!generations.join(&obsolete).exists());
+        assert!(store.validate(&current).is_ok());
     }
 
     #[test]
@@ -1905,5 +2234,94 @@ mod tests {
             oversized,
             "an undecidable manifest must be preserved byte-for-byte"
         );
+    }
+
+    /// Promotion rejects an occupant whose manifest exceeds the read cap and preserves its bytes.
+    #[test]
+    fn an_oversized_digest_occupant_is_never_repaired() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let manifest_path = store
+            .root()
+            .join(GENERATIONS_DIR_NAME)
+            .join(&digest)
+            .join(GENERATION_MANIFEST_NAME);
+        let mut oversized = br#"{"schema":2,"pad":""#.to_vec();
+        oversized.resize(oversized.len() + MAX_MANIFEST_BYTES, b'x');
+        oversized.extend_from_slice(br#""}"#);
+        std::fs::write(&manifest_path, &oversized).expect("write oversized manifest");
+
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::UnsupportedStateSchema)
+        ));
+        // The same sources reproduce `digest`, so promotion targets the oversized occupant.
+        let err = store
+            .stage_and_promote(&sources_in(src.path()), &meta(), &BTreeSet::new())
+            .expect_err("an oversized occupant must not be exchange-repaired");
+        assert!(matches!(err, GenerationError::UnsupportedStateSchema));
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("occupant still there"),
+            oversized
+        );
+    }
+
+    fn age_past_stale_threshold(path: &Path) {
+        let old = SystemTime::now() - STALE_PROFILE_TEMP_AFTER * 2;
+        let secs = old
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs();
+        let stamp = rustix::fs::Timespec {
+            tv_sec: secs as _,
+            tv_nsec: 0,
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            path,
+            &rustix::fs::Timestamps {
+                last_access: stamp,
+                last_modification: stamp,
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .expect("age entry");
+    }
+
+    /// `prune` reclaims a stale profile temp and leaves younger and unrelated temps alone.
+    #[test]
+    fn prune_sweeps_stale_profile_temps_only() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+
+        let stale = store.root().join(format!(
+            "{PROFILE_TEMP_PREFIX}0011223344556677{PROFILE_TEMP_SUFFIX}"
+        ));
+        std::fs::write(&stale, b"{\"torn\":true}").expect("stale temp");
+        age_past_stale_threshold(&stale);
+        let live = store.root().join(format!(
+            "{PROFILE_TEMP_PREFIX}8899aabbccddeeff{PROFILE_TEMP_SUFFIX}"
+        ));
+        std::fs::write(&live, b"{\"torn\":true}").expect("live temp");
+        let unrelated = store.root().join(".other.tmp");
+        std::fs::write(&unrelated, b"x").expect("unrelated temp");
+        age_past_stale_threshold(&unrelated);
+
+        let report = store.prune(&BTreeSet::new()).expect("prune");
+        assert_eq!(report.removed_profile_temps, 1);
+        assert!(!stale.exists(), "the stale profile temp is reclaimed");
+        assert!(
+            live.exists(),
+            "a young profile temp may belong to a live writer"
+        );
+        assert!(unrelated.exists(), "only profile temps are swept");
+        assert!(matches!(
+            store.read_current().expect("read"),
+            CurrentProfile::Current(_)
+        ));
     }
 }

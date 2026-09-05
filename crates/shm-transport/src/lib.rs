@@ -6,7 +6,7 @@
 //! frame it did not admit. The transport has no fallback: an unavailable or corrupt ring is
 //! terminal for that connection.
 #![warn(missing_docs)]
-#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 /// `Debug` that prints only the type name. Values here are sentinels a peer must echo back,
 /// so they stay out of logs.

@@ -18,7 +18,7 @@ use napi::{Env, Error, JsValue, Result, Status, Task, Unknown, ValueType, sys};
 use napi_derive::napi;
 use shm_transport::backend::ring::RingGrant;
 use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring};
-use shm_transport::descriptor::WIRE_V2_HEADER_BYTES;
+use shm_transport::descriptor::{WIRE_V2_HEADER_BYTES, check_wire_header};
 use shm_transport::lease::ReceiveLease;
 use shm_transport::profile::host_test_ring_profile;
 
@@ -338,15 +338,20 @@ fn detach_active(env: &Env, channel: &mut Channel, token: u32, complete: bool) -
         channel.active.insert(token, active);
         return Err(error("receive alias state is unknown; storage quarantined"));
     }
+    // Past the successful detach the token is consumed: these failures carry the prefix the
+    // JavaScript wrapper uses to release its handle rather than offer a retry that would fail as
+    // already released.
     if napi_buffers::delete_all(env, active.buffers).is_err() {
         channel.from_host.enter_quarantine();
-        return Err(error("receive alias cleanup failed; storage quarantined"));
+        return Err(consumed_error(
+            "receive alias cleanup failed; storage quarantined",
+        ));
     }
     if complete {
         active
             .lease
             .release()
-            .map_err(|_| error("receive completion failed"))?;
+            .map_err(|_| consumed_error("receive completion failed"))?;
     }
     Ok(())
 }
@@ -368,7 +373,9 @@ fn detach_producer(
     }
     if napi_buffers::delete_all(env, active.buffers).is_err() {
         channel.to_host.enter_quarantine();
-        return Err(error("producer alias cleanup failed; storage quarantined"));
+        return Err(consumed_error(
+            "producer alias cleanup failed; storage quarantined",
+        ));
     }
     Ok(active.reservation)
 }
@@ -1123,17 +1130,45 @@ pub fn commit_reservation(
             .as_ref()
             .try_into()
             .map_err(|_| error("wire header has invalid length"))?;
+        // The count is validated for the same reason: `advance` aborts the reservation on
+        // overflow, which would make a rejected commit unretryable once the token is gone.
+        let over_capacity = channel
+            .producers
+            .get(&token)
+            .is_some_and(|active| written as usize > active.reservation.remaining());
+        if over_capacity {
+            return Err(error("producer overflow"));
+        }
+        // Header semantics (version, declared length) are checked with the same predicate
+        // `commit` applies, while the token is still registered.
+        check_wire_header(&header, u64::from(written))
+            .map_err(|_| error("wire header does not describe the committed body"))?;
         let mut reservation = detach_producer(env, channel, token)?;
+        // Past this point the token is consumed, so every failure carries the prefix the
+        // JavaScript wrapper uses to release its handle instead of offering a retry that
+        // would fail as already released.
         reservation
             .set_wire_header(header)
             .and_then(|()| reservation.advance(written as usize))
-            .map_err(|_| error("producer overflow"))?;
-        before_publish.call(())?;
+            .map_err(|_| consumed_error("producer overflow"))?;
+        before_publish
+            .call(())
+            .map_err(|callback_error| consumed_error(&callback_error.to_string()))?;
         reservation
             .commit(written as usize)
-            .map_err(|_| error("producer underfill or invalid commit"))?;
+            .map_err(|_| consumed_error("producer underfill or invalid commit"))?;
         Ok(())
     })
+}
+
+/// Prefix on errors raised after a handle's native token was detached; the JavaScript wrapper treats such an error as consuming the handle. commentlint: allow(JUDGE)
+const HANDLE_CONSUMED_PREFIX: &str = "native handle consumed: ";
+
+fn consumed_error(message: &str) -> Error {
+    Error::new(
+        Status::GenericFailure,
+        format!("{HANDLE_CONSUMED_PREFIX}{message}"),
+    )
 }
 
 #[napi]

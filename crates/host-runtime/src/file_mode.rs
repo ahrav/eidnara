@@ -1,9 +1,5 @@
-//! Both closure and generation stagers use this platform-width mode conversion.
-//! stagers.
-//!
-//! Both stagers pass manifest-committed `u32` `mode` values to rustix.
+//! Both closure and generation stagers use this platform-width mode conversion for the manifest-committed `u32` `mode` values they pass to rustix.
 
-///
 /// `RawMode` is `u32` on Linux and `u16` on Darwin, whereas manifest `mode` is `u32`.
 /// Without the cast, the function compiles on Linux and fails on Darwin.
 /// Callers use only permission and set-ID bits.

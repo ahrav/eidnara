@@ -13,34 +13,33 @@ SHM_BENCH=""
 # crates/host-runtime/tests/perf_budget_runner.rs).
 BUDGET_RATES="${BUDGET_RATES:-20000 50000 80000}"
 
-budget_build() {
-  local out
-  out=$(cd "$ROOT" && cargo bench -p host-runtime --bench ipc_budget --no-run --locked 2>&1) || {
+# Builds one bench target and prints the executable path Cargo reports.
+# Cargo's `Executable <src> (<path>)` line names the artifact under whatever
+# target directory is configured (CARGO_TARGET_DIR, build.target-dir): relative
+# to the build cwd when it lies beneath it, absolute otherwise. The path is
+# taken as printed rather than reconstructed under $ROOT/target.
+bench_binary() {
+  local package="${1:?package}" bench="${2:?bench}" out path
+  out=$(cd "$ROOT" && cargo bench -p "$package" --bench "$bench" --no-run --locked 2>&1) || {
     echo "$out"
-    echo "bench build failed" >&2
+    echo "$bench bench build failed" >&2
     exit 1
   }
-  BUDGET_BENCH=$(echo "$out" | grep -oE 'target/release/deps/ipc_budget-[0-9a-f]+' | tail -1)
-  [[ -n "$BUDGET_BENCH" && -x "$ROOT/$BUDGET_BENCH" ]] || {
-    echo "could not locate ipc_budget bench binary" >&2
+  path=$(echo "$out" | sed -nE "s#^[[:space:]]*Executable [^(]*\(([^)]*/${bench}-[0-9a-f]+)\)\$#\1#p" | tail -1)
+  [[ -z "$path" || "$path" = /* ]] || path="$ROOT/$path"
+  [[ -n "$path" && -x "$path" ]] || {
+    echo "could not locate $bench bench binary" >&2
     exit 1
   }
-  BUDGET_BENCH="$ROOT/$BUDGET_BENCH"
+  printf '%s\n' "$path"
+}
+
+budget_build() {
+  BUDGET_BENCH=$(bench_binary host-runtime ipc_budget)
 }
 
 shm_build() {
-  local out
-  out=$(cd "$ROOT" && cargo bench -p shm-transport --bench hardware_envelope --no-run --locked 2>&1) || {
-    echo "$out"
-    echo "shared-memory evidence build failed" >&2
-    exit 1
-  }
-  SHM_BENCH=$(echo "$out" | grep -oE 'target/release/deps/hardware_envelope-[0-9a-f]+' | tail -1)
-  [[ -n "$SHM_BENCH" && -x "$ROOT/$SHM_BENCH" ]] || {
-    echo "could not locate hardware_envelope bench binary" >&2
-    exit 1
-  }
-  SHM_BENCH="$ROOT/$SHM_BENCH"
+  SHM_BENCH=$(bench_binary shm-transport hardware_envelope)
 }
 
 shm_run() {
@@ -128,12 +127,18 @@ budget_block() {
   local block="$1"
   shift
   local arms=(atomic-floor ring-serial ring-open ring-throughput)
+  # shellcheck disable=SC2206
+  local rates=($BUDGET_RATES)
   if (((block - 1) % 2 == 1)); then
     arms=(ring-throughput ring-open ring-serial atomic-floor)
+    # The rate sweep reverses with the arms so within-block position is not confounded with offered rate.
+    local reversed=()
+    for ((i = ${#rates[@]} - 1; i >= 0; i--)); do reversed+=("${rates[i]}"); done
+    rates=("${reversed[@]}")
   fi
   for arm in "${arms[@]}"; do
     if [[ "$arm" == ring-open ]]; then
-      for rate in $BUDGET_RATES; do
+      for rate in "${rates[@]}"; do
         budget_collect ring-open same-l3 "$block" "$@" "EIDNARA_IPC_BUDGET_RATE=$rate"
       done
     else
@@ -151,6 +156,30 @@ budget_block() {
   for arm in "${cross[@]}"; do
     BUDGET_PAIR="${BUDGET_CROSS_PAIR:-}" budget_collect "$arm" cross-numa "$block" "$@"
   done
+}
+
+# Fails when any same-L3 attempt under the given evidence directory finalized in
+# a state other than complete; cross-NUMA skips are the documented optional
+# outcome and are ignored.
+budget_require_same_l3() {
+  local out="${1:?outdir}" incomplete grep_status=0
+  local manifests=( "$out"/*same-l3*/manifest.json )
+  if [[ ! -e "${manifests[0]}" ]]; then
+    echo "no same-L3 manifests under $out; the run has no primary measurement" >&2
+    return 1
+  fi
+  # `grep -L` exits 1 when every file matches (nothing incomplete); any other
+  # nonzero status is a read failure and must not pass as success.
+  incomplete=$(grep -L '"state": *"complete"' "${manifests[@]}") || grep_status=$?
+  if (( grep_status > 1 )); then
+    echo "could not inspect same-L3 manifests under $out" >&2
+    return "$grep_status"
+  fi
+  if [[ -n "$incomplete" ]]; then
+    echo "$incomplete" >&2
+    echo "a required same-L3 arm did not complete; the run has no primary measurement" >&2
+    return 1
+  fi
 }
 
 budget_run() {
@@ -173,6 +202,10 @@ budget_run() {
   for block in $(seq 1 "$blocks"); do
     budget_block "$block" "$@"
   done
+  # Same-L3 arms are the primary measurements. The bench finalizes a
+  # structured skip with exit 0 when no valid pair exists, so their manifests
+  # are inspected before aggregation can summarize a run with no primary data.
+  budget_require_same_l3 "$BUDGET_OUT"
   EIDNARA_IPC_BUDGET_MODE=aggregate EIDNARA_IPC_BUDGET_OUT="$BUDGET_OUT" "$BUDGET_BENCH" \
     >"$BUDGET_OUT/summary.stdout.json"
   echo "evidence: $BUDGET_OUT"
@@ -196,6 +229,16 @@ budget-preflight)
     EIDNARA_IPC_BUDGET_WARMUP_BATCHES=2 EIDNARA_IPC_BUDGET_BATCHES=5 EIDNARA_IPC_BUDGET_EXCHANGES=1000
   budget_collect ring-serial same-l3 1 \
     EIDNARA_IPC_BUDGET_WARMUP_OPS=200 EIDNARA_IPC_BUDGET_MEASURED_OPS=1000
+  # The same-L3 arms are the experiment's primary measurements; the bench
+  # finalizes a structured skip with exit 0 when no valid pair exists, so the
+  # finalized manifests are inspected rather than trusting the exit status.
+  # The manifests are written by the bench itself before it exits, unlike the
+  # tee'd collection log, which a separate process may still be flushing.
+  if ! budget_require_same_l3 "$BUDGET_OUT"; then
+    echo "preflight failed" >&2
+    rm -rf "$BUDGET_OUT"
+    exit 1
+  fi
   if [[ -n "${BUDGET_CROSS_PAIR:-}" ]]; then
     # An explicit cross pair must fail preflight, not the final run: an
     # invalid pair finalizes a failed attempt and exits nonzero here.
@@ -242,6 +285,7 @@ budget-smoke | budget-pilot | budget-final)
 budget-summarize)
   BUDGET_OUT="${1:?outdir}"
   budget_build
+  budget_require_same_l3 "$BUDGET_OUT"
   EIDNARA_IPC_BUDGET_MODE=aggregate EIDNARA_IPC_BUDGET_OUT="$BUDGET_OUT" "$BUDGET_BENCH"
   exit 0
   ;;

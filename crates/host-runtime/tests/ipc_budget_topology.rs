@@ -20,8 +20,8 @@ fn put(root: &Path, rel: &str, contents: &str) {
 
 struct SynthCpu {
     cpu: u32,
-    package: u32,
-    core: u32,
+    package: i32,
+    core: i32,
     siblings: String,
     l3_shared: Option<String>,
 }
@@ -65,7 +65,7 @@ fn synth(root: &Path, cpus: &[SynthCpu], nodes: &[(u32, &str)]) {
     }
 }
 
-fn cpu(cpu: u32, core: u32, l3: &str) -> SynthCpu {
+fn cpu(cpu: u32, core: i32, l3: &str) -> SynthCpu {
     SynthCpu {
         cpu,
         package: 0,
@@ -102,6 +102,22 @@ fn classifies_same_l3_pair() {
         auto_select(&topo, &allowed(&[0, 1]), Class::SameL3),
         AutoSelection::Pair(0, 1)
     );
+}
+
+#[test]
+fn unexported_package_ids_still_read_as_a_topology() {
+    // The kernel reports `physical_package_id` as `-1` when the platform or
+    // hypervisor exports no socket id; the read must not fail on that value.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cpus = [cpu(0, 0, "0-3"), cpu(1, 1, "0-3")];
+    for c in &mut cpus {
+        c.package = -1;
+    }
+    synth(dir.path(), &cpus, &[(0, "0-1")]);
+    let topo = read_topology(dir.path()).unwrap();
+    assert_eq!(topo.cpus[&0].core, (-1, 0));
+    assert_eq!(topo.cpus[&1].core, (-1, 1));
+    validate_pair(&topo, &allowed(&[0, 1]), (0, 1), Class::SameL3).unwrap();
 }
 
 #[test]

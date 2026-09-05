@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates the committed synapse-tiny test bundle (run inside synapse-tiny/).
+"""Generates the committed synapse-tiny test bundle into synapse-tiny/ next to this script.
 
 Deterministic: every artifact byte, hash, fingerprint, and expected vector
 is reproducible from this script. The model is a toy embedding table lookup
@@ -16,10 +16,14 @@ produces the expected corpus vectors. NOT A PRODUCTION MODEL.
 import hashlib
 import json
 import re
+from pathlib import Path
 
 import numpy as np
 import onnx
 from onnx import TensorProto, helper
+
+# Every artifact is written under the committed fixture directory, so the working directory does not decide where the bundle lands.
+OUT_DIR = Path(__file__).resolve().parent / "synapse-tiny"
 
 DIMS = 8
 MAX_TOKENS = 8
@@ -34,7 +38,7 @@ OFFSET = np.linspace(0.5, 4.0, DIMS).astype(np.float32)
 
 def build_model() -> onnx.ModelProto:
     table_bytes = TABLE.tobytes()
-    with open("embedding.bin", "wb") as f:
+    with open(OUT_DIR / "embedding.bin", "wb") as f:
         f.write(table_bytes)
     table = TensorProto()
     table.name = "table"
@@ -102,12 +106,12 @@ def expected_vector(text: str, pooling: str = "mean", output: str = "last_hidden
 
 
 def sha256_file(name: str) -> str:
-    with open(name, "rb") as f:
+    with open(OUT_DIR / name, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
 
 
 def write_json(name: str, value) -> None:
-    with open(name, "w") as f:
+    with open(OUT_DIR / name, "w") as f:
         json.dump(value, f, indent=1, sort_keys=True)
         f.write("\n")
 
@@ -157,8 +161,9 @@ def canonical_fingerprint(
 
 
 def main() -> None:
+    OUT_DIR.mkdir(exist_ok=True)
     model = build_model()
-    with open("model.onnx", "wb") as f:
+    with open(OUT_DIR / "model.onnx", "wb") as f:
         f.write(model.SerializeToString())
 
     write_json(

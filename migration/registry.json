@@ -363,6 +363,18 @@
     },
     {
       "kind": "family",
+      "name": "tokenizer-vocab-blob",
+      "class": "absent-by-design",
+      "rationale": "Build-time decode of the tokenizer vocabulary, written to OUT_DIR by build.rs and compiled into the binary with include_bytes!. Nothing exists on disk at runtime.",
+      "literals": [
+        "vocab.bin",
+        "/vocab.bin"
+      ],
+      "paths": [],
+      "mismatch_behavior": "none"
+    },
+    {
+      "kind": "family",
       "name": "test-fixtures",
       "class": "test-only",
       "rationale": "Names that appear only in tests and fixtures: sample database files and the rendered store paths the storage-types tests assert.",

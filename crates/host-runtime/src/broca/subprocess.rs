@@ -114,9 +114,9 @@ impl EnvSnapshot {
         Ok(snapshot)
     }
 
-    /// Snapshots never carry `EIDNARA_MODULE_ID` or `EIDNARA_LAUNCH_NONCE`.
     /// Snapshots exclude `EIDNARA_MODULE_ID` and `EIDNARA_LAUNCH_NONCE` regardless of construction path.
-    pub fn from_vars(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Self {
+    /// Private because it skips the size bound; `capture_from` is the only constructor, so every snapshot the component retains is charged against `MAX_ENV_SNAPSHOT_BYTES`. commentlint: allow(JUDGE)
+    fn from_vars(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Self {
         let vars = vars
             .into_iter()
             .filter(|(name, _)| {
@@ -159,6 +159,16 @@ impl EnvSnapshot {
             return Err(CredentialRowError::CredentialValueTooLarge);
         }
         Ok(vec![(name.clone(), value.clone())])
+    }
+
+    /// Every provider `canonical_provider` admits for `harness`.
+    pub const SUPPORTED_PROVIDERS: [&'static str; 3] = ["anthropic", "google", "openai"];
+
+    /// A snapshot with no usable credential for any supported provider cannot run any send for `harness`, whatever the harness's own availability. commentlint: allow(JUDGE)
+    pub fn any_credential_available(&self, harness: &str) -> bool {
+        Self::SUPPORTED_PROVIDERS
+            .iter()
+            .any(|provider| self.provider_row(harness, provider).is_ok())
     }
 
     pub fn credential_fingerprint(
@@ -266,6 +276,8 @@ pub enum SubprocessEnd {
     StderrOverflow,
     /// CaptureFailed records a stdout read failure; parsers distrust the transcript even after a clean exit.
     CaptureFailed,
+    /// The leader exited but its status could not be reaped, so a clean exit cannot be proven; parsers distrust the transcript. commentlint: allow(JUDGE)
+    ExitUnknown,
     /// A group signal failure other than "already gone" leaves the run unsettled because descendants may still execute billable requests.
     TeardownUnconfirmed,
 }
@@ -347,12 +359,23 @@ pub async fn run(
     // The parent check aborts when the child no longer has `host_pid` as its parent.
     let host_pid = std::process::id();
     let child_inherit_fds = inherit_fds.clone();
+    // Every descendant inherits this per-run nonce; the startup sweep uses it to prove that a member of a leaderless group descends from this run rather than from an unrelated group that recycled the numeric pgid. commentlint: allow(JUDGE)
+    // Nonce and handshake-pipe setup precede the child, so their failures are retryable registration failures rather than permanent spawn errors. commentlint: allow(JUDGE)
+    let group_nonce =
+        group_registry::new_group_nonce().map_err(|_| io::Error::other(RegistrationFailed))?;
+    let mut env = env;
+    env.push((
+        OsString::from(group_registry::GROUP_NONCE_ENV),
+        OsString::from(group_nonce.clone()),
+    ));
     // Register crash ownership before `exec` so successor sweeps can find helpers after a host crash: `pdeathsig` kills only the leader, and a helper forked before record publication would otherwise be unrecorded. commentlint: allow(JUDGE)
     // `spawn` waits for `exec`, so the blocking-pool registrar reads `pid_report`, publishes the record, then releases `exec_barrier`.
     let (pid_report_read, pid_report_write) =
-        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .map_err(|_| io::Error::other(RegistrationFailed))?;
     let (exec_barrier_read, exec_barrier_write) =
-        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .map_err(|_| io::Error::other(RegistrationFailed))?;
     let child_pid_report_write = pid_report_write.as_raw_fd();
     let child_exec_barrier_read = exec_barrier_read.as_raw_fd();
     let child_pid_report_read = pid_report_read.as_raw_fd();
@@ -425,7 +448,8 @@ pub async fn run(
     let abort_registration = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let registrar_abort = Arc::clone(&abort_registration);
     let (pid_reported_send, mut pid_reported) = tokio::sync::oneshot::channel::<i32>();
-    let registrar = tokio::task::spawn_blocking(move || {
+    // The registrar takes a bounded blocking slot like every other filesystem job, so a run that gives up on a stalled publication cannot leave an unaccounted blocking task behind. commentlint: allow(JUDGE)
+    let registrar = tokio::spawn(off_runtime(move || {
         let mut pid_bytes = [0u8; size_of::<libc::pid_t>()];
         let mut filled = 0;
         while filled < pid_bytes.len() {
@@ -443,7 +467,7 @@ pub async fn run(
             // Withholding the barrier aborts the child before exec, so no record is needed.
             return None;
         }
-        let record = group_registry::GroupRecord::record(&state_root, leader)?;
+        let record = group_registry::GroupRecord::record(&state_root, leader, &group_nonce)?;
         if registrar_abort.load(std::sync::atomic::Ordering::SeqCst) {
             // The run gave up during publication; the barrier stays withheld so the child aborts, and the published record is returned for the abort path's cleanup task. commentlint: allow(JUDGE)
             return Some(record);
@@ -451,7 +475,7 @@ pub async fn run(
         // The already-published record is returned even when this write fails; the caller owns its removal. commentlint: allow(JUDGE)
         let _ = rustix::io::write(&exec_barrier_write, &[1u8]);
         Some(record)
-    });
+    }));
 
     let mut spawn_reply = queue_spawn(command, pid_report_write, exec_barrier_read)?;
     // Dropping `env` releases its environment-sized allocation before concurrent runs continue. commentlint: allow(JUDGE)
@@ -518,7 +542,7 @@ pub async fn run(
         // retained (when teardown is proven) and detaches best-effort removal. commentlint: allow(JUDGE)
         let record_retained =
             match tokio::time::timeout(limits.termination_grace, &mut registrar).await {
-                Ok(joined) => match joined.ok().flatten() {
+                Ok(joined) => match joined.ok().and_then(Result::ok).flatten() {
                     Some(record) if group_gone => {
                         remove_record_bounded(record, limits.termination_grace).await
                     }
@@ -527,7 +551,7 @@ pub async fn run(
                 },
                 Err(_) => {
                     tokio::spawn(async move {
-                        let record = registrar.await.ok().flatten();
+                        let record = registrar.await.ok().and_then(Result::ok).flatten();
                         if group_gone && let Some(record) = record {
                             let _ = off_runtime(move || record.remove()).await;
                         }
@@ -558,7 +582,7 @@ pub async fn run(
     let spawned = spawned
         .expect("the biased select returned either a spawn result or an abort")
         .map_err(|_| io::Error::other("the broca-spawner thread dropped a spawn reply"))?;
-    let group_record = registrar.await.ok().flatten();
+    let group_record = registrar.await.ok().and_then(Result::ok).flatten();
     let mut child = match spawned {
         Ok(child) => child,
         Err(err) => {
@@ -767,10 +791,11 @@ pub async fn run(
                 // the pgid.
                 group_gone =
                     signalled && wait_other_members_gone(group, limits.termination_grace).await;
+                // A failed reap (`ExitedUnfenced`: another in-process reaper consumed the leader) leaves the exit status unknown; treating it as a clean drain would let a nonzero exit publish a parseable transcript as success. commentlint: allow(JUDGE)
                 child
                     .wait()
                     .await
-                    .map_or(SubprocessEnd::DrainKilled, |status| {
+                    .map_or(SubprocessEnd::ExitUnknown, |status| {
                         status
                             .code()
                             .map_or(SubprocessEnd::Signaled, SubprocessEnd::Exited)
@@ -923,14 +948,31 @@ pub(crate) async fn bounded_cleanup(
     }
 }
 
+/// Blocking filesystem and `/proc` jobs are admitted through this many slots, each held until the job actually returns rather than until its caller stops waiting. commentlint: allow(JUDGE)
+/// A caller that times out drops only its join handle; without the slot, repeated sends against a stalled filesystem would pile up detached jobs, their captured descriptors, and pool threads without bound. commentlint: allow(JUDGE)
+const BLOCKING_SLOTS: usize = 4 * super::config::MAX_BACKEND_PROCESSES;
+
+fn blocking_slots() -> &'static Arc<tokio::sync::Semaphore> {
+    static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(BLOCKING_SLOTS)))
+}
+
 /// Runs a synchronous `/proc` or filesystem step on the blocking pool so it never stalls a runtime worker.
 /// A cancelled or panicked blocking task reads as an unknown answer.
+/// The slot moves into the job, so a stalled job keeps its slot until it returns and callers behind it wait (and time out) instead of adding more. commentlint: allow(JUDGE)
 pub(crate) async fn off_runtime<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> io::Result<T> {
-    tokio::task::spawn_blocking(work)
+    let slot = Arc::clone(blocking_slots())
+        .acquire_owned()
         .await
-        .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
+        .map_err(|_| io::Error::other("blocking slots are closed"))?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        work()
+    })
+    .await
+    .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
 }
 
 /// Queues a fork on one immortal OS thread and returns the reply channel without waiting. commentlint: allow(JUDGE)
@@ -1159,15 +1201,17 @@ impl PrivateDir {
             // `create` rejects existing entries, including symlinks, so success uses a previously absent pathname.
             match builder.create(&candidate) {
                 Ok(()) => {
+                    // The guard is constructed before any post-create check so a failure below removes the directory through `Drop` instead of leaving it for the restart sweep. commentlint: allow(JUDGE)
+                    let dir = Self {
+                        path: Some(candidate),
+                    };
                     // `mkdir(2)` modes are umask-filtered, so `set_permissions` forces `0700`.
-                    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))?;
-                    let meta = fs::symlink_metadata(&candidate)?;
+                    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
+                    let meta = fs::symlink_metadata(dir.path())?;
                     if !meta.file_type().is_dir() || meta.file_type().is_symlink() {
                         return Err(io::Error::other("private temp path is not a fresh dir"));
                     }
-                    return Ok(Self {
-                        path: Some(candidate),
-                    });
+                    return Ok(dir);
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(err) => return Err(err),
@@ -1229,7 +1273,7 @@ impl PrivateDir {
     /// The child controls the size of the tree under `HOME`, so the recursive delete runs on the blocking pool.
     /// A failed blocking task still reports a cleanup failure so no path can claim the private files are gone without proof.
     pub async fn cleanup_async(self) -> Result<(), CleanupFailure> {
-        match tokio::task::spawn_blocking(move || self.cleanup()).await {
+        match off_runtime(move || self.cleanup()).await {
             Ok(result) => result,
             Err(_) => Err(CleanupFailure {
                 kind: io::ErrorKind::Other,
@@ -1239,11 +1283,31 @@ impl PrivateDir {
 }
 
 impl Drop for PrivateDir {
+    /// A guard can be dropped on a runtime worker (a cleanup future abandoned while waiting for a blocking slot), so the recursive delete is handed to the cleanup thread rather than run inline. commentlint: allow(JUDGE)
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            let _ = fs::remove_dir_all(path);
+            defer_remove_dir(path);
         }
     }
+}
+
+/// One immortal thread performs best-effort removals for dropped [`PrivateDir`] guards.
+/// The queue is bounded like the spawn queue; a directory that cannot be queued stays for the startup run-dir sweep, which is the same fallback a failed `remove_dir_all` already relies on. commentlint: allow(JUDGE)
+fn defer_remove_dir(path: PathBuf) {
+    static CLEANUP: OnceLock<std::sync::mpsc::SyncSender<PathBuf>> = OnceLock::new();
+    let sender = CLEANUP.get_or_init(|| {
+        let (sender, paths) = std::sync::mpsc::sync_channel::<PathBuf>(BLOCKING_SLOTS);
+        std::thread::Builder::new()
+            .name("broca-cleanup".to_owned())
+            .spawn(move || {
+                while let Ok(path) = paths.recv() {
+                    let _ = fs::remove_dir_all(path);
+                }
+            })
+            .expect("spawn the broca-cleanup thread");
+        sender
+    });
+    let _ = sender.try_send(path);
 }
 
 /// A cleanup failure converts a completed run to a failure because sensitive files may remain.
@@ -1530,6 +1594,13 @@ pub(crate) fn abnormal_end_terminal(
             retry_after_secs: None,
             provider_code: None,
         },
+        // An unreapable exit status does not classify the request either.
+        SubprocessEnd::ExitUnknown => BackendError {
+            class: ErrorClass::Transient,
+            message: format!("{name} backend exit status could not be determined"),
+            retry_after_secs: None,
+            provider_code: None,
+        },
         // Signal denial is transient because a later run may be permitted.
         // The terminal must report that the work did not settle.
         // The supervisor must not treat `BackendTerminal::FailedUnresolved` as proof that the work stopped.
@@ -1599,6 +1670,14 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         "unavailable",
     ];
     const TRANSIENT_CODES: [&str; 3] = ["429", "503", "529"];
+    // Explicit rate-limit evidence outranks the broad authentication phrases: "rate limit exceeded for this API key" is a retry-after condition, not a missing credential. commentlint: allow(JUDGE)
+    if ["rate limit", "rate_limit"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        || contains_status_code(&lower, "429")
+    {
+        return ErrorClass::Transient;
+    }
     if AUTH.iter().any(|needle| lower.contains(needle))
         || AUTH_CODES
             .iter()
@@ -1915,6 +1994,66 @@ pub mod group_registry {
         scan_group_members(pgid, Some(pgid))
     }
 
+    /// Membership plus identity: a member must share `owner_sid`, must have started at or after the recorded leader, and must carry the recorded [`GROUP_NONCE_ENV`] in its environment. commentlint: allow(JUDGE)
+    /// The nonce is the non-reusable fence: a group that recycled the numeric pgid — even inside the owner's still-live session — never inherited it, whereas every descendant of the recorded leader did unless the harness scrubbed its environment. commentlint: allow(JUDGE)
+    /// A stat-matching member without the nonce is therefore indeterminate: the sweep fails closed, retaining the record, rather than signaling a possible stranger or releasing a possible descendant. commentlint: allow(JUDGE)
+    /// An unreadable environment on a stat-matching candidate fails the sweep closed, retaining the record; the stat checks run first so foreign processes are never probed. commentlint: allow(JUDGE)
+    fn group_has_verified_descendants(
+        pgid: i32,
+        owner_sid: i32,
+        leader_start: u64,
+        group_nonce: &str,
+    ) -> io::Result<bool> {
+        let marker = format!("{GROUP_NONCE_ENV}={group_nonce}");
+        for proc_entry in fs::read_dir("/proc")? {
+            let Some(pid) = proc_entry?
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            match proc_stat_row(pid) {
+                Ok(Some(row))
+                    if row.pgrp == pgid
+                        && row.state != 'Z'
+                        && row.state != 'X'
+                        && row.sid == owner_sid
+                        && row.start >= leader_start =>
+                {
+                    // A candidate that passes every stat check is almost certainly this run's; an unreadable environment leaves its identity indeterminate, so the sweep fails closed and retains the record rather than releasing a group that may still be running provider work. commentlint: allow(JUDGE)
+                    match environ_has_entry(pid, marker.as_bytes()) {
+                        Ok(true) => return Ok(true),
+                        // A descendant launched with a scrubbed environment omits the nonce yet still belongs to the run; a stranger that recycled the pgid is indistinguishable from it here, so the sweep neither signals nor retires and fails closed instead. commentlint: allow(JUDGE)
+                        Ok(false) => {
+                            return Err(io::Error::other(
+                                "a leaderless group's member could not be attributed to its record",
+                            ));
+                        }
+                        Err(err) if pid_vanished(&err) => {}
+                        Err(err) => {
+                            return Err(io::Error::other(format!(
+                                "a candidate descendant's environment could not be read ({})",
+                                err.kind()
+                            )));
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(err) if pid_vanished(&err) => {}
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(false)
+    }
+
+    /// `/proc/<pid>/environ` is NUL-separated `NAME=value` entries; the caller decides what an unreadable environment means.
+    fn environ_has_entry(pid: i32, entry: &[u8]) -> io::Result<bool> {
+        let environ = fs::read(format!("/proc/{pid}/environ"))?;
+        Ok(environ.split(|byte| *byte == 0).any(|item| item == entry))
+    }
+
     fn scan_group_members(pgid: i32, exclude_pid: Option<i32>) -> io::Result<bool> {
         for proc_entry in fs::read_dir("/proc")? {
             let Some(pid) = proc_entry?
@@ -1944,6 +2083,18 @@ pub mod group_registry {
 
     /// `/proc/<pid>/stat` stores state and process group as the first and third fields after `comm`.
     fn proc_stat_pgrp_state(pid: i32) -> io::Result<Option<(i32, char)>> {
+        Ok(proc_stat_row(pid)?.map(|row| (row.pgrp, row.state)))
+    }
+
+    struct ProcStatRow {
+        state: char,
+        pgrp: i32,
+        sid: i32,
+        start: u64,
+    }
+
+    /// After `comm`, `/proc/<pid>/stat` lists state, ppid, pgrp, session, ... and start time as the 20th field. commentlint: allow(JUDGE)
+    fn proc_stat_row(pid: i32) -> io::Result<Option<ProcStatRow>> {
         let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
         let unreadable = || io::Error::other("unreadable /proc stat format");
         let rest = stat.rsplit_once(')').ok_or_else(unreadable)?.1;
@@ -1957,7 +2108,23 @@ pub mod group_registry {
             .ok_or_else(unreadable)?
             .parse()
             .map_err(|_| unreadable())?;
-        Ok(Some((pgrp, state)))
+        let sid = fields
+            .next()
+            .ok_or_else(unreadable)?
+            .parse()
+            .map_err(|_| unreadable())?;
+        // `start` is stat field 22: after state (3), ppid (4), pgrp (5), session (6) are consumed, it is 15 fields further on. commentlint: allow(JUDGE)
+        let start = fields
+            .nth(15)
+            .ok_or_else(unreadable)?
+            .parse()
+            .map_err(|_| unreadable())?;
+        Ok(Some(ProcStatRow {
+            state,
+            pgrp,
+            sid,
+            start,
+        }))
     }
 
     /// `boot_id` must not use a placeholder, because one would make existing records appear to come from a different boot.
@@ -1969,6 +2136,26 @@ pub mod group_registry {
     }
 
     pub const STATE_DIR_NAME: &str = "broca";
+
+    /// Set in every harness child's environment; the startup sweep matches it against the recorded value when the group's leader is gone. commentlint: allow(JUDGE)
+    pub const GROUP_NONCE_ENV: &str = "EIDNARA_BROCA_GROUP_NONCE";
+    const GROUP_NONCE_HEX_LEN: usize = 32;
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// A fresh 128-bit hex nonce for one run's process group.
+    pub fn new_group_nonce() -> io::Result<String> {
+        let mut bytes = [0u8; 16];
+        getrandom::getrandom(&mut bytes)
+            .map_err(|_| io::Error::other("group nonce generation failed"))?;
+        Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
 
     /// `<managed eidnara dir>/broca`: the crash-ownership registry plus the `runs/` root for per-run private directories.
     ///
@@ -2014,32 +2201,53 @@ pub mod group_registry {
     }
 
     struct Entry {
-        boot_id: String,
         leader_pid: i32,
         leader_start: u64,
         owner_pid: i32,
         owner_start: u64,
+        /// The leader joins a fresh process group but keeps the owner's session, so every descendant shares this session id. commentlint: allow(JUDGE)
+        owner_sid: i32,
+        /// The per-run value of [`GROUP_NONCE_ENV`] in the leader's environment; descendants inherit it, and a process that recycled the numeric pgid cannot have it. commentlint: allow(JUDGE)
+        group_nonce: String,
     }
 
     impl Entry {
+        /// The final line is the SHA-256 of everything before it; a record whose checksum does not verify is uninterpretable, so a mismatched boot line cannot be mistaken for a foreign-boot record. commentlint: allow(JUDGE)
+        fn verified_body(text: &str) -> Option<&str> {
+            let (body, checksum) = text.trim_end_matches('\n').rsplit_once('\n')?;
+            let body_with_newline = &text[..body.len() + 1];
+            let expected = sha256_hex(body_with_newline.as_bytes());
+            (checksum == expected).then_some(body_with_newline)
+        }
+
         fn parse(text: &str) -> Option<Self> {
+            let text = Self::verified_body(text)?;
             let mut lines = text.lines();
-            if lines.next()? != "v1" {
+            if lines.next()? != "v4" {
                 return None;
             }
-            let boot_id = lines.next()?.to_owned();
+            // The boot line is consumed here; the sweep compares it before parsing so foreign-boot records of any version are retired. commentlint: allow(JUDGE)
+            lines.next()?;
             let pid_line = |lines: &mut std::str::Lines| -> Option<(i32, u64)> {
                 let (pid, start) = lines.next()?.split_once(' ')?;
                 Some((pid.parse().ok()?, start.parse().ok()?))
             };
             let (leader_pid, leader_start) = pid_line(&mut lines)?;
             let (owner_pid, owner_start) = pid_line(&mut lines)?;
+            let owner_sid = lines.next()?.parse().ok()?;
+            let group_nonce = lines.next()?.to_owned();
+            if group_nonce.len() != GROUP_NONCE_HEX_LEN
+                || !group_nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return None;
+            }
             Some(Self {
-                boot_id,
                 leader_pid,
                 leader_start,
                 owner_pid,
                 owner_start,
+                owner_sid,
+                group_nonce,
             })
         }
     }
@@ -2053,19 +2261,23 @@ pub mod group_registry {
     impl GroupRecord {
         /// `record` returns `None` if it cannot write the record or establish either process identity.
         /// The registrar then withholds the exec barrier, so the child aborts before executing harness code.
-        pub fn record(root: &StateRoot, leader_pid: i32) -> Option<Self> {
+        pub fn record(root: &StateRoot, leader_pid: i32, group_nonce: &str) -> Option<Self> {
             let leader_start = proc_start_time(leader_pid).ok().flatten()?;
             let owner_pid = std::process::id() as i32;
             let owner_start = proc_start_time(owner_pid).ok().flatten()?;
+            let owner_sid = rustix::process::getsid(None).ok()?.as_raw_nonzero().get();
             let dir = root.registry_dir().ok()?;
             let mut nonce = [0u8; 8];
             getrandom::getrandom(&mut nonce).ok()?;
             let name = format!("{leader_pid}-{:016x}", u64::from_le_bytes(nonce));
             let path = dir.join(&name);
-            let body = format!(
-                "v1\n{}\n{leader_pid} {leader_start}\n{owner_pid} {owner_start}\n",
+            let mut body = format!(
+                "v4\n{}\n{leader_pid} {leader_start}\n{owner_pid} {owner_start}\n{owner_sid}\n{group_nonce}\n",
                 boot_id().ok()?
             );
+            let checksum = sha256_hex(body.as_bytes());
+            body.push_str(&checksum);
+            body.push('\n');
             // A record is visible only once it is complete: a host crash between create and write must not leave a truncated record that the sweep discards without signaling its group.
             let temp = dir.join(format!(".{name}.tmp"));
             let written = fs::OpenOptions::new()
@@ -2104,7 +2316,7 @@ pub mod group_registry {
     /// `sweep` kills groups recorded by dead host incarnations and removes their entries.
     /// `sweep` leaves entries owned by live hosts untouched, so concurrent hosts do not sweep each other's runs.
     ///
-    /// `sweep` propagates unreadable-registry, unreadable-record, and indeterminate `/proc` lookup errors without removing the record.
+    /// `sweep` propagates unreadable-registry, unreadable-record, uninterpretable-record, and indeterminate `/proc` lookup errors without removing the record.
     /// Treating an unknown `/proc` result as "no orphan" can refire a run while its descendant executes.
     pub fn sweep_orphaned_groups(root: &StateRoot) -> io::Result<usize> {
         let dir = root.registry_dir()?;
@@ -2160,16 +2372,20 @@ pub mod group_registry {
                 std::io::Read::read_to_string(&mut file, &mut text)?;
                 text
             };
-            // A record that does not parse cannot identify a group.
-            let Some(entry) = Entry::parse(&text) else {
-                remove_swept_record(&path)?;
-                continue;
-            };
-            // A record from a different boot must be removed without signaling because its PIDs may be reused.
-            if entry.boot_id != current_boot {
+            // A record from a different boot is removed without signaling because its PIDs may be reused. The boot line is trusted only when the record's checksum verifies, so a corrupted boot line cannot masquerade as a stale record. commentlint: allow(JUDGE)
+            if Entry::verified_body(&text)
+                .and_then(|body| body.lines().nth(1))
+                .is_some_and(|boot| boot != current_boot)
+            {
                 remove_swept_record(&path)?;
                 continue;
             }
+            // A same-boot record this host cannot interpret (a newer schema from a mixed-version deployment, or damaged contents) may still fence a live group; deleting it would let recovery refire beside surviving provider work, so it blocks startup instead. commentlint: allow(JUDGE)
+            let Some(entry) = Entry::parse(&text) else {
+                return Err(io::Error::other(
+                    "a same-boot registry record could not be interpreted; it is retained",
+                ));
+            };
             if proc_live_start_time(entry.owner_pid)? == Some(entry.owner_start) {
                 continue;
             }
@@ -2179,10 +2395,17 @@ pub mod group_registry {
                 // A reused leader PID proves the recorded group is gone: a PID used as a PGID cannot be reallocated while group members remain.
                 // provably gone.
                 Some(_) => false,
-                // The leader was reaped (pdeathsig kills only the leader).
-                // Surviving members retain the PGID, so they are descendants of the recorded run.
-                // recorded run.
-                None => group_has_members(entry.leader_pid)?,
+                // The leader was reaped (pdeathsig kills only the leader), so the numeric pgid alone
+                // is no proof: it can be recycled into an unrelated same-UID group whose own leader
+                // has also exited. A surviving member counts as this run's descendant only when it
+                // shares the recording owner's session and started no earlier than the recorded
+                // leader. commentlint: allow(JUDGE)
+                None => group_has_verified_descendants(
+                    entry.leader_pid,
+                    entry.owner_sid,
+                    entry.leader_start,
+                    &entry.group_nonce,
+                )?,
             };
             if group_live {
                 if let Some(group) = rustix::process::Pid::from_raw(entry.leader_pid) {

@@ -278,7 +278,7 @@ pub async fn open_synapse_route(client: &mut raw_client::RawClient) -> (u16, u32
             Err(code) if code == "module_reloading" && tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            Err(code) => panic!("synapse route binds: {code}"),
+            Err(code) => panic!("synapse route failed to bind: {code}"),
         }
     }
 }
@@ -300,8 +300,6 @@ pub async fn open_synapse_route_rejection(client: &mut raw_client::RawClient) ->
             Err(code) if code == "module_reloading" && tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            // The harness treats `module_reloading` that never settles as a timeout, not a permanent rejection.
-            // The harness treats `module_reloading` that never settles as a timeout, not a permanent rejection.
             // The harness treats `module_reloading` that never settles as a timeout, not a permanent rejection.
             Err(code) if code == "module_reloading" => {
                 panic!("synapse route still reloading at the rejection deadline")

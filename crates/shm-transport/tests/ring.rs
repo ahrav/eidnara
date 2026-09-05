@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 use std::os::fd::OwnedFd;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::process::{Child, Command, Stdio};
@@ -253,8 +254,12 @@ fn sealed_sparse_object_repeated_setup_and_stress_conservation() {
         assert_eq!(ring.resident_arena_pages().unwrap(), 0);
         let smaller = (ring.object_size() - 1) as libc::off_t;
         let larger = (ring.object_size() + 1) as libc::off_t;
-        assert_eq!(unsafe { libc::ftruncate(ring.raw_fd(), smaller) }, -1);
-        assert_eq!(unsafe { libc::ftruncate(ring.raw_fd(), larger) }, -1);
+        // SAFETY: `ring` keeps the descriptor open for the call; ftruncate takes no pointers.
+        let shrink = unsafe { libc::ftruncate(ring.raw_fd(), smaller) };
+        // SAFETY: same descriptor and contract as above.
+        let grow = unsafe { libc::ftruncate(ring.raw_fd(), larger) };
+        assert_eq!(shrink, -1);
+        assert_eq!(grow, -1);
     }
 
     let ring = Ring::create(&profile(), 19).unwrap();
@@ -362,11 +367,12 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
     assert!(raw >= 0);
     // SAFETY: successful memfd_create returned a new owned descriptor.
     let unsealed = unsafe { OwnedFd::from_raw_fd(raw) };
-    assert_eq!(
-        unsafe { libc::ftruncate(unsealed.as_raw_fd(), ring.object_size() as libc::off_t) },
-        0
-    );
-    assert_eq!(unsafe { libc::fchmod(unsealed.as_raw_fd(), 0o600) }, 0);
+    // SAFETY: `unsealed` is open for the call; ftruncate takes no pointers.
+    let sized = unsafe { libc::ftruncate(unsealed.as_raw_fd(), ring.object_size() as libc::off_t) };
+    assert_eq!(sized, 0);
+    // SAFETY: same descriptor; fchmod takes no pointers.
+    let owner_only = unsafe { libc::fchmod(unsealed.as_raw_fd(), 0o600) };
+    assert_eq!(owner_only, 0);
     assert_eq!(mapped_region_count(UNSEALED_NAME), 0);
     let [_, data_ready, capacity_ready] = ring.attachment().unwrap().into_parts().0;
     assert!(matches!(
@@ -481,6 +487,10 @@ fn make_inheritable(fd: &OwnedFd) {
 
 #[test]
 fn two_process_zero_copy_exchange_uses_authenticated_grant() {
+    if std::env::var_os("EIDNARA_SHM_SKIP_TWO_PROCESS").is_some() {
+        eprintln!("skipped: EIDNARA_SHM_SKIP_TWO_PROCESS is set");
+        return;
+    }
     let ring = Ring::create(&profile(), 23).unwrap();
     let (descriptors, grant) = ring.attachment().unwrap().into_parts();
     for descriptor in &descriptors {
@@ -542,6 +552,8 @@ fn ring_child_exchange() {
     let capacity_ready = std::env::var("EIDNARA_SHM_CHILD_CAPACITY_READY_FD").unwrap();
     let grant = std::env::var("EIDNARA_SHM_CHILD_GRANT").unwrap();
     let grant = RingGrant::decode(decode_hex(&grant)).unwrap();
+    // SAFETY: the parent process opened these descriptors, left them inheritable, and named
+    // them in the environment; this child is their only owner.
     let descriptors = unsafe {
         [
             OwnedFd::from_raw_fd(fd.parse().unwrap()),

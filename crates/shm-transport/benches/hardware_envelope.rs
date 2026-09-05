@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 use std::collections::BTreeSet;
 use std::hint::black_box;
 use std::process::Command;
@@ -411,8 +412,11 @@ fn failed(arm: &str, payload: usize, iterations: u64, reason: &str) -> Measureme
 }
 
 fn voluntary_switches() -> u64 {
+    // SAFETY: every field of `rusage` is an integer or timeval, so all-zero is a valid value.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+    // SAFETY: `usage` is writable storage of exactly `sizeof(struct rusage)`.
+    let queried = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    if queried != 0 {
         return 0;
     }
     u64::try_from(usage.ru_nvcsw).unwrap_or(0)
@@ -430,6 +434,7 @@ fn await_line(line: &AtomicU64, expected: u64, deadline: Instant) -> Option<u64>
         if Instant::now() >= deadline {
             return None;
         }
+        // SAFETY: sched_yield takes no arguments.
         unsafe { libc::sched_yield() };
         yields += 1;
     }
@@ -454,6 +459,8 @@ struct SharedPage(*mut libc::c_void);
 
 impl SharedPage {
     fn map() -> Result<Self, &'static str> {
+        // SAFETY: A null hint lets the kernel pick the address; no descriptor is involved. A
+        // failed call returns `MAP_FAILED` rather than touching memory.
         let mapped = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -483,6 +490,8 @@ impl SharedPage {
 
 impl Drop for SharedPage {
     fn drop(&mut self) {
+        // SAFETY: `self.0` and `PAGE_BYTES` are what `map` received from mmap, unmapped once
+        // here after every borrow from `place` has ended.
         unsafe { libc::munmap(self.0, PAGE_BYTES) };
     }
 }
@@ -491,12 +500,16 @@ struct Peer(libc::pid_t);
 
 impl Peer {
     fn spawn(body: impl FnOnce() -> i32) -> Result<Self, &'static str> {
+        // SAFETY: fork takes no arguments; the bench is single-threaded at this point, so the
+        // child inherits no locks held by other threads.
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             return Err("peer fork");
         }
         if pid == 0 {
             let status = body();
+            // SAFETY: _exit takes an integer and never returns; the child skips atexit
+            // handlers it shares with the parent.
             unsafe { libc::_exit(status) };
         }
         Ok(Self(pid))
@@ -511,6 +524,8 @@ impl Peer {
 
 impl Drop for Peer {
     fn drop(&mut self) {
+        // SAFETY: kill takes integers only; `self.0` is a child this process forked and has
+        // not yet reaped, so the pid cannot have been reused.
         unsafe { libc::kill(self.0, libc::SIGKILL) };
         let _ = reap(self.0);
     }
@@ -518,7 +533,9 @@ impl Drop for Peer {
 
 fn reap(child: libc::pid_t) -> Result<i32, &'static str> {
     let mut status = 0;
-    if unsafe { libc::waitpid(child, &mut status, 0) } != child {
+    // SAFETY: `status` is writable storage for one `c_int`.
+    let reaped = unsafe { libc::waitpid(child, &mut status, 0) };
+    if reaped != child {
         return Err("peer wait failed");
     }
     if libc::WIFEXITED(status) {

@@ -84,15 +84,17 @@ async fn short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "multi-hour resource soak; dispatch via packages/e2e-tests/scripts/run-shm-soak.ts"]
+#[ignore = "multi-hour resource soak; run with EIDNARA_SHM_SOAK_SECONDS=<secs> cargo test -p host-runtime --test shm_soak -- --ignored long_soak"]
 async fn long_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded() {
-    let seconds = std::env::var("EIDNARA_SHM_SOAK_SECONDS")
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .expect("EIDNARA_SHM_SOAK_SECONDS must be an integer")
-        })
-        .unwrap_or(5 * 60 * 60);
+    // `--include-ignored` sweeps must not start a multi-hour run by accident, so
+    // the duration is opt-in through the environment rather than defaulted.
+    let Ok(value) = std::env::var("EIDNARA_SHM_SOAK_SECONDS") else {
+        eprintln!("EIDNARA_SHM_SOAK_SECONDS is unset; skipping the long soak");
+        return;
+    };
+    let seconds = value
+        .parse::<u64>()
+        .expect("EIDNARA_SHM_SOAK_SECONDS must be an integer");
     assert!(seconds > 0, "EIDNARA_SHM_SOAK_SECONDS must be positive");
     run_soak(None, Some(Duration::from_secs(seconds))).await;
 }

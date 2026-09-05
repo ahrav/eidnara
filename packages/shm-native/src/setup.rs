@@ -159,12 +159,24 @@ fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
         SocketFlags::CLOEXEC,
         None,
     )?;
-    sockopt::set_socket_timeout(&socket, sockopt::Timeout::Send, Some(remaining))?;
     let address = SocketAddrUnix::new(path)?;
+    // `SO_SNDTIMEO` bounds each blocking `connect` independently, so the remaining budget is
+    // re-armed before every attempt; otherwise each `EINTR` retry would receive the original
+    // duration again.
+    let mut remaining = remaining;
     loop {
+        sockopt::set_socket_timeout(&socket, sockopt::Timeout::Send, Some(remaining))?;
         match rustix::net::connect(&socket, &address) {
             Ok(()) => return Ok(UnixStream::from(socket)),
-            Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::INTR) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(timed_out());
+                }
+                remaining =
+                    Duration::from_micros(u64::try_from(left.as_micros()).unwrap_or(u64::MAX))
+                        .max(Duration::from_micros(1));
+            }
             Err(rustix::io::Errno::AGAIN) => return Err(timed_out()),
             Err(errno) => return Err(errno.into()),
         }
@@ -480,8 +492,29 @@ fn write_message<T: Serialize>(
     let mut frame = Vec::with_capacity(4 + body.len());
     frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
     frame.extend_from_slice(&body);
-    set_timeout(stream, deadline)?;
-    stream.write_all(&frame)
+    write_all(stream, &frame, deadline)
+}
+
+fn write_all(stream: &mut UnixStream, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
+    // `std::io::Write::write_all` grants each underlying send the full remaining budget, so a
+    // slowly draining peer could stretch wall time to remaining × chunks. Re-arming the timeout
+    // per chunk caps the whole write at the deadline, as `read_exact` does.
+    while !bytes.is_empty() {
+        set_timeout(stream, deadline)?;
+        match stream.write(bytes) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn read_exact(stream: &mut UnixStream, mut bytes: &mut [u8], deadline: Instant) -> io::Result<()> {

@@ -2,8 +2,8 @@
 //! synapse-tiny fixture.
 //!
 //! Native-inference tests require an ONNX Runtime shared library at `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY`.
-//! Set `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY` to the ONNX Runtime shared-library path.
-//! Without `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY`, native-inference tests skip while pre-ORT rejection tests run.
+//! Those tests are `#[ignore]`d so a default `cargo test` reports them as ignored rather than passed.
+//! Run them with `cargo test -p host-runtime --test synapse_bundle -- --ignored` after setting the variable.
 
 mod support;
 
@@ -17,6 +17,8 @@ use sha2::{Digest, Sha256};
 
 use support::synapse::{DeterministicEngine, EchoPrimary, test_lane};
 
+const ORT_LIBRARY_ENV: &str = "EIDNARA_SYNAPSE_TEST_ORT_LIBRARY";
+
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synapse-tiny")
 }
@@ -26,19 +28,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn ort_library() -> Option<(PathBuf, String)> {
-    let path = match std::env::var_os("EIDNARA_SYNAPSE_TEST_ORT_LIBRARY") {
-        Some(path) => PathBuf::from(path),
-        None => {
-            eprintln!(
-                "skipping: EIDNARA_SYNAPSE_TEST_ORT_LIBRARY is unset, no native ONNX Runtime available"
-            );
-            return None;
-        }
-    };
+/// An ignored native-inference test fails loudly when run without the variable instead of passing vacuously.
+fn ort_library() -> (PathBuf, String) {
+    let path = std::env::var_os(ORT_LIBRARY_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("{ORT_LIBRARY_ENV} must name an ONNX Runtime shared library"));
     let bytes = std::fs::read(&path).expect("ORT library is readable");
     let hash = sha256_hex(&bytes);
-    Some((path, hash))
+    (path, hash)
 }
 
 #[tokio::test]
@@ -115,9 +112,6 @@ async fn expect_disabled_with(mutate: impl FnOnce(&Path), expected_fragment: &st
 }
 
 /// Infeasible limits fail host startup instead of disabling Synapse while the host remains healthy.
-/// Infeasible limits fail host startup instead of disabling Synapse while the host remains healthy.
-///
-/// An `Err` from `activate` fails host startup.
 /// An `Err` from `activate` fails host startup.
 async fn expect_limits_fail_startup(
     mutate: impl FnOnce(&mut SynapseLimits),
@@ -324,7 +318,7 @@ async fn unlisted_extra_file_disables_the_lane() {
 #[tokio::test]
 async fn symlinked_artifact_disables_the_lane() {
     // The listed entry set makes this test reach symlink rejection before unlisted-entry rejection.
-    // validator uses symlink_metadata, so the target never has to exist.
+    // Artifacts open with `O_NOFOLLOW`, so the symlink fails with `ELOOP` and its target never has to exist.
     expect_disabled_with(
         |dir| {
             let real = dir.join("model.onnx");
@@ -452,6 +446,12 @@ async fn incoherent_host_serving_limits_fail_startup_before_ort() {
     expect_limits_fail_startup(|limits| limits.max_text_bytes = 3, "UTF-8 code point").await;
     expect_limits_fail_startup(|limits| limits.max_batch_items = 0, "max batch items").await;
     expect_limits_fail_startup(|limits| limits.max_retained_jobs = 0, "retained job count").await;
+    expect_limits_fail_startup(|limits| limits.max_queued_jobs = 0, "queued job count").await;
+    expect_limits_fail_startup(
+        |limits| limits.retention = std::time::Duration::ZERO,
+        "result retention",
+    )
+    .await;
     expect_limits_fail_startup(
         |limits| limits.max_queued_request_bytes = limits.max_batch_text_bytes as u64 - 1,
         "queued request bytes",
@@ -569,8 +569,9 @@ async fn missing_bundle_directory_disables_the_lane() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires EIDNARA_SYNAPSE_TEST_ORT_LIBRARY; run with --ignored"]
 async fn certified_bundle_loads_and_serves_expected_vectors() {
-    let Some(ort) = ort_library() else { return };
+    let ort = ort_library();
     let dir = tempfile::tempdir().expect("temp bundle dir");
     copy_fixture_to(dir.path());
     let component = initialize(config_for(dir.path(), &ort)).await;
@@ -636,13 +637,12 @@ async fn certified_bundle_loads_and_serves_expected_vectors() {
 }
 
 #[tokio::test]
+#[ignore = "requires EIDNARA_SYNAPSE_PRODUCTION_BUNDLE and EIDNARA_SYNAPSE_TEST_ORT_LIBRARY; run with --ignored"]
 async fn production_bundle_from_environment_certifies_offline() {
-    let Some(bundle_dir) = std::env::var_os("EIDNARA_SYNAPSE_PRODUCTION_BUNDLE").map(PathBuf::from)
-    else {
-        eprintln!("skipping: EIDNARA_SYNAPSE_PRODUCTION_BUNDLE is unset");
-        return;
-    };
-    let Some(ort) = ort_library() else { return };
+    let bundle_dir = std::env::var_os("EIDNARA_SYNAPSE_PRODUCTION_BUNDLE")
+        .map(PathBuf::from)
+        .expect("EIDNARA_SYNAPSE_PRODUCTION_BUNDLE must name a certified production bundle");
+    let ort = ort_library();
     let component = initialize(config_for(&bundle_dir, &ort)).await;
     let lane = match component.status() {
         SynapseStatus::Ready(lane) => lane,
@@ -683,8 +683,9 @@ async fn production_bundle_from_environment_certifies_offline() {
 }
 
 #[tokio::test]
+#[ignore = "requires EIDNARA_SYNAPSE_TEST_ORT_LIBRARY; run with --ignored"]
 async fn wrong_but_dimension_compatible_output_fails_certification() {
-    let Some(ort) = ort_library() else { return };
+    let ort = ort_library();
     let dir = tempfile::tempdir().expect("temp bundle dir");
     copy_fixture_to(dir.path());
     edit_certified_manifest(dir.path(), |m| {
@@ -695,8 +696,9 @@ async fn wrong_but_dimension_compatible_output_fails_certification() {
 }
 
 #[tokio::test]
+#[ignore = "requires EIDNARA_SYNAPSE_TEST_ORT_LIBRARY; run with --ignored"]
 async fn wrong_pooling_fails_certification() {
-    let Some(ort) = ort_library() else { return };
+    let ort = ort_library();
     let dir = tempfile::tempdir().expect("temp bundle dir");
     copy_fixture_to(dir.path());
     edit_certified_manifest(dir.path(), |m| m["pooling"] = "cls".into());
@@ -705,8 +707,9 @@ async fn wrong_pooling_fails_certification() {
 }
 
 #[tokio::test]
+#[ignore = "requires EIDNARA_SYNAPSE_TEST_ORT_LIBRARY; run with --ignored"]
 async fn wrong_ort_identity_disables_the_lane() {
-    let Some(ort) = ort_library() else { return };
+    let ort = ort_library();
     let dir = tempfile::tempdir().expect("temp bundle dir");
     copy_fixture_to(dir.path());
 
@@ -788,8 +791,11 @@ fn a_dropped_activate_keeps_shutdown_waiting_for_the_blocking_load() {
             .expect("shutdown completes once the blocking load stopped")
             .expect("synapse shutdown returns cleanly");
 
-        // The dropped `activate` never installs a lane because the tracked wrapper discards the load result.
-        assert!(matches!(component.status(), SynapseStatus::Starting));
+        // The dropped `activate` never installs a lane because the tracked wrapper discards the load result; shutdown then leaves the lane disabled rather than starting.
+        assert!(matches!(
+            component.status(),
+            SynapseStatus::Disabled { reason } if reason.contains("shut down")
+        ));
     });
 }
 

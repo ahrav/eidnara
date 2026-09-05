@@ -9,7 +9,7 @@
 //! Fixture mode runs instead of the test list.
 //! The adapter must own argv, so the default libtest harness cannot run these fixtures.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
@@ -55,6 +55,8 @@ const SECRET_ENV: &str = "EIDNARA_FIXTURE_SECRET";
 const SABOTAGE_ENV: &str = "EIDNARA_FIXTURE_SABOTAGE_CLEANUP";
 const SABOTAGE_RECORD_ENV: &str = "EIDNARA_FIXTURE_SABOTAGE_RECORD";
 const GROUP_PID_ENV: &str = "EIDNARA_FIXTURE_GROUP_PID";
+/// The `record_group` fixture records this nonce; the test sets the same value in the recorded leader's environment.
+const GROUP_NONCE_FIXTURE_ENV: &str = "EIDNARA_FIXTURE_GROUP_NONCE";
 /// The re-executed `record_group` fixture must write into the same registry the test sweeps.
 const STATE_ROOT_ENV: &str = "EIDNARA_FIXTURE_STATE_ROOT";
 
@@ -360,9 +362,14 @@ mod fixture {
             .ok()
             .and_then(|pid| pid.parse().ok())
             .expect("fixture leader pid");
+        let nonce = std::env::var(GROUP_NONCE_FIXTURE_ENV).unwrap_or_else(|_| {
+            host_runtime::broca::subprocess::group_registry::new_group_nonce()
+                .expect("fixture group nonce")
+        });
         let record = host_runtime::broca::subprocess::group_registry::GroupRecord::record(
             &state_root(),
             leader,
+            &nonce,
         )
         .expect("record leader group");
         drop(record);
@@ -917,10 +924,13 @@ fn fixture_closure_uncached(
     let store = HarnessClosureStore::open(&store_root).expect("closure store");
     Arc::new(
         store
-            .materialize(&ClosureCandidate {
-                manifest,
-                source_roots,
-            })
+            .materialize(
+                &ClosureCandidate {
+                    manifest,
+                    source_roots,
+                },
+                &BTreeSet::new(),
+            )
             .expect("fixture closure"),
     )
 }
@@ -938,7 +948,7 @@ fn fixture_snapshot(extra: &[(&str, &str)]) -> EnvSnapshot {
         (os("EIDNARA_MODULE_ID"), os("host-identity")),
         (os("EIDNARA_LAUNCH_NONCE"), os("host-nonce")),
     ];
-    EnvSnapshot::from_vars(vars)
+    EnvSnapshot::capture_from(vars).expect("fixture snapshot within the bound")
 }
 
 fn collecting_sink() -> (EventSink, Arc<Mutex<Vec<BackendEvent>>>) {
@@ -3016,11 +3026,12 @@ fn cleanup_failure_never_unqualified_success() {
 }
 
 fn env_snapshot_strips_launch_identity() {
-    let snapshot = EnvSnapshot::from_vars(vec![
+    let snapshot = EnvSnapshot::capture_from(vec![
         (os("EIDNARA_MODULE_ID"), os("evil")),
         (os("EIDNARA_LAUNCH_NONCE"), os("evil")),
         (os("KEEP_ME"), os("value")),
-    ]);
+    ])
+    .expect("small snapshot within the bound");
     let names: Vec<String> = snapshot
         .vars()
         .iter()
@@ -3342,7 +3353,9 @@ fn merge_cleanup_contract() {
 fn group_registry_sweep_kills_only_dead_owner_groups() {
     use std::os::unix::process::CommandExt;
 
-    use host_runtime::broca::subprocess::group_registry::{GroupRecord, sweep_orphaned_groups};
+    use host_runtime::broca::subprocess::group_registry::{
+        GROUP_NONCE_ENV, GroupRecord, new_group_nonce, sweep_orphaned_groups,
+    };
 
     let spawn_leader = || {
         let mut cmd = std::process::Command::new("/bin/sleep");
@@ -3377,6 +3390,7 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
     let survivor_record = GroupRecord::record(
         &state_root(),
         i32::try_from(survivor.id()).expect("pid fits"),
+        &new_group_nonce().expect("nonce"),
     )
     .expect("record");
 
@@ -3430,8 +3444,12 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
     let _ = recorder.wait();
 
     // Killing a group leader can leave group members running.
+    // The leaderless sweep proves descent through the inherited group nonce, exactly as a real
+    // harness child inherits it from `subprocess::run`.
+    let leaderless_nonce = new_group_nonce().expect("nonce");
     let mut leader = std::process::Command::new("/bin/sh");
     leader.args(["-c", "sleep 30 & echo $!; sleep 2"]);
+    leader.env(GROUP_NONCE_ENV, &leaderless_nonce);
     leader.process_group(0);
     leader.stdout(std::process::Stdio::piped());
     let mut leader = leader.spawn().expect("spawn leaderless-group shell");
@@ -3447,6 +3465,7 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
         .env(FIXTURE_MODE_ENV, "record_group")
         .env(STATE_ROOT_ENV, state_root_data_dir())
         .env(GROUP_PID_ENV, leader.id().to_string())
+        .env(GROUP_NONCE_FIXTURE_ENV, &leaderless_nonce)
         .status()
         .expect("run record_group fixture");
     assert!(status.success(), "fixture host failed: {status:?}");
@@ -3476,16 +3495,100 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+
+    // A leaderless group whose members lack the recorded nonce is neither provably this run's
+    // nor provably a stranger's: it models both an unrelated same-session group that recycled
+    // the numeric pgid and a descendant launched with a scrubbed environment. The sweep must
+    // neither signal it nor retire its record; it fails closed until the ambiguity clears.
+    let mut stranger = std::process::Command::new("/bin/sh");
+    stranger.args(["-c", "sleep 30 & echo $!; sleep 2"]);
+    stranger.process_group(0);
+    stranger.stdout(std::process::Stdio::piped());
+    let mut stranger = stranger
+        .spawn()
+        .expect("spawn unrelated leaderless-group shell");
+    let stranger_child: i32 = {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::BufReader::new(stranger.stdout.take().expect("piped stdout"))
+            .read_line(&mut line)
+            .expect("read stranger child pid");
+        line.trim().parse().expect("stranger child pid")
+    };
+    let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+        .env(FIXTURE_MODE_ENV, "record_group")
+        .env(STATE_ROOT_ENV, state_root_data_dir())
+        .env(GROUP_PID_ENV, stranger.id().to_string())
+        .env(GROUP_NONCE_FIXTURE_ENV, new_group_nonce().expect("nonce"))
+        .status()
+        .expect("run record_group fixture");
+    assert!(status.success(), "fixture host failed: {status:?}");
+    assert!(
+        stranger.wait().expect("stranger exits").success(),
+        "stranger shell must exit cleanly"
+    );
+    let stranger_record = fs::read_dir(state_root().path())
+        .expect("read registry")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("{}-", stranger.id())))
+        })
+        .expect("stranger record exists");
+    assert!(
+        sweep_orphaned_groups(&state_root()).is_err(),
+        "an unattributable leaderless member must fail the sweep closed"
+    );
+    assert!(
+        stranger_record.exists(),
+        "the sweep must retain the record while attribution is indeterminate"
+    );
+    let alive = fs::read_to_string(format!("/proc/{stranger_child}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_ascii_whitespace().next().map(str::to_owned))
+        })
+        .is_some_and(|state| state != "Z");
+    assert!(
+        alive,
+        "the sweep must not signal a leaderless group whose members lack the recorded nonce"
+    );
+    // Once the ambiguous member is gone the group is provably empty and the record retires.
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(stranger_child).expect("pid"),
+        rustix::process::Signal::KILL,
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(format!("/proc/{stranger_child}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_ascii_whitespace().next().map(str::to_owned))
+        })
+        .is_some_and(|state| state != "Z")
+    {
+        assert!(Instant::now() < deadline, "stranger child did not die");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    sweep_orphaned_groups(&state_root()).expect("sweep completes once the group is empty");
+    assert!(
+        !stranger_record.exists(),
+        "an empty leaderless group's record retires"
+    );
 }
 
 /// A successor daemon reads retained records with a fresh descriptor, so the published mode must stay `0600` under any umask.
 fn group_record_mode_forced_under_umask() {
-    use host_runtime::broca::subprocess::group_registry::GroupRecord;
+    use host_runtime::broca::subprocess::group_registry::{GroupRecord, new_group_nonce};
 
     for mask in [0o077u32, 0o777] {
         let _guard = UmaskGuard::set(mask);
         let own_pid = i32::try_from(std::process::id()).expect("pid fits");
-        let record = GroupRecord::record(&state_root(), own_pid).expect("record own group");
+        let record =
+            GroupRecord::record(&state_root(), own_pid, &new_group_nonce().expect("nonce"))
+                .expect("record own group");
         let registry = state_root();
         let prefix = format!("{own_pid}-");
         let record_path = fs::read_dir(registry.path())
@@ -3504,7 +3607,7 @@ fn group_record_mode_forced_under_umask() {
             & 0o7777;
         assert_eq!(mode, 0o600, "record mode under umask {mask:o}");
         let body = fs::read_to_string(&record_path).expect("record readable");
-        assert!(body.starts_with("v1\n"), "record is complete when visible");
+        assert!(body.starts_with("v4\n"), "record is complete when visible");
         record.remove().expect("remove record");
     }
 }

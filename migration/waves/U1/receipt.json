@@ -23,7 +23,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "87e9514d21681029c4b24d05ccb618be0a3f75028e33e8799fe926a0599806cf",
+      "destination_sha256": "31404c2d5aa41593a8fecebda599e892ab57e12a770174157856a13b875ce7f4",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -122,7 +122,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "a18dc599322758cb23f358c8622109848c70f7dfa2d8f76fac85a22fc5a8be1e",
+      "destination_sha256": "81584d69ee35bdd0d379b7a58cb96a96d07d16e3974a2d6e2568780bb10857f4",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -133,7 +133,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "cd4e569363843afb27264b9bf37d577966d68e7839bdaa67d3a6a28cf787239c",
+      "destination_sha256": "8f19665d2fa0a3b68fb79ee4dbfc01e5fb621593c0e978be916c720d605ea8d0",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -300,7 +300,7 @@
     {
       "source": null,
       "destination": "bun.lock",
-      "destination_sha256": "4b4a80766026ac6c1943ff94f04b8fb5e4a045991af4ff55c24aa9855d38cb76",
+      "destination_sha256": "57f2328078f14f3974b3901614e462a12c2590d71e01015707df6f786d7a498d",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {

@@ -15,6 +15,7 @@ const MAX_SIDE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXTERNAL_INITIALIZERS: usize = 16;
 const MAX_ARTIFACT_NAME_BYTES: usize = 255;
 const MAX_PROVENANCE_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_MODEL_NAME_BYTES: usize = 128;
 pub(crate) const MAX_DIMS: u64 = 16_384;
 const MAX_MAX_TOKENS: u64 = 1_048_576;
 /// `MAX_TABLE_EPOCH` prevents TypeScript JSON-number rounding from changing `table_epoch`.
@@ -33,7 +34,6 @@ const OUTPUT_NAME_ALLOWLIST: &[&str] = &[
 const MAX_OUTPUT_INDEX: u64 = 7;
 
 /// Bundle errors omit artifact bytes.
-/// their manifest.
 #[derive(Debug, Clone)]
 pub struct BundleError(pub String);
 
@@ -122,7 +122,7 @@ pub enum SelectedOutput {
 }
 
 impl BundleManifest {
-    /// FastEmbed vocabulary.
+    /// `selected_output` maps the manifest's output selector onto the FastEmbed `OutputKey` vocabulary; names outside `OUTPUT_NAME_ALLOWLIST` and indices above `MAX_OUTPUT_INDEX` are rejected.
     pub fn selected_output(&self) -> Result<SelectedOutput, BundleError> {
         match (&self.output.name, self.output.index, self.output.only_one) {
             (Some(name), None, None) => OUTPUT_NAME_ALLOWLIST
@@ -168,7 +168,6 @@ pub struct VerifiedBundle {
     pub corpus: Corpus,
 }
 
-///
 /// `expected_manifest_sha256` binds the parsed `manifest.json` to the outer trust root.
 /// The outer manifest digest extends trust over every artifact named by `manifest.json`.
 /// `None` permits callers that have no outer digest.
@@ -177,8 +176,15 @@ pub fn load_bundle(
     limits: &SynapseLimits,
     expected_manifest_sha256: Option<&str>,
 ) -> Result<VerifiedBundle, BundleError> {
-    let metadata =
-        std::fs::symlink_metadata(dir).map_err(|_| err("bundle directory is missing"))?;
+    // The bundle root is inspected without following symlinks, like every artifact under it, so a redirected root cannot swap the tree between the manifest read and the artifact opens.
+    // Only `NotFound` reports absence; a permission or I/O failure keeps its error so it is not misread as a missing bundle.
+    let metadata = std::fs::symlink_metadata(dir).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            err("bundle directory is missing")
+        } else {
+            err(format!("bundle directory is unreadable: {error}"))
+        }
+    })?;
     if !metadata.is_dir() {
         return Err(err("bundle path is not a directory"));
     }
@@ -291,7 +297,7 @@ fn validate_manifest(manifest: &BundleManifest) -> Result<(), BundleError> {
     if manifest.schema_version != 1 {
         return Err(err("unsupported manifest schema version"));
     }
-    if manifest.model.is_empty() || manifest.model.len() > 128 {
+    if manifest.model.is_empty() || manifest.model.len() > MAX_MODEL_NAME_BYTES {
         return Err(err("model name out of bounds"));
     }
     validate_sha256_hex(&manifest.fingerprint).map_err(err)?;
@@ -333,23 +339,15 @@ fn validate_manifest(manifest: &BundleManifest) -> Result<(), BundleError> {
 /// The startup budget must include `jobs::job_input_bytes` for each admitted job.
 /// `jobs::job_input_bytes` includes both key copies, decoded ID/hash capacities, and admission-time metadata copies.
 /// `max_queued_request_bytes` alone can permit scratch exhaustion because it excludes the per-job runtime charge.
-///
 /// `per_waiter_charge_bound` uses the runtime accounting on worst-case-shaped inputs to avoid duplicated formulas drifting apart.
 fn max_queued_metadata_bytes(limits: &SynapseLimits) -> Option<u64> {
-    // `per_waiter_charge_bound` assumes JSON decoding can retain String capacity up to twice the decoded length.
-    fn worst_decoded(len: usize) -> String {
-        let mut decoded = String::with_capacity(len.saturating_mul(2));
-        decoded.extend(std::iter::repeat_n('a', len));
-        decoded
-    }
     let worst_item = jobs::BatchItem {
         id: worst_decoded(jobs::MAX_ITEM_ID_BYTES),
         content_sha256: worst_decoded(jobs::CONTENT_SHA256_BYTES),
         // Text bytes are budgeted separately by `max_queued_request_bytes`.
         text: String::new(),
     };
-    // The canonical request key must contain 64 lowercase hexadecimal characters.
-    let key = "a".repeat(64);
+    let key = canonical_key_shape();
     let per_item = u64::try_from(jobs::job_input_bytes("", std::slice::from_ref(&worst_item)))
         .expect("one item's charge fits u64");
     let per_job_key =
@@ -360,6 +358,40 @@ fn max_queued_metadata_bytes(limits: &SynapseLimits) -> Option<u64> {
     u64::try_from(limits.max_queued_jobs)
         .ok()?
         .checked_mul(per_job)
+}
+
+/// The input charge includes `String` capacity, so worst-case fields carry the twice-decoded-length capacity that `per_waiter_charge_bound` assumes.
+fn worst_decoded(len: usize) -> String {
+    let mut decoded = String::with_capacity(len.saturating_mul(2));
+    decoded.extend(std::iter::repeat_n('a', len));
+    decoded
+}
+
+/// `protocol::is_lower_hex_64` admits only 64-byte request keys, so this shape has every admitted key's length.
+fn canonical_key_shape() -> String {
+    "a".repeat(64)
+}
+
+/// The worst retained charge for one completed job, computed by the runtime rule on the largest item shape.
+fn max_retained_job_bytes(limits: &SynapseLimits) -> u64 {
+    let item_lens = std::iter::repeat_n(
+        (jobs::MAX_ITEM_ID_BYTES, jobs::CONTENT_SHA256_BYTES),
+        limits.max_batch_items,
+    );
+    u64::try_from(jobs::retained_input_bytes(
+        canonical_key_shape().len(),
+        item_lens,
+    ))
+    .expect("one job's retained charge fits u64")
+}
+
+/// The worst `embed.result` request charge, computed by the runtime rule on maximal decoded fields.
+fn max_result_request_bytes() -> usize {
+    super::owned_input_bytes(&super::protocol::Request::EmbedResult {
+        job_id: worst_decoded(super::protocol::MAX_JOB_ID_BYTES),
+        request_key: worst_decoded(canonical_key_shape().len()),
+        cursor: Some(worst_decoded(super::protocol::MAX_CURSOR_BYTES)),
+    })
 }
 
 pub(crate) fn validate_serving_limits(
@@ -383,6 +415,16 @@ pub(crate) fn validate_serving_limits(
             "maximum batch result ({max_result_bytes} bytes) exceeds the host's retained-result \
              limit ({} bytes)",
             limits.max_retained_result_bytes
+        )));
+    }
+
+    // `reserve_output` refuses any body above the frame limit, so a page the pager can build but the wire cannot carry would fail every `embed.result` poll with no cursor able to make progress.
+    let wire_body_limit = crate::wire::MAX_BODY_LEN as usize;
+    let worst_page_body = super::protocol::max_vector_body_bytes(dims, limits);
+    if worst_page_body > wire_body_limit {
+        return Err(err(format!(
+            "worst-case result page ({worst_page_body} bytes) exceeds the wire body limit \
+             ({wire_body_limit} bytes); lower max_page_encoded_bytes"
         )));
     }
     Ok(())
@@ -409,6 +451,12 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
     if limits.max_retained_jobs == 0 {
         return Err(err("host retained job count must be nonzero"));
     }
+    if limits.max_queued_jobs == 0 {
+        return Err(err("host queued job count must be nonzero"));
+    }
+    if limits.retention.is_zero() {
+        return Err(err("host result retention must be nonzero"));
+    }
     if u64::try_from(limits.max_batch_text_bytes)
         .map(|max_batch_text_bytes| limits.max_queued_request_bytes < max_batch_text_bytes)
         .unwrap_or(true)
@@ -426,15 +474,11 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
 
     // Each embed.result request reserves result-page metadata from the scratch pool.
     // Result requests retain decoded job-ID and cursor capacity while reserving page metadata.
-    // Decoded request buffers can retain twice their decoded length as capacity.
     // The validator rejects configurations whose result-page metadata and request charge exceed reservable_scratch; otherwise every embed.result poll returns queue_full.
     let page_meta_bytes = limits
         .page_item_bound()
         .saturating_mul(jobs::MAX_ITEM_ID_BYTES + jobs::CONTENT_SHA256_BYTES);
-    let result_request_bytes = 2
-        * (super::protocol::MAX_JOB_ID_BYTES + super::protocol::MAX_CURSOR_BYTES + 64)
-        + super::RESPONSE_SCRATCH_BYTES;
-    let result_worst_case = page_meta_bytes.saturating_add(result_request_bytes);
+    let result_worst_case = page_meta_bytes.saturating_add(max_result_request_bytes());
     if result_worst_case as u64 > reservable_scratch {
         return Err(err(format!(
             "worst-case result-page metadata plus its request charge ({result_worst_case} \
@@ -513,12 +557,8 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
     // The validator prevents retained metadata from exceeding its reserved scratch-pool slice.
     // Overflowing the retained-metadata reservation can starve the worst advertised request until expiry.
     // Completing batches can exhaust the retained-metadata reservation without new requests.
-    let retained_worst = (limits.max_retained_jobs as u64).saturating_mul(
-        128u64.saturating_add(
-            (limits.max_batch_items as u64)
-                .saturating_mul((jobs::MAX_ITEM_ID_BYTES + jobs::CONTENT_SHA256_BYTES) as u64),
-        ),
-    );
+    let retained_worst =
+        (limits.max_retained_jobs as u64).saturating_mul(max_retained_job_bytes(limits));
     if retained_worst > crate::config::RETAINED_METADATA_RESERVED_BYTES {
         return Err(err(format!(
             "worst-case retained job metadata ({retained_worst} bytes) exceeds its reserved \
@@ -561,7 +601,6 @@ pub(crate) fn validate_sha256_hex(hash: &str) -> Result<(), &'static str> {
 
 /// The lane fingerprint uses SHA-256 over a versioned, newline-joined `key=value` serialization.
 /// The fingerprint excludes model name, provenance, and `recommended_batch` because they cannot change a served vector.
-///
 /// Length-prefixing initializer names prevents delimiters in legal filenames from forging fields.
 pub fn canonical_fingerprint(manifest: &BundleManifest) -> String {
     let output = match (
@@ -614,7 +653,6 @@ pub fn canonical_fingerprint(manifest: &BundleManifest) -> String {
 }
 
 /// The reader must use the descriptor whose metadata was validated.
-///
 /// A second path lookup can read bytes whose type and length were never checked.
 /// A path replacement can redirect the second lookup to a symlink or larger file.
 #[derive(Debug)]
@@ -625,13 +663,20 @@ pub(crate) struct OpenRegularFile {
 
 #[derive(Debug)]
 pub(crate) enum OpenRegularFileError {
-    Missing,
+    /// The open or the descriptor stat failed; the errno separates absence (`ENOENT`) from a permission or descriptor-limit failure.
+    Missing(rustix::io::Errno),
     NotRegular,
 }
 
 impl OpenRegularFile {
     pub(crate) fn read(self) -> std::io::Result<Vec<u8>> {
-        let mut bytes = Vec::with_capacity(self.len as usize);
+        let capacity = usize::try_from(self.len).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "file length exceeds the address space",
+            )
+        })?;
+        let mut bytes = Vec::with_capacity(capacity);
         self.file.take(self.len).read_to_end(&mut bytes)?;
         Ok(bytes)
     }
@@ -648,11 +693,15 @@ pub(crate) fn open_regular_file(path: &Path) -> Result<OpenRegularFile, OpenRegu
         if errno == rustix::io::Errno::LOOP {
             OpenRegularFileError::NotRegular
         } else {
-            OpenRegularFileError::Missing
+            OpenRegularFileError::Missing(errno)
         }
     })?;
     let file = std::fs::File::from(fd);
-    let metadata = file.metadata().map_err(|_| OpenRegularFileError::Missing)?;
+    let metadata = file.metadata().map_err(|error| {
+        OpenRegularFileError::Missing(
+            rustix::io::Errno::from_io_error(&error).unwrap_or(rustix::io::Errno::IO),
+        )
+    })?;
     if !metadata.is_file() {
         return Err(OpenRegularFileError::NotRegular);
     }
@@ -667,13 +716,13 @@ fn open_artifact(dir: &Path, name: &str) -> Result<OpenRegularFile, BundleError>
     // NOFOLLOW turns a symlink into an open failure rather than a redirect.
     // `O_NONBLOCK` prevents opening a planted FIFO from blocking.
     open_regular_file(&path).map_err(|error| match error {
-        OpenRegularFileError::Missing => err(format!("artifact is missing: {name}")),
+        OpenRegularFileError::Missing(errno) => {
+            err(format!("artifact is missing: {name} ({errno})"))
+        }
         OpenRegularFileError::NotRegular => err(format!("artifact is not a regular file: {name}")),
     })
 }
 
-/// The reader limits reads to the checked length to bound allocation.
-/// The reader limits reads to the checked length to bound allocation.
 /// The reader limits reads to the checked length to bound allocation.
 fn read_open_artifact(open: OpenRegularFile, name: &str) -> Result<Vec<u8>, BundleError> {
     open.read()
@@ -943,7 +992,6 @@ mod tests {
         assert!(error.0.contains("maximum batch result"));
     }
 
-    /// startup.
     #[test]
     fn a_page_bound_above_the_scratch_pool_is_rejected() {
         let manifest = manifest();
@@ -988,6 +1036,41 @@ mod tests {
     }
 
     #[test]
+    fn a_result_page_above_the_wire_body_limit_is_rejected_at_startup() {
+        use super::super::protocol::max_vector_body_bytes;
+        let mut manifest = manifest();
+        manifest.dims = MAX_DIMS;
+        let dims = MAX_DIMS as usize;
+        let wire_limit = crate::wire::MAX_BODY_LEN as usize;
+
+        let limits = SynapseLimits::default();
+        assert!(max_vector_body_bytes(dims, &limits) < wire_limit);
+        assert!(validate_test_serving(&manifest, &limits).is_ok());
+
+        // A page cap equal to the frame leaves no room for the body envelope.
+        let limits = SynapseLimits {
+            max_page_encoded_bytes: wire_limit,
+            ..SynapseLimits::default()
+        };
+        let error = validate_test_serving(&manifest, &limits)
+            .expect_err("a page the wire cannot carry is a permanent outage");
+        assert!(error.0.contains("wire body limit"), "{}", error.0);
+
+        // The largest cap that still fits validates; one more byte fails.
+        let fixed = max_vector_body_bytes(dims, &limits) - wire_limit;
+        let limits = SynapseLimits {
+            max_page_encoded_bytes: wire_limit - fixed,
+            ..SynapseLimits::default()
+        };
+        assert!(validate_test_serving(&manifest, &limits).is_ok());
+        let limits = SynapseLimits {
+            max_page_encoded_bytes: wire_limit - fixed + 1,
+            ..SynapseLimits::default()
+        };
+        assert!(validate_test_serving(&manifest, &limits).is_err());
+    }
+
+    #[test]
     fn an_oversized_retention_set_is_rejected_at_startup() {
         let manifest = manifest();
         let limits = SynapseLimits {
@@ -1008,6 +1091,32 @@ mod tests {
             ..SynapseLimits::default()
         };
         assert!(validate_test_serving(&manifest, &limits).is_ok());
+    }
+
+    #[test]
+    fn zero_job_and_retention_counts_are_rejected() {
+        for (mutate, fragment) in [
+            (
+                (|limits: &mut SynapseLimits| limits.max_retained_jobs = 0)
+                    as fn(&mut SynapseLimits),
+                "retained job count",
+            ),
+            (|limits| limits.max_queued_jobs = 0, "queued job count"),
+            (
+                |limits| limits.retention = std::time::Duration::ZERO,
+                "result retention",
+            ),
+        ] {
+            let mut limits = SynapseLimits::default();
+            mutate(&mut limits);
+            let error = validate_limits(&limits).expect_err("a zero limit disables the lane");
+            assert!(
+                error.0.contains(fragment),
+                "reason {:?} does not mention {fragment:?}",
+                error.0
+            );
+        }
+        assert!(validate_limits(&SynapseLimits::default()).is_ok());
     }
 
     #[test]

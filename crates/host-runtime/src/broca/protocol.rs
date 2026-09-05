@@ -3,8 +3,9 @@
 
 use crate::control::check_string;
 use crate::synapse::protocol::{
-    MapOnly, MethodEnvelope, NoParams, OptionalParams, RequiredParams, depth_exceeds, schema,
+    MapOnly, NoParams, OptionalParams, RequiredParams, depth_exceeds, schema,
 };
+use serde::Deserialize;
 
 pub use crate::synapse::protocol::RequestError;
 
@@ -80,8 +81,16 @@ struct SendParams {
     #[serde(rename = "tools")]
     _tools: EmptyTools,
     generation: MapOnly<GenerationParams>,
-    #[serde(default)]
+    // Absence is the only encoding of "no system prompt": a present `null` would give the same request two byte-different bodies, which the supervisor's exact-bytes fingerprint reports as `idempotency_conflict`. commentlint: allow(JUDGE)
+    #[serde(default, deserialize_with = "present_string")]
     system: Option<String>,
+}
+
+/// Deserializes a present field as a string, rejecting `null`; `#[serde(default)]` covers absence.
+fn present_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 
 #[derive(serde::Deserialize)]
@@ -155,6 +164,16 @@ fn preflight(body: &[u8], binary: bool) -> Result<(), RequestError> {
         return Err(schema("request body too deeply nested"));
     }
     Ok(())
+}
+
+/// The first decode pass reads only `method`; `params` is skipped with `IgnoredAny` because its schema depends on the method and the second pass decodes it typed. commentlint: allow(JUDGE)
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MethodEnvelope<'a> {
+    #[serde(borrow)]
+    method: std::borrow::Cow<'a, str>,
+    #[serde(default, rename = "params")]
+    _params: serde::de::IgnoredAny,
 }
 
 fn decode_request(body: &[u8]) -> Result<Request, RequestError> {
