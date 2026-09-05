@@ -19,7 +19,13 @@ property from the catalog. Test adequacy belongs to
 
 ## The coverage fact that frames this inventory, and the correction to it
 
-**35 in-crate tests reach this sub-part. None of them runs in CI.**
+**35 in-crate tests reach this sub-part (37 at HEAD; see the merged catalog's
+coverage section), and in this tree all of them run in CI** through
+`cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`, `:126`).
+The "Executed in CI" column below records the source repository's workflow, in
+which no library test target of `host-runtime` was built, and is superseded here;
+later statements in this file that in-crate oracles have no CI lane inherit that
+source-workflow premise.
 
 | Unit | Test module | Lines | Tests | Executed in CI |
 | --- | --- | --- | --- | --- |

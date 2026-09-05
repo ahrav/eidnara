@@ -2913,10 +2913,16 @@ Guarantee: No host or client producer path retains the `ReleaseIdentity`
 returned by `ProducerReservation::commit`, so `Ring::release` is never called
 with a producer-derived identity, and the producer-side half of Part 1's
 release contract stays unreachable.
-Check: `always` - `always(!X)` where X is "`Ring::release` (`ring.rs:1469`) is
+Check: `always` - `always(!X)` where X is "`Ring::release`
+(`crates/shm-transport/src/backend/ring.rs:1469`, `pub(crate)`, re-verified) is
 entered with an identity that originated from `ProducerReservation::commit`
-(`ring.rs:2561`)". Discharged today by enumerating every `.commit(` site and
-showing each discards its `Ok` value; optionally backed by a
+(`:2561`)". The property is scoped to code inside `shm-transport`, the only crate
+that can call `release`: the `host-runtime` producer sites enumerated here cannot
+reach it even if they retained the `ReleaseIdentity`, so their retention is
+harmless and is not what the check forbids; what it forbids is a `release` call
+inside the transport whose identity came from a commit. Discharged today by
+enumerating every `.commit(` site in both crates and showing each discards its
+`Ok` value, and every `release` caller in `shm-transport` is lease-derived; optionally backed by a
 `#[cfg(debug_assertions)]` counter on the producer-identity path that must stay
 at zero. **This record previously claimed `unreachable`, which was wrong and is
 corrected here.** `unreachable` is reserved for a code location that must never
@@ -5532,10 +5538,10 @@ Guarantee: **In the shipped plugin path**, every channel inserted into the nativ
 registry originates from `connect_setup`, which authenticated over the setup
 socket, and never from `attach`, which takes caller-supplied descriptors and
 authenticates nothing.
-Check: `always` - instrument the three `insert_channel` call sites, `lib.rs:619`
+Check: `always` - instrument the four `insert_channel` call sites, `lib.rs:619`
 (from `attach`), `:745` (from the `finish_setup` task that completes
-`connect_setup`), and `:823` (from `create_test_pair`, a test-only export), and
-assert that a full shipped-plugin run inserts only through the `connect_setup`
+`connect_setup`), and `:823` and `:840` (both inside `create_test_pair`, a
+test-only export), and assert that a full shipped-plugin run inserts only through the `connect_setup`
 path. `always` rather than
 `unreachable` because `attach` is a published export that tests and embedders may
 legitimately call; the forbidden thing is a *state*, a registry entry with no
@@ -9774,13 +9780,20 @@ Status: active
 Exercised: not yet - `tests/harness_closure.rs` covers `open` succeeding and
 `validate`/`materialize` failing; no test exercises `open` failing on the
 production path
-Guarantee: A failure to open the harness closure store is reported with its
-distinct cause, not collapsed into an absent store that silently selects a
-different execution backend.
-Check: `always` - whenever `HarnessClosureStore::open` returns `Err`, assert that
-the resulting host startup carries a classified unavailability reason naming that
-cause. `always` because every open failure must be classified; the store's
-absence is a legitimate state, but an indistinguishable one is not.
+Guarantee: A failure to open the harness closure store is reported as an `Err`
+whose `HarnessClosureError::detail` names its distinct cause, never as an `Ok`
+that looks like an absent store; when the daemon that opens the store in
+production lands, its startup classification must carry that cause forward
+rather than silently selecting a different execution backend.
+Check: `always` - for every failure `open` (`harness_closure.rs:531`) can take,
+an unnormalized path, an anchor that cannot be opened, a directory that cannot be
+created or opened, and a traversal failure (`open_or_create_store_path`,
+`:1043-1101`), assert the call returns `Err` and that `detail()` is the distinct
+string for that cause, so no two causes share a detail and none returns `Ok`.
+The host-startup half of the guarantee has no in-tree caller to assert against
+(`open` is called only from tests; `crates/daemon` is U4) and is deferred to the
+wave that lands it. `always` because every open failure must be classified; the
+store's absence is a legitimate state, but an indistinguishable one is not.
 Fault/timing angle: none timing-related. The window is startup. `open` fails on a
 symlinked or non-owner-only ancestor, a wrong mode, a non-directory, or a
 creation failure, each with a distinct `&'static str`

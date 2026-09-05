@@ -3,7 +3,10 @@
 ## Discovery trigger
 
 The task for this lens carries an explicit re-check. Part 1 found that
-`Ring::release` is public and identity-parameterized, and judged the
+`Ring::release` is identity-parameterized (at HEAD it is `pub(crate)` inside
+`shm-transport`, `crates/shm-transport/src/backend/ring.rs:1469`, so only
+transport-internal code can call it; the `host-runtime` producers below cannot,
+which scopes the property to the transport crate), and judged the
 producer-side release **latent** because every non-test `commit` caller
 discarded the identity. The refactor rewrote those callers: Part 1's host-side
 anchor was `shm_provider.rs:365`, and the re-scope confirms that line now holds
