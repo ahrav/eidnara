@@ -109,8 +109,9 @@ The record's check is covered by the two vector tests, the host-level test,
 and `credential_fingerprint_matches_the_documented_derivation_across_rows`
 (the test module of `broca/subprocess.rs`). That campaign writes the
 documented derivation independently of `credential_fingerprint` and compares
-the two over three connection keys, seven harness-and-provider pairs
-including the Pi aliases that canonicalize onto shared provider names, and
+the two over three connection keys, eight harness-and-provider pairs
+including both Pi aliases (`openai-codex`, `google-antigravity`) that
+canonicalize onto shared provider names, and
 six value shapes chosen to collide under naive concatenation (a colon that
 mimics the field separator, a digit run that mimics a length prefix, one
 byte, and the longest admitted value). It asserts every distinct

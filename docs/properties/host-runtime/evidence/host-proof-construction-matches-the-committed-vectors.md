@@ -64,6 +64,14 @@ Existing checks, verified, all run under `cargo test --workspace
 - `proof_folds_every_input` (`:75-157`) flips one byte of the key, client
   nonce, server nonce, and daemon id, and changes the daemon version string,
   asserting each perturbation changes the oracle's proof (`:152-155`).
+- `production_proof_matches_the_oracle_across_perturbed_tuples` calls the
+  production `compute_proof` and `raw_client::proof` on the same tuple and
+  asserts equality, for both domains, over the committed tuple, each input
+  perturbed alone at three byte positions, daemon versions whose lengths change
+  the length prefix (one byte, the committed version with a different patch,
+  and a long pre-release string), and a one-byte and a 256-byte key; it also
+  asserts every tuple's proof is distinct. This is the direct equality the
+  Check states, rather than agreement through the shared literal.
 - `host_authenticates_against_the_independent_oracle` (`:221-227`) completes
   a handshake between the real host and the oracle client, so the two
   implementations agree at runtime, not only on the vector inputs.
@@ -94,12 +102,14 @@ committed to the tree.
 
 ## What a test must construct
 
-The existing pair already forms the record's `always` check. One gap
-remains: the protocol document's own example vectors do not match the code
-(see the second question below). A test that decodes the JSON examples in
-`docs/host-wire-protocol.md` section 5.2 and compares them to
-`shm_transport::setup_auth::vectors` would catch documentation drift of this
-kind; today no test reads those bytes.
+The vector tests, the perturbation test, and the production-versus-oracle
+campaign together form the record's `always` check: the committed tuple is
+pinned on both sides, and the two implementations are compared directly over
+perturbed tuples and daemon-version lengths. One gap remains: no test reads
+the JSON examples in `docs/host-wire-protocol.md` section 5.2 and compares
+them to `shm_transport::setup_auth::vectors`, so documentation drift of the
+kind the second question found would be caught by review rather than by a
+test.
 
 ## Investigation log
 

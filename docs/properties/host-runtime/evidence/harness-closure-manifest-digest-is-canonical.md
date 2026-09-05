@@ -105,11 +105,13 @@ The record's check has three parts, each with a test in
   `preserve_order` feature or a raw-bytes digest.
 - `manifest_digest_changes_when_any_field_changes` changes one field at a
   time while keeping the manifest valid (`harness`, `package`, `version`,
-  `argument_variant`, `source_roots`, the interpreter launch root, the
-  extension list, and a node's `source_path`, `sha256`, `size_bytes`, and
-  dependency list) and asserts the digest moves and no two mutations collide.
-  A foreign `schema` is shown to be refused before hashing, since the schema
-  is a gate rather than a digest input. `ordered_extensions_are_part_of_manifest_identity`
+  `argument_variant`, `source_roots`, the interpreter and entrypoint launch
+  roots, the extension list, the node count, and a node's `source_root`,
+  `source_path`, `kind`, `sha256`, `size_bytes`, dependency `kind`,
+  dependency `path`, and dependency count) and asserts the digest moves and
+  no two mutations collide. A foreign `schema` and a `mode` that disagrees
+  with its `kind` are shown to be refused before hashing, since the validator
+  fixes both. `ordered_extensions_are_part_of_manifest_identity`
   covers extension order separately.
 
 ## Investigation log

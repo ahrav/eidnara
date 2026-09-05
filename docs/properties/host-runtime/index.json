@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "104ce3eec46885b56971cdb98fb08d35cabdfa9f6edf3e6f51839572948654a3",
+  "source_sha256": "24dbbad85af5f6a1e51f465d93413182c2d76cce60a997f33c3b657f6bc09250",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -3741,8 +3741,8 @@
       "reachability_note": "every client and server handshake computes this proof.",
       "status": "active",
       "exercised": {
-        "state": "partial",
-        "note": "the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal; no test calls `compute_proof` and `raw_client::proof` against each other, so the equality in the Check is met through the literal rather than asserted directly."
+        "state": "yes",
+        "note": "the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal, and `production_proof_matches_the_oracle_across_perturbed_tuples` calls `compute_proof` and `raw_client::proof` on the same tuple for both domains over the committed inputs, each input perturbed alone, daemon versions of several lengths, and short and long keys, asserting equality and distinctness."
       },
       "guarantee": "The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v1` and `eidnara-client-v1`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.",
       "check": {
@@ -3755,7 +3755,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/host-proof-construction-matches-the-committed-vectors.md)."
       },
-      "existing_check": "`committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction` and `proof_folds_every_input` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.",
+      "existing_check": "`committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction`, `proof_folds_every_input`, and `production_proof_matches_the_oracle_across_perturbed_tuples` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.",
       "impact": "A client that cannot authenticate, or a rogue listener that can.",
       "open_questions": [
         "`docs/host-wire-protocol.md:213` and `:217` carry example proof bytes that match neither the code nor a recomputation, and `:220` names the daemon version differently from `:213`. Code and tests agree with each other; the document needs a fix. (needs human input)"
@@ -3850,7 +3850,7 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "the committed fixture's digest is asserted, an independent canonical-JSON digest reproduced both the predecessor and the current value, a key-reordered copy of the fixture digests the same, and each manifest field is changed alone and shown to move the digest."
+        "note": "the committed fixture's digest is asserted, an independent canonical-JSON digest reproduced both the predecessor and the current value, a key-reordered copy of the fixture digests the same, and each manifest and node field is changed alone and shown to move the digest, with the validator-fixed fields shown to be refused."
       },
       "guarantee": "The manifest digest is SHA-256 over the manifest serialized as key-sorted, two-space-indented JSON, so any manifest with the same fields hashes the same regardless of field order, and the committed `pi-valid.json` fixture digests to `5386c200...f911`.",
       "check": {
@@ -3876,7 +3876,7 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, harness-and-provider pairs, and value shapes agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows."
+        "note": "the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows."
       },
       "guarantee": "The credential fingerprint is `HMAC(derive(connection_key, \"eidnara-broca-credential-v1\"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.",
       "check": {

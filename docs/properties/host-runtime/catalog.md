@@ -9829,13 +9829,13 @@ applied below and whose remaining findings are queued there.
 Type: safety
 Reachability: default-production - every client and server handshake computes this proof.
 Status: active
-Exercised: partial - the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal; no test calls `compute_proof` and `raw_client::proof` against each other, so the equality in the Check is met through the literal rather than asserted directly.
+Exercised: yes - the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal, and `production_proof_matches_the_oracle_across_perturbed_tuples` calls `compute_proof` and `raw_client::proof` on the same tuple for both domains over the committed inputs, each input perturbed alone, daemon versions of several lengths, and short and long keys, asserting equality and distinctness.
 Guarantee: The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v1` and `eidnara-client-v1`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.
 Check: `always` - `compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every generated or single-field-perturbed input tuple, where `raw_client::proof` is the test-local HMAC implementation of the documented transcript; the equality over arbitrary inputs, not the change under perturbation, is the oracle, and distinct inputs must give distinct proofs. `always` because the transcript is a pure function evaluated on every handshake.
 Fault/timing angle: Only an external oracle detects a transcript change both sides apply.
 Required faults and enabling state: The committed inputs and the test-local HMAC oracle.
 Confidence: high - [evidence](evidence/host-proof-construction-matches-the-committed-vectors.md).
-Existing check: `committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction` and `proof_folds_every_input` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.
+Existing check: `committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction`, `proof_folds_every_input`, and `production_proof_matches_the_oracle_across_perturbed_tuples` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.
 Impact: A client that cannot authenticate, or a rogue listener that can.
 Open questions:
 - `docs/host-wire-protocol.md:213` and `:217` carry example proof bytes that match neither the code nor a recomputation, and `:220` names the daemon version differently from `:213`. Code and tests agree with each other; the document needs a fix. (needs human input)
@@ -9891,7 +9891,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every closure manifest the host stores or verifies is digested this way.
 Status: active
-Exercised: yes - the committed fixture's digest is asserted, an independent canonical-JSON digest reproduced both the predecessor and the current value, a key-reordered copy of the fixture digests the same, and each manifest field is changed alone and shown to move the digest.
+Exercised: yes - the committed fixture's digest is asserted, an independent canonical-JSON digest reproduced both the predecessor and the current value, a key-reordered copy of the fixture digests the same, and each manifest and node field is changed alone and shown to move the digest, with the validator-fixed fields shown to be refused.
 Guarantee: The manifest digest is SHA-256 over the manifest serialized as key-sorted, two-space-indented JSON, so any manifest with the same fields hashes the same regardless of field order, and the committed `pi-valid.json` fixture digests to `5386c200...f911`.
 Check: `always` - `manifest_digest(fixture) == committed literal`; the digest changes when any field changes and is unchanged under key reordering.
 Fault/timing angle: A digest that depended on serialization order would let two equal manifests disagree; a digest over a different canonical form would break the TypeScript twin, which lands with the packages in U7 and reads this fixture.
@@ -9906,7 +9906,7 @@ Open questions: None.
 Type: safety
 Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `BrocaComponent::new_with_credentials` (`crates/host-runtime/src/broca/mod.rs:82`) installs one; its single caller is `tests/broca_protocol.rs:443`. `BrocaComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
 Status: active
-Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, harness-and-provider pairs, and value shapes agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows.
+Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-broca-credential-v1"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
 Check: `always` - for the documented row, `credential_fingerprint(key, harness, provider) == committed literal`; for every generated `(key, harness, provider name, value)` row in a campaign, `credential_fingerprint` equals an independent implementation of the documented derivation (`HMAC(derive(key, "eidnara-broca-credential-v1"), canonical_row)` with length-prefixed fields), including rows that differ only by moving one byte across a field boundary and rows with an empty field, which must yield distinct fingerprints; and the per-value size cap rejects before fingerprinting. `always` because the derivation is a pure function evaluated on every row.
 Fault/timing angle: A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.

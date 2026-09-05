@@ -4866,19 +4866,19 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Golden-vector test with an independent oracle (`raw_client::proof`) plus a perturbation test that every field changes the digest; vectors regenerated once at U3.",
+      "strategy_decision": "Golden-vector tests on both sides of the committed tuple plus a campaign that calls the production `compute_proof` and the test-local `raw_client::proof` on the same perturbed tuples, daemon-version lengths, and key lengths for both domains and asserts equality and distinctness; vectors regenerated once at U3 for the renamed domains.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
-      "evidence_digest": "24b49b714386886a89046052afae822a8923c786fc57d04fce5ee151ef405944",
+      "evidence_digest": "b2d4ba46af97628ce34b2d9fa4bf9b7b9084d5e17fdf8579771ef3aa8da266d4",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#committed_auth_proof_vectors_pin_the_construction",
-      "check_hash": "e17ea9c1b5faacdfacbd6e9ed3bfc43efd8db9b45349e94d32c9f6a6af703938",
-      "code_hash": "3cff13bd2a32a56175810526e4beb1f88306625a1f01199df6a364ee9806e298",
+      "check_hash": "c3990fd883551e9affa2cda5ce5a2731129b9513c25bd0f45125888491ac3710",
+      "code_hash": "d7cd646b6e3a3779f4612507444e4b0b233080d0f92df7716091584ac8c30090",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "24b49b714386886a89046052afae822a8923c786fc57d04fce5ee151ef405944",
+        "digest": "b2d4ba46af97628ce34b2d9fa4bf9b7b9084d5e17fdf8579771ef3aa8da266d4",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -4963,8 +4963,8 @@
       "evidence_pointer": "docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md",
       "evidence_digest": "024438be0a5f62a6ddb31c326593de5e5c6ebf6fbaee8c1fbf2c12f4bd968f9b",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#canonical_route_open_body_is_167_bytes",
-      "check_hash": "e17ea9c1b5faacdfacbd6e9ed3bfc43efd8db9b45349e94d32c9f6a6af703938",
-      "code_hash": "33b75212177521607b4ae22310d3f91922f93a25e2cfc24445f4422d8c29d6db",
+      "check_hash": "c3990fd883551e9affa2cda5ce5a2731129b9513c25bd0f45125888491ac3710",
+      "code_hash": "28cc8748c292a461107a58a55bfcb380027dcfc5188590ba046f734a7a0a3652",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
@@ -4992,16 +4992,16 @@
       "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), a key-reordering test over the fixture text, and a per-field mutation campaign; regenerated once at U3 for the renamed schema id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "evidence_digest": "023676fb5620c7b0ff451eaca45ad6dbc3e74e25a92c0b84997d55c5211c6cc7",
+      "evidence_digest": "8b4a1ba9140dd123b8ea3c1a706a734703b6d96c28837ae3ab0e1e814f53d77e",
       "check_pointer": "crates/host-runtime/tests/harness_closure.rs#canonical_manifest_digest_is_pinned",
-      "check_hash": "bd85ca8928d198ec1899f0acdcf8e97cd4803516edde6a83a0e326c26516017a",
-      "code_hash": "46494a4620cee5e3ed8fe2bb6202ac6a5ffd2b32fe5459da0dae013a421458e0",
+      "check_hash": "d4f3c9983f030bd88a8ac7531c1297b0aea9a647fba71b2e4c4361a3c8887cd5",
+      "code_hash": "7540e3d863d6e9ccd5a6780938f6692b9c491ace9ebc61e759894bda17a0a831",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "023676fb5620c7b0ff451eaca45ad6dbc3e74e25a92c0b84997d55c5211c6cc7",
+        "digest": "8b4a1ba9140dd123b8ea3c1a706a734703b6d96c28837ae3ab0e1e814f53d77e",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5022,16 +5022,16 @@
       "strategy_decision": "Golden-vector unit test against a digest produced outside the crate (Python HMAC derivation) plus a campaign comparing generated rows with an in-test implementation of the documented derivation; regenerated once at U3 for the renamed domain; mirrors the check in the harness = false integration binary, which the checker cannot anchor into.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
-      "evidence_digest": "1b9efcb0b8176d209056083ec8b35a34fcd4487411f3083656d81236c75b6805",
+      "evidence_digest": "be4e7f7f77ffac53fdfdb55e06ea02a60408b9c03e2de478a5f51fcf16476a8f",
       "check_pointer": "crates/host-runtime/src/broca/subprocess.rs#credential_fingerprint_matches_the_committed_vector",
-      "check_hash": "66a8c4997d5dab0b652add06cd1a0cc19dbad25bd288aac9bf84deddcab4bdb7",
-      "code_hash": "6e59a60da51529b510466260a2247594a3055a0403c6a89323dd9e0ebb2a028e",
+      "check_hash": "64698ced5210ee86c89391e35fe8aa4a05cd9a7055df4baefa3279168cf9f8ef",
+      "code_hash": "362c8f1df10ec0184bb5c4347135ea22bcf5ae0dcf5c17a94f16823342fad833",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "1b9efcb0b8176d209056083ec8b35a34fcd4487411f3083656d81236c75b6805",
+        "digest": "be4e7f7f77ffac53fdfdb55e06ea02a60408b9c03e2de478a5f51fcf16476a8f",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
