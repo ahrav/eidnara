@@ -9,7 +9,7 @@ Provenance: code read from `the `host` source checkout, branch
 `feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`. Every line
 reference below was printed from that tree before being written. Method contract
 in [../../METHOD.md](../../../METHOD.md). File list taken verbatim from
-[../../part-2-rescope/scope-map-and-risk-ranking.md](../../part-2-rescope/scope-map-and-risk-ranking.md):
+`part-2-rescope/scope-map-and-risk-ranking.md` (a source-tree artifact that was not migrated into this repository):
 `ring_transport.rs` (966), `wire.rs` (973), `frame_channel.rs` (807),
 `frame_channel/contract_tests.rs` (701).
 

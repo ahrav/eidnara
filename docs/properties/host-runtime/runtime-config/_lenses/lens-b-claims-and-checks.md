@@ -587,5 +587,5 @@ proves.
   required status checks for merge? It decides whether "unnamed in CI" means
   ungated or merely unexecuted-in-one-job. Unverifiable from workflow content;
   carried forward from
-  [../../part-2-rescope/scope-map-and-risk-ranking.md:750-752](../../part-2-rescope/scope-map-and-risk-ranking.md).
+  `part-2-rescope/scope-map-and-risk-ranking.md:750-752` (a source-tree artifact that was not migrated into this repository).
   (unresolved, needs repository settings)

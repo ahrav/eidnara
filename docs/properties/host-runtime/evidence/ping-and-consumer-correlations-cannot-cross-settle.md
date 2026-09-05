@@ -1,5 +1,15 @@
 # ping-and-consumer-correlations-cannot-cross-settle
 
+## Anchors
+
+Line references in the evidence trail below were written against the pre-ring layout
+(`connection.rs:1357-1447`, `tests/lifecycle.rs:400`). In the current tree the Pong
+match is `connection.rs:439-466`, the liveness loop is `:733-845` (probe insert
+`:783-792`, expiry `:755-760`, completion hook `:810-820`), and the test begins at
+`tests/lifecycle.rs:406`. Every `pings` access is inside those two regions and the
+consumer `pending` map is touched by none of them, which is the fact the trail
+establishes.
+
 ## Discovery trigger
 
 Two correlation namespaces share one connection and one `u64` space. The wire protocol explicitly
@@ -82,12 +92,12 @@ the default is `liveness: None` (`config.rs:296`).
 A consumer correlation numerically equal to a live ping correlation, driven while the probe is
 outstanding, with an assertion that the probe survives the consumer terminal.
 
-The existing test is `tests/lifecycle.rs:400`
+The existing test is `tests/lifecycle.rs:406`
 `ping_and_consumer_correlations_do_not_cross_settle`. It configures liveness explicitly at
 `:401-408` with `ping_interval: 50ms` and `pong_deadline: 30s`, so a probe is live and cannot expire
 during the test. Note the catalog cites `tests/lifecycle.rs:468` for this test; `:468` is a line
 inside the body - the `.expect("unmatched pong")` on a Pong sent with correlation `999_999`
-(`:465-468`) - and the function itself begins at `:400`. That file runs in no CI workflow.
+(`:465-468`) - and the function itself begins at `:406`; the catalog now cites `:406`. That file runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 
 Because the separation is structural, the test that would actually protect it is a source- or
 review-level assertion: the Pong arm names only `pings`, and no terminal path names `pings`. A
