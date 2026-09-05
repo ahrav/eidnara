@@ -364,39 +364,21 @@ Open questions: None.
 ### disconnect-releases-every-resource-keyed-to-the-connection
 
 Type: safety
-Reachability: default-production - the draining early return is on the default
-connection path (`crates/host-runtime/src/connection.rs:273-276`). Note that the
-promoted-versus-unpromoted asymmetry this record's fault angle describes is
-gone: that return now takes one arm, `discard_unregistered_generation`, which
-cancels the root (`:350-354`).
+Reachability: default-production - the draining early return is on the default connection path (`crates/host-runtime/src/connection.rs:256-258`, re-verified): under the connections lock, if `draining` is set or the shutdown token is cancelled, `discard_unregistered_generation` (`:319-323`) cancels `read_cancel`, cancels the root `token`, and discards the writer before returning. The promoted-versus-unpromoted asymmetry the source catalog described was removed with transport negotiation; one arm remains.
 Status: active
 Exercised: not yet - no test lands shutdown in the post-commit,
 pre-registration window.
 Guarantee: When a connection ends, every permit, charge, map entry, task, and
 cancellation root created for it is released, including on the early-return path
 taken while the host is draining.
-Check: `always` - after the connection task returns, both permits are released,
-the registry holds neither generation id, every owned route is finalized, and the
-candidate's root token is cancelled.
-Fault/timing angle: the gap is the promoted branch. `serve_generation` can return
-early when draining is observed under the connections lock, before the read loop
-runs. For the promoted generation `gen.token` *is* the candidate's root, and that
-early return never cancels it, while the un-promoted arm explicitly discards the
-sender and cancels the root. Release then depends on the abort-on-drop handle
-rather than on the root the provider contract is written against.
-Required faults and enabling state: a committed shutdown landing between the
-candidate's commit completion and the promoted generation's registration.
-Confidence: medium - [evidence](evidence/disconnect-releases-every-resource-keyed-to-the-connection.md). the asymmetry and the early return are certain; what is not
-established is whether any shipped provider's release depends on the root rather
-than on task abort.
-Existing check: `tests/lifecycle.rs:1722` covers shutdown before promotion;
-`tests/transport_negotiation.rs:1522` covers the failure path. Neither lands in
-this window.
-Impact: a candidate transport whose root is never cancelled, released only
-incidentally.
+Check: `always` - after the connection task returns, both permits are released, the registry holds neither generation id, every owned route is finalized, and the generation's root token is cancelled, on the normal path and on the draining early return at `connection.rs:256-258`.
+Fault/timing angle: the window is a committed shutdown landing after setup completes and before the generation is registered under the connections lock. The early return at `connection.rs:256-258` handles it with one arm that cancels the root directly, so release no longer depends on the abort-on-drop handle. What is unverified is the rest of the guarantee on that arm: whether the setup-phase permits and charges taken before `:256` are released by the discard or only by task exit.
+Required faults and enabling state: a committed shutdown landing between setup completion and the generation's registration at `connection.rs:260`.
+Confidence: medium - [evidence](evidence/disconnect-releases-every-resource-keyed-to-the-connection.md). The early return and the discard are read directly at HEAD; the source catalog's candidate-specific fault is recorded in the evidence file as history. What is not established is which permits the early return releases.
+Existing check: `tests/lifecycle.rs` covers shutdown before a connection registers; nothing lands shutdown in the post-setup, pre-registration window. The source catalog's `tests/transport_negotiation.rs` reference was removed with that file.
+Impact: a connection retired during shutdown that leaks a permit or charge until the host exits.
 Open questions:
-- Does any provider's release depend on root cancellation? That decides whether
-  this leaks today. (needs human input)
+- Which of the setup-phase permits and charges does the `:256-258` early return release directly, and which only through task exit? (needs human input)
 
 ---
 
@@ -865,9 +847,7 @@ Status: active
 Exercised: not yet - one test covers the hook never running; nothing runs the hook and fails it partway to assert that draining and the latch either both moved or neither did.
 Guarantee: The commit point either applies all three effects - draining, frozen
 route admission, latch commit plus token cancellation - or none.
-Check: `always` - for every prefix of the hook body, if draining is set then the
-shutdown token is cancelled, or a successor requester can still commit and reach
-that state.
+Check: `always` - for every prefix of the hook body at which a panic is injected, after the hook has unwound either all three effects are applied (draining set, admission frozen, latch committed with the token cancelled) or none is observable or retained (draining false, admission open, latch reopened and not acknowledged). A partial state, in particular draining set with the latch reopened, or the acknowledged flag set without a commit, fails the check; recovery by a later successor does not make a partial state pass.
 Fault/timing angle: the hook runs three effects in sequence inside the writer
 task. Corrected after portfolio evaluation: a tokio **abort cannot** split it,
 because the hook body is a synchronous closure with no await point, and tokio
@@ -877,6 +857,7 @@ while the dropped hook reopens the latch, which is recoverable by a successor
 requester. A panic inside the acknowledgement is worse: the acknowledged flag is
 set *before* the commit, so the drop declines to reopen and the latch is stuck in
 the in-flight phase with no possible successor. That second prefix is the wedge.
+Under the check as stated, the freeze-prefix panic is a predicted violation, not a recoverable pass: it leaves draining set with the latch reopened. The record keeps the guarantee unconditional because the code's own contract is all-or-nothing; a campaign that constructs the prefix should expect the check to fail until the hook restores draining on unwind.
 Required faults and enabling state: an authenticated shutdown that reaches write
 completion, plus a panic at one of the two prefixes.
 Confidence: medium - [evidence](evidence/shutdown-commit-effects-are-all-or-nothing.md). the hazard and both prefixes are read directly; a panic in
@@ -3577,12 +3558,15 @@ sustained inbound traffic, cancel `read_cancel`, **stop the peer's publication
 and let the peer-to-host ring drain**, then poll until the endpoint thread has
 exited. Assert two bounds, both counted in frames rather than in wall-clock
 time. First, the thread performs at most `N + 1` further `receive_one`
-invocations, where `N` is the number of frames the peer committed before the
-cancellation edge: each committed frame costs one `Ok(true)` pass through
-`:415-421`, and the first empty observation returns `Ok(false)` and reaches the
-`read_cancel` check at `:400`, which takes the `inbound` sender (`:401`) and
-sends `Cancelled` (`:402`). Second, no frame committed *after* the cancellation
-edge is forwarded on the inbound channel. `always` rather than `sometimes`
+invocations, where `N` is the number of frames the peer committed before it
+stopped publishing, snapshotted at the publication stop rather than at the
+cancellation edge: the loop at `ring_transport.rs:384-409` calls `receive_one`
+before it checks `read_cancel`, so a frame committed after the edge but before
+the stop is forwarded on its `Ok(true)` pass and counts toward `N`. The first
+empty observation returns `Ok(false)` and reaches the `read_cancel` check
+(`:399`), which takes the `inbound` sender (`:400`) and sends `Cancelled`
+(`:402`). Second, nothing is forwarded on the inbound channel after `Cancelled`
+is sent. `always` rather than `sometimes`
 because the assertion is a bound that must hold every time the window closes,
 not a state to reach.
 **Re-derived 2026-08-31 against the eventfd transport (PR #131), which removed
@@ -7296,51 +7280,48 @@ are carried in [existing-checks.md](request-path/existing-checks.md).
 
 ## Reachability: admission and dispatch
 
-**All fourteen records are `default-production`, and no record here is
-`test-only` or `explicit-config-only`.** The label rests on three verified facts
-rather than on a blanket preamble assertion, per METHOD rule 4.
+**Fifteen of the sixteen records are `default-production`; one,
+[req-a-both-admission-classes-and-the-rejection-bound-saturate](#req-a-both-admission-classes-and-the-rejection-bound-saturate),
+is `test-only` in this tree.** The labels rest on three facts, re-verified here,
+per METHOD rule 4.
 
-1. **The routed request path is production.** The production binary is
-   `crates/daemon/src/bin/eidnara_host/serve.rs`, which builds the composite at
-   `:575` and calls `host_runtime::run` at `:632`. Part 2b resolved the ring as
-   `default-production` against three misleading signals, and `read_loop`
-   (`connection.rs:373`) is the ring's only frame consumer, calling
-   `dispatch_request` at `:467` and `handle_control` at `:462`.
-2. **`RouteClass::Reserved` is production, not a test fixture.** The comment at
-   `runtime.rs:118-119` claims the reserved pools are "Zero-permit when no
-   module declared a reservation, and then unreachable because every route is
-   general-class". That is not a reachability answer.
-   `broca/mod.rs:164-177` declares `route_class: RouteClass::Reserved` with
-   `RESERVED_PENDING_REQUESTS = 96` and `RESERVED_HANDLER_TASKS = 96`
-   (`broca/config.rs:185`, `:188`), the comment at `broca/mod.rs:169-170` makes
-   it deliberate and unconditional, and `serve.rs:575` composes that exact
-   component. `RouteClass` is read back by dispatch to pick a permit pair
-   (`handler.rs:60-64`), so reserved-class dispatch is a live path. Sub-part 2f
-   reached the same verdict independently and cross-filed it as its lens B lead
-   L2.
+1. **The routed request path is `run`'s default path.** `host_runtime::run`
+   (`runtime.rs:541`) accepts every connection through `run_connection`
+   (`connection.rs:86`), whose `read_loop` (`:337`) is the ring's only frame
+   consumer and calls `dispatch_request` (`dispatch.rs:780`). The source catalog
+   cited the daemon binary `crates/daemon/src/bin/eidnara_host/serve.rs` as the
+   production caller of `run`; that crate is not in this tree (scheduled for U4,
+   `docs/properties/README.md:52`), and `run` is reached here from examples and a
+   bench. This catalog labels the path `run` takes by default as
+   `default-production` and defers the question of `run`'s own callers to the wave
+   that lands them; see bias B1 in
+   [discovered-at-u3/portfolio-evaluation.md](discovered-at-u3/portfolio-evaluation.md).
+2. **`RouteClass::Reserved` is declared only by a composed component.** The
+   comment at `runtime.rs:118-119` says the reserved pools are zero-permit when no
+   module declares a reservation. In this tree the only declarer is
+   `BrocaComponent::resources` (`broca/mod.rs:151`), and every `BrocaComponent`
+   constructor is called only from `crates/host-runtime/tests/`. `RouteClass` is
+   read back by dispatch to pick a permit pair (`dispatch.rs:821`), so
+   reserved-class dispatch is live code, but the state that saturates it is
+   reachable only through a test composition. The one record whose required state
+   is reserved saturation is therefore `test-only`, and the permit-pair record
+   states which half of its bound the reservation covers.
 3. **Nothing in the five files is `cfg`-gated on the production path.** The
-   sub-part's only `#[cfg(test)]` markers are the four module gates at
-   `dispatch.rs:1498`, `routing.rs:435`, `:454`, `:477`, and `control.rs:710`,
-   plus 2f's at `runtime.rs:1299` and `config.rs:463`. Sub-part 2f's
-   construction conditionality map establishes independently that nothing in the
-   host runtime is feature-gated or `cfg`-gated.
+   sub-part's only `#[cfg(test)]` markers are module gates for inline tests.
+   Sub-part 2f's construction conditionality map establishes independently that
+   nothing in the host runtime is feature-gated or `cfg`-gated.
 
-Two code points inside this `default-production` surface are entered only by a
-failing host rather than by a configuration gate, and both are stated at the
-record rather than relabelled: `dispatch.rs:1164` and `:1174`, whose enabling
-state is the fatal latch inside `lifecycle_join` (`runtime.rs:186-207`).
+Two code points inside this surface are entered only by a failing host rather
+than by a configuration gate, and both are stated at the record rather than
+relabelled: `dispatch.rs:1164` and `:1174`, whose enabling state is the fatal
+latch inside `lifecycle_join` (`runtime.rs:186-207`).
 
 **The two records carried in later, in
 [Group F](#group-f-composite-route-ownership-and-panic-containment), are also
-`default-production`, and their label was verified at carry time rather than
-inherited from this section.** Fact 1 above already establishes the routed path;
-what those two additionally need is that the composite itself is on it, and it is:
-`serve.rs:575` constructs `StaticComposite::new(...)` and `:632` passes that value
-to `host_runtime::run`, both re-printed at carry time. `composite.rs` contains **zero
-`#[cfg]` attributes** of any kind, which is the strongest form of the claim
-available for one file and is consistent with the inventory's note that the file
-has no test module. So all sixteen records in this sub-part are
-`default-production`, and none is `test-only` or `explicit-config-only`.
+`default-production`.** Fact 1 establishes the routed path; what those two need
+in addition is that a composite is on it, and `StaticComposite` is what every
+in-tree caller of `run` passes. `composite.rs` contains **zero `#[cfg]` attributes**
+of any kind.
 
 ## Index
 
@@ -7828,7 +7809,7 @@ must construct.
 ### req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs
 
 Type: safety
-Reachability: default-production
+Reachability: default-production for the general-class pair, which every routed request through `host_runtime::run` takes; the reserved-class pair is declared only by `BrocaComponent::resources` (`broca/mod.rs:151`), whose constructors have only test callers in this tree, so the reserved half of the bound is exercised only in tests until a production composition declares a reservation.
 Status: active
 Exercised: partial - `tests/dispatch.rs:976` and `:1074` prove the two classes
 cannot consume each other; `tests/handler_contract.rs:323` and `:636` prove the
@@ -7928,7 +7909,7 @@ Open questions:
 ### req-a-both-admission-classes-and-the-rejection-bound-saturate
 
 Type: reachability
-Reachability: default-production
+Reachability: test-only - the reserved class exists only when a composed component declares it, and the only declarer in this tree is `BrocaComponent::resources` (`crates/host-runtime/src/broca/mod.rs:151`), whose constructors are called only from `crates/host-runtime/tests/`. Reserved-pending and reserved-task saturation are therefore reachable only in tests here; reclassify when a production composition declares a reservation.
 Status: active
 Exercised: partial - `tests/dispatch.rs:295`, `:976`, and `:1074` saturate
 pending capacity in both classes. Task-permit saturation and `busy_rejects`
@@ -10112,7 +10093,7 @@ Reachability: test-only - every batch and query a composed `SynapseComponent` re
 Status: active
 Exercised: partial - count and byte boundaries, eviction order, and expiry are covered with a deterministic engine; the bounded-waiter test that opens 33 ring clients is ignored because the host admits at most 8 rings per process.
 Guarantee: Job admission is exact at the count and queued-byte boundaries, never evicts live work, evicts completed jobs oldest first under count pressure, and reports expired jobs as `module_restarted`.
-Check: `always` - the boundary-plus-one request is rejected and the boundary request admitted, no live job is evicted, and charges return on completion; every clause is an invariant over every admission and completion, so one `always` covers the conjunction.
+Check: `always` - the boundary-plus-one request is rejected and the boundary request admitted; no live job is evicted; under count pressure the completed job evicted is the one with the oldest `completed_at`; an expired job is reported as `module_restarted` (`jobs.rs:624`, exact `>=` on retention); and charges return on completion. Every clause is an invariant over every admission, eviction, expiry, and completion, so one `always` covers the conjunction.
 Fault/timing angle: Off-by-one at the boundary or eviction of live work loses a caller's result.
 Required faults and enabling state: Boundary-sized admission; completion under count pressure; expiry.
 Confidence: medium - [evidence](evidence/synapse-admission-boundaries-are-exact.md). `admission_count_boundary_is_exact_and_never_evicts_live_work`, `queued_byte_boundary_is_exact_and_releases_on_completion`, `completed_jobs_evict_oldest_first_under_count_pressure`, `expired_jobs_return_module_restarted` (`crates/host-runtime/tests/synapse_jobs.rs`).
