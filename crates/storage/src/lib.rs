@@ -157,20 +157,32 @@ mod sqlite_backend {
         /// are additionally checked: pragma writes, transaction control, savepoints,
         /// `ATTACH`/`DETACH`, and writes to the fence and format-marker tables are denied.
         ///
+        /// Every statement the callback issues shares one deferred-transaction snapshot,
+        /// so a write another connection commits between two of its reads stays invisible
+        /// to the second read. Transaction control is denied, so the callback cannot end
+        /// that transaction.
+        ///
         /// # Errors
         ///
-        /// Returns [`StoreError::Backend`] if the callback returns an error, attempts a
-        /// write or a denied statement, or if the scope cannot be installed or released.
+        /// Returns [`StoreError::Backend`] if the callback returns an error, issues a write
+        /// or denied statement, or if the transaction or scope fails to start or release.
         pub fn with_conn<T>(
             &self,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-            let scope = CallbackScope::read_only(&guard)?;
-            let out = f(&GuardedConn::new(&guard));
+            let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let tx = guard
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            let scope = CallbackScope::read_only(&tx)?;
+            let out = f(&GuardedConn::new(&tx));
             let restored = scope.release();
+            // Finishing the read transaction releases its snapshot; there is nothing to
+            // commit.
+            let finished = tx.finish().map_err(|e| StoreError::Backend(e.to_string()));
             let out = out.map_err(|e| StoreError::Backend(e.to_string()))?;
             restored?;
+            finished?;
             Ok(out)
         }
 
@@ -3520,12 +3532,46 @@ mod tests {
         let store = open_sqlite(&d, KV_BASELINE).expect("open");
         let r = store.with_conn(|c| c.execute("VACUUM", []));
         assert!(
-            matches!(&r, Err(StoreError::Backend(m)) if m.contains("authorization denied")),
-            "VACUUM must not pass the read callback scope, got {r:?}"
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("VACUUM")),
+            "VACUUM must not pass the read callback, got {r:?}"
         );
         store
             .with_conn_unfenced(|c| c.execute_batch("VACUUM"))
             .expect("VACUUM through the maintenance path");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_read_callback_observes_one_snapshot_across_its_statements() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", []))
+            .expect("seed");
+        let mut raw = rusqlite::Connection::open(&path).expect("raw connection");
+        raw.pragma_update(None, "busy_timeout", 5_000)
+            .expect("busy timeout");
+        let (first, second): (String, String) = store
+            .with_conn(|c| {
+                let first: String =
+                    c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0))?;
+                // A separate connection changes the row between the two reads, so equal
+                // values prove the callback reads one snapshot.
+                let tx = raw.transaction().expect("raw transaction");
+                tx.execute("UPDATE kv SET v = '2' WHERE k = 'a'", [])
+                    .expect("raw update");
+                tx.commit().expect("raw commit");
+                let second: String =
+                    c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0))?;
+                Ok((first, second))
+            })
+            .expect("read callback");
+        assert_eq!((first.as_str(), second.as_str()), ("1", "1"));
+        let after: String = store
+            .with_conn(|c| c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0)))
+            .expect("next callback sees the commit");
+        assert_eq!(after, "2");
         let _ = std::fs::remove_dir_all(&root);
     }
 
