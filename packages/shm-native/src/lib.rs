@@ -556,29 +556,43 @@ pub fn is_watching(channel_id: u32) -> bool {
 
 /// Whether a producer token is still registered. A wrapper asks this after a partial close so
 /// a token the sweep already consumed retires while one the sweep could not detach stays
-/// releasable. A busy or missing registry reads as not registered.
+/// releasable. A busy registry (a re-entrant query from inside a native callback) is an
+/// error rather than `false`, so the wrapper never retires a token it could not observe.
 #[napi]
-pub fn producer_registered(channel_id: u32, token: u32) -> bool {
+pub fn producer_registered(channel_id: u32, token: u32) -> Result<bool> {
     REGISTRY.with(|registry| {
-        registry.try_borrow().is_ok_and(|registry| {
-            registry
-                .channels
-                .get(&channel_id)
-                .is_some_and(|channel| channel.producers.contains_key(&token))
-        })
+        let registry = registry
+            .try_borrow()
+            .map_err(|_| error("native channel is busy"))?;
+        Ok(registry
+            .channels
+            .get(&channel_id)
+            .is_some_and(|channel| channel.producers.contains_key(&token)))
     })
 }
 
 /// Receive-lease counterpart of `producer_registered`.
 #[napi]
-pub fn lease_registered(channel_id: u32, token: u32) -> bool {
+pub fn lease_registered(channel_id: u32, token: u32) -> Result<bool> {
     REGISTRY.with(|registry| {
-        registry.try_borrow().is_ok_and(|registry| {
-            registry
-                .channels
-                .get(&channel_id)
-                .is_some_and(|channel| channel.active.contains_key(&token))
-        })
+        let registry = registry
+            .try_borrow()
+            .map_err(|_| error("native channel is busy"))?;
+        Ok(registry
+            .channels
+            .get(&channel_id)
+            .is_some_and(|channel| channel.active.contains_key(&token)))
+    })
+}
+
+/// Whether the channel entry still exists; a failed close is "consumed" only when it is gone.
+#[napi]
+pub fn channel_registered(channel_id: u32) -> Result<bool> {
+    REGISTRY.with(|registry| {
+        let registry = registry
+            .try_borrow()
+            .map_err(|_| error("native channel is busy"))?;
+        Ok(registry.channels.contains_key(&channel_id))
     })
 }
 

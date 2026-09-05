@@ -2332,110 +2332,128 @@ pub mod group_registry {
         let dir = root.registry_dir()?;
         let current_boot = boot_id()?;
         let mut killed = 0;
+        // A record that must be retained (uninterpretable, or unattributable members) blocks
+        // startup, but only after every other record has been swept: stopping at the first one
+        // would leave later dead-owner groups running across repeated startups. commentlint: allow(JUDGE)
+        let mut retained: Option<io::Error> = None;
         for file in fs::read_dir(&dir)? {
             let path = file?.path();
-            // Only regular files are registry records; `sweep_orphaned_run_dirs` sweeps `runs/`.
-            if !path.is_file() {
-                continue;
-            }
-            // Hosts sharing one state root sweep concurrently with each other's record writes. commentlint: allow(JUDGE)
-            // Deleting a dot-prefixed temp younger than `UNPUBLISHED_TEMP_GRACE` could unlink an in-flight write, causing its publishing rename to fail with `ENOENT`.
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with('.'))
-            {
-                let stale = fs::symlink_metadata(&path)
-                    .and_then(|meta| meta.modified())
-                    .map(|modified| {
-                        std::time::SystemTime::now()
-                            .duration_since(modified)
-                            .is_ok_and(|age| age >= UNPUBLISHED_TEMP_GRACE)
-                    })
-                    .unwrap_or(false);
-                if stale {
-                    remove_swept_record(&path)?;
-                }
-                continue;
-            }
-            // A record names a kill target, so the sweep parses only a pinned regular file owned by this user.
-            // A planted foreign-owned file or symlink fails the sweep closed instead of driving `kill_process_group`.
-            let text = {
-                use std::os::unix::fs::MetadataExt;
-                let mut file = match fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                    .open(&path)
-                {
-                    Ok(file) => file,
-                    // `NotFound` means another process removed the record after directory enumeration.
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                    Err(err) => return Err(err),
-                };
-                let meta = file.metadata()?;
-                if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
-                    return Err(io::Error::other(
-                        "a registry record is not a regular file owned by this user",
-                    ));
-                }
-                let mut text = String::new();
-                std::io::Read::read_to_string(&mut file, &mut text)?;
-                text
-            };
-            // A record from a different boot is removed without signaling because its PIDs may be reused. The boot line is trusted only when the record's checksum verifies, so a corrupted boot line cannot masquerade as a stale record. commentlint: allow(JUDGE)
-            if Entry::verified_body(&text)
-                .and_then(|body| body.lines().nth(1))
-                .is_some_and(|boot| boot != current_boot)
-            {
-                remove_swept_record(&path)?;
-                continue;
-            }
-            // A same-boot record this host cannot interpret (a newer schema from a mixed-version deployment, or damaged contents) may still fence a live group; deleting it would let recovery refire beside surviving provider work, so it blocks startup instead. commentlint: allow(JUDGE)
-            let Some(entry) = Entry::parse(&text) else {
-                return Err(io::Error::other(
-                    "a same-boot registry record could not be interpreted; it is retained",
-                ));
-            };
-            if proc_live_start_time(entry.owner_pid)? == Some(entry.owner_start) {
-                continue;
-            }
-            let group_live = match proc_start_time(entry.leader_pid)? {
-                // Matching `leader_pid` and `leader_start` identifies the recorded leader.
-                Some(start) if start == entry.leader_start => true,
-                // A reused leader PID proves the recorded group is gone: a PID used as a PGID cannot be reallocated while group members remain.
-                // provably gone.
-                Some(_) => false,
-                // The leader was reaped (pdeathsig kills only the leader), so the numeric pgid alone
-                // is no proof: it can be recycled into an unrelated same-UID group whose own leader
-                // has also exited. A surviving member counts as this run's descendant only when it
-                // shares the recording owner's session and started no earlier than the recorded
-                // leader. commentlint: allow(JUDGE)
-                None => group_has_verified_descendants(
-                    entry.leader_pid,
-                    entry.owner_sid,
-                    entry.leader_start,
-                    &entry.group_nonce,
-                )?,
-            };
-            if group_live {
-                if let Some(group) = rustix::process::Pid::from_raw(entry.leader_pid) {
-                    match rustix::process::kill_process_group(group, rustix::process::Signal::KILL)
-                    {
-                        Ok(()) => killed += 1,
-                        // `SRCH` means the group exited after membership verification; treat it as resolved rather than failing startup.
-                        Err(rustix::io::Errno::SRCH) => {}
-                        Err(err) => return Err(err.into()),
-                    }
-                }
-                // The caller keeps the record after `SIGKILL` until membership drains, because surviving members could otherwise cause recovery to refire the run beside them.
-                if !wait_group_empty_blocking(entry.leader_pid, SWEEP_MEMBER_GRACE)? {
-                    return Err(io::Error::other(
-                        "a swept group's members could not be confirmed stopped",
-                    ));
+            match sweep_record(&path, &current_boot) {
+                Ok(count) => killed += count,
+                Err(err) => {
+                    retained.get_or_insert(err);
                 }
             }
-            remove_swept_record(&path)?;
         }
+        match retained {
+            Some(err) => Err(err),
+            None => Ok(killed),
+        }
+    }
+
+    /// Sweeps one registry entry; `Ok(n)` counts groups killed, `Err` means the record was retained. commentlint: allow(JUDGE)
+    fn sweep_record(path: &Path, current_boot: &str) -> io::Result<usize> {
+        let mut killed = 0;
+        // Only regular files are registry records; `sweep_orphaned_run_dirs` sweeps `runs/`.
+        if !path.is_file() {
+            return Ok(0);
+        }
+        // Hosts sharing one state root sweep concurrently with each other's record writes. commentlint: allow(JUDGE)
+        // Deleting a dot-prefixed temp younger than `UNPUBLISHED_TEMP_GRACE` could unlink an in-flight write, causing its publishing rename to fail with `ENOENT`.
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.'))
+        {
+            let stale = fs::symlink_metadata(path)
+                .and_then(|meta| meta.modified())
+                .map(|modified| {
+                    std::time::SystemTime::now()
+                        .duration_since(modified)
+                        .is_ok_and(|age| age >= UNPUBLISHED_TEMP_GRACE)
+                })
+                .unwrap_or(false);
+            if stale {
+                remove_swept_record(path)?;
+            }
+            return Ok(0);
+        }
+        // A record names a kill target, so the sweep parses only a pinned regular file owned by this user.
+        // A planted foreign-owned file or symlink fails the sweep closed instead of driving `kill_process_group`.
+        let text = {
+            use std::os::unix::fs::MetadataExt;
+            let mut file = match fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)
+            {
+                Ok(file) => file,
+                // `NotFound` means another process removed the record after directory enumeration.
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+                Err(err) => return Err(err),
+            };
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
+                return Err(io::Error::other(
+                    "a registry record is not a regular file owned by this user",
+                ));
+            }
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut file, &mut text)?;
+            text
+        };
+        // A record from a different boot is removed without signaling because its PIDs may be reused. The boot line is trusted only when the record's checksum verifies, so a corrupted boot line cannot masquerade as a stale record. commentlint: allow(JUDGE)
+        if Entry::verified_body(&text)
+            .and_then(|body| body.lines().nth(1))
+            .is_some_and(|boot| boot != current_boot)
+        {
+            remove_swept_record(path)?;
+            return Ok(0);
+        }
+        // A same-boot record this host cannot interpret (a newer schema from a mixed-version deployment, or damaged contents) may still fence a live group; deleting it would let recovery refire beside surviving provider work, so it blocks startup instead. commentlint: allow(JUDGE)
+        let Some(entry) = Entry::parse(&text) else {
+            return Err(io::Error::other(
+                "a same-boot registry record could not be interpreted; it is retained",
+            ));
+        };
+        if proc_live_start_time(entry.owner_pid)? == Some(entry.owner_start) {
+            return Ok(0);
+        }
+        let group_live = match proc_start_time(entry.leader_pid)? {
+            // Matching `leader_pid` and `leader_start` identifies the recorded leader.
+            Some(start) if start == entry.leader_start => true,
+            // A reused leader PID proves the recorded group is gone: a PID used as a PGID cannot be reallocated while group members remain.
+            // provably gone.
+            Some(_) => false,
+            // The leader was reaped (pdeathsig kills only the leader), so the numeric pgid alone
+            // is no proof: it can be recycled into an unrelated same-UID group whose own leader
+            // has also exited. A surviving member counts as this run's descendant only when it
+            // shares the recording owner's session and started no earlier than the recorded
+            // leader. commentlint: allow(JUDGE)
+            None => group_has_verified_descendants(
+                entry.leader_pid,
+                entry.owner_sid,
+                entry.leader_start,
+                &entry.group_nonce,
+            )?,
+        };
+        if group_live {
+            if let Some(group) = rustix::process::Pid::from_raw(entry.leader_pid) {
+                match rustix::process::kill_process_group(group, rustix::process::Signal::KILL) {
+                    Ok(()) => killed += 1,
+                    // `SRCH` means the group exited after membership verification; treat it as resolved rather than failing startup.
+                    Err(rustix::io::Errno::SRCH) => {}
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            // The caller keeps the record after `SIGKILL` until membership drains, because surviving members could otherwise cause recovery to refire the run beside them.
+            if !wait_group_empty_blocking(entry.leader_pid, SWEEP_MEMBER_GRACE)? {
+                return Err(io::Error::other(
+                    "a swept group's members could not be confirmed stopped",
+                ));
+            }
+        }
+        remove_swept_record(path)?;
         Ok(killed)
     }
 
