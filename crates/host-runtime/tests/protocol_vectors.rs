@@ -203,6 +203,14 @@ fn canonical_route_open_body_is_167_bytes() {
         167,
         "the documented control header declares 167 body bytes"
     );
+    // The header fixture must encode `canonical.len()`; decoding it with the test-local
+    // decoder fails if `canonical` changes without re-encoding the header.
+    let control = hex_to_bytes("a70000000200020000000000000100000000000000");
+    assert_eq!(
+        raw_client::decode_header(&control).len as usize,
+        canonical.len(),
+        "the committed control header must declare the canonical body's length"
+    );
     // The fixture literal must remain valid input to the host.
     let parsed: serde_json::Value = serde_json::from_str(canonical).expect("canonical JSON");
     assert_eq!(parsed["op"], "route.open");
