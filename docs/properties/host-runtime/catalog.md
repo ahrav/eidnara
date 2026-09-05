@@ -12,8 +12,10 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   mechanism that refactor deleted carry `Status: invalidated` with the removal named in `Invalidated:`; records
   whose mechanism moved keep their status and cite the file that owns the mechanism now.
 - Line citations in record bodies are the source catalogs' citations and name lines of the source files at the
-  time the catalog was written; test names are the stable anchors. `migration/waves/U3/property-impact.json` names
-  which records are `core`, `carried-forward`, or `invalidated` for this wave and where each check resolves.
+  time the catalog was written; test names are the stable anchors. Where a record's line citation has been
+  re-verified against this tree, the record says so. This tree has no `migration/waves/U3/` ledger: each record's
+  `Status` and `Reachability` fields are the coverage authority for this catalog, and the wave-level
+  `core`/`carried-forward`/`invalidated` classification is recorded when the U3 `property-impact.json` lands.
 - Discovery at U3 for code the source catalogs did not cover (`broca/`, `synapse/`, `harness_closure.rs`, `wire.rs`)
   is in the trailing "Discovered at U3" section; those records carry the status observed at discovery.
 
@@ -194,7 +196,7 @@ counter near its maximum rather than running a concurrency campaign.
 Required faults and enabling state: a counter seeded near its maximum. The
 two-generations-per-socket case needs a candidate promotion, which is a test-only
 path.
-Confidence: high - verified: the counter is initialized to 1 at `runtime.rs:898`
+Confidence: high - [evidence](evidence/generation-id-strictly-increases-and-is-never-reused.md). verified: the counter is initialized to 1 at `runtime.rs:898`
 and `gen_counter` has exactly two references.
 Existing check: none. `routing.rs:535`
 `concurrent_generations_never_share_a_live_channel` asserts channel exclusivity
@@ -224,7 +226,7 @@ registered. The registration check and the shutdown snapshot share the
 `connections` mutex, which is what makes the interleaving safe.
 Required faults and enabling state: a committed non-TCP grant, plus a shutdown or
 signal drain landing in the transfer window.
-Confidence: high on the exclusion; medium that the neither-registered window is
+Confidence: high - [evidence](evidence/at-most-one-registered-generation-per-connection.md). On the exclusion; medium that the neither-registered window is
 harmless, since the lock ordering was traced but not tested.
 Existing check: none at HEAD. The cited `tests/lifecycle.rs:1722`
 `shutdown_during_candidate_setup_reaps_both_channels` covered drain during
@@ -249,8 +251,8 @@ connection teardown (`crates/host-runtime/src/connection.rs:293-319`), reached
 unconditionally from `run_connection` (`crates/host-runtime/src/runtime.rs:1043`).
 Status: active
 Exercised: partial - the current three-arm disposition is proven only by
-`tests/lifecycle.rs` and `tests/transport_negotiation.rs`, and the first runs in
-no CI job.
+`tests/lifecycle.rs` and `tests/transport_negotiation.rs`; the first runs in CI in
+this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`), the second was removed by the mandatory-ring refactor.
 Guarantee: For every read-exit cause, the frames emitted after the close decision
 are exactly the declared set for that cause.
 Check: `always` - for each cause, assert the emitted sequence: nothing for a peer
@@ -262,7 +264,7 @@ Fault/timing angle: a peer-driven close racing queued off-reader emissions. The
 cancellation source silently falls into the silent-close arm.
 Required faults and enabling state: each of the eleven read-exit sites, with
 queued emissions in flight.
-Confidence: high - this property is derived from an incident chain, not a
+Confidence: high - [evidence](evidence/close-disposition-is-a-total-function-of-the-read-exit-cause.md). this property is derived from an incident chain, not a
 hypothesis. Five successive commits corrected one decision: cancel without
 discard still flushed queued frames; keying on the host-wide `draining` flag gave
 terminals to a peer that sent a corrupt frame during shutdown; an inherited
@@ -297,7 +299,7 @@ enforced downstream by the writer's biased discard arm, not by admission: a
 producer can be admitted after cancel, and it is the writer that must drop it.
 Required faults and enabling state: a producer suspended between its
 `is_cancelled` precheck and its send, with the cancel landing in between.
-Confidence: high - every gate read directly; `discard` being a separate token
+Confidence: high - [evidence](evidence/retirement-discards-only-through-the-discard-token.md). every gate read directly; `discard` being a separate token
 from `retired` is the load-bearing detail.
 Existing check: partial - `tcp_frame_channel.rs:1130` and `:1062` cover
 writer-initiated retirement only.
@@ -329,7 +331,7 @@ discard together, which is what makes a corrupt-frame close silent even during
 shutdown.
 Required faults and enabling state: an in-flight off-reader emission concurrent
 with a peer-driven close.
-Confidence: high - every emit path routes through a charge helper or an explicit
+Confidence: high - [evidence](evidence/a-retired-generation-emits-nothing-and-mutates-nothing.md). every emit path routes through a charge helper or an explicit
 `is_cancelled` pair.
 Existing check: `tests/transport_negotiation.rs:907` covers one shape;
 `connection.rs:1598-1606` pins the positive fence, not the negative case.
@@ -355,7 +357,7 @@ writer sender and pending map alive for host lifetime, and the shutdown sequence
 iterates a generation whose task is gone.
 Required faults and enabling state: a panic in the read loop, control handling,
 grant, or close-route decision; or an abort while between insert and removal.
-Confidence: high - the single-remover structure is directly readable and nothing
+Confidence: high - [evidence](evidence/generation-registry-entry-released-on-every-connection-exit.md). the single-remover structure is directly readable and nothing
 guards the interval.
 Existing check: none.
 Impact: a permanently leaked registry entry that shutdown will wait on.
@@ -386,7 +388,7 @@ sender and cancels the root. Release then depends on the abort-on-drop handle
 rather than on the root the provider contract is written against.
 Required faults and enabling state: a committed shutdown landing between the
 candidate's commit completion and the promoted generation's registration.
-Confidence: medium - the asymmetry and the early return are certain; what is not
+Confidence: medium - [evidence](evidence/disconnect-releases-every-resource-keyed-to-the-connection.md). the asymmetry and the early return are certain; what is not
 established is whether any shipped provider's release depends on the root rather
 than on task abort.
 Existing check: `tests/lifecycle.rs:1722` covers shutdown before promotion;
@@ -420,7 +422,7 @@ silently overwrites, so correctness rests entirely on the watermark one function
 away, with nothing asserting the insert returned empty.
 Required faults and enabling state: a repeated or lower correlation; and for the
 second clause, a mutation weakening the watermark while leaving the insert alone.
-Confidence: high - both sites read; the check precedes the channel-0 split, so it
+Confidence: high - [evidence](evidence/request-correlation-strictly-increases-per-generation.md). both sites read; the check precedes the channel-0 split, so it
 covers control and routed requests alike.
 Existing check: `tests/dispatch.rs:211`
 `a_non_increasing_correlation_closes_the_generation_before_dispatch` covers the
@@ -456,7 +458,7 @@ awaiting write completion, so those frames are first observed by the promoted re
 loop, which is exactly where this watermark applies.
 Required faults and enabling state: a client that pipelines a correlation-1 or
 correlation-2 request behind its commit request.
-Confidence: high - the seed value and the comparison were both read.
+Confidence: high - [evidence](evidence/promoted-generation-refuses-the-setup-correlations.md). the seed value and the comparison were both read.
 Existing check: none. The cited pre-promotion test,
 `application_frame_before_promotion_fails_setup_instead_of_dispatching` at
 `crates/host-runtime/tests/transport_negotiation.rs:1268`, lived in a file `ed487e11`
@@ -494,7 +496,7 @@ config from that default without overriding it
 Status: active
 Exercised: yes - `tests/lifecycle.rs:468`
 `ping_and_consumer_correlations_do_not_cross_settle` constructs a numerically
-equal consumer correlation. Note that file runs in no CI job.
+equal consumer correlation. That file runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`).
 Guarantee: Host-originated ping correlations and consumer-originated correlations
 never settle each other even when numerically equal.
 Check: `always` - pong handling reads only the pings map; consumer terminals key
@@ -502,7 +504,7 @@ only the pending map by channel, epoch, and correlation.
 Fault/timing angle: none; the separation is structural, two maps.
 Required faults and enabling state: a consumer correlation numerically equal to a
 live ping correlation.
-Confidence: high - the two maps and both lookup sites read directly.
+Confidence: high - [evidence](evidence/ping-and-consumer-correlations-cannot-cross-settle.md). the two maps and both lookup sites read directly.
 Existing check: as above. Status unaudited.
 Impact: a cross-settle would let a client's request terminal clear a liveness
 probe, defeating read-liveness detection.
@@ -538,7 +540,7 @@ Required faults and enabling state: a peer emitting a pong for a correlation
 before the ping bytes complete (sequential correlations make this cheap), plus
 writer-task preemption so the hook lands after the peer's pong is read, plus a
 configured liveness policy.
-Confidence: high - both branches read directly at HEAD, and the saturating
+Confidence: high - [evidence](evidence/pong-preanswer-rejected-in-every-mutex-order.md). both branches read directly at HEAD, and the saturating
 subtraction is documented tokio behaviour.
 Existing check: none. `tests/lifecycle.rs:468` covers an *unmatched* pong, not a
 matched pre-answer.
@@ -574,7 +576,7 @@ frame-shape rule the host's own client-side matching enforces.
 Required faults and enabling state: none constructible; the record exists because
 this is a documented MUST with no implementing code, which the wire protocol
 explicitly calls out as a defect to be replaced with checked exhaustion.
-Confidence: high - the counter and the absence of a bound were read directly.
+Confidence: high - [evidence](evidence/host-ping-correlation-exhaustion-retires-the-generation.md). the counter and the absence of a bound were read directly.
 Existing check: none.
 Impact: negligible operationally, material contractually: the ingress half of
 this rule is enforced and the egress half is not.
@@ -607,7 +609,7 @@ generation already removed from the registry.
 Required faults and enabling state: an authenticated shutdown whose response is
 admitted to the writer queue; the interesting case is a second shutdown on a
 generation the first watchdog still holds.
-Confidence: high - verified by enumerating every spawn in the three files; this is
+Confidence: high - [evidence](evidence/no-task-outlives-the-generation-it-serves.md). verified by enumerating every spawn in the three files; this is
 the only untracked one.
 Existing check: none.
 Impact: harmless as written, which is exactly why it should be pinned: the
@@ -636,7 +638,7 @@ abort-on-drop handle, which aborts the writer. Break either link and forced
 shutdown waits forever on a stalled writer while holding the instance lock.
 Required faults and enabling state: a peer that authenticates then stops reading,
 queued frames, and a drain that misses its deadline so the forced branch runs.
-Confidence: high - the spawn-helper difference at this one site is unambiguous and
+Confidence: high - [evidence](evidence/the-writer-task-is-abortable-through-a-stated-owner.md). the spawn-helper difference at this one site is unambiguous and
 the abort chain is the only thing closing the gap.
 Existing check: none for the forced path.
 Impact: the instance lock is held until the tracker wait completes, so a surviving
@@ -669,7 +671,7 @@ instance lock.
 Required faults and enabling state: draining true, a generation whose read loop
 exits inside the drain window, and a route-settle phase slow enough to consume the
 shutdown deadline.
-Confidence: high on the mechanism; medium on severity, since abort does rescue it,
+Confidence: high - [evidence](evidence/draining-rendezvous-is-released-or-the-loss-is-declared.md). On the mechanism; medium on severity, since abort does rescue it,
 but by abort, and no signal distinguishes drained from aborted mid-rendezvous.
 Existing check: none.
 Impact: the graceful-close guarantee degrades to task abort, two timeouts deep.
@@ -699,7 +701,7 @@ rather than the shutdown path is what makes this non-obvious.
 Required faults and enabling state: a socket accepted and authenticated between
 the draining store and the snapshot; requires a multi-thread runtime to be
 interesting.
-Confidence: high that it holds, high that it is unchecked.
+Confidence: high - [evidence](evidence/no-generation-registers-after-the-drain-snapshot.md). That it holds, high that it is unchecked.
 Existing check: none. The in-code comment documents only the token half of the
 window, not the snapshot half.
 Impact: one violation is a permanent hang.
@@ -724,7 +726,7 @@ exists. The shutdown sequence closes the tracker while read loops are still live
 which is exactly the case the argument must cover.
 Required faults and enabling state: a read cancellation fired while an emission
 task is mid-flight.
-Confidence: high - all ten registration sites enumerated; all are inside the read
+Confidence: high - [evidence](evidence/read-task-quiescence-implies-no-further-registration.md). all ten registration sites enumerated; all are inside the read
 loop's dynamic extent or precede it.
 Existing check: `connection.rs:1598-1607` proves an already-started producer is
 waited for, but hand-rolls the producer with a bare spawn instead of driving the
@@ -754,7 +756,7 @@ success, so the bug would be invisible to a happy-path test.
 Required faults and enabling state: pools at or near saturation, plus a forced
 sweep or a read cancellation while emissions are parked on contended egress.
 Without saturation the check cannot distinguish a leak from headroom.
-Confidence: high - the binding is inside the future at all seven sites, verified.
+Confidence: high - [evidence](evidence/a-cancelled-emission-releases-every-permit-it-held.md). the binding is inside the future at all seven sites, verified.
 Existing check: `tests/transport_negotiation.rs:1522` covers connection permits;
 `tcp_frame_channel.rs:944` and `:1062` cover charges. Nothing covers pending or
 reject permits under abort.
@@ -786,7 +788,7 @@ setting `retired` and senders learn only through the closed channel.
 Required faults and enabling state: a configured liveness policy and an injected
 panic in a completion hook. Unreachable today, which makes this a hardening
 property rather than a live bug.
-Confidence: high for the mechanism; medium that a hook can panic today, since no
+Confidence: high - [evidence](evidence/no-writer-hook-panic-poisons-a-generation-lock.md). For the mechanism; medium that a hook can panic today, since no
 current hook has arithmetic that must overflow.
 Existing check: none. The comparable boundaries elsewhere *are* guarded - the
 provider preflight, the prepare worker, and the writer's owned-conversion all
@@ -806,8 +808,8 @@ Reachability: default-production - the shutdown latch is constructed for every
 host incarnation (`crates/host-runtime/src/runtime.rs:919`) and driven by the
 ordinary shutdown path; nothing gates it on configuration.
 Status: active
-Exercised: yes - four in-crate latch tests plus three integration tests, though
-the integration file runs in no CI job.
+Exercised: yes - four in-crate latch tests plus three integration tests, and
+the integration file runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`).
 Guarantee: Across any number of concurrent and repeated shutdown requests, the
 latch commits and the shutdown token is cancelled at most once per incarnation.
 Check: `always` - drive concurrent and pipelined requests, some on generations
@@ -819,7 +821,7 @@ part is that commit is unconditional while reopen is guarded, so a late reopen
 after a commit is a no-op but a late commit after a reopen would not be.
 Required faults and enabling state: at least two requesters, plus a
 pre-acknowledgement failure on the first owner.
-Confidence: high - all transitions read and the mutual exclusion traced.
+Confidence: high - [evidence](evidence/shutdown-commits-exactly-once-on-write-ack.md). all transitions read and the mutual exclusion traced.
 Existing check: strong. Four in-crate tests including one that directly pins the
 enable-before-check rule against a lost wakeup, plus three integration tests.
 Status unaudited.
@@ -847,7 +849,7 @@ stores draining and freezes before acknowledging. But the commit only commits an
 cancels; the freeze is entirely the caller's duty, unenforced by the type.
 Required faults and enabling state: a socket accepted and authenticated between
 the token cancellation and the freeze.
-Confidence: high - the ordering and the unenforced duty were both read.
+Confidence: high - [evidence](evidence/admission-freeze-precedes-the-shutdown-commit.md). the ordering and the unenforced duty were both read.
 Existing check: the latch tests cannot see it, because they have no registry.
 Impact: handler work admitted after the host promised it had stopped admitting.
 Open questions: None.
@@ -876,7 +878,7 @@ set *before* the commit, so the drop declines to reopen and the latch is stuck i
 the in-flight phase with no possible successor. That second prefix is the wedge.
 Required faults and enabling state: an authenticated shutdown that reaches write
 completion, plus a panic at one of the two prefixes.
-Confidence: medium - the hazard and both prefixes are read directly; a panic in
+Confidence: medium - [evidence](evidence/shutdown-commit-effects-are-all-or-nothing.md). the hazard and both prefixes are read directly; a panic in
 the freeze could not be constructed by inspection, so reachability rests on the
 general no-unwind-guard argument rather than a specific panicking operation.
 Existing check: one test covers the hook never running. Nothing covers it running
@@ -906,7 +908,7 @@ Required faults and enabling state: at least two concurrent requests on distinct
 generations, plus a pre-acknowledgement failure so reopen fires rather than
 commit. Needs a multi-thread runtime for the notify-between-check-and-poll
 interleaving to be reachable, and every existing test is current-thread.
-Confidence: high - the protocol is correct as written and the reasoning is
+Confidence: high - [evidence](evidence/latch-wake-cannot-be-lost.md). the protocol is correct as written and the reasoning is
 spelled out in comments.
 Existing check: the strongest existing check in this scope. Status unaudited.
 Impact: a lost wakeup is a permanently stuck requester holding a pending permit.
@@ -919,9 +921,13 @@ Open questions: None.
 ### probe-never-reports-stopped-while-either-fence-is-held
 
 Type: safety
-Reachability: default-production - the lifecycle record is written on every
-host start (`crates/host-runtime/src/runtime.rs:849`) and `probe_lifecycle` is the
-production CLI's status path (`crates/daemon/src/bin/eidnara-host.rs:404`).
+Reachability: test-only - the lifecycle record this probe reads is written on
+every host start (`crates/host-runtime/src/runtime.rs:587` for `Starting`, `:715`
+for `Running`, re-verified) and on teardown (`lifecycle.rs:384`), but the reader
+this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outside
+`crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI
+(`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+to `default-production` in the wave that lands it.
 Status: active
 Exercised: yes - five in-crate tests, all Linux-only.
 Guarantee: The probe returns stopped only when both the lifetime fence and the
@@ -936,7 +942,7 @@ coherent single-fence shape, a held runtime lock with a free lifetime fence and 
 legacy record, is a pre-coordination incumbent and classifies by its record.
 Required faults and enabling state: a live daemon plus namespace replacement, or a
 probe sampling inside the few-syscall window between the two acquisitions.
-Confidence: high - stopped is returned from exactly two places and both require
+Confidence: high - [evidence](evidence/probe-never-reports-stopped-while-either-fence-is-held.md). stopped is returned from exactly two places and both require
 the lifetime fence free.
 Existing check: strong, five tests. Status unaudited; all Linux-only.
 Impact: a false stopped authorizes a launcher to start a second incarnation over a
@@ -946,9 +952,13 @@ Open questions: None.
 ### stopping-precedes-unpublication-on-every-path
 
 Type: safety
-Reachability: default-production - the stopping record is written on the
-shipped teardown path (`crates/host-runtime/src/lifecycle.rs:451`) and read back by
-the production CLI probe (`crates/daemon/src/bin/eidnara-host.rs:404`).
+Reachability: test-only - the stopping record is written on the shipped teardown
+path (`crates/host-runtime/src/lifecycle.rs:384`, re-verified), but the reader that
+this record's guarantee is stated against, `probe_lifecycle` (`lifecycle.rs:805`),
+has no caller outside `crates/host-runtime` tests in this tree. Its production
+consumer, the daemon CLI (`crates/daemon`), is scheduled for U4
+(`docs/properties/README.md:52`); reclassify to `default-production` in the wave
+that lands it.
 Status: active
 Exercised: partial - the success path only.
 Guarantee: When an incarnation removes its publication, the on-disk record already
@@ -963,7 +973,7 @@ stale phase ages to wedged honestly, covers a *successful* write followed by a
 hang, not a *failed* write, which produces an immediate wedged for a clean stop.
 Required faults and enabling state: a storage or permission failure on the runtime
 directory at teardown, with a publication still present.
-Confidence: high on the ordering and the discarded error; medium on reachability.
+Confidence: high - [evidence](evidence/stopping-precedes-unpublication-on-every-path.md). On the ordering and the discarded error; medium on reachability.
 Existing check: two tests cover the success path. Nothing covers the failed write.
 Impact: an orderly stop reported to the operator as a fault.
 Open questions:
@@ -974,9 +984,13 @@ Open questions:
 ### phase-evidence-outlives-a-long-phase
 
 Type: liveness
-Reachability: default-production - the lifecycle record is written on every
-host start (`crates/host-runtime/src/runtime.rs:849`) and `probe_lifecycle` is the
-production CLI's status path (`crates/daemon/src/bin/eidnara-host.rs:404`).
+Reachability: test-only - the lifecycle record this probe reads is written on
+every host start (`crates/host-runtime/src/runtime.rs:587` for `Starting`, `:715`
+for `Running`, re-verified) and on teardown (`lifecycle.rs:384`), but the reader
+this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outside
+`crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI
+(`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+to `default-production` in the wave that lands it.
 Status: active - **reframed after portfolio evaluation**
 Exercised: not yet.
 Guarantee: The documented freshness window is wide enough for every phase the
@@ -1001,7 +1015,7 @@ nothing couples them.
 Required faults and enabling state: a configuration whose callback or drain budget
 exceeds 60 seconds, or a slow filesystem making a phase exceed it. No adversary
 needed.
-Confidence: high - the window value, its non-configurability, and the settable
+Confidence: high - [evidence](evidence/phase-evidence-outlives-a-long-phase.md). the window value, its non-configurability, and the settable
 budgets were all verified. One candidate cause the earlier revision named,
 per-file hashing during payload validation, was **refuted**: it runs before the
 phase record exists.
@@ -1018,9 +1032,13 @@ Open questions:
 ### clock-anomalies-do-not-invalidate-live-evidence
 
 Type: safety
-Reachability: default-production - the lifecycle record is written on every
-host start (`crates/host-runtime/src/runtime.rs:849`) and `probe_lifecycle` is the
-production CLI's status path (`crates/daemon/src/bin/eidnara-host.rs:404`).
+Reachability: test-only - the lifecycle record this probe reads is written on
+every host start (`crates/host-runtime/src/runtime.rs:587` for `Starting`, `:715`
+for `Running`, re-verified) and on teardown (`lifecycle.rs:384`), but the reader
+this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outside
+`crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI
+(`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+to `default-production` in the wave that lands it.
 Status: active
 Exercised: not yet - both freshness tests manipulate the record, not the clock.
 Guarantee: A wall-clock step or an unrepresentable clock value does not reclassify
@@ -1035,7 +1053,7 @@ daemon nor the probe uses a monotonic source for this comparison, and there is n
 skew allowance beyond the same 60 second value used for expiry.
 Required faults and enabling state: a clock step exceeding the window, or a clock
 set before the epoch, concurrent with an incarnation in starting or stopping.
-Confidence: high - the saturating collapses and the wall-clock comparison are
+Confidence: high - [evidence](evidence/clock-anomalies-do-not-invalidate-live-evidence.md). the saturating collapses and the wall-clock comparison are
 literal.
 Existing check: one test confirms the future-side behaviour is intended for a
 *forged* record; it does not distinguish forgery from a clock step.
@@ -1045,9 +1063,13 @@ Open questions: None.
 ### legacy-incumbent-classification-needs-an-unforgeable-witness
 
 Type: safety
-Reachability: default-production - the lifecycle record is written on every
-host start (`crates/host-runtime/src/runtime.rs:849`) and `probe_lifecycle` is the
-production CLI's status path (`crates/daemon/src/bin/eidnara-host.rs:404`).
+Reachability: test-only - the lifecycle record this probe reads is written on
+every host start (`crates/host-runtime/src/runtime.rs:587` for `Starting`, `:715`
+for `Running`, re-verified) and on teardown (`lifecycle.rs:384`), but the reader
+this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outside
+`crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI
+(`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+to `default-production` in the wave that lands it.
 Status: active
 Exercised: partial - the regression test plants exactly the forgery by hand.
 Guarantee: A running verdict derived from a legacy record is accompanied by
@@ -1063,7 +1085,7 @@ same-user model, and nothing distinguishes a genuine pre-coordination daemon fro
 a squatter holding only the runtime-directory flock.
 Required faults and enabling state: a planted empty-digest record plus a matching
 publication, with the runtime lock held.
-Confidence: high - the widened predicate was read directly, and the regression
+Confidence: high - [evidence](evidence/legacy-incumbent-classification-needs-an-unforgeable-witness.md). the widened predicate was read directly, and the regression
 test constructs the forgery itself.
 Existing check: one test pins the classification, using the forgeable shape.
 Status unaudited.
@@ -1076,9 +1098,13 @@ Open questions:
 ### an-observed-wedge-cause-reaches-the-operator
 
 Type: reachability
-Reachability: default-production - the lifecycle record is written on every
-host start (`crates/host-runtime/src/runtime.rs:849`) and `probe_lifecycle` is the
-production CLI's status path (`crates/daemon/src/bin/eidnara-host.rs:404`).
+Reachability: test-only - the lifecycle record this probe reads is written on
+every host start (`crates/host-runtime/src/runtime.rs:587` for `Starting`, `:715`
+for `Running`, re-verified) and on teardown (`lifecycle.rs:384`), but the reader
+this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outside
+`crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI
+(`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+to `default-production` in the wave that lands it.
 Status: active
 Exercised: not yet.
 Guarantee: When the host distinguishes a wedge cause, that distinction is
@@ -1092,7 +1118,7 @@ incoherence and an I/O failure. Verified: the crate has no tracing or log
 dependency, so there is no second channel.
 Required faults and enabling state: any wedge other than the forwarded one; two
 are already fixtured in the existing tests.
-Confidence: high - the forwarding is a single conditional and the reason table is
+Confidence: high - [evidence](evidence/an-observed-wedge-cause-reaches-the-operator.md). the forwarding is a single conditional and the reason table is
 complete in one function.
 Existing check: none. In-crate tests assert the reason field directly, so the
 crate proves the reasons are computed while nothing proves they are conveyed.
@@ -1109,9 +1135,11 @@ Open questions:
 ### current-profile-never-names-an-unvalidatable-generation
 
 Type: safety
-Reachability: default-production - the production CLI reads the current profile
-and calls `stage_and_promote` on every start
-(`crates/daemon/src/bin/eidnara-host.rs:970`, `:992`).
+Reachability: test-only - `stage_and_promote` has no caller outside
+`crates/host-runtime` tests in this tree (re-verified by a workspace-wide search).
+The daemon CLI that reads the current profile and promotes on every start
+(`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+to `default-production` in the wave that lands it.
 Status: active
 Exercised: partial - success and post-hoc tampering only; no fault injection and
 no crash test.
@@ -1128,7 +1156,7 @@ later prune removes as unprotected.
 Required faults and enabling state: storage exhaustion at each write and sync
 point, a delayed-allocation filesystem so exhaustion first surfaces at sync, and
 power-loss simulation between the two renames, all under the transaction lock.
-Confidence: high on the ordering; medium on completeness, since the
+Confidence: high - [evidence](evidence/current-profile-never-names-an-unvalidatable-generation.md). On the ordering; medium on completeness, since the
 exchange-then-revalidate window has a state where the digest name holds a
 candidate and the temp name holds the corrupt orphan.
 Existing check: four tests cover the success path, same-digest convergence,
@@ -1142,9 +1170,11 @@ Open questions:
 ### validation-and-enumeration-address-one-directory-object
 
 Type: safety
-Reachability: default-production - the production CLI reads the current profile
-and calls `stage_and_promote` on every start
-(`crates/daemon/src/bin/eidnara-host.rs:970`, `:992`).
+Reachability: test-only - `stage_and_promote` has no caller outside
+`crates/host-runtime` tests in this tree (re-verified by a workspace-wide search).
+The daemon CLI that reads the current profile and promotes on every start
+(`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+to `default-production` in the wave that lands it.
 Status: active
 Exercised: partial.
 Guarantee: Every read, walk, and removal in a store operation resolves through the
@@ -1159,7 +1189,7 @@ identical split then survived in prune for eight more review rounds, where
 enumeration by pathname drove deletions inside the pinned store.
 Required faults and enabling state: a directory replacement between the pin and the
 walk, under the transaction lock.
-Confidence: high - both instances read as diffs.
+Confidence: high - [evidence](evidence/validation-and-enumeration-address-one-directory-object.md). both instances read as diffs.
 Existing check: partial; the fixed instances have regression tests. Nothing
 prevents a third instance.
 Impact: two separate shipped defects from one class, and the class was never swept.
@@ -1170,9 +1200,11 @@ Open questions:
 ### an-undecidable-quarantine-witness-fails-closed
 
 Type: safety
-Reachability: default-production - the production CLI reads the current profile
-and calls `stage_and_promote` on every start
-(`crates/daemon/src/bin/eidnara-host.rs:970`, `:992`).
+Reachability: test-only - `stage_and_promote` has no caller outside
+`crates/host-runtime` tests in this tree (re-verified by a workspace-wide search).
+The daemon CLI that reads the current profile and promotes on every start
+(`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+to `default-production` in the wave that lands it.
 Status: active
 Exercised: partial - the oversize case only.
 Guarantee: For every *read-failure* mode of the lifecycle record and the generation
@@ -1196,7 +1228,7 @@ deleted. The other three are a missing or symlinked manifest, a stat error on an
 open descriptor, and a read error.
 Required faults and enabling state: a generation directory with a wider mode, or an
 oversize manifest, or an I/O error on either object.
-Confidence: high - the four early returns were enumerated and their reachability
+Confidence: high - [evidence](evidence/an-undecidable-quarantine-witness-fails-closed.md). the four early returns were enumerated and their reachability
 ranked; the mode-bit cause is the practical one.
 Existing check: one test covers the oversize manifest case.
 Impact: a retained generation written by a newer release, or restored with wider
@@ -1207,9 +1239,11 @@ Open questions: None.
 ### persisted-state-quarantine-caps-agree
 
 Type: safety
-Reachability: default-production - the production CLI reads the current profile
-and calls `stage_and_promote` on every start
-(`crates/daemon/src/bin/eidnara-host.rs:970`, `:992`).
+Reachability: test-only - `stage_and_promote` has no caller outside
+`crates/host-runtime` tests in this tree (re-verified by a workspace-wide search).
+The daemon CLI that reads the current profile and promotes on every start
+(`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+to `default-production` in the wave that lands it.
 Status: active
 Exercised: not yet - statically checkable, and currently false.
 Guarantee: The size above which persisted state is unreadable and therefore
@@ -1223,7 +1257,7 @@ release writing a 100 KiB record is quarantined by this release; a 100 KiB manif
 is not. A maintainer adjusting one cap on the comment's authority moves only one
 threshold.
 Required faults and enabling state: none.
-Confidence: high - both constants and the claim read directly.
+Confidence: high - [evidence](evidence/persisted-state-quarantine-caps-agree.md). both constants and the claim read directly.
 Existing check: none.
 Impact: the two forward-compatibility thresholds that must agree do not, and the
 code says they do.
@@ -1232,10 +1266,12 @@ Open questions: None.
 ### every-declared-cli-reason-id-has-a-producer
 
 Type: reachability
-Reachability: default-production - the reason ids are emitted by the shipped
-CLI binary `crates/daemon/src/bin/eidnara-host.rs` and consumed by the
-plugin's lifecycle surface
-(`packages/plugin/src/shared/host-lifecycle/paths.ts`).
+Reachability: test-only - neither the CLI binary that emits the reason ids
+(`crates/daemon/src/bin/eidnara-host.rs`) nor the plugin surface that consumes
+them (`packages/plugin/src/shared/host-lifecycle/paths.ts`) is in this tree; the
+`packages/` directory holds only `shm-native`. The daemon is scheduled for U4
+(`docs/properties/README.md:52`); reclassify in the wave that lands it. The
+TypeScript producer and mis-mapping findings below are source-repository evidence.
 Status: active - **premise corrected after portfolio evaluation**
 Exercised: not yet.
 Guarantee: Each reason id the release contract declares is emitted by the layer
@@ -1256,7 +1292,7 @@ reachable; the native classification does not use it.
 Required faults and enabling state: a data root on a filesystem lacking atomic
 same-filesystem exchange, with a corrupt unprotected occupant at the digest name so
 promotion reaches the exchange.
-Confidence: high - the TypeScript producer and the Rust mis-mapping were both
+Confidence: high - [evidence](evidence/every-declared-cli-reason-id-has-a-producer.md). the TypeScript producer and the Rust mis-mapping were both
 verified, and 17 of 31 declared ids have Rust producers.
 Existing check: the TypeScript side has targeted tests. Nothing checks that the
 native error classification uses the declared vocabulary.
@@ -1293,7 +1329,7 @@ prior hook is preserved, and any hook installed by a test harness afterwards is
 replaced.
 Required faults and enabling state: a panicking callback, plus a concurrently
 panicking unrelated task on the same worker to prove the guard is not over-broad.
-Confidence: high on the inventory, which is an exhaustive grep of roughly twenty
+Confidence: high - [evidence](evidence/every-callback-invocation-is-inside-the-redaction-guard.md). On the inventory, which is an exhaustive grep of roughly twenty
 call sites; medium on the guarantee, because the promise is enforced by convention
 at each site with nothing in the type system requiring a new site to wrap.
 Existing check: `tests/dispatch.rs:661` pins the not-over-broad direction. Verified:
@@ -1324,7 +1360,7 @@ is a pipe whose reader has stalled, the write blocks and the panicking thread pa
 inside the hook.
 Required faults and enabling state: a callback panic concurrent with a write
 failure on the standard error stream, or a non-draining consumer.
-Confidence: medium - the panic-on-write-error and nested-panic-abort behaviours are
+Confidence: medium - [evidence](evidence/the-panic-hook-cannot-itself-fail.md). the panic-on-write-error and nested-panic-abort behaviours are
 stable standard-library semantics; the disk-full coincidence is plausible rather
 than demonstrated.
 Existing check: none.
@@ -1355,7 +1391,7 @@ and drain refusal both drop an authenticated client with no frame. The crate has
 no tracing or log dependency, so there is no channel to carry any of it.
 Required faults and enabling state: an authentication failure, a capacity
 exhaustion, and a drain refusal.
-Confidence: high - all three discard sites verified at their line numbers.
+Confidence: high - [evidence](evidence/authentication-and-capacity-rejections-are-observable.md). all three discard sites verified at their line numbers.
 Existing check: none.
 Impact: the single most alarm-worthy event in the connection path produces nothing,
 and capacity exhaustion looks like a network reset to both sides.
@@ -1365,43 +1401,37 @@ Open questions: None.
 
 Type: reachability
 Reachability: test-only - the subject is the integration-test binaries and the
-CI workflow that names them; `--test client --test lifecycle` runs on Linux
-(`the source repository `ci.yml` workflow:168-169`, job `shm-source-build`). After PR #131
-(merge `5d638e3e8`) `ci.yml` contains only `ubuntu-latest` jobs, so no macOS
-run exists. This is build configuration, not a runtime path.
+CI workflow that runs them. Re-verified against this tree: `.github/workflows/ci.yml:118`
+and `:126` run `cargo test --workspace --all-targets --all-features --locked` on
+the 1.98 and stable toolchains, on `ubuntu-latest` only. This is build
+configuration, not a runtime path.
 Status: active
-Exercised: not yet - this is the finding.
+Exercised: yes - `cargo test --workspace --all-targets` builds and runs every
+integration binary in the workspace, including `tests/lifecycle.rs` (35 tests),
+`tests/activation.rs` (4), and `tests/host_roundtrip.rs` (4), on both toolchains
+(`ci.yml:118`, `:126`). No binary is named individually; none needs to be.
 Guarantee: The executed proof of shutdown ordering, lock-release ordering, latch
 commit, fence overlap refusal, and probe-across-an-incarnation runs in continuous
 integration.
 Check: `reachable` - the lifecycle, activation, and roundtrip integration binaries
-are named in a workflow and execute on at least one platform.
+execute in a workflow on at least one platform.
 Fault/timing angle: none; a configuration fact.
 Required faults and enabling state: none.
-Confidence: high - verified directly at authoring time, when of `host-runtime`'s 26
-integration binaries CI named four: the library tests, two shared-memory
-suites, one negotiation suite, a macOS soak, one filtered macOS library test,
-and doc tests. The macOS steps were removed with every other macOS job by
-PR #131 (merge `5d638e3e8`), which left `ci.yml` Linux-only. `tests/lifecycle.rs`,
-`tests/activation.rs`, and `tests/host_roundtrip.rs` appear in no workflow. The
-only `--test lifecycle` match in the workflows is a different crate's
-`lifecycle_cli`.
+Confidence: high - [evidence](evidence/the-largest-lifecycle-proof-runs-in-ci.md). Verified in this tree by reading
+`ci.yml:118` and `:126`, and by `cargo test --help`: `--workspace` tests every
+workspace package and `--all-targets` includes every integration test target. The
+source-tree history the evidence file records (four named binaries out of 26 at
+authoring time, the `ed487e11` refactor adding `--test lifecycle`, PR #131 removing
+the macOS jobs) describes the source repository's workflow, not this one.
 Existing check: none - this record *is* the check.
-Impact: 36 tests and 1872 lines, including the regression tests for ten repaired
-lifecycle defects, execute only when a developer runs the local script. **Gap
-closed by the ring-transport refactor, observed 2026-08-30.** `ed487e11
-refactor(host): make ring transport mandatory` rewrote the CI workflow to add
-`--test lifecycle` to the Linux `host-runtime` run and `--test client --test
-lifecycle` to a then-existing macOS run. PR #131 (merge `5d638e3e8`) later
-removed every macOS job, so at HEAD the lifecycle binary executes on Linux
-only (`ci.yml:168-169`). The record is retained because the gap was real and
-its closure is the evidence. Two residual gaps are narrower than the original finding:
-`tests/activation.rs` and `tests/host_roundtrip.rs` remain unnamed, and the
-`--test lifecycle` in the `daemon` step at `:149` is still the unrelated
-`lifecycle_cli` binary, not this one.
-Open questions:
-- Is the exclusion deliberate or an oversight? 22 of 26 binaries are unnamed, which
-  is a broad pattern rather than a targeted exclusion. (needs human input)
+Impact: 43 tests across 2543 lines, including the regression tests for ten repaired
+lifecycle defects, would execute only when a developer runs them locally. In this
+tree the gap is closed by construction: the workspace-wide test step runs every
+binary, so the residual gaps the source catalog recorded (`activation.rs` and
+`host_roundtrip.rs` unnamed; a `daemon` step's unrelated `lifecycle_cli`) do not
+apply here. The record is retained because the gap was real in the source
+repository and its closure is the evidence.
+Open questions: None.
 
 ## Group I: setup-state transitions
 
@@ -1456,7 +1486,7 @@ liveness, and no fault injection: `TestHost::start` plus `setup_client`
 (`tests/support/mod.rs:688`) is sufficient. Reaching the `CandidateSetup` half
 of the state predicate additionally needs an injected provider, which is
 test-only; the `BootstrapTcp` half is the default path.
-Confidence: high -
+Confidence: high - [evidence](evidence/negotiation-precedes-every-gated-frame-kind.md).
 [evidence](evidence/negotiation-precedes-every-gated-frame-kind.md). All five
 gate sites and all fourteen frame-kind arms enumerated against
 `connection.rs:417-598` and `:626-647`.
@@ -1509,7 +1539,7 @@ Required faults and enabling state: a raw client that negotiates twice. The
 and `ProviderActive` arcs need an injected provider, which is test-only; that
 is why this record is labelled by its default-reachable arc and the provider
 arcs are named explicitly.
-Confidence: high -
+Confidence: high - [evidence](evidence/setup-selection-is-sticky-for-the-generation.md).
 [evidence](evidence/setup-selection-is-sticky-for-the-generation.md).
 `setup.state` has exactly two write sites and `setup.handoff` exactly one, all
 enumerated by grep over `connection.rs`.
@@ -1551,7 +1581,7 @@ the property. To make the check meaningful, add a fifth `TransportState`
 variant in a test fixture, or assert both predicates over all variants; the
 `matches!` shape means a new variant is refused by both copies unless a author
 adds it, which is the fail-closed direction.
-Confidence: high -
+Confidence: high - [evidence](evidence/setup-readiness-is-decided-by-one-predicate.md).
 [evidence](evidence/setup-readiness-is-decided-by-one-predicate.md). Both
 predicate bodies read at HEAD and confirmed textually identical over the same
 field; the four `transport_ready` call sites and the one inline site
@@ -1610,7 +1640,7 @@ contradiction, that an *unsolicited* `Pong` before negotiation is silently
 ignored rather than retiring the generation, needs no liveness at all and is
 default-production; it is a strictly smaller claim and is recorded in the
 evidence file.
-Confidence: high -
+Confidence: high - [evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md).
 [evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md).
 Both sides read at HEAD: the document sentence, the ungated `Pong` arm, the
 liveness start point, and the grant path's own comment explaining that
@@ -1672,7 +1702,7 @@ providers are test-only: `TransportProviders::default()` is empty
 test-injected (`:1-13`), and `HostConfig::default` installs the empty registry
 (`config.rs:297`). Verified consequence: in every shipped configuration the
 reason is always `None`.
-Confidence: high -
+Confidence: high - [evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md).
 [evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md).
 Precedence block, preflight default, panic mapping, and the `serves_transport`
 gate all read at HEAD; the empty-registry conclusion traced from
@@ -1738,7 +1768,7 @@ plus a token cancelled before the poll. Both are constructible with
 `tokio::io::duplex`: write the bytes, cancel the token, then call the helper.
 No scheduler control is needed because the ordering is established before the
 call.
-Confidence: high -
+Confidence: high - [evidence](evidence/cancellation-preempts-every-bounded-frame-read.md).
 [evidence](evidence/cancellation-preempts-every-bounded-frame-read.md).
 Verified the `biased;` keyword and branch order at `frame_read.rs:47-49`,
 `:81-83`, `:111-113`; the production cancellation sources at
@@ -1787,7 +1817,7 @@ Required faults and enabling state: no fault. Call `read_body` directly with a
 buffer pre-filled with `k` bytes, `0 < k < len`, and a reader holding `len`
 body bytes followed by a valid header. The observable is that the header no
 longer parses on the next read.
-Confidence: high -
+Confidence: high - [evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md).
 [evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md).
 The cap and the loop condition were read at `frame_read.rs:79-80`; the
 freshness of both callers' buffers was verified at `tcp_frame_channel.rs:217`
@@ -1835,7 +1865,7 @@ Required faults and enabling state: a mid-target peer close, three times: after
 one header byte (`read_exact`), after a partial declared body (`read_body`),
 and after a partial drained body (`drain`). All three are one `drop(client)` on
 a `tokio::io::duplex` pair.
-Confidence: high -
+Confidence: high - [evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md).
 [evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md).
 Read the three `if read == 0` sites at `frame_read.rs:55-57`, `:89-91`,
 `:119-121`, and verified the non-empty-target guards at `:46`, `:109-110`. The
@@ -1890,7 +1920,7 @@ drain left. `connection.rs:401-410` is the only thing preventing that.
 Required faults and enabling state: any stop class, then an attempted second
 read. Cheapest construction: a truncated declared body for EOF, a paused clock
 for the deadline, a cancelled token for cancellation.
-Confidence: high -
+Confidence: high - [evidence](evidence/no-framed-read-resumes-after-a-read-stop.md).
 [evidence](evidence/no-framed-read-resumes-after-a-read-stop.md). Verified that
 no helper retains an offset (`frame_read.rs:45`, `:79`, `:108`), and that both
 callers stop: the host's four exhaustive `Err` arms at `connection.rs:400`,
@@ -1944,7 +1974,7 @@ Required faults and enabling state: a peer sending channel-0 `Request` headers
 with strictly increasing correlations (`connection.rs:426-429`) declaring
 `len > MAX_CONTROL_BODY_LEN`, each followed by the declared bytes, repeated. To
 observe the aggregate, run `max_connections` of them.
-Confidence: high on the mechanism, medium on whether the cost is a defect -
+Confidence: high on the mechanism, medium on whether the cost is a defect - [evidence](evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md).
 [evidence](evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md).
 Verified that the oversize branch at `tcp_frame_channel.rs:198-202` precedes
 the budget charge at `:204-215`; that the ceiling is `MAX_BODY_LEN` and not the
@@ -2000,7 +2030,7 @@ item borrows the read charge instead of `retained_budget` (`:1523`).
 Required faults and enabling state: to *prove* unreachability, none: it follows
 from the four verified steps in the evidence. To detect a regression,
 instrument the arm and run the ordinary inbound suite.
-Confidence: high -
+Confidence: high - [evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md).
 [evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md).
 Verified all four steps the claim rests on: the cap equals the framing maximum
 (`client.rs:88`, `:403`); `validate_inbound` rejects a larger `len` first
@@ -2088,7 +2118,7 @@ shipped configuration supplies. For (a) a cooperative peer, which the in-crate
 duplex harness at `connection.rs:1480` onward already provides. For (b) a peer
 that reads but never sends a Pong, plus `invalidate_on_missed: true`. Paused
 tokio time for both. No adversary and no concurrency campaign.
-Confidence: high -
+Confidence: high - [evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md).
 [evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md).
 Every bound was read at HEAD and the two `sent` anchors were traced through
 both writers of the field.
@@ -2159,7 +2189,7 @@ that stops reading is retired by the write deadline on its own, which
 `config.rs:204-206` documents as intended. Paused time makes the 30 second
 window cheap. The second marker needs only a Ping enqueued behind at least one
 unwritten frame plus a prompt Pong.
-Confidence: high -
+Confidence: high - [evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md).
 [evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md).
 The admission path was traced from the Ping send through the cancel calls, and
 the absence of a host-side control lane was confirmed by reading the whole
@@ -2218,7 +2248,7 @@ about the fixture's bytes.
 Required faults and enabling state: none. The check is a pure unit test with no
 store, no filesystem, and no fault injection. It is the cheapest record in this
 pass.
-Confidence: high -
+Confidence: high - [evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md).
 [evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md).
 Both structs, both encoding functions, and the existing fixture were read at
 HEAD, and the three blind spots were each confirmed by reasoning from the
@@ -2274,7 +2304,7 @@ Required faults and enabling state: none at runtime. Constructing the check
 needs a fixture manifest whose bytes encode an older field order, which is a
 string literal, plus a staged directory whose files match it. No fault
 injection.
-Confidence: high -
+Confidence: high - [evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md).
 [evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md).
 Both equality checks were read at HEAD, and the fail-closed conclusion was
 derived from them rather than assumed; the prompt's "silently change every
@@ -2331,7 +2361,7 @@ test `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
 (`generation.rs:1689`) already builds that fixture, so the fault is available;
 the missing element is executing it on macOS. On the stub platforms the check
 is a compile-and-call assertion.
-Confidence: high -
+Confidence: high - [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md).
 [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md).
 Both cfg arms and the call site were read at the authoring pass's HEAD, along
 with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`)
@@ -2395,7 +2425,7 @@ the `statat` and the `renameat`. Deterministically: a failpoint between the two
 calls, or an extracted fallback called with the target pre-planted. Reaching
 the fallback on Linux at all needs a filesystem that rejects `renameat2` flags;
 running it as the default needs macOS.
-Confidence: high on the mechanism, medium on severity, since the transaction
+Confidence: high - [evidence](evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md). On the mechanism, medium on severity, since the transaction
 lock does exclude the in-model actors and no out-of-model writer is
 demonstrated -
 [evidence](evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md).
@@ -2477,7 +2507,7 @@ Provenance: source catalogs at `host@39e823037`; see [../README.md](../README.md
 ("refactor(shm): trim final review leftovers"). Both lens agents read and
 verified their line references at that commit, and this synthesis re-verified
 every citation it repeats. Scope and CI findings come from
-[../part-2-rescope/scope-map-and-risk-ranking.md](../part-2-rescope/scope-map-and-risk-ranking.md).
+`part-2-rescope/scope-map-and-risk-ranking.md` (a source-tree artifact that was not migrated into this repository).
 
 Two corrections to the lens files are carried in this catalog rather than left
 in the working material, per METHOD.md rule 1.
@@ -2711,7 +2741,7 @@ result is exactly lens B's list: `client.rs` (6 tests), `lifecycle.rs` (35),
 `host_roundtrip.rs` (4), and `instance_security.rs` (15). The four named are
 `client`, `lifecycle`, `shm_failure_modes`, and one of `shm_soak`'s two tests
 under `--exact`. Details are in
-[existing-checks.md](existing-checks.md).
+[existing-checks.md](ring-datapath/existing-checks.md).
 
 ## Index
 
@@ -2752,7 +2782,7 @@ mechanism rather than by the order records were proposed. Grouping reorders the
 records relative to the index; the index is the record-order artifact.
 
 Distribution after the portfolio disposition in
-[portfolio-evaluation.md](portfolio-evaluation.md): **8 safety, 5 reachability,
+[portfolio-evaluation.md](ring-datapath/portfolio-evaluation.md): **8 safety, 5 reachability,
 1 liveness**, and semantics **8 `always`, 1 `always-or-unreached`, 2
 `sometimes`, 2 `reachable`, 1 `unreachable`**. `always(!X)` counts as `always`.
 Two records changed under that disposition and both are recorded at the record:
@@ -2818,7 +2848,7 @@ a `serde_json::Value` and `[OwnedFd; RING_DESCRIPTOR_COUNT]` - six descriptors
 post-#131, up from two, still no ring - sent at `:261`.
 Existing check: `ring_transport.rs:851-856`
 `construction_has_no_ring_side_effects` - covers the process owner only, and
-does not run in CI. Status unaudited.
+runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`). Status unaudited.
 Impact: two threads driving one direction's cursors is a data race on the shared
 control page, which the transport's `try_receive` would surface as descriptor
 validation failure and quarantine at best, and as torn payload delivery at
@@ -3003,7 +3033,7 @@ reserves `unreachable` for a *forbidden* code location, and nobody forbids
 say it should be live. So this record is closer to a static architecture
 assertion than to a forbidden-location claim, and whether such assertions belong
 in this catalog at all is bias 1 in
-[portfolio-evaluation.md](portfolio-evaluation.md). The independent evaluation
+[portfolio-evaluation.md](ring-datapath/portfolio-evaluation.md). The independent evaluation
 raised the same objection against the release-identity record and it was applied
 there; it was not extended here, because that record's subject is an argument
 provenance at an *executed* function and this one's is a function that never
@@ -3044,7 +3074,7 @@ and the doc is what is wrong; but the two readings differ on whether a
 quarantined ring's arena bytes should be retained against the process bound,
 and only a human can settle which was intended. This is the
 release-versus-quarantine policy question, and it is bias 2 in
-[portfolio-evaluation.md](portfolio-evaluation.md); it must be settled before
+[portfolio-evaluation.md](ring-datapath/portfolio-evaluation.md); it must be settled before
 this record and
 [ring-a-admission-charge-releases-on-every-endpoint-thread-exit](#ring-a-admission-charge-releases-on-every-endpoint-thread-exit)
 can both be right, because one requires the charge to come back on every exit
@@ -3620,7 +3650,7 @@ Existing check: `ring_transport.rs:1008-1043`
 `budget_wait_observes_read_cancellation` covers the charge-wait path, and
 `:809-846` `finish_wakes_after_read_cancellation_with_unread_peer_data` covers
 the empty-ring report plus the post-cancellation finishing wake. `host-runtime`
-inline tests do not run in CI. Status unaudited.
+inline tests run in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`). Status unaudited.
 Impact: a cancelled generation's endpoint thread can keep consuming and
 forwarding peer frames after the close decision. Since the charge is released
 only when the thread exits (`:276`), a peer that floods during teardown extends
@@ -3877,7 +3907,7 @@ these records.
   not mutually consistent until the release-versus-quarantine policy question is
   answered**, because the release record requires an unconditional return and the
   quarantine record asks whether a condemned ring is an exception to it. That is
-  bias 2 in [portfolio-evaluation.md](portfolio-evaluation.md). Hypothesis: an
+  bias 2 in [portfolio-evaluation.md](ring-datapath/portfolio-evaluation.md). Hypothesis: an
   oracle that reads `snapshot().active` before and after each connection
   *dominates* the reclamation record, because a release-witnessed delta makes the
   counter's ordering observable as a side effect. It dominates neither the
@@ -3961,7 +3991,7 @@ Four records on `crates/host-runtime/src/wire.rs`, the 21-byte envelope header, 
 decoder and its encoders. **All four were carried into this sub-part from the
 superseded pre-refactor sub-part `part-2b-wire-and-channels`**, where they were
 records 1, 2, 3 and 6 of `_lenses/lens-a-wire-format.md`. See
-[../part-2b-wire-and-channels/README.md](../part-2b-wire-and-channels/README.md)
+`part-2b-wire-and-channels/README.md` (source-tree only, not migrated)
 for that directory's disposition.
 
 They were orphaned rather than retired, and the mechanism was a scope move that
@@ -4408,7 +4438,7 @@ because it touches record text this synthesis may not edit.
   `#[cfg(test)]`, the figures are **one** `debug_assert!`
   (`instance.rs:592-595`), **five** `.expect(`, **five** constant-time
   comparisons, and **nine** `let _ =`. The corrections and their sites are in
-  [existing-checks.md](existing-checks.md); none of them changes a record.
+  [existing-checks.md](setup-identity/existing-checks.md); none of them changes a record.
 
 **A fourth refinement, on the native addon's line numbers, now applied to the
 record text.** Two records cited `packages/shm-native/src/lib.rs` a few lines
@@ -4571,19 +4601,19 @@ the same proof construction on the host side do not.
 `cargo test -p host-runtime --doc`, but this sub-part has zero doctests: a grep for
 `/// ``` ` and `//! ``` ` fences across `setup_socket.rs`, `auth.rs`,
 `instance.rs` and `connection_file.rs` returns zero in each file, verified at
-`HEAD`. The one `debug_assert!` in scope (`instance.rs:592-595`) is compiled out
-of release builds and lives in a module CI does not build, so it fires nowhere in
-CI either.
+`HEAD`. The one `debug_assert!` in scope (`instance.rs:563`, re-verified) is compiled out
+of release builds; CI's debug-profile test runs compile it, so it fires under test
+and never in a release binary.
 
-Six of the crate's 24 integration binaries reach this boundary, and the split runs
-against the claims. **Three are named in CI and three are not.** `lifecycle.rs`
-(35 tests, `ci.yml:179`, `:187`), `client.rs` (6, `:132`, `:179`, `:187`) and
-`shm_failure_modes.rs` (6, `:133`) are named. `instance_security.rs` (15),
-`host_roundtrip.rs` (4) and `activation.rs` (4) are named in no workflow, and
-grepping all five workflow files for those three names returns nothing. Those
-three unnamed binaries are the sole homes of descriptor-anchored discovery,
-symlink and replacement safety, fenced shutdown removal, credential rotation, and
-the normative startup order. Nothing else covers any of them.
+Six of the crate's 24 integration binaries reach this boundary. In this tree all
+six run in CI: `ci.yml:118` and `:126` run `cargo test --workspace --all-targets`,
+which builds and runs every integration binary. They are `lifecycle.rs` (35
+tests), `client.rs` (6), `shm_failure_modes.rs` (6), `instance_security.rs` (15),
+`host_roundtrip.rs` (4) and `activation.rs` (4). The last three are the sole homes
+of descriptor-anchored discovery, symlink and replacement safety, fenced shutdown
+removal, credential rotation, and the normative startup order. Nothing else covers
+any of them. (The source catalog recorded three of the six as named in no
+workflow; that was the source repository's CI, not this one.)
 
 ## Index
 
@@ -4612,7 +4642,7 @@ differ deliberately; every record appears exactly once in each.
 | [setup-a-concurrent-setup-saturation-is-reached](#setup-a-concurrent-setup-saturation-is-reached) | reachability | high |
 
 Distribution after the portfolio disposition in
-[portfolio-evaluation.md](portfolio-evaluation.md): **13 `safety`, 2 `liveness`, 1
+[portfolio-evaluation.md](setup-identity/portfolio-evaluation.md): **13 `safety`, 2 `liveness`, 1
 `reachability`**; **15 `always` and 1 `sometimes`**; 16 high confidence and 0
 medium. Reachability classes are 15 `default-production` plus one record whose
 subject is a published export **compiled with no shipped-plugin caller**
@@ -5225,7 +5255,7 @@ disposition, which was scoped to `catalog.md`, `fault-map.md`, and
 `portfolio-evaluation.md` and forbidden from writing under `evidence/`. The link is
 written to the schema's target so it resolves once the file lands, and the gap is
 recorded in the process caveat of
-[portfolio-evaluation.md](portfolio-evaluation.md). Everything the file would hold
+[portfolio-evaluation.md](setup-identity/portfolio-evaluation.md). Everything the file would hold
 is verified and stated here.
 Verified: the single `deadline` computation at `setup_socket.rs:246-248` and its
 reuse at `:249-260`, `:261`, `:273`, `:281`, and `:282`; `read_message`
@@ -5279,7 +5309,7 @@ Fault/timing angle: none for the cap itself; the check at
 straight-line and the property is that the ordering does not regress.
 Required faults and enabling state: a peer that completes commit and then sends a
 huge length prefix.
-Confidence: high - [evidence](evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md).
+Confidence: high - [evidence](evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap.md).
 Verified: the cap at `setup_socket.rs:361-363` precedes the `vec![0u8; len]` at
 `:364`, and `MAX_SETUP_MESSAGE_LEN` is `16 * 1024` (`:24`).
 Existing check: `setup_socket.rs:810-825`
@@ -5340,14 +5370,14 @@ Required faults and enabling state: a peer that sends a partial length prefix an
 then stalls, plus a cancellation of `read_cancel` while it is parked. Both halves
 are in-process over a `UnixStream::pair`, the shape `setup_socket.rs:810-825`
 already uses.
-Confidence: high - [evidence](evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md).
+Confidence: high - [evidence](evidence/setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input.md).
 Verified: `read_message_unbounded` (`:355-367`) applies no `timeout_at`, unlike
 `read_message` (`:369-386`) which wraps both `read_exact` calls; the `select!` at
 `connection.rs:196-206` is `biased` with `peer_read_cancel.cancelled()` first
-(`:198`); `observe_peer` is `setup_socket.rs:345-353`. **Note the shared evidence
-file:** this record and its safety sibling both link
-`evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md`
-so no link breaks, and that file needs splitting into two.
+(`:198`); `observe_peer` is `setup_socket.rs:345-353`. The evidence file for
+this record is its own; the safety sibling links
+`evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap.md`, and the
+evidence files re-verify the line citations above against this tree.
 Existing check: none. `setup_socket.rs:810-825`
 `goodbye_and_eof_have_distinct_outcomes` reaches `observe_peer` but always through
 a peer-driven outcome, never through cancellation. Status unaudited.
@@ -5557,7 +5587,7 @@ executes anywhere, so nothing here has been measured.
   cover. Hypothesis: the first *dominates neither*, because it constrains the
   ordering `auth` then `send_grant` and says nothing about what happens between
   `send_grant` and the token compare, which is exactly the window the second
-  record is about. The token-scoping record is the one with genuine test leverage
+  record is about. The token-scoping record is the one with genuine test payoff
   in this cluster, because it is the only one with a negative outcome the host
   emits, `SetupError::InvalidActivation` (`setup_socket.rs:275`), and that outcome
   has no test at all today: `stale_wire_or_descriptor_schema_is_invalid_identity`
@@ -5612,7 +5642,7 @@ executes anywhere, so nothing here has been measured.
   `activate_server`, because their squatters never authenticate. One harness
   change, a dialer that authenticates and then delays its `Activate` inside the
   2-second setup deadline, populates the second clause and serves all four
-  records. That makes this the cheapest cluster in the part by leverage, and the
+  records. That makes this the cheapest cluster in the part by payoff, and the
   fixture it needs is a small variation on one that already exists.
 
 - **The one exit with no discard, and the question 2b has now answered.**
@@ -5735,7 +5765,7 @@ Provenance: source catalogs at `host@39e823037`; see [../README.md](../README.md
 ("refactor(shm): trim final review leftovers"), confirmed with
 `git branch --show-current` and `git log -1`. Both lens agents read and verified
 their line references at that commit. Scope and CI findings come from
-[../part-2-rescope/scope-map-and-risk-ranking.md](../part-2-rescope/scope-map-and-risk-ranking.md).
+`part-2-rescope/scope-map-and-risk-ranking.md` (a source-tree artifact that was not migrated into this repository).
 
 **Lens B re-derived every citation lens A made and corrected three, so lens B's
 line numbers win wherever the two differ.** All three are in the normative
@@ -5753,7 +5783,7 @@ document and none changes a finding.
 
 This synthesis re-verified the citations it repeats and adds two corrections of
 its own, both recorded where they land: the count of CI-named fixture binaries
-in [existing-checks.md](existing-checks.md), and the coverage of `Cancel` by
+in [existing-checks.md](client-peer/existing-checks.md), and the coverage of `Cancel` by
 `inbound_validation_enforces_the_direct_profile_table`, resolved below.
 
 ## What this part is about
@@ -6031,7 +6061,7 @@ Semantics distribution: twelve `always`, one `sometimes`, one `unreachable`. No
 reachability, one liveness. The distribution moved during disposition: the
 `always-or-unreached` record became `always` once its optional branch was proved
 impossible rather than merely unreached. See
-[portfolio-evaluation.md](portfolio-evaluation.md).
+[portfolio-evaluation.md](client-peer/portfolio-evaluation.md).
 
 **The seven group headings below are this synthesis's own**, chosen by shared
 mechanism rather than by the order records were proposed. Grouping reorders the
@@ -6404,7 +6434,7 @@ Required faults and enabling state: Exhaust `control_budget` (`:399`, funded by
 `CLIENT_CONTROL_QUEUED_BYTES` at `:76`) or fill `control_tx`, then deliver a
 `Ping`. Assert the generation retired, that the code is
 `control_capacity_exhausted`, and that no state names the unanswered probe.
-Confidence: high - [evidence](evidence/client-a-a-dropped-pong-is-never-observable-to-the-client.md).
+Confidence: high - [evidence](evidence/client-a-a-failed-pong-enqueue-retires-the-generation-as-a-local-fault.md).
 The original record's `always-or-unreached` encode branch is **impossible**, not
 merely unresolved, which is what this disposition changed. `encode_owned_frame`
 (`wire.rs:571-601`) returns `Err` only when `body.len() > MAX_BODY_LEN`
@@ -6663,7 +6693,7 @@ fake peer that answers `route.open` with `Error{code:"module_timeout"}` and also
 binds a route, then counting host-side binds against client-side handles and
 checking `release_stranded_route` (`:1572`) for reclamation. Form (b) tests the
 client against a host protocol violation, which is the framing question a human
-must settle; see [portfolio-evaluation.md](portfolio-evaluation.md).
+must settle; see [portfolio-evaluation.md](client-peer/portfolio-evaluation.md).
 Confidence: high - [evidence](evidence/client-a-route-open-retries-treat-four-host-terminals-as-proof-of-no-bind.md).
 Raised from medium during disposition, because the question the original record
 could not resolve is now resolved against the current host: the retry is safe
@@ -6923,7 +6953,7 @@ Provenance: source catalogs at `host@39e823037`; see [../README.md](../README.md
 `feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`, confirmed with
 `git log -1`. Both lens agents read and verified their line references at that
 commit. Scope and CI findings come from
-[../part-2-rescope/scope-map-and-risk-ranking.md](../part-2-rescope/scope-map-and-risk-ranking.md).
+`part-2-rescope/scope-map-and-risk-ranking.md` (a source-tree artifact that was not migrated into this repository).
 
 **Where lens B re-derived a citation lens A made, lens B's line numbers win.**
 Four differences, all verified again by this synthesis by printing the lines,
@@ -6982,7 +7012,7 @@ are control-channel `route.open` exits.
    catalog asserts the silence here.** The pending-entry record covers the
    `remove_pending` at `:1059`, which is the entry's removal, not the missing
    terminal; see the gaps queued in
-   [portfolio-evaluation.md](portfolio-evaluation.md).
+   [portfolio-evaluation.md](request-path/portfolio-evaluation.md).
 2. `dispatch.rs:637-638` - busy-reject exhaustion, which is **pre-dispatch**: the
    rejection never became an admitted request and no `Settlement` exists for it.
    Past the per-generation `MAX_INFLIGHT_BUSY_REJECTS` of 32
@@ -7216,15 +7246,15 @@ than privacy. `handler.rs:213-219` is stronger, because `OutputBuffer`'s
 
 **Three quiet areas frame the fault map.** Stated here in full because each is
 the gap between what the code decides and what any check proves, and all three
-are carried in [existing-checks.md](existing-checks.md).
+are carried in [existing-checks.md](request-path/existing-checks.md).
 
 1. **`dispatch.rs` decides every terminal on 1,497 production lines and carries
    2 in-crate tests, both about length arithmetic.** Those 1,497 lines own
    `Settlement` (`:34`), `settle` (`:399`), `dispatch_request` (`:828`),
    `open_route` (`:1103`), `close_generation` (`:1394`),
    `force_close_all_routes` (`:1421`), and `handle_cancel` (`:1489`). The two
-   tests at `:1502` and `:1524` cover `error_body_len` (`:115`). Neither runs in
-   CI and neither touches a terminal. All five silent exits, the emptiness gap
+   tests at `:1502` and `:1524` cover `error_body_len` (`:115`). Both run in CI in
+   this tree (`ci.yml:118`, `:126`) and neither touches a terminal. All five silent exits, the emptiness gap
    at `:1031`, and the missing acknowledgement at `:447-460` sit in the same
    file, so the three highest-consequence findings in this catalog all land
    where in-crate coverage is thinnest.
@@ -7582,8 +7612,8 @@ constructs a `GenerationCore`" is false on the second half.
 `connection.rs:946-963` (`shutdown_registration_rejection_leaves_no_graceful_drain_work`)
 constructs a complete `GenerationCore` today, all eleven fields, using
 `frame_sender` for the writer, and asserts against it. So the postcondition is
-assertable; what it costs is placing the oracle in a lane CI does not run, which
-is a trade rather than a block.
+assertable; what it costs is placing the oracle in an inline unit-test lane, which
+CI runs in this tree (`ci.yml:118`, `:126`); that is a trade rather than a block.
 Existing check: none for this record's postcondition.
 `connection.rs:946-963` is not a check of it - it constructs a `GenerationCore`
 for an unrelated claim - but it is the construction proof this record's oracle
@@ -8039,7 +8069,7 @@ Reachability: default-production
 Status: active
 Exercised: partial - `tests/dispatch.rs:1524` `diagnostic_limit_substitution_drops_retry_hint`
 is an inline unit test covering `bounded_terminal_error` only, and inline
-`host-runtime` tests do not run in CI. The `BindOutcome::Reject` copy of the same
+`host-runtime` tests run in CI in this tree (`ci.yml:118`, `:126`). The `BindOutcome::Reject` copy of the same
 policy has no test.
 Guarantee: Handler-authored error codes and messages are truncated-by-
 substitution to at most 128 and 4,096 bytes before the terminal is held across
@@ -8164,7 +8194,7 @@ Two records on `crates/host-runtime/src/composite.rs`, the static three-child
 composition every production host runs. **Both were carried into this sub-part
 from the superseded pre-refactor sub-part `part-2b-wire-and-channels`**, where
 they were records 10 and 11 of `_lenses/lens-c-negotiation-provider.md`. See
-[../part-2b-wire-and-channels/README.md](../part-2b-wire-and-channels/README.md)
+`part-2b-wire-and-channels/README.md` (source-tree only, not migrated)
 for that directory's disposition.
 
 They were orphaned rather than retired, and the mechanism was a route that was
@@ -8269,8 +8299,9 @@ exceptions, all fatal-latched, listed in the open questions below.
 Existing check: `tests/composite_routing.rs:485-531` pins exactly one
 `route_gone` for a rejected bind;
 `tests/composite_routing.rs:532-600` pins that a closed handle cannot dispatch
-to stale child ownership. Neither runs in CI: the binary is unnamed, per
-[existing-checks.md](existing-checks.md). Status unaudited. Both spans
+to stale child ownership. Both run in CI in this tree (`ci.yml:118`, `:126`); the
+unnamed-binary status in [existing-checks.md](request-path/existing-checks.md) is the
+source repository's. Status unaudited. Both spans
 re-verified at carry time: `rejected_broca_bind_gets_exactly_one_broca_route_gone`
 has its attribute at `:485` and its `fn` at `:486`, and
 `a_closed_route_handle_cannot_dispatch_to_stale_child_ownership` has its attribute
@@ -8347,9 +8378,9 @@ the optional children's `health` (`:318`, `:321`) and all three `shutdown` calls
 Existing check: `tests/composite_routing.rs:851-885` and `:886-917` cover
 shutdown panic and error; `tests/composite_routing.rs:986-1027` and `:1028-1049`
 cover optional-child health panics;
-`tests/composite_routing.rs:918-985` covers the non-graceful incarnation. None
-runs in CI: the binary is unnamed, per
-[existing-checks.md](existing-checks.md). Status unaudited. **One citation
+`tests/composite_routing.rs:918-985` covers the non-graceful incarnation. All
+run in CI in this tree (`ci.yml:118`, `:126`); the unnamed-binary status in
+[existing-checks.md](request-path/existing-checks.md) is the source repository's. Status unaudited. **One citation
 repaired at carry time:** the last of the health-panic spans is `:1028-1049`, not
 `:1028-1060`. The file is 1,049 lines, so the lens's end bound overran it by
 eleven; the test is `a_panicking_synapse_health_reports_failing_without_unwinding`
@@ -8374,7 +8405,7 @@ test module at `1299-1344`; `config.rs` production is `1-462` with its tests at
 `463-674`. `harness_closure.rs`, `lib.rs`, and `file_mode.rs` have **no test
 module at all**, which for a 1,122-line security-relevant filesystem module is a
 finding in its own right and is carried in
-[existing-checks.md](existing-checks.md).
+[existing-checks.md](runtime-config/existing-checks.md).
 
 Boundary context, read but not mined: `connection.rs` is Part 2a's file and is
 cited only as the consumer of four configured deadlines (`:125`, `:145`, `:158`,
@@ -8436,7 +8467,7 @@ Provenance: source catalogs at `host@39e823037`; see [../README.md](../README.md
 `feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`, confirmed with
 `git log -1`. Both lens agents read and verified their line references at that
 commit. Scope and CI findings come from
-[../part-2-rescope/scope-map-and-risk-ranking.md](../part-2-rescope/scope-map-and-risk-ranking.md).
+`part-2-rescope/scope-map-and-risk-ranking.md` (a source-tree artifact that was not migrated into this repository).
 
 **Where lens B re-derived a citation lens A made, lens B's line numbers and
 figures win.** Three differences, all verified again by this synthesis by
@@ -8643,10 +8674,10 @@ the production claim, and the three records it applies to are exactly the three
 `explicit-config-only` records in 2a's catalog, confirmed by enumerating that
 catalog's `Reachability:` lines:
 
-- [../part-2a-host-lifecycle/catalog.md#a-timely-pong-sustains-the-generation-within-a-bounded-round](../part-2a-host-lifecycle/catalog.md#a-timely-pong-sustains-the-generation-within-a-bounded-round),
+- [a-timely-pong-sustains-the-generation-within-a-bounded-round](#a-timely-pong-sustains-the-generation-within-a-bounded-round),
   2a's liveness record proper.
-- [../part-2a-host-lifecycle/catalog.md#slow-egress-alone-does-not-retire-a-probed-generation](../part-2a-host-lifecycle/catalog.md#slow-egress-alone-does-not-retire-a-probed-generation).
-- [../part-2a-host-lifecycle/catalog.md#a-setup-pong-is-required-and-forbidden-in-the-same-window](../part-2a-host-lifecycle/catalog.md#a-setup-pong-is-required-and-forbidden-in-the-same-window),
+- [slow-egress-alone-does-not-retire-a-probed-generation](#slow-egress-alone-does-not-retire-a-probed-generation).
+- [a-setup-pong-is-required-and-forbidden-in-the-same-window](#a-setup-pong-is-required-and-forbidden-in-the-same-window),
   **the pong pre-answer record**, whose enabling state its own
   `Required faults and enabling state:` line gives as `liveness: Some(..)` in
   `HostConfig`.
@@ -8668,7 +8699,7 @@ Both are the shape Part 2a found with its 60-second freshness window, where a
 hardcoded value governs an operator-settable one and the fixed value wins. **Two
 recurrences in one sub-part, in the same direction, makes this the catalog's
 second-most repeated finding after the success-shaped error path.** Part 2a's is
-[../part-2a-host-lifecycle/catalog.md#phase-evidence-outlives-a-long-phase](../part-2a-host-lifecycle/catalog.md#phase-evidence-outlives-a-long-phase),
+[phase-evidence-outlives-a-long-phase](#phase-evidence-outlives-a-long-phase),
 where the record is written once per phase transition and compared against a
 fixed, non-configurable 60-second window while the frame and lifecycle deadlines
 are settable to 365 days.
@@ -8951,7 +8982,7 @@ path that touches these files at all.
 **Four quiet areas frame the fault map**, three synthesized here and a fourth
 added by a disposition pass once the construction conditionality map's
 shutdown-is-unconditional row was refuted. Carried in full in
-[existing-checks.md](existing-checks.md).
+[existing-checks.md](runtime-config/existing-checks.md).
 
 1. **`harness_closure.rs` is 1,122 lines of untrusted-manifest filesystem code
    with zero in-crate tests.** It validates untrusted manifests
@@ -8961,8 +8992,8 @@ shutdown-is-unconditional row was refuted. Carried in full in
    prunes a store (`:554`), enforces five hard caps (`MAX_MANIFEST_BYTES` 16 MiB,
    `MAX_NODES` 65,536, `MAX_PATH_BYTES` 4096, `MAX_STRING_BYTES` 1024,
    `:25-28`), and guards against sticky bits and non-regular files (`:29-32`).
-   None of that is exercised by anything CI runs, its one test binary is
-   unnamed, and `:400`'s `.expect` makes a validation gap a panic rather than a
+   None of that is exercised by its one test binary, which CI does run in this
+   tree (`ci.yml:118`, `:126`), and `:400`'s `.expect` makes a validation gap a panic rather than a
    rejection.
 2. **The configuration contract is proven only by rejection.** `config.rs` is the
    only authority for twenty of the twenty-one keys, its ten tests all prove
@@ -8994,7 +9025,7 @@ shutdown-is-unconditional row was refuted. Carried in full in
    wait deliberately. The proof that the interleaving is real is in the crate:
    `run_handler_shutdown`'s once-latch comment (`:1260-1264`) exists to stop this
    path and `shutdown_sequence` from both running the handler callback. Full
-   entry in [existing-checks.md](existing-checks.md).
+   entry in [existing-checks.md](runtime-config/existing-checks.md).
 
 ## Reachability: runtime and configuration
 
@@ -9085,7 +9116,7 @@ and
 [rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline](#rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline),
 both in Group B, whose `Check:` lines asserted conditions that could not fail and
 could not pass respectively. The changes and their justification are in
-[portfolio-evaluation.md](portfolio-evaluation.md). Where a record's prose says
+[portfolio-evaluation.md](runtime-config/portfolio-evaluation.md). Where a record's prose says
 "per the map above", the map it means is the construction conditionality map in
 the leading section of this file, which the same pass rebuilt.
 
@@ -9833,7 +9864,7 @@ rather than the configuration contract.
   Standing alone because its relationship is across parts rather than within
   this one. Its guarantee is conditional on no module declaring a reservation;
   Broca declares one, so 2e's
-  [../part-2e-request-path/catalog.md#req-a-both-admission-classes-and-the-rejection-bound-saturate](../part-2e-request-path/catalog.md#req-a-both-admission-classes-and-the-rejection-bound-saturate)
+  [req-a-both-admission-classes-and-the-rejection-bound-saturate](#req-a-both-admission-classes-and-the-rejection-bound-saturate)
   owns the live half, namely that reserved *task* exhaustion is constructed by no
   test. Hypothesis: 2e's five-state saturation campaign *dominates this record's
   entry half*, because a campaign that saturates the reserved task pool has
@@ -9962,7 +9993,7 @@ Guarantee: Two byte-identical sends converge on one run and one backend start; a
 Check: `always` - `runs_started <= 1` per identical send key; a differing body returns the conflict terminal.
 Fault/timing angle: Two harness clients retry the same prompt concurrently.
 Required faults and enabling state: Concurrent identical sends; a differing resend under the same key.
-Confidence: medium - `identical_resend_dedups_and_any_byte_difference_conflicts`, `racing_identical_sends_converge_on_one_run_and_one_backend_start` (`crates/host-runtime/tests/broca_supervisor.rs`).
+Confidence: medium - [evidence](evidence/broca-identical-resends-converge-on-one-run.md). `identical_resend_dedups_and_any_byte_difference_conflicts`, `racing_identical_sends_converge_on_one_run_and_one_backend_start` (`crates/host-runtime/tests/broca_supervisor.rs`).
 Existing check: The two tests named above; unaudited.
 Impact: Two model calls billed and two divergent transcripts for one prompt.
 Open questions: None.
@@ -9977,7 +10008,7 @@ Guarantee: Every run path returns its pending permits, task permits, and byte ch
 Check: `always` - after every terminal, the supervisor's permits and charges equal their starting values; after shutdown the state is empty.
 Fault/timing angle: A leaked permit shrinks the admission pool until the host restarts.
 Required faults and enabling state: Each terminal path: success, error, cancel, detach, shutdown.
-Confidence: medium - `every_path_returns_permits_and_charges_to_baseline`, `host_shutdown_drains_the_supervisor_to_zero_state`, `transport_detach_paths_leave_the_run_untouched` (`crates/host-runtime/tests/broca_supervisor.rs`).
+Confidence: medium - [evidence](evidence/broca-permits-and-charges-return-to-baseline.md). `every_path_returns_permits_and_charges_to_baseline`, `host_shutdown_drains_the_supervisor_to_zero_state`, `transport_detach_paths_leave_the_run_untouched` (`crates/host-runtime/tests/broca_supervisor.rs`).
 Existing check: The tests named above; unaudited.
 Impact: Slow admission collapse of the Broca lane.
 Open questions: None.
@@ -9989,10 +10020,10 @@ Reachability: default-production - every harness child runs in its own process g
 Status: active
 Exercised: partial - SIGTERM-then-SIGKILL reaping on cancel, delete, and shutdown is covered with real processes; the orphan sweep is covered for dead owners.
 Guarantee: Cancelling, deleting, or shutting down a run terminates the whole harness process group, escalating from SIGTERM to SIGKILL when the child ignores the first, and the orphan sweep kills only groups whose owner is dead.
-Check: `always` - no process of a reaped group survives the terminal; `always` - the sweep never signals a group whose owner is alive.
+Check: `always` - no process of a reaped group survives the terminal, and the sweep never signals a group whose owner is alive; both are invariants over every terminal, so one `always` covers the conjunction.
 Fault/timing angle: A grandchild that survives its parent keeps a credential in its environment.
 Required faults and enabling state: A child that ignores SIGTERM; a forked grandchild; a dead owner with a live group.
-Confidence: medium - `cancel_reaps_group_with_sigterm_first`, `sigkill_escalation_when_term_ignored`, `supervisor_shutdown_reaps_group`, `group_registry_sweep_kills_only_dead_owner_groups` (`crates/host-runtime/tests/broca_subprocess.rs`, `harness = false` runner).
+Confidence: medium - [evidence](evidence/broca-children-are-reaped-as-a-process-group.md). `cancel_reaps_group_with_sigterm_first`, `sigkill_escalation_when_term_ignored`, `supervisor_shutdown_reaps_group`, `group_registry_sweep_kills_only_dead_owner_groups` (`crates/host-runtime/tests/broca_subprocess.rs`, `harness = false` runner).
 Existing check: The checks named above; unaudited.
 Impact: Orphaned model processes holding credentials.
 Open questions: None.
@@ -10007,7 +10038,7 @@ Guarantee: The child environment is the admitted snapshot with the launch identi
 Check: `always` - the spawned environment contains no `EIDNARA_MODULE_ID` or `EIDNARA_LAUNCH_NONCE`, exactly the selected provider variable, and no entry over the per-value cap.
 Fault/timing angle: A leaked launch identity lets the child impersonate the module; a leaked ambient credential reaches a harness the user did not choose.
 Required faults and enabling state: An environment with several provider credentials and the launch identity set.
-Confidence: medium - `env_snapshot_strips_launch_identity`, `env_snapshot_admission_charges_per_entry_overhead`, `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`), `credential_snapshot_must_match_before_backend_spawn` (`crates/host-runtime/tests/broca_protocol.rs`).
+Confidence: medium - [evidence](evidence/broca-child-environment-carries-only-the-provider-row.md). `env_snapshot_strips_launch_identity`, `env_snapshot_admission_charges_per_entry_overhead`, `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`), `credential_snapshot_must_match_before_backend_spawn` (`crates/host-runtime/tests/broca_protocol.rs`).
 Existing check: The checks named above; unaudited.
 Impact: Credential exfiltration through a harness child.
 Open questions: None.
@@ -10019,12 +10050,27 @@ Reachability: default-production - every Broca request is decoded through the cl
 Status: active
 Exercised: yes - each valid operation decodes its exact schema, every enumerated malformed shape is rejected, and the 512 KiB boundary is exact.
 Guarantee: The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.
-Check: `always` - every malformed shape is rejected with `schema_violation`; `always` - a 512 KiB body is admitted and one byte more is rejected; `always` - a rejected request leaves no run.
+Check: `always` - every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, and a rejected request leaves no run; every clause is an invariant over every request, so one `always` covers the conjunction.
 Fault/timing angle: A permissive decoder lets a harness smuggle fields the host does not validate.
 Required faults and enabling state: Malformed and boundary-sized bodies.
-Confidence: medium - `each_valid_operation_decodes_its_exact_schema`, `every_malformed_shape_is_rejected_with_schema_violation`, `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over`, `malformed_requests_over_the_host_create_no_run_state`, `harness_vocabulary_is_closed` (`crates/host-runtime/tests/broca_protocol.rs`).
+Confidence: medium - [evidence](evidence/broca-protocol-shapes-are-closed.md). `each_valid_operation_decodes_its_exact_schema`, `every_malformed_shape_is_rejected_with_schema_violation`, `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over`, `malformed_requests_over_the_host_create_no_run_state`, `harness_vocabulary_is_closed` (`crates/host-runtime/tests/broca_protocol.rs`).
 Existing check: The tests named above; unaudited.
 Impact: Unvalidated input reaches the harness spawn path.
+Open questions: None.
+
+### broca-payload-hook-owns-the-generation-controls
+
+Type: safety
+Reachability: default-production - every Pi run loads the compiled-in hook as the last `--extension` after `--no-extensions` disables discovery, so the hook is the final `before_provider_request` handler on every provider request.
+Status: active
+Exercised: partial - a driver that registers a tampering handler ahead of the hook covers the OpenAI-style, Gemini-style, and mixed-spelling payloads plus one unrecognized shape; nothing runs the hook inside a real Pi process or covers a missing or non-numeric environment value.
+Guarantee: The provider payload Pi sends carries exactly the output-token bound and temperature the `session.send` request admitted: every recognized output-token spelling present on the payload and `generationConfig.maxOutputTokens` are rewritten to the request's `max_output_tokens`, `temperature` follows it, every unrelated field survives, and a payload with no recognized output-token field or a non-object payload fails the request rather than running uncapped.
+Check: `always` - for every payload the hook returns, each recognized output-token field equals the admitted bound and `temperature` equals the admitted temperature, fields the hook does not own are byte-identical to the input, and a payload with no recognized field throws; the rewrite is an invariant over every provider request, so one `always` covers the conjunction.
+Fault/timing angle: An earlier trusted extension leaves a larger limit in a second spelling, or a provider adds a wire family the hook does not recognize; either lets a provider default exceed the caller's budget.
+Required faults and enabling state: A payload touched by an earlier handler; a payload carrying two output-token spellings; a payload with no recognized spelling.
+Confidence: medium - [evidence](evidence/broca-payload-hook-owns-the-generation-controls.md). `pi_broca_hook_owns_generation_controls` (`crates/host-runtime/tests/broca_subprocess.rs`, `harness = false` runner) materializes the hook bytes from `PI_BROCA_EXTENSION_BYTES` and drives them under Node or Bun.
+Existing check: The check named above; unaudited.
+Impact: A provider request runs with a token budget or temperature the caller did not admit.
 Open questions: None.
 
 ### synapse-admission-boundaries-are-exact
@@ -10034,13 +10080,14 @@ Reachability: default-production - every batch and query is admitted through the
 Status: active
 Exercised: partial - count and byte boundaries, eviction order, and expiry are covered with a deterministic engine; the bounded-waiter test that opens 33 ring clients is ignored because the host admits at most 8 rings per process.
 Guarantee: Job admission is exact at the count and queued-byte boundaries, never evicts live work, evicts completed jobs oldest first under count pressure, and reports expired jobs as `module_restarted`.
-Check: `always` - the boundary-plus-one request is rejected and the boundary request admitted; `always` - no live job is evicted; charges return on completion.
+Check: `always` - the boundary-plus-one request is rejected and the boundary request admitted, no live job is evicted, and charges return on completion; every clause is an invariant over every admission and completion, so one `always` covers the conjunction.
 Fault/timing angle: Off-by-one at the boundary or eviction of live work loses a caller's result.
 Required faults and enabling state: Boundary-sized admission; completion under count pressure; expiry.
-Confidence: medium - `admission_count_boundary_is_exact_and_never_evicts_live_work`, `queued_byte_boundary_is_exact_and_releases_on_completion`, `completed_jobs_evict_oldest_first_under_count_pressure`, `expired_jobs_return_module_restarted` (`crates/host-runtime/tests/synapse_jobs.rs`).
+Confidence: medium - [evidence](evidence/synapse-admission-boundaries-are-exact.md). `admission_count_boundary_is_exact_and_never_evicts_live_work`, `queued_byte_boundary_is_exact_and_releases_on_completion`, `completed_jobs_evict_oldest_first_under_count_pressure`, `expired_jobs_return_module_restarted` (`crates/host-runtime/tests/synapse_jobs.rs`).
 Existing check: The tests named above; unaudited.
 Impact: A lost or silently duplicated embedding job.
-Open questions: Whether `boundary_waiters_with_maximal_texts_are_all_admitted` should be rewritten for the eight-ring admission cap or dropped; it is `#[ignore]` with that reason.
+Open questions:
+- Whether `boundary_waiters_with_maximal_texts_are_all_admitted` (`crates/host-runtime/tests/synapse_protocol.rs:415`, a query-waiter admission test, not a job-table test) should be rewritten for the eight-ring admission cap or dropped; it is `#[ignore]` with that reason (`:412-414`). (needs human input)
 
 ### synapse-degrades-to-disabled-and-keeps-the-context-routable
 
@@ -10049,10 +10096,10 @@ Reachability: default-production - every artifact fault takes this path.
 Status: active
 Exercised: partial - missing, corrupt, extra, wrong-identity, and wrong-pooling artifacts disable the lane while the context module stays routable; a fault during inference itself is covered only by the deterministic engine.
 Guarantee: An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.
-Check: `always` - `activate` returns `Ok` with the lane disabled for every artifact fault; `reachable` - a context request completes while Synapse is disabled.
+Check: `always` - for every artifact fault, `activate` returns `Ok` with the lane disabled and a context request issued afterwards completes; the second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation.
 Fault/timing angle: A host-fatal Synapse fault would take the product down for an optional lane.
 Required faults and enabling state: Each artifact fault class; an unconfigured component.
-Confidence: medium - `unconfigured_component_is_disabled_not_fatal`, `one_bit_changes_to_each_artifact_disable_the_lane`, `missing_artifact_disables_the_lane`, `wrong_ort_identity_disables_the_lane`, `corrupt_bundle_degrades_synapse_and_keeps_context_routable` (`crates/host-runtime/tests/synapse_bundle.rs`, `crates/host-runtime/tests/synapse_roundtrip.rs`).
+Confidence: medium - [evidence](evidence/synapse-degrades-to-disabled-and-keeps-the-context-routable.md). `unconfigured_component_is_disabled_not_fatal`, `one_bit_changes_to_each_artifact_disable_the_lane`, `missing_artifact_disables_the_lane`, `wrong_ort_identity_disables_the_lane`, `corrupt_bundle_degrades_synapse_and_keeps_context_routable` (`crates/host-runtime/tests/synapse_bundle.rs`, `crates/host-runtime/tests/synapse_roundtrip.rs`).
 Existing check: The tests named above; unaudited.
 Impact: The whole host fails because an embedding model is missing.
 Open questions: None.
@@ -10064,10 +10111,10 @@ Reachability: default-production - every Synapse request is decoded and bounded 
 Status: active
 Exercised: partial - constraint violations, unknown fields, excessive depth, oversize bodies, and replay reuse are covered with a deterministic engine that counts calls.
 Guarantee: A request that violates a constraint, carries an unknown field, exceeds the depth or size bound, names a different model, fingerprint, or epoch, or names a foreign job is rejected before the engine runs (as `schema_violation`, `substitution_rejected`, or `module_restarted` by class), and equal replays reuse one job and one inference.
-Check: `always` - `engine.calls` is unchanged by a rejected request; `always` - equal replays produce one inference.
+Check: `always` - `engine.calls` is unchanged by a rejected request, and equal replays produce exactly one inference; both are invariants over every request, so one `always` covers the conjunction.
 Fault/timing angle: Validation after inference would spend model time on hostile input.
 Required faults and enabling state: Each violation class; replayed requests.
-Confidence: medium - `embed_query_rejects_every_constraint_violation`, `embed_batch_validation_creates_no_job_and_no_inference`, `an_unknown_top_level_field_is_rejected_without_reading_its_value`, `a_routed_depth_nine_request_is_a_schema_violation`, `equal_replays_reuse_one_job_and_one_inference` (`crates/host-runtime/tests/synapse_protocol.rs`).
+Confidence: medium - [evidence](evidence/synapse-requests-are-validated-before-any-inference.md). `embed_query_rejects_every_constraint_violation`, `embed_batch_validation_creates_no_job_and_no_inference`, `an_unknown_top_level_field_is_rejected_without_reading_its_value`, `a_routed_depth_nine_request_is_a_schema_violation`, `equal_replays_reuse_one_job_and_one_inference` (`crates/host-runtime/tests/synapse_protocol.rs`).
 Existing check: The tests named above; unaudited.
 Impact: Model time spent on requests that were never valid.
 Open questions: None.
@@ -10079,10 +10126,10 @@ Reachability: default-production - every inference loads ONNX Runtime through th
 Status: active
 Exercised: partial - `source_replacement_cannot_change_verified_loader_bytes` asserts the seals, rejected writes, replacement resistance, and the digest on the memfd path; the full load into ONNX Runtime is exercised only where the runtime library is present.
 Guarantee: The ONNX Runtime library is loaded from a sealed memfd named `host-onnxruntime` whose bytes were certified with the bundle, so a library swapped on disk after certification cannot reach inference.
-Check: `always` - the loaded image's digest equals the certified digest; `always` - the memfd carries the write and grow seals.
+Check: `always` - the loaded image's digest equals the certified digest and the memfd carries the write and grow seals; both are invariants over every load, so one `always` covers the conjunction.
 Fault/timing angle: A library swapped between certification and load changes every embedding.
 Required faults and enabling state: A modified library on disk after certification; a memfd without seals.
-Confidence: medium - `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`) observes the seals and the digest.
+Confidence: medium - [evidence](evidence/synapse-inference-runs-through-a-sealed-runtime-image.md). `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`) observes the seals and the digest.
 Existing check: `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`); unaudited.
 Impact: Embeddings from an uncertified runtime under a certified identity.
 Open questions: None.

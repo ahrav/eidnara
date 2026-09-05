@@ -639,7 +639,7 @@
       "source": null,
       "destination": "crates/tokenizer/assets/claude.pat",
       "destination_sha256": "8933fca2f22a0222062cf9676ef593a06528fa5a2b8ddf9960087b653fb72f44",
-      "transformation": "generated",
+      "transformation": "authored",
       "class": "generated",
       "review_evidence": {
         "regeneration": "bun crates/tokenizer/gen/gen-claude-vocab.ts"
@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "aeb4eb0222e69e89c250e028d01dbf19599faf3b9c14bad172f139312f4e7c28",
+      "destination_sha256": "45cbad138daadda739d0c1500f47d8c338a579e0249d6743f5ef4b1353058e85",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "a7161010fd10a30809a2254c27ad3fea055abf007d2f464cc8bd70ac8e7fabc6",
+      "destination_sha256": "4d15a8087d11e2f5afcdc831d4dbd17abc5d2e2e5be73f9ecc97add80b42bc96",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -4261,19 +4261,6 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "951471ae0a706ed9d8aaa6ebf07151181defe1e0"
-      },
-      "destination": "docs/properties/host-runtime/evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md",
-      "destination_sha256": "8c51c54693fd763480b040994215d6fbe124be4a95088a73e9403210b79018d7",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
         "blob_sha": "d7bc08de06a349bb10851ae58144432e82d76d29"
       },
       "destination": "docs/properties/host-runtime/evidence/setup-a-the-setup-socket-is-never-connectable-outside-the-owning-uid.md",
@@ -4317,19 +4304,6 @@
       },
       "destination": "docs/properties/host-runtime/evidence/client-a-a-close-completes-before-its-setup-goodbye-is-written.md",
       "destination_sha256": "84601d8360076fb9a893811f96b8883525d11433e3e3da52416b46719b42a3c3",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
-        "blob_sha": "025598e756396f321e233440cc7bc752744c5789"
-      },
-      "destination": "docs/properties/host-runtime/evidence/client-a-a-dropped-pong-is-never-observable-to-the-client.md",
-      "destination_sha256": "31d2010daa5913cc3ce84e863d8377b6570d2b4fde2e54ae0b0ae7c05a3e1a24",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5351,6 +5325,149 @@
     },
     {
       "source": null,
+      "destination": "docs/properties/host-runtime/evidence/broca-payload-hook-owns-the-generation-controls.md",
+      "destination_sha256": "508db78da11246a5903660aa539d2171e1c5e44663e447de151b93ddb7c886aa",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/broca-child-environment-carries-only-the-provider-row.md",
+      "destination_sha256": "5d7e9357786e6a2d2c6c398e5902e5f4928cf9cc12ebedbbcdbd84180fafa366",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/broca-children-are-reaped-as-a-process-group.md",
+      "destination_sha256": "d23ca06af9859d531549f269b749efd48e62515fe8fe06cdc8a86956e7a936a5",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/broca-identical-resends-converge-on-one-run.md",
+      "destination_sha256": "609c0ec35e512822b19ad7eaaa0ba868b20c172d5689264611f1d70da50bbb80",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/broca-permits-and-charges-return-to-baseline.md",
+      "destination_sha256": "2c13f360a62ce4b0403075dfe8531a19f12b21e85bb6aa639c3715b7f35d2d18",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/broca-protocol-shapes-are-closed.md",
+      "destination_sha256": "c3825fa07bb8d7ac0c12356b14fd9b72a7b7adf1dd6bdede5e0ec1e3786c1276",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/client-a-a-failed-pong-enqueue-retires-the-generation-as-a-local-fault.md",
+      "destination_sha256": "25f29d4ce00a0196daa76a80e6f489d4a2f45053a2a8ae8807f474266c3cbae5",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap.md",
+      "destination_sha256": "d9dcfa8cf60ee6ead4fdcc0989258e3e9bed1dd29bd0ad0e2d2e705b92af9b4c",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input.md",
+      "destination_sha256": "975387938e619bd42b5aaa01792d103878ae497db7f9662260345f3d06bddcfc",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/synapse-admission-boundaries-are-exact.md",
+      "destination_sha256": "f4c33a7f520a5abfb851106dcd8b0809173ae6e58a03545a48b2c3cdde367d6d",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/synapse-degrades-to-disabled-and-keeps-the-context-routable.md",
+      "destination_sha256": "8521a04caf13a1de7c1a41b6c8fafdbcd27a03b34765d58ad62be9a88cc62339",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/synapse-inference-runs-through-a-sealed-runtime-image.md",
+      "destination_sha256": "2a244f4bb1a3dbf62f7e9bc764ab78c787c222d41a5f478e5778839bd2828bf9",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/evidence/synapse-requests-are-validated-before-any-inference.md",
+      "destination_sha256": "2daab3d51f4cf508c3f5daa12cf0b575389319df963fa48f4df8f57e7a78dbd2",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
       "destination": "docs/properties/tokenizer/catalog.md",
       "destination_sha256": "38ae29fb7a1ade7cb1061769244948ebdb5f4d5e786ecde2d59f13db2a5ecf16",
       "transformation": "authored",
@@ -5483,7 +5600,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "42eccf24d2bfc63c8daba16adf7e31d3e34ab7b3736994170ba7affb68a3f82c",
+      "destination_sha256": "8c2966206d5808b9d30282db9fbfd047d24152c9ce565240b9a8628857595f3b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5527,7 +5644,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "79100f093785bc2e03084d61e6e36fc47506aa04b7ece8be30c424377ec61ba4",
+      "destination_sha256": "62a5e6764d319b9ff61acc9108a655831666d2294f1d6c867e1c30bc077871ee",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5593,7 +5710,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/receipt.json",
-      "destination_sha256": "d31c3a0221b11a09c5f530f38a63214104fc2f7314e0a897b623677a2dcc5fe6",
+      "destination_sha256": "0b87ee14acda766b23aa68688906cd94b52a9fa0e2136f281a9d1817192d0a81",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5615,7 +5732,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/receipt.json",
-      "destination_sha256": "a0352d5c8e9334cd4878484e52fe5e69cc2b1e3f422579ea473b2a48ee2e3b08",
+      "destination_sha256": "9d80874f86041583f2366a26bc64ebd4271149490ec8ec6dbb6152864e287a7a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

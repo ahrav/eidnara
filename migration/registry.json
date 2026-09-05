@@ -929,6 +929,16 @@
     },
     {
       "kind": "fixture",
+      "path": "crates/tokenizer/assets/claude.pat",
+      "role": "byte-stable",
+      "rationale": "Upstream claude pre-tokenizer pattern, written by the same generator as the vocabulary. Byte-stable; `pattern_is_upstream_with_ecmascript_whitespace` compares the crate's pattern against it, so regeneration is a reviewed contract change.",
+      "evidence": [
+        "migration/waves/U3/receipt.json",
+        "docs/properties/tokenizer/evidence/tokenizer-pattern-is-upstream-with-ecmascript-whitespace.md"
+      ]
+    },
+    {
+      "kind": "fixture",
       "path": "crates/host-runtime/tests/fixtures/harness-closures/pi-valid.json",
       "role": "byte-stable",
       "rationale": "Harness-closure manifest whose canonical digest the Rust and TypeScript sides must agree on. Byte-stable under R18.",
@@ -962,7 +972,7 @@
       "path": "crates/tokenizer/gen/gen-claude-vocab.ts",
       "role": "generator",
       "fixture": "crates/tokenizer/assets/claude.tiktoken",
-      "rationale": "Generator for the embedded vocabulary asset.",
+      "rationale": "Generator for the embedded vocabulary asset. It writes two byte-stable outputs from the ai-tokenizer claude encoding: `assets/claude.tiktoken` (named here as its fixture) and `assets/claude.pat`, the upstream pre-tokenizer pattern that `src/lib.rs` compares its own pattern against.",
       "evidence": [
         "crates/tokenizer/src/lib.rs"
       ]
@@ -1175,6 +1185,71 @@
     {
       "kind": "authored",
       "path": "docs/properties/tokenizer/portfolio-evaluation.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/broca-payload-hook-owns-the-generation-controls.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/broca-child-environment-carries-only-the-provider-row.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/broca-children-are-reaped-as-a-process-group.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/broca-identical-resends-converge-on-one-run.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/broca-permits-and-charges-return-to-baseline.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/broca-protocol-shapes-are-closed.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/client-a-a-failed-pong-enqueue-retires-the-generation-as-a-local-fault.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/synapse-admission-boundaries-are-exact.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/synapse-degrades-to-disabled-and-keeps-the-context-routable.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/synapse-inference-runs-through-a-sealed-runtime-image.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/evidence/synapse-requests-are-validated-before-any-inference.md",
       "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
     }
   ]
