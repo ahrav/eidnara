@@ -274,10 +274,10 @@ records unblocked per capability.
    `proof_folds_every_input` (`tests/protocol_vectors.rs:75`) to call
    `compute_proof` beside `raw_client::proof` on each perturbed input turns
    the proof record's `Check:` from a shared literal into the equality it
-   states. Whether the integration binary can reach `compute_proof` is the
-   one thing to verify first; `src/auth.rs:641` reaches it from inside the
-   crate. If the binary cannot, the loop belongs in `auth.rs` with a copy of
-   the oracle's HMAC, which is 15 lines.
+   states. `compute_proof` is `pub` at `src/auth.rs:119` and re-exported from the
+   crate root (`lib.rs:38-42`), so the integration binary calls it directly as
+   `host_runtime::compute_proof`; the loop belongs in `protocol_vectors.rs`, and
+   no copy of the oracle's HMAC inside `auth.rs` is needed.
 
 3. **Three one-test compositions over existing fixtures.** A resend after
    `terminal_expiry_and_oldest_eviction_enforce_the_session_caps`

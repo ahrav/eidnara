@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "469ceded0bd892b04fefa42ecd2267ea10e6caaa1cd77b68c4311d61a2cd2c12",
+  "source_sha256": "87969166e047391682b41ce1f1ac27319b3e3c3ebde4aecb9f75f4ec80d68931",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -99,7 +99,7 @@
       "guarantee": "After a generation is retired with both `token.cancel()` and `writer.discard()`, no byte of any frame admitted after the cancel reaches the socket.",
       "check": {
         "semantics": "always",
-        "condition": "cancel the token and call `writer.discard()`, then have a producer that already passed its `is_cancelled` precheck call send; assert the bytes never appear on the peer socket. Both halves of the precondition are required: `send_ticket_before` gates on the writer's own `retired` token (`frame_channel.rs:640-653`), and the endpoint select services a ready queue before `root.cancelled()` (`ring_transport.rs:438-470`), so cancelling the generation token alone may still publish the newly queued frame. Separately assert `token.cancel()` alone does *not* stop queued frames, because the drain paths depend on that."
+        "condition": "two interleavings. First, cancel the token and call `writer.discard()`, then have a producer that already passed its `is_cancelled` precheck call send; assert the bytes never appear on the peer socket. Second, the gap the guarantee is really about: place a barrier between `token.cancel()` and `writer.discard()`, and in that gap release both the prechecked producer (so its frame is enqueued) and the endpoint (so it dequeues), then call `discard()` and assert the bytes never appear. `run_endpoint` checks `discard` only before the dequeue (`ring_transport.rs:438-445`) and calls `publish_one` (`:475`) without re-checking it, so a frame dequeued in the gap is published; that is the predicted violation at HEAD and the reason the first interleaving alone cannot fail. Both halves of the precondition are required: `send_ticket_before` gates on the writer's own `retired` token (`frame_channel.rs:640-653`), and the endpoint select services a ready queue before `root.cancelled()` (`ring_transport.rs:438-470`), so cancelling the generation token alone may still publish the newly queued frame. Separately assert `token.cancel()` alone does *not* stop queued frames, because the drain paths depend on that."
       },
       "fault_timing": "`send_ticket_before` gates on `retired` only, not on the generation token or `discard` (`frame_channel.rs:812-825` (source-catalog line, not present at HEAD)). So the guarantee is enforced downstream by the writer's biased discard arm, not by admission: a producer can be admitted after cancel, and it is the writer that must drop it.",
       "required_faults": "a producer suspended between its `is_cancelled` precheck and its send, with the cancel landing in between.",
@@ -3758,8 +3758,8 @@
       "reachability_note": "every `route.open` carries a header whose declared length the reader trusts for framing.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "the canonical body's byte length and the committed header bytes are asserted against literals."
+        "state": "partial",
+        "note": "`tests/protocol_vectors.rs:160-210` asserts the canonical body's byte length against a literal and decodes the committed header bytes with the test-local `raw_client::header`/`raw_client::decode_header`; neither the production route-open encoder nor `wire::decode_header` sees those bytes, so a production encoder that declared the wrong length would leave both tests passing. What is exercised is documentation-vector consistency, not the production round trip the Impact describes."
       },
       "guarantee": "The canonical compact `route.open` request targeting module `context` is 167 UTF-8 bytes, and the committed control header `a7 00 00 00 02 00 02 00 00 00 00 00 00 01 00 ...` declares exactly that length with version 2, request type, interactive flags, channel 0, epoch 0, correlation 1.",
       "check": {
@@ -4000,7 +4000,7 @@
       "status": "active",
       "exercised": {
         "state": "partial",
-        "note": "count and byte boundaries, eviction order, and expiry are covered with a deterministic engine; the bounded-waiter test that opens 33 ring clients is ignored because the host admits at most 8 rings per process."
+        "note": "count and byte boundaries and eviction order are covered with a deterministic engine; expiry is covered only as eventual expiry, since `expired_jobs_return_module_restarted` (`tests/synapse_jobs.rs:238-272`) configures 100 ms retention and sleeps 250 ms before polling, so the exact `>= retention` boundary the Check states is unexercised and an implementation using `>` or a larger threshold below 250 ms would pass; the bounded-waiter test that opens 33 ring clients is ignored because the host admits at most 8 rings per process."
       },
       "guarantee": "Job admission is exact at the count and queued-byte boundaries, never evicts live work, evicts completed jobs oldest first under count pressure, and reports expired jobs as `module_restarted`.",
       "check": {
