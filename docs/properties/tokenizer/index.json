@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "tokenizer",
   "source": "catalog.md",
-  "source_sha256": "060a030bc2602f5f6c590c112c0dbabbccb14cf7d5a1dc652971118cd28f5506",
+  "source_sha256": "362a38ec2b834fc6b98422842c178c3b997b583cf36442906df04dac109fa133",
   "records": [
     {
       "slug": "tokenizer-encoding-matches-the-independent-oracle",
@@ -104,10 +104,8 @@
         "evidence": "[evidence](evidence/tokenizer-pattern-is-upstream-with-ecmascript-whitespace.md). The constant, the crate docs at `lib.rs:10-13`, and both tests were read directly."
       },
       "existing_check": "The two tests named above; unaudited.",
-      "impact": "A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`tests/token_golden.rs:101`); U+0085 is not known to be in the corpus.",
-      "open_questions": [
-        "Does any golden case contain U+0085, so that a class drift on that code point would also fail parity? (needs human input)"
-      ],
+      "impact": "A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`tests/token_golden.rs:101`) and U+0085 by the `nel-after-space` and `nel-runs` golden cases (`gen/gen-token-golden.ts:99-100`, present in `testdata/token-golden.json`), so a class drift on either code point also fails parity.",
+      "open_questions": [],
       "extra": {}
     },
     {

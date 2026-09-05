@@ -46,7 +46,7 @@ Setup proceeds through these phases:
 
 Any setup, attachment, activation, ring, or peer-lifetime failure terminates the affected connection. A caller may create a fresh connection.
 
-Clean `Goodbye` and unexpected setup-socket closure are distinct. Unexpected closure records peer death, cancels ring work, and tears down the exact connection. Joined endpoint teardown returns its admission charge when the mapping is unmapped. Native aliases whose detachment fails keep their channel and mapping alive until cleanup succeeds.
+Clean `Goodbye` and unexpected setup-socket closure are distinct. Unexpected closure records peer death, cancels ring work, and tears down the exact connection. That teardown is host-side. A native client whose host drops the setup socket is told through readiness; `NativeChannel.peerClosed()` reports it, and the channel, its reactor registration, and its mapping are released only by the caller's `close()` or `forceClose()` (`packages/shm-native/index.ts:639-655`). An application that does not close leaves the dead channel and its mapping alive. Joined endpoint teardown returns its admission charge when the mapping is unmapped. Native aliases whose detachment fails keep their channel and mapping alive until cleanup succeeds.
 
 ## Doctor and diagnostics
 

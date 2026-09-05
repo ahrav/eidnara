@@ -525,7 +525,7 @@ the rest. Findings are reproduced with its citations; the disposition is ours.
 
 | Category | Count | Status |
 | --- | --- | --- |
-| refinement | 16 | 15 applied; the whole-catalog `ring.rs` re-anchor is queued with a HEAD anchor table added to `catalog.md` |
+| refinement | 16 | 16 applied; the whole-catalog `ring.rs` re-anchor landed on 2026-09-05 after a HEAD anchor table was added to `catalog.md` |
 | gap | 6 | queued for a follow-up discovery pass; the host-test inventory gap is closed in `existing-checks.md` |
 | bias | 3 | require human judgment, listed below |
 
@@ -537,7 +537,7 @@ the rest. Findings are reproduced with its citations; the disposition is ours.
    `abort_reservation` at `:2283`, `DuplexRing::create` at `:2631`,
    `removal_ranges` at `:307`, `GRANT_BYTES` at `:45`. Disposition: a
    generated HEAD anchor table is at the top of `catalog.md`; the per-record
-   rewrite is queued (gap 6 below).
+   rewrite landed on 2026-09-05 (gap 6 below).
 2. **`operation-counters-are-observed-not-declared`.** The transport now counts
    its own syscalls (`SyscallCounters`, `page_removals`, `syscall_counters()`,
    pinned by `syscall_counters_track_only_actual_ring_syscalls`), the counter
@@ -619,6 +619,9 @@ the rest. Findings are reproduced with its citations; the disposition is ours.
    the back-link column is filled for a minority; complete it and triage the
    forged-shared-state, `probe`, and redaction clusters.
 6. **Whole-catalog `ring.rs` re-anchor** for the 31 records in refinement 1.
+   Closed 2026-09-05: every citation in every record was checked against HEAD
+   in six independent batches and 269 were corrected; the anchor-table note in
+   `catalog.md` lists the mechanism corrections that fell out of it.
 
 The host-test inventory gap the evaluator raised is closed: nine
 `crates/host-runtime` tests are now inventoried in `existing-checks.md`.
@@ -653,8 +656,8 @@ anchoring had drifted against the transport it describes, three substantive
 claims were false rather than mis-numbered (in-transport syscall counting
 exists, the bench checksum is computed from received bytes, both readers
 quarantine on every error), and the fault map mis-stated its own top-ranked
-investment. Fifteen of the sixteen refinements are applied above; the sixteenth,
-the per-record `ring.rs` re-anchor, has a HEAD anchor table in its place. The
+investment. All sixteen refinements are applied above, the per-record `ring.rs`
+re-anchor last. The
 four missing property areas (`trim`, diagnostics, quarantine wake, redaction)
 now have records; with the back-link triage still queued, the set is a solid
 basis for a campaign but not a finished one.

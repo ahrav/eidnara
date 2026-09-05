@@ -241,8 +241,27 @@ the host's header validation.
 | File | Claims asserted | Status |
 | --- | --- | --- |
 | `packages/shm-native/tests/capability.ts` | Channel count is zero before and after the probe; if capable, a test pair opens two channels and closes to zero; if not, construction throws and the count stays zero | unaudited — both branches print and exit 0; CI does not parse stdout |
-| `packages/shm-native/tests/mechanism.ts` | Runtime mechanism gate or clean omission; cleanup hook runs at exit with empty stderr; five raw-descriptor boundary suites covering non-objects, unsafe numerics, malformed grant text, throwing accessors, wrong profile, and an unresolvable descriptor | unaudited — six suites self-skip when the addon is absent or the platform is not Linux; the four raw-descriptor suites are cited by `raw-native-attach-rejects-hostile-descriptors-without-effects` |
+| `packages/shm-native/tests/mechanism.ts` | Runtime mechanism gate or clean omission; cleanup hook runs at exit with empty stderr; six raw-descriptor boundary suites covering non-objects, unsafe numerics, malformed grant text, throwing accessors, wrong profile, and an unresolvable descriptor; per-test rows below | unaudited — six suites self-skip when the addon is absent or the platform is not Linux; per-test rows below |
 | `packages/shm-native/tests/runtime.ts` | Producer aliases detached before publish; receive segment has exact bounds; transfer refused; post-release reads are zeroed; double release throws; a throwing fill publishes nothing; descriptor and arena exhaustion recover; an external-view failpoint leaves the channel usable; leaked leases survive a forced GC | unaudited |
+
+### `packages/shm-native/tests/mechanism.ts` - 11 tests
+
+Every test self-skips when the addon is absent; the raw-descriptor suites also
+run on Darwin.
+
+| Test | Claim asserted | Status |
+| --- | --- | --- |
+| `proves every required runtime mechanism or omits capability` (`:20`) | `probeCapabilities` reports available only when every mechanism proves, otherwise a closed omission reason | unaudited; cited by `capability-probe-gates-every-advertised-mechanism` |
+| `environment cleanup hook runs at runtime exit when addon loads` (`:38`) | The cleanup hook runs at exit with empty stderr | unaudited |
+| `one channel handler failure does not starve later channels` (`:168`) | A throwing readiness handler does not prevent later handlers in the same batch from running | unaudited |
+| `readiness acknowledgement preserves a frame published during callback` (`:211`) | A frame published while a callback is in flight is delivered by the next callback, with exactly two callbacks | unaudited; cited by `wake-published-during-readiness-callback-is-not-lost`, `reactor-callback-is-one-in-flight`, `each-channel-wake-survives-a-shared-acknowledgement` |
+| `releasing a lease returns its slot; an unreleased ring fills` (`:336`) | Unreleased receive leases fill the ring until publish fails with `ring is full`; releasing one returns its slot; a stale token is refused | unaudited; cited by `lease-saturation-is-reached-then-drains` |
+| `rejects non-object and structurally hostile arguments` (`:401`) | Raw `attach` rejects non-objects and hostile shapes with the fixed descriptor error and no counter change | unaudited; cited by `raw-native-attach-rejects-hostile-descriptors-without-effects` |
+| `rejects every unsafe numeric representation before narrowing` (`:424`) | Negative, fractional, NaN, out-of-range, and string numerics are refused before narrowing | unaudited; cited by same record |
+| `rejects malformed, non-ASCII, and aliased grant text` (`:446`) | Malformed or aliased grant text is refused with no counter change | unaudited; cited by same record |
+| `accessor objects and proxies get one bounded redacted error` (`:476`) | Accessor and proxy descriptors produce exactly `invalid shared-memory descriptor` and nothing else | unaudited; cited by same record |
+| `a wrong profile is refused before any attachment effect` (`:509`) | A descriptor naming another profile is refused before any registration | unaudited; cited by same record |
+| `a well-formed but unresolvable descriptor fails without registry effects` (`:519`) | A structurally valid descriptor whose handles do not resolve fails without registry effects | unaudited; cited by same record |
 
 The addon's negative tests pin channel count, external-ref count, and leak
 diagnostics across each throw, which is the right shape. Two weaknesses: the

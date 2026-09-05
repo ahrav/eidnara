@@ -97,8 +97,8 @@ Fault/timing angle: An edit to `assets/claude.pat`, to `ecmascript_whitespace!`,
 Required faults and enabling state: None; static checks over the constant and the class.
 Confidence: high - [evidence](evidence/tokenizer-pattern-is-upstream-with-ecmascript-whitespace.md). The constant, the crate docs at `lib.rs:10-13`, and both tests were read directly.
 Existing check: The two tests named above; unaudited.
-Impact: A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`tests/token_golden.rs:101`); U+0085 is not known to be in the corpus.
-Open questions: Does any golden case contain U+0085, so that a class drift on that code point would also fail parity? (needs human input)
+Impact: A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`tests/token_golden.rs:101`) and U+0085 by the `nel-after-space` and `nel-runs` golden cases (`gen/gen-token-golden.ts:99-100`, present in `testdata/token-golden.json`), so a class drift on either code point also fails parity.
+Open questions: None.
 
 ### tokenizer-bom-is-its-own-token
 
