@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "ca60d8ce2e2a94aee84b4a5f68787b20361f80b14c1f3a673cac02bcfb3ddd8e",
+  "source_sha256": "7b1721862866cd09d8d84b468264618de75a60a201cf202b72fa7454e21f5e28",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -600,8 +600,8 @@
       "reachability_note": "the shutdown latch is constructed for every host incarnation (`crates/host-runtime/src/runtime.rs:919`) and driven by the ordinary shutdown path; nothing gates it on configuration.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "`an_enabled_change_future_survives_a_pre_poll_notification` (`crates/host-runtime/src/lifecycle.rs:1771`) pins that a notification landing between `try_own` and the first poll is observed; note that it constructs `changed()` before `try_own()`, which is the ordering that carries the guarantee (see the timing angle)."
+        "state": "partial",
+        "note": "`an_enabled_change_future_survives_a_pre_poll_notification` (`crates/host-runtime/src/lifecycle.rs:1771`) pins, under a one-second bound, that a notification landing between `try_own` and the first poll is observed, but only for `reopen` (`:1778-1781`); the test that reaches the `commit` notification (`:1763`) awaits the waiter without a bound at `:1765`, so a lost commit wake hangs the job rather than failing this record's one-poll oracle. Note that the bounded test constructs `changed()` before `try_own()`"
       },
       "guarantee": "A shutdown requester that observes the wait state is always woken by the next phase change.",
       "check": {
@@ -821,7 +821,7 @@
       "status": "active",
       "exercised": {
         "state": "partial",
-        "note": "partial."
+        "note": "the two fixed instances each have a regression test: the validation walk that once re-resolved by pathname, and the prune enumeration that did the same for eight further review rounds. No test sweeps the remaining store operations (read, walk, and removal in `stage_and_promote`, quarantine, and current-profile handling) for a third pathname-based call, which is the open question below."
       },
       "guarantee": "Every read, walk, and removal in a store operation resolves through the descriptor that operation pinned, never through a re-resolved pathname.",
       "check": {
@@ -1412,8 +1412,8 @@
     {
       "slug": "manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "",
+      "reachability": "test-only",
+      "reachability_note": "`GenerationStore::stage_and_promote` has no caller outside `crates/host-runtime` tests in this tree (workspace-wide search); the daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify to `default-production` in the wave that lands it.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -1438,8 +1438,8 @@
     {
       "slug": "a-declaration-order-change-cannot-orphan-a-retained-generation",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "",
+      "reachability": "test-only",
+      "reachability_note": "`GenerationStore::stage_and_promote` has no caller outside `crates/host-runtime` tests in this tree (workspace-wide search); the daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify to `default-production` in the wave that lands it.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -1466,8 +1466,8 @@
     {
       "slug": "the-atomic-directory-exchange-is-atomic-on-every-supported-platform",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "",
+      "reachability": "test-only",
+      "reachability_note": "`GenerationStore::stage_and_promote` has no caller outside `crates/host-runtime` tests in this tree (workspace-wide search); the daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify to `default-production` in the wave that lands it.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -1495,8 +1495,8 @@
     {
       "slug": "an-occupied-rename-target-is-never-replaced-on-the-portable-path",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "",
+      "reachability": "test-only",
+      "reachability_note": "`GenerationStore::stage_and_promote` has no caller outside `crates/host-runtime` tests in this tree (workspace-wide search); the daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify to `default-production` in the wave that lands it.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -2467,8 +2467,8 @@
     {
       "slug": "setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "for the native path (`shm-frame-channel.ts:77`); the managed Rust peer is the `host_runtime::Client` surface reached from `client.rs:346`, also production for embedders.",
+      "reachability": "test-only",
+      "reachability_note": "both peers lack an in-tree production caller. `host_runtime::Client::connect` is called only from `tests/`, `benches/`, and `examples/` (workspace-wide search), and `NativeChannel.connectSetup` has no shipped-plugin caller here because `packages/plugin` is not in this tree; the native reference `shm-frame-channel.ts:77` is source-repository evidence. Public visibility and possible embedder use do not make either path `default-production` under this catalog's reachability convention.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3681,8 +3681,8 @@
     {
       "slug": "rt-a-a-closure-store-open-failure-is-classified-not-swallowed",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "",
+      "reachability": "test-only",
+      "reachability_note": "`HarnessClosureStore::open` is called only from `crates/host-runtime/tests/harness_closure.rs` in this tree, and `manifest_digest` is reached only through the store; the daemon that opens the store in production (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify in the wave that lands it.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3843,8 +3843,8 @@
     {
       "slug": "harness-closure-manifest-digest-is-canonical",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every closure manifest the host stores or verifies is digested this way.",
+      "reachability": "test-only",
+      "reachability_note": "`HarnessClosureStore::open` is called only from `crates/host-runtime/tests/harness_closure.rs` in this tree, and `manifest_digest` is reached only through the store; the daemon that opens the store in production (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify in the wave that lands it.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4068,7 +4068,7 @@
       "guarantee": "Job admission is exact at the count and queued-byte boundaries, never evicts live work, evicts completed jobs oldest first under count pressure, and reports expired jobs as `module_restarted`.",
       "check": {
         "semantics": "always",
-        "condition": "the boundary-plus-one request is rejected and the boundary request admitted; no live job is evicted; under count pressure the completed job evicted is the one with the oldest `completed_at`; an expired job is reported as `module_restarted` (`jobs.rs:624`, exact `>=` on retention); and charges return on completion. Every clause is an invariant over every admission, eviction, expiry, and completion, so one `always` covers the conjunction."
+        "condition": "the boundary-plus-one request is rejected and the boundary request admitted; no live job is evicted; under count pressure the completed job evicted is the one with the oldest `completed_at`; an expired job is reported as `module_restarted` (`jobs.rs:624`, exact `>=` on retention); and, at completion, the excess over the retained key-and-metadata bytes is released (`publish_ready` splits it off at `jobs.rs:453-455`) while the retained remainder is held by the completed job for polling and returns only when the job is removed, evicted, expired, or cleared (`jobs.rs:96-100`). Every clause is an invariant over every admission, eviction, expiry, and completion, so one `always` covers the conjunction."
       },
       "fault_timing": "Off-by-one at the boundary or eviction of live work loses a caller's result.",
       "required_faults": "Boundary-sized admission; completion under count pressure; expiry.",

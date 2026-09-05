@@ -856,7 +856,7 @@ Reachability: default-production - the shutdown latch is constructed for every
 host incarnation (`crates/host-runtime/src/runtime.rs:919`) and driven by the
 ordinary shutdown path; nothing gates it on configuration.
 Status: active
-Exercised: yes - `an_enabled_change_future_survives_a_pre_poll_notification` (`crates/host-runtime/src/lifecycle.rs:1771`) pins that a notification landing between `try_own` and the first poll is observed; note that it constructs `changed()` before `try_own()`, which is the ordering that carries the guarantee (see the timing angle).
+Exercised: partial - `an_enabled_change_future_survives_a_pre_poll_notification` (`crates/host-runtime/src/lifecycle.rs:1771`) pins, under a one-second bound, that a notification landing between `try_own` and the first poll is observed, but only for `reopen` (`:1778-1781`); the test that reaches the `commit` notification (`:1763`) awaits the waiter without a bound at `:1765`, so a lost commit wake hangs the job rather than failing this record's one-poll oracle. Note that the bounded test constructs `changed()` before `try_own()`
 Guarantee: A shutdown requester that observes the wait state is always woken by
 the next phase change.
 Check: `always` - for every interleaving of ownership attempt, reopen, commit, and a waiter's change-future lifecycle, the waiter returns owner or committed within a bounded window after the phase change: the existing test bounds it at 1 s of wall clock (`lifecycle.rs:1779`), and under `start_paused` the waiter must be ready at the first poll after the notify. The invariant a test must protect is that the `Notified` future is created (`changed()`, `lifecycle.rs:1091`) before the state is re-checked (`try_own()`, `:1065`).
@@ -1141,7 +1141,12 @@ The daemon CLI that reads the current profile and promotes on every start
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
 Status: active
-Exercised: partial.
+Exercised: partial - the two fixed instances each have a regression test: the
+validation walk that once re-resolved by pathname, and the prune enumeration that
+did the same for eight further review rounds. No test sweeps the remaining store
+operations (read, walk, and removal in `stage_and_promote`, quarantine, and
+current-profile handling) for a third pathname-based call, which is the open
+question below.
 Guarantee: Every read, walk, and removal in a store operation resolves through the
 descriptor that operation pinned, never through a re-resolved pathname.
 Check: `always` - for every store operation, a replacement directory planted at
@@ -2180,7 +2185,11 @@ Open questions:
 ### manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `GenerationStore::stage_and_promote` has no caller
+outside `crates/host-runtime` tests in this tree (workspace-wide search); the
+daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4
+(`docs/properties/README.md:52`); reclassify to `default-production` in the wave
+that lands it.
 Status: active
 Exercised: partial - one byte-exact golden vector exists
 (`generation.rs:1395-1412`) but its fixture omits the optional field and
@@ -2230,7 +2239,11 @@ Open questions: None.
 ### a-declaration-order-change-cannot-orphan-a-retained-generation
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `GenerationStore::stage_and_promote` has no caller
+outside `crates/host-runtime` tests in this tree (workspace-wide search); the
+daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4
+(`docs/properties/README.md:52`); reclassify to `default-production` in the wave
+that lands it.
 Status: active
 Exercised: not yet - no test validates a manifest written under one declaration
 order against a binary using another.
@@ -2285,7 +2298,11 @@ Open questions:
 ### the-atomic-directory-exchange-is-atomic-on-every-supported-platform
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `GenerationStore::stage_and_promote` has no caller
+outside `crates/host-runtime` tests in this tree (workspace-wide search); the
+daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4
+(`docs/properties/README.md:52`); reclassify to `default-production` in the wave
+that lands it.
 Status: active
 Exercised: partial - the Linux arm is covered by one test through `promote_temp`
 (`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`,
@@ -2350,7 +2367,11 @@ Open questions:
 ### an-occupied-rename-target-is-never-replaced-on-the-portable-path
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `GenerationStore::stage_and_promote` has no caller
+outside `crates/host-runtime` tests in this tree (workspace-wide search); the
+daemon CLI that promotes on every start (`crates/daemon`) is scheduled for U4
+(`docs/properties/README.md:52`); reclassify to `default-production` in the wave
+that lands it.
 Status: active
 Exercised: not yet - the branch is unreachable on Linux without a filesystem
 that rejects `renameat2` flags, and it is the only path on macOS, where no test
@@ -5418,9 +5439,13 @@ one, which the managed Rust client does not go through.
 ### setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection
 
 Type: safety
-Reachability: default-production for the native path
-(`shm-frame-channel.ts:77`); the managed Rust peer is the `host_runtime::Client`
-surface reached from `client.rs:346`, also production for embedders.
+Reachability: test-only - both peers lack an in-tree production caller.
+`host_runtime::Client::connect` is called only from `tests/`, `benches/`, and
+`examples/` (workspace-wide search), and `NativeChannel.connectSetup` has no
+shipped-plugin caller here because `packages/plugin` is not in this tree; the
+native reference `shm-frame-channel.ts:77` is source-repository evidence.
+Public visibility and possible embedder use do not make either path
+`default-production` under this catalog's reachability convention.
 Status: active
 Exercised: not yet - no test drives a malformed grant at the managed Rust peer.
 Guarantee: Every grant-level rejection the native peer performs is also performed
@@ -9692,7 +9717,11 @@ footprint.
 ### rt-a-a-closure-store-open-failure-is-classified-not-swallowed
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `HarnessClosureStore::open` is called only from
+`crates/host-runtime/tests/harness_closure.rs` in this tree, and `manifest_digest`
+is reached only through the store; the daemon that opens the store in production
+(`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+in the wave that lands it.
 Status: active
 Exercised: not yet - `tests/harness_closure.rs` covers `open` succeeding and
 `validate`/`materialize` failing; no test exercises `open` failing on the
@@ -9956,7 +9985,11 @@ Open questions: None.
 ### harness-closure-manifest-digest-is-canonical
 
 Type: safety
-Reachability: default-production - every closure manifest the host stores or verifies is digested this way.
+Reachability: test-only - `HarnessClosureStore::open` is called only from
+`crates/host-runtime/tests/harness_closure.rs` in this tree, and `manifest_digest`
+is reached only through the store; the daemon that opens the store in production
+(`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
+in the wave that lands it.
 Status: active
 Exercised: partial - the committed fixture's digest is asserted and an independent canonical-JSON digest reproduced both the predecessor and the current value, but the suite perturbs only `extensions` and no test reorders JSON object keys, so the every-field sensitivity and key-order invariance halves of the check are not exercised (evidence, "What a test must construct").
 Guarantee: The manifest digest is SHA-256 over the manifest serialized as key-sorted, two-space-indented JSON, so any manifest with the same fields hashes the same regardless of field order, and the committed `pi-valid.json` fixture digests to `5386c200...f911`.
@@ -10083,7 +10116,7 @@ Reachability: test-only - every batch and query a composed `SynapseComponent` re
 Status: active
 Exercised: partial - count and byte boundaries, eviction order, and expiry are covered with a deterministic engine; the bounded-waiter test that opens 33 ring clients is ignored because the host admits at most 8 rings per process.
 Guarantee: Job admission is exact at the count and queued-byte boundaries, never evicts live work, evicts completed jobs oldest first under count pressure, and reports expired jobs as `module_restarted`.
-Check: `always` - the boundary-plus-one request is rejected and the boundary request admitted; no live job is evicted; under count pressure the completed job evicted is the one with the oldest `completed_at`; an expired job is reported as `module_restarted` (`jobs.rs:624`, exact `>=` on retention); and charges return on completion. Every clause is an invariant over every admission, eviction, expiry, and completion, so one `always` covers the conjunction.
+Check: `always` - the boundary-plus-one request is rejected and the boundary request admitted; no live job is evicted; under count pressure the completed job evicted is the one with the oldest `completed_at`; an expired job is reported as `module_restarted` (`jobs.rs:624`, exact `>=` on retention); and, at completion, the excess over the retained key-and-metadata bytes is released (`publish_ready` splits it off at `jobs.rs:453-455`) while the retained remainder is held by the completed job for polling and returns only when the job is removed, evicted, expired, or cleared (`jobs.rs:96-100`). Every clause is an invariant over every admission, eviction, expiry, and completion, so one `always` covers the conjunction.
 Fault/timing angle: Off-by-one at the boundary or eviction of live work loses a caller's result.
 Required faults and enabling state: Boundary-sized admission; completion under count pressure; expiry.
 Confidence: medium - [evidence](evidence/synapse-admission-boundaries-are-exact.md). `admission_count_boundary_is_exact_and_never_evicts_live_work`, `queued_byte_boundary_is_exact_and_releases_on_completion`, `completed_jobs_evict_oldest_first_under_count_pressure`, `expired_jobs_return_module_restarted` (`crates/host-runtime/tests/synapse_jobs.rs`).
