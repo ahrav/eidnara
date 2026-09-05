@@ -367,7 +367,10 @@ impl SynapseComponent {
         let joined =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lane.backend.embed(texts)))
                 .map_err(|_| PanickedBackend);
-        settle_inference(&self.inner, joined)
+        let vectors = settle_inference(&self.inner, joined)?;
+        check_engine_vectors(&self.inner, lane.lane.dims, texts.len(), &vectors)
+            .map_err(InferenceError::Invariant)?;
+        Ok(vectors)
     }
 }
 

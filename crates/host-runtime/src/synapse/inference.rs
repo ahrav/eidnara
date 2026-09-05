@@ -402,43 +402,41 @@ impl Backend {
                 ));
             }
         }
-        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so a multi-row call is certified too, with every row attributed to its item.
-        // The first two rows are a pair with different expectations, so a permuted output cannot match; the rest cycle through the corpus to fill the batch.
-        let (first, second) = corpus
-            .items
-            .iter()
-            .enumerate()
-            .find_map(|(index, first)| {
-                corpus.items[index + 1..]
-                    .iter()
-                    .find(|second| {
-                        super::bundle::certification_mismatch(
-                            &first.expected,
-                            &second.expected,
-                            corpus.tolerance,
-                        )
-                    })
-                    .map(|second| (first, second))
-            })
-            .unwrap_or((&corpus.items[0], &corpus.items[0]));
-        let batch: Vec<&CorpusItem> = [first, second]
-            .into_iter()
-            .chain(
-                corpus
-                    .items
-                    .iter()
-                    .cycle()
-                    .take(batch_rows.max(1).saturating_sub(2)),
-            )
-            .take(batch_rows.max(1))
-            .collect();
+        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so two multi-row calls are certified as well.
+        // The attribution call uses only pairwise-distinct expectations, so any permutation of its rows changes some row's output and is caught; repeated expectations would let a permutation among equal rows pass unseen. Its size is therefore bounded by how many distinct items the corpus supplies.
+        let mut distinct: Vec<&CorpusItem> = Vec::new();
+        for item in &corpus.items {
+            if distinct.len() == batch_rows.max(1) {
+                break;
+            }
+            if distinct.iter().all(|kept| {
+                super::bundle::certification_mismatch(
+                    &kept.expected,
+                    &item.expected,
+                    corpus.tolerance,
+                )
+            }) {
+                distinct.push(item);
+            }
+        }
+        self.certify_batch(&distinct, &matches)?;
+        // The capacity call runs at the largest admitted batch size, cycling the corpus to fill it, so a graph that fails, exhausts memory, or drifts only at large sizes is caught before publication; each row is still compared with its own expectation.
+        if batch_rows > distinct.len() {
+            let full: Vec<&CorpusItem> = corpus.items.iter().cycle().take(batch_rows).collect();
+            self.certify_batch(&full, &matches)?;
+        }
+        Ok(())
+    }
+
+    fn certify_batch(
+        &self,
+        batch: &[&CorpusItem],
+        matches: &impl Fn(&[f32], &CorpusItem) -> bool,
+    ) -> Result<(), InferenceError> {
         let texts: Vec<&str> = batch.iter().map(|item| item.text.as_str()).collect();
         let rows = self.embed(&texts)?;
         if rows.len() != batch.len()
-            || !rows
-                .iter()
-                .zip(&batch)
-                .all(|(row, item)| matches(row, item))
+            || !rows.iter().zip(batch).all(|(row, item)| matches(row, item))
         {
             return Err(InferenceError::Artifact(
                 "multi-row semantic certification failed".to_owned(),
