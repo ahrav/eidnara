@@ -93,10 +93,14 @@ supplies the wedged-host precondition that
 ## What a test must construct
 
 An injection point between `dispatch.rs:729` and `:730`, and a second between
-`:730` and `:731`. With the first, assert the reachable-successor claim: after the
-panic, `draining` is true, the latch is `Open`, the token is not cancelled, and a
-second authenticated `host.shutdown` still commits and the host stops gracefully.
-With the second, assert the stronger negative: the latch is neither `Open` nor
+`:730` and `:731`. With either, assert the all-or-nothing postcondition
+immediately after unwinding, as the catalog's `Check:` field requires: `draining`,
+the latch, and the token are all committed or all untouched. At the first point the
+predicted outcome at `HEAD` is the partial state, `draining == true` with an open
+latch and an uncancelled token, and that is a failing observation; a successor
+`host.shutdown` that later commits does not turn it into a pass, so a test must not
+accept "a second request still stops the host" as the oracle. With the second
+point, also assert the stronger negative: the latch is neither `Open` nor
 `Committed`, so no successor can own it, and the host never reaches
 `shutdown_sequence`. A bounded assertion is required in both cases, because the
 failing shape is a hang: wrap the run future in a timeout and assert the run does

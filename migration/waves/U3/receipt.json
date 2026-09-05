@@ -3224,8 +3224,8 @@
         "blob_sha": "d07ac9af8e31f60385cd3d8ed8aaf259589a0e7b"
       },
       "destination": "docs/properties/host-runtime/evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md",
-      "destination_sha256": "4940e002442862212df44722df72ec26d3144a27627025c6e9333f35e9312080",
-      "transformation": "verbatim",
+      "destination_sha256": "12662595fb0062ad766a1b8f305310395fd8732b4e70942542d3afe661777e2e",
+      "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3471,7 +3471,7 @@
         "blob_sha": "6fb7ea9d03cf6c1c991f1eaf7614cbdc38f3b5c5"
       },
       "destination": "docs/properties/host-runtime/evidence/host-ping-correlation-exhaustion-retires-the-generation.md",
-      "destination_sha256": "5c0d671e8bcdb104bb468da17e06e268d3bed874f5311d87e182e41439710953",
+      "destination_sha256": "7b019d7b78d6c60437042ff1a67f8e6c25e2991b00d6cd08f386b7a217e50a39",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3744,7 +3744,7 @@
         "blob_sha": "6df4cd1f3e000a404848f37ed55eee9965b2dcbd"
       },
       "destination": "docs/properties/host-runtime/evidence/shutdown-commit-effects-are-all-or-nothing.md",
-      "destination_sha256": "5b4c97032cc502a453e6498948be7ffd81bc87885941ba223597cdd239543728",
+      "destination_sha256": "2a11ac478700ab4ee0449020a4dde9c25875a98d35128bd35faf0ab49e80e068",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3887,7 +3887,7 @@
         "blob_sha": "6247575b448e41ebd4bac7e555db7dab48b3e548"
       },
       "destination": "docs/properties/host-runtime/evidence/decode-header-is-total-over-arbitrary-bytes.md",
-      "destination_sha256": "c01a0d400d415039d7940a2ec50e35de4b55a700d8122d998771e5f9654ee0aa",
+      "destination_sha256": "f105b9f47ddc10c50001f5b32edac1335b43c6aaa97f25734067c4a0ee2005f7",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4043,7 +4043,7 @@
         "blob_sha": "820067facc25bb0d6b800cae305d54484aa699fb"
       },
       "destination": "docs/properties/host-runtime/evidence/ring-a-publish-failure-is-reported-as-a-clean-peer-close.md",
-      "destination_sha256": "b5767900138ad63d10da3ea5e70a5706acb77540563a3d6b9ec89ce8e76fbcf1",
+      "destination_sha256": "fcd81c9dde6c9527999018307e2748f6cae4d6314c0f460403e06def16acfa6a",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4433,7 +4433,7 @@
         "blob_sha": "c4e034f1f802e4a36035dfc45c2c9fc63e34d729"
       },
       "destination": "docs/properties/host-runtime/evidence/client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production.md",
-      "destination_sha256": "6330632aa2fab5e95440e01e29a96e71256447d0911a48a1ccbac9aa76ce2ff9",
+      "destination_sha256": "666481d0162204bcc5399d015f09d1949f5108878360842af5209e5374df0645",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4589,7 +4589,7 @@
         "blob_sha": "3d16a552b11d9be3316e4b75e52667a8df434f6f"
       },
       "destination": "docs/properties/host-runtime/evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md",
-      "destination_sha256": "2f1640371b25496fa1c929490441675a7a7dbefc9191f048b8cead651efb77b5",
+      "destination_sha256": "9e0552603721e03c3eeb2520d33ffe27a37b3f23a42f855a4e77a219bba2b38d",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4823,7 +4823,7 @@
         "blob_sha": "a9ad120962180f59e47318318f0ac50892f929aa"
       },
       "destination": "docs/properties/host-runtime/evidence/rt-a-the-ingress-pool-derivation-cannot-underflow.md",
-      "destination_sha256": "57c3f6f703eccfc813dc3dc97bb9f545e7d60271c65c58d375b62d06b0fe3456",
+      "destination_sha256": "9a48531633cb34359d283ab17d0a0f40f516c5f92167e9ccd32fdf9bebfab440",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4846,7 +4846,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
-      "destination_sha256": "b2d4ba46af97628ce34b2d9fa4bf9b7b9084d5e17fdf8579771ef3aa8da266d4",
+      "destination_sha256": "0a3939e196473c1df427e447923156408910de40dc271a1ab0a6c402cb2ea2d9",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "e8fe81a9ecbad89abf7270b8fbabd9d523c24d1f4145f016bd6b81cb5feb764b",
+      "destination_sha256": "abbd661c7ba7e2f47e19be08cd79b059eda8e537286f815950d0aa6d7736523d",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

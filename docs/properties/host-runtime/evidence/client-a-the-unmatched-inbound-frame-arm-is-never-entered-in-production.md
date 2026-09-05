@@ -90,8 +90,11 @@ added to both functions, the residue shrinks to four and the property still hold
 Per METHOD, `unreachable` semantics attach to a code location that must not execute,
 which is exactly what this is:
 
-1. A marker at `client.rs:1557` named constantly and uniquely, for example
-   `client_dispatch_unmatched_frame_type`. It must never fire during any
+1. A marker on the `_ => self.retire("protocol_violation")` arm of `dispatch` at
+   `client.rs:1468`, named constantly and uniquely, for example
+   `client_dispatch_unmatched_frame_type`. `:1557` is `settle_all` calling
+   `cancel_classification`, which ordinary retirement with pending requests
+   executes, so a marker there false-fails on normal cleanup. It must never fire during any
    production-path campaign. Marker names must not be constructed dynamically.
 2. Independently, an assertion that `validate_inbound` returned `Err` for each of the
    five residue types, which is the reason the marker cannot fire. Without that second

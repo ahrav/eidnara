@@ -95,12 +95,14 @@ Direction (a):
    400ms deadline, `invalidate_on_missed: true`.
 2. Drive a cooperative peer that reads each Ping and writes a Pong echoing its
    flag byte exactly, one virtual millisecond later.
-3. Advance the clock by `k * ping_interval + pong_deadline` for a fixed small `k`,
-   for example 5.
-4. Assert `gen.token.is_cancelled()` is false, `gen.pings` is empty, and exactly
-   `k` Pings were observed on the wire. The Ping count is the part
-   `tests/client.rs` omits, and it is what stops the test passing when the probe
-   never runs.
+3. Advance the clock by `k * ping_interval` for a fixed small `k`, for example 5,
+   and assert exactly `k` Pings were observed on the wire. The Ping count is the
+   part `tests/client.rs` omits, and it is what stops the test passing when the
+   probe never runs. Count only over these intervals: the loop rearms
+   `next_ping_at` after every send (`connection.rs:779`), so with the 100ms/400ms
+   policy above the peer keeps receiving Pings during any further tail.
+4. Then advance a further `pong_deadline` and assert `gen.token.is_cancelled()` is
+   false and `gen.pings` is empty, without re-asserting the count.
 
 Direction (b):
 

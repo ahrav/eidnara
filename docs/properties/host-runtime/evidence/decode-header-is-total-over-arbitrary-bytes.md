@@ -138,9 +138,12 @@ sweep is `wire.rs`'s own test module.
    `flags.priority().is_some()`, `flags.admission_class().is_some()`, Sheddable
    only on `Push` or `StreamData`, `len == 0` whenever `ty.is_pure_header()`, and
    `(channel == 0) == (epoch == 0)`.
-3. **Exhaustive length sweep.** Lengths 0 through 21 inclusive, so gates 1 and 3
+3. **No allocation.** Run each call, accepted and rejected, under a counting
+   global allocator and assert zero heap allocations; a temporary `Vec` or a
+   formatted error string would pass every other assertion here.
+4. **Exhaustive length sweep.** Lengths 0 through 21 inclusive, so gates 1 and 3
    are hit at every boundary rather than at two hand-picked points.
-4. **Structured mutation.** Start from an accepted 21-byte seed and flip each of
+5. **Structured mutation.** Start from an accepted 21-byte seed and flip each of
    the 168 bits, asserting the result is either accepted with a changed value or
    rejected. This overlaps the bijection record's per-bit oracle and the two are
    cheapest to write together.

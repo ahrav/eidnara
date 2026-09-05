@@ -82,9 +82,10 @@ enforced ingress half and an unimplemented egress half, and the wire protocol na
 
 Exhaustion cannot be driven. What can be tested is the boundary behaviour, by seeding the counter
 rather than reaching it: construct a `GenerationCore` with `next_ping_corr` initialized to
-`u64::MAX`, run one probe cycle, and assert the observable contract - either that the generation
-retires without emitting, or, pinning today's behaviour, that a correlation-0 Ping is emitted and
-that the host closes the generation when it is echoed. The four in-file constructors that already set
+`u64::MAX`, run one probe cycle, and assert the one outcome the guarantee allows: the generation retires
+without emitting a Ping that carries a reused or wrapped correlation. A test that accepts a
+correlation-0 Ping followed by closure passes exactly when the no-wrap guarantee fails and would
+pin the `fetch_add` wrap, so it is not an admissible oracle; at `HEAD` this test is expected to fail. The four in-file constructors that already set
 `next_ping_corr` (`connection.rs:255`, `:1527`, `:1632`, `routing.rs:502`) show the seam is
 reachable from test code.
 

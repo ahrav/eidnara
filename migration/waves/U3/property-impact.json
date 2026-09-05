@@ -4869,7 +4869,7 @@
       "strategy_decision": "Golden-vector tests on both sides of the committed tuple plus a campaign that calls the production `compute_proof` and the test-local `raw_client::proof` on the same perturbed tuples, daemon-version lengths, and key lengths for both domains and asserts equality and distinctness; vectors regenerated once at U3 for the renamed domains.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
-      "evidence_digest": "b2d4ba46af97628ce34b2d9fa4bf9b7b9084d5e17fdf8579771ef3aa8da266d4",
+      "evidence_digest": "0a3939e196473c1df427e447923156408910de40dc271a1ab0a6c402cb2ea2d9",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#committed_auth_proof_vectors_pin_the_construction",
       "check_hash": "c3990fd883551e9affa2cda5ce5a2731129b9513c25bd0f45125888491ac3710",
       "code_hash": "d7cd646b6e3a3779f4612507444e4b0b233080d0f92df7716091584ac8c30090",
@@ -4878,7 +4878,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "b2d4ba46af97628ce34b2d9fa4bf9b7b9084d5e17fdf8579771ef3aa8da266d4",
+        "digest": "0a3939e196473c1df427e447923156408910de40dc271a1ab0a6c402cb2ea2d9",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
