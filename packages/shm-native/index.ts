@@ -769,14 +769,29 @@ export class NativeChannel {
 
     close(): void {
         if (this.closed) return;
-        this.native.close(this.id);
-        readinessHandlers.delete(this.id);
-        this.closed = true;
+        this.finishClose(() => this.native.close(this.id));
     }
 
     forceClose(): void {
         if (this.closed) return;
-        this.native.forceClose(this.id);
+        this.finishClose(() => this.native.forceClose(this.id));
+    }
+
+    /**
+     * A close that fails after the addon already removed the native entry still transitions
+     * the wrapper: no later call can reach the channel, and a retry would fail as already
+     * closed.
+     */
+    private finishClose(nativeClose: () => void): void {
+        try {
+            nativeClose();
+        } catch (error) {
+            if (consumesHandle(error)) {
+                readinessHandlers.delete(this.id);
+                this.closed = true;
+            }
+            throw error;
+        }
         readinessHandlers.delete(this.id);
         this.closed = true;
     }
