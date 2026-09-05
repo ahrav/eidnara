@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shm-transport",
   "source": "catalog.md",
-  "source_sha256": "af665c501331a969c3a8fc1d5ccaae545d21096f59dd1b1a705af92d3be257ad",
+  "source_sha256": "7925ffeeb3ec01ed8d1cb15f5429c7c10f0214e4f034279c3999c5cff2e1fce3",
   "records": [
     {
       "slug": "quarantine-authority-survives-peer-writes",
@@ -2004,7 +2004,7 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "the id string, depth, lease bound, span bound, descriptor charge, and arena charge (134,217,728 bytes, two 64 MiB arenas) are all asserted against literals spelled in the test, so a geometry change under an unchanged id fails it."
+        "note": "the id string, depth, lease bound, span bound, per-direction arena size (67,108,864 bytes), descriptor charge, and arena charge (134,217,728 bytes, two 64 MiB arenas) are all asserted against literals spelled in the test, so a geometry change under an unchanged id fails it."
       },
       "guarantee": "The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, a span bound of 2, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.",
       "check": {

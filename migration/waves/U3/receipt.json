@@ -602,7 +602,7 @@
         "blob_sha": "b1fc8fc47b0e3bb421c28c24edf2567955ef3a17"
       },
       "destination": "crates/shm-transport/tests/profile.rs",
-      "destination_sha256": "5199c55384b4bbac996ec101037f76cce1eac9aafe8d5edc849b77267510faff",
+      "destination_sha256": "e32d5410f37cbbc77cb4507245fb40f5ae6242a88dbf30a9a4a09ebf384f80f0",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -1273,7 +1273,7 @@
         "blob_sha": "1939312fa200dbef74d836b3718b501b12dcd135"
       },
       "destination": "crates/host-runtime/src/synapse/bundle.rs",
-      "destination_sha256": "2305009aedea20a9ba75a163765d348d34045350bdf5a545b11801c7dcccfe51",
+      "destination_sha256": "3f6657589d6e541e4a04910da03f7fd8ba704402dff993231b9536f56b85a575",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2088,7 +2088,7 @@
         "blob_sha": "33b65a1644e04373f5ed6e871c5c6e331fb34add"
       },
       "destination": "docs/properties/shm-transport/catalog.md",
-      "destination_sha256": "af665c501331a969c3a8fc1d5ccaae545d21096f59dd1b1a705af92d3be257ad",
+      "destination_sha256": "7925ffeeb3ec01ed8d1cb15f5429c7c10f0214e4f034279c3999c5cff2e1fce3",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2137,7 +2137,7 @@
     {
       "source": null,
       "destination": "docs/properties/shm-transport/index.json",
-      "destination_sha256": "cec292180f8011136be8436e5a4de8f4e5a4c8d098343b50f3b628f559b45f23",
+      "destination_sha256": "d9743d6d9fe01a6cbd10a7457017e4526983abbbe7ec9d28dff840fddd622383",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3003,7 +3003,7 @@
     {
       "source": null,
       "destination": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
-      "destination_sha256": "876376077301ded4ce025d925fe05e5fe0d5d7514acf65237ca596dde053db9d",
+      "destination_sha256": "48f85331ecedb46eefa8fcaba043671e49d50f1f4d80cfd0beafbe1d448d9160",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4912,7 +4912,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "destination_sha256": "f9443f3711f25460a6106a1f3b2462fe610b41cac6ed8c68a02a78dcfbf2d69a",
+      "destination_sha256": "e387bac26e88ea6562805f674ff8c978f6d3212319e7816ef0e3f075e87ed18b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "a3dcc63648ffb783c261ea5bcfdad0c55aea9004b5d3b4cb278a3533ca37a53b",
+      "destination_sha256": "19b12e6969c7ea857dcadc4581231ec1e6030323a623deda01e139787734f274",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5644,7 +5644,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "13f577abbf9f66ce972eddc3e0396c4b0d20986215c3b50fe1ec78e7f9b9c067",
+      "destination_sha256": "f95a1bad195ee70482913014fad494954f8c6c28279ee970e01597ade2927307",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

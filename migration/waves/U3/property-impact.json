@@ -1653,16 +1653,16 @@
       "strategy_decision": "Example test spelling the id and every geometry literal (depth, lease bound, span bound, descriptor charge, arena charge), added at U3 for the renamed profile id; the addon package test states the same geometry independently.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
-      "evidence_digest": "876376077301ded4ce025d925fe05e5fe0d5d7514acf65237ca596dde053db9d",
+      "evidence_digest": "48f85331ecedb46eefa8fcaba043671e49d50f1f4d80cfd0beafbe1d448d9160",
       "check_pointer": "crates/shm-transport/tests/profile.rs#host_test_ring_profile_names_one_geometry",
-      "check_hash": "5199c55384b4bbac996ec101037f76cce1eac9aafe8d5edc849b77267510faff",
-      "code_hash": "85fa637079d3121fcac380578d1f0fc9704d3bc17589e33f6614de9ea44559b0",
+      "check_hash": "e32d5410f37cbbc77cb4507245fb40f5ae6242a88dbf30a9a4a09ebf384f80f0",
+      "code_hash": "2e1381a299cf7a3747ea6dd5c54a322fc3fc4ba7f88a5e62c8564f80fb7ff6b3",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "876376077301ded4ce025d925fe05e5fe0d5d7514acf65237ca596dde053db9d",
+        "digest": "48f85331ecedb46eefa8fcaba043671e49d50f1f4d80cfd0beafbe1d448d9160",
         "description": "U3 evidence record docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5053,16 +5053,16 @@
       "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint), the committed fingerprint pinned as a literal, a structural test that changes each artifact hash and each embedding-space scalar alone and asserts the fingerprint moves, plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "evidence_digest": "f9443f3711f25460a6106a1f3b2462fe610b41cac6ed8c68a02a78dcfbf2d69a",
+      "evidence_digest": "e387bac26e88ea6562805f674ff8c978f6d3212319e7816ef0e3f075e87ed18b",
       "check_pointer": "crates/host-runtime/tests/synapse_bundle.rs#the_committed_fixture_carries_its_canonical_fingerprint",
       "check_hash": "2bd1119b04d575d60614e2e51fd6ca2e8b256dc8f5a27d17fb8e47cb428f9e88",
-      "code_hash": "14d6093ec82e2396a0012000a9afc14d894d6af9e3372445cc89b1130457e52c",
+      "code_hash": "9f718b1a9ec25e3125bd3e8bfd4a91508590e98de949e5568f4ea7e456662032",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "f9443f3711f25460a6106a1f3b2462fe610b41cac6ed8c68a02a78dcfbf2d69a",
+        "digest": "e387bac26e88ea6562805f674ff8c978f6d3212319e7816ef0e3f075e87ed18b",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },

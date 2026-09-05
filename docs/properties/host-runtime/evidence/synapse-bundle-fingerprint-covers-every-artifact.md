@@ -121,7 +121,8 @@ the function against its Python mirror:
   embedding-space scalar alone
   (`pooling`, `quantization`, each `output` selector form and the numeric
   `output.index` value under an unchanged tag, `max_tokens`, `dims`,
-  `table_epoch`), and asserts `canonical_fingerprint` changes and
+  `table_epoch`), validates each mutated manifest so every case is a loadable
+  bundle, and asserts `canonical_fingerprint` changes and
   that no two mutations produce the same fingerprint. An input added to
   `BundleManifest` but omitted from the pre-image fails the test once its
   mutation is listed. `fingerprint_binds_initializer_names_to_their_hashes`
