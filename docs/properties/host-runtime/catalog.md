@@ -9874,13 +9874,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every closure manifest the host stores or verifies is digested this way.
 Status: active
-Exercised: yes - the committed fixture's digest is asserted, and an independent canonical-JSON digest reproduced both the predecessor and the current value.
+Exercised: yes - the committed fixture's digest is asserted, an independent canonical-JSON digest reproduced both the predecessor and the current value, a key-reordered copy of the fixture digests the same, and each manifest field is changed alone and shown to move the digest.
 Guarantee: The manifest digest is SHA-256 over the manifest serialized as key-sorted, two-space-indented JSON, so any manifest with the same fields hashes the same regardless of field order, and the committed `pi-valid.json` fixture digests to `5386c200...f911`.
 Check: `always` - `manifest_digest(fixture) == committed literal`; the digest changes when any field changes and is unchanged under key reordering.
 Fault/timing angle: A digest that depended on serialization order would let two equal manifests disagree; a digest over a different canonical form would break the TypeScript twin, which lands with the packages in U7 and reads this fixture.
 Required faults and enabling state: The committed fixture and an oracle outside the crate.
 Confidence: high - [evidence](evidence/harness-closure-manifest-digest-is-canonical.md). The fixture's `schema` field is a renamed identity, so the digest was regenerated once; a Python `json.dumps(sort_keys=True, indent=2)` digest reproduced the predecessor value from the predecessor schema string and the new value from the new one.
-Existing check: `canonical_manifest_digest_is_pinned` (`crates/host-runtime/tests/harness_closure.rs`) and the strict-decode tests in the same file; audited at U3.
+Existing check: `canonical_manifest_digest_is_pinned`, `manifest_digest_is_stable_under_key_reordering`, `manifest_digest_changes_when_any_field_changes`, and the strict-decode tests (`crates/host-runtime/tests/harness_closure.rs`); audited at U3.
 Impact: A closure verified by one side is rejected by the other, or a tampered closure passes.
 Open questions: None.
 
@@ -9889,13 +9889,13 @@ Open questions: None.
 Type: safety
 Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `BrocaComponent::new_with_credentials` (`crates/host-runtime/src/broca/mod.rs:82`) installs one; its single caller is `tests/broca_protocol.rs:443`. `BrocaComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
 Status: active
-Exercised: yes - the committed vector is asserted, and an independent HMAC oracle reproduced it.
+Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, harness-and-provider pairs, and value shapes agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-broca-credential-v1"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
 Check: `always` - for the documented row, `credential_fingerprint(key, harness, provider) == committed literal`; for every generated `(key, harness, provider name, value)` row in a campaign, `credential_fingerprint` equals an independent implementation of the documented derivation (`HMAC(derive(key, "eidnara-broca-credential-v1"), canonical_row)` with length-prefixed fields), including rows that differ only by moving one byte across a field boundary and rows with an empty field, which must yield distinct fingerprints; and the per-value size cap rejects before fingerprinting. `always` because the derivation is a pure function evaluated on every row.
 Fault/timing angle: A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.
 Required faults and enabling state: The documented inputs and an oracle outside the crate.
 Confidence: high - [evidence](evidence/credential-fingerprint-derives-from-the-product-domain.md). The domain separator is a renamed identity; the vector was regenerated once from a Python implementation of the documented derivation, which also reproduced the predecessor value from the predecessor domain.
-Existing check: `credential_fingerprint_matches_the_committed_vector` (`crates/host-runtime/src/broca/subprocess.rs`, added at U3) and `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`, a `harness = false` binary whose checks are plain functions the binary's own runner names); audited at U3.
+Existing check: `credential_fingerprint_matches_the_committed_vector` and `credential_fingerprint_matches_the_documented_derivation_across_rows` (`crates/host-runtime/src/broca/subprocess.rs`, added at U3) and `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`, a `harness = false` binary whose checks are plain functions the binary's own runner names); audited at U3.
 Impact: A credential row passes a fingerprint check it should fail, or fails one it should pass.
 Open questions: `CREDENTIAL_ROW_CAP_BYTES` is defined in `subprocess.rs` but nothing enforces it; only the 16 KiB per-value cap is checked.
 

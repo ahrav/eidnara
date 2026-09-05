@@ -4989,19 +4989,19 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), regenerated once at U3 for the renamed schema id.",
+      "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), a key-reordering test over the fixture text, and a per-field mutation campaign; regenerated once at U3 for the renamed schema id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "evidence_digest": "c15c79aa880d292cc0607d1b5653931b4e6280ec5d6beaea9e0050f3a432b92e",
+      "evidence_digest": "023676fb5620c7b0ff451eaca45ad6dbc3e74e25a92c0b84997d55c5211c6cc7",
       "check_pointer": "crates/host-runtime/tests/harness_closure.rs#canonical_manifest_digest_is_pinned",
-      "check_hash": "2bd84f3d243bae0189381226b67ec89b6fe9f1affd984f2698bc579bc17101e9",
-      "code_hash": "33522d9f0e47aea6049b5c925ce929174dca199bae0b4743da481ab08687d5af",
+      "check_hash": "bd85ca8928d198ec1899f0acdcf8e97cd4803516edde6a83a0e326c26516017a",
+      "code_hash": "46494a4620cee5e3ed8fe2bb6202ac6a5ffd2b32fe5459da0dae013a421458e0",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "c15c79aa880d292cc0607d1b5653931b4e6280ec5d6beaea9e0050f3a432b92e",
+        "digest": "023676fb5620c7b0ff451eaca45ad6dbc3e74e25a92c0b84997d55c5211c6cc7",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5019,19 +5019,19 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Golden-vector unit test against a digest produced outside the crate (Python HMAC derivation), regenerated once at U3 for the renamed domain; mirrors the check in the harness = false integration binary, which the checker cannot anchor into.",
+      "strategy_decision": "Golden-vector unit test against a digest produced outside the crate (Python HMAC derivation) plus a campaign comparing generated rows with an in-test implementation of the documented derivation; regenerated once at U3 for the renamed domain; mirrors the check in the harness = false integration binary, which the checker cannot anchor into.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
-      "evidence_digest": "b4b6cc8e29d58beb3b907d5e6eb642d13e5c16caefb0c796070962e469ab5d17",
+      "evidence_digest": "1b9efcb0b8176d209056083ec8b35a34fcd4487411f3083656d81236c75b6805",
       "check_pointer": "crates/host-runtime/src/broca/subprocess.rs#credential_fingerprint_matches_the_committed_vector",
-      "check_hash": "ac4053e2c50f94914b764877bbc26757d4996c52590608af787225b08808df69",
-      "code_hash": "ca1e12a1e319c9aa8e5bb7e198d5f6cf9e1e1014a369b96761f14359c403d76e",
+      "check_hash": "66a8c4997d5dab0b652add06cd1a0cc19dbad25bd288aac9bf84deddcab4bdb7",
+      "code_hash": "6e59a60da51529b510466260a2247594a3055a0403c6a89323dd9e0ebb2a028e",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "b4b6cc8e29d58beb3b907d5e6eb642d13e5c16caefb0c796070962e469ab5d17",
+        "digest": "1b9efcb0b8176d209056083ec8b35a34fcd4487411f3083656d81236c75b6805",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },

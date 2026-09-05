@@ -93,14 +93,24 @@ side is not in this tree.
 
 ## What a test must construct
 
-The record's check has three parts. The fixture literal covers
-`manifest_digest(fixture) == committed`. The `extensions` test covers one
-field change. No test decodes two byte-different JSON documents with the
-same fields in different key order and asserts equal digests; that is
-implied by decoding through a struct, but a test would pin it against a
-future `preserve_order` feature or a raw-bytes digest. A test that reads the
-fixture bytes, reorders keys at the JSON level, and asserts the same digest
-would close it.
+The record's check has three parts, each with a test in
+`tests/harness_closure.rs`:
+
+- `canonical_manifest_digest_is_pinned` covers
+  `manifest_digest(fixture) == committed`.
+- `manifest_digest_is_stable_under_key_reordering` rewrites the fixture as
+  JSON text with every object's keys in reverse order, asserts the text
+  differs from serde's key-sorted output, decodes it, and asserts the digest
+  equals the fixture's. This pins the key-order clause against a future
+  `preserve_order` feature or a raw-bytes digest.
+- `manifest_digest_changes_when_any_field_changes` changes one field at a
+  time while keeping the manifest valid (`harness`, `package`, `version`,
+  `argument_variant`, `source_roots`, the interpreter launch root, the
+  extension list, and a node's `source_path`, `sha256`, `size_bytes`, and
+  dependency list) and asserts the digest moves and no two mutations collide.
+  A foreign `schema` is shown to be refused before hashing, since the schema
+  is a gate rather than a digest input. `ordered_extensions_are_part_of_manifest_identity`
+  covers extension order separately.
 
 ## Investigation log
 

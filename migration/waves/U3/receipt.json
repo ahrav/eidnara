@@ -1234,7 +1234,7 @@
         "blob_sha": "978fbe6f682f1990b6352dd8d7d039a0b636966a"
       },
       "destination": "crates/host-runtime/src/broca/subprocess.rs",
-      "destination_sha256": "ac4053e2c50f94914b764877bbc26757d4996c52590608af787225b08808df69",
+      "destination_sha256": "66a8c4997d5dab0b652add06cd1a0cc19dbad25bd288aac9bf84deddcab4bdb7",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -1455,7 +1455,7 @@
         "blob_sha": "0b0d2a7c5d21ca089157371e854cf7b7490d3b6b"
       },
       "destination": "crates/host-runtime/tests/harness_closure.rs",
-      "destination_sha256": "2bd84f3d243bae0189381226b67ec89b6fe9f1affd984f2698bc579bc17101e9",
+      "destination_sha256": "bd85ca8928d198ec1899f0acdcf8e97cd4803516edde6a83a0e326c26516017a",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "d7ea3d1292afffc589586171cc3dfb21f69d7f289ae5b7a261b0a327d8e96f21",
+      "destination_sha256": "30ea9925735c6cfa092d113448704594209eacb1e34a9e2b3fe9d35d903a5c53",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "0fd663e2ad2df3a3fdb18f8e120cf18c2d96147eeef564de7329ed8ee0bf6106",
+      "destination_sha256": "06c222db0f8432c9ccfc3087d141dea72beba489b853a28d56cf81e8b3a27ab9",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -4890,7 +4890,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "destination_sha256": "c15c79aa880d292cc0607d1b5653931b4e6280ec5d6beaea9e0050f3a432b92e",
+      "destination_sha256": "023676fb5620c7b0ff451eaca45ad6dbc3e74e25a92c0b84997d55c5211c6cc7",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4901,7 +4901,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
-      "destination_sha256": "b4b6cc8e29d58beb3b907d5e6eb642d13e5c16caefb0c796070962e469ab5d17",
+      "destination_sha256": "1b9efcb0b8176d209056083ec8b35a34fcd4487411f3083656d81236c75b6805",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "86ab2f87459bca91be8a78c36d2389e83576c4488f532935e952a66e77e16ee0",
+      "destination_sha256": "695155a3297d46c4c7dd6ec2314db6d6e7aa33e52130704fcf44cf607c5dc044",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5644,7 +5644,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "311de0e2d3296c13e877ef2cdb957c1e7a33173744749ddf8866ca8211fa172f",
+      "destination_sha256": "9232436ccd39c0ef8b4e592ad9d4a5cf22bb305273da731f38945107f737fc77",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
