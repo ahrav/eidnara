@@ -16,6 +16,7 @@ import {
     DESCRIPTOR_SCHEMA_VERSION,
     NativeChannel,
     nativeWireConstants,
+    privateBytes,
     probeCapabilities,
     QUALIFIED_TEST_PROFILE,
 } from "../index.ts";
@@ -264,6 +265,22 @@ describe("readiness dispatch", () => {
         for (const value of [0, 1, 0xffff_ffff]) {
             expect(assertUint32Argument("timeoutMs", value)).toBe(value);
         }
+    });
+
+    test("byte arguments cross into the addon as private non-shared copies", () => {
+        const shared = new Uint8Array(new SharedArrayBuffer(4));
+        shared.set([1, 2, 3, 4]);
+        const copy = privateBytes(shared);
+        expect(copy.buffer instanceof SharedArrayBuffer).toBe(false);
+        expect(copy.buffer instanceof ArrayBuffer).toBe(true);
+        expect([...copy]).toEqual([1, 2, 3, 4]);
+        shared[0] = 9;
+        expect(copy[0]).toBe(1);
+        // Node's Buffer.slice aliases; the copy must not.
+        const nodeBuffer = Buffer.from([7, 8]);
+        const bufferCopy = privateBytes(nodeBuffer);
+        nodeBuffer[0] = 0;
+        expect(bufferCopy[0]).toBe(7);
     });
 });
 

@@ -414,13 +414,25 @@ fn quarantine_channel(env: &Env, channel: &mut Channel) -> Result<()> {
 }
 
 fn insert_channel(registry: &mut Registry, channel: Channel) -> Result<u32> {
-    registry.next_channel = registry
-        .next_channel
-        .checked_add(1)
+    let id = allocate_token(&mut registry.next_channel, &registry.channels)
         .ok_or_else(|| error("native channel identity exhausted"))?;
-    let id = registry.next_channel;
     registry.channels.insert(id, channel);
     Ok(id)
+}
+
+/// Wrapping permits token reuse after `u32` exhaustion; `in_use` prevents collisions with
+/// outstanding tokens.
+fn allocate_token<T>(next: &mut u32, in_use: &HashMap<u32, T>) -> Option<u32> {
+    // Among any `len + 2` consecutive values at most `len` are in use and at most one is
+    // zero, so that many attempts always reach a free token.
+    let attempts = in_use.len().saturating_add(2);
+    for _ in 0..attempts {
+        *next = next.wrapping_add(1);
+        if *next != 0 && !in_use.contains_key(next) {
+            return Some(*next);
+        }
+    }
+    None
 }
 
 fn cleanup_env(raw_env: usize) {
@@ -761,11 +773,9 @@ impl Task for BeginSetupTask {
                 .try_borrow_mut()
                 .map_err(|_| error("native channel is busy"))?;
             ensure_cleanup(&env, &mut registry)?;
-            registry.next_pending = registry
-                .next_pending
-                .checked_add(1)
+            let registry = &mut *registry;
+            let id = allocate_token(&mut registry.next_pending, &registry.pending)
                 .ok_or_else(|| error("native setup identity exhausted"))?;
-            let id = registry.next_pending;
             registry.pending.insert(
                 id,
                 PendingChannel {
@@ -1056,11 +1066,8 @@ pub fn reserve(
             cleanup_created_refs(env, &channel.to_host, &mut channel.stranded, refs)?;
             return Err(build_error);
         }
-        channel.next_producer = channel
-            .next_producer
-            .checked_add(1)
+        let token = allocate_token(&mut channel.next_producer, &channel.producers)
             .ok_or_else(|| error("producer reservation identity exhausted"))?;
-        let token = channel.next_producer;
         channel.producers.insert(
             token,
             ActiveProducer {
@@ -1138,6 +1145,24 @@ pub fn abort_reservation(env: &Env, channel_id: u32, token: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_allocation_wraps_and_skips_outstanding_tokens() {
+        let mut in_use: HashMap<u32, ()> = HashMap::new();
+        in_use.insert(u32::MAX, ());
+        in_use.insert(1, ());
+        let mut next = u32::MAX - 1;
+        // MAX is outstanding, 0 is never issued, 1 is outstanding: 2 is the first free token.
+        assert_eq!(allocate_token(&mut next, &in_use), Some(2));
+        assert_eq!(next, 2);
+        assert_eq!(allocate_token(&mut next, &in_use), Some(3));
+
+        let mut fresh = 0;
+        assert_eq!(
+            allocate_token(&mut fresh, &HashMap::<u32, ()>::new()),
+            Some(1)
+        );
+    }
 
     #[test]
     fn profile_geometry_admits_the_test_profile_and_rejects_another_depth() {
@@ -1290,11 +1315,8 @@ pub fn poll(
         else {
             return Ok::<Option<(u32, Buffer, Vec<Unknown<'_>>)>, Error>(None);
         };
-        channel.next_lease = channel
-            .next_lease
-            .checked_add(1)
+        let token = allocate_token(&mut channel.next_lease, &channel.active)
             .ok_or_else(|| error("receive lease identity exhausted"))?;
-        let token = channel.next_lease;
         let header = Buffer::from(lease.wire_header().to_vec());
         let mut views = Vec::with_capacity(lease.segment_count());
         let mut refs = Vec::with_capacity(lease.segment_count());

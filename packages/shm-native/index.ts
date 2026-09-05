@@ -280,6 +280,14 @@ export function assertUint32Argument(name: string, value: number): number {
     return value;
 }
 
+/**
+ * Byte arguments are copied because a `SharedArrayBuffer` view can change while the addon
+ * borrows its Rust slice.
+ */
+export function privateBytes(bytes: Uint8Array): Uint8Array {
+    return new Uint8Array(bytes);
+}
+
 export function probeCapabilities(): NativeCapabilities {
     const base = {
         napiVersion: null,
@@ -495,7 +503,7 @@ export class NativeProducerReservation {
         this.native.commitReservation(
             this.channel,
             this.token,
-            header,
+            privateBytes(header),
             written,
             beforePublish ?? (() => {}),
         );
@@ -598,7 +606,11 @@ export class NativeChannel {
     static async connectSetup(options: NativeSetupOptions): Promise<NativeChannel> {
         const native = capableAddon();
         assertUint32Argument("timeoutMs", options.timeoutMs);
-        const pending = await native.connectSetup(options);
+        const pending = await native.connectSetup({
+            ...options,
+            key: privateBytes(options.key),
+            daemonId: privateBytes(options.daemonId),
+        });
         return new NativeChannel(native, await native.finishSetup(pending));
     }
 
@@ -625,7 +637,7 @@ export class NativeChannel {
         assertUint32Argument("timeoutMs", timeoutMs);
         this.native.produce(
             this.id,
-            header,
+            privateBytes(header),
             capacity,
             timeoutMs,
             (segments) => {
