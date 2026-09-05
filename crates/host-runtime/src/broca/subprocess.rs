@@ -2185,7 +2185,6 @@ pub mod group_registry {
     }
 
     struct Entry {
-        boot_id: String,
         leader_pid: i32,
         leader_start: u64,
         owner_pid: i32,
@@ -2202,7 +2201,8 @@ pub mod group_registry {
             if lines.next()? != "v3" {
                 return None;
             }
-            let boot_id = lines.next()?.to_owned();
+            // The boot line is consumed here; the sweep compares it before parsing so foreign-boot records of any version are retired. commentlint: allow(JUDGE)
+            lines.next()?;
             let pid_line = |lines: &mut std::str::Lines| -> Option<(i32, u64)> {
                 let (pid, start) = lines.next()?.split_once(' ')?;
                 Some((pid.parse().ok()?, start.parse().ok()?))
@@ -2217,7 +2217,6 @@ pub mod group_registry {
                 return None;
             }
             Some(Self {
-                boot_id,
                 leader_pid,
                 leader_start,
                 owner_pid,
@@ -2289,7 +2288,7 @@ pub mod group_registry {
     /// `sweep` kills groups recorded by dead host incarnations and removes their entries.
     /// `sweep` leaves entries owned by live hosts untouched, so concurrent hosts do not sweep each other's runs.
     ///
-    /// `sweep` propagates unreadable-registry, unreadable-record, and indeterminate `/proc` lookup errors without removing the record.
+    /// `sweep` propagates unreadable-registry, unreadable-record, uninterpretable-record, and indeterminate `/proc` lookup errors without removing the record.
     /// Treating an unknown `/proc` result as "no orphan" can refire a run while its descendant executes.
     pub fn sweep_orphaned_groups(root: &StateRoot) -> io::Result<usize> {
         let dir = root.registry_dir()?;
@@ -2345,16 +2344,21 @@ pub mod group_registry {
                 std::io::Read::read_to_string(&mut file, &mut text)?;
                 text
             };
-            // A record that does not parse cannot identify a group.
-            let Some(entry) = Entry::parse(&text) else {
-                remove_swept_record(&path)?;
-                continue;
-            };
-            // A record from a different boot must be removed without signaling because its PIDs may be reused.
-            if entry.boot_id != current_boot {
+            // A record from a different boot is removed without signaling because its PIDs may be reused; the boot line is read before full parsing so that holds for any record version. commentlint: allow(JUDGE)
+            if text
+                .lines()
+                .nth(1)
+                .is_some_and(|boot| boot.len() == current_boot.len() && boot != current_boot)
+            {
                 remove_swept_record(&path)?;
                 continue;
             }
+            // A same-boot record this host cannot interpret (a newer schema from a mixed-version deployment, or damaged contents) may still fence a live group; deleting it would let recovery refire beside surviving provider work, so it blocks startup instead. commentlint: allow(JUDGE)
+            let Some(entry) = Entry::parse(&text) else {
+                return Err(io::Error::other(
+                    "a same-boot registry record could not be interpreted; it is retained",
+                ));
+            };
             if proc_live_start_time(entry.owner_pid)? == Some(entry.owner_start) {
                 continue;
             }

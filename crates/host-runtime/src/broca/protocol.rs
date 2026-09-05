@@ -5,6 +5,7 @@ use crate::control::check_string;
 use crate::synapse::protocol::{
     MapOnly, NoParams, OptionalParams, RequiredParams, depth_exceeds, schema,
 };
+use serde::Deserialize;
 
 pub use crate::synapse::protocol::RequestError;
 
@@ -80,8 +81,16 @@ struct SendParams {
     #[serde(rename = "tools")]
     _tools: EmptyTools,
     generation: MapOnly<GenerationParams>,
-    #[serde(default)]
+    // Absence is the only encoding of "no system prompt": a present `null` would give the same request two byte-different bodies, which the supervisor's exact-bytes fingerprint reports as `idempotency_conflict`. commentlint: allow(JUDGE)
+    #[serde(default, deserialize_with = "present_string")]
     system: Option<String>,
+}
+
+/// Deserializes a present field as a string, rejecting `null`; `#[serde(default)]` covers absence.
+fn present_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 
 #[derive(serde::Deserialize)]

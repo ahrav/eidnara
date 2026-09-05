@@ -612,16 +612,16 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
                 }
             }
             "agent_end" => {
-                if let Some(message) = value
-                    .get("messages")
-                    .and_then(serde_json::Value::as_array)
-                    .and_then(|messages| {
-                        messages.iter().rev().find(|message| {
-                            message.get("role").and_then(serde_json::Value::as_str)
-                                == Some("assistant")
-                        })
-                    })
-                {
+                // The authoritative final event must carry a well-formed `messages` array (an empty one is valid); a malformed one cannot be allowed to leave an earlier provisional answer standing. commentlint: allow(JUDGE)
+                let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array)
+                else {
+                    return Err(format!(
+                        "agent_end without a messages array at line {line_no}"
+                    ));
+                };
+                if let Some(message) = messages.iter().rev().find(|message| {
+                    message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                }) {
                     agent_end_final = Some((message.clone(), line_no));
                 }
             }
