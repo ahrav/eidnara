@@ -4869,7 +4869,7 @@
       "strategy_decision": "Golden-vector test with an independent oracle (`raw_client::proof`) plus a perturbation test that every field changes the digest; vectors regenerated once at U3.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
-      "evidence_digest": "5b5e8f08d9d489c1f2db94a471cd0ce8bd1166c64edc987bc12ab3ed6aee028f",
+      "evidence_digest": "24b49b714386886a89046052afae822a8923c786fc57d04fce5ee151ef405944",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#committed_auth_proof_vectors_pin_the_construction",
       "check_hash": "e17ea9c1b5faacdfacbd6e9ed3bfc43efd8db9b45349e94d32c9f6a6af703938",
       "code_hash": "3cff13bd2a32a56175810526e4beb1f88306625a1f01199df6a364ee9806e298",
@@ -4878,7 +4878,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "5b5e8f08d9d489c1f2db94a471cd0ce8bd1166c64edc987bc12ab3ed6aee028f",
+        "digest": "24b49b714386886a89046052afae822a8923c786fc57d04fce5ee151ef405944",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -4926,13 +4926,13 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Example test spelling the renamed lock path and asserting inode identity across a managed-subtree replacement.",
+      "strategy_decision": "Example test spelling both renamed lock paths (`.eidnara-coordination/transaction.lock` and `lifetime.lock`), asserting the two are distinct regular files, and asserting each inode survives a managed-subtree replacement.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/coordination-locks-live-beside-the-managed-subtree.md",
       "evidence_digest": "498bebf019cb8515aa190d573969f0fc18dc62208787906b56af10538daa9ebf",
       "check_pointer": "crates/host-runtime/src/lifecycle.rs#independent_openers_see_one_stable_coordination_identity",
-      "check_hash": "174a863751cb73e25353ef3bce8898f9a3bbf4ed7c08b10376046daf421e5d32",
-      "code_hash": "d6d78a2b0545db0761564ab57b403f54e464c8e816c2be54883f1d35a33f54aa",
+      "check_hash": "704ec816a34fccf436478241cfb5e3fbca289f791f067d0633968c29bd377fbc",
+      "code_hash": "79f78388d18531850b89c6197fbfa878437b272f096606b39d79e7bde26eff01",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],

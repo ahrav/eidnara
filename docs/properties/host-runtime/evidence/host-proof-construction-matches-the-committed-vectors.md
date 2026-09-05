@@ -131,11 +131,11 @@ kind; today no test reads those bytes.
   the document nor the code. The document's bytes therefore come from a
   transcript this tree does not contain, most likely the predecessor domain
   strings.
-- Missing evidence: the predecessor domain and version strings, to confirm
-  the document's bytes are the predecessor vectors rather than an error.
-- Conclusion: unresolved, needs a documentation fix or the predecessor
-  strings. The code and both tests agree with each other and with the
-  independent reproduction; the protocol document's section 5.2 examples do
-  not describe this implementation. Section 18 of the same document names
-  `host-runtime` source and tests as authority (`:989-991`), so this is a
-  stale example, not a contract the code violates.
+- Missing evidence: none. The examples were regenerated: `docs/host-wire-protocol.md:213`
+  and `:217` now carry the committed `[89, 41, 95, 101, ...]` and
+  `[140, 161, 69, 27, ...]` vectors, and the prose at `:220` names
+  `eidnara-host/0.1.0`. An HMAC-SHA256 over the documented layout with the
+  documented inputs and the current domains reproduces both arrays.
+- Conclusion: resolved. The code, both tests, the independent reproduction,
+  and the protocol document's section 5.2 examples agree; the stale bytes
+  came from a transcript this tree does not contain.

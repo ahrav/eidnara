@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "dd38c61468de84c00f243812509590b52211961ca7d0b22f3b3c98a272ba819c",
+  "source_sha256": "5d7f06afdf61146ec4ad11500f7f9591b7b591ac064c579ea26d6c36c37405d8",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -3994,8 +3994,8 @@
     {
       "slug": "broca-payload-hook-owns-the-generation-controls",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every Pi run loads the compiled-in hook as the last `--extension` after `--no-extensions` disables discovery, so the hook is the final `before_provider_request` handler on every provider request.",
+      "reachability": "test-only",
+      "reachability_note": "every Pi run loads the compiled-in hook as the last `--extension` after `--no-extensions` disables discovery, so the hook is the final `before_provider_request` handler on every provider request; but `PiBackend::new` and `run_pi` have no caller outside `crates/host-runtime/tests/broca_subprocess.rs` in this tree, so no production request reaches the hook until the daemon (U4) wires a real backend. Reclassify with the other Broca records then.",
       "status": "active",
       "exercised": {
         "state": "partial",

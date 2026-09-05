@@ -52,6 +52,15 @@ with both `max_completion_tokens` and `max_tokens` has both rewritten
 (`:1664-1666`); and `{ foo: "bar" }` is rejected (`:1669`). The runner lists
 the check in its `main` table (`:100-101`); the binary is `harness = false`.
 
+## Reachability
+
+The hook is on the path of every Pi run, but the runs themselves are test-only
+at this tree: `PiBackend::new`, `PiBackend::with_limits`, and `run_pi` have no
+caller outside `tests/broca_subprocess.rs`, the same fact
+`broca-child-environment-carries-only-the-provider-row` records for the spawn
+path. The label moves with the other Broca records when the daemon wires a
+real backend.
+
 ## Failure scenario
 
 An earlier extension in the load chain, or a provider's default, sets a larger

@@ -10114,7 +10114,7 @@ Open questions: None.
 ### broca-payload-hook-owns-the-generation-controls
 
 Type: safety
-Reachability: default-production - every Pi run loads the compiled-in hook as the last `--extension` after `--no-extensions` disables discovery, so the hook is the final `before_provider_request` handler on every provider request.
+Reachability: test-only - every Pi run loads the compiled-in hook as the last `--extension` after `--no-extensions` disables discovery, so the hook is the final `before_provider_request` handler on every provider request; but `PiBackend::new` and `run_pi` have no caller outside `crates/host-runtime/tests/broca_subprocess.rs` in this tree, so no production request reaches the hook until the daemon (U4) wires a real backend. Reclassify with the other Broca records then.
 Status: active
 Exercised: partial - a driver that registers a tampering handler ahead of the hook covers the OpenAI-style, Gemini-style, and mixed-spelling payloads plus one unrecognized shape; nothing runs the hook inside a real Pi process or covers a missing or non-numeric environment value.
 Guarantee: The provider payload Pi sends carries exactly the output-token bound and temperature the `session.send` request admitted: every recognized output-token spelling present on the payload and `generationConfig.maxOutputTokens` are rewritten to the request's `max_output_tokens`, `temperature` follows it, every unrelated field survives, and a payload with no recognized output-token field or a non-object payload fails the request rather than running uncapped.
