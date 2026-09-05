@@ -2235,13 +2235,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/runtime.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/shutdown-commit-effects-are-all-or-nothing.md"
@@ -2512,13 +2512,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/generation.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/every-declared-cli-reason-id-has-a-producer.md"
@@ -3001,13 +3001,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/ring_transport.rs#diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-host-never-quarantines-an-admission-charge.md"
