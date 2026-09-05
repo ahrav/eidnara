@@ -1752,7 +1752,9 @@ mod tests {
             "secret", "s", "1:a", "3:abc", "sec:ret", multibyte, &longest,
         ];
 
-        let mut seen = std::collections::BTreeSet::new();
+        // Fingerprint to the row that produced it. A second row landing on an existing
+        // fingerprint must be the same row under an alias, never a different row.
+        let mut seen = std::collections::BTreeMap::new();
         for key in &keys {
             for (harness, provider, variable, canonical) in providers {
                 for value in values {
@@ -1772,25 +1774,17 @@ mod tests {
                     // The alias and its canonical provider name enter the same transcript,
                     // so they share a fingerprint by contract; every other input distinguishes.
                     let identity = (key, harness, canonical, variable, value);
-                    let fresh = seen.insert((identity, actual.clone()));
-                    assert!(
-                        fresh || seen.contains(&(identity, actual)),
+                    let owner = seen.entry(actual).or_insert(identity);
+                    assert_eq!(
+                        *owner, identity,
                         "{harness}/{provider} value {value:?} collides with a different row"
                     );
                 }
             }
         }
-        let distinct_identities: std::collections::BTreeSet<_> =
-            seen.iter().map(|(identity, _)| *identity).collect();
-        let distinct_fingerprints: std::collections::BTreeSet<_> = seen
-            .iter()
-            .map(|(_, fingerprint)| fingerprint.clone())
-            .collect();
-        assert_eq!(
-            distinct_identities.len(),
-            distinct_fingerprints.len(),
-            "distinct rows must yield distinct fingerprints"
-        );
+        // Eight (harness, provider) pairs canonicalize onto six rows, so the campaign
+        // yields exactly keys x six rows x values distinct fingerprints.
+        assert_eq!(seen.len(), keys.len() * 6 * values.len());
 
         // An empty value is refused before fingerprinting.
         let empty = EnvSnapshot::capture_from(vec![(
