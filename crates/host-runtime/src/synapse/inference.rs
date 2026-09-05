@@ -542,19 +542,26 @@ impl Backend {
                 "long-input probe returned a wrong item count".to_owned(),
             ));
         }
-        // `[batch_rows, max_tokens]` is the largest tensor a legal batch can produce: one text that reaches the window padded against short items, within the aggregate cap. The shortest such prefix leaves the most room for rows, so the joint probe is not narrowed by bytes the window never sees.
-        let text = self.shortest_window_prefix(text)?;
+        // `[batch_rows, max_tokens]` is the largest tensor a legal batch can produce: one text that reaches the window padded against short items, within the aggregate cap. That shape is legal when a window-reaching text fits in the bytes left beside `batch_rows - 1` shortest items, so that byte budget is measured directly; when no examined prefix within it reaches the window, the largest shape this candidate supports is probed instead.
         let short = corpus
             .items
             .iter()
             .min_by_key(|item| item.text.len())
             .expect("corpus parsing requires items");
-        let remaining = max_batch_text_bytes.saturating_sub(text.len());
-        let rows = batch_rows
-            .max(1)
-            .min(1 + remaining / short.text.len().max(1));
+        let batch_rows = batch_rows.max(1);
+        let short_len = short.text.len().max(1);
+        let long_budget = max_batch_text_bytes
+            .saturating_sub((batch_rows - 1).saturating_mul(short_len))
+            .min(text.len());
+        let (text, rows) = match self.window_prefix_within(&text, long_budget)? {
+            Some(end) => (&text[..end], batch_rows),
+            None => {
+                let remaining = max_batch_text_bytes.saturating_sub(text.len());
+                (text.as_str(), batch_rows.min(1 + remaining / short_len))
+            }
+        };
         if rows > 1 {
-            let mut texts = vec![text.as_str()];
+            let mut texts = vec![text];
             texts.extend(std::iter::repeat_n(short.text.as_str(), rows - 1));
             let rows_out = self.embed(&texts)?;
             let short_rows_match = rows_out.len() == texts.len()
@@ -570,34 +577,31 @@ impl Backend {
         Ok(())
     }
 
-    /// Shortest char-boundary prefix of `text` that still reaches `max_tokens`, found by bisection on the prefix length. Token counts need not be monotone in prefix length for every tokenizer, so the result is re-measured and the full text is kept when the bisected prefix falls short.
-    fn shortest_window_prefix(&self, text: String) -> Result<String, InferenceError> {
-        let mut low = 0usize;
-        let mut high = text.len();
-        while low < high {
-            let mut mid = low + (high - low) / 2;
-            while mid < high && !text.is_char_boundary(mid) {
-                mid += 1;
+    /// End of a non-empty char-boundary prefix of `text` no longer than `budget` bytes that reaches `max_tokens`, or `None` when none of the examined prefixes does.
+    /// Token counts are not monotone in prefix length: the character after a boundary can merge with the characters before it and lower the count at that boundary. The longest prefix within the budget is measured first, then the boundaries just below it, which covers a merge at the cut without scanning every boundary of a megabyte-scale candidate.
+    fn window_prefix_within(
+        &self,
+        text: &str,
+        budget: usize,
+    ) -> Result<Option<usize>, InferenceError> {
+        const BOUNDARIES_BELOW_BUDGET: usize = 8;
+        let mut end = budget.min(text.len());
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        for _ in 0..=BOUNDARIES_BELOW_BUDGET {
+            if end == 0 {
+                return Ok(None);
             }
-            if mid == high {
-                break;
+            if self.token_count(&text[..end])? >= self.max_tokens {
+                return Ok(Some(end));
             }
-            if self.token_count(&text[..mid])? >= self.max_tokens {
-                high = mid;
-            } else {
-                low = mid + 1;
+            end -= 1;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
             }
         }
-        let mut end = high;
-        while end < text.len() && !text.is_char_boundary(end) {
-            end += 1;
-        }
-        if end < text.len() && self.token_count(&text[..end])? >= self.max_tokens {
-            let mut prefix = text;
-            prefix.truncate(end);
-            return Ok(prefix);
-        }
-        Ok(text)
+        Ok(None)
     }
 
     /// Tokens in `text` after the tokenizer's truncation, so a count equal to `max_tokens` means the text reached the window.
