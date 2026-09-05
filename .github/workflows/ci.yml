@@ -88,6 +88,18 @@ jobs:
             bun run eidnara:check property-catalog "$part/index.json"
           done
 
+      - name: Property and architecture impact records
+        # Core records pin the bytes of the files they cover, so these fail when a covered
+        # file changes without the record being regenerated.
+        run: |
+          shopt -s nullglob
+          for file in migration/waves/*/property-impact.json; do
+            bun run eidnara:check property-impact "$file"
+          done
+          for file in migration/waves/*/architecture-impact.json; do
+            bun run eidnara:check architecture-impact "$file"
+          done
+
       - name: Rust toolchains
         run: |
           rustup toolchain install 1.98 --profile minimal --component clippy,rustfmt

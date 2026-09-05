@@ -6,8 +6,8 @@
     "packages/*"
   ],
   "devDependencies": {
-    "@types/bun": "1.3.14",
     "ai-tokenizer": "1.0.6",
+    "bun-types": "1.3.14",
     "typescript": "5.9.3"
   },
   "scripts": {
@@ -16,6 +16,6 @@
     "eidnara:check": "bun scripts/eidnara-migration/check.ts",
     "eidnara:registry-audit": "bun scripts/eidnara-migration/registry-audit.ts",
     "eidnara:property-index": "bun scripts/eidnara-migration/generate-property-index.ts",
-    "check:repo": "bun run typecheck && bun run test:eidnara-migration && bun run eidnara:check registry migration/registry.json && bun run eidnara:check waivers migration/waves/U1/waivers.json && bun run eidnara:check waivers migration/waves/U2/waivers.json && bun run eidnara:property-index docs/properties/shared-primitives --check && bun run eidnara:check property-catalog docs/properties/shared-primitives/index.json && bun run eidnara:check property-impact migration/waves/U2/property-impact.json && bun run eidnara:check architecture-impact migration/waves/U2/architecture-impact.json && bun run eidnara:check receipt migration/waves/U1/receipt.json && bun run eidnara:check receipt migration/waves/U2/receipt.json"
+    "check:repo": "bun run typecheck && bun run test:eidnara-migration && bun run eidnara:check registry migration/registry.json && for f in migration/waves/*/waivers.json; do [ -f \"$f\" ] || continue; bun run eidnara:check waivers \"$f\" || exit 1; done && for d in docs/properties/*/; do [ -f \"${d%/}/catalog.md\" ] || continue; bun run eidnara:property-index \"${d%/}\" --check && bun run eidnara:check property-catalog \"${d%/}/index.json\" || exit 1; done && for f in migration/waves/*/property-impact.json; do [ -f \"$f\" ] || continue; bun run eidnara:check property-impact \"$f\" || exit 1; done && for f in migration/waves/*/architecture-impact.json; do [ -f \"$f\" ] || continue; bun run eidnara:check architecture-impact \"$f\" || exit 1; done && for f in migration/waves/*/receipt.json; do [ -f \"$f\" ] || continue; bun run eidnara:check receipt \"$f\" || exit 1; done"
   }
 }

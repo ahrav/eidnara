@@ -1,0 +1,1048 @@
+# Part 1 portfolio evaluation
+
+Discovery seeks properties; evaluation seeks flaws in the set. This pass was run
+by an independent evaluator with fresh context that had not seen the discovery
+reasoning, against `catalog.md`, `existing-checks.md`, and `fault-map.md` at
+`9c1eb4d1`. Its charter was to expose systematic gaps rather than to agree.
+
+Four lenses were applied: harness fit, coverage balance, implementability, and a
+wildcard pass that questioned the framing itself.
+
+## Disposition summary
+
+| Category | Count | Status |
+| --- | --- | --- |
+| refinement | 9 | 8 applied to the catalog, 1 rejected as stale |
+| gap | 7 | queued for a follow-up discovery pass |
+| bias | 4 | require human judgment, listed below |
+
+## Refinements applied
+
+Each of these changed a record's semantics, type, scope, or verdict. They are
+already in `catalog.md`.
+
+1. **`release-authority-bound-to-lease-ownership` — reachability verdict added.**
+   The record implied a live read-after-recycle. Independent analysis established
+   it is **not reachable in the shipped two-process topology**: every non-test
+   `commit` caller discards the returned identity, the only non-test direct
+   `Ring::release` is a receiver completing its own lease, and the two directions
+   are separate objects with independent random incarnations. Reclassified as a
+   latent API-shape hazard, with the real constraint behind the public method
+   recorded (the addon needs lease-independent completion because `poll` forgets
+   the lease).
+2. **`receive-failure-leaves-no-wedged-slot` — semantics `always-or-unreached` to
+   `unreachable`.** Two independent analyses agreed all post-commit-point failure
+   branches are dead given that `validate` already succeeded on a 64-bit target.
+   A third branch the catalog had missed was found (the `body_len` conversion at
+   `ring.rs:828-829`). The property is now that the forbidden points are never
+   entered, and the wedge is documented as what would happen if they became
+   reachable. A synthetic failpoint would have proven nothing about production.
+3. **`clean-reclamation-is-reachable` — semantics `reachable` to `sometimes`.**
+   This is a situation, not a code location. A campaign can execute the branch's
+   lines through a fake backend while never producing the operational state the
+   outcome represents.
+4. **`quarantine-charge-transition-is-atomic` — semantics `always` to
+   `always-or-unreached`.** Admission checks `active + requested + quarantined`
+   under the same mutex, so a valid public execution cannot approach the overflow.
+   The ordering defect is real; the record now says it is reachable only through a
+   synthetic seam instead of implying a live path.
+5. **`quarantine-gates-cover-every-storage-mutation` — scope narrowed.** The
+   abort clause was dropped. Restoring a slot to free does not by itself permit
+   reuse while `try_reserve` remains gated on the quarantine flag, and no
+   independent harm from the abort path was established. The commit clause stands.
+6. **`release-exactly-once-per-sequence` — preconditions moved into the
+   guarantee.** "Exactly one succeeds" is false when zero succeed, which happens
+   if the ring is quarantined, the identity is wrong, or no lease was taken. The
+   at-most-once half is the invariant; exactly-once holds only under the stated
+   preconditions.
+7. **`custody-terminal-transition-exactly-once` — reframed as a
+   documentation-versus-API mismatch.** `CandidateCustody::release` takes no
+   incarnation argument, so no input could carry a stale one, and the recovery
+   contract deliberately keeps committed candidates valid across readiness
+   changes. The documented sentence describes a mechanism that does not exist.
+   That is a different finding from an unenforced runtime check, and the record
+   now says so.
+8. **`attach-refuses-a-quarantined-object` — confidence medium to high, impact
+   corrected.** Direct read confirmed `validate_lifecycle` reads exactly eight
+   fields and never `quarantined`. The claim that a quarantined attach pins a
+   grant claim "for the process lifetime" was overstated: `close` and
+   `force_close` release it once producers, active leases, and stranded aliases
+   are empty, so it is pinned indefinitely only when a detach already stranded an
+   alias.
+9. **`traceability-pointers-resolve` — classification made precise.** The blunt
+   "11 of 29 unresolved" was misleading. Only 2 distinct citations are
+   definitively stale, one of them load-bearing for three requirement rows. Two
+   are markdown anchors that resolve under standard anchor derivation, and 7 are
+   TypeScript citations across two files whose snake-case fragments map
+   one-to-one to real declarations under a single transform. A literal substring
+   check can never match the latter two classes.
+
+Two smaller corrections were also applied: the capability-probe open question
+had an unsupported premise about step ordering, replaced with the two real
+divergences (an undocumented gate before step one, and eight documented steps
+implemented as five gates plus a catch-all); and the `daf6e244` incident masked
+four of six boundary tests, not five, because the wrong-profile case returns
+before grant decode.
+
+Beyond these, the evidence authors corrected roughly a dozen line references
+against HEAD while writing the per-property files. Those corrections live in the
+evidence files; the catalog was updated where a reference supported a verdict.
+
+## Refinement rejected as stale
+
+The evaluator reported that 25 of 32 evidence links had no target file. That was
+an artifact of reading the directory while four authors were still writing in
+parallel. Verified at the time: 32 evidence files existed and all 32 catalog
+links resolved, with no orphans, balanced fences, required sections present in
+every file, and no content damage. After gap closure the same check passes at 58
+files and 58 links.
+
+## Gaps queued for a follow-up discovery pass
+
+These are real omissions, not scope decisions. They belong to Part 1's surface
+and are queued rather than dismissed.
+
+| # | Gap | Why it matters |
+| --- | --- | --- |
+| G1 | The descriptor and grant **decode contract** is not cataloged as a whole. No record states decoder totality, exact consumption, identity and schema rejection, grant reserved-byte enforcement, or agreement between the production snapshot layout and the fuzz harness's hand-rolled layout. | This is the best-tested surface in the crate, which is exactly why its absence from the catalog is a blind spot: the catalog's own rule is that an existing check does not remove a property. |
+| G2 | The **macOS path** has no property. Object creation, unlink-and-failure cleanup, object validation, and ring behaviour on macOS are all uncataloged, and macOS CI runs two of four test files. | Two macOS-specific defects were fixed with no executed check. The platform is compiled and shipped-adjacent. |
+| G3 | The **iceoryx backend** has no contract-level property. It is a second implementation of the same contract with process-local sequence state. | Note one correction to the discovery input: its release is not a no-op in the sense of doing nothing; `release(self)` consumes and drops the sample. The real gaps are contract parity, restart behaviour, completion reporting, and cross-process identity. |
+| G4 | The **transport-to-host wire-header composition** is absent. The transport validates only body length and version; the host validates type, flags, channel, epoch, and correlation before ingress. | The ordering currently looks correct, and nothing pins it. A reordering would move unvalidated attacker-controlled fields further into the system. |
+| G5 | The **runtime-directory** authentication and revalidation path is absent. | Existing checks confirm no negative test exists for inode swap, mode change, or symlink replacement. |
+| G6 | **Runtime page-size assumptions** are absent. Layout arithmetic and both prefault walks use a compile-time 4096 while only the residency vector uses the runtime size. | A prior defect in this exact area was fixed only halfway, and nothing asserts the layout total is a multiple of the real page size. |
+| G7 | **Normal-operation liveness** is missing. All three liveness records concern failures; bounded backpressure progress, capacity recovery, and full-duplex starvation are uncovered. | A transport that never wedges but also never makes progress would satisfy this catalog. |
+
+## Biases requiring human judgment
+
+These are systematic orientations of the whole portfolio. Each needs a decision
+from someone who owns the transport, not a code change.
+
+1. **Harness-weight bias.** The portfolio routes several properties toward
+   expensive fault, concurrency, and mutating-peer infrastructure when a plain
+   integration test would answer them. The evaluator identified
+   `no-frame-observable-before-commit`, `publish-signal-implies-committed-frame`,
+   and most attach-side records as needing no concurrency at all.
+   *Judgment required:* should the cheap static and plain-integration checks be
+   built and landed before any of the F2, F3, F4, or F5 harness capability in
+   `fault-map.md`? The fault map currently ranks capability by how many records it
+   unblocks, which implicitly favours infrastructure.
+2. **No situation-coverage records.** The catalog declares eleven rare windows in
+   `fault-map.md` as coverage checks to add, but at evaluation time no record had
+   `sometimes` semantics. Zero of 32.
+   *Judgment required:* should those eleven coverage markers become first-class
+   catalog records, or remain harness obligations attached to their properties?
+   *Partly addressed by gap closure:* Group M added four situation-coverage
+   records, two of them `sometimes` markers with explicit constant names. The
+   remaining question is whether the other declared windows get the same
+   treatment.
+3. **Nine unresolved normative questions carried as active properties.** Nine
+   records are tagged `needs human input`: what a publish signal means to a
+   client, whether losing one acquired frame on cancellation is acceptable,
+   whether the hostile-peer non-guarantee extends to control pages, whether the
+   documented incarnation-fencing sentence should be deleted, whether one profile
+   name may denote two geometries, which code is normative for close ordering,
+   whether the test-only export surface is acceptable, whether `Ring::release`
+   should stay public, and whether the capability enumeration is one gate per
+   step.
+   *Judgment required:* several of these decide whether a record is a defect, a
+   documentation fix, or a non-issue. They cannot be resolved from code, and
+   handing the catalog to test implementation without them will produce tests
+   that encode a guess.
+4. **"Reaches production" is ambiguous and hand-maintained.** The evaluator
+   refuted the claim that admission accounting reaches production through shared
+   code: its only non-test consumers are the explicitly injected test provider,
+   and the default registry is empty. The label currently conflates default
+   registration, compiled code, exported API surface, and release-gate relevance.
+   *Judgment required:* define the term, then derive the labels mechanically
+   rather than by hand. Related: the concentration of 11 records on ring
+   quarantine, charge movement, and release bookkeeping, against zero on backend
+   or platform boundaries, may or may not be intentional. Gap closure has since
+   added five backend and five platform records, so the concentration is now 11 of
+   58 with both boundaries represented; the labelling question stands.
+
+## Verdict, initial 32-record pass
+
+The evaluator's verdict was "not fit for full handoff", and after applying the
+refinements that assessment is partly addressed and partly still open.
+
+What is ready to hand to `/testing:test-strategy` now: the fourteen records the
+evaluator classified as observable through current interfaces or artifacts, which
+includes the whole evidence-integrity group and most of the attach-side and
+cross-artifact records. Several of these need no harness investment at all.
+
+What is not ready: the nine records blocked on a normative decision (bias 3), and
+the seven queued gaps (G1 to G7). Handing over the blocked records first would
+spend harness effort encoding a guess about intended behaviour.
+
+The gap closure section below records G1 to G7 as closed on 2026-08-29; the
+verdict is kept here, in sequence, as the state it described.
+
+## Gap closure, 2026-08-29
+
+All seven queued gaps were mined in a follow-up pass. The catalog went from 32
+records to 58, and the evidence directory from 32 files to 58.
+
+| Gap | Records added | Group |
+| --- | --- | --- |
+| G1 decode contract | 5 | I |
+| G2 macOS path | 3 | J |
+| G6 page-size assumptions | 2 | J |
+| G3 iceoryx backend | 5 | K |
+| G4 wire-header composition | 4 | L |
+| G5 runtime directory | 1 | L |
+| G7 normal-operation liveness | 6 | M |
+
+Effects on the evaluation's own findings:
+
+- **Bias 2 partly addressed.** Semantics now span all five kinds: 47 `always`,
+  3 `always-or-unreached`, 1 `unreachable`, 3 `reachable`, 4 `sometimes`. The
+  portfolio had zero situation-coverage records; it now has four.
+- **Bias 4 partly addressed.** The type mix moved from 28 safety / 2 liveness /
+  2 reachability to 44 / 7 / 7, and the backend and platform boundaries the
+  evaluator named as unrepresented now have ten records between them.
+- **Two findings corrected during closure.** The characterization of the iceoryx
+  release as a no-op was wrong: `release(self)` takes `self` by value, so drop
+  glue returns the chunk to the publisher's retrieve channel, and the reclamation
+  is real and exactly-once by move semantics. And `existing-checks.md` claimed
+  the iceoryx suite never runs in CI; it runs on Linux, because `iceoryx` is a
+  default feature and the CI step selects the crate by name, confirmed by running
+  `cargo nextest list`. Both corrections are recorded at their source.
+- **Four new fault classes** were required and are now in `fault-map.md`: macOS
+  ring execution, a non-4096 page host, a duplex-capable peer, and iceoryx
+  cross-process pairing. The last is not a harness investment; it needs an API
+  change.
+- **Open questions grew.** The nine `needs human input` items are now
+  substantially more, concentrated in the new groups. Two are worth surfacing
+  because they may invalidate records rather than answer them: whether the macOS
+  ring is intended to become functional at all, and whether the iceoryx loopback
+  shape is permanent.
+
+What did not change: the seven gaps were genuine omissions rather than scope
+decisions, and closing them did not overturn any original record. The transport
+crate and addon are byte-identical between the commit the original records cite
+and the commit the closure records were verified against.
+
+## Re-evaluation trigger
+
+A fresh portfolio pass is now warranted, and for the reason the original trigger
+named: closure added whole categories (decode contract, platform, second backend,
+normal-operation liveness) rather than additions inside existing ones. The
+58-record set has not been evaluated as a whole by an independent reader. One to
+three additions inside an existing category would not warrant one.
+
+## Process note
+
+During parallel evidence authoring, one author ran a markdown re-wrapper across
+the entire evidence directory rather than only its own eight files, and one pass
+was not fence-aware. It reflowed 24 files belonging to other authors and damaged
+fenced code blocks in five, which that author then repaired against the real
+sources. Verified afterwards: no unbalanced fences, no missing sections, and no
+code-and-prose glue anywhere in the directory. Eleven files carry lines between
+152 and 249 columns, against the roughly 80-column wrap used elsewhere in
+`docs/`. That is a cosmetic inconsistency, recorded rather than fixed, since
+reflowing tables and code references mechanically is what caused the incident.
+
+## Group N evaluation, 2026-08-31 (fresh context)
+
+Scope: the seven Group N records appended 2026-08-31, their evidence files,
+fault classes F14 to F17, and their interaction with the six polling-era
+records rewritten the same day. This pass was run by an independent evaluator
+with fresh context that had not seen the discovery reasoning. Every code
+citation sampled was re-read at HEAD before being relied on: `ring.rs`
+387-448, 723-724, 783-798, 828-862, 980-1048, 1236-1241, 1418-1432, 221-299,
+1500-1563, 2248-2270; `scheduling.rs` 52-68, 130-200, 210-262, 265-287;
+`lib.rs` 1109-1157, 1220-1240; `client.rs` 1683-1725, 1760-1830, 1840-1940,
+4003; `index.ts` 515-526. All sampled references are accurate. One trivial
+inconsistency: `mechanism.ts` is cited as `211-278` in the catalog and
+`211-276` in two evidence files; both bracket the real test and neither is
+load-bearing. No disposition needed.
+
+### Disposition summary
+
+| Category | Count | Status |
+| --- | --- | --- |
+| refinement | 4 | recorded for the orchestrator to apply or reject |
+| gap | 4 | queued for a follow-up discovery pass |
+| bias | 2 | require human judgment |
+
+Refinements 1-4 applied 2026-08-31.
+
+### Lens 1: harness fit
+
+Routing is mostly clean. Five of the seven records need no fault harness at
+all: `attach-validates-doorbell-sockets` completes with a full-attach
+negative that is plain fd plumbing; `wake-published-during-readiness-callback-is-not-lost`
+and `reactor-callback-is-one-in-flight` live at the raw-addon JS level where
+the existing `mechanism.ts` shape already constructs the race by publishing
+from inside a callback; `queued-write-needs-no-second-wake` and
+`released-charges-wake-blocked-readers` are in-module bridge tests;
+`reclamation-excludes-pages-with-live-wrapped-bytes` is a pure function plus
+in-process leases, and is the group's best property-test candidate
+(`removal_ranges` is total over five integer inputs with explicit error
+returns). Only `capacity-recheck-after-a-wake-race` genuinely needs F16
+infrastructure. The harness-weight bias of the original evaluation does not
+recur here.
+
+Two findings.
+
+1. **Bounds stated in units no harness can count** (refinement).
+   `queued-write-needs-no-second-wake` bounds completion in bridge loop
+   passes and `released-charges-wake-blocked-readers` in "one poll wakeup
+   plus one loop iteration". Neither passes nor iterations are observable
+   from outside `start_ring_bridge`, so both Check lines should name a
+   harness-visible proxy. The internal bound is the right explanation of *why*
+   the wall-clock bound is safe to assert. The two records need **different**
+   proxies, because they govern opposite directions: the first is an outbound
+   write-queue drain, the second is inbound read-budget capacity and read-loop
+   resumption (`client.rs:1869-1902`).
+   *Disposition:* refinement — in `queued-write-needs-no-second-wake`'s Check
+   line, append: "harness proxy: per-write completion within an explicit
+   wall-clock deadline with the delivered signal count pinned by the test,
+   since loop passes are not externally observable", which is the oracle its
+   existing test already uses (`client.rs:4069-4075`, 250 ms, zero per-write
+   wakes). In `released-charges-wake-blocked-readers`'s Check line, name
+   **receipt of the pending inbound frame** within an explicit deadline of the
+   `ByteCharge` drop instead. Per-write completion is not a valid proxy there:
+   the loop services `write_rx` (`:1847-1859`) before it reaches
+   `try_recv_with(charge)` (`:1903`), so a write submitted before the park
+   completes and reports success while the bridge parks indefinitely and the
+   frame is never admitted. That record's proxy must also require outbound
+   traffic to be quiesced, since `ByteCharge::drop` (`:1722`),
+   `RingWriteSender::try_send` (`:1766`), and `RingWriteSender::drop` (`:1773`)
+   all signal the same descriptor and a pinned count cannot attribute the
+   resumption to the charge release.
+2. **The loom recommendation understates its own cost** (refinement). The
+   open question on `capacity-recheck-after-a-wake-race` and leverage item 1
+   in `fault-map.md` present a loom model of `signal_wake` against the arm
+   ladders as the cheap oracle. The protocol's atomics live behind raw
+   pointers into an mmapped shared page (`WakeEpoch` via
+   `capacity_wake_ptr`); loom types cannot inhabit that page, so the model
+   is necessarily a hand transcription of `reserve_until` and `signal_wake`
+   over loom atomics, kept in sync manually. The transcription must also
+   carry a detail the evidence file states inexactly: the investigation log
+   says "both sides SeqCst on generation and parked", but every `parked`
+   reset on the exit paths is a `Release` store
+   (`ring.rs:1004`, `:1013`, and the other exit arms through `:1041`), not
+   SeqCst. The mix is harmless on the current
+   reading, a resetting producer is by definition not blocked, but a loom
+   model that silently "corrected" it to SeqCst would validate different
+   code.
+   *Disposition:* refinement — in the record's open question and the
+   fault-map leverage entry, replace "loom model of `signal_wake` against
+   the park ladder" with "loom model of a hand transcription of the
+   protocol (the atomics live in an mmapped page loom cannot instrument),
+   including the Release-not-SeqCst parked resets"; correct the evidence
+   file's "both sides SeqCst" sentence to name the Release resets.
+
+### Lens 2: coverage balance
+
+No duplication finding. The relationship map's dominance hypotheses were
+checked against the code and hold as stated: `queued-write-needs-no-second-wake`
+and `released-charges-wake-blocked-readers` guard distinct resources (write
+queue, read budget) coalescing on one private eventfd; the six rewritten
+records cite the doorbell mechanics without restating Group N's checks, and
+`backpressure-converges-in-a-bounded-reclaim-window`'s convergence window is
+the recheck ladder without asserting the ladder itself. The group does not
+dominate the rewritten records.
+
+What the group leaves uncovered clusters on one blind side: every Group N
+record asserts that wakes are *delivered*; none asserts that delivery
+*terminates or is bounded*. Three gaps and one bias.
+
+1. **Redispatch and dispatch have no termination bound** (gap). Two
+   concrete unbounded shapes existed in the source tree this pass evaluated.
+   First, in that tree `readiness_handled` converted any per-channel
+   `arm_data_wait` error into `redispatch = true`, and the wrapper re-queued
+   itself with `queueMicrotask`; a channel whose arm persistently errored
+   therefore produced an unbounded microtask recursion. That shape is
+   superseded at HEAD: `readiness_handled` (`lib.rs:1352-1391`) unregisters
+   the channel on `Err` (`:1385`) and returns `redispatch = true` only for an
+   advanced `Ok(false)` (`:1378-1381`), and the wrapper's `scheduleRedispatch`
+   (`index.ts:684-697`) yields to `setImmediate` after
+   `REDISPATCH_MICROTASK_BUDGET` consecutive microtasks; the record
+   `readiness-redispatch-is-bounded-under-persistent-arm-failure` owns it.
+   Second, the setup socket is registered with
+   `IN|HUP|ERR|RDHUP` (`scheduling.rs:70-80`, `:228-239`); in that tree the
+   registration was level-triggered, so after peer death
+   the HUP can never be drained, so every `epoll::wait` returns immediately
+   and the reactor dispatched callbacks at acknowledgement speed until JS
+   closed the channel. At HEAD that registration carries `ONESHOT` (`:79`), so
+   the hangup is reported once and the registration disables itself. At the
+   time of this pass no record stated any bound on either loop.
+   *Disposition:* gap — queue a discovery pass over the reactor's
+   termination behavior: redispatch termination on persistent error,
+   dispatch rate on a permanently-ready descriptor, and what obligation the
+   JS layer carries to break each loop.
+2. **fd-resource exhaustion of the wake mechanism itself** (gap). The
+   mechanism spends descriptors: two eventfds per ring, one per bridge, an
+   epoll and control fd per reactor, plus a duplicated doorbell and
+   optionally a duplicated setup socket per registration
+   (`scheduling.rs:220-239`). Creation failures under `EMFILE` map to
+   `DoorbellFailed` or a generic registration error; `register`'s
+   partial-failure cleanup (delete the doorbell registration when the setup
+   registration fails, `:235-238`) is untested and uncataloged. No record
+   covers the exhaustion surface F15's substitution record sits next to.
+   *Disposition:* gap — queue discovery over creation and registration
+   failure paths and their cleanup obligations.
+3. **Multi-channel interleaving has no owning record** (gap). Two Group N
+   Exercised lines name the multi-channel case as not covered, but no
+   record owns the property those tests would pin: one channel's doorbell
+   edge must not cost another channel its wake, given that
+   `readiness_handled` re-arms *every* registered channel per
+   acknowledgement (`lib.rs:1191-1201`), a deliberate cross-channel
+   coupling. Adjacent and also unowned: a second `watch` silently discards
+   its callback because the reactor is created only once
+   (`lib.rs:1165-1167`), so all
+   channels share the first caller's callback, by design at the wrapper,
+   undocumented at the addon boundary.
+   *Disposition:* gap — queue a multi-channel discovery pass: per-channel
+   wake independence under one shared callback, and the one-reactor
+   contract of `watch`.
+4. **Marker promotion is inconsistent across same-day groups** (bias).
+   Group N names six new enabling situations in its Required-faults lines
+   and promotes none to first-class `sometimes` records, while Group M,
+   written the same day, promoted two of its own
+   (`lease-saturation-is-reached-then-drains`,
+   `duplex-overlap-is-reached`). The portfolio thereby answers the original
+   evaluation's bias 2 both ways at once.
+   *Disposition:* bias — a human should set the promotion rule once: what
+   makes an enabling situation a record rather than a harness obligation,
+   and apply it to Group N's six markers retroactively.
+
+### Lens 3: implementability
+
+Three of the six new coverage markers are genuinely reachable on a correct
+system, two of them already constructed:
+`shm_publish_during_readiness_callback` (`mechanism.ts:527-650`, the
+"readiness acknowledgement preserves a frame published during callback" test),
+`shm_queued_writes_exceed_one_per_wake` (the `RingWriteSender::try_send` bypass
+at `client.rs:2400-2404`), and `shm_partial_page_shared_with_live_lease`
+(`punch_dead_pages`, `ring.rs:2169-2240`). Three findings on the other three.
+
+1. **`shm_kick_during_pending_callback` needs a race, not a call order**
+   (refinement). The marker was recorded as constructible by calling `poll`
+   from inside an unacknowledged callback with data visible. That construction
+   cannot reach the kick: `poll` takes `try_receive()` first
+   (`lib.rs:1418-1423`), and with data visible that returns `Some(lease)`, so
+   the frame is delivered at `:1479` and the `else` arm holding
+   `arm_data_wait()` and `reactor.kick()` (`:1455-1472`) is skipped entirely.
+   The kick is reachable only on the empty-receive arm, and only when
+   `arm_data_wait()` returns `Ok(false)` — that is, when data or a generation
+   change appears after the empty `try_receive` but before the arm's recheck
+   (`arm_data_wait_guarded`, `ring.rs:1201-1215`, and `armed_wait_holds`,
+   `:1227-1233`). Witnessing it therefore requires a concurrent
+   publication or a scheduling seam inside that window, not a call order.
+   *Disposition:* refinement — restate the marker's construction in the
+   fault-map row and the Required-faults line as a race between an empty
+   receive and the arm recheck, and name the seam a test would use to hold that
+   window open.
+
+2. **`shm_capacity_signal_hit_parked_epoch` cannot witness its situation**
+   (refinement). The marker is defined as firing "on the release side when
+   `signal_wake` swaps a nonzero epoch". Two defects. First, no observation
+   point exists: the swap result is internal to `signal_wake`
+   (`ring.rs:1427-1429`) with no probe, counter, or return-value exposure,
+   so emitting the marker requires a code seam. Second, even with a seam,
+   a nonzero swap occurs on every ordinary mid-block wake, the existing
+   two-process test fires it constantly, so the marker over-approximates
+   the F16 arm window (tens of instructions) by the three orders of
+   magnitude the fault map itself names, and a campaign could saturate the
+   marker forever without once covering the window the record exists for.
+   *Disposition:* refinement — in the record's Required-faults line and the
+   fault-map row, either (a) redefine the witness as "wake landed after the
+   waiter's generation read and before its `wait_until` entry", stating
+   that only a loom or shuttle schedule can observe it, or (b) keep the
+   marker but rename its claim to block-then-wake coverage and state
+   explicitly that F16 has no constructible runtime marker.
+
+3. **The parked-bridge witness should use observable state** (refinement).
+   `shm_read_budget_exhausted_with_parked_bridge` names a park site that is
+   not externally distinguishable: the charge poll and the data-wait poll
+   block on the same `worker_wake` descriptor (`client.rs:1879-1901`,
+   `:1921-1937`). The observable conjunction is `read_budget` at capacity
+   at publication time plus subsequent non-receipt; the `used()` accessor
+   already exists in-crate under `#[cfg(test)]` (`client.rs:1688-1690`).
+   The test is necessarily in-module since `start_ring_bridge` is private;
+   that is fine for a Rust unit test and worth stating so the record does
+   not get routed to an integration harness that cannot reach it.
+   *Disposition:* refinement — in the record's Required-faults line, define
+   the witness as "`read_budget.used == capacity` at the moment a further
+   frame is published, followed by bounded resumption after one
+   `ByteCharge` drop", and note the in-module topology.
+
+Observability of the asserted states is otherwise sound: callback counts,
+frame receipt, `conservation()` snapshots, and `DoorbellFailed` returns are
+all reachable from existing test surfaces.
+
+### Lens 4: wildcard
+
+1. **The acknowledgement path's own failure is silent and wedging** (gap).
+   `readiness_handled` returns `false` without calling `reactor.handled()`
+   when the registry borrow fails or the reactor is gone (the two
+   early-return arms at `lib.rs:1185-1189`). The reactor then stays blocked
+   in `wait_until_handled` with `pending` set, and the JS dispatcher reads
+   `false` as "nothing to redispatch": a lost acknowledgement is exactly
+   the manufactured permanent lost wake that
+   `reactor-callback-is-one-in-flight` names as the downstream harm of a
+   *double* acknowledgement, yet no record covers the acknowledgement
+   failing to happen at all. The borrow-failure arm is probably
+   unreachable on a single JS thread with scoped borrows, but nothing pins
+   that, and the return value conflates "no redispatch needed" with
+   "acknowledgement never ran".
+   *Disposition:* gap — queue discovery over the acknowledgement path's
+   failure modes: reachability of the early returns, and whether the
+   boolean should be tri-state or the wedge should be detectable
+   (`ensure_healthy` is never consulted by the dispatcher).
+2. **The group is fix-commit-shaped** (bias). Every Group N record's
+   discovery trigger is a fix commit inside PR #131's own branch history.
+   That orientation finds precisely the hazards the author already noticed
+   and fixed, and both wildcard-adjacent findings of this evaluation
+   (redispatch termination, acknowledgement failure) sit where no fix
+   commit exists. The method is honest about it ("the commit is the
+   trigger, the code is the evidence"), but the selection effect is real.
+   *Disposition:* bias — a human should weigh commissioning one discovery
+   pass over the reactor and bridge *failure and termination* behavior that
+   deliberately ignores commit history, before test investment locks in the
+   fix-shaped frame.
+
+### Verdict for this scope
+
+The seven records are accurate against HEAD in every sampled citation, well
+separated from the six rewritten records, and five of seven are cheaply
+implementable today. The two medium-confidence records are honestly
+labelled, and the group's one safety-of-data record
+(`reclamation-excludes-pages-with-live-wrapped-bytes`) is the strongest in
+the set. The portfolio-level weaknesses are the two invalid-or-unobservable
+markers (implementability findings 1 and 2) and the shared blind side: the
+group proves wakes arrive and never asks whether wake processing stops.
+
+## Whole-portfolio evaluation, 2026-09-05 (fresh context, 71 records)
+
+The earlier sections evaluated 58 records at discovery and then the seven Group N
+records; the U3 additions and the post-refactor gap-closure records had never
+been evaluated as one set. This pass was run by a fresh-context evaluator given
+`../METHOD.md`, `catalog.md`, `existing-checks.md`, `fault-map.md`, the
+generated index, and the code, and told not to open this file, the evidence
+directory, or git history. It read all 71 records, fully verified every citation
+in 28 of them across Groups A through N and the U3 additions, and spot-checked
+the rest. Findings are reproduced with its citations; the disposition is ours.
+
+### Disposition summary
+
+| Category | Count | Status |
+| --- | --- | --- |
+| refinement | 16 | 16 applied; the whole-catalog `ring.rs` re-anchor landed on 2026-09-05 after a HEAD anchor table was added to `catalog.md` |
+| gap | 6 | queued for a follow-up discovery pass; the host-test inventory gap is closed in `existing-checks.md` |
+| bias | 3 | require human judgment, listed below |
+
+### Refinements applied
+
+1. **Stale `ring.rs` anchors in 31 records.** `try_reserve` is at `:1149` not
+   `:693-726`, `try_receive` at `:1312`, `Ring::release` at `:1469`,
+   `reserve_until` at `:1237`, `probe` at `:1848`, `conservation` at `:1558`,
+   `abort_reservation` at `:2283`, `DuplexRing::create` at `:2631`,
+   `removal_ranges` at `:307`, `GRANT_BYTES` at `:45`. Disposition: a
+   generated HEAD anchor table is at the top of `catalog.md`; the per-record
+   rewrite landed on 2026-09-05 (gap 6 below).
+2. **`operation-counters-are-observed-not-declared`.** The transport now counts
+   its own syscalls (`SyscallCounters`, `page_removals`, `syscall_counters()`,
+   pinned by `syscall_counters_track_only_actual_ring_syscalls`), the counter
+   set is the seven fields in `evidence.rs:7-22`, and the cited check moved to
+   `tests/evidence.rs` with two siblings. Record re-derived; the residual is
+   which counters are observed versus computed.
+3. **`measured-transfer-is-witnessed-by-the-data`.** The bench folds received
+   bytes into the checksum and fails the run against an independent expectation
+   (`hardware_envelope.rs:656-664`, `:742-748`). Verdict flipped to a
+   regression contract.
+4. **`identity-and-schema-rejection-is-one-contract`.** Both readers quarantine
+   on every rejection (`quarantine_with` at `ring.rs:1316-1318`, `:2073-2075`).
+   Disposition arm and its `needs human input` question dropped; enforcement
+   arm kept.
+5. **`header-rejection-effect-does-not-depend-on-the-catching-layer`.**
+   `enter_quarantine` has four direct callers and twenty via `quarantine_with`,
+   not one. Confidence basis rewritten; the two-layer question survives.
+6. **`receive-failure-leaves-no-wedged-slot`.** All post-commit-point branches
+   pass through the quarantine wrapper, so the un-quarantined wedge cannot
+   occur; `unreachable` kept, angle and impact rewritten.
+7. **`decoder-totality-over-arbitrary-bytes`,
+   `fuzz-harness-encoding-tracks-the-production-descriptor`.**
+   `harness_replays_terminate_on_arbitrary_lengths` does not exist in this tree
+   (`contract.rs` has eleven tests, none of that name). Existing check set to
+   the corpus replays and the grant fixture pin, with the gap named.
+8. **Fault map F2.** Marked available in-process: sixteen forged-shared-state
+   unit tests store values into the shared pages (`ring.rs:3190`, `:3210`,
+   `:3228`, `:3247`, `:3682`, `:3857`, `:4043`, `:4257`, `:4274`, `:4292`, and
+   the doorbell tests). Ranking recomputed against the cross-process half.
+9. **Fault map F10 and F11.** F10 retired (all three macOS records are
+   invalidated); F11 marked not available (CI has one `ubuntu-latest` job).
+10. **`dead-peer-charges-are-reclaimed-or-declared`.** Catalog and fault map
+    reconciled to `partial` on `shm_failure_modes.rs:213`; F1's injection
+    points and `Victim::kill` (`:154-161`) recorded.
+11. **`reservation-charge-visible-with-non-free-state`.** Both arena-plan early
+    returns restore `SLOT_FREE` (`ring.rs:1201`, `:1207`); the window is the
+    CAS-to-store interval on the success path only, and the contradicting
+    SAFETY comment is at `:1637`.
+12. **`charge-release-never-silently-strands`.** `AdmissionController::release`
+    (`profile.rs:498-506`) read directly; Confidence to high, anchors fixed.
+13. **Four records deriving reachability from `packages/plugin`.**
+    `publish-signal-implies-committed-frame`,
+    `native-boundary-not-weaker-than-its-wrapper`,
+    `test-only-surface-absent-from-the-shipped-addon`, and
+    `reactor-callback-is-one-in-flight` re-derived from in-tree anchors, with
+    the absent directory named as a source-tree reference.
+14. **`existing-checks.md` duplicate line sets.** The per-merge tables from
+    2026-08-31 are retired in favour of the regenerated inventories; the Group N
+    intro's `signal_wake` and `arm_data_wait` anchors now match the doorbell
+    pass.
+15. **Preamble contradiction.** The 2026-08-30 note that
+    `quarantine-charge-transition-is-atomic` and `release-failure-is-observable`
+    moved to `Reaches production: no` now says that was then and both are
+    `default-production` at U3.
+16. **Fault map scope.** Six U3 records added to the Map; the count corrected to
+    71; the older leverage ranking marked superseded.
+
+### Gaps queued
+
+1. **`Ring::trim`** (`ring.rs:2259`) punches arena pages with three dedicated
+   tests (`:3150`, `:3276`, `:4183`) and no record; the live-byte exclusion
+   property covers `reclaim_completed` only. Closed 2026-09-05:
+   `trim-removes-only-dead-pages-below-the-write-cursor` added and the
+   reclamation record scoped to `reclaim_completed`.
+2. **Diagnostics contract.** `RingTransport` publishes `peer_deaths` and
+   `reclamations` (`ring_transport.rs:86-87`, `:188-189`), pinned by
+   `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts`
+   (`:862`), and six records say "no counter fires". Closed 2026-09-05:
+   `diagnostics-report-lifecycle-counts-in-a-fixed-shape` added; using it as
+   the oracle inside the dead-peer and release-failure records is still open.
+3. **Quarantine wake protocol.** Three tests (`ring.rs:3116`, `:3294`, `:3314`)
+   assert a quarantine raised while a peer is parked is delivered; no record.
+   Closed 2026-09-05: `quarantine-wakes-a-parked-waiter` added.
+4. **Redaction.** Three tests (`contract.rs:446`, `:714`, `profile.rs:22`) and
+   the `redacted_debug!` macro assert sentinels never reach logs; no record.
+   Closed 2026-09-05: `transport-debug-output-redacts-every-sentinel` added,
+   labelled `test-only` because no shipped formatter reaches the impls.
+5. **Unattached tests.** 82 of the inventoried tests are named by no record and
+   the back-link column is filled for a minority; complete it and triage the
+   forged-shared-state, `probe`, and redaction clusters.
+6. **Whole-catalog `ring.rs` re-anchor** for the 31 records in refinement 1.
+   Closed 2026-09-05: every citation in every record was checked against HEAD
+   in six independent batches and 269 were corrected; the anchor-table note in
+   `catalog.md` lists the mechanism corrections that fell out of it.
+
+The host-test inventory gap the evaluator raised is closed: nine
+`crates/host-runtime` tests are now inventoried in `existing-checks.md`.
+
+### Biases requiring human judgment
+
+1. **What does `Reaches production` mean?** The derivation maps
+   `default-production` to yes and `test-only` to no and drops METHOD's
+   `explicit-config-only` (unused, so vacuous). It also conflates code
+   reachability with state reachability: `lease-saturation-is-reached-then-drains`
+   and `receive-resumes-when-lease-capacity-clears` are `default-production`
+   while their own bodies show the saturated state is unreachable in the shipped
+   host (`max_leases` is 8, `receive_one` holds one lease per call). Decide
+   whether the column means "the code runs" or "the state occurs", and split it
+   if both are wanted.
+2. **Invalidated records carry a live `reachability` in `index.json`.** Four
+   invalidated records report `default-production` although their bodies say no
+   class applies. Either add an explicit `n/a` value or require
+   `status == active` in every consumer.
+3. **Twelve invalidated records occupy roughly 900 lines** with source-tree
+   anchors that resolve against neither HEAD nor each other, and the latent/TCP
+   preamble is retracted in every active record but still opens the file. Move
+   invalidated records to an appendix, promote Group K's one transferable
+   finding (a same-instance harness cannot prove a two-address-space predicate)
+   into the live text, and date-stamp or delete the preamble.
+
+### Verdict for the whole portfolio
+
+The evaluator's verdict, which we adopt: the property selection is strong and
+self-aware, but the set was not ready to hand to campaign planning because its
+anchoring had drifted against the transport it describes, three substantive
+claims were false rather than mis-numbered (in-transport syscall counting
+exists, the bench checksum is computed from received bytes, both readers
+quarantine on every error), and the fault map mis-stated its own top-ranked
+investment. All sixteen refinements are applied above, the per-record `ring.rs`
+re-anchor last. The
+four missing property areas (`trim`, diagnostics, quarantine wake, redaction)
+now have records; with the back-link triage still queued, the set is a solid
+basis for a campaign but not a finished one.
+
+## Evaluation of the seven 2026-09-05 additions (fresh context)
+
+A fresh-context evaluator that had not read this file or the evidence directory
+evaluated the seven records added after the whole-portfolio pass
+(`trim-removes-only-dead-pages-below-the-write-cursor`,
+`quarantine-wakes-a-parked-waiter`,
+`raw-native-attach-rejects-hostile-descriptors-without-effects`,
+`diagnostics-report-lifecycle-counts-in-a-fixed-shape`,
+`transport-debug-output-redacts-every-sentinel`,
+`readiness-redispatch-is-bounded-under-persistent-arm-failure`,
+`each-channel-wake-survives-a-shared-acknowledgement`) against HEAD and the
+other 71 records. Of about 68 citations, two resolved wrongly (`index.ts:555`
+for the self-requeue, `tests/capability.ts` as two watched channels); both were
+corrected against the source tree this pass evaluated. That tree's line numbers
+are not HEAD's: the self-requeue is `scheduleRedispatch` at `index.ts:684-697`
+at HEAD, and the `lib.rs` and `ring.rs` anchors this section cites elsewhere
+were re-anchored in the same HEAD pass as Lens 3 above. Eighteen refinements
+were returned and all are applied:
+
+- `trim`: the dead range is `[punched, arena_reclaimed)` with partial pages
+  removable under `everything`, the protective bound is the producer-local
+  `reserved_end`, not `arena_write`, two more existing checks (the
+  `Quarantined` refusal and the `page_removals == 1` witness) are cited, and
+  the Check now requires a released frame so it cannot pass with no removal.
+- `quarantine-wakes`: the first test leaves a token for a later waiter rather
+  than releasing a sleeping one, the third event returns `DoorbellFailed`, not
+  `Quarantined`, and `enter_quarantine` rings both doorbells, which closes
+  the open question by code.
+- `raw-native-attach`: two of the six suites expect their own messages, the
+  suites run on Darwin as well as Linux, and every suite is vacuous without a
+  built addon, now an enabling situation.
+- `diagnostics`: the test pins the counter-to-key mapping and part of the
+  shape, not the closed key set, and the Check now drives the events through
+  `connection.rs` so a forgotten `record_*` call is inside the oracle.
+- `transport-debug`: eight of thirteen macro types are formatted by a test,
+  `SamplePrefix` was missing from the guarantee's list, and the Check is a
+  set-coverage oracle because the rendering holds by construction.
+- `readiness-redispatch`: `Reactor::register` unregisters on a failed first
+  arm, so only a ring quarantined after registration enters the loop; the
+  guarantee states that HEAD does not meet it.
+- `each-channel-wake`: a two-channel suite exists (`mechanism.ts:170-207`),
+  so Exercised is partial, and at the wrapper level the single-channel record
+  dominates this one; the raw addon is the undominated residue.
+
+### Gaps queued
+
+1. `watch`'s callback argument is honoured only for the first channel
+   (`packages/shm-native/src/lib.rs:1334-1336`, inside `watch` at
+   `:1322-1347`); the reactor holds one callback and the wrapper hides it by
+   keying handlers in a JS map. Known to the acknowledgement test's later-pair
+   arm (`mechanism.ts:625-627`), uncatalogued. The raw-path half of
+   `each-channel-wake`.
+2. A dropped acknowledgement parks the shared reactor for every channel:
+   `readiness_handled` returns `false` without `reactor.handled()` when the
+   registry is borrowed or the reactor is absent (`lib.rs:1354-1362`, inside
+   `readiness_handled` at `:1352-1385`). The inverse of the redispatch record;
+   no test.
+3. The host diagnostics report has no value-level redaction oracle
+   (`ring_transport.rs:1164-1175` asserts that seven secret key names are
+   absent from the encoded report, and nothing else about values); the join the
+   relationship map asserts between the diagnostics and redaction records is
+   checked by neither.
+4. A failed `native.close` strips readiness while leaving the channel open
+   when the native side retained the entry (`index.ts:886-898`,
+   `finish_close` at `lib.rs:1563-1576`); at HEAD the wrapper retires only the
+   handles whose tokens are confirmed absent (`:896`) and the native side reports
+   a cleanup failure with the consumed prefix once the entry is gone
+   (`lib.rs:1576`). The runtime tests cover the mapping-retention half only.
+
+### Biases requiring human judgment
+
+1. `trim`'s intended owner: with no non-test caller the record is either a
+   regression contract for a future idle path or an argument for `cfg(test)`.
+2. Whether `readiness-redispatch` is a defect record or a property record; the
+   catalog has no convention for a property the code fails today.
+3. Raw-addon boundary scope: six of the seven records treat the directly
+   requirable addon as a production surface while
+   `test-only-surface-absent-from-the-shipped-addon` says the same surface
+   ships fault injectors ungated. Both positions cannot stand.
+4. Darwin execution of the raw-descriptor suites against a Linux-only product.
+
+## Evaluation of the four addon additions (fresh context, 82 records)
+
+A fresh-context evaluator that had not read this file or the evidence directory
+evaluated the four records added after the seven-record pass
+(`packaged-addon-load-verifies-manifest-and-checksum`,
+`setup-descriptors-name-distinct-open-files`,
+`setup-connect-honors-its-deadline`,
+`addon-tokens-never-collide-with-live-entries`) against the merged HEAD and the
+other 78 records. Of 40 citations, 17 resolved wrongly: nine bare citations in
+the packaged-load record and four in the connect record had missed two base
+merges, two connect ranges overshot by a line, and two `docs/shm-transport.md`
+lines were off by one. All are corrected. The evaluator also confirmed all four
+Index rows against their record bodies.
+
+### Refinements applied
+
+1. `packaged-addon-load-verifies-manifest-and-checksum`: the Guarantee now says
+   the taxonomy is not total over manifest content (a `null` or malformed
+   manifest raises a raw `TypeError`, and a payload read can fail after
+   `existsSync`), that the unsigned co-located manifest detects corruption and
+   substitution rather than tampering, and where registry-level provenance lives;
+   the Check names eight fault shapes, requires one fault per run because the
+   gates are ordered, distinguishes the two `missing_addon` shapes and the
+   uppercase-hex case, and asserts the memoized rethrow; Reachability cites the
+   `files` array and `optionalDependencies` entry that force the package path;
+   Fault/timing angle gains the process-wide memoization hazard; Impact drops
+   "tampered". Two open questions added.
+2. `setup-descriptors-name-distinct-open-files`: the inode fallback is described
+   as stricter and incomplete rather than weaker, since it has no false accepts;
+   the Check gives the pair counts on both paths (21 with the setup socket, 15
+   without); Reachability names the raw `attach` path's two ordered checks and the
+   bridge endpoint's geometry-equality comparison, which admits byte-identical
+   grants; the Guarantee adds that refused descriptors are closed on the way out;
+   the fallback trigger is narrowed to `ENOSYS` or `EPERM`.
+3. `setup-connect-honors-its-deadline`: Exercised moves to partial, because the
+   `EINTR` re-arm, the pass-through errno arm, and the microsecond floor have no
+   test and the deadline assertion allows a 25x slack; the Guarantee names the
+   three outcomes (stream, `TimedOut`, kernel errno); the Check adds the
+   no-listener and zero-timeout arms; the Fault/timing angle records that one
+   caller deadline bounds connect, authentication, grant receive, and activation
+   while `goodbye` has its own budget. One open question added on the slack.
+4. `addon-tokens-never-collide-with-live-entries`: Exercised moves to partial
+   (no production call site, no `None` return, no read-then-insert property is
+   tested); the Guarantee scopes uniqueness per table and per thread and states
+   that the `None` return is unreachable on the per-channel tables; Required
+   faults distinguishes the registry counters, which wrap after `2^32` creations,
+   from the per-channel counters, which wrap after `2^32` frames on one channel;
+   Impact names the cross-thread channel-id case. Two open questions added.
+5. Relationship map: the ordering claim that the connect record sits in front of
+   the two identity records is qualified to the `connectSetup` path; the raw
+   `attach` path issues descriptors and tokens without a connect.
+6. `fault-map.md`: the connect and token rows move from Yes to Partial for the
+   reasons above.
+
+### Gaps queued
+
+Each was checked against the catalog with a fixed-string search before being
+claimed.
+
+1. `unsupported_platform` and the musl/glibc discrimination in `isMuslLinux`
+   (`packages/shm-native/index.ts:184-201`): fails closed when `process.report`
+   is hidden and open when a musl runtime exposes `glibcVersionRuntime`.
+2. Startup outcome memoized for the process (`loadError`, `index.ts:244-245`,
+   `:269-273`), which also governs `probeCapabilities`, `nativeWireConstants`,
+   `nativeLeakDiagnostics`, and `activeNativeChannels`.
+3. Process-wide grant exclusivity across worker threads (`ACTIVE_GRANTS`,
+   `GrantReservation::claim`, `packages/shm-native/src/lib.rs:98-130`), owned by
+   no record; it appears only as an element of the quarantined-attach check.
+4. The wrapper handle-retirement contract (`consumesHandle`, `confirmedAbsent`,
+   `ChannelLiveness`, `retireIfConsumed`, `finishClose`'s partial-sweep branch).
+5. `ProducerCursor` span arithmetic across a wrapped reservation and the
+   underfill gate before publication.
+6. Wrapper argument hardening (`assertUint32Argument`, `privateBytes`,
+   `markAsUntransferable`), distinct from the Rust-side descriptor decode.
+7. TypeScript and Rust wire constants agree (`DESCRIPTOR_SCHEMA_VERSION`,
+   `QUALIFIED_TEST_PROFILE`); a check exists in `mechanism.ts`, so the record
+   would open at partial.
+8. One caller timeout is one budget across connect, authentication, grant
+   receive, and activation, with `goodbye` outside it; the two JavaScript
+   promises between them consume the same budget.
+9. Grant-message ancillary hygiene: zero-byte receive, `CTRUNC`, non-`ScmRights`
+   messages, and the exact descriptor count (`setup.rs:343-356`).
+10. Length-prefixed setup framing (`read_message_from_prefix`, `read_message`).
+11. Mixed comparison discipline in `authenticate`: constant-time for proof and
+    daemon id, plain `!=` for `daemon_ver`.
+12. Once-only descriptor handoff (`take_descriptors`) and pending-entry removal
+    on a rejected finish.
+13. Bounded string fields before materialisation (`string_field`,
+    `lib.rs:213-232`).
+14. N-API environment teardown closes every channel (`cleanup_env`,
+    `ensure_cleanup`); the addon's own close ordering has no record.
+
+### Biases requiring human judgment
+
+1. `Reaches production: yes` for the packaged-load path rests on a package that
+   does not exist in the tree and is recorded as unpublished; whether
+   `default-production` or a class for an unrealised ship path is the honest
+   label changes how the addon group reads.
+2. The manifest reader has no writer anywhere in the repository; the record
+   gates on half a contract.
+3. Only one file in the manifest is verified; "the payload" leaves the scope of
+   the integrity claim implicit.
+4. The deadline test's 25x slack; tightening it trades pinning for CI
+   sensitivity.
+5. Three of the four records rest on tests that call the private function
+   directly; the group's aggregate confidence is unit-level, and no test drives an
+   aliased bundle through a socket or `attach`, or a token wrap through the API.
+6. The relationship map's ordering claim, now qualified, still asserts a
+   dominance that a human should confirm or drop.
+7. Citation freshness was uneven within records: qualified citations were
+   current and bare ones stale, the signature of a re-anchor pass that shifted by
+   paragraph rather than by record. The bare citations across the catalog were
+   re-shifted with record-scoped inheritance in the same commit; the claim in the
+   catalog preamble that a whole-catalog pass corrected every citation should be
+   read with that caveat.
+8. An unreachable exhaustion clause inside an `always` record; whether the dead
+   `identity exhausted` branch on the per-channel tables is defensive code worth
+   keeping or dead code worth deleting is a design decision.
+
+## Evaluation of the three ring additions (fresh context, 85 records)
+
+A fresh-context evaluator that had not read this file or the evidence directory
+evaluated `attach-makes-every-received-descriptor-close-on-exec`,
+`foreign-slot-state-on-reserve-is-a-fault-not-backpressure`, and
+`failed-publication-wake-leaves-the-slot-published` against the merged HEAD.
+The portfolio at that pass held 85 records: the 82 that existed after the four
+addon additions above, plus these three. (The "other 78 records" in the
+four-addon section is that earlier pass's own baseline, 82 less its four.)
+Of 29 citations, 23 resolved exactly, four were imprecise, and two were wrong
+(`:4277-4295` for a test that ends at `:4288`; `:1294-1297` for a check at
+`:1293-1295`); all are corrected. All four cited tests run and pass. Index rows
+match all three bodies. Three prose claims were contradicted by code and are
+restated: the wake is not the only post-store failure in `publish_commit`, peer
+death alone does not make the wake fail (`signal_wake` sends only when `parked`
+is set), and `peer_closed` probes the setup socket, not the ring descriptors.
+
+### Refinements applied
+
+1. Close-on-exec: Reachability lists all four `Ring::attach` entry points; the
+   Guarantee names this side's end of each doorbell rather than both ends; the
+   Check splits the failure arm into an `always-or-unreached` obligation that the
+   safe API cannot reach and notes that `ObjectValidationFailed` is shared with
+   `validate_object` and `validate_seals` and that `sys::is_cloexec` is
+   test-only; the Fault/timing angle drops the `peer_closed` claim, names
+   `drain` and `signal` as the ring-level detection that a leaked end defeats,
+   and records that both in-tree receivers already pass `MSG_CMSG_CLOEXEC`, so
+   the gate is defence in depth in-tree; Exercised is partial.
+2. Foreign slot state: Reachability bounds `try_reserve` correctly and states
+   which receives reach the exchange; the Guarantee scopes never-`Exhausted` to
+   the slot-state decision, since `Exhausted` remains legitimate after the
+   exchange when the arena is full; the Check requires a fresh ring per state
+   because quarantine latches, enumerates the five defined states plus an
+   out-of-range byte, names the elapsed-time oracle for the `reserve_until`
+   clause, and records the `reclaim_completed_inner` detection point that
+   catches a forced `RELEASE_PENDING` first; Exercised is partial (one state per
+   side on a never-used slot, no recycled-slot case, no `reserve_until` test);
+   the Fault/timing angle says the quarantine wake is best effort.
+3. Failed wake: Reachability names the guards before `publish_commit` and the
+   two conditions a wake failure needs; the Guarantee and Check generalise from
+   the doorbell to any post-store failure and add the wake generation, `parked`,
+   and `reserved_end` observations; the Fault/timing angle lists the four
+   post-store failure points and marks the cursor-exchange arm as a live path;
+   Exercised is partial and the raced-quarantine test is named for its error
+   only.
+4. `fault-map.md`: the foreign-slot and failed-wake rows move to Partial.
+
+### Gaps queued
+
+Test names below were checked against the catalog before being claimed.
+
+1. `publication_that_raced_a_quarantine_is_not_reported_as_delivered`
+   (`ring.rs:3648-3664`) asserts the error of the raced-quarantine arm and
+   nothing about the slot; folded into the failed-wake record's Check, the slot
+   half stays unasserted.
+2. `two_producer_reserved_slots_are_impossible` (`:3719-3734`): the same forced
+   state rejected at `attachment().attach()` and `probe()`; no record owns
+   "every entry point rejects an impossible slot state".
+3. The four `probe_*` tests (`:3414`, `:3523`, `:3548`, `:3616`) define which
+   slot-state and cursor combinations are protocol-reachable; the tolerance
+   boundary has no owner.
+4. `owned_cursor_advance_fails_closed_when_the_shared_value_moved`
+   (`:3633-3645`): the `advance_cursor` exchange behind every cursor advance is
+   unowned.
+5. `creator_observes_peer_exit_once_the_attachment_is_handed_over`
+   (`:3172-3188`): the positive form of ring-level death detection through
+   `drain`, and `attachment()` being once-only.
+6. `sealed_object_of_the_wrong_size_is_refused_before_mapping` (`:3398-3411`):
+   the seals-before-size ordering in `Mapping::attach`, the gate after the
+   close-on-exec gate in the same chain.
+7. Four attach-time refusals (`:3567`, `:3603`, `:3766`, `:3780`) beyond the one
+   `attach-reconciles-or-refuses-stale-shared-cursors` names.
+8. `outstanding_reservation_is_refused_without_parking` (`:4164-4186`) and
+   `reserve_until_deadline_leaves_the_capacity_wake_unparked` (`:4189-4210`):
+   the no-parking and post-deadline `parked == 0` oracles.
+9. The forged-cursor family (ten tests from `:3255` to `:4291`): F2 against the
+   cursors rather than the slot states, unowned as a group.
+10. `armed_wait_recheck_sees_a_quarantine_that_sent_no_token` and the
+    doorbell-level tests are owned; `syscall_counters_track_only_actual_ring_syscalls`
+    (`:3050`) and the residency tests beyond the trim record are not.
+11. `wrapped_errors_preserve_sources` (`:4309`): error-source chaining has no
+    record.
+
+### Biases requiring human judgment
+
+1. Defence-in-depth records read like production properties: the close-on-exec
+   label is true of the code path and false of the fault, because both in-tree
+   receivers already deliver `CLOEXEC` descriptors. METHOD's three reachability
+   values cannot express "production path, out-of-tree fault".
+2. `Exercised: yes` had been used where `partial` fits, in all three records;
+   the correction is applied here and should be applied consistently.
+3. In-process forged state as evidence for a hostile peer: `Confidence: high` on
+   tests that write and read the shared page from one thread proves the error
+   mapping and the latch, not visibility or ordering under a concurrent writer.
+4. Whether the failed-wake record should be one record or split by failure arm.
+5. `crashed-producer-does-not-wedge-the-sequence` still describes the
+   pre-correction symptom as its source-tree finding and carries `Type: liveness`;
+   at HEAD the wedge is a quarantine, which makes it a terminality question.
+6. How much of `publish_commit`'s failure surface is worth pinning; two arms
+   need a cursor corrupted between `prepare_commit` and `publish_commit`.
+7. Whether the leaked-descriptor impact is a confidentiality and integrity
+   finding rather than a liveness one, since an execed child holds read and write
+   access to the arena.
+
+## Evaluation of the parked-marker addition (fresh context, 86 records)
+
+A fresh-context evaluator that had not read this file or the evidence directory
+evaluated `release-leaves-the-consumer-parked-marker-intact` against the merged
+HEAD and the other 85 records. Of eight citations, six resolved exactly and two
+were imprecise (`signal_wake`'s marker swap is `:2033-2035`, not `:2032-2035`;
+the test ends at `:3763`); both are corrected, and three citations the record
+should carry were added (the `Ring::release` doc comment at `:1518-1523`, the
+`publish_commit` call site at `:2376`, and `ParkGuard::arm` at `:645-650`,
+which explains why the marker check is non-zero rather than one). The Index row
+matches the body.
+
+### Refinements applied
+
+1. Reachability no longer says `Ring::release` never touches the data wake: the
+   failure path quarantines and `enter_quarantine` rings both epochs by design,
+   which `quarantine-wakes-a-parked-waiter` owns; the success path is the
+   record's subject, and both lease release entry points are cited.
+2. The Check is conditioned on a successful release and states its bound in the
+   code's units (`wait_for_data(deadline)` returns `Ok(true)` strictly before
+   the deadline), instead of an unbounded "returns".
+3. The Fault/timing angle names the actual hazard: `signal_wake` clears
+   `parked` on whichever epoch it is handed, so the property rests on the single
+   argument at `:1598` being the capacity wake.
+4. Exercised moves to partial. The test asserts the marker directly but asserts
+   the wake as a doorbell token observed afterwards on the same thread, with no
+   blocked waiter, which is the oracle shape the sibling record already classes
+   as partial; applying the same standard keeps the field comparable. The
+   fault-map row moves with it.
+5. The Guarantee gains "successful" before "publication", since a commit that
+   fails earlier signals nothing and belongs to
+   `publish-signal-implies-committed-frame`.
+
+### Gaps queued
+
+Each test below has no citing record in the catalog.
+
+1. `reserve_until_deadline_leaves_the_capacity_wake_unparked`
+   (`ring.rs:4189-4210`): the producer-side mirror of this record with opposite
+   polarity, an abandoned park must clear `parked`; the capacity half of the
+   wake protocol has no record at all.
+2. `stale_capacity_token_after_a_drain_does_not_deadlock_the_next_park`
+   (`:4213-4240`): bounded liveness across the drain and re-park, and the only
+   two-thread test in the file.
+3. `forged_consumer_cursors_fail_waits_instead_of_parking` (`:3304-3326`): the
+   safety precondition under the arm step, a wait on unverifiable cursors must
+   fail rather than park.
+4. `forged_active_lease_count_quarantines_on_release` (`:3255-3268`): the only
+   test that drives `Ring::release`'s error path.
+5. `receive_that_raced_a_quarantine_is_not_reported_as_delivered`
+   (`:3705-3716`): the consumer-side twin of an owned producer-side test.
+6. `two_producer_reserved_slots_are_impossible` (`:3719-3734`), adjacent by
+   position.
+
+### Biases requiring human judgment
+
+1. Which `Exercised` standard governs a doorbell-token oracle; this pass applied
+   the sibling record's standard, and the catalog should say so once rather than
+   record by record.
+2. Whether the wake protocol should be catalogued as one two-sided property
+   (consumer must not un-park itself on release; producer must un-park itself on
+   deadline) rather than as two mirror records.
+3. Whether a single-threaded token oracle can ever support `Confidence: high`
+   for a liveness claim, or whether the two-thread test in gap 2 should be the
+   shared witness for every wake record.
+4. The doc comment at `ring.rs:1518-1523` states this record's contract in the
+   source; whether a record that restates a documented invariant earns a place
+   in the catalog, or whether the catalog should point at the comment and stop.
+5. `Reaches production: yes` rests on the shipped addon's `poll`, which arms and
+   releases in the order the record describes; whether the bridge endpoint, which
+   releases through `ReceiveLease` drop, shares the same exposure was not traced.
+6. The record's Impact says "forever" for an idle channel; whether the reactor's
+   readiness path or a setup-socket event bounds that in practice was not
+   established.
