@@ -11,7 +11,7 @@ U3 renamed the domain separators (`eidnara-server-v1`, `eidnara-client-v1`) and 
 - `committed_vectors_pin_the_shared_construction` (`setup_auth.rs:331`) and `daemon_ver_is_bound_into_the_proof` (`:358`) compare `compute_proof` against the literals.
 - `committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs:654`) pins the host side.
 - `committed_auth_proof_vectors_pin_the_construction` (`crates/host-runtime/tests/protocol_vectors.rs:33`) uses the test-local `raw_client::proof`, an HMAC written over the documented layout rather than a call into `compute_proof`; `proof_folds_every_input` (`:146`) shows every field, including `daemon_ver`, changes the digest.
-- `auth_proofs_match_committed_wire_vectors` (`packages/shm-native/src/setup.rs:616`) pins the addon side against the same literals.
+- `auth_proofs_match_committed_wire_vectors` (`packages/shm-native/src/setup.rs:626`) pins the addon side against the same literals.
 - All of the above pass under `cargo test --workspace` on Rust 1.98 (CI) and stable.
 
 ## Failure scenario

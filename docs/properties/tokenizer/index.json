@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "tokenizer",
   "source": "catalog.md",
-  "source_sha256": "38e7eafb22e5e180591507ea27370cf8acff8bf8e982e899cae843347906ad61",
+  "source_sha256": "14432c4689cf7063df66957f219749ece695a7f49b073fd9b004c917ba2eadeb",
   "records": [
     {
       "slug": "tokenizer-encoding-matches-the-independent-oracle",

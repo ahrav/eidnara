@@ -85,9 +85,9 @@ shipped host that span contains the entire serialization of the frame body —
 writes (`:809-810`) — so it is proportional to frame size, up to
 `MAX_FRAME_BYTES = 64 MiB` (`crates/shm-transport/src/arena.rs:4`). In the addon
 the window is wider still and includes a JavaScript callback: `produce` holds the
-reservation across `fill.call(views)` (`packages/shm-native/src/lib.rs:1007`), and
+reservation across `fill.call(views)` (`packages/shm-native/src/lib.rs:1049`), and
 the two-phase `reserve`/`commit_reservation` pair holds it across an entire return to
-JavaScript and back (`:1057-1063` to `:1157-1159`). That second shape is the practical
+JavaScript and back (`:1105-1111` to `:1205-1207`). That second shape is the practical
 kill target. No configuration dependency; no platform gating beyond the
 Linux-only attach path. Relationship: this is the producer-side twin of
 `attach-reconciles-or-refuses-stale-shared-cursors` and shares its root — no
@@ -139,7 +139,7 @@ guarantee statement leaves implicit, and it decides what the test can assert.
   `crates/host-runtime/src/ring_transport.rs:749-800`, `:901-933` (the custody
   admission formerly at `shm_provider.rs:299-302` is gone; `ed487e11` replaced it
   with `admission.admit` at `ring_transport.rs:272-275`);
-  `packages/shm-native/src/lib.rs:956-1031`, `:1034-1108`, `:1111-1162`;
+  `packages/shm-native/src/lib.rs:998-1079`, `:1082-1156`, `:1159-1210`;
   `crates/host-runtime/tests/support/shm_process.rs:256-292` (source tree; not at HEAD), `:644-757` (source tree; not at HEAD).
 - Findings: the mechanism is confirmed exactly as the catalog states it — the
   derivation from `published + 1`, the losing CAS reported as `Exhausted`, and `Drop`
@@ -149,7 +149,7 @@ guarantee statement leaves implicit, and it decides what the test can assert.
   invalidate the property; it relocates the observable consequence from "a later
   producer is blocked" to "the surviving side holds unreclaimable capacity that
   accounting reports as in-flight". The two-phase addon reservation
-  (`lib.rs:980-987` and `:1085-1091`), which holds a claim across a return to
+  (`lib.rs:1022-1029` and `:1133-1139`), which holds a claim across a return to
   JavaScript, is the widest real window and the right kill target.
 - Missing evidence: none for the mechanism. What is untested rather than unknown is
   whether any deployment re-offers a descriptor whose object already carries a

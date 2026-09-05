@@ -9,16 +9,23 @@ The report had a test and no record.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/ring_transport.rs:132-135` declare `activations`,
-  `peer_deaths`, `reclamations`, `exhaustions` as `AtomicU64`; `:172-175`
-  initialise them to zero.
+- `crates/host-runtime/src/ring_transport.rs:132-138` declare `activations`,
+  `peer_deaths`, `reclamations`, `exhaustions`, and `endpoint_panics` as
+  `AtomicU64`; `:172-176` initialise them to zero.
 - `pub fn diagnostics(&self) -> serde_json::Value` at `:190`. The report carries
-  `artifact` (`:231`), `bounds` (`:236`), and at `:238-241` the four counters as
+  `artifact` (`:231`), `bounds` (`:236`), and at `:238-242` the five counters as
   `activation.completed`, `peer_death.observed`, `reclamation.completed`,
-  `exhaustion.observed`, each loaded with `Ordering::Acquire`.
+  `exhaustion.observed`, and `endpoint_panic.observed`, each loaded with
+  `Ordering::Acquire`.
 - Increment sites: `record_activation` (`:246-247`), `record_peer_death`
   (`:250-251`), `record_reclamation` (`:254-255`), all `fetch_add(1, Relaxed)`;
-  the exhaustion increment sits inside `prepare` at `:273`.
+  the exhaustion increment sits inside `prepare` at `:273`, and the endpoint-panic
+  increment sits in the `catch_unwind` failure arm of the endpoint thread at
+  `:344`, which also retires the connection and pushes a `Corrupt` close into the
+  inbound queue (`:345-348`).
+- Test: `endpoint_panic_is_reported_while_the_inbound_queue_is_full`
+  (`ring_transport.rs:1686-1740`) drives a real panic through the endpoint body
+  and asserts `endpoint_panic.observed == 1` (`:1739`).
 - Wiring: `crates/host-runtime/src/connection.rs:188` calls
   `shared.ring.record_activation()`; `:201` calls
   `peer_ring.record_peer_death()`; `:209` calls

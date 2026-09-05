@@ -8,8 +8,8 @@ The native addon's `Channel` holds producer reservations and receive leases that
 
 - `Channel` (`packages/shm-native/src/lib.rs:69-88`) declares `producers`, `active`, and `stranded` before `to_host` and `from_host`; the field comment states the order is load-bearing because Rust drops fields in declaration order.
 - `close_channel` (`lib.rs:407-413`) detaches every producer, every active lease, and every stranded alias with `?`, so a detachment failure returns before the entry is removed.
-- `close` (`lib.rs:1498-1513`) removes the registry entry only when `producers`, `active`, and `stranded` are all empty; otherwise the entry and its mapping stay registered and a later `close` retries.
-- `channel_drops_borrowing_reservations_before_the_ring` (`lib.rs:1234`) builds a `Channel` holding a reservation that borrows `to_host` and drops it; the test passes only if the reservation is destroyed first.
+- `close` (`lib.rs:1546-1561`) removes the registry entry only when `producers`, `active`, and `stranded` are all empty; otherwise the entry and its mapping stay registered and a later `close` retries.
+- `channel_drops_borrowing_reservations_before_the_ring` (`lib.rs:1282`) builds a `Channel` holding a reservation that borrows `to_host` and drops it; the test passes only if the reservation is destroyed first.
 - `packages/shm-native/tests/runtime.ts` asserts detachment under Bun and records `detachment_unavailable` under Node.
 
 ## Failure scenario

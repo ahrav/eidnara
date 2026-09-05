@@ -60,7 +60,7 @@ test rather than a paragraph.
   pre-refactor release-versus-suspect branch (former `shm_provider.rs:364-371`)
   has no successor; both a sentinel-triggered cancellation and a publish failure
   (`ring_transport.rs:622-630`) end at the same release.
-- `crates/host-runtime/src/config.rs:238` and `:250` — `pub liveness:
+- `crates/host-runtime/src/config.rs:239` and `:251` — `pub liveness:
   Option<LivenessPolicy>` still defaults to `None`, so by default nothing on the
   host side writes to the ring on a timer; with outbound traffic queued, a dead
   consumer surfaces as `reserve_until` parking on `capacity_ready` and returning
@@ -145,7 +145,7 @@ chain is the only mechanism under test.
 
 ### Q: Which behaviour is normative when a liveness policy is configured — retention, or quarantine via a failed publish?
 
-- Sources examined: `crates/host-runtime/src/config.rs:234-296` and `:370-381` for
+- Sources examined: `crates/host-runtime/src/config.rs:235-297` and `:371-382` for
   the policy shape and its default; `crates/host-runtime/src/connection.rs:291-301`
   for where a liveness loop is spawned per generation;
   former `crates/host-runtime/src/shm_provider.rs:475-503` and former `:538-541` for both close
@@ -171,7 +171,7 @@ chain is the only mechanism under test.
 
 - Sources examined: `crates/host-runtime/src/ring_transport.rs:305-363`, `:472-632`,
   `:622-630`; `crates/host-runtime/src/connection.rs:195-207`;
-  `crates/host-runtime/src/config.rs:238-250`;
+  `crates/host-runtime/src/config.rs:239-251`;
   `crates/shm-transport/src/backend/ring.rs:1187-1220`, `:1345-1390`,
   `:1424-1426`; `crates/host-runtime/tests/shm_failure_modes.rs:118-166`, `:170-199`,
   `:212-255`; `docs/shm-transport.md` (whole file, 85 lines).

@@ -39,10 +39,10 @@ No production caller exists. `Lifecycle` is constructed only by the test.
 
 The two real close paths each implement their own ordering:
 
-- **Addon.** `close` (`packages/shm-native/src/lib.rs:1498`) calls
+- **Addon.** `close` (`packages/shm-native/src/lib.rs:1546`) calls
   `close_channel` (`:407-413`), which sets `channel.closed = true`, aborts every
   registered producer reservation via `detach_producer(...)?.abort()`, detaches
-  every active lease, then detaches stranded references. `force_close` (`:1531`)
+  every active lease, then detaches stranded references. `force_close` (`:1579`)
   calls `quarantine_channel` (`:415`), which additionally calls
   `enter_quarantine()` on both rings (`:421-422`) before the same detach
   sequence. Neither calls `Lifecycle::advance`.
@@ -103,7 +103,7 @@ A reachability assertion, not a state construction:
   repository-wide search for `CloseState`, `Lifecycle::new`, `mark_prepared`,
   `must_fail_closed` excluding `docs/` and `target/`;
   `crates/shm-transport/tests/contract.rs:379-444`;
-  `packages/shm-native/src/lib.rs:407-424` and `:1498-1546`;
+  `packages/shm-native/src/lib.rs:407-424` and `:1546-1594`;
   `crates/host-runtime/src/ring_transport.rs:324-367`;
   `docs/shm-transport.md` (the close narrative formerly at `:59-65` is
   gone from the trimmed post-#131 document).

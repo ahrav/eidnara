@@ -164,7 +164,7 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   entry that the golden corpus reaches fails parity, and one it does not reach
   passes both records. Parity therefore dominates completeness only over the
   606 ids the corpus exercises; for the rest, completeness is the only record
-  that speaks, and it has no Rust check.
+  that speaks, and `vocab_blob_matches_claude_tiktoken` is its check.
 - **Parity below the cap, bounded work above it.**
   `tokenizer-encoding-matches-the-independent-oracle` and
   `tokenizer-over-long-pieces-are-chunked-and-bounded` partition the input space

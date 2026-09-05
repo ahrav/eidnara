@@ -58,7 +58,7 @@ maps whatever the grant declares, with no step that compares the two.
   longer opens `/proc/{pid}/fd/{fd}` and no longer takes a pid),
   the Rust test peer's `attach_ring`, deleted with `shm_provider.rs` in `ed487e11`,
   and `crates/shm-transport/tests/ring.rs:352`, `:379`, `:564`.
-- `packages/shm-native/src/lib.rs:602-605` — the addon does check a profile,
+- `packages/shm-native/src/lib.rs:644-647` — the addon does check a profile,
   but only as a string: `profile != PROFILE` rejects. `PROFILE` is
   `"host-test-ring-v1"` (`:27`). A name match is not a geometry match.
 - `crates/host-runtime/src/ring_transport.rs:1179-1184` —
@@ -130,7 +130,7 @@ run before accepting the claim, since a single missed call site would refute it.
   `attach_ring` wrappers carried, at `9c1eb4d1`, a `pid` and `fd` and opened
   `/proc/{pid}/fd/{fd}`, so they authenticate the object's provenance, but they
   pass the decoded grant straight through. `create_test_pair`
-  (`packages/shm-native/src/lib.rs:889-903`) is the one path that does use a
+  (`packages/shm-native/src/lib.rs:931-945`) is the one path that does use a
   profile on both sides, and only because it creates both rings locally and
   attaches via `RingAttachment`, so the grant it attaches with was derived from
   that same profile moments earlier.
@@ -150,8 +150,8 @@ run before accepting the claim, since a single missed call site would refute it.
   Mechanisms whose citation moved and whose surrounding claim needed restating:
   - line 27, `crates/shm-transport/src/backend/ring.rs:598-616` now `crates/shm-transport/src/backend/ring.rs:1095-1150`: At HEAD `Ring::attach(descriptors: [OwnedFd; 3], grant: RingGrant)` takes two parameters, still none of them a profile; there is no `scheduling` argument and no prefault, and the body also sets CLOEXEC on all three descriptors, captures the cursor baselines, refuses a quarantined mapping (`:1141`), and runs `conservation_inner(true)` (`:1148`).
   - line 34, `:552-557` now `:1047-1049`: Only `max_spans` is re-checked here; backend and memory-layout agreement is enforced by `TargetProfile::new` before `Ring::create` runs.
-  - line 57, `packages/shm-native/src/lib.rs:250` now `packages/shm-native/src/lib.rs:287`: Call sites now pass `(descriptors, grant)`, and the tree has more of them than this list: `packages/shm-native/src/lib.rs:772` and `:777`, plus `crates/host-runtime/src/ring_transport.rs:877` and `:879`, none of them passing a profile.
-  - line 61, `packages/shm-native/src/lib.rs:503-506` now `packages/shm-native/src/lib.rs:602-605`: The addon does bind grant geometry to the local profile at HEAD: `grant_matches_profile` (`packages/shm-native/src/lib.rs:257-266`) compares descriptor depth, arena bytes, and max leases against `host_test_ring_profile()`, and `attach` refuses a grant that fails it (`:668-669`), so the addon check is no longer name-only.
+  - line 57, `packages/shm-native/src/lib.rs:250` now `packages/shm-native/src/lib.rs:287`: Call sites now pass `(descriptors, grant)`, and the tree has more of them than this list: `packages/shm-native/src/lib.rs:814` and `:819`, plus `crates/host-runtime/src/ring_transport.rs:877` and `:879`, none of them passing a profile.
+  - line 61, `packages/shm-native/src/lib.rs:503-506` now `packages/shm-native/src/lib.rs:644-647`: The addon does bind grant geometry to the local profile at HEAD: `grant_matches_profile` (`packages/shm-native/src/lib.rs:257-266`) compares descriptor depth, arena bytes, and max leases against `host_test_ring_profile()`, and `attach` refuses a grant that fails it (`:710-711`), so the addon check is no longer name-only.
   - line 68, `packages/plugin/src/shared/host-client/shm-grant.ts:161-171`: At HEAD the attaching-side geometry bounds are in Rust: `MAX_DESCRIPTOR_DEPTH` enforced by `Layout::new`, and the addon's `grant_matches_profile` check against the local profile.
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
   - line 31, `:607` (prefault_read): Attach performs no prefault at HEAD; the steps after `validate_lifecycle` are the cursor baseline reads, the quarantine check, and `conservation_inner(true)`.

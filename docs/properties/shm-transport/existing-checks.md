@@ -199,32 +199,32 @@ assertion. Rows that a catalog record already cites are marked with the record.
 
 | Test | Claim asserted (from the name) | Status |
 | --- | --- | --- |
-| `token_allocation_wraps_and_skips_outstanding_tokens` (`:1198`) | Token allocation wraps and skips outstanding tokens | unaudited |
-| `profile_geometry_admits_the_test_profile_and_rejects_another_depth` (`:1216`) | Profile geometry admits the test profile and rejects another depth | unaudited |
-| `channel_drops_borrowing_reservations_before_the_ring` (`:1234`) | Channel drops borrowing reservations before the ring | unaudited; cited by `addon-reservations-drop-before-the-ring` |
+| `token_allocation_wraps_and_skips_outstanding_tokens` (`:1246`) | Token allocation wraps and skips outstanding tokens | unaudited; cited by `addon-tokens-never-collide-with-live-entries` |
+| `profile_geometry_admits_the_test_profile_and_rejects_another_depth` (`:1264`) | Profile geometry admits the test profile and rejects another depth | unaudited |
+| `channel_drops_borrowing_reservations_before_the_ring` (`:1282`) | Channel drops borrowing reservations before the ring | unaudited; cited by `addon-reservations-drop-before-the-ring` |
 
 #### `packages/shm-native/src/scheduling.rs` - 4 tests
 
 | Test | Claim asserted (from the name) | Status |
 | --- | --- | --- |
-| `pending_callback_waits_for_acknowledgement` (`:399`) | Pending callback waits for acknowledgement | unaudited; cited by `addon-scheduling-wakes-only-on-acknowledged-readiness` |
-| `setup_socket_eof_is_reported_once` (`:432`) | Setup socket EOF is reported once (renamed from `setup_socket_eof_is_reactor_readiness`) | unaudited; cited by `addon-scheduling-reaches-peer-eof-and-interrupted-wait` |
-| `channel_events_round_trip_and_never_collide_with_control` (`:463`) | Channel events round trip and never collide with control | unaudited |
-| `interrupted_wait_retries_until_success_or_close` (`:473`) | Interrupted wait retries until success or close | unaudited; cited by `addon-scheduling-wakes-only-on-acknowledged-readiness` |
+| `pending_callback_waits_for_acknowledgement` (`:406`) | Pending callback waits for acknowledgement | unaudited; cited by `addon-scheduling-wakes-only-on-acknowledged-readiness` |
+| `setup_socket_eof_is_reported_once` (`:439`) | Setup socket EOF is reported once (renamed from `setup_socket_eof_is_reactor_readiness`) | unaudited; cited by `addon-scheduling-reaches-peer-eof-and-interrupted-wait` |
+| `channel_events_round_trip_and_never_collide_with_control` (`:470`) | Channel events round trip and never collide with control | unaudited |
+| `interrupted_wait_retries_until_success_or_close` (`:480`) | Interrupted wait retries until success or close | unaudited; cited by `addon-scheduling-wakes-only-on-acknowledged-readiness` |
 
 #### `packages/shm-native/src/setup.rs` - 9 tests
 
 | Test | Claim asserted (from the name) | Status |
 | --- | --- | --- |
-| `grant_message_accepts_tagged_setup_envelope` (`:597`) | Grant message accepts tagged setup envelope | unaudited; cited by `addon-grant-decoding-is-the-shared-setup-envelope` |
-| `auth_proofs_match_committed_wire_vectors` (`:616`) | Auth proofs match committed wire vectors | unaudited; cited by `setup-proof-vectors-pin-the-shared-hmac-transcript` |
-| `distinct_descriptors_are_accepted_and_a_dup_is_rejected` (`:661`) | Distinct descriptors are accepted and a dup is rejected | unaudited |
-| `inode_fallback_rejects_the_same_aliases` (`:684`) | Inode fallback rejects the same aliases | unaudited |
-| `kcmp_separates_eventfds_that_share_an_inode` (`:713`) | Kcmp separates eventfds that share an inode | unaudited |
-| `identity_mismatch_is_distinguished_from_socket_permission_errors` (`:739`) | Identity mismatch is distinguished from socket permission errors | unaudited |
-| `peer_closed_reports_live_then_dropped_sentinel` (`:751`) | Peer closed reports live then dropped sentinel | unaudited; cited by `addon-grant-decoding-is-the-shared-setup-envelope` |
-| `connect_honors_the_deadline_when_the_backlog_is_full` (`:765`) | Connect honors the deadline when the backlog is full | unaudited |
-| `connect_succeeds_against_an_accepting_listener` (`:811`) | Connect succeeds against an accepting listener | unaudited |
+| `grant_message_accepts_tagged_setup_envelope` (`:607`) | Grant message accepts tagged setup envelope | unaudited; cited by `addon-grant-decoding-is-the-shared-setup-envelope` |
+| `auth_proofs_match_committed_wire_vectors` (`:626`) | Auth proofs match committed wire vectors | unaudited; cited by `setup-proof-vectors-pin-the-shared-hmac-transcript` |
+| `distinct_descriptors_are_accepted_and_a_dup_is_rejected` (`:671`) | Distinct descriptors are accepted and a dup is rejected | unaudited; cited by `setup-descriptors-name-distinct-open-files` |
+| `inode_fallback_rejects_the_same_aliases` (`:694`) | Inode fallback rejects the same aliases | unaudited; cited by `setup-descriptors-name-distinct-open-files` |
+| `kcmp_separates_eventfds_that_share_an_inode` (`:723`) | Kcmp separates eventfds that share an inode | unaudited; cited by `setup-descriptors-name-distinct-open-files` |
+| `identity_mismatch_is_distinguished_from_socket_permission_errors` (`:749`) | Identity mismatch is distinguished from socket permission errors | unaudited |
+| `peer_closed_reports_live_then_dropped_sentinel` (`:761`) | Peer closed reports live then dropped sentinel | unaudited; cited by `addon-grant-decoding-is-the-shared-setup-envelope` |
+| `connect_honors_the_deadline_when_the_backlog_is_full` (`:775`) | Connect honors the deadline when the backlog is full | unaudited; cited by `setup-connect-honors-its-deadline` |
+| `connect_succeeds_against_an_accepting_listener` (`:821`) | Connect succeeds against an accepting listener | unaudited; cited by `setup-connect-honors-its-deadline` |
 
 Total: 78 in-crate tests. Suspiciously quiet: no in-crate test names a
 non-4096 page size, a receiver killed while holding leases, or a full
@@ -263,7 +263,7 @@ the host's header validation.
 | `packages/shm-native/tests/mechanism.ts` | Runtime mechanism gate or clean omission; cleanup hook runs at exit with empty stderr; six raw-descriptor boundary suites covering non-objects, unsafe numerics, malformed grant text, throwing accessors, wrong profile, and an unresolvable descriptor; per-test rows below | unaudited — six suites self-skip when the addon is absent; the raw-descriptor suites run on Linux and Darwin and skip elsewhere; per-test rows below |
 | `packages/shm-native/tests/runtime.ts` | Producer aliases detached before publish; receive segment has exact bounds; transfer refused; post-release reads are zeroed; double release throws; a throwing fill publishes nothing; descriptor and arena exhaustion recover; an external-view failpoint leaves the channel usable; leaked leases survive a forced GC | unaudited |
 
-### `packages/shm-native/tests/mechanism.ts` - 20 tests
+### `packages/shm-native/tests/mechanism.ts` - 21 tests
 
 Every test self-skips when the addon is absent; the raw-descriptor suites run on
 Linux and Darwin and skip on every other platform.
@@ -273,23 +273,24 @@ Linux and Darwin and skip on every other platform.
 | `proves every required runtime mechanism or omits capability` (`:28`) | `probeCapabilities` reports available only when every mechanism proves, otherwise a closed omission reason | unaudited; cited by `capability-probe-gates-every-advertised-mechanism` |
 | `exported wire constants match the addon` (`:46`) | Exported wire constants match the addon | unaudited |
 | `environment cleanup hook runs at runtime exit when addon loads` (`:58`) | The cleanup hook runs at exit with empty stderr | unaudited |
-| `a dead peer ends dispatch for its channel and reports peerClosed` (`:188`) | A dead peer ends dispatch for its channel and reports peerClosed | unaudited |
-| `one channel handler failure does not starve later channels` (`:222`) | A throwing readiness handler does not prevent later handlers in the same batch from running | unaudited; also cited by `each-channel-wake-survives-a-shared-acknowledgement` |
-| `out-of-range u32 arguments are rejected before reaching the addon` (`:261`) | Out-of-range u32 arguments are rejected before reaching the addon | unaudited |
-| `byte arguments cross into the addon as private non-shared copies` (`:270`) | Byte arguments cross into the addon as private non-shared copies | unaudited |
-| `a dead peer leaves the reactor instead of redispatching forever` (`:290`) | A dead peer leaves the reactor instead of redispatching forever | unaudited |
-| `a handler that throws over an undrained frame does not liveloop the event loop` (`:345`) | A handler that throws over an undrained frame does not liveloop the event loop | unaudited |
-| `a dead channel's handler is pruned once the reactor drops it` (`:403`) | A dead channel's handler is pruned once the reactor drops it | unaudited |
-| `a handler that takes one frame per callback is redispatched until the ring is empty` (`:467`) | A handler that takes one frame per callback is redispatched until the ring is empty | unaudited |
-| `readiness acknowledgement preserves a frame published during callback` (`:525`) | A frame published while a callback is in flight is delivered by the next callback, with exactly two callbacks | unaudited; cited by `wake-published-during-readiness-callback-is-not-lost`, `reactor-callback-is-one-in-flight`, `each-channel-wake-survives-a-shared-acknowledgement` |
-| `releasing a lease returns its slot; an unreleased ring fills` (`:650`) | Unreleased receive leases fill the ring until publish fails with `ring is full`; releasing one returns its slot; a stale token is refused | unaudited; cited by `lease-saturation-is-reached-then-drains` |
-| `a rejected commit leaves the reservation retryable and abort is idempotent` (`:701`) | A rejected commit leaves the reservation retryable and abort is idempotent | unaudited |
-| `rejects non-object and structurally hostile arguments` (`:772`) | Raw `attach` rejects non-objects and hostile shapes with the fixed descriptor error and no counter change | unaudited; cited by `raw-native-attach-rejects-hostile-descriptors-without-effects` |
-| `rejects every unsafe numeric representation before narrowing` (`:795`) | Negative, fractional, NaN, out-of-range, and string numerics are refused before narrowing | unaudited; cited by same record |
-| `rejects malformed, non-ASCII, and aliased grant text` (`:817`) | Malformed or aliased grant text is refused with no counter change | unaudited; cited by same record |
-| `accessor objects and proxies get one bounded redacted error` (`:847`) | Accessor and proxy descriptors produce exactly `invalid shared-memory descriptor` and nothing else | unaudited; cited by same record |
-| `a wrong profile is refused before any attachment effect` (`:880`) | A descriptor naming another profile is refused before any registration | unaudited; cited by same record |
-| `a well-formed but unresolvable descriptor fails without registry effects` (`:890`) | A structurally valid descriptor whose handles do not resolve fails without registry effects | unaudited; cited by same record |
+| `a dead peer ends dispatch for its channel and reports peerClosed` (`:190`) | A dead peer ends dispatch for its channel and reports peerClosed | unaudited |
+| `one channel handler failure does not starve later channels` (`:224`) | A throwing readiness handler does not prevent later handlers in the same batch from running | unaudited; also cited by `each-channel-wake-survives-a-shared-acknowledgement` |
+| `out-of-range u32 arguments are rejected before reaching the addon` (`:263`) | Out-of-range u32 arguments are rejected before reaching the addon | unaudited |
+| `byte arguments cross into the addon as private non-shared copies` (`:272`) | Byte arguments cross into the addon as private non-shared copies | unaudited |
+| `a dead peer leaves the reactor instead of redispatching forever` (`:292`) | A dead peer leaves the reactor instead of redispatching forever | unaudited |
+| `a handler that throws over an undrained frame does not liveloop the event loop` (`:347`) | A handler that throws over an undrained frame does not liveloop the event loop | unaudited |
+| `a dead channel's handler is pruned once the reactor drops it` (`:405`) | A dead channel's handler is pruned once the reactor drops it | unaudited |
+| `a handler that takes one frame per callback is redispatched until the ring is empty` (`:469`) | A handler that takes one frame per callback is redispatched until the ring is empty | unaudited |
+| `readiness acknowledgement preserves a frame published during callback` (`:527`) | A frame published while a callback is in flight is delivered by the next callback, with exactly two callbacks | unaudited; cited by `wake-published-during-readiness-callback-is-not-lost`, `reactor-callback-is-one-in-flight`, `each-channel-wake-survives-a-shared-acknowledgement` |
+| `releasing a lease returns its slot; an unreleased ring fills` (`:652`) | Unreleased receive leases fill the ring until publish fails with `ring is full`; releasing one returns its slot; a stale token is refused | unaudited; cited by `lease-saturation-is-reached-then-drains` |
+| `a header that disagrees with the body is refused before beforePublish runs` (`:703`) | A header that disagrees with the body is refused before beforePublish runs | unaudited |
+| `a rejected commit leaves the reservation retryable and abort is idempotent` (`:733`) | A rejected commit leaves the reservation retryable and abort is idempotent | unaudited |
+| `rejects non-object and structurally hostile arguments` (`:804`) | Raw `attach` rejects non-objects and hostile shapes with the fixed descriptor error and no counter change | unaudited; cited by `raw-native-attach-rejects-hostile-descriptors-without-effects` |
+| `rejects every unsafe numeric representation before narrowing` (`:827`) | Negative, fractional, NaN, out-of-range, and string numerics are refused before narrowing | unaudited; cited by same record |
+| `rejects malformed, non-ASCII, and aliased grant text` (`:849`) | Malformed or aliased grant text is refused with no counter change | unaudited; cited by same record |
+| `accessor objects and proxies get one bounded redacted error` (`:879`) | Accessor and proxy descriptors produce exactly `invalid shared-memory descriptor` and nothing else | unaudited; cited by same record |
+| `a wrong profile is refused before any attachment effect` (`:912`) | A descriptor naming another profile is refused before any registration | unaudited; cited by same record |
+| `a well-formed but unresolvable descriptor fails without registry effects` (`:922`) | A structurally valid descriptor whose handles do not resolve fails without registry effects | unaudited; cited by same record |
 
 The addon's negative tests pin channel count, external-ref count, and leak
 diagnostics across each throw, which is the right shape. Two weaknesses: the

@@ -47,7 +47,7 @@ were added.
   `ProducerError::Deadline`. None of these calls `enter_quarantine`, and
   `enter_quarantine` (`ring.rs:1915-1922`) is the only writer of the quarantine flag.
 - Non-test attach callers: `packages/shm-native/src/lib.rs:286-288` `attach_ring`
-  (`Ring::attach` at `:287`), reached from the bootstrap at `:698-699`, and
+  (`Ring::attach` at `:287`), reached from the bootstrap at `:740-741`, and
   `ring.rs:979` inside `RingAttachment::attach`. The host-side
   the host-side `attach_ring` that opened `/proc/{pid}/fd/{fd}` is gone: `ed487e11`
   deleted it with `shm_provider.rs`, and its successor
@@ -87,12 +87,12 @@ were added.
 There is no narrow window: the stale state is permanent from the moment the receiver
 dies until the object is destroyed. The kill must land while at least one lease is
 held, which in the shipped client path means between `poll`'s
-`std::mem::forget(lease)` (`packages/shm-native/src/lib.rs:1208` (source tree; not at HEAD)) and the
+`std::mem::forget(lease)` (`packages/shm-native/src/lib.rs:1256` (source tree; not at HEAD)) and the
 corresponding `detach_active` completion (`:332-357`) — that is, while a frame is in
 JavaScript hands. The worst case is `K == max_leases`, because then even the lease
 bound alone kills the receive direction. Configuration dependencies:
 `HostConfig.liveness` is `None` by default
-(`crates/host-runtime/src/config.rs:238`, `:250`), so nothing probes the peer and the
+(`crates/host-runtime/src/config.rs:239`, `:251`), so nothing probes the peer and the
 receive side waits on the data doorbell indefinitely (`wait_for_data`,
 `ring.rs:1476-1499`); with a liveness policy configured the
 ring instead fills and a failed publish makes the close unclean, which is the same
@@ -142,8 +142,8 @@ check to emit: `shm_kill_with_leases_held`.
 
 - Sources examined: `ring.rs:1095-1150`, `:2813-2831`, `:209-219`, `:66-85`,
   `:147-154`, `:1915-1940`, `:1417-1422`, `:1293-1295`, `:1354`, `:2070-2151`, `:2604-2612`;
-  `packages/shm-native/src/lib.rs:286-288`, `:592-699`, `:1346-1452`;
-  `crates/host-runtime/src/config.rs:238`, `:250`;
+  `packages/shm-native/src/lib.rs:286-288`, `:634-741`, `:1394-1500`;
+  `crates/host-runtime/src/config.rs:239`, `:251`;
   `crates/host-runtime/tests/support/shm_process.rs:256-292`, `:644-757` (file since
   deleted by `907746f7b`);
   `crates/host-runtime/tests/shm_failure_modes.rs` test inventory;
@@ -185,11 +185,11 @@ check to emit: `shm_kill_with_leases_held`.
 - Findings:
   Mechanisms whose citation moved and whose surrounding claim needed restating:
   - line 16, `crates/shm-transport/src/backend/ring.rs:783-798` now `crates/shm-transport/src/backend/ring.rs:1095-1150`: At HEAD `attach` loads all six shared cursors as this handle's baseline, refuses a quarantined mapping, and runs `conservation_inner(true)`, so it does read cursors, slot states, and the quarantine flag.
-  - line 90, `packages/shm-native/src/lib.rs:1208`: The lease is owned by the channel's `active` map from `poll` until `detach_active` releases it, so the window is the life of that entry.
+  - line 90, `packages/shm-native/src/lib.rs:1256`: The lease is owned by the channel's `active` map from `poll` until `detach_active` releases it, so the window is the life of that entry.
   - line 101, `ring.rs:783` now `ring.rs:1095`: Attach receives three already-transferred descriptors and each doorbell is one end of an AF_UNIX socketpair rather than an eventfd.
   - line 152, `ring_transport.rs:276` now `ring_transport.rs:360`: The release is not unconditional at HEAD: a quarantined ring whose peer has not released its attachment moves its charges through `admission.quarantine()` instead (`ring_transport.rs:353-361`).
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
-  - line 90, `packages/shm-native/src/lib.rs:1208` (std::mem::forget(lease) in poll): `poll` no longer forgets the lease; it moves it into `channel.active` as an `ActiveLease` at `packages/shm-native/src/lib.rs:1397-1403`.
+  - line 90, `packages/shm-native/src/lib.rs:1256` (std::mem::forget(lease) in poll): `poll` no longer forgets the lease; it moves it into `channel.active` as an `ActiveLease` at `packages/shm-native/src/lib.rs:1445-1451`.
   - line 102, `ring.rs:389` (eventfd doorbell creation): No eventfd remains in the ring backend: `Doorbell::create` builds an AF_UNIX socketpair at `ring.rs:727-738`, and Linux-only support is enforced by the `compile_error!` at `ring.rs:18-19`.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

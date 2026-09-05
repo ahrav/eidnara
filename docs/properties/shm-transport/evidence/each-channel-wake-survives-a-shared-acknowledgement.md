@@ -8,20 +8,20 @@ callback count. The per-channel progress claim had no owner.
 
 ## Evidence trail
 
-- `packages/shm-native/src/lib.rs:1315-1341`: one walk over all registered
+- `packages/shm-native/src/lib.rs:1363-1389`: one walk over all registered
   channels computes a single `redispatch` boolean from every channel's
   `complete_data_wait` and `arm_data_wait` results.
-- `packages/shm-native/index.ts:652-676`: `dispatchReadiness` runs every
+- `packages/shm-native/index.ts:699-729`: `dispatchReadiness` runs every
   registered handler on each batch, so a redispatch triggered by one channel
   re-runs all handlers.
 - `crates/shm-transport/src/backend/ring.rs:1179-1196`: `arm_data_wait` returns
   `Ok(false)` when data or a generation change is already visible, with the
   documented meaning "poll again instead of blocking".
-- `packages/shm-native/tests/mechanism.ts:525-648`: the single-channel suite
+- `packages/shm-native/tests/mechanism.ts:527-650`: the single-channel suite
   cited by `wake-published-during-readiness-callback-is-not-lost`.
-- `packages/shm-native/tests/mechanism.ts:222-259`: two channels are watched
-  through `startReadiness` (`:228`, `:232`), the first handler throws, the
-  second channel is published to (`:246`), and delivery is asserted within one
+- `packages/shm-native/tests/mechanism.ts:224-261`: two channels are watched
+  through `startReadiness` (`:230`, `:234`), the first handler throws, the
+  second channel is published to (`:248`), and delivery is asserted within one
   second; this is two-channel delivery under the shared acknowledgement, without
   the edge timed inside the first channel's pending window.
 

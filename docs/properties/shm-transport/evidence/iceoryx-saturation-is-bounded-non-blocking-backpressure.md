@@ -41,7 +41,7 @@ the question is what it returns instead when the same two limits bind.
   `initial_max_slice_len`, `max_loaned_samples(1)`, and `allocation_strategy`.
   It never calls `.backpressure_strategy(...)`, so the publisher inherits the
   compiled default.
-- iceoryx2 0.9.3, `src/config.rs:317-320` and `:344` — the default is
+- iceoryx2 0.9.3, `src/config.rs:318-321` and `:345` — the default is
   `BackpressureStrategy::RetryUntilDelivered`, and the field's own
   documentation says it "defines the deliver strategy of the Publisher when the
   Subscriber's buffer is full" **if safe overflow is deactivated**. That is
@@ -131,7 +131,7 @@ to emit, both preconditions rather than violations:
   `:247-303`; `backend/ring.rs:1263-1340`, `:1345-1390`, `:1392-1409`;
   `backend/mod.rs:1-8`; `tests/iceoryx.rs:16-43`, `:122-137`;
   `benches/hardware_envelope.rs:531-598`; and in the vendored iceoryx2 0.9.3
-  and iceoryx2-cal 0.9.3 sources, `src/config.rs:300-350`,
+  and iceoryx2-cal 0.9.3 sources, `src/config.rs:301-351`,
   `src/service/port_factory/publisher.rs:160-215`,
   `src/port/details/sender.rs:191-280`,
   `src/port/details/receiver.rs:540-580`,

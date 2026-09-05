@@ -347,6 +347,9 @@ and `n/a - invalidated` for an invalidated record.
 | [each-channel-wake-survives-a-shared-acknowledgement](#each-channel-wake-survives-a-shared-acknowledgement) | liveness | high | yes |
 | [addon-scheduling-reaches-peer-eof-and-interrupted-wait](#addon-scheduling-reaches-peer-eof-and-interrupted-wait) | reachability | medium | yes |
 | [addon-grant-decoding-is-the-shared-setup-envelope](#addon-grant-decoding-is-the-shared-setup-envelope) | safety | low | yes |
+| [setup-descriptors-name-distinct-open-files](#setup-descriptors-name-distinct-open-files) | safety | high | yes |
+| [setup-connect-honors-its-deadline](#setup-connect-honors-its-deadline) | liveness | high | yes |
+| [addon-tokens-never-collide-with-live-entries](#addon-tokens-never-collide-with-live-entries) | safety | high | yes |
 
 ---
 
@@ -474,7 +477,7 @@ through `Ring::attach` (`crates/shm-transport/src/backend/ring.rs:1095`), from
 the in-crate bridge endpoint `RingClientEndpoint::attach_with_descriptors`
 (`crates/host-runtime/src/ring_transport.rs:855`, `Ring::attach` at `:877` and
 `:879`, reached from `client.rs:2489`) and from the shipped addon
-(`packages/shm-native/src/lib.rs:592`). The host side never attaches: it
+(`packages/shm-native/src/lib.rs:634`). The host side never attaches: it
 creates the rings with `DuplexRing::create` (`ring_transport.rs:315`) inside
 `prepare`, called per connection at `crates/host-runtime/src/connection.rs:137-138`.
 The source tree's `ShmFrameChannel` in `packages/plugin` is not in this tree.
@@ -509,8 +512,8 @@ transport half; none for the addon-side entry and claim. Status unaudited.
 Impact: if the attach gate were removed, a caller would receive a channel id and
 a usable-looking channel that fails at first reserve or receive. The grant claim
 is held until the registry entry is removed; `close` and `force_close` do remove it once producers, active leases,
-and stranded aliases are all empty (`packages/shm-native/src/lib.rs:1515-1528`,
-`:1359-1362`), so the claim is pinned indefinitely only when a detach has already
+and stranded aliases are all empty (`packages/shm-native/src/lib.rs:1563-1576`,
+`:1407-1410`), so the claim is pinned indefinitely only when a detach has already
 stranded an alias. An earlier draft of this record overstated that as "for the
 process lifetime".
 Open questions: None.
@@ -839,9 +842,9 @@ Check: `always` — make `commit` fail after `before_publish` ran (underfill, wi
 header mismatch, or an arena error) and assert the sender was not told the frame
 published and the peer sees no frame.
 Fault/timing angle: `before_publish` is invoked before `reservation.commit` on
-both native produce paths (`packages/shm-native/src/lib.rs:1025-1028`,
-`:1154-1159`), so whatever a JavaScript caller does inside `beforePublish`
-(`packages/shm-native/index.ts:527`, `:717`) runs while commit can still fail.
+both native produce paths (`packages/shm-native/src/lib.rs:1073-1076`,
+`:1202-1207`), so whatever a JavaScript caller does inside `beforePublish`
+(`packages/shm-native/index.ts:558`, `:770`) runs while commit can still fail.
 The host's `publish_one` (`crates/host-runtime/src/ring_transport.rs:749`)
 runs its `publish_hook` and `written` callbacks only after
 `matches!(result, Ok(Ok(())))` (`:773-785`), so the two sides place their
@@ -852,7 +855,7 @@ addon's hook position rather than any specific client.
 Required faults and enabling state: a commit that fails after the hook fires.
 Confidence: medium — [evidence](evidence/publish-signal-implies-committed-frame.md).
 The ordering is confirmed by direct read at HEAD
-(`packages/shm-native/src/lib.rs:1025-1028`, `:1154-1159`;
+(`packages/shm-native/src/lib.rs:1073-1076`, `:1202-1207`;
 `crates/host-runtime/src/ring_transport.rs:773-785`); the client half of the
 source-tree finding lived in `packages/plugin/src/shared/host-client/shm-frame-channel.ts:296-321`,
 which is not in this tree. What "published" is contractually supposed to mean to
@@ -880,9 +883,12 @@ duplex ring (`crates/host-runtime/src/connection.rs:138`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: yes, by construction - the violating call does not compile outside
-the transport crate, so no test needs to issue it; what remains to regress is a
-visibility change.
+Exercised: partial - the violating call does not compile outside the transport
+crate today, but nothing pins that: no compile-fail test, no dependent-crate
+probe, and no lint names the `pub(crate)` marker, so a refactor that widens
+`Ring::release` to `pub` passes every test in the tree while every existing
+release test keeps releasing through a legitimate lease. The construction
+argument is the current state, not a check that can fail.
 Guarantee: Only the holder of a receive lease can complete it; possession of a
 frame's release identity does not by itself authorize completing that frame.
 Check: `always` - `Ring::release` stays `pub(crate)` (`ring.rs:1528`); the only
@@ -908,12 +914,13 @@ ReleaseIdentity) -> Result<(), LeaseError>` (`ring.rs:1528`),
 `pub fn release(mut self) -> Result<(), LeaseError>` on `ReceiveLease`
 (`lease.rs:324`), and `pub fn commit(mut self, body_len: usize) ->
 Result<ReleaseIdentity, ProducerError>` (`ring.rs:2536`). The addon's
-`release` (`packages/shm-native/src/lib.rs:1455`) reaches the ring only
+`release` (`packages/shm-native/src/lib.rs:1503`) reaches the ring only
 through the `ReceiveLease` it stored at `poll` time (`detach_active`,
 `:332-357`), so the lease-independent completion the source tree's addon needed
 is gone.
-Existing check: none names the visibility. The identity-validation tests
-(`ring.rs:3871-3907`, `ring.rs:3910`) all release from the legitimate holder.
+Existing check: none names the visibility, which is why Exercised is partial.
+The identity-validation tests (`ring.rs:3871-3907`, `ring.rs:3910`) all release
+from the legitimate holder.
 Impact: none live; the record is a regression contract. Widening
 `Ring::release` to `pub` again, or adding a public helper that completes by
 identity for a caller that forgot its lease, restores a read-after-recycle on
@@ -1484,7 +1491,7 @@ Status: active
 Exercised: partial - `host_test_ring_profile_names_one_geometry`
 (`crates/shm-transport/tests/profile.rs:202`) pins the Rust geometry against
 literals and the addon fixture spells the same literals
-(`packages/shm-native/tests/mechanism.ts:126-130`); no test asserts the fixture
+(`packages/shm-native/tests/mechanism.ts:128-132`); no test asserts the fixture
 against the Rust profile, so agreement is maintained by hand.
 Guarantee: Every artifact naming profile `host-test-ring-v1` derives its
 geometry from one source, so the name uniquely determines depth, arena bytes,
@@ -1502,7 +1509,7 @@ At HEAD the contradiction this record was written against is resolved. The host'
 `ring_profile()` (`crates/host-runtime/src/ring_transport.rs:38-39`) returns
 `host_test_ring_profile` (`crates/shm-transport/src/profile.rs:679-692`: depth
 8, eight leases), and the addon fixture encodes depth 8, a 64 MiB arena, and
-eight leases under the same id (`packages/shm-native/tests/mechanism.ts:126-130`).
+eight leases under the same id (`packages/shm-native/tests/mechanism.ts:128-132`).
 The depth-32 `ring_profile(hardware)` helper (`profile.rs:699-706`) takes an
 arbitrary caller-supplied id for tests and local tools and is not a second
 definition of `host-test-ring-v1`. The source tree's fixture encoded 32 and its
@@ -1550,7 +1557,7 @@ Required faults and enabling state: a direct native call with a descriptor the
 wrapper would reject.
 Confidence: high — [evidence](evidence/native-boundary-not-weaker-than-its-wrapper.md).
 The native field reads are enumerable at
-`packages/shm-native/src/lib.rs:602-659` and contain none of these checks;
+`packages/shm-native/src/lib.rs:644-701` and contain none of these checks;
 `NativeDescriptor` (`packages/shm-native/index.ts:55-65`) structurally omits
 `candidateId`, so the replay fence is dropped by the type contract.
 Existing check: none at the native boundary; the TypeScript tests exercise the
@@ -1560,13 +1567,13 @@ gap: nothing binds a grant to its direction — field *position* is the only rol
 assignment, so swapped fields would put two producers on one single-producer
 lane.
 Invalidated: the wrapper this record compared against does not exist in the
-U3 tree. `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`)
+U3 tree. `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`)
 forwards the caller's descriptor to `native.attach` unchanged, so there is no
 TypeScript grant decoder, no wrapper error code, and nothing for the native
 boundary to be weaker than; the rejection set lives in the addon alone
-(`packages/shm-native/src/lib.rs:592`) and is pinned by the raw-descriptor
-suites in `packages/shm-native/tests/mechanism.ts` (`:772`, `:795`, `:817`,
-`:847`). The guarantee is vacuous against this tree. Its live content, that the
+(`packages/shm-native/src/lib.rs:634`) and is pinned by the raw-descriptor
+suites in `packages/shm-native/tests/mechanism.ts` (`:814`, `:837`, `:859`,
+`:889`). The guarantee is vacuous against this tree. Its live content, that the
 directly-requirable `attach` rejects hostile descriptors with one bounded error
 and retains nothing, is carried by
 `raw-native-attach-rejects-hostile-descriptors-without-effects`; the
@@ -1783,10 +1790,10 @@ named rejected seeds (`tests/fuzz_corpus.rs:14`, `:57-66`), and
 `golden_grant_fixture_matches_the_frozen_ring_profile_encoding` (`:93`)
 cross-checks the grant fixture's bytes against the frozen ring geometry
 (`:122-145`). The addon side asserts several specific messages,
-`/wire header has invalid length/` (`packages/shm-native/tests/mechanism.ts:731`),
-`/ring is full/` (`:687`), `/already released/` (`:691`), but every attach
-boundary case shares the one `DESCRIPTOR_ERROR` pattern (`:288`) through
-`expectRejectedWithoutEffects` (`:758-770`), which pins one message for many
+`/wire header has invalid length/` (`packages/shm-native/tests/mechanism.ts:763`),
+`/ring is full/` (`:689`), `/already released/` (`:693`), but every attach
+boundary case shares the one `DESCRIPTOR_ERROR` pattern (`:290`) through
+`expectRejectedWithoutEffects` (`:790-802`), which pins one message for many
 different hostile inputs rather than a distinct reason per case. Status
 unaudited.
 Impact: a whole class of negative tests can silently stop testing what they
@@ -1842,8 +1849,8 @@ Open questions:
 ### capability-probe-gates-every-advertised-mechanism
 
 Type: safety
-Reachability: default-production - `capableAddon` (`packages/shm-native/index.ts:264-269`)
-calls `probeCapabilities` (`:266`) once and throws
+Reachability: default-production - `capableAddon` (`packages/shm-native/index.ts:276-281`)
+calls `probeCapabilities` (`:278`) once and throws
 `NativeStartupError("capability_unavailable")` when it reports
 `available: false`, so every channel construction consults the probe. The
 source tree's `ShmFrameChannel` in `packages/plugin`, which bypassed it, is
@@ -1863,10 +1870,10 @@ Verified by direct read of `packages/shm-native/index.ts` at HEAD: every
 enumerated mechanism, including the cleanup hook, gates with an
 `available: false` return carrying a closed reason; the cleanup-hook gate calls
 `native.probeCleanupHooks()` inside a try/catch and sets `cleanupHooks` from
-whether it threw (`:387-393`), returns `available: false` with
-`reason: "cleanup_hooks_unavailable"` when the flag is false (`:394-405`), and
-only then returns `available: true` with `cleanupHooks: true` (`:406-414`);
-`registerCleanupProbe` is a separate exported wrapper (`:778-781`) the probe
+whether it threw (`:408-414`), returns `available: false` with
+`reason: "cleanup_hooks_unavailable"` when the flag is false (`:415-426`), and
+only then returns `available: true` with `cleanupHooks: true` (`:427-435`);
+`registerCleanupProbe` is a separate exported wrapper (`:912-915`) the probe
 never inspects. The source tree reported the hook inside an `available: true`
 object instead of gating on it, which is the defect this record was written
 against.
@@ -1878,21 +1885,21 @@ Impact: if a mechanism were reported rather than gated, a runtime lacking it
 would be advertised as capable and `capableAddon` would construct channels that
 fail later. The rewritten document says an install that cannot load the addon
 fails before application traffic (`docs/shm-transport.md:15`) and that
-unsupported or omitted results are not success states (`:98`); at HEAD the probe
+unsupported or omitted results are not success states (`:100`); at HEAD the probe
 is consistent with that.
 Open questions:
 - An earlier draft asserted that the code's step order differs from the
   document's numbering. That is **not supported**: steps one through eight appear
   in documented order. Two real divergences replace it. At HEAD
-  `probeCapabilities` (`packages/shm-native/index.ts:307-431`) refuses in the
-  order `addon_unavailable` (`:319-320`), `node_detachment_unavailable`
-  (`:321-322`), `napi_8_unavailable` (`:326-333`),
-  `external_exact_bounds_unavailable` (`:341-348`),
-  `transfer_prevention_unavailable` (`:361-370`), `detachment_unavailable`
-  (`:385-395`), `cleanup_hooks_unavailable` (`:403-414`), then the catch-all
-  `runtime_mechanism_unavailable` (`:424-430`); the addon-load gate precedes the
+  `probeCapabilities` (`packages/shm-native/index.ts:319-443`) refuses in the
+  order `addon_unavailable` (`:331-332`), `node_detachment_unavailable`
+  (`:333-334`), `napi_8_unavailable` (`:338-345`),
+  `external_exact_bounds_unavailable` (`:353-360`),
+  `transfer_prevention_unavailable` (`:373-382`), `detachment_unavailable`
+  (`:397-407`), `cleanup_hooks_unavailable` (`:415-426`), then the catch-all
+  `runtime_mechanism_unavailable` (`:436-442`); the addon-load gate precedes the
   Node detachment gate so an unavailable addon is not reported as a detachment
-  failure (`:316-317`). Whether the enumeration is meant to be one gate per
+  failure (`:328-329`). Whether the enumeration is meant to be one gate per
   documented step is the open question. (needs human input)
 
 ### clean-reclamation-is-reachable
@@ -1969,7 +1976,7 @@ The addon source contains no `cfg(test)`, `cfg(feature)`, or
 `cfg(debug_assertions)` gates at all, and exports the failpoint setter, an
 arbitrary `ArrayBuffer` detach, the external probe, an arbitrary-path cleanup
 probe, the test-pair constructor, and a forced close
-(`packages/shm-native/src/lib.rs:524-570`, `:889`, `:1531`). The ungated block
+(`packages/shm-native/src/lib.rs:524-612`, `:931`, `:1579`). The ungated block
 grew rather than shrank: `d8bde128` added `build_profile` (`:500-507`) and
 `build_target` (`:509-512`) to it. The fuzz harness
 module is likewise ungated in the library (`crates/shm-transport/src/lib.rs:33`).
@@ -1993,25 +2000,29 @@ Type: safety
 Reachability: default-production - `RingTransport::diagnostics`
 (`crates/host-runtime/src/ring_transport.rs:190`) is what
 `ControlAction::HostStatus` returns (`crates/host-runtime/src/connection.rs:625`),
-and the four counters it reports are bumped on the shipped connection path:
+and the five counters it reports are bumped on the shipped connection path:
 `record_activation` at `connection.rs:188`, `record_peer_death` at `:201`,
-`record_reclamation` at `:209`, and the exhaustion count inside `prepare`
-(`ring_transport.rs:273`).
+`record_reclamation` at `:209`, the exhaustion count inside `prepare`
+(`ring_transport.rs:273`), and the endpoint-panic count inside the
+`catch_unwind` around the endpoint thread body (`:344`).
 Status: active
 Exercised: partial - `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts`
 (`ring_transport.rs:1137-1176`) calls the three `record_*` methods directly
 (`:1140-1142`) and asserts `state`, `error_class`, three `artifact` keys, one of
 the `bounds` fields (`arena_bytes`, `:1156`), one `accounting` field per side
-(`:1157-1158`), and the four counts, so it pins the counter-to-key mapping and part
-of the shape; it does not assert that no key outside the closed set is present,
-and no test drives a real activation, peer death, or reclamation through
-`connection.rs` and reads the count back.
+(`:1157-1158`), and four of the five counts, so it pins the counter-to-key
+mapping and part of the shape; it does not assert that no key outside the closed
+set is present, and no test drives a real activation, peer death, or reclamation
+through `connection.rs` and reads the count back. The fifth counter is pinned
+by `endpoint_panic_is_reported_while_the_inbound_queue_is_full` (`:1686-1740`),
+which does drive a real endpoint panic and asserts
+`endpoint_panic.observed == 1` (`:1739`).
 Guarantee: The status report is a closed JSON shape: `state`, `error_class`,
 `artifact` (profile identity), `bounds` (the admitted limits), `accounting`
 (`active` and `quarantined` charges), and monotonic `activation.completed`,
-`peer_death.observed`, `reclamation.completed`, and `exhaustion.observed`
-counts, each of which increments exactly once per corresponding lifecycle
-event and never decrements. `error_class` is `null` while `state` is
+`peer_death.observed`, `reclamation.completed`, `exhaustion.observed`, and
+`endpoint_panic.observed` counts (`ring_transport.rs:238-242`), each of which
+increments exactly once per corresponding lifecycle event and never decrements. `error_class` is `null` while `state` is
 `healthy` and otherwise one of the five documented class names
 (`missing_addon`, `identity_mismatch`, `setup_failure`, `peer_death`,
 `resource_exhaustion`; `docs/shm-transport.md:57-61`); at HEAD the only value
@@ -2020,7 +2031,9 @@ accounting is unavailable (`ring_transport.rs:222-226`).
 Check: `always` - drive one activation, one observed peer death, and one
 reclamation through the connection path (`connection.rs:188`, `:201`, `:209`)
 rather than by calling `record_*`, then read the report: `1` under each of
-those keys and `0` under `exhaustion.observed`; `bounds` equal to the admitted
+those keys and `0` under `exhaustion.observed` and `endpoint_panic.observed`;
+separately, a panicking endpoint body yields `1` under `endpoint_panic.observed`
+and retires the connection; `bounds` equal to the admitted
 limits; the key set equal to the closed set and nothing else; `error_class`
 either `null` or a member of the five-name vocabulary, and `setup_failure`
 exactly when `state` is `terminal`; and every count non-decreasing across
@@ -2028,16 +2041,18 @@ successive reports on the same transport. Calling `record_*` directly, as the
 existing test does, cannot witness the "exactly once per lifecycle event" half
 of the guarantee.
 Fault/timing angle: the counters are `AtomicU64` with `Relaxed` increments
-(`:247-273`) read with `Acquire` at report time (`:238-242`), so a report
+(`:247-273`, `:344`) read with `Acquire` at report time (`:238-242`), so a report
 concurrent with an event may lag by one but can never go backwards; the hazard
 is a lifecycle path that forgets its `record_*` call, which no test detects
 because the only test increments the counters itself.
 Required faults and enabling state: a connection that activates, then loses its
 peer (F1 or F4), then reclaims; a status request after each step.
 Confidence: high - [evidence](evidence/diagnostics-report-lifecycle-counts-in-a-fixed-shape.md).
-The report builder, the four increment sites, the `HostStatus` caller, and the
-test were read directly.
-Existing check: the test named above, unaudited; `docs/shm-transport.md:71`
+The report builder, the five increment sites, the `HostStatus` caller, and both
+tests were read directly. An earlier draft of this record listed four counters;
+`endpoint_panic.observed` was already emitted at HEAD and is now part of the
+closed set here and in `docs/shm-transport.md`.
+Existing check: the two tests named above, unaudited; `docs/shm-transport.md:66-74`
 documents the same surface.
 Impact: five records in this catalog say "no counter fires" for a failure they
 describe; this report is the one surface where a peer death or a reclamation
@@ -2117,10 +2132,15 @@ Open questions:
 
 Type: safety
 Reachability: default-production - a client that installs the platform package
-loads the addon through `packageAddonPath` (`packages/shm-native/index.ts:191-229`),
-which `requireAddon` (`:231-262`) reaches whenever no `shm_native.node` sits
-beside `index.ts`; that is every clean install, and the only path a shipped
-client takes.
+loads the addon through `packageAddonPath` (`packages/shm-native/index.ts:203-241`),
+which `requireAddon` (`:243-274`) reaches whenever no `shm_native.node` sits
+beside `index.ts` (`:249-251`); that is every clean install, mechanically,
+because `packages/shm-native/package.json` publishes only `index.js` and
+`index.ts` in its `files` array (`:27-30`) and the addon arrives through the
+`optionalDependencies` entry `@eidnara/host-linux-x64-gnu` (`:31-33`). No such
+package, and no producer of `payload-manifest.json`, exists in this tree, so
+the label describes the shipped install path rather than anything an in-tree
+artifact can take today.
 Status: active
 Exercised: not yet - no test in `packages/shm-native/tests` exercises
 `packageAddonPath`, and the native CI step (`.github/workflows/ci.yml:170-181`)
@@ -2128,44 +2148,95 @@ runs `build:native` first, which places `shm_native.node` beside `index.ts` so
 `requireAddon` takes the local path and reads no manifest and no checksum. The
 manifest, checksum, and package-name checks have never executed under
 observation.
-Guarantee: Loading the addon from the platform package refuses to load a binary
-whose provenance is not established: a missing package directory or payload is
-`missing_addon` (`:197`, `:222`); an unreadable or unparsable
-`payload-manifest.json` is `missing_manifest` (`:208`); a manifest naming
-another package or target is `wrong_platform_payload` (`:210-215`); a manifest
-without a 64-hex-digit SHA-256 entry for the payload is `missing_checksum`
-(`:216-219`); a payload whose SHA-256 differs from the entry is
-`checksum_mismatch` (`:224-227`); and only then is the path handed to
-`createRequire`, after which a loader failure is `addon_load_failed` (`:243-246`, the raw loader error is dropped so no path or dynamic-linker text crosses the package boundary), a non-release build is `debug_build` (`:249-251`)
-and a binary for another target is `wrong_platform_binary` (`:252-254`). Each
-refusal is a `NativeStartupError` with a closed reason, and none loads code.
+Guarantee: Loading the addon from the platform package refuses to load a payload
+that disagrees with the manifest shipped beside it: an unresolvable package
+directory is `missing_addon` (`:206-210`); an unreadable or unparsable
+`payload-manifest.json` is `missing_manifest` (`:217-221`); a manifest naming
+another package or target is `wrong_platform_payload` (`:222-227`); a manifest
+without an entry for `payload/native/shm_native.node` carrying 64 lowercase hex
+digits is `missing_checksum` (`:228-231`); an absent payload file is
+`missing_addon` again (`:233-235`); a payload whose SHA-256 differs from the
+entry is `checksum_mismatch` (`:236-239`); and only then is the path handed to
+`createRequire`, after which a loader failure is `addon_load_failed` (`:256-260`,
+the raw loader error is dropped so no path or dynamic-linker text crosses the
+package boundary), a non-release build is `debug_build` (`:261-263`), and a
+binary for another target is `wrong_platform_binary` (`:264-266`). Each refusal
+the code names is a `NativeStartupError` with a closed reason, but the taxonomy
+is not total over manifest content: `manifest` is declared as an object type and
+used without a shape check, so a manifest whose top-level JSON is `null` throws
+a raw `TypeError` at `:223`, one whose `files` is not an array or holds a
+`null` element throws at `:228`, and `readFileSync(addonPath)` at `:236` can
+throw `EACCES` or `EISDIR` after `existsSync` passed; all three escape
+`packageAddonPath` and are stored verbatim as `loadError` by `requireAddon`'s
+outer catch (`:270`), so a caller reading `error.reason` gets `undefined`.
+The manifest is unsigned and read from the same directory as the payload
+(`:212`, `:232`), so this check detects truncation, partial download, and
+accidental substitution, not tampering; registry-level provenance is the
+separate gate recorded in `release/registry-gate.json`. The five refusals before
+`createRequire` execute no native code; the three after it (`addon_load_failed`,
+`debug_build`, `wrong_platform_binary`) are raised only once the module's
+initializer has run, because `buildProfile` and `buildTarget` are exports of the
+loaded addon (`:261`, `:264`), so they classify a payload that has already
+executed rather than preventing execution.
 Check: `always` - against a staged platform package directory with no local
-`shm_native.node` beside `index.ts`, each of the six fault shapes (absent
-payload, absent or malformed manifest, wrong package or target, absent or
-malformed checksum entry, altered payload bytes, debug or wrong-target binary)
-produces exactly its named `NativeStartupError` reason and no addon is loaded;
-the unaltered package loads and `probeCapabilities` reports available.
+`shm_native.node` beside `index.ts`, with exactly one fault injected per run,
+each of the eight fault shapes (unresolvable package directory, absent payload
+file, absent or unparsable manifest, wrong package or target, absent or
+non-lowercase-hex checksum entry, altered payload bytes, a checksum-valid payload
+the loader rejects, debug or wrong-target binary) produces exactly its named
+`NativeStartupError` reason. One fault at a time is required because the gates
+are ordered manifest before payload existence (`:217`, `:233`): a run with both
+a bad manifest and an absent payload reports `missing_manifest`. Two shapes
+share `missing_addon`, so the test must also assert which file it removed, and
+an uppercase-hex digest is `missing_checksum`, not `checksum_mismatch`, because
+the gate at `:229` is `/^[0-9a-f]{64}$/`. For the six pre-`createRequire`
+shapes no addon is loaded; for the two post-load shapes the reason is raised and
+`loaded` stays `null` even though the payload ran; a second call after any
+failure rethrows the same cached error without re-reading the manifest
+(`:244-245`, `:270-271`); the unaltered package loads and `probeCapabilities`
+reports available.
 Fault/timing angle: not a race. The hazard is that the verified path is never
 the tested path: every in-tree run has a local `shm_native.node`, so a regression
-in any of the six checks, or in the order that puts the checksum before
+in any of the checks, or in the order that puts the checksum before
 `createRequire`, passes CI and every catalog gate. The local-path exception
-itself is trusted by location, as `docs/shm-transport.md:96` says.
+itself is trusted by location, as `docs/shm-transport.md:97` says. A second,
+orthogonal hazard is that the outcome is memoized for the process:
+`requireAddon` records the first failure in `loadError` and sets `loaded` to
+`null` (`:270-271`), every later call rethrows it (`:245`), and `addon()`
+swallows it so `probeCapabilities` reports only `addon_unavailable` from then
+on; a transient cause such as a payload still being written during install is
+permanent for the process.
 Required faults and enabling state: a staged `@eidnara/host-linux-x64-gnu`
 package directory and the absence of a local `shm_native.node`; then one
 mutation per fault shape.
 Confidence: high - [evidence](evidence/packaged-addon-load-verifies-manifest-and-checksum.md).
 `packageAddonPath`, `requireAddon`, the reason union, the CI step, and the test
-directory were read directly.
-Existing check: none. `docs/shm-transport.md:98` states the clean-install gate
+directory were read directly. An earlier draft claimed none of the refusals
+loads code; the two post-load identity checks cannot make that promise without
+identity metadata that is verifiable before loading, which is the open question
+below.
+Existing check: none. `docs/shm-transport.md:99` states the clean-install gate
 as a requirement this tree does not implement.
-Impact: a release can ship a missing, mismatched, or tampered payload while every
-repository and catalog gate passes; the integrity check exists in code and has
-no witness.
+Impact: a release can ship a missing or mismatched payload while every repository
+and catalog gate passes; the integrity check exists in code and has no witness.
+Tampering is outside what an unsigned co-located manifest can detect.
 Open questions:
 - Should the clean-install gate be a CI job that installs the platform package
   into an empty prefix, or a unit test that stages a package directory and
   redirects `packageAddonPath`? The record accepts either; the doc names the
   first. (needs human input)
+- Should the manifest carry the build profile and target so `debug_build` and
+  `wrong_platform_binary` can be refused before `createRequire` executes the
+  payload, or is post-load classification acceptable for a checksum-verified
+  binary? (needs human input)
+- Is `default-production` the right label for a load path whose supporting
+  package does not exist in this tree and is recorded as unpublished in
+  `release/registry-gate.json`, or does the catalog need a class for a shipped
+  path that no in-tree artifact realises yet? (needs human input)
+- Should `packageAddonPath` guard the parsed manifest's shape so a `null` or
+  malformed manifest is `missing_manifest` rather than a raw `TypeError`, and
+  should the check cover every file the package ships rather than the one addon
+  payload (`:228`)? (needs human input)
 
 ---
 
@@ -3471,28 +3542,28 @@ Open questions:
 
 Type: safety
 Reachability: default-production - the addon is the shipped client and its
-`attach` (`packages/shm-native/src/lib.rs:592`) is the only descriptor
-validator; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`)
+`attach` (`packages/shm-native/src/lib.rs:634`) is the only descriptor
+validator; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`)
 forwards the caller's object unchanged, and the addon is directly requirable
 without the wrapper.
 Status: active
 Exercised: partial, and only when the addon is built - six suites in
 `packages/shm-native/tests/mechanism.ts` drive the raw addon: non-object and
-structurally hostile arguments (`:772`), every unsafe numeric representation
-before narrowing (`:795`), malformed, non-ASCII, and aliased grant text (`:817`),
-accessor objects and proxies (`:847`), a wrong profile refused before any
-attachment effect (`:880`), and a well-formed but unresolvable descriptor
-(`:890`). Each goes through `expectRejectedWithoutEffects` (`:758`), which
+structurally hostile arguments (`:906`), every unsafe numeric representation
+before narrowing (`:929`), malformed, non-ASCII, and aliased grant text (`:951`),
+accessor objects and proxies (`:981`), a wrong profile refused before any
+attachment effect (`:1014`), and a well-formed but unresolvable descriptor
+(`:1024`). Each goes through `expectRejectedWithoutEffects` (`:867`), which
 asserts the error pattern and that `activeChannelCount`,
 `activeExternalRefCount`, and `nativeLeakDiagnostics` are unchanged afterwards.
 The no-effects half is exact in all six. The message half is not: the helper
 matches with `toThrow(pattern)` against the unanchored regex
-`/invalid shared-memory descriptor/` (`:288`), so the four shape suites accept
-any message that contains that text, and only the accessor branch (`:847-871`)
+`/invalid shared-memory descriptor/` (`:309`), so the four shape suites accept
+any message that contains that text, and only the accessor branch (`:981-1005`)
 asserts exact equality of the message; the wrong-profile and unresolvable
-suites match their own messages the same way (`:886`, `:896`).
+suites match their own messages the same way (`:1020`, `:1030`).
 Every suite returns with zero assertions when `loadRawAddon()` finds no addon or
-the platform is neither Linux nor Darwin (`:774`, `:797`, and each sibling), so
+the platform is neither Linux nor Darwin (`:774`, `:931`, and each sibling), so
 the label depends on a built addon; enabling situation `shm_raw_addon_loaded`.
 Guarantee: A descriptor that is not a plain object, carries a field in an
 unsafe numeric representation, carries malformed or aliased grant text, or
@@ -3500,9 +3571,10 @@ observes its own reads through accessors or a proxy is rejected by the raw
 native `attach` with the single fixed message `invalid shared-memory descriptor`
 (`DESCRIPTOR_ERROR`, `lib.rs:31`; `descriptor_error`, `:150`); a descriptor
 naming a profile the addon does not have is rejected with
-`shared-memory profile is unavailable` (`:604`) and a well-formed descriptor
-whose handles do not resolve with `shared-memory attachment failed` (`:776`,
-`:781`); and in all six cases the rejection retains no channel, external
+`shared-memory profile is unavailable` (`:646`) and a well-formed descriptor
+whose handles do not resolve with `shared-memory attachment failed` from
+`clone_descriptors` (`:276`, `:283`) or `attach_ring` (`:287`), reached from
+`attach` at `:718-719` and `:740-741`; and in all six cases the rejection retains no channel, external
 reference, or native allocation.
 Check: `always` - for each of the four hostile shapes, `attach` throws exactly
 `invalid shared-memory descriptor`; for the wrong-profile and unresolvable cases
@@ -3644,8 +3716,8 @@ would park a waiter, and nothing un-parks it until the next publish. The
 recovery assertion must therefore poll directly after the release. `always-or-unreached` because the saturation state is unreachable through
 the Rust host receiver: `receive_one` holds at most one of eight leases and
 releases it on every path. It is reachable through the addon receiver, whose
-leases live until the caller releases them (`packages/shm-native/src/lib.rs:1397`,
-`:1455`), which is why the label stays `default-production`.
+leases live until the caller releases them (`packages/shm-native/src/lib.rs:1445`,
+`:1503`), which is why the label stays `default-production`.
 Fault/timing angle: no race — the counter is incremented and decremented by the
 same thread-confined receiver. The hazard is representational: the declining
 return is used both for saturation (`ring.rs:1417-1422`) and for an empty ring
@@ -3677,10 +3749,10 @@ quarantine, or counter fires: the silent capacity-loss signature of
 Open questions:
 - Resolved (2026-09-05): the addon receive path does saturate where the Rust
   host cannot. `poll` inserts every lease into `channel.active`
-  (`packages/shm-native/src/lib.rs:1397`) and only `release` (`:1455`,
+  (`packages/shm-native/src/lib.rs:1445`) and only `release` (`:1503`,
   through `detach_active`, `:332-357`) removes it, and the wrapper hands the
   release decision to the caller (`NativeReceiveLease.release` and
-  `[Symbol.dispose]`, `packages/shm-native/index.ts:608-624`). The property
+  `[Symbol.dispose]`, `packages/shm-native/index.ts:649-665`). The property
   is live for the client-side ring whenever a caller holds eight frames.
 - Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
   references were written against the source tree's eventfd doorbells. The
@@ -3830,9 +3902,9 @@ holds at most one of the `max_leases` (8, `HOST_TEST_RING_DEPTH`,
 `crates/shm-transport/src/profile.rs:679`, `:683-697`) leases per call, so
 the host-side receive ring never reaches the cap. The addon's `poll` stores
 every lease it hands out in `channel.active`
-(`packages/shm-native/src/lib.rs:1397`) until the caller invokes `release`
-(`:1455`, reached from `NativeReceiveLease.release` or `[Symbol.dispose]`,
-`packages/shm-native/index.ts:608-624`), so a caller holding eight frames puts
+(`packages/shm-native/src/lib.rs:1445`) until the caller invokes `release`
+(`:1503`, reached from `NativeReceiveLease.release` or `[Symbol.dispose]`,
+`packages/shm-native/index.ts:649-665`), so a caller holding eight frames puts
 the client-side receive ring at the cap with no fault. The label stays
 `default-production` for that reason; the host-side unreachability is a
 finding about one receiver, not about the transport.
@@ -3872,11 +3944,11 @@ marker needs no new instrumentation. The Rust host cannot reach the state:
 `max_leases` is 8 while `receive_one` holds at most one lease per call,
 releasing it on every path (`crates/host-runtime/src/ring_transport.rs:685-687`,
 `:734-736`, and `Drop` on error returns). The addon can, because lease
-lifetime there is the caller's (`lib.rs:1397`, `:1455`).
+lifetime there is the caller's (`lib.rs:1445`, `:1503`).
 Existing check: none as a coverage marker. The lease-limit test constructs and
 drains the state at a cap of one, so the situation is reached but not witnessed.
 On the addon side, `releasing a lease returns its slot; an unreleased ring fills`
-(`packages/shm-native/tests/mechanism.ts:650`) drives the client receiver to the
+(`packages/shm-native/tests/mechanism.ts:652`) drives the client receiver to the
 cap by never releasing, which is the shipped reachability path; unaudited.
 Impact: without this marker,
 `receive-resumes-when-lease-capacity-clears` reports a pass that means the gate
@@ -4041,30 +4113,34 @@ Open questions:
 Type: liveness
 Reachability: default-production - the addon readiness path is the shipped
 client's delivery path: `NativeChannel.startReadiness`
-(`packages/shm-native/index.ts:767`) is the wrapper's public readiness entry
+(`packages/shm-native/index.ts:820`) is the wrapper's public readiness entry
 point and wires the reactor through `watch` (`packages/shm-native/src/lib.rs`).
 The downstream consumer that registers a handler (`ShmFrameChannel` in the
 source tree's `packages/plugin`) is not in this tree; the in-tree callers are
-`packages/shm-native/tests/mechanism.ts:228-232`. The label rests on the addon
+`packages/shm-native/tests/mechanism.ts:230-234`. The label rests on the addon
 being the shipped client, not on an in-tree production caller.
 Status: active
-Exercised: yes — `readiness acknowledgement preserves a frame published during
-callback` (`packages/shm-native/tests/mechanism.ts:525-648`) publishes
+Exercised: partial — `readiness acknowledgement preserves a frame published during
+callback` (`packages/shm-native/tests/mechanism.ts:527-650`) publishes
 frame 2 from inside callback 1 and requires `received == [1, 2]` with exactly
-two callbacks. Not covered: the same race through the `NativeChannel` wrapper
-with multiple registered channels.
+two callbacks, but it drives the raw addon and performs the redispatch itself
+(`if (addon.readinessHandled()) queueMicrotask(onReady)`, `:591-593`); it never
+runs `NativeChannel.startReadiness` or `dispatchReadiness`, so a wrapper that
+ignored the addon's redispatch result would pass it while losing the frame on
+the shipped path. Not covered: the same race through the wrapper, and with
+multiple registered channels.
 Guarantee: a frame published while the one in-flight readiness callback runs is
 delivered by a subsequent callback without any further publication, within one
 acknowledgement cycle.
 Check: `always` — every `readiness_handled` acknowledgement whose per-channel
 re-arm observes visible data or a generation change (`arm_data_wait` returning
-false, `lib.rs:1326-1338`) returns `redispatch = true`, and the dispatcher
-re-enters on true (`index.ts:670-671`). `always` because the acknowledgement
+false, `lib.rs:1374-1386`) returns `redispatch = true`, and the dispatcher
+re-enters on true (`index.ts:723-724`). `always` because the acknowledgement
 runs after every callback and is the sole carrier of a wake whose doorbell
 token was already drained; a bounded window (one cycle) makes this checkable
 by a finite test.
 Fault/timing angle: the window is the whole callback execution, from the
-reactor's `pending` CAS (`scheduling.rs:214-217`) to `handled()` (`:346-349`),
+reactor's `pending` CAS (`scheduling.rs:214-217`) to `handled()` (`:353-356`),
 during which the reactor thread is blocked in `wait_until_handled` (`:85-101`)
 and observes no epoll edges. A kick raised inside the window is preserved by
 rewriting the control eventfd (`:228-231`).
@@ -4077,7 +4153,8 @@ Confidence: high —
 The re-arm walk, the redispatch boolean, both dispatcher `finally` blocks, and
 the kick-preservation path were read directly.
 Existing check: `readiness acknowledgement preserves a frame published during
-callback` (`mechanism.ts:525-648`), raw-addon level; status unaudited.
+callback` (`mechanism.ts:527-650`), raw-addon level with a hand-rolled
+redispatch; the wrapper path has no check. Status unaudited.
 Impact: a delivered frame sits invisible until an unrelated event; on an
 otherwise idle channel, forever. The client sees a response that never
 arrives; the host sees a healthy setup socket. Silent, no counter fires.
@@ -4359,21 +4436,21 @@ Open questions:
 Type: safety
 Reachability: default-production - the reactor is created on the first `watch`
 (`packages/shm-native/src/lib.rs`), which the shipped wrapper reaches through
-`NativeChannel.startReadiness` (`packages/shm-native/index.ts:767`); the source
+`NativeChannel.startReadiness` (`packages/shm-native/index.ts:820`); the source
 tree's `ShmFrameChannel` caller in `packages/plugin` is not in this tree and the
-in-tree callers are `packages/shm-native/tests/mechanism.ts:193`.
+in-tree callers are `packages/shm-native/tests/mechanism.ts:195`.
 Status: active
 Exercised: partial — `readiness acknowledgement preserves a frame published
-during callback` (`mechanism.ts:525-648`) pins exactly one deferred dispatch
+during callback` (`mechanism.ts:527-650`) pins exactly one deferred dispatch
 (`callbacks === 2`), and `pending_callback_waits_for_acknowledgement`
-(`scheduling.rs:398-429`) pins that a control write alone does not release the
+(`scheduling.rs:405-436`) pins that a control write alone does not release the
 wait. Three raw-addon readiness tests added with the reactor rework bear on this
 record: `a dead peer leaves the reactor instead of redispatching forever`
-(`mechanism.ts:290-343`), `a dead channel's handler is pruned once the reactor
-drops it` (`:403-465`), and `a handler that takes one frame per callback is
-redispatched until the ring is empty` (`:467-523`), and the acknowledgement
+(`mechanism.ts:292-345`), `a dead channel's handler is pruned once the reactor
+drops it` (`:405-467`), and `a handler that takes one frame per callback is
+redispatched until the ring is empty` (`:469-525`), and the acknowledgement
 test now registers a second channel on the same reactor and proves its edge
-still arrives (`:625-640`). No test lands edges from multiple channels inside
+still arrives (`:627-642`). No test lands edges from multiple channels inside
 one pending window.
 Guarantee: **during non-error reactor operation** the reactor never has two
 unacknowledged readiness callbacks in flight — a second dispatch occurs only
@@ -4386,7 +4463,7 @@ unacknowledged that is two unacknowledged callbacks in flight, so an
 unqualified `never` would be false at HEAD.
 Check: `always` — a callback is dispatched only through a successful
 `pending` compare-exchange (`scheduling.rs:214-218`) and the reactor blocks in
-`wait_until_handled` (`:85-101`) until `handled()` (`:346-349`) clears the
+`wait_until_handled` (`:85-101`) until `handled()` (`:353-356`) clears the
 flag; assert no dispatch while an acknowledgement is outstanding. `always` over
 the non-error arms, which is where the compare-exchange is the sole gate. The
 reactor thread has three `callback.call` sites at HEAD: the readiness dispatch
@@ -4404,9 +4481,9 @@ record covers it; it is queued with the acknowledgement-failure gap the Group N
 portfolio evaluation already names.
 Required faults and enabling state: doorbell or kick edges concurrent with an
 unacknowledged callback — one in-flight callback plus a publisher or a
-`poll`-side `kick` (`lib.rs:1419-1421`). The `poll`-side kick is a race, not a
+`poll`-side `kick` (`lib.rs:1467-1469`). The `poll`-side kick is a race, not a
 call order: `poll` consumes any visible frame at `try_receive()`
-(`lib.rs:1370-1375`) and delivers it, skipping the kick arm entirely, so the
+(`lib.rs:1418-1423`) and delivers it, skipping the kick arm entirely, so the
 kick is reached only when the receive came back empty and `arm_data_wait()` then
 returned `Ok(false)` because data or a generation change landed before its
 recheck (`ring.rs:1201-1220`). A test needs a concurrent publication or a
@@ -4415,8 +4492,8 @@ scheduling seam holding that window open. Enabling situation
 Confidence: high —
 [evidence](evidence/reactor-callback-is-one-in-flight.md). The CAS, the wait,
 the acknowledgement ordering (re-arm before `handled()`,
-`lib.rs:1316-1340`), and both error paths were read directly.
-Existing check: `mechanism.ts:525-648` and `scheduling.rs:398-429` as above;
+`lib.rs:1364-1388`), and both error paths were read directly.
+Existing check: `mechanism.ts:527-650` and `scheduling.rs:405-436` as above;
 both status unaudited.
 Impact: overlapping dispatchers interleave over the thread-confined registry —
 "native channel is busy" errors on a healthy channel — and a double
@@ -4480,7 +4557,7 @@ consumer handle on the same ring.
 Confidence: high - [evidence](evidence/trim-removes-only-dead-pages-below-the-write-cursor.md).
 The role and quarantine gates, the reclaim call, `punch_dead_pages`'s dead range
 and `everything` branch, and `live_end` were read directly at `:2154-2156` and
-`:2163-2248`; the five tests were read and their assertions match the guarantee.
+`:2163-2266` (`punch_dead_pages` at `:2169-2244`, `trim` at `:2247-2266`); the five tests were read and their assertions match the guarantee.
 Existing check: the five tests named above, all unaudited.
 Impact: a wrong upper bound zeroes the bytes of a frame the producer is still
 writing, which the receiver later decodes as a valid frame of zeros; a missing
@@ -4701,10 +4778,23 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   dropped channel and with an unbounded run of them. At the wrapper level
   `wake-published-during-readiness-callback-is-not-lost` dominates
   `each-channel-wake-survives-a-shared-acknowledgement`: one boolean over all
-  channels (`lib.rs:1152-1162`) plus a dispatcher that runs every handler on
-  re-entry (`index.ts:539`) gives the second channel's delivery for free. The
+  channels (`lib.rs:1316-1339`) plus a dispatcher that runs every handler on
+  re-entry (`index.ts:701-721`) gives the second channel's delivery for free. The
   undominated residue is the raw addon, whose reactor holds a single callback
-  (`lib.rs:1126-1128`).
+  (`lib.rs:1334-1336`).
+- **Setup admits identities before the ring sees them.**
+  `setup-descriptors-name-distinct-open-files` and
+  `addon-tokens-never-collide-with-live-entries` both guard identity at the
+  addon boundary: the first that the seven kernel objects a setup delivers are
+  distinct, the second that the `u32` handles JavaScript holds are distinct from
+  every live one. `attach-validates-doorbell-sockets` checks each doorbell's
+  type; only the distinctness record checks that two slots are not the same
+  doorbell, so the two are independent. On the `connectSetup` path
+  `setup-connect-honors-its-deadline` sits in front of both, since a setup that
+  never connects issues no descriptors and no tokens; the raw `attach` path
+  issues both without any connect, so the ordering does not hold there.
+  `setup-proof-vectors-pin-the-shared-hmac-transcript` covers only what happens
+  after the connection exists.
 
 ## Discovered at U3
 
@@ -4764,7 +4854,7 @@ Reachability: default-production - `watch` callbacks and readiness acknowledgeme
 Status: active
 Exercised: partial - one unit test covers acknowledgement waiting, and `packages/shm-native/tests/mechanism.ts` covers a frame published during a callback; no test covers a lost eventfd wake with no frame behind it.
 Guarantee: At most one readiness callback batch is in flight: the next readiness notification is delivered only after the previous batch has been acknowledged through `readinessHandled()`, and an interrupted wait retries until success or close rather than reporting a spurious wake.
-Check: `always` - `dispatchReadiness` (`packages/shm-native/index.ts:652-676`) runs every registered handler and calls `readinessHandled()` in its `finally`, and `wait_until_handled` (`packages/shm-native/src/scheduling.rs`) does not release a new wake while the pending flag is set, so no second dispatch begins before the first is acknowledged; and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. The handler runs first and the acknowledgement follows it; the ordering this record forbids is a second dispatch ahead of that acknowledgement. The `wait_until_handled` error arm (`packages/shm-native/src/scheduling.rs:234-239`), which records failure, fires one final callback without the pending gate, and stops the reactor, is outside this guarantee, as it is for `reactor-callback-is-one-in-flight`; the record covers the non-error arms. `always` because it must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`.
+Check: `always` - `dispatchReadiness` (`packages/shm-native/index.ts:699-729`) runs every registered handler and calls `readinessHandled()` in its `finally`, and `wait_until_handled` (`packages/shm-native/src/scheduling.rs`) does not release a new wake while the pending flag is set, so no second dispatch begins before the first is acknowledged; and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. The handler runs first and the acknowledgement follows it; the ordering this record forbids is a second dispatch ahead of that acknowledgement. The `wait_until_handled` error arm (`packages/shm-native/src/scheduling.rs:234-239`), which records failure, fires one final callback without the pending gate, and stops the reactor, is outside this guarantee, as it is for `reactor-callback-is-one-in-flight`; the record covers the non-error arms. `always` because it must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`.
 Fault/timing angle: A missed or duplicated wake leaves the JavaScript side spinning or stalled.
 Required faults and enabling state: A readiness event with no pending callback; a signal interrupting the wait.
 Confidence: medium - [evidence](evidence/addon-scheduling-wakes-only-on-acknowledged-readiness.md). `pending_callback_waits_for_acknowledgement` and `interrupted_wait_retries_until_success_or_close` (`packages/shm-native/src/scheduling.rs`).
@@ -4776,18 +4866,18 @@ Open questions: None.
 
 Type: liveness
 Reachability: default-production - the addon is the shipped client and
-`dispatchReadiness` (`packages/shm-native/index.ts:652-676`) is the readiness
+`dispatchReadiness` (`packages/shm-native/index.ts:699-729`) is the readiness
 path of every watched channel; a quarantined ring is an ordinary outcome of peer
 death or a verification failure, so a registered channel whose re-arm fails
 persistently is a production state.
 Status: active
 Exercised: yes - `a dead peer leaves the reactor instead of redispatching forever`
-(`packages/shm-native/tests/mechanism.ts:290-343`) closes the peer, asserts the
-dispatch count stops growing (`report.dispatches === report.settled`, `:341`)
-while a 100 ms `setTimeout` macrotask still runs (`:321`), and asserts the
-receive errors were observed (`:342`); `a handler that throws over an undrained
-frame does not liveloop the event loop` (`:345-401`) and `a dead channel's
-handler is pruned once the reactor drops it` (`:403-465`) cover the adjacent
+(`packages/shm-native/tests/mechanism.ts:292-345`) closes the peer, asserts the
+dispatch count stops growing (`report.dispatches === report.settled`, `:343`)
+while a 100 ms `setTimeout` macrotask still runs (`:323`), and asserts the
+receive errors were observed (`:344`); `a handler that throws over an undrained
+frame does not liveloop the event loop` (`:347-403`) and `a dead channel's
+handler is pruned once the reactor drops it` (`:405-467`) cover the adjacent
 cases.
 Guarantee: When a
 watched channel's `complete_data_wait` or `arm_data_wait` fails on every
@@ -4802,17 +4892,17 @@ bounded, and a queued macrotask (a timer or I/O callback) runs.
 Fault/timing angle: the source tree conflated the two return values and requeued
 unconditionally, so a quarantined channel spun the microtask queue until the
 caller closed it. At HEAD `readiness_handled`
-(`packages/shm-native/src/lib.rs:1304-1343`) matches on
-`(completed, arm_data_wait())` (`:1327-1338`): `(false, _) | (true, Err(_))`
-unregisters the channel (`:1337`), `(true, Ok(false))` sets `redispatch` only
-when a lease advanced during the callback (`:1324-1325`, `:1330-1333`), and a
-non-progressing `Ok(false)` does nothing (`:1336`). The dispatcher's `finally`
-calls `scheduleRedispatch` (`index.ts:671`), which queues a microtask only
+(`packages/shm-native/src/lib.rs:1352-1391`) matches on
+`(completed, arm_data_wait())` (`:1375-1386`): `(false, _) | (true, Err(_))`
+unregisters the channel (`:1385`), `(true, Ok(false))` sets `redispatch` only
+when a lease advanced during the callback (`:1372-1373`, `:1378-1381`), and a
+non-progressing `Ok(false)` does nothing (`:1384`). The dispatcher's `finally`
+calls `scheduleRedispatch` (`index.ts:724`), which queues a microtask only
 while `consecutiveMicrotaskRedispatches < REDISPATCH_MICROTASK_BUDGET` (16,
-`:637`) and otherwise resets the counter and defers through `setImmediate`
-(`:642-650`), so a macrotask runs at least every seventeen dispatches.
+`:684`) and otherwise resets the counter and defers through `setImmediate`
+(`:689-697`), so a macrotask runs at least every seventeen dispatches.
 `Reactor::register` unregisters a channel whose first `arm_data_wait` fails
-(`packages/shm-native/src/scheduling.rs:292-302`), so a ring quarantined before
+(`packages/shm-native/src/scheduling.rs:299-309`), so a ring quarantined before
 `watch` never enters the loop either. The hazard the record guards is a
 regression to the conflated match or to an unbounded requeue.
 Required faults and enabling state: a channel registered while healthy whose
@@ -4838,19 +4928,19 @@ Open questions: None. Both halves of the earlier question (distinguish
 
 Type: liveness
 Reachability: default-production - one reactor serves every watched channel in
-the process (`packages/shm-native/src/lib.rs:1316-1339` re-arms every channel
+the process (`packages/shm-native/src/lib.rs:1364-1387` re-arms every channel
 the reactor reported ready in one walk), and a client with more than one channel is the shipped
-topology whenever it opens a second connection (`tests/mechanism.ts:224-237`
+topology whenever it opens a second connection (`tests/mechanism.ts:226-239`
 watches two).
 Status: active
 Exercised: partial - `one channel handler failure does not starve later channels`
-(`tests/mechanism.ts:222-259`) registers two channels through `startReadiness`
-(`:228`, `:232`), makes the first handler throw, publishes to the second
-(`:246`), and asserts delivery within one second, which is two-channel delivery
+(`tests/mechanism.ts:224-261`) registers two channels through `startReadiness`
+(`:230`, `:234`), makes the first handler throw, publishes to the second
+(`:248`), and asserts delivery within one second, which is two-channel delivery
 under a shared acknowledgement; `readiness acknowledgement preserves a frame
-published during callback` (`:525-648`) proves the single-channel window and
+published during callback` (`:527-650`) proves the single-channel window and
 then opens a later pair on the same reactor and proves its publish still reaches
-the retained callback (`:625-640`), but only after the first pair is closed. No
+the retained callback (`:627-642`), but only after the first pair is closed. No
 test lands the second channel's edge inside the first channel's pending window.
 Guarantee: With two or more registered channels, an edge on channel B that
 arrives while the batch raised by channel A is pending, before
@@ -4862,14 +4952,14 @@ acknowledgement; B's handler observes the frame in the immediately following
 batch, and A's handler is not invoked more than once more for the same edge.
 Fault/timing angle: at HEAD B's edge survives by a different mechanism from the
 one the source tree relied on. The reactor registers each data doorbell
-level-triggered (`epoll::EventFlags::IN` alone, `scheduling.rs:273-278`) and
+level-triggered (`epoll::EventFlags::IN` alone, `scheduling.rs:280-285`) and
 does not call `epoll_wait` while a batch is pending
 (`wait_until_handled`, `:85-101`), so a wake byte B's peer sends during A's
 window stays unread in B's socket; the acknowledgement walk drains only the
-channels in `take_ready()` (`lib.rs:1316`, drain in `complete_data_wait`,
+channels in `take_ready()` (`lib.rs:1364`, drain in `complete_data_wait`,
 `ring.rs:1237-1242`), which B is not, so the next `epoll_wait` reports B and
 raises a fresh batch. The walk's `(true, Ok(false))` arm now requeues a channel
-only when its lease advanced during the callback (`lib.rs:1324-1333`); a
+only when its lease advanced during the callback (`lib.rs:1372-1381`); a
 visible-but-untouched B is left to its own doorbell byte. The hazard is a
 regression that drains or re-registers B's doorbell inside A's window, or that
 switches the registration to edge-triggered or oneshot, either of which would
@@ -4884,15 +4974,15 @@ The re-arm walk, `arm_data_wait`'s `Ok(false)` contract, the level-triggered
 doorbell registration, and the dispatcher were read directly; the property is
 unexercised in its pending-window form, not unverified.
 Existing check: partial for two channels: the two-channel suite at
-`mechanism.ts:222-259` and the single-channel suite at `:525-648`, both
+`mechanism.ts:224-261` and the single-channel suite at `:527-650`, both
 unaudited.
 Impact: one channel stalls until its next unrelated edge while the process looks
 healthy; with a request/response protocol on that channel, the stall is a hang.
 Open questions:
 - Should the walk return per-channel results so the dispatcher can run only
   the handlers with visible data, rather than every registered handler on every
-  batch (`index.ts:654-668`; a handler that throws is now removed from the map
-  at `:664-667` instead of being retried on the next batch)? (needs human input)
+  batch (`index.ts:701-721`; a handler that throws is now removed from the map
+  and its owner told through `onDropped` at `:711-720` instead of being retried on the next batch)? (needs human input)
 
 ---
 
@@ -4906,7 +4996,7 @@ Guarantee: Setup-socket EOF is delivered to the scheduler as reactor readiness, 
 Check: `sometimes` - across a campaign, at least one wait observes setup-socket EOF as readiness and at least one wait returns through the `EINTR` retry. `sometimes` because these are situations a campaign must reach, not conditions that hold on every wake; the ordering condition on every wake is `addon-scheduling-wakes-only-on-acknowledged-readiness`.
 Fault/timing angle: A peer that dies mid-wait, or a signal that lands inside the blocking wait, leaves a scheduler that never reaches these paths looking healthy while the JavaScript side waits forever.
 Required faults and enabling state: Peer close while a wait is pending; a signal delivered to the waiting thread.
-Confidence: medium - [evidence](evidence/addon-scheduling-reaches-peer-eof-and-interrupted-wait.md). `setup_socket_eof_is_reported_once` (`packages/shm-native/src/scheduling.rs:432`, the renamed `setup_socket_eof_is_reactor_readiness`, which now also asserts that a second wait sees nothing because the registration is `ONESHOT`) and `interrupted_wait_retries_until_success_or_close` (`:473`) construct each situation directly against the scheduler internals.
+Confidence: medium - [evidence](evidence/addon-scheduling-reaches-peer-eof-and-interrupted-wait.md). `setup_socket_eof_is_reported_once` (`packages/shm-native/src/scheduling.rs:439`, the renamed `setup_socket_eof_is_reactor_readiness`, which now also asserts that a second wait sees nothing because the registration is `ONESHOT`) and `interrupted_wait_retries_until_success_or_close` (`:480`) construct each situation directly against the scheduler internals.
 Existing check: The two unit tests named above; unaudited.
 Impact: A closed daemon is never noticed, or a signal turns one wait into a permanent stall.
 Open questions: None.
@@ -4926,3 +5016,214 @@ Existing check: The two unit tests named above; unaudited.
 Impact: A grant the host never issued attaches a ring, or every real grant is refused.
 Open questions:
 - Add a committed grant-envelope fixture that the host serializes against and the addon deserializes, or a live host-to-addon setup test, so a field or tag change on one side fails a test (needs human input).
+
+### setup-descriptors-name-distinct-open-files
+
+Type: safety
+Reachability: default-production - every client setup passes the six transferred
+descriptors and the setup socket through `reject_aliased_descriptors`
+(`packages/shm-native/src/setup.rs:382-389`, called from the grant receive at
+`:357`), and the raw `attach` entry point applies two ordered checks: the six
+raw descriptor numbers must be distinct (`packages/shm-native/src/lib.rs:704-714`,
+which cannot see a `dup` alias, `:715-717`), then the duplicated descriptors
+are compared as open files (`setup::reject_aliased_files`, `:725-731`) before
+`GrantReservation::claim` (`:736`), `attach_ring` (`:740-741`), or
+`insert_channel` (`:747`). The bridge's
+`RingClientEndpoint::attach_with_descriptors`
+(`crates/host-runtime/src/ring_transport.rs:855`) performs neither: it
+destructures the array at `:864-871` and attaches at `:877-879`, and its only
+cross-lane comparison requires the two grants to have equal geometry
+(`:874-876`), so it admits two byte-identical grants, the case the addon rejects
+at `setup.rs:125` and `lib.rs:709`.
+Status: active
+Exercised: partial - `distinct_descriptors_are_accepted_and_a_dup_is_rejected`
+(`setup.rs:671-691`) accepts a distinct bundle and rejects a duplicated
+doorbell, a duplicated mapping, and a slot aliasing the setup socket;
+`inode_fallback_rejects_the_same_aliases` (`:694`) drives the same three shapes
+through `reject_aliased_inodes`; `kcmp_separates_eventfds_that_share_an_inode`
+(`:723`) proves the primary comparison distinguishes two anonymous-inode
+descriptors the fallback cannot. All three call the comparison functions
+directly; no test sends an aliased bundle over a real setup socket into
+`begin_connect`, and no test drives an aliased bundle through the raw `attach`
+entry point.
+Guarantee: The six descriptors a setup message transfers, together with the
+setup socket itself, name seven distinct open file descriptions; a bundle in
+which any two slots share one open file description, or in which a slot aliases
+the stream carrying the message, is refused before any of them is mapped,
+registered, or armed, and the refused descriptors are closed by `OwnedFd`'s drop
+as the error propagates out of `receive_grant` (the `Vec<OwnedFd>` built at
+`setup.rs:347-353` owns them), so a rejected bundle leaks no descriptor into the
+client's table.
+Check: `always` - on the setup path, for every pair among the six transferred
+descriptors plus the setup socket (seven objects, 21 pairs), `kcmp(KCMP_FILE)`
+reports distinct open file descriptions; on the raw `attach` path the comparison
+covers the six duplicated descriptors only (15 pairs), because that call has no
+setup socket (`lib.rs:720-724`); when `kcmp` is unavailable, every pair has a
+distinct `(st_dev, st_ino)`; a refused
+bundle leaves `activeChannelCount`, `activeExternalRefCount`, and the pending
+setup table unchanged.
+Fault/timing angle: `SCM_RIGHTS` installs a fresh descriptor number per slot even
+when two slots name one open file, so a duplicate is invisible to a
+number-equality check and visible only on the open file description
+(`setup.rs:379-381`). A host that sends one doorbell twice collapses the two
+ring directions onto one wake channel; a host that sends the setup socket in a
+doorbell slot makes the client drain setup traffic as wake bytes. The inode
+fallback is stricter and incomplete rather than weaker in the unsafe direction:
+two descriptors naming one open file description always share
+`(st_dev, st_ino)`, so the fallback has no false accepts, but every
+anonymous-inode descriptor shares one `(st_dev, st_ino)`, so it would refuse
+two genuinely distinct eventfds (`:392-396`, `:410-418`). For the bundle this
+transport sends (two memfds, four `socketpair` ends, the setup socket) each
+object carries its own inode, so the over-refusal is unreachable today;
+`kcmp_separates_eventfds_that_share_an_inode` pins the gap for a descriptor type
+the bundle does not carry.
+Required faults and enabling state: a host, or a test standing in for one, that
+transfers a bundle with a duplicated slot; for the fallback arm, a sandbox that
+refuses `kcmp` with `ENOSYS` or `EPERM` specifically, because `same_open_file`
+(`setup.rs:438-448`) maps only those two errnos to the inode fallback and
+returns any other errno as a hard setup error.
+Confidence: high - [evidence](evidence/setup-descriptors-name-distinct-open-files.md).
+`reject_aliased_descriptors`, `reject_aliased_files`, `reject_aliased_inodes`,
+`same_open_file`, both call sites, and the three tests were read directly.
+Existing check: the three tests named above, unaudited. None reaches the check
+through a socket or through `attach`.
+Impact: two independent ring directions share a doorbell or a mapping, so a wake
+or a frame meant for one direction lands in the other, or setup bytes are consumed
+as doorbell tokens; the failure presents as a hung or misrouted channel with no
+counter.
+Open questions:
+- Should the bridge endpoint apply the same distinctness check to the descriptors
+  it attaches, or is the host-side sender trusted there by construction?
+  (needs human input)
+
+### setup-connect-honors-its-deadline
+
+Type: liveness
+Reachability: default-production - every client setup enters through
+`begin_connect` (`packages/shm-native/src/setup.rs:97-108`), which derives one
+deadline from the caller's timeout and calls `connect_until` (`:147-184`)
+before authenticating.
+Status: active
+Exercised: partial - `connect_honors_the_deadline_when_the_backlog_is_full`
+(`setup.rs:775-818`) binds a listener that never accepts, fills its backlog with
+non-blocking connects until one returns `EAGAIN` (`:789-803`), then calls
+`connect_until` with a 200 ms deadline and asserts a `TimedOut` error within
+five seconds (`:805-817`); `connect_succeeds_against_an_accepting_listener`
+(`:821-834`) covers the positive path. The `EINTR` re-arm, the pass-through
+errno arm (`:181`), and the sub-microsecond floor (`:152-155`) are covered by
+nothing, and the deadline assertion allows a 25x slack, so the existing test
+refutes unbounded parking rather than pinning the 200 ms bound.
+Guarantee: Establishing the setup connection returns within the caller's deadline
+with one of three outcomes: a connected stream, `TimedOut`, or the kernel's own
+errno passed through unchanged; this holds when the listener's backlog is full
+and a plain blocking `connect(2)` would park indefinitely, and an interrupted
+attempt re-arms the remaining budget rather than the original one.
+Check: `always` - with a listener whose backlog is full, `connect_until` returns
+`TimedOut` no later than the deadline plus a stated scheduling slack expressed
+as a multiple of the deadline; with an accepting listener it returns a connected
+stream; with no listener bound it returns the kernel errno verbatim and
+immediately (`:181`), not `TimedOut`; a zero `timeout` is rejected by
+`begin_connect` as `InvalidData` before any socket exists (`:104-106`); and
+after an `EINTR` the socket's send timeout equals the remaining budget, not the
+original.
+Fault/timing angle: Linux parks a blocking `AF_UNIX` connect for the socket's
+`SO_SNDTIMEO`, which std never sets, so `UnixStream::connect` against a full
+backlog blocks without bound (`setup.rs:143-146`). `connect_until` sets
+`SO_SNDTIMEO` to the remaining budget at the top of the retry loop, so every
+attempt is armed independently (`:168`), maps the kernel's `EAGAIN` to
+`TimedOut` (`:180`), and recomputes the budget on `EINTR` (`:171-179`),
+returning `TimedOut` at `:174` when nothing is left; a budget just under one
+second is floored to whole microseconds so the kernel does not reject it with
+`EDOM` (`:152-155`). The same `deadline` is then reused for the rest of setup:
+`authenticate` (`:109-115`) and `receive_grant` (`:116`) re-arm it per chunk,
+and `PendingSetup` carries it into `activate`, so one caller-supplied timeout
+bounds connect, authentication, grant receive, and activation together;
+`goodbye` uses its own fixed 100 ms budget (`:239`). A regression that returns
+to `UnixStream::connect`, or that re-arms the original duration on retry,
+stalls client startup for as long as the host's accept loop is wedged.
+Required faults and enabling state: a listener with a full backlog, or one that
+never accepts; a signal delivered during the blocking connect for the retry arm.
+Confidence: high - [evidence](evidence/setup-connect-honors-its-deadline.md).
+`connect_until`, `begin_connect`, and both tests were read directly; the
+`EINTR` re-arm is asserted by no test.
+Existing check: the two tests named above, unaudited. The deadline assertion in
+`connect_honors_the_deadline_when_the_backlog_is_full` is
+`elapsed < Duration::from_secs(5)` against a 200 ms deadline (`:806`,
+`:814-817`), so it cannot distinguish an honored 200 ms bound from a 4.9 s one.
+Impact: a client whose host has a wedged accept loop hangs in setup past its own
+timeout instead of failing over, with no error and no counter.
+Open questions:
+- Should the `EINTR` re-arm be pinned by a test that interrupts the blocking
+  connect, or is the code path considered covered by inspection? (needs human
+  input)
+- What slack multiple should the deadline test accept? Tightening the 25x bound
+  makes the assertion sensitive to loaded CI runners; leaving it means the bound
+  is not pinned. (needs human input)
+
+### addon-tokens-never-collide-with-live-entries
+
+Type: safety
+Reachability: default-production - every JavaScript-facing identity the addon
+issues comes from `allocate_token` (`packages/shm-native/src/lib.rs:435-446`):
+channel ids (`:427`), pending setups (`:830`), producer reservations
+(`:1131`), and receive leases (`:1424`).
+Status: active
+Exercised: partial - `token_allocation_wraps_and_skips_outstanding_tokens`
+(`lib.rs:1246-1261`) starts the counter at `u32::MAX - 1` with `u32::MAX` and
+`1` outstanding, asserts the next token is `2` (skipping the live `MAX`, the
+reserved `0`, and the live `1`), then `3`, and asserts a fresh counter issues
+`1`; with two entries the attempt bound is four and the free token is the fourth
+candidate, so the test lands exactly on the bound. Not covered: the `None`
+return, any of the four production call sites, and the property that the table
+read for `in_use` is the table inserted into afterwards. It drives the function
+directly; no test exhausts a table through the public API.
+Guarantee: A token handed to JavaScript is never zero and never equal to a token
+still present in the table it indexes, across wraparound. Uniqueness is scoped
+per table, because each counter pairs with one map (`next_channel` with
+`channels`, `next_pending` with `pending`, `next_producer` with `producers`,
+`next_lease` with `active`), so a channel id and a lease token may share a
+value without colliding; and per thread, because `REGISTRY` is a
+`thread_local!` (`lib.rs:142-144`). The `None` return that would produce
+`identity exhausted` requires the map to hold every non-zero `u32`: it is
+unreachable for the two per-channel tables, which the profile bounds at 16
+entries, and needs `u32::MAX - 1` live entries for the two registry tables.
+Check: `always` - for any table `in_use` and counter, `allocate_token` returns
+`Some(t)` with `t != 0` and `!in_use.contains_key(&t)`, or `None`; the
+insertion that follows each call therefore never overwrites an entry.
+Fault/timing angle: the counter wraps (`wrapping_add`, `:440`), so after
+`u32::MAX` issues the sequence revisits tokens that may still be live; the loop
+skips zero and live keys and bounds itself to `in_use.len() + 2` attempts
+(`:438-439`), which is enough because at most `len` of any `len + 2`
+consecutive values are in use and at most one is zero. A regression to a bare
+increment, or to `insert` without the membership check, would let a later
+`release` or `close` act on the wrong live lease or channel once the counter
+wraps. Two facts bound the blast radius: the only other consumer of
+`next_lease` compares it for inequality, not order (`:1372-1373`), so
+wraparound does not corrupt readiness accounting; and at `:1424` the token is
+allocated before the external views are built, so a failure in the view loop
+(`:1441-1443`) advances the counter without inserting, and a skipped token is
+expected rather than a defect.
+Required faults and enabling state: a counter positioned just below wraparound
+with entries outstanding at the revisited values. Reachable directly in a unit
+test; through the public API the horizon differs per counter: `next_channel`
+(`:427`) and `next_pending` (`:830`) wrap only after `2^32` creations on one
+thread, but `channel.next_lease` (`:1424`) advances once per `poll` that yields
+a frame and `channel.next_producer` (`:1131`) once per reservation, so one
+long-lived channel wraps after `2^32` frames, which a sustained ring reaches in
+hours; wraparound with live entries is a production situation on the per-channel
+counters.
+Confidence: high - [evidence](evidence/addon-tokens-never-collide-with-live-entries.md).
+`allocate_token`, its four callers, and the test were read directly.
+Existing check: the test named above, unaudited.
+Impact: a JavaScript handle silently refers to another live resource; releasing
+or closing it acts on that resource, which is a use-after-recycle across the
+N-API boundary with no error. The same outcome is reachable without wraparound
+if an embedder moves a channel id between worker threads, because each thread's
+`REGISTRY` numbers its channels independently.
+Open questions:
+- Should the per-channel counters carry a `sometimes` situation record for
+  wraparound with live entries, since a long-lived channel reaches it in hours?
+  (needs human input)
+- Is the dead `identity exhausted` path on the per-channel tables worth keeping
+  as a defensive branch or worth deleting, and can a caller move a channel id
+  across worker threads? (needs human input)

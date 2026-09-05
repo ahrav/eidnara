@@ -85,7 +85,7 @@ A peer writes a descriptor whose two spans cover the same arena bytes. If the
 conjunction above were ever weakened, `try_receive` would build two `LeaseSpan`s
 over one range (`ring.rs:1446-1451`), the addon would expose two writable external
 ArrayBuffers aliasing the same memory
-(`packages/shm-native/src/lib.rs:1382-1390`), and `to_vec` would produce a body
+(`packages/shm-native/src/lib.rs:1430-1438`), and `to_vec` would produce a body
 whose two halves are the same bytes. No guard downstream re-checks disjointness:
 `lease_span` (`ring.rs:2057-2068`) bounds each span independently.
 

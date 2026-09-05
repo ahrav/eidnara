@@ -34,18 +34,18 @@ entry point that creates a usable handle should observe it.
 - `ring.rs:2797-2810` initializes a fresh lifecycle page and sets
   `quarantined: AtomicU8::new(0)` at `:2808`, so the field is meaningful from
   creation onward.
-- `packages/shm-native/src/lib.rs:694-697` claims the process-wide grant
-  reservation with `GrantReservation::claim`, and `:698-699` attaches the two
+- `packages/shm-native/src/lib.rs:736-739` claims the process-wide grant
+  reservation with `GrantReservation::claim`, and `:740-741` attaches the two
   rings afterwards. Ordering matters: the claim is consumed **before** the
   mapping is validated, so a failing attach releases it through
   `GrantReservation::drop` (`lib.rs:122-130`, removing both grants at `:126`)
   while a succeeding attach retains it.
-- `lib.rs:705-720` inserts the `Channel` with `_reservation: Some(reservation)`
+- `lib.rs:747-762` inserts the `Channel` with `_reservation: Some(reservation)`
   (field declared at `lib.rs:89`), so the claim outlives attach and is held by
   the registry entry.
-- `lib.rs:1497-1513` (`close`) and `:1530-1546` (`force_close`) remove the registry
-  entry at `:1525` and `:1525` respectively, but only under the condition at
-  `:1516-1518` and `:1516-1518`: `channel.producers.is_empty() && channel.active
+- `lib.rs:1545-1561` (`close`) and `:1578-1594` (`force_close`) remove the registry
+  entry at `:1573` (both `close` and `force_close` route through `finish_close`), but only under the condition at
+  `:1564-1566`: `channel.producers.is_empty() && channel.active
   .is_empty() && channel.stranded.is_empty()`. **Correction:** the catalog's
   impact claim that the grant reservation is "held for the process lifetime" is
   too strong. An alias-free quarantined channel can be closed and its claim
@@ -63,8 +63,8 @@ entry point that creates a usable handle should observe it.
    (`ring.rs:978-980`).
 3. `validate_lifecycle` compares its eight fields, all of which still match, and
    returns `Ok(())`. A `Ring` is returned.
-4. On the addon path the grant claim taken at `lib.rs:694` is now consumed and a
-   channel id is issued at `lib.rs:705-720`. The caller receives a success.
+4. On the addon path the grant claim taken at `lib.rs:736` is now consumed and a
+   channel id is issued at `lib.rs:747-762`. The caller receives a success.
 5. Every subsequent operation fails: `try_reserve` returns
    `ProducerError::Quarantined` (`ring.rs:1275-1277`), `try_receive` returns
    `RingError::Quarantined` (`:1396-1398`), `release` returns

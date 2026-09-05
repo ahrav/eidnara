@@ -8,8 +8,8 @@ Split from `addon-scheduling-wakes-only-on-acknowledged-readiness` so the situat
 
 - `register_setup_socket` (`packages/shm-native/src/scheduling.rs:63`) adds the setup socket to the reactor with the channel id as event data, so peer closure surfaces as `IN`, `HUP`, or `RDHUP` readiness on that id.
 - `retry_interrupted` (`scheduling.rs:16`) treats `EINTR` as a retry and the closing flag as the only other exit.
-- `setup_socket_eof_is_reactor_readiness` (`scheduling.rs:432`) registers one end of a socket pair, drops the other, and asserts exactly one event for the registered id with a readiness or hang-up flag.
-- `interrupted_wait_retries_until_success_or_close` (`scheduling.rs:473`) constructs the `EINTR` retry and the close exit directly.
+- `setup_socket_eof_is_reactor_readiness` (`scheduling.rs:439`) registers one end of a socket pair, drops the other, and asserts exactly one event for the registered id with a readiness or hang-up flag.
+- `interrupted_wait_retries_until_success_or_close` (`scheduling.rs:480`) constructs the `EINTR` retry and the close exit directly.
 
 ## Failure scenario
 

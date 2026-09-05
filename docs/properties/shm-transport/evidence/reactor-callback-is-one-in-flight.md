@@ -17,12 +17,12 @@ gate and the kick deferral. Leads only; re-verified at HEAD.
   (`:85-101`): poll the control eventfd while `pending && !closing`. It
   cannot reach `epoll::wait` again — cannot observe another doorbell edge —
   until JS acknowledges.
-- The acknowledgement is `handled()` (`:346-349`): store `pending = false`,
+- The acknowledgement is `handled()` (`:360-363`): store `pending = false`,
   write the control eventfd. Called from `readiness_handled`
-  (`packages/shm-native/src/lib.rs:1340`) after every channel has been
+  (`packages/shm-native/src/lib.rs:1388`) after every channel has been
   re-armed, so the epoch where a second callback becomes possible starts
   only after the re-arm that makes it safe.
-- A `kick` (`scheduling.rs:352-356`) raised during the pending window does not dispatch;
+- A `kick` (`scheduling.rs:359-363`) raised during the pending window does not dispatch;
   `wait_until_handled` returning true with `kick` set rewrites the control
   fd (`scheduling.rs:229-231`), producing exactly one deferred pass through the loop.
 - The error paths keep the callback path single-file too: an epoll failure
@@ -31,7 +31,7 @@ gate and the kick deferral. Leads only; re-verified at HEAD.
   (`scheduling.rs:234-239`) — the sole call site that bypasses the CAS, on a path that
   terminates the thread.
 - Why it matters downstream: `readiness_handled` walks a thread-confined
-  `REGISTRY` (`lib.rs:1304-1343`) and the `Ring` is `!Send + !Sync`
+  `REGISTRY` (`lib.rs:1352-1391`) and the `Ring` is `!Send + !Sync`
   (`ring.rs:1033` `PhantomData<Rc<()>>`); one-in-flight is what makes "at
   most one readiness closure touching the channels at a time" true, and the
   max-queue-size-2 threadsafe function (`scheduling.rs:131`) relies on calls
@@ -41,7 +41,7 @@ gate and the kick deferral. Leads only; re-verified at HEAD.
 
 Two unacknowledged callbacks in flight: the second `dispatchReadiness` runs
 while the first is mid-walk. Both iterate every registered channel
-(`index.ts:652-676`), interleaving `poll`/`readiness_handled` calls; the
+(`index.ts:699-729`), interleaving `poll`/`readiness_handled` calls; the
 registry's `try_borrow_mut` turns the overlap into "native channel is busy"
 errors on a healthy channel, and a double `handled()` un-blocks a reactor
 epoch whose re-arm never ran, which is a manufactured lost wake.
@@ -50,7 +50,7 @@ epoch whose re-arm never ran, which is a manufactured lost wake.
 
 The protected window is dispatch-to-acknowledgement. The property depends on
 JS calling `readinessHandled` exactly once per callback: the wrapper's
-`finally` (`index.ts:669-675`) does this; a raw-addon consumer that calls it
+`finally` (`index.ts:722-728`) does this; a raw-addon consumer that calls it
 twice per callback breaks the epoch pairing from the outside. The
 `closing`/`failed` transitions bound the window at shutdown
 (`wait_until_handled` exits on `closing`, `scheduling.rs:91-99`).
@@ -60,10 +60,10 @@ twice per callback breaks the epoch pairing from the outside. The
 Doorbell edges arriving while a callback is unacknowledged, then an exact
 callback count. Exists in two halves:
 `readiness acknowledgement preserves a frame published during callback`
-(`packages/shm-native/tests/mechanism.ts:525-648`) publishes during
+(`packages/shm-native/tests/mechanism.ts:527-650`) publishes during
 callback 1 and asserts `callbacks === 2` — exactly one deferred dispatch,
 not two; `pending_callback_waits_for_acknowledgement`
-(`scheduling.rs:398-429`) pins that a control write alone does not release
+(`scheduling.rs:405-436`) pins that a control write alone does not release
 the wait while `pending` holds. Not yet constructed: edges from *multiple*
 registered channels landing in one pending window (the coalescing claim),
 and a hostile double-`readinessHandled` probing the epoch pairing.
@@ -76,7 +76,7 @@ and a hostile double-`readinessHandled` probing the epoch pairing.
 - Findings: it can overlap an unacknowledged callback only if
   `wait_until_handled` errored, which requires a poll failure on a live
   eventfd; the thread then breaks, `failed` is not set on this branch, but
-  `ensure_healthy` (`:335-344`) is also not consulted by the JS dispatcher.
+  `ensure_healthy` (`:349-358`) is also not consulted by the JS dispatcher.
   One extra callback on a dying reactor is the worst case.
 - Missing evidence: none.
 - Conclusion: resolved with answer — bounded single-shot exception on a

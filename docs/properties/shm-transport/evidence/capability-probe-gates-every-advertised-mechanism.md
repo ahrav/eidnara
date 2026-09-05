@@ -9,7 +9,7 @@ claim over the eight steps, so each step was matched to the code that gates it.
 
 ## Evidence trail
 
-`packages/shm-native/index.ts:307-431` is the whole probe. Its exits, in
+`packages/shm-native/index.ts:319-443` is the whole probe. Its exits, in
 source order, with the line carrying the `available:` field:
 
 | Exit | Line | Reason | Documented step |
@@ -103,7 +103,7 @@ non-vacuous, so the property and its check share a single enabling condition.
 ### Q: Is the documented eight-step list normative on ordering as well as on membership? The code's order differs from the doc's numbering.
 
 - Sources examined: `docs/shm-transport.md:29-42` (source tree; not at HEAD);
-  `packages/shm-native/index.ts:307-431` line by line;
+  `packages/shm-native/index.ts:319-443` line by line;
   `packages/shm-native/src/lib.rs:534-537` for the `registerCleanupProbe`
   export; `packages/shm-native/tests/mechanism.ts:28-44`;
   `packages/shm-native/tests/capability.ts:1-67`.
@@ -130,7 +130,7 @@ non-vacuous, so the property and its check share a single enabling condition.
 
 ### Q: Is the cleanup hook gated or only reported at HEAD? (added 2026-09-05)
 
-- Checked: `probeCapabilities` (`packages/shm-native/index.ts:307`) returns `available: false` with `reason: "cleanup_hooks_unavailable"` when `typeof native.registerCleanupProbe !== "function"` (`:403-414`) and `available: true, cleanupHooks: true` only otherwise (`:415-423`). `capableAddon` (`:264-269`) calls the probe on every channel construction and throws `capability_unavailable` when it fails, so the probe is on the shipped path.
+- Checked: `probeCapabilities` (`packages/shm-native/index.ts:319`) returns `available: false` with `reason: "cleanup_hooks_unavailable"` when `typeof native.registerCleanupProbe !== "function"` (`:415-426`) and `available: true, cleanupHooks: true` only otherwise (`:427-435`). `capableAddon` (`:276-281`) calls the probe on every channel construction and throws `capability_unavailable` when it fails, so the probe is on the shipped path.
 - Conclusion: gated. The record is refreshed; Reachability moves to default-production.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
@@ -138,7 +138,7 @@ non-vacuous, so the property and its check share a single enabling condition.
 - Sources examined: every file this trail cites, at the merged HEAD.
 - Findings:
   Mechanisms whose citation moved and whose surrounding claim needed restating:
-  - line 12, `packages/shm-native/index.ts:108-218` now `packages/shm-native/index.ts:307-431`: At HEAD the cleanup hook is gated, not only reported: `probeCapabilities` returns `available: false` with `cleanup_hooks_unavailable` (`:403-414`) before the success return (`:415-423`), and it probes the hook by calling `native.probeCleanupHooks()` (`:396-402`).
+  - line 12, `packages/shm-native/index.ts:108-230` now `packages/shm-native/index.ts:319-443`: At HEAD the cleanup hook is gated, not only reported: `probeCapabilities` returns `available: false` with `cleanup_hooks_unavailable` (`:415-426`) before the success return (`:427-435`), and it probes the hook by calling `native.probeCleanupHooks()` (`:408-414`).
   - line 64, `packages/shm-native/tests/capability.ts:8-33` now `packages/shm-native/tests/capability.ts:9-59`: At HEAD the unavailable branch asserts `createTestPair` throws `/shared-memory native addon|shared-memory native startup failed/` (`:55-58`), not `/capability unavailable/`.
   - line 133, `:329-340` now `:403-414`: At HEAD the gate calls `native.probeCleanupHooks()` inside a `try` (`:396-402`) and refuses when it throws; it does not test `typeof native.registerCleanupProbe`.
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":

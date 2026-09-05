@@ -352,8 +352,8 @@ record asserts that wakes are *delivered*; none asserts that delivery
 1. **Redispatch and dispatch have no termination bound** (gap). Two
    concrete unbounded shapes exist at HEAD. First, `readiness_handled`
    converts any per-channel `arm_data_wait` error into `redispatch = true`
-   (`lib.rs:1149-1152`), and the wrapper re-queues itself with
-   `queueMicrotask` (`index.ts:524-526`); a channel whose arm persistently
+   (`lib.rs:1197-1200`), and the wrapper re-queues itself with
+   `queueMicrotask` (`index.ts:555-557`); a channel whose arm persistently
    errors (a quarantined ring, a dead wake page) therefore produces an
    unbounded microtask recursion that never yields to the macrotask queue.
    Second, the setup socket is registered level-triggered with
@@ -381,10 +381,10 @@ record asserts that wakes are *delivered*; none asserts that delivery
    record owns the property those tests would pin: one channel's doorbell
    edge must not cost another channel its wake, given that
    `readiness_handled` re-arms *every* registered channel per
-   acknowledgement (`lib.rs:1143-1153`), a deliberate cross-channel
+   acknowledgement (`lib.rs:1191-1201`), a deliberate cross-channel
    coupling. Adjacent and also unowned: a second `watch` silently discards
    its callback because the reactor is created only once
-   (`lib.rs:1117-1119`), so all
+   (`lib.rs:1165-1167`), so all
    channels share the first caller's callback, by design at the wrapper,
    undocumented at the addon boundary.
    *Disposition:* gap — queue a multi-channel discovery pass: per-channel
@@ -405,7 +405,7 @@ record asserts that wakes are *delivered*; none asserts that delivery
 
 Three of the six new coverage markers are genuinely reachable on a correct
 system, two of them already constructed:
-`shm_publish_during_readiness_callback` (`mechanism.ts:211-278`),
+`shm_publish_during_readiness_callback` (`mechanism.ts:213-280`),
 `shm_queued_writes_exceed_one_per_wake` (the `try_send` bypass at
 `client.rs:4041`), and `shm_partial_page_shared_with_live_lease`
 (`ring.rs:2337-2353`). Three findings on the other three.
@@ -414,9 +414,9 @@ system, two of them already constructed:
    (refinement). The marker was recorded as constructible by calling `poll`
    from inside an unacknowledged callback with data visible. That construction
    cannot reach the kick: `poll` takes `try_receive()` first
-   (`lib.rs:1176-1182`), and with data visible that returns `Some(lease)`, so
-   the frame is delivered at `:1241` and the `else` arm holding
-   `arm_data_wait()` and `reactor.kick()` (`:1227-1235`) is skipped entirely.
+   (`lib.rs:1224-1230`), and with data visible that returns `Some(lease)`, so
+   the frame is delivered at `:1289` and the `else` arm holding
+   `arm_data_wait()` and `reactor.kick()` (`:1275-1283`) is skipped entirely.
    The kick is reachable only on the empty-receive arm, and only when
    `arm_data_wait()` returns `Ok(false)` — that is, when data or a generation
    change appears after the empty `try_receive` but before the arm's recheck
@@ -469,7 +469,7 @@ all reachable from existing test surfaces.
 1. **The acknowledgement path's own failure is silent and wedging** (gap).
    `readiness_handled` returns `false` without calling `reactor.handled()`
    when the registry borrow fails or the reactor is gone (the two
-   early-return arms at `lib.rs:1137-1141`). The reactor then stays blocked
+   early-return arms at `lib.rs:1185-1189`). The reactor then stays blocked
    in `wait_until_handled` with `pending` set, and the JS dispatcher reads
    `false` as "nothing to redispatch": a lost acknowledgement is exactly
    the manufactured permanent lost wake that
@@ -669,7 +669,7 @@ evaluated the seven records added after the whole-portfolio pass
 `transport-debug-output-redacts-every-sentinel`,
 `readiness-redispatch-is-bounded-under-persistent-arm-failure`,
 `each-channel-wake-survives-a-shared-acknowledgement`) against HEAD and the
-other 71 records. Of about 68 citations, two resolved wrongly (`index.ts:524`
+other 71 records. Of about 68 citations, two resolved wrongly (`index.ts:555`
 for the self-requeue, `tests/capability.ts` as two watched channels); both are
 corrected. Eighteen refinements were returned and all are applied:
 
@@ -694,27 +694,27 @@ corrected. Eighteen refinements were returned and all are applied:
 - `readiness-redispatch`: `Reactor::register` unregisters on a failed first
   arm, so only a ring quarantined after registration enters the loop; the
   guarantee states that HEAD does not meet it.
-- `each-channel-wake`: a two-channel suite exists (`mechanism.ts:168-205`),
+- `each-channel-wake`: a two-channel suite exists (`mechanism.ts:170-207`),
   so Exercised is partial, and at the wrapper level the single-channel record
   dominates this one; the raw addon is the undominated residue.
 
 ### Gaps queued
 
 1. `watch`'s callback argument is honoured only for the first channel
-   (`packages/shm-native/src/lib.rs:1126-1128`); the reactor holds one
+   (`packages/shm-native/src/lib.rs:1174-1176`); the reactor holds one
    callback and the wrapper hides it by keying handlers in a JS map. Known to
-   `mechanism.ts:309-314`, uncatalogued. The raw-path half of
+   `mechanism.ts:311-316`, uncatalogued. The raw-path half of
    `each-channel-wake`.
 2. A dropped acknowledgement parks the shared reactor for every channel:
    `readiness_handled` returns `false` without `reactor.handled()` when the
-   registry is borrowed or the reactor is absent (`lib.rs:1146-1151`). The
+   registry is borrowed or the reactor is absent (`lib.rs:1194-1199`). The
    inverse of the redispatch record; no test.
 3. The host diagnostics report has no value-level redaction oracle
    (`ring_transport.rs:889-900` asserts seven key names only); the join the
    relationship map asserts between the diagnostics and redaction records is
    checked by neither.
 4. A failed `native.close` strips readiness while leaving the channel open
-   (`index.ts:644-648`, `lib.rs:1323`, `:1330-1338`); the runtime tests
+   (`index.ts:691-695`, `lib.rs:1371`, `:1378-1386`); the runtime tests
    cover the mapping-retention half only.
 
 ### Biases requiring human judgment
@@ -728,3 +728,122 @@ corrected. Eighteen refinements were returned and all are applied:
    `test-only-surface-absent-from-the-shipped-addon` says the same surface
    ships fault injectors ungated. Both positions cannot stand.
 4. Darwin execution of the raw-descriptor suites against a Linux-only product.
+
+## Evaluation of the four addon additions (fresh context, 82 records)
+
+A fresh-context evaluator that had not read this file or the evidence directory
+evaluated the four records added after the seven-record pass
+(`packaged-addon-load-verifies-manifest-and-checksum`,
+`setup-descriptors-name-distinct-open-files`,
+`setup-connect-honors-its-deadline`,
+`addon-tokens-never-collide-with-live-entries`) against the merged HEAD and the
+other 78 records. Of 40 citations, 17 resolved wrongly: nine bare citations in
+the packaged-load record and four in the connect record had missed two base
+merges, two connect ranges overshot by a line, and two `docs/shm-transport.md`
+lines were off by one. All are corrected. The evaluator also confirmed all four
+Index rows against their record bodies.
+
+### Refinements applied
+
+1. `packaged-addon-load-verifies-manifest-and-checksum`: the Guarantee now says
+   the taxonomy is not total over manifest content (a `null` or malformed
+   manifest raises a raw `TypeError`, and a payload read can fail after
+   `existsSync`), that the unsigned co-located manifest detects corruption and
+   substitution rather than tampering, and where registry-level provenance lives;
+   the Check names eight fault shapes, requires one fault per run because the
+   gates are ordered, distinguishes the two `missing_addon` shapes and the
+   uppercase-hex case, and asserts the memoized rethrow; Reachability cites the
+   `files` array and `optionalDependencies` entry that force the package path;
+   Fault/timing angle gains the process-wide memoization hazard; Impact drops
+   "tampered". Two open questions added.
+2. `setup-descriptors-name-distinct-open-files`: the inode fallback is described
+   as stricter and incomplete rather than weaker, since it has no false accepts;
+   the Check gives the pair counts on both paths (21 with the setup socket, 15
+   without); Reachability names the raw `attach` path's two ordered checks and the
+   bridge endpoint's geometry-equality comparison, which admits byte-identical
+   grants; the Guarantee adds that refused descriptors are closed on the way out;
+   the fallback trigger is narrowed to `ENOSYS` or `EPERM`.
+3. `setup-connect-honors-its-deadline`: Exercised moves to partial, because the
+   `EINTR` re-arm, the pass-through errno arm, and the microsecond floor have no
+   test and the deadline assertion allows a 25x slack; the Guarantee names the
+   three outcomes (stream, `TimedOut`, kernel errno); the Check adds the
+   no-listener and zero-timeout arms; the Fault/timing angle records that one
+   caller deadline bounds connect, authentication, grant receive, and activation
+   while `goodbye` has its own budget. One open question added on the slack.
+4. `addon-tokens-never-collide-with-live-entries`: Exercised moves to partial
+   (no production call site, no `None` return, no read-then-insert property is
+   tested); the Guarantee scopes uniqueness per table and per thread and states
+   that the `None` return is unreachable on the per-channel tables; Required
+   faults distinguishes the registry counters, which wrap after `2^32` creations,
+   from the per-channel counters, which wrap after `2^32` frames on one channel;
+   Impact names the cross-thread channel-id case. Two open questions added.
+5. Relationship map: the ordering claim that the connect record sits in front of
+   the two identity records is qualified to the `connectSetup` path; the raw
+   `attach` path issues descriptors and tokens without a connect.
+6. `fault-map.md`: the connect and token rows move from Yes to Partial for the
+   reasons above.
+
+### Gaps queued
+
+Each was checked against the catalog with a fixed-string search before being
+claimed.
+
+1. `unsupported_platform` and the musl/glibc discrimination in `isMuslLinux`
+   (`packages/shm-native/index.ts:184-201`): fails closed when `process.report`
+   is hidden and open when a musl runtime exposes `glibcVersionRuntime`.
+2. Startup outcome memoized for the process (`loadError`, `index.ts:244-245`,
+   `:269-273`), which also governs `probeCapabilities`, `nativeWireConstants`,
+   `nativeLeakDiagnostics`, and `activeNativeChannels`.
+3. Process-wide grant exclusivity across worker threads (`ACTIVE_GRANTS`,
+   `GrantReservation::claim`, `packages/shm-native/src/lib.rs:98-130`), owned by
+   no record; it appears only as an element of the quarantined-attach check.
+4. The wrapper handle-retirement contract (`consumesHandle`, `confirmedAbsent`,
+   `ChannelLiveness`, `retireIfConsumed`, `finishClose`'s partial-sweep branch).
+5. `ProducerCursor` span arithmetic across a wrapped reservation and the
+   underfill gate before publication.
+6. Wrapper argument hardening (`assertUint32Argument`, `privateBytes`,
+   `markAsUntransferable`), distinct from the Rust-side descriptor decode.
+7. TypeScript and Rust wire constants agree (`DESCRIPTOR_SCHEMA_VERSION`,
+   `QUALIFIED_TEST_PROFILE`); a check exists in `mechanism.ts`, so the record
+   would open at partial.
+8. One caller timeout is one budget across connect, authentication, grant
+   receive, and activation, with `goodbye` outside it; the two JavaScript
+   promises between them consume the same budget.
+9. Grant-message ancillary hygiene: zero-byte receive, `CTRUNC`, non-`ScmRights`
+   messages, and the exact descriptor count (`setup.rs:343-356`).
+10. Length-prefixed setup framing (`read_message_from_prefix`, `read_message`).
+11. Mixed comparison discipline in `authenticate`: constant-time for proof and
+    daemon id, plain `!=` for `daemon_ver`.
+12. Once-only descriptor handoff (`take_descriptors`) and pending-entry removal
+    on a rejected finish.
+13. Bounded string fields before materialisation (`string_field`,
+    `lib.rs:213-232`).
+14. N-API environment teardown closes every channel (`cleanup_env`,
+    `ensure_cleanup`); the addon's own close ordering has no record.
+
+### Biases requiring human judgment
+
+1. `Reaches production: yes` for the packaged-load path rests on a package that
+   does not exist in the tree and is recorded as unpublished; whether
+   `default-production` or a class for an unrealised ship path is the honest
+   label changes how the addon group reads.
+2. The manifest reader has no writer anywhere in the repository; the record
+   gates on half a contract.
+3. Only one file in the manifest is verified; "the payload" leaves the scope of
+   the integrity claim implicit.
+4. The deadline test's 25x slack; tightening it trades pinning for CI
+   sensitivity.
+5. Three of the four records rest on tests that call the private function
+   directly; the group's aggregate confidence is unit-level, and no test drives an
+   aliased bundle through a socket or `attach`, or a token wrap through the API.
+6. The relationship map's ordering claim, now qualified, still asserts a
+   dominance that a human should confirm or drop.
+7. Citation freshness was uneven within records: qualified citations were
+   current and bare ones stale, the signature of a re-anchor pass that shifted by
+   paragraph rather than by record. The bare citations across the catalog were
+   re-shifted with record-scoped inheritance in the same commit; the claim in the
+   catalog preamble that a whole-catalog pass corrected every citation should be
+   read with that caveat.
+8. An unreachable exhaustion clause inside an `always` record; whether the dead
+   `identity exhausted` branch on the per-channel tables is defensive code worth
+   keeping or dead code worth deleting is a design decision.

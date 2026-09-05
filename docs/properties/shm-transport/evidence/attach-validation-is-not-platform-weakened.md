@@ -57,7 +57,7 @@ record rests on has changed and needs re-review rather than re-citation. At
 (`packages/shm-native/src/lib.rs:237-246`,
 and the host-side `attach_ring` deleted with `shm_provider.rs` in `ed487e11`), and
 `create_test_pair` returned an
-error on non-Linux (`packages/shm-native/src/lib.rs:552-560`). macOS thus gets
+error on non-Linux (`packages/shm-native/src/lib.rs:552-602`). macOS thus gets
 size immutability by unreachability, not by sealing.
 
 Update 2026-08-31: PR #131 (merge `5d638e3e8`) changed the reachability ground

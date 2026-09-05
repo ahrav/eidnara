@@ -123,7 +123,7 @@ Three independent facts establish this:
 1. **No non-test caller retains the identity `commit` returns.** Every non-test
    `commit` call site discards it: `crates/host-runtime/src/ring_transport.rs:823` and
    `:823` (`reservation.commit(body_len).map_err(|_| ())?;`),
-   `packages/shm-native/src/lib.rs:1026-1029` and `:1157-1160`
+   `packages/shm-native/src/lib.rs:1074-1077` and `:1205-1208`
    (`.map_err(|_| error(...))?;` followed by `Ok(())`), and the public-but-test-only
    client endpoint (formerly `TestShmPeer::send`, now `RingClientEndpoint::send`)
    at `ring_transport.rs:885` (commit at `:930`).
@@ -134,8 +134,8 @@ Three independent facts establish this:
    `packages/shm-native/src/lib.rs:327-331` (source tree; not at HEAD),
    `channel.from_host.release(active.identity)` inside `detach_active`
    (`:332-357`). The second is on the addon's *receive* ring, with an identity
-   captured from `lease.identity()` at `:1188` (source tree; not at HEAD) and stored in the addon's `active`
-   table because `poll` calls `std::mem::forget(lease)` at `:1208` (source tree; not at HEAD). That is the
+   captured from `lease.identity()` at `:1236` (source tree; not at HEAD) and stored in the addon's `active`
+   table because `poll` calls `std::mem::forget(lease)` at `:1256` (source tree; not at HEAD). That is the
    legitimate holder completing its own lease through a different bookkeeping
    route. The addon never calls `release` on `to_host`.
 3. **The two directions are separate objects with separate identities.**
@@ -179,13 +179,13 @@ should not be public, the test becomes a compile-fail assertion instead.
   (`DuplexRing::create`), `:1040-1091` (`create`/`create_in` and the random
   incarnation); `crates/shm-transport/src/lease.rs:324-372`
   (`ReceiveLease::release`, `release_once`, `Drop`);
-  `packages/shm-native/src/lib.rs:77-78`, `:332-357`, `:1346-1452`;
+  `packages/shm-native/src/lib.rs:77-78`, `:332-357`, `:1394-1500`;
   `crates/host-runtime/src/ring_transport.rs:664-747`, `:846-933`; a
   repository-wide search of `crates/` and `packages/` for `.release(` call sites.
 - Findings: the reachability half is resolved — see the section above. The
   *reason* the method is public is also established: the addon needs a
   lease-independent completion path because `poll` `mem::forget`s the
-  `ReceiveLease` at `lib.rs:1208` (source tree; not at HEAD) and re-derives completion from its own `active`
+  `ReceiveLease` at `lib.rs:1256` (source tree; not at HEAD) and re-derives completion from its own `active`
   table at `:332-357`, so making completion reachable only through `ReceiveLease`
   would require the addon to keep the Rust lease alive across the N-API boundary.
   That is a real design constraint, not an accident.
@@ -213,14 +213,14 @@ should not be public, the test becomes a compile-fail assertion instead.
   - line 44, `ring.rs:1175-1247` now `ring.rs:1528-1600`: The checks now live in `release_inner`, they include an `active_leases == 0` rejection at `:1559`, every failure quarantines through `inspect_err(|_| self.enter_quarantine())` at `:1533`, and `release` is `pub(crate)`.
   - line 68, `crates/shm-transport/tests/ring.rs:152-175` now `crates/shm-transport/src/backend/ring.rs:3871-3907`: The ladder moved into the `ring.rs` unit tests as the table-driven `mismatched_release_identity_names_the_field_and_quarantines`, which adds a fourth `DuplicateRelease` case and asserts every mismatch quarantines; `crates/shm-transport/tests/ring.rs` cannot call `Ring::release` at all now that it is `pub(crate)`.
   - line 134, `packages/shm-native/src/lib.rs:327-331`: The addon holds a `ReceiveLease<'static>` inside `ActiveLease` and never calls `Ring::release`, which is `pub(crate)` at HEAD, so the only `Ring::release` caller in the tree is the `ReleaseSink` impl the lease uses.
-  - line 188, `lib.rs:1208`: The addon does keep the Rust lease alive across the N-API boundary at HEAD and completes through it, and `Ring::release` is `pub(crate)`, so the design constraint that justified a public entry point no longer exists.
+  - line 188, `lib.rs:1256`: The addon does keep the Rust lease alive across the N-API boundary at HEAD and completes through it, and `Ring::release` is `pub(crate)`, so the design constraint that justified a public entry point no longer exists.
   - line 197, `ring.rs:1174` now `ring.rs:1514`: The doc comment now names the caller set: it says only `ReceiveLease` reaches this, because an identity is `Copy` and a public entry point would let a caller release a frame while still holding the lease that reads it (`:1514-1517`).
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
   - line 68, `:177-180` (following ProducerError::Exhausted assert): The ladder is a standalone test with nothing after it; the `ProducerError::Exhausted` assertion now lives in `retained_oldest_lease_enforces_fifo_reclamation` at `crates/shm-transport/tests/ring.rs:148-151`.
   - line 70, `:140` (first_id from first.commit(first_len)): The ladder no longer keeps the identity `commit` returned; it forges copies of the live lease's own `identity()` at `crates/shm-transport/src/backend/ring.rs:3903`.
   - line 134, `packages/shm-native/src/lib.rs:327-331` (channel.from_host.release(active.identity)): `detach_active` now completes through the stored lease with `active.lease.release()` at `packages/shm-native/src/lib.rs:350-355`.
-  - line 137, `:1188` (identity captured from lease.identity() in poll): No identity is captured; `poll` moves the whole `ReceiveLease` into `channel.active` at `packages/shm-native/src/lib.rs:1397-1403`.
-  - line 138, `:1208` (std::mem::forget(lease) in poll): `poll` no longer forgets the lease; it stores it in `ActiveLease` at `packages/shm-native/src/lib.rs:1397-1403`.
-  - line 188, `lib.rs:1208` (poll mem::forgets the ReceiveLease): `poll` stores the `ReceiveLease<'static>` in `ActiveLease` (`packages/shm-native/src/lib.rs:50-54` and `:1397-1403`) instead of forgetting it.
+  - line 137, `:1236` (identity captured from lease.identity() in poll): No identity is captured; `poll` moves the whole `ReceiveLease` into `channel.active` at `packages/shm-native/src/lib.rs:1445-1451`.
+  - line 138, `:1256` (std::mem::forget(lease) in poll): `poll` no longer forgets the lease; it stores it in `ActiveLease` at `packages/shm-native/src/lib.rs:1445-1451`.
+  - line 188, `lib.rs:1256` (poll mem::forgets the ReceiveLease): `poll` stores the `ReceiveLease<'static>` in `ActiveLease` (`packages/shm-native/src/lib.rs:50-54` and `:1445-1451`) instead of forgetting it.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

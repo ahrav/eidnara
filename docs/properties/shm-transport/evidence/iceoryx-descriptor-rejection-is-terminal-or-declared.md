@@ -141,7 +141,7 @@ observation. Coverage checks, preconditions rather than violations:
   `ed487e11`;
   `crates/shm-transport/tests/iceoryx.rs` in full; the three `Cargo.toml`
   files; `the source repository `ci.yml` workflow:154-183`; and in vendored iceoryx2 0.9.3
-  `src/config.rs:95`, `:314-347`, `:719-752` and
+  `src/config.rs:96`, `:315-348`, `:720-753` and
   `src/port/details/sender.rs:191-319`.
 - Findings: two of the five are provided, three are not, and the reason differs
   in each case. Sequence monotonicity is enforced, on process-local state rather

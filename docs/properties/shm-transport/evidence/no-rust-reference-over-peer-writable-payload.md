@@ -38,13 +38,13 @@ reference to memory a trusted peer could still address." `checksum` creates one.
 - `crates/shm-transport/src/lib.rs:45` — `pub use lease::{LeaseSpan,
   ReceiveLease};`. Both the slice-building method and `as_mut_ptr` are crate
   public API, not internal helpers.
-- `packages/shm-native/src/lib.rs:1383-1387` — the receive path calls
+- `packages/shm-native/src/lib.rs:1431-1435` — the receive path calls
   `lease.segment(index)` then `napi_buffers::create_external_view(env,
   span.as_mut_ptr(), span.len())`.
 - `packages/shm-native/src/napi_buffers.rs:60-140` — that helper calls
   `napi_create_external_arraybuffer` over the raw pointer. The result is an
   ordinary writable ArrayBuffer; nothing marks it read-only.
-- `packages/shm-native/src/lib.rs:997` and `:1073` — the same helper on the two
+- `packages/shm-native/src/lib.rs:1039` and `:1121` — the same helper on the two
   produce paths, where a writable view is intended.
 
 ## Failure scenario

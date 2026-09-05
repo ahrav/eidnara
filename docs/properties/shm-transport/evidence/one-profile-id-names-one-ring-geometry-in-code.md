@@ -9,7 +9,7 @@ U3 renamed the ring profile id to `host-test-ring-v1`. A renamed identity is an 
 - `host_test_ring_profile` (`crates/shm-transport/src/profile.rs:683-692`) builds the geometry from `HOST_TEST_RING_DEPTH` (8, `:679`) and `MIN_ARENA_BYTES`, with `max_leases` equal to the depth.
 - `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs:202`) asserts the id string, depth 8, eight leases, and sixteen descriptors against literals, and asserts the arena charge equals `2 * shm_transport::MIN_ARENA_BYTES`.
 - The host reads the profile through `ring_profile()` (`crates/host-runtime/src/ring_transport.rs:38-39`) and every connection charges `profile.charges()`.
-- The addon fixture (`packages/shm-native/tests/mechanism.ts:126-130`) and the addon setup code name the same id.
+- The addon fixture (`packages/shm-native/tests/mechanism.ts:128-132`) and the addon setup code name the same id.
 
 ## Failure scenario
 

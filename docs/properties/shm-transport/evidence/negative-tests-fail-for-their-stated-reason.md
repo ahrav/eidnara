@@ -28,7 +28,7 @@ constant against the layout it mirrors.
 
 ### Current state of the boundary suite
 
-`packages/shm-native/tests/mechanism.ts:287` opens
+`packages/shm-native/tests/mechanism.ts:289` opens
 `describe("raw N-API descriptor boundary")` with
 `DESCRIPTOR_ERROR = /invalid shared-memory descriptor/` at line 139 and a helper
 `expectRejectedWithoutEffects` (lines 141-153) that defaults to that pattern.
@@ -45,11 +45,11 @@ Six cases follow:
 
 The four generic cases cannot distinguish the rejection they name from a
 grant-layout rejection, because `RingGrant::decode` failure maps to
-`descriptor_error()` — the same message (`packages/shm-native/src/lib.rs:640-659`).
+`descriptor_error()` — the same message (`packages/shm-native/src/lib.rs:682-701`).
 
 Ordering matters here and refines the catalog's count. In `attach`, the profile
-comparison is at `src/lib.rs:603`, before the two `RingGrant::decode` calls at
-`:640` and `:650`. The wrong-profile case at line 278 therefore returns before
+comparison is at `src/lib.rs:645`, before the two `RingGrant::decode` calls at
+`:682` and `:692`. The wrong-profile case at line 278 therefore returns before
 grant decode is ever reached and could not have been masked by a stale grant.
 Of the six cases, four are maskable, one short-circuits earlier, and one — line
 288, the only case that needs the grant to be *valid* — is the case that
@@ -134,13 +134,13 @@ during the trail is logged so the count in the catalog can be re-derived.
 
 - Sources examined: `git show daf6e244` message and its diff against
   `packages/shm-native/tests/mechanism.ts`; the current
-  `raw N-API descriptor boundary` block (`mechanism.ts:287-899`); the `attach`
-  validation order (`packages/shm-native/src/lib.rs:591-723`);
+  `raw N-API descriptor boundary` block (`mechanism.ts:289-931`); the `attach`
+  validation order (`packages/shm-native/src/lib.rs:633-765`);
   `crates/shm-transport/tests/fuzz_corpus.rs` in full;
   `crates/shm-transport/src/harness.rs:28-38` and `:102-146`; the corpus
   directory listings and file sizes.
 - Findings: four of the six cases assert the generic descriptor message and are
-  maskable; the wrong-profile case returns at `src/lib.rs:603-605`, before grant
+  maskable; the wrong-profile case returns at `src/lib.rs:645-647`, before grant
   decode, so it is not; the unresolvable-descriptor case is the detector. The
   corpus replay has exactly one decoder-result assertion, and it is a positive
   one. A guaranteed-rejected seed (`empty`, 0 bytes) exists in all three
@@ -161,7 +161,7 @@ during the trail is logged so the count in the catalog can be re-derived.
 - Sources examined: every file this trail cites, at the merged HEAD.
 - Findings:
   Mechanisms whose citation moved and whose surrounding claim needed restating:
-  - line 31, `packages/shm-native/tests/mechanism.ts:148` now `packages/shm-native/tests/mechanism.ts:287`: The block holds far more than six cases now, DESCRIPTOR_ERROR sits at `:288`, and expectRejectedWithoutEffects is defined mid-block at `:758-770`, so every plain line number in the table below is stale as well.
-  - line 138, `packages/shm-native/src/lib.rs:490-568` now `packages/shm-native/src/lib.rs:591-723`: The order at HEAD is raw type check, profile, fd fields, both grant decodes, distinctness and profile match, descriptor duplication and alias rejection, grant claim, then attach, so the wrong-profile case still short-circuits before any grant decode.
+  - line 31, `packages/shm-native/tests/mechanism.ts:150` now `packages/shm-native/tests/mechanism.ts:289`: The block holds far more than six cases now, DESCRIPTOR_ERROR sits at `:290`, and expectRejectedWithoutEffects is defined mid-block at `:790-802`, so every plain line number in the table below is stale as well.
+  - line 138, `packages/shm-native/src/lib.rs:490-610` now `packages/shm-native/src/lib.rs:633-765`: The order at HEAD is raw type check, profile, fd fields, both grant decodes, distinctness and profile match, descriptor duplication and alias rejection, grant claim, then attach, so the wrong-profile case still short-circuits before any grant decode.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

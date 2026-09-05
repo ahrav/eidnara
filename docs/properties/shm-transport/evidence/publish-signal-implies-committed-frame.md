@@ -24,16 +24,16 @@ input where the orderings differ: a commit that fails after the hook has already
 
 ## Evidence trail
 
-- `packages/shm-native/src/lib.rs:956-1031` `produce` — reserves with the caller's wire header (`:980-987`),
-  runs the fill callback (`:1007`), advances the cursor (`:1022-1024`), then:
+- `packages/shm-native/src/lib.rs:998-1079` `produce` — reserves with the caller's wire header (`:1022-1029`),
+  runs the fill callback (`:1049`), advances the cursor (`:1064-1072`), then:
   ```rust
   before_publish.call(())?;
   reservation
       .commit(written)
       .map_err(|_| error("producer underfill or invalid commit"))?;
   ```
-  (`:1025-1029`). The hook runs unconditionally before commit is attempted.
-- `packages/shm-native/src/lib.rs:1154-1159` — the same ordering on the two-phase `commit_reservation` entry
+  (`:1073-1077`). The hook runs unconditionally before commit is attempted.
+- `packages/shm-native/src/lib.rs:1202-1207` — the same ordering on the two-phase `commit_reservation` entry
   point: `before_publish.call(())?` then `reservation.commit(written as usize)`.
 - `packages/plugin/src/shared/host-client/shm-frame-channel.ts:289-321` (source tree; not at HEAD) `publishFrame` —
   `let published = false;` (`:296` (source tree; not at HEAD)), and the callback passed as the native before-publish hook sets
@@ -48,8 +48,8 @@ input where the orderings differ: a commit that fails after the hook has already
   and any error from `commit_reservation` (`:2562-2566`).
 - `ring.rs:2316-2317` — inside `commit_reservation`,
   `if declared_len as usize != exact_len || wire_header[4] != 2` returns `ProducerError::WireHeaderMismatch`.
-  Because the addon fixes the header at *reserve* time (`lib.rs:984`) but commits the length the fill callback
-  reported (`lib.rs:1023`, `:1027`), a fill that under-advances produces this failure with no injected fault.
+  Because the addon fixes the header at *reserve* time (`lib.rs:1026`) but commits the length the fill callback
+  reported (`lib.rs:1065`, `:1075`), a fill that under-advances produces this failure with no injected fault.
 - `ring.rs:2271-2282` `abort_reservation` — the failure path stores `SLOT_FREE` and never touches `published`,
   so the peer genuinely sees no frame.
 - Existing check, **corrected and re-anchored at post-#131 HEAD**: the catalog cites
@@ -71,15 +71,15 @@ input where the orderings differ: a commit that fails after the hook has already
    `WireHeaderMismatch` (`ring.rs:2316-2317`).
 6. `commit` aborts the reservation (`:2563`) and the slot returns to `SLOT_FREE`. `published` is never advanced,
    so the peer will never see this frame.
-7. Native returns `Err("producer underfill or invalid commit")` (`lib.rs:1028`).
+7. Native returns `Err("producer underfill or invalid commit")` (`lib.rs:1076`).
 8. Consequence: the sender's `onPublish` has already fired for a frame that does not exist and will never be
    delivered. There is no retry on this transport, and `cancel()` would report `false` — not cancellable — for a
    frame that was never published.
 
 ## Timing windows and dependencies
 
-The window is the interval between `before_publish.call(())` and `commit`'s return — `lib.rs:1025-1028` and
-`:1154-1159`. It contains one JavaScript callback invocation and one commit, so it is short but entirely
+The window is the interval between `before_publish.call(())` and `commit`'s return — `lib.rs:1073-1076` and
+`:1202-1207`. It contains one JavaScript callback invocation and one commit, so it is short but entirely
 deterministic: it is entered on every publish and the outcome depends only on whether commit succeeds. No
 configuration dependency, no platform gating. This is a client-side property: the host path
 (`ring_transport.rs:773-780`) is ordered correctly, so a host-only test cannot observe it. It interacts with
@@ -93,7 +93,7 @@ No process kill and no memory fault. Construct it from the TypeScript surface wi
 `hooks.onPublish` was *not* called, or if the contract permits calling it, that the caller was given a
 distinguishable signal that publication failed; and that the peer's `try_receive` returns `Ok(None)` for a
 bounded window afterwards. A second arm should inject the failure at the two-phase entry point
-(`lib.rs:1154-1159`) so both call sites are covered. A third arm should assert the host path stays correct under
+(`lib.rs:1202-1207`) so both call sites are covered. A third arm should assert the host path stays correct under
 the same fault, so the test documents the asymmetry rather than the symptom. Coverage check to emit:
 `shm_commit_failed_after_publish_hook`.
 
@@ -102,7 +102,7 @@ the same fault, so the test documents the asymmetry rather than the symptom. Cov
 ### Q: Does the client's `FrameSendTicket.cancel()`/`onPublish` contract mean "handed to the transport" or "committed"?
 
 - Sources examined: `packages/plugin/src/shared/host-client/shm-frame-channel.ts:289-321` (source tree; not at HEAD);
-  `packages/shm-native/src/lib.rs:956-1031` and `:1111-1162`; `crates/host-runtime/src/ring_transport.rs:749-786`;
+  `packages/shm-native/src/lib.rs:998-1079` and `:1159-1210`; `crates/host-runtime/src/ring_transport.rs:749-786`;
   `crates/shm-transport/src/backend/ring.rs:2536-2570`, `:2308-2386`;
   `packages/shm-native/tests/runtime.ts:110-129`.
 - Findings: the *mechanics* are settled and verified — the hook precedes commit on both native paths, the
@@ -123,8 +123,8 @@ the same fault, so the test documents the asymmetry rather than the symptom. Cov
 - Sources examined: every file this trail cites, at the merged HEAD.
 - Findings:
   Mechanisms whose citation moved and whose surrounding claim needed restating:
-  - line 36, `packages/shm-native/src/lib.rs:1042-1045` now `packages/shm-native/src/lib.rs:1154-1159`: At HEAD `commit_reservation` validates the header against the committed count with `check_wire_header` before the hook runs (`:1144-1145`), so the two-phase path can no longer reach a post-hook WireHeaderMismatch; only `produce` still can.
-  - line 48, `:1791-1795` now `:2562-2566`: The fifth branch now aborts on any error from `prepare_commit` (`:2308-2343`); `commit_reservation` no longer exists, and a Quarantined branch sits at `:2541-2545`.
+  - line 36, `packages/shm-native/src/lib.rs:1090-1093` now `packages/shm-native/src/lib.rs:1202-1207`: At HEAD `commit_reservation` validates the header against the committed count with `check_wire_header` before the hook runs (`:1192-1193`), so the two-phase path can no longer reach a post-hook WireHeaderMismatch; only `produce` still can.
+  - line 48, `:1839-1843` now `:2610-2614`: The fifth branch now aborts on any error from `prepare_commit` (`:2356-2391`); `commit_reservation` no longer exists, and a Quarantined branch sits at `:2589-2593`.
   - line 49, `ring.rs:1591-1593` now `ring.rs:2316-2317`: At HEAD the declared-length and version comparison is delegated to `check_wire_header` inside `prepare_commit`, not written out as a declared_len versus exact_len comparison plus a wire_header[4] test.
   - line 85, `ring_transport.rs:588-591` now `ring_transport.rs:773-780`: At HEAD the host returns Err on a failed publish (`:773-775`) and only then runs the hook (`:776-780`); there is no completion marker left to store after commit.
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":

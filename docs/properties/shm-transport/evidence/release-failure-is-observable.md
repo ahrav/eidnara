@@ -71,7 +71,7 @@ anything else.
   deleted with `shm_provider.rs`). On the TypeScript surface the addon path also reports: a failed
   `Ring::release` inside `detach_active` becomes
   `error("receive completion failed")` (`packages/shm-native/src/lib.rs:350-354`),
-  which throws through `packages/shm-native/index.ts:608-618` into either
+  which throws through `packages/shm-native/index.ts:649-659` into either
   `shm-frame-channel.ts:227-245` (source tree; not at HEAD), where `close()` reports
   `onClosed("quarantined", error)` and rethrows, or
   `shm-frame-channel.ts:411-416` (source tree; not at HEAD), where the doorbell-driven drain path reports
@@ -117,7 +117,7 @@ narrow — it is as long as ingress is saturated, bounded by `frame_deadline`. T
 custody-bool window is a single call at close. Configuration dependencies: none for
 the drop path itself, but the *reachability* of step 2 depends on ingress budget
 sizing and `frame_deadline`; and `HostConfig.liveness = None` by default
-(`crates/host-runtime/src/config.rs:238`, `:250`) keeps the endpoint waiting on the
+(`crates/host-runtime/src/config.rs:239`, `:251`) keeps the endpoint waiting on the
 data doorbell rather than
 failing, which lengthens the window in practice. No platform gating. This record is
 the reason the other three charge-conservation properties would go unnoticed:
@@ -145,15 +145,15 @@ this the cheapest of the group to make non-vacuous.
 ### Q: Is silent loss on the drop path intended, given the addon `mem::forget`s leases and releases through its own table instead?
 
 - Sources examined: `crates/shm-transport/src/lease.rs:324-372`;
-  `packages/shm-native/src/lib.rs:332-357` (`detach_active`) and `:1345-1451`
-  (`poll`, with `std::mem::forget(lease)` at `:1208` (source tree; not at HEAD));
-  `packages/shm-native/index.ts:608-623`;
+  `packages/shm-native/src/lib.rs:332-357` (`detach_active`) and `:1393-1499`
+  (`poll`, with `std::mem::forget(lease)` at `:1256` (source tree; not at HEAD));
+  `packages/shm-native/index.ts:649-664`;
   `packages/plugin/src/shared/host-client/shm-frame-channel.ts:209-230` (source tree; not at HEAD) and
   `:323-370` (source tree; not at HEAD); former `crates/host-runtime/src/shm_provider.rs:363-371`, former `:546-619`;
   former `crates/host-runtime/src/provider_recovery.rs:137-179`;
   `crates/shm-transport/src/profile.rs:498-506`, `:551-566`.
 - Findings: the addon genuinely does not use the drop path — `poll` forgets the
-  lease at `lib.rs:1208` (source tree; not at HEAD) and completes through its own `active` table at `:332-357`,
+  lease at `lib.rs:1256` (source tree; not at HEAD) and completes through its own `active` table at `:332-357`,
   and that route *does* report failure all the way to `onClosed`. The host's
   explicit releases also report. So every deliberate completion path in the
   repository observes failure, and `Drop` is the fallback for paths that exit
@@ -205,16 +205,16 @@ lease drop path, and no shipped configuration selects the shared-memory transpor
   Mechanisms whose citation moved and whose surrounding claim needed restating:
   - line 73, `packages/shm-native/src/lib.rs:327-331` now `packages/shm-native/src/lib.rs:350-354`: The failure is raised as `consumed_error("receive completion failed")`, which marks the token consumed so the wrapper releases its handle instead of offering a retry.
   - line 75, `shm-frame-channel.ts:227-245`: There is no plugin-side frame channel above the addon here, so a reported release failure stops at the `Error` thrown by `NativeReceiveLease.release` (`packages/shm-native/index.ts:608-618`).
-  - line 90, `:525` now `:712`: Read cancellation inside the budget wait returns `Ok(false)` so the writer keeps draining; the endpoint loop then closes the inbound channel with `ReadClose::Cancelled` (`crates/host-runtime/src/ring_transport.rs:541-543`).
+  - line 90, `:556` now `:765`: Read cancellation inside the budget wait returns `Ok(false)` so the writer keeps draining; the endpoint loop then closes the inbound channel with `ReadClose::Cancelled` (`crates/host-runtime/src/ring_transport.rs:541-543`).
   - line 101, `crates/host-runtime/src/ring_transport.rs:276` now `crates/host-runtime/src/ring_transport.rs:360`: The host release is not unconditional: a ring that latched quarantine without a peer release takes `admission.quarantine()` instead (`ring_transport.rs:353-361`).
   - line 167, `lease.rs:160-162` now `lease.rs:324-326`: `release` carries a doc comment at HEAD (`crates/shm-transport/src/lease.rs:322-323`) stating that `Drop` does the same thing but discards the error.
   - line 189, `crates/host-runtime/src/ring_transport.rs:276` now `crates/host-runtime/src/ring_transport.rs:360`: The call is reached only on the non-quarantined branch (`ring_transport.rs:353-361`), so it is conditional rather than unconditional.
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
   - line 75, `shm-frame-channel.ts:227-245` (close() reporting onClosed("quarantined", error)): `packages/plugin` does not exist in this tree; `packages/shm-native/index.ts` is the only TypeScript surface.
   - line 77, `shm-frame-channel.ts:411-416` (drain path reporting onClosed("protocol_violation", error)): `packages/plugin` does not exist in this tree, so no drain-path reporter above the addon remains.
-  - line 149, `:1208` (std::mem::forget(lease) in poll): `poll` moves the lease into `channel.active` as an `ActiveLease` (`packages/shm-native/src/lib.rs:1397-1403`); the only remaining `mem::forget` is for a quarantined channel (`:472`).
+  - line 149, `:1208` (std::mem::forget(lease) in poll): `poll` moves the lease into `channel.active` as an `ActiveLease` (`packages/shm-native/src/lib.rs:1445-1451`); the only remaining `mem::forget` is for a quarantined channel (`:472`).
   - line 151, `packages/plugin/src/shared/host-client/shm-frame-channel.ts:209-230` (plugin-side frame channel close path): `packages/plugin` does not exist in this tree.
   - line 152, `:323-370` (plugin-side drain path): `packages/plugin` does not exist in this tree.
-  - line 156, `lib.rs:1208` (std::mem::forget(lease) in poll): The lease is stored in `channel.active` instead (`packages/shm-native/src/lib.rs:1397-1403`).
+  - line 156, `lib.rs:1256` (std::mem::forget(lease) in poll): The lease is stored in `channel.active` instead (`packages/shm-native/src/lib.rs:1445-1451`).
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

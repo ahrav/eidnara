@@ -16,9 +16,10 @@ page-removal pass only, while `Ring::trim`
   `arena_write` and `arena_reclaimed` from `verified_producer_cursors()`, and calls
   `self.punch_dead_pages(arena_reclaimed, arena_write, true)`. Both fallible
   reads map their error through `quarantine_with`.
-- `punch_dead_pages` (`:2163-2242`): the dead range is `[punched, reclaimed)`
+- `punch_dead_pages` (`:2169-2244`, doc comment `:2163-2168`): the dead range is `[punched, reclaimed)`
   (`:2163`); `everything` counts partially covered pages as dead once no live
-  bytes remain (`:2164`, `:2223-2226`); the function returns early when
+  bytes remain (`:2164`, `:2199-2204`), while the other branch bounds the range inward at
+  `:2222-2226`; the function returns early when
   `punched == reclaimed` (`:2176-2178`), so a ring with nothing released
   removes nothing. `live_end` (`:2154-2156`) returns the producer-local
   `reserved_end` when a reservation is open, which is what keeps an uncommitted

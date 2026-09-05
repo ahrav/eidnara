@@ -31,15 +31,15 @@ The wrapper, `decodeShmGrant` in
 - `:283-287` (source tree; not at HEAD) — `aliased_lanes` on equal fds, equal grant text, **or equal
   incarnations**.
 
-The native boundary, `attach` in `packages/shm-native/src/lib.rs:592-723`:
+The native boundary, `attach` in `packages/shm-native/src/lib.rs:634-765`:
 
-- `:597-599` — argument must be an `Object`.
-- `:602-605` — `profile != PROFILE`, where `PROFILE` is `"host-test-ring-v1"`
+- `:639-641` — argument must be an `Object`.
+- `:644-647` — `profile != PROFILE`, where `PROFILE` is `"host-test-ring-v1"`
   (`:27`). Present.
-- `:606-639` — both fds in `0..=i32::MAX`. Present. The `pid` bound is gone with
+- `:648-681` — both fds in `0..=i32::MAX`. Present. The `pid` bound is gone with
   the descriptor field: `0f336d3c` moved attachment onto descriptors transferred
   by the setup socket, so `attach_ring` no longer takes a pid.
-- `:640-659` — both grant strings are read with a `GRANT_HEX_LEN` length cap and
+- `:682-701` — both grant strings are read with a `GRANT_HEX_LEN` length cap and
   decoded by `strict_hex` (`:234-253`, which replaced `decode_hex`), requiring
   exact length and strict lowercase hex, then by `RingGrant::decode`
   (`crates/shm-transport/src/backend/ring.rs:893-921`), which rejects nonzero
@@ -116,7 +116,7 @@ addon's own test already has. For each of `unexpected_field`, `stale_candidate`,
 `out_of_range`, build the descriptor that triggers it and assert the native
 `attach` rejects, with `activeChannelCount()`, `activeExternalRefCount()`, and
 `nativeLeakDiagnostics()` unchanged across the throw — the pattern
-`expectRejectedWithoutEffects` (`mechanism.ts:758-770`) already uses. Six of these
+`expectRejectedWithoutEffects` (`mechanism.ts:790-802`) already uses. Six of these
 are expected to fail today; that is the point. The replay case needs a full
 attach, close, and re-attach with the same grant, so it needs a real host-created
 object rather than the synthetic fixture.
@@ -128,11 +128,11 @@ object rather than the synthetic fixture.
 - Sources examined:
   `packages/plugin/src/shared/host-client/shm-transport-provider.ts:41-71` (source tree; not at HEAD),
   the only production construction of a `NativeDescriptor`;
-  `packages/shm-native/index.ts:97` and `:686-689`, where `NativeChannel.attach`
+  `packages/shm-native/index.ts:97` and `:739-742`, where `NativeChannel.attach`
   forwards a `NativeDescriptor` to `native.attach`;
-  `packages/shm-native/tests/mechanism.ts:84-185` for the direct-require path
-  and its synthetic grants; `packages/shm-native/src/lib.rs:592-723` and
-  `:698-699` for how the two grants are bound to `from_host` and `to_host`.
+  `packages/shm-native/tests/mechanism.ts:86-187` for the direct-require path
+  and its synthetic grants; `packages/shm-native/src/lib.rs:634-765` and
+  `:740-741` for how the two grants are bound to `from_host` and `to_host`.
 - Findings: no *attacker*-ordered path exists today. The single production caller
   copies the wrapper's already-validated, already-lane-checked fields into the
   descriptor by name (`:63-70` (source tree; not at HEAD)), so a hostile provider cannot swap them there —
@@ -165,24 +165,24 @@ object rather than the synthetic fixture.
   - line 47, `:533-535` now `:666-672`: The rejection now also requires six distinct descriptor numbers and calls `grant_matches_profile` on both grants (`:668-669`), with `setup::reject_aliased_files` (`:683`) catching `dup` aliases the number comparison cannot.
   - line 55, `:491-512` now `:602-659`: Nine named fields are read at HEAD: `profile`, six descriptor numbers, and two grants; extra properties are still ignored.
   - line 57, `packages/shm-native/index.ts:17-24` now `packages/shm-native/index.ts:55-65`: `NativeDescriptor` declares nine fields at HEAD, still without `candidateId`.
-  - line 66, `ring.rs:461-478` now `ring.rs:929-946`: The addon now pins the geometry itself: `grant_matches_profile` (`packages/shm-native/src/lib.rs:257-266`), called at `:668-669`, compares depth, arena bytes, and lease bound against `host_test_ring_profile`, so a depth-32 grant is refused.
+  - line 66, `ring.rs:461-478` now `ring.rs:929-946`: The addon now pins the geometry itself: `grant_matches_profile` (`packages/shm-native/src/lib.rs:257-266`), called at `:710-711`, compares depth, arena bytes, and lease bound against `host_test_ring_profile`, so a depth-32 grant is refused.
   - line 70, `ring.rs:474-476` now `ring.rs:942-944`: With depth and arena bytes pinned by `grant_matches_profile`, the consistent total is determined, so the missing absolute ceiling no longer admits an arbitrary total.
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
-  - line 14, `packages/plugin/src/shared/host-client/shm-grant.ts:198-287` (decodeShmGrant): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 15, `:146-174` (validateRingGrant): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 17, `:203-217` (closed field set check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 18, `:81-89` (GRANT_FIELDS): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 20, `:225-230` (profile_mismatch check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 21, `:232-247` (stale_candidate replay fence): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 24, `:160-168` (exact geometry check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 27, `:169-171` (out_of_range total-bytes check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 28, `:76` (MAX_TOTAL_BYTES constant): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 29, `:172` (lane_mismatch check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 30, `:78-79` (expected lane constants): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 30, `:270-281` (lane expectations per direction): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 31, `:283-287` (aliased_lanes check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 103, `packages/plugin/src/shared/host-client/shm-transport-provider.ts:57-64` (the production NativeDescriptor construction): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 129, `packages/plugin/src/shared/host-client/shm-transport-provider.ts:41-71` (the only production NativeDescriptor construction): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
-  - line 138, `:63-70` (field-by-name copy into the descriptor): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 14, `packages/plugin/src/shared/host-client/shm-grant.ts:198-287` (decodeShmGrant): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 15, `:149-186` (validateRingGrant): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 17, `:215-229` (closed field set check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 18, `:81-89` (GRANT_FIELDS): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 20, `:237-242` (profile_mismatch check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 21, `:244-259` (stale_candidate replay fence): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 24, `:163-180` (exact geometry check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 27, `:181-183` (out_of_range total-bytes check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 28, `:76` (MAX_TOTAL_BYTES constant): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 29, `:184` (lane_mismatch check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 30, `:78-79` (expected lane constants): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 30, `:282-293` (lane expectations per direction): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 31, `:295-299` (aliased_lanes check): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 103, `packages/plugin/src/shared/host-client/shm-transport-provider.ts:57-64` (the production NativeDescriptor construction): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 129, `packages/plugin/src/shared/host-client/shm-transport-provider.ts:41-71` (the only production NativeDescriptor construction): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
+  - line 138, `:63-70` (field-by-name copy into the descriptor): The plugin package does not exist in this tree; `NativeChannel.attach` (`packages/shm-native/index.ts:739-742`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.

@@ -102,7 +102,7 @@ declared interface.
   including buffers the addon never created.
 - `register_cleanup_probe` (432) forwards a caller-supplied `String` as a
   `PathBuf` to `lifecycle::register_cleanup_marker`. The path is written at
-  environment teardown; `tests/mechanism.ts:80` reads the marker back and asserts
+  environment teardown; `tests/mechanism.ts:82` reads the marker back and asserts
   its contents are `"clean"`.
 
 ### Debug versus release
@@ -162,11 +162,11 @@ release build; the export surface stands on its own.
 - Sources examined: `packages/shm-native/src/lib.rs` — every `#[napi]`
   attribute and every `cfg` attribute enumerated;
   `packages/shm-native/package.json` in full;
-  `packages/shm-native/index.ts:702-867` for the re-export surface;
+  `packages/shm-native/index.ts:755-933` for the re-export surface;
   `packages/shm-native/src/napi_buffers.rs:52-87`, `:220-222`, `:268-283`;
   `packages/shm-native/src/lib.rs:290-312` and `:407-424`;
   `crates/shm-transport/src/lib.rs:1-41`;
-  `packages/shm-native/tests/mechanism.ts:58-81`.
+  `packages/shm-native/tests/mechanism.ts:58-83`.
 - Findings: no gating mechanism exists to be intended or unintended — the
   package declares no Cargo features and no `cfg` gates any export. (The
   pre-#131 debug-build observation is obsolete: `build:native` now runs
