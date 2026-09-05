@@ -234,7 +234,7 @@ and `n/a - invalidated` for an invalidated record.
 | [cancelled-frame-disposition-is-declared](#cancelled-frame-disposition-is-declared) | safety | high | yes |
 | [validated-spans-are-disjoint-and-inside-the-arena](#validated-spans-are-disjoint-and-inside-the-arena) | safety | high | yes |
 | [no-rust-reference-over-peer-writable-payload](#no-rust-reference-over-peer-writable-payload) | safety | high | yes |
-| [reclaim-advance-bounded-by-the-producer-reservation](#reclaim-advance-bounded-by-the-producer-reservation) | safety | medium | yes |
+| [reclaim-advance-bounded-by-the-producer-reservation](#reclaim-advance-bounded-by-the-producer-reservation) | safety | high | yes |
 | [attach-binds-geometry-to-a-local-profile](#attach-binds-geometry-to-a-local-profile) | safety | high | yes |
 | [one-profile-name-denotes-one-geometry](#one-profile-name-denotes-one-geometry) | safety | high | yes |
 | [native-boundary-not-weaker-than-its-wrapper](#native-boundary-not-weaker-than-its-wrapper) | safety | high | yes |
@@ -243,7 +243,7 @@ and `n/a - invalidated` for an invalidated record.
 | [traceability-pointers-resolve](#traceability-pointers-resolve) | safety | high | n/a - invalidated |
 | [negative-tests-fail-for-their-stated-reason](#negative-tests-fail-for-their-stated-reason) | safety | high | no |
 | [documented-close-order-has-a-production-driver](#documented-close-order-has-a-production-driver) | reachability | high | no |
-| [capability-probe-gates-every-advertised-mechanism](#capability-probe-gates-every-advertised-mechanism) | safety | high | no |
+| [capability-probe-gates-every-advertised-mechanism](#capability-probe-gates-every-advertised-mechanism) | safety | high | yes |
 | [clean-reclamation-is-reachable](#clean-reclamation-is-reachable) | reachability | high | n/a - invalidated |
 | [test-only-surface-absent-from-the-shipped-addon](#test-only-surface-absent-from-the-shipped-addon) | safety | high | yes |
 | [decoder-totality-over-arbitrary-bytes](#decoder-totality-over-arbitrary-bytes) | safety | high | yes |
@@ -303,8 +303,12 @@ duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: not yet — needs a peer that writes the lifecycle page directly; no
-harness models a peer mutating control pages.
+Exercised: yes - `quarantine_survives_peer_clearing_shared_flag`
+(`crates/shm-transport/src/backend/ring.rs:4257`) quarantines a ring, clears the
+shared flag as the peer would, and asserts operations stay quarantined;
+`shared_quarantine_flag_latches_locally_when_observed` (`:3976`) sets the shared
+flag from outside, has the handle observe it, clears it, and asserts the handle
+stays quarantined.
 Guarantee: Once a direction is quarantined locally, no action by the peer can
 make it accept a reserve, receive, or release again.
 Check: `always` — after `enter_quarantine()`, for every peer-authored mutation
@@ -313,35 +317,40 @@ of the shared object including a zero store to the `quarantined` byte,
 `Quarantined` variant. `always` fits because this must hold at every evaluation
 for the lifetime of the mapping; there is no optional path and no eventual
 convergence involved.
-Fault/timing angle: the peer writes `0` to the flag between the host's
-`enter_quarantine()` and its next gate read. The window is unbounded, because
-the flag is re-read on every operation rather than latched.
+Fault/timing angle: the peer writes `0` to the shared flag after the host's
+`enter_quarantine()` or after the host has observed a peer-set flag. At HEAD
+the write has no effect: `Ring` carries a private `quarantined: Cell<bool>`
+(`ring.rs:883`) that `enter_quarantine` sets (`:1889-1897`) and that
+`is_quarantined` (`:1902-1917`) latches on the first observation of the shared
+flag, so the gate never depends on the shared byte alone. The source tree
+re-read the shared flag on every operation with no local mirror, which is the
+window this record was written against.
 Required faults and enabling state: a quarantine trigger (corrupt descriptor, or
 a failed alias detach) **and** a peer that writes the shared lifecycle page
 after it. Without the second, the check passes without testing anything.
 Confidence: high — [evidence](evidence/quarantine-authority-survives-peer-writes.md).
-Verified by inspection: the only store is to `LifecyclePage.quarantined` in the
-shared mapping (`ring.rs:1373`), every gate re-reads it (`ring.rs:913`, `:1056`,
-`:1176`, `:1251`, `:1337`), the `Ring` struct carries no local mirror, and both
-`Mapping::create` and `Mapping::attach` map the whole object
-`PROT_READ|PROT_WRITE` (`ring.rs:321`, `:342`) with required seals of
-`F_SEAL_GROW|SHRINK|SEAL` only and no `F_SEAL_WRITE` (`ring.rs:2131`).
-Existing check: `crates/shm-transport/tests/ring.rs:240`
-`quarantine_rejects_all_operations_and_reports_conservation` — covers
-self-quarantine only, never a peer clearing the flag. Status unaudited.
-Impact: a one-byte write by the peer un-terminates a channel the local side
-condemned, defeating "permanently prevents that record's storage from being
-reused" (former `docs/shm-transport.md:79`; the rewritten document at U3 states
-only that active and quarantined charges are reported separately, `:21`, and
-that quarantined charges stay within the process bound, `:92`, so the quoted
-guarantee is no longer documented). Under the source document's same-user
-trust model this may have been in-contract; the point is that it is unstated and
-unchecked.
+Verified by direct read at HEAD: `Ring.quarantined: Cell<bool>` (`ring.rs:883`);
+`enter_quarantine` sets the local cell first and then stores the shared flag
+(`:1889-1897`); `is_quarantined` returns the local cell when set, otherwise
+loads the shared flag, treats an unreadable lifecycle page as quarantined, and
+latches any observed set flag into the cell (`:1902-1917`). The shared mapping
+is still `PROT_READ|PROT_WRITE` with `F_SEAL_GROW|SHRINK|SEAL` only, so the
+peer can still write the byte; it just cannot revive the handle. The source
+tree's `Ring` had no local mirror and re-read the shared flag at every gate,
+which is the defect this record was written against.
+Existing check: `quarantine_survives_peer_clearing_shared_flag` (`ring.rs:4257`),
+`shared_quarantine_flag_latches_locally_when_observed` (`:3976`), and
+`quarantine_rejects_all_operations_and_reports_conservation`
+(`crates/shm-transport/tests/ring.rs`) for the self-quarantine half. Status
+unaudited.
+Impact: if the local latch were removed, a one-byte write by the peer would
+un-terminate a channel the local side condemned, and the rewritten document's
+statements that active and quarantined charges are reported separately
+(`docs/shm-transport.md:21`) and stay within the process bound (`:92`) would
+rest on a byte the peer controls. At HEAD the latch makes the peer's write
+inert.
 Open questions:
 
-- Is the flag deliberately shared so the *peer* observes quarantine, and if so
-  what protects the local decision? A local `Cell<bool>` OR'd into
-  `is_quarantined()` would close this without a layout change.
 - The source document's explicit non-guarantee about malicious peers (former
   `docs/shm-transport.md:116`) is absent from the rewritten document, which
   makes no statement about peer misbehaviour either way. Did it extend to
@@ -358,8 +367,10 @@ duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: not yet — needs a quarantine raised while a reservation is
-outstanding.
+Exercised: yes - `commit_after_quarantine_is_refused_and_aborts`
+(`crates/shm-transport/src/backend/ring.rs:3134`) holds a reservation,
+quarantines the ring, and asserts the commit is refused and `published` stays
+zero.
 Guarantee: Once a direction is quarantined, no further descriptor can be
 published into it, including from a reservation acquired before the quarantine.
 Check: `always` — hold a reservation, quarantine the ring, then assert
@@ -375,13 +386,17 @@ publishes a corrupt frame → the receiver's `try_receive` quarantines
 Required faults and enabling state: an outstanding `ProducerReservation`
 **and** a quarantine trigger from the other side during its lifetime.
 Confidence: high — [evidence](evidence/quarantine-gates-cover-every-storage-mutation.md).
-Verified by inspection: `try_reserve` (`ring.rs:913`), `try_receive`
-(`ring.rs:1056`), `release` (`ring.rs:1176`), and `probe` (`ring.rs:1337`) gate on
-`is_quarantined()`; `commit_reservation` (`ring.rs:1577-1627`) and
-`abort_reservation` (`ring.rs:1563-1578`) have no gate.
-Existing check: none.
-Impact: publication into a ring whose storage is already considered
-unrecyclable, and an abort that hands quarantined storage back to the free pool.
+Verified by direct read at HEAD: `ProducerReservation::commit`
+(`ring.rs:2566-2572`) checks `ring.is_quarantined()` first, aborts the
+reservation, and returns `ProducerError::Quarantined`, so the commit path is
+gated. `try_reserve`, `try_receive`, `release`, and `probe` gate on
+`is_quarantined()` as before. The source tree's `commit_reservation` had no
+gate, which is the defect this record was written against.
+Existing check: `commit_after_quarantine_is_refused_and_aborts` (`ring.rs:3134`).
+Status unaudited.
+Impact: if the commit gate were removed, a reservation admitted before
+quarantine could publish into a ring whose storage is already considered
+unrecyclable, and an abort would hand quarantined storage back to the free pool.
 The abort path matters most where quarantine was raised *because* a JavaScript
 alias may still be attached to the aborted range
 (`packages/shm-native/src/lib.rs:283-287`).
@@ -977,8 +992,13 @@ duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: not yet — needs a receiver killed while holding leases, then a fresh
-attach.
+Exercised: partial - unit tests refuse an attach whose cursors already break
+the protocol (`attach_refuses_a_mapping_whose_cursors_already_break_the_protocol`,
+`crates/shm-transport/src/backend/ring.rs:3478`), a phantom lease count
+(`:3573`), an orphaned receiver slot (`:3612`), a quarantined ring (`:3715`), a
+write cursor beyond the committed frames (`:3789`), and a live slot whose
+descriptor does not validate (`:3806`). No test kills a receiver holding leases
+and then attaches fresh.
 Guarantee: A process attaching to a shared object either reconciles stale
 receiver state or refuses to attach; it never silently inherits leases and
 descriptor slots that no live process owns.
@@ -990,18 +1010,26 @@ is dead and every symptom is a normal backpressure code.
 Required faults and enabling state: an actual process termination while leases
 are held — not a clean shutdown — followed by an attach.
 Confidence: high — [evidence](evidence/attach-reconciles-or-refuses-stale-shared-cursors.md).
-`Ring::attach` validates identity and geometry and wires the socketpair doorbells
-(`ring.rs:783-798`, `:2067-2098`; the pre-#131 prefault step is gone); it never
-inspects `published`, `consumed`,
-`completed`, `arena_write`, `arena_reclaimed`, or `quarantined`. Reclamation
-head-of-line blocks at the lowest stale sequence (`ring.rs:1482-1484`),
-`try_receive` returns `Ok(None)` (`:1063-1067`), and `try_reserve` eventually
-returns `Exhausted` (`:926-928`). None of these is an error, so no quarantine
-and no recovery episode occurs.
-Existing check: none.
-Impact: permanent, silent loss of lease and descriptor capacity, reported as
-ordinary backpressure. The `LifecyclePage` has no holder count, attach epoch,
-heartbeat, or peer pid, so there is no field a reconciliation could read.
+At HEAD `Ring::attach` (`ring.rs:969-1030`) reads `published`, `arena_write`,
+`completed`, `arena_reclaimed`, `consumed`, and `active_leases` from the shared
+pages, refuses a quarantined ring (`:1020-1021`), and runs
+`conservation_inner(true)` (`:1027`) before returning, so cursors that already
+violate the protocol's ordering bounds are refused as `InvalidSharedState`. The
+source tree's attach validated identity and geometry only and inspected no
+cursor, which is the silent-inheritance path this record was written against.
+What attach still cannot do is distinguish stale-but-consistent state: a
+receiver killed while holding K leases leaves `active_leases == K` and K slots
+in `RECEIVER_LEASED`, which conservation accepts, so those leases and slots are
+inherited. Reclamation then head-of-line blocks at the lowest stale sequence,
+`try_receive` reports nothing, and `try_reserve` eventually returns
+`Exhausted`; none is an error.
+Existing check: the six attach-refusal unit tests named above; none constructs
+the stale-but-consistent case. Status unaudited.
+Impact: for a peer that dies holding consistent state, permanent, silent loss of
+lease and descriptor capacity reported as ordinary backpressure. The
+`LifecyclePage` has no holder count, attach epoch, heartbeat, or peer pid, so
+there is no field a reconciliation could read; the setup-socket sentinel, not the
+ring, is what detects the death.
 Open questions:
 
 - Is a peer crash meant to be recoverable at all? If yes, something must reset
@@ -1267,33 +1295,42 @@ duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: not yet — needs a peer rewriting the descriptor of a pending slot.
+Exercised: yes - `lengthened_released_descriptor_cannot_reclaim_a_live_frame`
+(`crates/shm-transport/src/backend/ring.rs:3163`) rewrites a released slot's
+`allocation_len` as the peer would and asserts reclamation refuses rather than
+advancing into the next live frame.
 Guarantee: The producer's `arena_reclaimed` advances by exactly the length the
 producer itself reserved for that sequence, never by a peer-chosen value.
 Check: `always` — after the receiver releases, have the peer rewrite
 `allocation_len` in the pending slot, then assert reclaim either rejects or
 advances by the original reservation.
 Fault/timing angle: the window between commit and `reclaim_completed` reading
-the slot is unbounded. The only guard is `allocation_start == arena_reclaimed`,
-which pins *where* the advance starts but not *how far* it goes.
+the slot is unbounded, and the descriptor is peer-writable throughout. At HEAD
+the re-read `(allocation_start, allocation_len)` is compared against the
+producer-private `published_allocations` shadow before any advance
+(`ring.rs:2106-2112`), so a lengthened descriptor yields `InvalidSharedState`;
+the source tree's only guard was `allocation_start == arena_reclaimed`, which
+pinned where the advance started but not how far it went.
 Required faults and enabling state: a peer write to a `RELEASE_PENDING` slot's
 descriptor between release and reclaim.
-Confidence: medium — [evidence](evidence/reclaim-advance-bounded-by-the-producer-reservation.md).
-Reclaim consumes the re-read `allocation_len` (`ring.rs:1548-1556`) with only
-the FIFO start check (`:1498-1500`). Both candidate records — the descriptor and the
-atomic `reservation_len` — live in peer-writable memory, so neither is
-trustworthy. Exploitability past the start check was not established, hence
-medium.
-Existing check: none.
-Impact: the reclaim cursor can be pushed past bytes still under a live lease.
-Later underflow is caught (`arena.rs:104-108`), so this is corruption and
-denial of service rather than an out-of-bounds access.
-Open questions:
-
-- Was the atomic `reservation_len` (`ring.rs:122`) intended to be the producer's
-  trusted record? It is written but never read by `reclaim_completed`. A
-  producer-local table would be trustworthy; is that feasible given `Ring` is
-  thread-confined?
+Confidence: high - [evidence](evidence/reclaim-advance-bounded-by-the-producer-reservation.md).
+Verified by direct read at HEAD: `Ring` holds `published_allocations:
+Vec<Cell<Option<(u64, u64)>>>` (`ring.rs:897`, built by `allocation_shadow`,
+`:295-297`) as a producer-private record of each published slot's allocation;
+`reclaim_completed_inner` (`:2078`) re-reads the descriptor, validates it, and
+returns `InvalidSharedState` when `(allocation_start, allocation_len)` differs
+from the shadow (`:2106-2112`), then checks the FIFO start (`:2116-2117`). The
+source tree consumed the re-read `allocation_len` with only the start check and
+both candidate records lived in peer-writable memory; that is the defect this
+record was written against, and the producer-local table its open question
+proposed is what HEAD implements.
+Existing check: `lengthened_released_descriptor_cannot_reclaim_a_live_frame`
+(`ring.rs:3163`). Status unaudited.
+Impact: if the shadow comparison were removed, the reclaim cursor could be
+pushed past bytes still under a live lease; later underflow would be caught, so
+the result would be corruption and denial of service rather than an
+out-of-bounds access.
+Open questions: None.
 
 ### attach-binds-geometry-to-a-local-profile
 
@@ -1656,13 +1693,15 @@ Open questions:
 ### capability-probe-gates-every-advertised-mechanism
 
 Type: safety
-Reachability: test-only — `probeCapabilities`
-(`packages/shm-native/index.ts:238`) is called only from
-`packages/plugin/src/shared/host-client/shm-frame-channel.test.ts`; the
-default client path constructs `ShmFrameChannel` without consulting it
-(`connection.ts:393`).
+Reachability: default-production - `capableAddon` (`packages/shm-native/index.ts:218-223`)
+calls `probeCapabilities` (`:242`) once and throws
+`NativeStartupError("capability_unavailable")` when it reports
+`available: false`, so every channel construction consults the probe. The
+source tree's `ShmFrameChannel` in `packages/plugin`, which bypassed it, is
+not in this tree.
 Status: active
-Exercised: not yet — needs a runtime lacking the cleanup hook.
+Exercised: not yet - no test removes an enumerated mechanism from the runtime
+and asserts `available: false`; the gating is verified by reading the probe.
 Guarantee: Capability is advertised only when every mechanism the documentation
 enumerates is actually present.
 Check: `always` — for each enumerated mechanism, a runtime lacking it yields
@@ -1671,20 +1710,25 @@ Fault/timing angle: a runtime that is neither Bun nor reports as Node, or one
 without the cleanup-hook export.
 Required faults and enabling state: a runtime missing one enumerated mechanism.
 Confidence: high — [evidence](evidence/capability-probe-gates-every-advertised-mechanism.md).
-Verified by direct read of `packages/shm-native/index.ts`: steps one through
-seven each gate with an `available: false` return (lines 118, 122, 129, 134,
-149, 169, 193), but the eighth is only *reported* — line 203 returns
-`available: true` and line 209 sets
-`cleanupHooks: typeof native.registerCleanupProbe === "function"` inside the
-same object. A runtime without the hook is advertised as capable.
-Existing check: the capability suite asserts channel counts around the probe,
-not the gating itself. Status unaudited.
-Impact: the source document (former `docs/shm-transport.md:42`) stated "any
-failure returns `available: false` with a bounded reason"; the rewritten
-document says an install that cannot load the addon fails before application
-traffic (`:15`) and that unsupported or omitted results are not success states
-(`:98`). The source statement was falsified for one of the
-eight enumerated steps.
+Verified by direct read of `packages/shm-native/index.ts` at HEAD: every
+enumerated mechanism, including the cleanup hook, gates with an
+`available: false` return carrying a closed reason; the cleanup-hook branch is
+`typeof native.registerCleanupProbe !== "function"` returning
+`reason: "cleanup_hooks_unavailable"` (`:329-340`), and only the branch where the
+function exists returns `available: true` with `cleanupHooks: true`
+(`:341-349`). The source tree reported the hook inside an `available: true`
+object instead of gating on it, which is the defect this record was written
+against.
+Existing check: `packages/shm-native/tests/mechanism.ts:21` calls
+`probeCapabilities` and the capability suite asserts channel counts around it;
+no test removes a mechanism and asserts the corresponding reason. Status
+unaudited.
+Impact: if a mechanism were reported rather than gated, a runtime lacking it
+would be advertised as capable and `capableAddon` would construct channels that
+fail later. The rewritten document says an install that cannot load the addon
+fails before application traffic (`docs/shm-transport.md:15`) and that
+unsupported or omitted results are not success states (`:98`); at HEAD the probe
+is consistent with that.
 Open questions:
 
 - An earlier draft asserted that the code's step order differs from the

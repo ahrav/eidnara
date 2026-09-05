@@ -119,3 +119,8 @@ depth and arena as quarantined without reading any slot. The oracle must read
 - Conclusion: unresolved, needs the intended close ordering stated. The evidence
   establishes that publication and slot release both proceed after quarantine;
   it does not establish whether that was a decision or an oversight.
+
+### Q: Is the commit path gated at HEAD? (added 2026-09-05)
+
+- Checked: `ProducerReservation::commit` (`ring.rs:2566-2572`) checks `is_quarantined()`, aborts the reservation, and returns `ProducerError::Quarantined`. `commit_after_quarantine_is_refused_and_aborts` (`:3134`) holds a reservation, quarantines, and asserts `published` stays zero.
+- Conclusion: yes. The record is refreshed to Exercised: yes.

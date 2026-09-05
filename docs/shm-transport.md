@@ -79,7 +79,7 @@ The terminal-class list above is the host report's vocabulary. The native client
 - Peer death is exposed as the `peerClosed()` boolean on the channel, not as an event or class.
 - Ring exhaustion surfaces as the fixed message `shared-memory ring is full`.
 
-A client that needs the host's five classes must map from these surfaces; the mapping is not provided. Frame events retain only numeric header identity and byte length. Emission remains rate-limited to the configured per-second cap, and all string fields use fixed closed values or a 128-byte display bound.
+A client that needs the host's five classes must map from these surfaces; the mapping is not provided. Frame events retain only numeric header identity and byte length. There is no per-second cap on status reports: `ControlAction::HostStatus` (`crates/host-runtime/src/connection.rs:628`) answers every accepted status request, and `RingTransport::diagnostics` has no rate limiter. What bounds status traffic is the pending-request permit and the egress byte budget, which cap concurrent work and bytes in flight, not emissions per second. All string fields use fixed closed values or a 128-byte display bound.
 
 Reports never include setup-socket paths, native handles, mapping descriptors, grants, activation tokens, authentication keys or proofs, payload bytes, mapped addresses, or provider error text. Peer-controlled text is either reduced to a closed class or redacted and length-bounded before rendering.
 

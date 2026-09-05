@@ -127,3 +127,8 @@ non-vacuous, so the property and its check share a single enabling condition.
   `9c1eb4d1` for steps 1-8. The substantive finding — step 8 is reported at line
   209 and never gated, while line 203 has already committed `available: true` —
   is confirmed exactly as stated.
+
+### Q: Is the cleanup hook gated or only reported at HEAD? (added 2026-09-05)
+
+- Checked: `probeCapabilities` (`packages/shm-native/index.ts:242`) returns `available: false` with `reason: "cleanup_hooks_unavailable"` when `typeof native.registerCleanupProbe !== "function"` (`:329-340`) and `available: true, cleanupHooks: true` only otherwise (`:341-349`). `capableAddon` (`:218-223`) calls the probe on every channel construction and throws `capability_unavailable` when it fails, so the probe is on the shipped path.
+- Conclusion: gated. The record is refreshed; Reachability moves to default-production.

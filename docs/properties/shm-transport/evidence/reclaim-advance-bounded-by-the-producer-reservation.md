@@ -129,3 +129,8 @@ case is actually reached.
   producer's stored `reservation_len`. Until that exists the record is a lead
   about a missing cross-check rather than a demonstrated defect. The
   design-intent half needs human input.
+
+### Q: Does reclamation still trust the re-read descriptor at HEAD? (added 2026-09-05)
+
+- Checked: `reclaim_completed_inner` (`ring.rs:2078`) compares the re-read `(allocation_start, allocation_len)` with the producer-private `published_allocations` shadow (`:897`, `:295-297`) and returns `InvalidSharedState` on mismatch (`:2106-2112`). `lengthened_released_descriptor_cannot_reclaim_a_live_frame` (`:3163`) sets `allocation_len = 8192` on a released slot and asserts `InvalidSharedState` and quarantine.
+- Conclusion: no. The producer-local table the open question proposed is implemented; the record is refreshed to Exercised: yes and Confidence: high.

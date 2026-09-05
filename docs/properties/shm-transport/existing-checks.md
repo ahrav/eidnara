@@ -78,10 +78,129 @@ rejected.** Status unaudited; see
 
 ### In-crate unit tests
 
-Exactly one: `residency_vector_tracks_runtime_page_size` in
-`src/backend/ring.rs`. It is pure arithmetic over a helper and would still pass
-if the mapping layout were misaligned. No other `#[cfg(test)]` module exists in
-`crates/shm-transport/src` or `packages/shm-native/src`.
+Inventory regenerated 2026-09-05 from every `#[test]` under
+`crates/shm-transport/src` and `packages/shm-native/src`. The earlier statement
+that exactly one in-crate test existed described the source tree. The "Claim
+asserted" column below transcribes each test's name into a sentence; it is a
+locator, not an audit, and every row is `unaudited` until a record reads the
+assertion. Rows that a catalog record already cites are marked with the record.
+
+#### `crates/shm-transport/src/backend/ring.rs` - 59 tests
+
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `syscall_counters_track_only_actual_ring_syscalls` (`:2973`) | Syscall counters track only actual ring syscalls | unaudited |
+| `doorbell_attachment_requires_connected_unix_stream_socket` (`:3021`) | Doorbell attachment requires connected unix stream socket | unaudited; cited by `attach-validates-doorbell-sockets` |
+| `doorbell_never_blocks_after_either_end_clears_nonblock` (`:3062`) | Doorbell never blocks after either end clears nonblock | unaudited; cited by `attach-validates-doorbell-sockets` |
+| `closed_peer_doorbell_fails_instead_of_blocking` (`:3088`) | Closed peer doorbell fails instead of blocking | unaudited; cited by `attach-validates-doorbell-sockets` |
+| `creator_observes_peer_exit_once_the_attachment_is_handed_over` (`:3097`) | Creator observes peer exit once the attachment is handed over | unaudited |
+| `quarantine_wakes_a_parked_peer` (`:3116`) | Quarantine wakes a parked peer | unaudited |
+| `commit_after_quarantine_is_refused_and_aborts` (`:3134`) | Commit after quarantine is refused and aborts | unaudited; cited by `quarantine-gates-cover-every-storage-mutation` |
+| `only_a_producer_handle_may_trim` (`:3150`) | Only a producer handle may trim | unaudited |
+| `lengthened_released_descriptor_cannot_reclaim_a_live_frame` (`:3163`) | Lengthened released descriptor cannot reclaim a live frame | unaudited; cited by `reclaim-advance-bounded-by-the-producer-reservation` |
+| `forged_active_lease_count_quarantines_on_release` (`:3190`) | Forged active lease count quarantines on release | unaudited |
+| `rewound_arena_write_quarantines_instead_of_overlapping_a_live_frame` (`:3210`) | Rewound arena write quarantines instead of overlapping a live frame | unaudited |
+| `rewound_published_cursor_quarantines_even_with_a_freed_slot` (`:3228`) | Rewound published cursor quarantines even with a freed slot | unaudited |
+| `forged_consumer_cursors_fail_waits_instead_of_parking` (`:3247`) | Forged consumer cursors fail waits instead of parking | unaudited |
+| `trim_reclaims_pending_releases_before_punching` (`:3276`) | Trim reclaims pending releases before punching | unaudited |
+| `armed_wait_recheck_sees_a_quarantine_that_sent_no_token` (`:3294`) | Armed wait recheck sees a quarantine that sent no token | unaudited |
+| `peer_closing_its_doorbell_quarantines_the_waiting_side` (`:3314`) | Peer closing its doorbell quarantines the waiting side | unaudited |
+| `sealed_object_of_the_wrong_size_is_refused_before_mapping` (`:3344`) | Sealed object of the wrong size is refused before mapping | unaudited |
+| `probe_checks_cursors_against_slot_states` (`:3378`) | Probe checks cursors against slot states | unaudited |
+| `rewound_published_cursor_does_not_hide_a_queued_frame` (`:3425`) | Rewound published cursor does not hide a queued frame | unaudited |
+| `attach_sets_close_on_exec_on_every_descriptor` (`:3444`) | Attach sets close on exec on every descriptor | unaudited |
+| `attach_refuses_a_mapping_whose_cursors_already_break_the_protocol` (`:3478`) | Attach refuses a mapping whose cursors already break the protocol | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
+| `probe_tolerates_every_intermediate_state_of_honest_transitions` (`:3511`) | Probe tolerates every intermediate state of honest transitions | unaudited |
+| `probe_rejects_a_lease_count_more_than_one_transition_from_the_slots` (`:3553`) | Probe rejects a lease count more than one transition from the slots | unaudited |
+| `attach_refuses_a_phantom_lease_count_that_a_probe_would_tolerate` (`:3573`) | Attach refuses a phantom lease count that a probe would tolerate | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
+| `published_running_ahead_of_depth_quarantines_before_any_delivery` (`:3586`) | Published running ahead of depth quarantines before any delivery | unaudited |
+| `attach_refuses_an_orphaned_receiver_slot` (`:3612`) | Attach refuses an orphaned receiver slot | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
+| `probe_treats_receiver_slots_beyond_the_cursor_gap_as_a_fault` (`:3629`) | Probe treats receiver slots beyond the cursor gap as a fault | unaudited |
+| `owned_cursor_advance_fails_closed_when_the_shared_value_moved` (`:3647`) | Owned cursor advance fails closed when the shared value moved | unaudited |
+| `publication_that_raced_a_quarantine_is_not_reported_as_delivered` (`:3662`) | Publication that raced a quarantine is not reported as delivered | unaudited |
+| `health_check_bounds_do_not_overflow_on_forged_cursors` (`:3682`) | Health check bounds do not overflow on forged cursors | unaudited |
+| `aborted_reservation_leaves_no_resident_pages` (`:3695`) | Aborted reservation leaves no resident pages | unaudited |
+| `attach_refuses_a_quarantined_ring` (`:3715`) | Attach refuses a quarantined ring | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
+| `receive_that_raced_a_quarantine_is_not_reported_as_delivered` (`:3723`) | Receive that raced a quarantine is not reported as delivered | unaudited |
+| `two_producer_reserved_slots_are_impossible` (`:3738`) | Two producer reserved slots are impossible | unaudited |
+| `release_leaves_the_consumers_data_wait_armed_for_the_next_publish` (`:3759`) | Release leaves the consumers data wait armed for the next publish | unaudited |
+| `attach_refuses_a_write_cursor_beyond_the_committed_frames` (`:3789`) | Attach refuses a write cursor beyond the committed frames | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
+| `attach_refuses_a_live_slot_whose_descriptor_does_not_validate` (`:3806`) | Attach refuses a live slot whose descriptor does not validate | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
+| `descriptor_depth_above_the_cap_is_rejected_before_any_allocation` (`:3831`) | Descriptor depth above the cap is rejected before any allocation | unaudited |
+| `oversized_active_lease_count_quarantines_on_receive` (`:3857`) | Oversized active lease count quarantines on receive | unaudited |
+| `unaligned_arena_is_rejected_before_any_frame_flows` (`:3871`) | Unaligned arena is rejected before any frame flows | unaudited |
+| `mismatched_release_identity_names_the_field_and_quarantines` (`:3902`) | Mismatched release identity names the field and quarantines | unaudited |
+| `stale_lap_release_cannot_complete_recycled_slot` (`:3941`) | Stale lap release cannot complete recycled slot | unaudited |
+| `shared_quarantine_flag_latches_locally_when_observed` (`:3976`) | Shared quarantine flag latches locally when observed | unaudited; cited by `quarantine-authority-survives-peer-writes` |
+| `foreign_slot_state_on_reserve_is_a_fault_not_backpressure` (`:3996`) | Foreign slot state on reserve is a fault not backpressure | unaudited |
+| `failed_publication_wake_leaves_the_slot_published` (`:4013`) | Failed publication wake leaves the slot published | unaudited |
+| `forged_arena_write_quarantines_instead_of_underflowing` (`:4043`) | Forged arena write quarantines instead of underflowing | unaudited |
+| `unaligned_batch_boundaries_do_not_strand_pages` (`:4063`) | Unaligned batch boundaries do not strand pages | unaudited |
+| `residency_vector_tracks_runtime_page_size` (`:4093`) | Residency vector tracks runtime page size | unaudited |
+| `removal_ranges_exclude_partial_pages_and_split_once_at_wrap` (`:4100`) | Removal ranges exclude partial pages and split once at wrap | unaudited |
+| `reclaimed_pages_leave_residency_and_reuse_as_zeroes` (`:4120`) | Reclaimed pages leave residency and reuse as zeroes | unaudited |
+| `subpage_releases_stay_resident_until_trim` (`:4138`) | Subpage releases stay resident until trim | unaudited |
+| `partial_page_reclaim_preserves_live_neighbor` (`:4165`) | Partial page reclaim preserves live neighbor | unaudited |
+| `trim_preserves_bytes_of_an_uncommitted_reservation` (`:4183`) | Trim preserves bytes of an uncommitted reservation | unaudited |
+| `outstanding_reservation_is_refused_without_parking` (`:4211`) | Outstanding reservation is refused without parking | unaudited |
+| `page_removal_failure_quarantines_before_capacity_publication` (`:4236`) | Page removal failure quarantines before capacity publication | unaudited |
+| `quarantine_survives_peer_clearing_shared_flag` (`:4257`) | Quarantine survives peer clearing shared flag | unaudited; cited by `quarantine-authority-survives-peer-writes` |
+| `impossible_slot_state_quarantines_the_receiver` (`:4274`) | Impossible slot state quarantines the receiver | unaudited |
+| `forged_reclaim_length_quarantines_the_producer` (`:4292`) | Forged reclaim length quarantines the producer | unaudited |
+| `wrapped_errors_preserve_sources` (`:4313`) | Wrapped errors preserve sources | unaudited |
+
+#### `crates/shm-transport/src/lease.rs` - 3 tests
+
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `failed_explicit_release_is_not_retried_by_drop` (`:329`) | Failed explicit release is not retried by drop | unaudited |
+| `drop_releases_exactly_once` (`:345`) | Drop releases exactly once | unaudited |
+| `volatile_copy_matches_plain_copy_at_every_offset_and_length` (`:356`) | Volatile copy matches plain copy at every offset and length | unaudited |
+
+#### `crates/shm-transport/src/profile.rs` - 2 tests
+
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `cpu_list_accepts_singletons_and_ascending_ranges` (`:718`) | Cpu list accepts singletons and ascending ranges | unaudited |
+| `cpu_list_rejects_every_malformed_item_rather_than_returning_a_subset` (`:728`) | Cpu list rejects every malformed item rather than returning a subset | unaudited |
+
+#### `crates/shm-transport/src/setup_auth.rs` - 7 tests
+
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `descriptor_count_matches_setup_contract` (`:152`) | Descriptor count matches setup contract | unaudited |
+| `verify_proof_accepts_committed_vectors_and_rejects_every_altered_input` (`:162`) | Verify proof accepts committed vectors and rejects every altered input | unaudited |
+| `verify_proof_agrees_with_compute_proof` (`:297`) | Verify proof agrees with compute proof | unaudited |
+| `committed_daemon_ver_carries_the_published_prefix` (`:325`) | Committed daemon ver carries the published prefix | unaudited |
+| `committed_vectors_pin_the_shared_construction` (`:331`) | Committed vectors pin the shared construction | unaudited; cited by `setup-proof-vectors-pin-the-shared-hmac-transcript` |
+| `daemon_ver_is_bound_into_the_proof` (`:358`) | Daemon ver is bound into the proof | unaudited; cited by `setup-proof-vectors-pin-the-shared-hmac-transcript` |
+| `domains_separate_the_two_proofs` (`:380`) | Domains separate the two proofs | unaudited |
+
+#### `packages/shm-native/src/lib.rs` - 1 test
+
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `channel_drops_borrowing_reservations_before_the_ring` (`:1079`) | Channel drops borrowing reservations before the ring | unaudited; cited by `addon-reservations-drop-before-the-ring` |
+
+#### `packages/shm-native/src/scheduling.rs` - 3 tests
+
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `pending_callback_waits_for_acknowledgement` (`:320`) | Pending callback waits for acknowledgement | unaudited; cited by `addon-scheduling-wakes-only-on-acknowledged-readiness` |
+| `setup_socket_eof_is_reactor_readiness` (`:353`) | Setup socket eof is reactor readiness | unaudited; cited by `addon-scheduling-reaches-peer-eof-and-interrupted-wait` |
+| `interrupted_wait_retries_until_success_or_close` (`:374`) | Interrupted wait retries until success or close | unaudited; cited by `addon-scheduling-wakes-only-on-acknowledged-readiness` |
+
+#### `packages/shm-native/src/setup.rs` - 3 tests
+
+| Test | Claim asserted (from the name) | Status |
+| --- | --- | --- |
+| `grant_message_accepts_tagged_setup_envelope` (`:433`) | Grant message accepts tagged setup envelope | unaudited; cited by `addon-grant-decoding-is-the-shared-setup-envelope` |
+| `auth_proofs_match_committed_wire_vectors` (`:452`) | Auth proofs match committed wire vectors | unaudited; cited by `setup-proof-vectors-pin-the-shared-hmac-transcript` |
+| `peer_closed_reports_live_then_dropped_sentinel` (`:479`) | Peer closed reports live then dropped sentinel | unaudited; cited by `addon-grant-decoding-is-the-shared-setup-envelope` |
+
+Total: 78 in-crate tests. Suspiciously quiet: no in-crate test names a
+non-4096 page size, a receiver killed while holding leases, or a full
+`Ring::attach` with one substituted doorbell descriptor.
 
 ## Fuzz targets
 

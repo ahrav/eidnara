@@ -119,3 +119,8 @@ cannot fail regardless of the answer.
   integrity.
 - Conclusion: needs human input. The text is silent on control pages, and
   reading silence as either coverage or exclusion would be a fabricated answer.
+
+### Q: Can a peer still revive a quarantined handle at HEAD? (added 2026-09-05)
+
+- Checked: `Ring.quarantined: Cell<bool>` (`crates/shm-transport/src/backend/ring.rs:883`); `enter_quarantine` (`:1889-1897`) sets it before storing the shared flag; `is_quarantined` (`:1902-1917`) returns the cell when set and latches any observed shared flag. `quarantine_survives_peer_clearing_shared_flag` (`:4257`) and `shared_quarantine_flag_latches_locally_when_observed` (`:3976`) clear the shared flag and assert `try_receive`, `try_reserve`, `trim`, and `arm_data_wait` stay quarantined.
+- Conclusion: no. The record is refreshed to Exercised: yes; the trail above describes the source tree's unlatched gate.

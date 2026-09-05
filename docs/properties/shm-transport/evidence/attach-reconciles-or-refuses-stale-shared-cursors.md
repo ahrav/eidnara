@@ -173,3 +173,8 @@ check to emit: `shm_kill_with_leases_held`.
   requires no further investigation; the normative question decides whether the test
   above asserts reconciliation or asserts refusal, and those are different tests with
   different oracles.
+
+### Q: Does attach inspect the shared cursors at HEAD? (added 2026-09-05)
+
+- Checked: `Ring::attach` (`ring.rs:969-1030`) loads `published`, `arena_write`, `completed`, `arena_reclaimed`, `consumed`, and `active_leases`, refuses a quarantined ring (`:1020-1021`), and runs `conservation_inner(true)` (`:1027`). Six unit tests (`:3478`, `:3573`, `:3612`, `:3715`, `:3789`, `:3806`) refuse inconsistent cursors, phantom leases, orphaned receiver slots, a quarantined ring, a write cursor past the committed frames, and a live slot whose descriptor does not validate.
+- Conclusion: yes, for inconsistent state. Stale-but-consistent state left by a receiver killed while holding leases still passes conservation and is inherited; that residual is what the record now describes.
