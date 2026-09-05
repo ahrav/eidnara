@@ -162,8 +162,19 @@ budget_block() {
 # a state other than complete; cross-NUMA skips are the documented optional
 # outcome and are ignored.
 budget_require_same_l3() {
-  local out="${1:?outdir}" incomplete
-  incomplete=$(grep -L '"state": *"complete"' "$out"/*same-l3*/manifest.json 2>/dev/null || true)
+  local out="${1:?outdir}" incomplete grep_status=0
+  local manifests=( "$out"/*same-l3*/manifest.json )
+  if [[ ! -e "${manifests[0]}" ]]; then
+    echo "no same-L3 manifests under $out; the run has no primary measurement" >&2
+    return 1
+  fi
+  # `grep -L` exits 1 when every file matches (nothing incomplete); any other
+  # nonzero status is a read failure and must not pass as success.
+  incomplete=$(grep -L '"state": *"complete"' "${manifests[@]}") || grep_status=$?
+  if (( grep_status > 1 )); then
+    echo "could not inspect same-L3 manifests under $out" >&2
+    return "$grep_status"
+  fi
   if [[ -n "$incomplete" ]]; then
     echo "$incomplete" >&2
     echo "a required same-L3 arm did not complete; the run has no primary measurement" >&2
