@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "9ba3468c4c7a9c1ae0a01459ae106b7cdda00aaef0071ca463a810d975852bb9",
+  "source_sha256": "3a369a45cc60b2b481fbb72ca433b2e36a74399c43edf80554e05383eac29a87",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -34,27 +34,27 @@
       "slug": "at-most-one-registered-generation-per-connection",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "every accepted setup socket runs `run_connection` unconditionally (`crates/host-runtime/src/runtime.rs:1043`); no configuration gates this path.",
+      "reachability_note": "every accepted setup socket runs `run_connection` unconditionally (`crates/host-runtime/src/runtime.rs:893`, re-verified); no configuration gates this path.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
-        "note": "no test drives drain during the bootstrap-to-promoted transfer."
+        "note": "no test lands a drain between setup completion and the registration at `connection.rs:260` and asserts that no insert occurs."
       },
-      "guarantee": "One accepted socket never has two generations registered in `shared.connections` simultaneously, and a generation minted while draining is never registered.",
+      "guarantee": "One accepted socket never has two generations registered in `shared.connections` simultaneously, and a generation minted while draining or after the shutdown token is cancelled is never registered.",
       "check": {
         "semantics": "always",
-        "condition": "for each connection task, at most one of its minted ids is in the registry at any observation point; and when `draining` is true at the registration check, no insert occurs."
+        "condition": "for each connection task, at most one of its minted ids is in the registry at any observation point; and when `draining` is true or `shutdown.is_cancelled()` at the registration check (`connection.rs:256`), no insert occurs at `:260`."
       },
-      "fault_timing": "the bootstrap is removed inside `close_generation` and the promoted generation is inserted afterwards, so a window exists where neither is registered. The registration check and the shutdown snapshot share the `connections` mutex, which is what makes the interleaving safe.",
-      "required_faults": "a committed non-TCP grant, plus a shutdown or signal drain landing in the transfer window.",
+      "fault_timing": "`run_connection` constructs one `GenerationCore` and the registry has a single insertion at `connection.rs:260`, taken under the `connections` mutex that the shutdown snapshot also holds; that shared lock is what makes the drain-time interleaving safe. The bootstrap-to-promoted transfer window the source catalog described, with its neither-registered gap, was removed with transport negotiation (`ed487e11`) and is recorded in the evidence file as history.",
+      "required_faults": "a shutdown or signal drain landing between setup completion and the registration check at `connection.rs:256`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/at-most-one-registered-generation-per-connection.md). On the exclusion; medium that the neither-registered window is harmless, since the lock ordering was traced but not tested."
+        "evidence": "[evidence](evidence/at-most-one-registered-generation-per-connection.md). The single insertion and its lock are read directly at HEAD; the exclusion is structural now that only one generation exists per connection."
       },
-      "existing_check": "none at HEAD. The cited `tests/lifecycle.rs:1722` `shutdown_during_candidate_setup_reaps_both_channels` covered drain during candidate setup, not during the transfer; the mandatory-ring refactor (`ed487e11`) removed the candidate-handoff path and that test with it, and `tests/lifecycle.rs` at HEAD declares no test by that name. The surviving drain-time half of the guarantee (a generation minted while draining is never registered) has no dedicated check; `tests/lifecycle.rs` shutdown cases execute `run_connection` under drain incidentally and assert nothing about registration.",
-      "impact": "shutdown, route ownership, and Goodbye delivery all enumerate the registry assuming one live owner per socket.",
+      "existing_check": "none at HEAD. The source catalog's `shutdown_during_candidate_setup_reaps_both_channels` was removed with the candidate-handoff path (`ed487e11`); `tests/lifecycle.rs` shutdown cases execute `run_connection` under drain incidentally and assert nothing about registration.",
+      "impact": "shutdown, route ownership, and Goodbye delivery all enumerate the registry assuming one live owner per socket; a generation registered after the drain snapshot is never told to stop.",
       "open_questions": [
-        "Should the promoted generation receive a connection Goodbye when the host drains in the transfer window? Today it gets neither a Goodbye nor a reap. (needs human input)"
+        "Should a generation discarded by the `:256-258` early return receive a connection Goodbye? Today it is cancelled and its writer discarded without one. (needs human input)"
       ],
       "extra": {}
     },
@@ -677,7 +677,7 @@
     },
     {
       "slug": "phase-evidence-outlives-a-long-phase",
-      "type": "liveness",
+      "type": "safety",
       "reachability": "test-only",
       "reachability_note": "the lifecycle record this probe reads is written on every host start (`crates/host-runtime/src/runtime.rs:587` for `Starting`, `:715` for `Running`, re-verified) and on teardown (`lifecycle.rs:384`), but the reader this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outside `crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI (`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify to `default-production` in the wave that lands it.",
       "status": "active",
@@ -1542,7 +1542,9 @@
       },
       "existing_check": "`ring_transport.rs:851-856` `construction_has_no_ring_side_effects` - covers the process owner only, and runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`). Status unaudited.",
       "impact": "two threads driving one direction's cursors is a data race on the shared control page, which the transport's `try_receive` would surface as descriptor validation failure and quarantine at best, and as torn payload delivery at worst.",
-      "open_questions": [],
+      "open_questions": [
+        "Should `PreparedRing` carry a negative marker, or a compile-fail doctest like the two on `frame_channel::ReceiveLease` (`frame_channel.rs:296-308`), so the confinement is enforced rather than reviewed?"
+      ],
       "extra": {
         "Verified by inspection": "`DuplexRing::create` at `ring_transport.rs:248` is inside the thread closure opened at `:240`; `rings` is moved into `run_endpoint` by value at `:265`; `PreparedRing` (`:93-101`) has seven fields and none is a `Ring`; the only values crossing the `sync_channel` at `:231` are a `serde_json::Value` and `[OwnedFd; RING_DESCRIPTOR_COUNT]` - six descriptors post-#131, up from two, still no ring - sent at `:261`."
       }
@@ -1570,7 +1572,9 @@
       },
       "existing_check": "none.",
       "impact": "**Part 1's latency verdict on the producer-side release survives the refactor.** Part 1 judged `Ring::release`'s producer-facing form latent because every non-test `commit` caller discarded the identity. The refactor rewrote all of those callers, and they still discard it. So Part 1's `release-authority-bound-to-lease-ownership` and `release-exactly-once-per-sequence` keep their reachability labels on the producer side, and no re-anchoring of the verdict is needed - only of the line numbers, from `shm_provider.rs:365` to `ring_transport.rs:615`/`:628`.",
-      "open_questions": [],
+      "open_questions": [
+        "Is the producer-side `ReleaseIdentity` return value intended to stay unused? If so, `#[must_use]` on `commit` is currently misleading, and the simpler contract would be for `commit` to return `()` and for identities to exist only on the consumer side. (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -1596,7 +1600,9 @@
       },
       "existing_check": "none in the 2b file set. `crates/shm-transport/tests/contract.rs:472` covers `Admission::release` at the transport layer. Status unaudited.",
       "impact": "a stranded charge is permanent. Since `process_limits` multiplies the per-connection charge by the connection count - post-#131 additionally capped by `MAX_RING_RESIDENT_BYTES` (`ring_transport.rs:60-80`) - one stranded connection's worth of arena bytes permanently removes one connection slot, and the failure presents much later as `RingUnavailable` on an unrelated connect with `state: \"healthy\"` in diagnostics (see `ring-a-host-doctor-emits-one-of-five-declared-terminal-classes`).",
-      "open_questions": [],
+      "open_questions": [
+        "`AdmissionController::release` swallows a `checked_sub` underflow (`profile.rs:516-519`). Is a double release meant to be silent, or should it be a detectable accounting fault?"
+      ],
       "extra": {
         "Verified by inspection": "`Admission` carries an `AdmissionState` (`profile.rs:546-557`) and its `Drop` releases when `Active` (`profile.rs:581-586`); the explicit `release()` at `ring_transport.rs:276` is outside the `catch_unwind`, so a panic inside `run_endpoint` still reaches it; `AdmissionController::release` (`profile.rs:512-520`) is a `checked_sub` that silently no-ops on underflow, so a double release cannot go negative but also cannot be detected."
       }
@@ -1624,7 +1630,9 @@
       },
       "existing_check": "`ring_transport.rs:880` asserts `accounting.quarantined.arena_bytes == 0` on a fresh transport, which is the same value the property says can never change. A second assertion of the same fact is at `:855`. Status unaudited.",
       "impact": "the quarantine accounting that `docs/shm-transport.md:21`, `:65`, and `:79` present as a live safety mechanism is inert on the host. Because the mapping is genuinely unmapped when `run_endpoint` drops the `DuplexRing`, releasing the charge is arguably correct and the doc is what is wrong; but the two readings differ on whether a quarantined ring's arena bytes should be retained against the process bound, and only a human can settle which was intended. This is the release-versus-quarantine policy question, and it is bias 2 in [portfolio-evaluation.md](ring-datapath/portfolio-evaluation.md); it must be settled before this record and [ring-a-admission-charge-releases-on-every-endpoint-thread-exit](#ring-a-admission-charge-releases-on-every-endpoint-thread-exit) can both be right, because one requires the charge to come back on every exit and the other asks whether a condemned ring is an exception.",
-      "open_questions": [],
+      "open_questions": [
+        "Was host-side quarantine accounting deliberately dropped with `provider_recovery.rs`, or lost? Part 1's `quarantine-charge-transition-is-atomic` cited `provider_recovery.rs:187` as its host-side driver, and that file has no successor. (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -1650,7 +1658,10 @@
       },
       "existing_check": "none. `connection.rs:401-404` is the consuming match, not a check.",
       "impact": "two consequences. Operationally, a host-side ring fault is indexed as a peer disconnect, so the diagnostics counters and any operator narrative blame the client. Protocol-wise, `ReadExit::Peer` retires silently and discards the queued frames (`connection.rs:315-318`), which is the correct handling for a peer-caused close but means a host-caused close also produces no terminal, so every pending correlation becomes `outcome_unknown` with no recorded reason.",
-      "open_questions": [],
+      "open_questions": [
+        "Should `publish_one` carry a cause enum rather than `()`? The information exists at each of the four failure sites and is discarded at `:588-590`.",
+        "Is the asymmetry between `:535-537` (`Corrupt`) and `:479-484` (`CleanEof`) for the identical fault deliberate? (needs human input)"
+      ],
       "extra": {
         "Verified by inspection": "`publish_one` returns `Result<(), ()>` (`:560-565`), so every distinct cause is erased to a unit before `run_endpoint` sees it; the `:479-484` block sends nothing; `:354` is the only `CleanEof` producer in the crate; `connection.rs:401` is the only `CleanEof` consumer."
       }
@@ -1678,7 +1689,9 @@
       },
       "existing_check": "none for the ring thread. `panic_boundary.rs` is Part 2a scope.",
       "impact": "the host loses its only transport thread and reports success. Frames admitted after the panic sit in the queue until each hits its admission deadline, so the connection degrades over `frame_deadline` per frame rather than retiring, and diagnostics records nothing at all: no `peer_death`, no `exhaustion`, and `state: \"healthy\"`.",
-      "open_questions": [],
+      "open_questions": [
+        "Should `:591`'s `COMPLETE` store move after the hooks, or should the hooks move inside the inner `catch_unwind`? The two answers differ on whether a hook panic should retire the connection."
+      ],
       "extra": {
         "Verified by inspection": "`:264` discards the `catch_unwind` result; the inner `catch_unwind` closes at `:587`; `:591` stores `COMPLETE` before the hooks run at `:592-598`; `panic_boundary::redact_sync` wraps only the direct serializer (`:610-613`) and not the hooks."
       }
@@ -1706,7 +1719,10 @@
       },
       "existing_check": "`ring_transport.rs:884` asserts `diagnostics[\"exhaustion\"][\"observed\"] == 0` on a transport with no admissions. Nothing covers the other four causes. Status unaudited.",
       "impact": "the host fails closed, which is the important half and holds. But four of five causes are invisible: a host that cannot create shared-memory objects at all refuses every connection while reporting `state: \"healthy\"` with all five counters at zero, and the client sees only `setup_failed`. That is a silent total outage of the only datapath.",
-      "open_questions": [],
+      "open_questions": [
+        "Should `RingUnavailable` carry a closed cause class matching the doctor's five terminal classes (`docs/shm-transport.md:53-59`)?",
+        "On the `prepare` timeout path, should the connection task cancel the ring it abandoned? It currently relies on sender-drop, which the `received == true` branch can defer (see `ring-a-cancellation-close-requires-an-empty-inbound-observation`)."
+      ],
       "extra": {
         "Verified by inspection": "`RingUnavailable` (`:103-112`) is a unit struct with a fixed `Display` string and no cause field; only `:224` increments a counter; `connection.rs:149-164`'s `else` branch is a bare `return` that emits no `ServerMessage`, so the peer observes a closed setup socket and `activate_client` (`client.rs:367`) reports the generic `ClientError::new(\"setup_failed\", ...)` at `client.rs:368`."
       }
@@ -1734,7 +1750,9 @@
       },
       "existing_check": "`ring_transport.rs:883` asserts `diagnostics[\"reclamation\"][\"completed\"] == 1` after a direct `record_reclamation()` call, which exercises the counter and not the ordering. Status unaudited.",
       "impact": "the exact metric a release gate would read as proof that charges came back can be incremented before they did. The gate would pass on a host that is in fact still holding the charge.",
-      "open_questions": [],
+      "open_questions": [
+        "Should `record_reclamation` move onto the endpoint thread, immediately after `admission.release()`, so the counter is release-witnessed by construction?"
+      ],
       "extra": {
         "Verified by inspection": "`connection.rs:208-209` places `record_reclamation` after the `serve_generation` await, and an inner `return` at `:275` still returns there; `AbortOnDropHandle` aborts on drop; `ring_transport.rs:276-277` orders release before the done signal."
       }
@@ -1762,7 +1780,9 @@
       },
       "existing_check": "`ring_transport.rs:859-897` covers the host's healthy branch and its lifecycle counters - four post-#131, since `record_attachment` and the `attachment` field were removed with the eventfd rewrite - and it is a host-side check that cannot reach the client taxonomy at all. On the client side, `packages/plugin/src/shared/host-client/shm-frame-channel.test.ts:47-58` `shared-memory failures collapse to five terminal diagnostic classes` reaches all five classes, but every one of its nine cases is a hand-constructed `new NativeStartupError(...)` or `new Error(...)` (`:49-57`) rather than a produced condition, so it is location coverage of the classifier and not situation coverage of the classes. Status unaudited.",
       "impact": "`docs/shm-transport.md:53-59` promises the operator a five-class terminal taxonomy from `eidnara daemon doctor`. That contract is real and it is met by the client, not by the host, and this record's earlier framing - that four of five producers \"do not exist at all\" - was an artifact of looking for them in Rust. What remains true and matters is narrower: a host that has refused every connection for capacity, or lost every endpoint thread to a hook panic, still reports `state: \"healthy\"` from `diagnostics()`, so the client's classifier only ever sees a terminal condition when its *own* call fails. A host that is unhealthy but still answering produces no terminal class from either side.",
-      "open_questions": [],
+      "open_questions": [
+        "The five-class taxonomy is the client's, and the doc attributes it to `eidnara daemon doctor`. Should the host's `diagnostics()` also derive a class from its own counters, so an unhealthy-but-answering host is classifiable? Today `state` keys on `accounting()` alone (`ring_transport.rs:165-179`) and no counter can move it. (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -1788,7 +1808,10 @@
       },
       "existing_check": "`crates/shm-transport/tests/ring.rs:240` `quarantine_rejects_all_operations_and_reports_conservation` covers the transport-side `Err(Quarantined)` from `release`, not the host's handling of it. Status unaudited.",
       "impact": "this is the host-side counterpart of Part 1's `release-failure-is-observable`, which Part 1 marked `medium` confidence with its host anchor at `shm_provider.rs:365`. That anchor is gone; the surviving host behaviour is the asymmetry above. Scoped correctly after investigation: all three untracked paths return an `Err(ReadClose::..)` that ends the read loop (`:406-411`), so a silent release failure always coincides with the connection retiring and cannot accumulate across its life. What is lost is the signal that the ring was quarantined rather than merely overloaded, and that matters because `ReadClose::Overloaded`'s own doc comment (`frame_channel.rs:40-43`) asserts \"the peer and the transport are healthy\" - false on a quarantined ring. Today `connection.rs:401-404` collapses `Corrupt` and `Overloaded` into the same `ReadExit::Peer`, so the gap is latent and becomes live only if that taxonomy is split.",
-      "open_questions": [],
+      "open_questions": [
+        "Should the `Overloaded` and `Cancelled` paths release explicitly and upgrade a release failure to `Corrupt`? Investigation found this buys nothing until `connection.rs:401-404` stops collapsing the two causes into one `ReadExit`, so the two changes travel together or not at all.",
+        "A peer can condemn the shared ring unilaterally through the public `Ring::enter_quarantine` (`ring.rs:1373`) while the host holds a lease. Is that intended peer authority, or should quarantine be host-initiated only? It is the cheapest route to this record's fault and simultaneously a capability the threat model may not want. (needs human input)"
+      ],
       "extra": {
         "Verified by inspection": "`receive_one`'s return points that follow a successful `try_receive` are `:509`, `:516`, `:525`, `:531`, `:536`, `:539`, `:545`, `:548`, `:556`, `:557`; of those, only `:509` and `:548` route a release error; `lease.rs:201-206` discards the drop-path `Result` with `let _ =`. Re-verified for this disposition: `pub fn enter_quarantine(&self)` at `ring.rs:1373` writes `quarantined` on the lifecycle page with `Ordering::Release`, `is_quarantined` reads it with `Ordering::Acquire` (`:1381-1388`), and both directions of one duplex pair map the same object, so the peer's store is visible to the host's consumer."
       }
@@ -1816,7 +1839,11 @@
       },
       "existing_check": "`ring_transport.rs:1008-1043` `budget_wait_observes_read_cancellation` covers the charge-wait path, and `:809-846` `finish_wakes_after_read_cancellation_with_unread_peer_data` covers the empty-ring report plus the post-cancellation finishing wake. `host-runtime` inline tests run in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`). Status unaudited.",
       "impact": "a cancelled generation's endpoint thread can keep consuming and forwarding peer frames after the close decision. Since the charge is released only when the thread exits (`:276`), a peer that floods during teardown extends the window in which a retiring connection still holds its full admission charge, which is exactly the pressure that turns an ordinary retirement into `RingUnavailable` for the next connect.",
-      "open_questions": [],
+      "open_questions": [
+        "Does `read_loop` stop draining the inbound channel promptly on `read_cancel`, closing the channel and bounding this window? That is in Part 2a's `connection.rs` scope and I did not resolve it. Until it is resolved, the case where the channel neither closes nor drains has **no bound at all**: the `Cancelled` report parks on `inbound.send(..).await` at `:402`. That residual is recorded as unresolved rather than given a wall-clock stand-in.",
+        "Should the `received == true` branch check `root.is_cancelled()`, at the cost of dropping frames the current comment deliberately drains?",
+        "Should the three `inbound.send(..).await` sites carry a deadline, so a report cannot outlive the generation that produced it? Today only the charge wait is deadlined (`:519`, `:527-532`)."
+      ],
       "extra": {}
     },
     {
@@ -1842,7 +1869,9 @@
       },
       "existing_check": "two inline tests are each one precondition short. `copied_control_frame_records_one_host_adapter_copy` (`:961-1005`) uses `ByteBudget::new(1024)` (`:994`), so the charge resolves immediately and the wait is never entered. `budget_wait_observes_read_cancellation` (`:1008-1043`) uses `ByteBudget::new(0)` (`:1028`) and does park in the wait, but its sender queue is empty (`:1024-1026`), so `:533-540` never runs. Neither runs in CI. Status unaudited.",
       "impact": "if this state is never reached, three mechanisms are untested together. The `Overloaded` exit at `:527-532`, whose `ReadClose::Overloaded` doc (`frame_channel.rs:40-43`) asserts \"the peer and the transport are healthy\" - an assertion this record's window can falsify. The outbound servicing whose intent the alternation comment at `:416-420` states. And the longest window in which host code holds a reference into shared storage, which is where Part 1's `quarantine-authority-survives-peer-writes` scenario has the most room. It is also the enabling state for `ring-a-lease-release-failure-is-observable-only-on-the-success-path` and for observing the `Corrupt`-versus-`CleanEof` asymmetry in `ring-a-publish-failure-is-reported-as-a-clean-peer-close`, so leaving it unreached leaves both unfalsifiable.",
-      "open_questions": [],
+      "open_questions": [
+        "Should `receive_one` distinguish \"ring empty\" from \"leases saturated\"? Both arrive as `Ok(None)` from `try_receive` (`ring.rs:1063-1068`, `:1073-1074`) and both collapse to `Ok(false)` at `:500-501`. Investigation found this is moot under the current single-active-lease design and would matter only for a concurrently-leasing consumer, so it is a latent API gap rather than a live one."
+      ],
       "extra": {}
     },
     {
@@ -1868,7 +1897,9 @@
       },
       "existing_check": "none. Part 2a's `the-client-body-budget-refusal-drain-is-never-entered` is the closest analogue and was written against the deleted `frame_read.rs`.",
       "impact": "the wire contract at `docs/host-wire-protocol.md:321` promises that an early oversize-control terminal \"is authoritative for its correlation even if the declared body then truncates, stalls, or EOFs\". On the ring that promise is satisfied vacuously, since there is no separate body to truncate, but the engine still carries the machinery that would have honoured it. The risk is not a current defect; it is that the dead arm looks like coverage.",
-      "open_questions": [],
+      "open_questions": [
+        "Should `RejectedDrainFailed` and `Io` be removed, or retained for a future transport? Removing them would make Part 2a's drain records genuinely closed rather than superseded."
+      ],
       "extra": {
         "Verified by grepping both variants": "`ReadClose::RejectedDrainFailed` appears at `frame_channel.rs:47` (declaration) and `connection.rs:391` (consumer) and nowhere else; `ReadClose::Io` appears at `frame_channel.rs:45` and `connection.rs:403` and nowhere else. `ReadExit::PeerKeepQueue` is produced only at `connection.rs:397`, so the `serve_generation` arm at `connection.rs:304-308` plus the `reject_written` bookkeeping at `connection.rs:385` are dead. `#[allow(dead_code)]` on the `ReadClose` enum (`frame_channel.rs:32`) is what keeps this compiling silently."
       }
@@ -1896,7 +1927,9 @@
       },
       "existing_check": "`frame_channel/contract_tests.rs:141` calls `with_lease` and asserts `lease.segment(0)`, on a hand-built frame. Status unaudited.",
       "impact": "two things. First, the attribute at `frame_channel.rs:476` reads `#[allow(dead_code, reason = \"shared-memory backends supply wrapped bodies\")]` and that reason is false at `HEAD`: the shared-memory backend supplies `owned`. A stale suppression reason is how a genuinely dead branch survives review. Second, `docs/shm-transport.md:19` says the receiver \"validates the descriptor and header before exposing a scoped lease\", which is true of the transport but not of the host boundary: the host exposes a lease over its own copy.",
-      "open_questions": [],
+      "open_questions": [
+        "Is the segmented path intended to return, or should `InboundFrame::segmented`, `ReceiveBody::Segmented`, and `frame_channel::LeaseTracker` be deleted together? `LeaseTracker` (`frame_channel.rs:398-444`), `frame_channel::ProducerReservation` (`:117`), and `ProducedBody` (`:231`) are in the same position: test-only, with `ProducedBody::into_charge` (`:283`) having no caller at all."
+      ],
       "extra": {
         "Verified by grepping": "`InboundFrame::segmented` has zero call sites in the tree, including tests. `ReceiveBody::Segmented` (`frame_channel.rs:448`) is therefore unconstructible, so `with_lease` (`:506-513`) always takes the `Owned` arm and `decode_contiguous`'s `None` arm (`connection.rs:586`) is dead. `ring_transport.rs:552` is the only `InboundFrame` constructor call on the host path and it uses `owned`."
       }
@@ -1924,7 +1957,9 @@
       },
       "existing_check": "`wire.rs:722` `reject_truncated_headers_and_unsupported_versions` and `wire.rs:745` `reject_unknown_frame_type_and_reserved_flag_encodings`, both table-driven over single hand-picked inputs. Neither runs in CI, under this sub-part's `R0`. Status unaudited. **One citation repaired at carry time:** the second test's span is `:745-774`, not `:745-773`; the closing brace is at 774 and the lens range truncated it by one line.",
       "impact": "today, none observable, and the reason was refreshed at carry time. All three production callers pass an exactly-21-byte array, not a variable-length slice: `ring_transport.rs:503` and `:730` pass `&lease.wire_header()`, typed `[u8; WIRE_V2_HEADER_BYTES]` at `crates/shm-transport/src/lease.rs:163` with that constant equal to 21 at `descriptor.rs:10`, and `client.rs:1978` passes `header_bytes: &[u8; HEADER_LEN]` narrowed at `:1977`. **The lens said \"both production callers\" and there are three; the count is repaired and the conclusion is unchanged.** The value of the record is that the reasoning keeping totality true lives nowhere in the tree, and the moment a caller passes a variable-length slice - a coalescing reader, a batched shared-memory descriptor, a future version with a shorter header - the constant indexes become the only thing between a peer and a panic in the read loop.",
-      "open_questions": [],
+      "open_questions": [
+        "Should `header_len_for_version` be required to return at least the largest constant index used by the parse body, so a future version cannot silently make the parse out of bounds? (needs human input)"
+      ],
       "extra": {
         "Missing": "any sweep over arbitrary bytes, any exhaustive length sweep from 0 to 21, and any structured mutation of an accepted seed. There is no fuzz target for this decoder anywhere in the repository (`crates/shm-transport/fuzz` is the only fuzz directory; its three targets are `frame_descriptor.rs`, `provider_grant.rs` and `provider_sample.rs`, all transport decoders)."
       }
@@ -1952,7 +1987,9 @@
       },
       "existing_check": "`wire.rs:703` `little_endian_and_frozen_prefix_layout` (encode direction, distinctive values, plus `buf.len() == HEADER_LEN` at `:718`); `wire.rs:680` `round_trip_request`; `wire.rs:693` `round_trip_all_frame_types`. None runs in CI, under this sub-part's `R0`. Status unaudited.",
       "impact": "this bijection is what makes the frozen-prefix promise in the module header [wire.rs:16-18] mean anything, and it is the only reason a peer's independently written codec can interoperate. A drifted offset that still satisfies the eleven gates produces a frame both sides accept and interpret differently.",
-      "open_questions": [],
+      "open_questions": [
+        "Should `encode` and `decode_header` be generated from one offset table so a transposition is impossible by construction? (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -2004,7 +2041,10 @@
       },
       "existing_check": "none. `tests/protocol_vectors.rs:143` `committed_header_vectors_decode_to_their_documented_fields` asserts the document's byte vectors against the independent `raw_client::decode_header` oracle (`tests/support/raw_client.rs:286`), which is the decode direction over fixed inputs and not encoder refusal. Status: none found.",
       "impact": "this is the encode side of the framing contract, and it is entirely unenforced. A host that emits a frame its own decoder would reject produces stream-alignment corruption at the peer, which the protocol requires the peer to answer by retiring the connection without resynchronization and with no error frame (`docs/host-wire-protocol.md:296`, which lists \"unsupported version, unknown type, invalid flags, nonzero channel-0 epoch, zero epoch on a routed channel, pure-header body\" - three of this record's four holes by name) - an unattributable connection drop. **One citation repaired at carry time:** the lens cited `:293`, which was correct at `1c193ae0`, where that line began \"Clean EOF before any byte of the next header is orderly connection close. EOF after the first header byte, truncated header/body, unsupported version, unknown t...\". The document shrank from 1,031 lines to 936 and that sentence was rewritten; both its clean-close and its retirement clauses now sit in `:296`. `:293` is blank at `HEAD`.",
-      "open_questions": [],
+      "open_questions": [
+        "Should the encoders validate, or should the illegal region be made unconstructible by removing the public field from `Flags` and by giving pure-header types a body-free encoder? (needs human input)",
+        "Should `encode_frame`'s `#[cfg(test)]` gate be reconsidered? It is the only encoder that takes `&[u8]` rather than an owned body, and its existence means the contract-test suite exercises an encoder the production path never uses. (needs human input)"
+      ],
       "extra": {
         "The gap is high confidence and unchanged": "all encoders were read end to end and the only rejection in either production encoder is the body-length cap, at [wire.rs:577] and [:618]. `Flags::new` [wire.rs:146-156] cannot produce the illegal flag values, and the two host flag helpers `response_flags` [wire.rs:636-638] and `pure_header_flags` [wire.rs:642-644] both go through it, so the in-tree host emission paths are safe today by construction rather than by enforcement. **Two things the lens recorded are corrected here.** First, the lens counted three production encoders and cited a third cap at [wire.rs:548]; that cap is inside `encode_frame`, which carries `#[cfg(test)]` at [wire.rs:541] and whose only two callers are `frame_channel/contract_tests.rs:93` and `:163`. So there are two production encoders and one test-only one, and the guarantee is stated over the two. Second, the lens's `medium on reachability` rested on not having audited route allocation; that audit is done above and the allocator is closed, which leaves the hole reachable only through a hand-built handle. The finding survives both corrections: nothing on either production encoder checks the pure-header, Sheddable, reserved-bit or channel-and-epoch rules its own decoder enforces."
       }
@@ -2350,7 +2390,7 @@
       "guarantee": "The post-commit sentinel read never allocates more than `MAX_SETUP_MESSAGE_LEN`, whatever length the peer declares.",
       "check": {
         "semantics": "always",
-        "condition": "declare a length of `u32::MAX` and assert `SetupError::MessageTooLarge` with no allocation of that size. `always` because it must hold on every sentinel read. **This record was split under the portfolio disposition.** It previously carried a second clause, \"and it always yields to `read_cancel`\", which is a liveness obligation about eventual task exit rather than a safety invariant about allocation, and METHOD.md's schema gives each record exactly one `Type`. That clause is now [setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input](#setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input), with an explicit bound, because smuggled into a safety record it had no bound at all."
+        "condition": "for declared lengths of exactly `MAX_SETUP_MESSAGE_LEN` (16 KiB, `setup_socket.rs:25`), `MAX_SETUP_MESSAGE_LEN + 1`, and `u32::MAX`, the exact-cap read is accepted and both over-cap reads return `SetupError::MessageTooLarge` before any body allocation; and across every sentinel read the maximum attempted allocation is at most `MAX_SETUP_MESSAGE_LEN` bytes (observed through the allocator or a counting wrapper), so the check protects the boundary rather than one 4 GiB refusal. `always` because it must hold on every sentinel read. must hold on every sentinel read. **This record was split under the portfolio disposition.** It previously carried a second clause, \"and it always yields to `read_cancel`\", which is a liveness obligation about eventual task exit rather than a safety invariant about allocation, and METHOD.md's schema gives each record exactly one `Type`. That clause is now [setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input](#setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input), with an explicit bound, because smuggled into a safety record it had no bound at all."
       },
       "fault_timing": "none for the cap itself; the check at `setup_socket.rs:361-363` precedes the allocation at `:364`, so the ordering is straight-line and the property is that the ordering does not regress.",
       "required_faults": "a peer that completes commit and then sends a huge length prefix.",
@@ -2974,7 +3014,9 @@
       },
       "existing_check": "`tests/routing.rs:396` `rejected_bind_never_publishes_and_still_reports_route_gone`, `:570` `route_capacity_exhaustion_is_refused_without_binding`, `tests/handler_contract.rs:229` `a_rejected_bind_carries_the_handler_code_to_the_client`. Status unaudited. Not in CI.",
       "impact": "Protocol §8.2 acknowledges an abandoned `route.open` and gives the client a remedy keyed on receiving an *unmatched control `Response`*. On these three exits there is no frame at all, so that remedy never triggers and the client burns its full 30-second route deadline. Repeated bind panics therefore cost one route deadline each.",
-      "open_questions": [],
+      "open_questions": [
+        "Is the `CloseWins` silent exit reachable on a generation that stays live afterwards, or does every producer of that decision also retire the generation? `settle_route` is called from host shutdown, so the host is at least draining; a route `Goodbye` cannot reach it because the client does not yet know the handle. (unresolved, needs the shutdown-path caller list from `harness_closure.rs`, which is sub-part 2f)"
+      ],
       "extra": {}
     },
     {
@@ -3000,7 +3042,10 @@
       },
       "existing_check": "none for this record's postcondition. `connection.rs:946-963` is not a check of it - it constructs a `GenerationCore` for an unrelated claim - but it is the construction proof this record's oracle needs. Status `unaudited`.",
       "impact": "Bounded by the pending-permit pool in the worst case, so this is not unbounded growth. The consequence is a stale `PendingEntry` holding a `CancellationToken` and an `Arc<Settlement>` for the remaining life of the generation, which makes `handle_cancel` for that key a live no-op against an already-dead task.",
-      "open_questions": [],
+      "open_questions": [
+        "Does the forced path always drop the `GenerationCore` immediately afterwards? `close_generation` removes the connection at `dispatch.rs:1409-1413`, but `force_close_all_routes` does not call it. (unresolved, needs sub-part 2f)",
+        "Should the oracle be an in-crate test that reads `pending` directly, or should a test-only accessor expose it so the integration binaries CI might one day run can assert it? The first is free and runs nowhere; the second is a production edit. (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -3026,7 +3071,9 @@
       },
       "existing_check": "none.",
       "impact": "The host cannot report, log, or meter which requests were actually answered. Protocol §10.1 makes an unobserved terminal `outcome_unknown` on the client side; the host has no matching classification, so the two ends cannot be reconciled after a close.",
-      "open_questions": [],
+      "open_questions": [
+        "Should routed terminals carry a `written` hook for metering, given the hook is a boxed closure per frame? (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -3052,7 +3099,9 @@
       },
       "existing_check": "none in this sub-part. Part 2b holds `ring-a-publish-failure-is-reported-as-a-clean-peer-close`, which establishes the close half but not the settlement half.",
       "impact": "The host believes the request was answered and the client believes nothing was answered. Combined with Part 2d's finding that a clean host close and a transport failure share one code, the client cannot attribute the loss, and any effect the handler already applied is invisible to it.",
-      "open_questions": [],
+      "open_questions": [
+        "Does any production handler use `output_from_writer` with a computed `exact_len` that could disagree with its serializer? That is `daemon`'s side of the boundary. (unresolved, needs an `daemon` audit)"
+      ],
       "extra": {}
     },
     {
@@ -3078,7 +3127,10 @@
       },
       "existing_check": "`tests/dispatch.rs:665` for the ceiling. Status unaudited. Not in CI.",
       "impact": "An empty `Response` is indistinguishable from a legitimately empty result at every layer that could reject it, so a handler that abandons its output mid-request and still reports success is invisible. The severity depends entirely on whether an empty `Response` is a supported outcome, which nothing states. Note what this record does **not** cover after narrowing: the *direct*-output underfill, where a declared `exact_len` is never satisfied, is caught - it fails at publication with `ProducerError::Underfill` rather than at this gate, which is [req-a-a-response-publication-failure-never-reaches-the-settling-path](#req-a-a-response-publication-failure-never-reaches-the-settling-path)'s territory. The gap here is specifically the owned path, where declared and written are the same field and zero is legal.",
-      "open_questions": [],
+      "open_questions": [
+        "Is a zero-length `Response` a defect or a supported outcome? `handler.rs:220-235` does not state the intent, and `OutputBuffer::is_empty()` (`:368-370`) exists as public API, which weakly suggests emptiness is a state callers are expected to reason about rather than an error. Settling this decides whether this record is a missing guard or a documentation gap. (needs human input)",
+        "Does any client treat an empty-body `Response` as a protocol violation? The Rust client does not (`client.rs:2022-2031`, verified). The TypeScript peer is Part 5's surface. (unresolved, needs a Part 5 check)"
+      ],
       "extra": {}
     },
     {
@@ -3104,7 +3156,9 @@
       },
       "existing_check": "`tests/dispatch.rs:976` `saturated_broca_reserve_cannot_consume_a_general_slot`, `:1074` `saturated_general_capacity_cannot_consume_the_broca_reserve`, `tests/handler_contract.rs:323` `reservations_must_leave_one_general_slot_in_each_pool`, `:636` `zero_reservation_handlers_keep_single_pool_admission`. Status unaudited. None in CI.",
       "impact": "All four pools are host-global, so one connection can hold every general permit. Per-connection fairness is not provided at this layer; if it is required, it is required somewhere else and nothing here supplies it.",
-      "open_questions": [],
+      "open_questions": [
+        "Is per-connection handler-capacity fairness owned anywhere? `connection_permits` bounds connection count but not per-connection dispatch share. (unresolved, needs sub-part 2f's `runtime.rs` and `config.rs` pass)"
+      ],
       "extra": {}
     },
     {
@@ -3130,7 +3184,9 @@
       },
       "existing_check": "`tests/dispatch.rs:295` constructs the state incidentally. Status unaudited. Not in CI.",
       "impact": "Handler-task capacity is reclaimed only by handler cooperation, client `Cancel`, route close, or generation teardown. A module with a missing internal timeout can hold all 256 general task permits, at which point every other route's traffic gets `server_busy` while the host reports itself healthy.",
-      "open_questions": [],
+      "open_questions": [
+        "Should the host own a request deadline at all, given protocol §11's rule that each operation owns exactly one absolute deadline and it assigns the request deadline to the client? Adding one would create the multiplied timer §11 forbids. (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -3182,7 +3238,9 @@
       },
       "existing_check": "**corrected during disposition from \"none\".** `tests/lifecycle.rs:570-651` `shutdown_refuses_new_routes_and_new_routed_work` asserts this property exactly and in the record's own shape: it holds a drain open with a parked handler (`:584-600`), spawns the shutdown (`:605`), waits for the publication to be unlinked (`:608-615`), then sends a `route.open` and asserts `open_error.error_code() == \"target_unavailable\"` (`:620-632`) and sends a routed request on the still-live route and asserts `request_error.error_code() == \"server_busy\"` (`:634-651`). Both codes, one draining host, one test. Status `unaudited`. **In CI**, unlike every other check this catalog cites: `ci.yml:168-169` runs `--test client --test lifecycle` on Linux. The former macOS run of the same pair was removed by PR #131 (merge `5d638e3e8`), which left `ci.yml` Linux-only.",
       "impact": "Protocol §10.2 tells a client to retry `target_unavailable` \"with new correlation under bounded route deadline\" and `server_busy` \"with backoff\". A draining host therefore invites un-backed-off `route.open` retries from exactly the clients it is trying to shed, while backing off their routed traffic. The divergence is not merely unchecked, it is **pinned by a CI-executed test**, so it is current intended behaviour unless someone changes both the code and that test.",
-      "open_questions": [],
+      "open_questions": [
+        "Which code does the protocol intend for a `route.open` during shutdown? §12 step 1 names `server_busy` for routed requests and is silent on `route.open`; §8.3 reserves `target_unavailable` for route admission failures such as channel exhaustion, which shutdown is not. (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -3208,7 +3266,9 @@
       },
       "existing_check": "`tests/routing.rs:98` `unsupported_operations_leave_the_generation_usable`, `:212` `malformed_control_bodies_are_refused_before_handler_work`. Status unaudited. Not in CI.",
       "impact": "A semantic-rejection flood consumes the same global pool that funds real requests, so malformed control traffic degrades application throughput on every connection, while a capacity-rejection flood is contained per generation. The two attack surfaces have different blast radii for the same client behaviour.",
-      "open_questions": [],
+      "open_questions": [
+        "Protocol §8.3 says a control request is \"one consumer request against the global unsettled bound\", which the semantic path honours. Is charging malformed traffic to the *global* pool rather than a per-generation one the intended reading? (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -3262,7 +3322,10 @@
       },
       "existing_check": "`tests/composite_routing.rs:485-531` pins exactly one `route_gone` for a rejected bind; `tests/composite_routing.rs:532-600` pins that a closed handle cannot dispatch to stale child ownership. Both run in CI in this tree (`ci.yml:118`, `:126`); the unnamed-binary status in [existing-checks.md](request-path/existing-checks.md) is the source repository's. Status unaudited. Both spans re-verified at carry time: `rejected_broca_bind_gets_exactly_one_broca_route_gone` has its attribute at `:485` and its `fn` at `:486`, and `a_closed_route_handle_cannot_dispatch_to_stale_child_ownership` has its attribute at `:532` and its `fn` at `:533`.",
       "impact": "a bind path that never yields `route_gone` leaks one map entry per connection for the host's lifetime, and the leaked entry keeps routing a reused handle to a stale child.",
-      "open_questions": [],
+      "open_questions": [
+        "Does the host guarantee `route_gone` after a panicking `bind`, or only after `Reject` and close? The comment claims all three; the runtime side is outside this lens. **Resolved at carry time, and the answer is yes.** The runtime side is `dispatch.rs`, which is inside *this* sub-part's scope rather than outside it, so the question was answerable here and was not asked. A panic in `bind` propagates out of the spawned task, because `panic_boundary::redact_sync` (`panic_boundary.rs:52-55`) only marks the panic-hook depth and does not `catch_unwind`; `lifecycle_join` observes `is_panic()` at `runtime.rs:187`, trips the fatal latch at `:192-193`, and returns `Err(LifecycleFailure { stopped: true })` at `:194`; and `dispatch.rs:1164` matches that arm and calls `run_route_gone` at `:1166`. All three outcomes the comment at `composite.rs:262-265` names do produce exactly one `route_gone`.",
+        "**A new question, opened by that resolution.** There are three further bind or close outcomes the composite's comment does not name, and on each the map entry is never removed: `dispatch.rs:1174`, where the bind is still executing past `lifecycle_callback_deadline` and the comment at `:1171-1173` deliberately declines to run `route_gone`; `dispatch.rs:1440-1444`, where a dispatch task did not stop before route-gone and the function returns before the `run_route_gone` at `:1446`; and `run_route_gone` returning `false` at `:1276`, where the child's own callback did not return. All three trip the fatal latch, so the leak is bounded by a terminating incarnation rather than by the host's lifetime, which is a weaker bound than this record's `Impact:` assumes but not an unbounded one. Is that bound intended as the answer, or should the composite's map be dropped wholesale on a fatal latch? (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -3304,7 +3367,7 @@
       "guarantee": "If `run` reaches `HostShared` construction, every permit count and byte quantity it computes is non-negative, within `Semaphore::MAX_PERMITS`, and leaves at least one maximum request body of ingress headroom.",
       "check": {
         "semantics": "always",
-        "condition": "at `runtime.rs:882`, assert `max_pending_requests > reservations.pending`, `max_handler_tasks > reservations.tasks`, `general_task_holds < max_handler_tasks - reservations.tasks`, and `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog_resident + retained_bytes`. `always` rather than `always-or-unreached` because this construction is on every successful startup path with no condition, per the map above."
+        "condition": "at `HostShared` construction (`runtime.rs:748`, re-verified; the source catalog cited `:882`), assert `max_pending_requests > reservations.pending`, `max_handler_tasks > reservations.tasks`, `general_task_holds < max_handler_tasks - reservations.tasks`, `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog_resident + retained_bytes`, and, for every count passed to `Semaphore::new` at `:771-779` (pending, task, reserved pending, reserved task, handshake), that the count is at most `Semaphore::MAX_PERMITS`, and for every quantity passed to `ByteBudget::new` at `:762-770` that it is within the budget type's range. `always` rather than `always-or-unreached` because this construction is on every successful startup path with no condition, per the map above."
       },
       "fault_timing": "none. Startup is single-threaded here and the inputs are fixed by the time the gates run.",
       "required_faults": "a handler whose `resource_declarations` sum approaches or exceeds a configured limit. `handler_contract.rs:302-320` already builds one.",
@@ -3384,7 +3447,7 @@
       "guarantee": "The health probe cadence is either the configured `health_interval` or the fixed 50 ms activation cadence, and which one applies is a stated function of the component-reported activation state rather than an unbounded override of operator configuration.",
       "check": {
         "semantics": "always",
-        "condition": "over one of two conjuncts, and the split is the point. **Conjunct 1, which carries the `always` semantics:** at `runtime.rs:1129`, whenever `activation_in_progress` is false the selected interval equals `shared.timing.health_interval` exactly. That is a pass/fail bound, it holds on every loop iteration, and `always` is correct because the selection is unconditional within the loop. **Conjunct 2 has no assertable semantics and is `partial` pending a product decision, having previously masqueraded as a check.** The fast path has *no pass/fail bound in the code to assert*: the earlier text asked an oracle to \"record the number of consecutive iterations that selected 50 ms so a campaign can bound it\", which measures without deciding - every observation passes, so it cannot fail and is therefore not a check. The two candidate bounds a campaign could assert instead are stated here so the decision is a choice between named options rather than an open-ended design question, and neither can be adopted without the open question below being answered, because both invent a limit the code does not contain:"
+        "condition": "over two assertable conjuncts and one measurement, and the split is the point. **Conjunct 0:** at `runtime.rs:972-973` (re-verified), whenever `activation_in_progress` is true the selected interval equals `Duration::from_millis(50)` exactly, and whenever it is false the selected interval equals `shared.timing.health_interval`; both branches are unconditional within the loop, so `always` holds on every iteration. The remaining text names the source catalog's conjuncts. **Conjunct 1, which carries the `always` semantics:** at `runtime.rs:1129`, whenever `activation_in_progress` is false the selected interval equals `shared.timing.health_interval` exactly. That is a pass/fail bound, it holds on every loop iteration, and `always` is correct because the selection is unconditional within the loop. **Conjunct 2 has no assertable semantics and is `partial` pending a product decision, having previously masqueraded as a check.** The fast path has *no pass/fail bound in the code to assert*: the earlier text asked an oracle to \"record the number of consecutive iterations that selected 50 ms so a campaign can bound it\", which measures without deciding - every observation passes, so it cannot fail and is therefore not a check. The two candidate bounds a campaign could assert instead are stated here so the decision is a choice between named options rather than an open-ended design question, and neither can be adopted without the open question below being answered, because both invent a limit the code does not contain: - **A count bound**, `consecutive_fast_probes <= K`, which needs a `K`. Nothing in `HostTiming` supplies one and no constant in `runtime.rs` is a candidate. - **A duration bound**, `time_in_fast_cadence <= lifecycle_callback_deadline` or some other configured span, which needs a decision about which existing knob ought to govern activation, and there is no reading of `config.rs:216-232` under which any of them does. Until one is chosen, the honest oracle is conjunct 1 plus an instrumented count reported as a **measurement**, not asserted. Recording that distinction is what keeps this record from shipping a check that can only pass."
       },
       "fault_timing": "the window is unbounded and that is the finding rather than an accident of the fixture. The predicate at `:1051-1071` is driven entirely by handler-authored strings in the previous report's metrics, so nothing in the host limits how long the fixed cadence persists. A handler that never leaves `starting` holds it forever.",
       "required_faults": "a handler whose `health` report carries `metrics.components.<id>.metrics.storage_state == \"starting\"` or `synapse_state == \"starting\"`, plus a `health_interval` distinguishable from 50 ms. `tests/lifecycle.rs:165` must change its value to make the two branches separable. Conjunct 1 needs only the second half, since it asserts the `else` branch; conjunct 2 needs both.",
@@ -3438,7 +3501,7 @@
       "guarantee": "`run` returns within a stated function of the configured deadlines, that function is stated per exit rather than as one figure, and it is documented wherever `shutdown_deadline` is described.",
       "check": {
         "semantics": "always",
-        "condition": ", per exit, because `shutdown_sequence` has three and they do different amounts of work. From the shutdown token's cancellation to `run`'s return, assert elapsed time is at most:"
+        "condition": ", per exit, because `shutdown_sequence` has three and they do different amounts of work. From the shutdown token's cancellation to `run`'s return, assert elapsed time is at most: - `shutdown_deadline + lifecycle_callback_deadline` on the graceful exit at `runtime.rs:1243`, where the drain or the tracker wait finished inside `deadline` and `run_handler_shutdown` then ran under its own budget (`:1276`); - `shutdown_deadline + 2 * lifecycle_callback_deadline` on the fatal-latch exit at `:1238`, which is the *only* exit that never calls `run_handler_shutdown` (`:1234-1238` returns before `:1240`); - `shutdown_deadline + 3 * lifecycle_callback_deadline` on the forced exit at `:1241`, which pays the drain (`:1148`, `:1200`), the doubled chain (`:1223`, `:1224`), **and** the handler callback (`:1240`, bounded at `:1276`). Each bound also admits the two `force_close_all_routes` calls at `:1206` and `:1216`, which no `timeout` wraps and which are internally bounded at 30 s (`dispatch.rs:1434`) plus 30 s in `run_route_gone`; an oracle should either measure them separately or state that its bound is the sum plus those. `always` because each bound must hold on every shutdown that takes its exit, and the bounds are in the units the code bounds. **Every bound above is conditional, and the condition is not a detail.** These are `tokio::time::timeout` and `timeout_at` budgets over awaited futures, and a timeout cannot preempt a future that never yields. A handler whose `shutdown()` blocks its worker thread instead of awaiting is not interrupted by `:1276`; the function's own doc comment at `:1256-1258` states that the callback \"is never aborted\" and that an overrun \"trips the fatal latch and returns non-graceful while the still-tracked task keeps running\". The same holds for both `tracker.wait()` calls. So the check is `elapsed <= bound` **given cooperatively cancellable callbacks**, and an oracle must construct a yielding slow callback, not a blocking one, or it will time out rather than fail an assertion. A non-yielding callback defeats every finite ceiling here, which is why the previous single-figure framing was not merely imprecise but the wrong shape."
       },
       "fault_timing": "`:1214` fails, then `:1224` awaits a second, fresh budget computed at `:1223` as `lifecycle_callback_deadline.saturating_mul(2)`. At defaults, 60 s armed after a 10 s deadline expired, and then either the fatal latch at `:1234` or 30 s more at `:1240`. `saturating_mul` means a `lifecycle_callback_deadline` above half of `MAX_CONFIG_DURATION` yields a budget the validator would itself reject.",
       "required_faults": "a tracked task that survives the shutdown deadline and then *does* drain, for the `:1241` exit; one that never drains, for the `:1238` exit. `tests/lifecycle.rs:678` and `:714` build the non-yielding callback shape, which reaches the forced path but which, being non-yielding, is the shape that cannot bound anything. Distinguishing the two forced exits is fixture work nothing currently does.",
