@@ -441,7 +441,6 @@ impl ByteBudget {
             })
     }
 
-    #[allow(dead_code)] // U1: used by broca (U4)
     pub(crate) fn available(&self) -> usize {
         self.semaphore.available_permits()
     }
@@ -454,7 +453,6 @@ pub struct ByteCharge {
     permit: Option<OwnedSemaphorePermit>,
 }
 
-#[allow(dead_code)] // U1: split/shrink helpers used by client, synapse, broca (U2-U4)
 impl ByteCharge {
     pub fn none() -> Self {
         Self { permit: None }

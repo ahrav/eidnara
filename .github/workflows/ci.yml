@@ -155,6 +155,19 @@ jobs:
           cargo +1.98 update
           cargo +1.98 check --workspace --all-targets --all-features
 
+      - name: Native addon package (Bun)
+        # The addon loads a release build of the cdylib; the package tests then drive the
+        # setup handshake, ring geometry, buffer bounds, and detachment through N-API.
+        # The claimed-target flag makes an addon-load failure fail the suite instead of
+        # skipping the tests that need the artifact.
+        env:
+          EIDNARA_SHM_NATIVE_CLAIMED_TARGET: "1"
+        run: |
+          bun run --cwd packages/shm-native build:native
+          bun run --cwd packages/shm-native typecheck
+          bun run --cwd packages/shm-native test
+          bun run --cwd packages/shm-native test:capability:bun
+
       - name: Workspace graph has no sibling checkout or metadata stub
         run: |
           set -euo pipefail

@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 
 pub mod auth;
+pub mod broca;
 pub mod client;
 pub mod composite;
 pub mod config;
