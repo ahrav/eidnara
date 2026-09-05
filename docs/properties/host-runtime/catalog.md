@@ -9998,13 +9998,13 @@ Open questions: `CREDENTIAL_ROW_CAP_BYTES` is defined in `subprocess.rs` but not
 Type: safety
 Reachability: test-only - every bundle load through a composed `SynapseComponent` recomputes and compares the fingerprint (`load_bundle` is called only from `crates/host-runtime/src/synapse/mod.rs:1025`), but the component is not on `host_runtime::run`'s default path; an embedder composes it, and in this tree the only compositions are tests and `examples/synapse_host.rs:123`. The daemon that will compose it is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
-Exercised: yes - the committed tiny fixture's fingerprint is recomputed from its manifest; single-bit artifact changes are caught by each artifact's own digest at load.
+Exercised: yes - the committed tiny fixture's fingerprint is recomputed from its manifest and pinned as a literal; each artifact hash is changed alone and shown to move the fingerprint; single-bit artifact changes are caught by each artifact's own digest at load.
 Guarantee: The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.
 Check: `always` - `canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load.
 Fault/timing angle: A fingerprint that omitted an artifact would let a swapped artifact change embedding bytes under an unchanged identity.
 Required faults and enabling state: The committed fixture and its generator's independent fingerprint function.
 Confidence: high - [evidence](evidence/synapse-bundle-fingerprint-covers-every-artifact.md). The pre-image's first line is a renamed identity; the fixture manifest's fingerprint was regenerated once with the generator's Python `canonical_fingerprint`, which also reproduced the predecessor value from the predecessor line.
-Existing check: `the_committed_fixture_carries_its_canonical_fingerprint`, `a_bundle_manifest_outside_the_committed_digest_does_not_load`, `one_bit_changes_to_each_artifact_disable_the_lane` (`crates/host-runtime/tests/synapse_bundle.rs`); audited at U3.
+Existing check: `the_committed_fixture_carries_its_canonical_fingerprint`, `a_bundle_manifest_outside_the_committed_digest_does_not_load`, `one_bit_changes_to_each_artifact_disable_the_lane` (`crates/host-runtime/tests/synapse_bundle.rs`), and `every_artifact_hash_participates_in_the_fingerprint` (`crates/host-runtime/src/synapse/bundle.rs`); audited at U3.
 Impact: A different model produces embeddings under the identity of the certified one.
 Open questions: None.
 

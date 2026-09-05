@@ -5050,19 +5050,19 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint) plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
+      "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint), the committed fingerprint pinned as a literal, a structural test that changes each artifact hash alone and asserts the fingerprint moves, plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "evidence_digest": "8f40f2dc3510037ff79e1b06e57eb23efeb0dd64f1592e0c809f8fd959fea5e2",
+      "evidence_digest": "7051d704ade396ee33b2d9f311c8a9a0712f86d32cc851fe856d351433755a59",
       "check_pointer": "crates/host-runtime/tests/synapse_bundle.rs#the_committed_fixture_carries_its_canonical_fingerprint",
-      "check_hash": "e8219707a8e980b66102e9e25131097261068f7f6a94ac8af705359285826820",
-      "code_hash": "da53a5ad117797ad46a227538b68a603e539c2de9eba36a0a1d81f161a73a320",
+      "check_hash": "2bd1119b04d575d60614e2e51fd6ca2e8b256dc8f5a27d17fb8e47cb428f9e88",
+      "code_hash": "a4d7c3cf9536aa7b33105e0d944393661b18f534afb0e3e5d5573d8b49794fbf",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "8f40f2dc3510037ff79e1b06e57eb23efeb0dd64f1592e0c809f8fd959fea5e2",
+        "digest": "7051d704ade396ee33b2d9f311c8a9a0712f86d32cc851fe856d351433755a59",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },

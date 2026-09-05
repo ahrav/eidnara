@@ -1273,7 +1273,7 @@
         "blob_sha": "1939312fa200dbef74d836b3718b501b12dcd135"
       },
       "destination": "crates/host-runtime/src/synapse/bundle.rs",
-      "destination_sha256": "302d6df973840692d03faf0d06a8364cedb468e27d27a1f12f7fb00cc5eede57",
+      "destination_sha256": "992d755ba838d061081733772ed614fe91d1ba4bf8b2d5b2998fcadb3cedc22b",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -1598,7 +1598,7 @@
         "blob_sha": "15edf81161da8b4eef97ed420f8bc89d3f3e8a51"
       },
       "destination": "crates/host-runtime/tests/synapse_bundle.rs",
-      "destination_sha256": "e8219707a8e980b66102e9e25131097261068f7f6a94ac8af705359285826820",
+      "destination_sha256": "2bd1119b04d575d60614e2e51fd6ca2e8b256dc8f5a27d17fb8e47cb428f9e88",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "cf677bab09849954054fa25a053598e117e8103ac336032dbfcc5358ff92725e",
+      "destination_sha256": "9ba3468c4c7a9c1ae0a01459ae106b7cdda00aaef0071ca463a810d975852bb9",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "3723c1d643134685253ac88e93996eea0e5962dece97e8317ad566057c59c9fb",
+      "destination_sha256": "bb8e42af1e5f781ad3b8ce0e4b3d7d42239223c36dc9d4afffe0c4054de0769a",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -4912,7 +4912,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "destination_sha256": "8f40f2dc3510037ff79e1b06e57eb23efeb0dd64f1592e0c809f8fd959fea5e2",
+      "destination_sha256": "7051d704ade396ee33b2d9f311c8a9a0712f86d32cc851fe856d351433755a59",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "ceed717b87b3745ce3ecca9355550ae398855e0a0fb83eb8371b68cded05ace7",
+      "destination_sha256": "26efe431040ab4b40d329e2f2ae75d2aaa02b636488ace49fb414ef857ffe2ef",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5644,7 +5644,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "9c64572674c78ce7555fe276899901d894da012aa765bb48517e45e5b003c7b2",
+      "destination_sha256": "311de0e2d3296c13e877ef2cdb957c1e7a33173744749ddf8866ca8211fa172f",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
