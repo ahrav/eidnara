@@ -569,6 +569,11 @@ export class NativeReceiveLease {
         return segment;
     }
 
+    /** Records that the addon already consumed this lease's token, so no release call may follow. */
+    markReleased(): void {
+        this.released = true;
+    }
+
     release(): void {
         if (this.released) throw new Error("receive lease is already released");
         // A failure after the addon detached the token cannot be retried; the wrapper releases
@@ -734,15 +739,21 @@ export class NativeChannel {
     drainOne(deliver: (lease: NativeReceiveLease) => void): boolean {
         this.assertOpen();
         return this.native.poll(this.id, (token, header, segments) => {
-            deliver(
-                new NativeReceiveLease(
-                    this.native,
-                    this.id,
-                    token,
-                    segments,
-                    header,
-                ),
+            const lease = new NativeReceiveLease(
+                this.native,
+                this.id,
+                token,
+                segments,
+                header,
             );
+            // A throwing `deliver` makes the addon detach and release the token, so a wrapper
+            // that escaped the callback must not present itself as active afterwards.
+            try {
+                deliver(lease);
+            } catch (error) {
+                lease.markReleased();
+                throw error;
+            }
         });
     }
 

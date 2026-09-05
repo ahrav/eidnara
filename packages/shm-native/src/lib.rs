@@ -1519,8 +1519,11 @@ fn finish_close(registry: &mut Registry, channel_id: u32, result: Result<()>) ->
     if retained {
         return result;
     }
+    // An alias-free channel is removed either way, but a cleanup failure (a reference whose
+    // deletion failed after detachment) is still reported: nothing remains to retry through,
+    // and a silent `Ok` would hide the leaked reference.
     registry.channels.remove(&channel_id);
-    Ok(())
+    result
 }
 
 #[napi]

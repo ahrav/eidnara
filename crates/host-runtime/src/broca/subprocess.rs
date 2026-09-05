@@ -1094,7 +1094,8 @@ async fn terminate_group(
     // Wait for members to disappear rather than treating `SIGKILL` delivery as teardown proof.
     let members_gone = wait_other_members_gone(group, grace).await;
     // Bound `child.wait()` by `grace` to prevent an unreapable leader from blocking teardown indefinitely.
-    if tokio::time::timeout(grace, child.wait()).await.is_err() {
+    // A wait error is as unproven as a timeout: `wait_other_members_gone` excludes the leader, so only a successful reap proves it gone. commentlint: allow(JUDGE)
+    if !matches!(tokio::time::timeout(grace, child.wait()).await, Ok(Ok(_))) {
         return Err(io::Error::other(
             "harness leader was not reapable within the termination grace",
         ));
