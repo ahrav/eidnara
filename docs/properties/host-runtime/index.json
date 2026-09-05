@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "87969166e047391682b41ce1f1ac27319b3e3c3ebde4aecb9f75f4ec80d68931",
+  "source_sha256": "9564dfe276d2a5d6d6e44e5f4d51b24e5525133f33d0b901a7db781b24107d52",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -2556,7 +2556,7 @@
       "status": "active",
       "exercised": {
         "state": "partial",
-        "note": "nothing constructs the ordering, but the thread's *exit* is observed in CI: `tests/shm_soak.rs:54-110` and `tests/shm_failure_modes.rs:193-228` poll until the process thread count returns to a post-close baseline after real `Client::connect`/`close` cycles, so a bridge thread that never left its loop would fail those assertions"
+        "note": "nothing constructs the ordering, but the thread's *exit* is observed in CI by `tests/shm_soak.rs:54-110`, whose `await_envelope` predicate compares the process thread count against a post-close baseline after real `Client::connect`/`close` cycles, so a bridge thread that never left its loop would fail it; `tests/shm_failure_modes.rs:193-228` proves only that a replacement connection can acquire capacity after a close, which a detached bridge thread that holds no host permit does not affect, so it is not evidence of thread exit"
       },
       "guarantee": "The window in which `close()` has returned `Ok` while the detached bridge thread has not yet written its setup-socket Goodbye is genuinely reachable, so a client's departure from the setup socket is not joined to its own close, contrary to protocol `:691`'s \"followed by joined ring teardown and setup-socket close\".",
       "check": {
@@ -3682,7 +3682,7 @@
       "guarantee": "The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v1` and `eidnara-client-v1`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.",
       "check": {
         "semantics": "always",
-        "condition": "`compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every generated or single-field-perturbed input tuple, where `raw_client::proof` is the test-local HMAC implementation of the documented transcript; the equality over arbitrary inputs, not the change under perturbation, is the oracle, and distinct inputs must give distinct proofs. `always` because the transcript is a pure function evaluated on every handshake."
+        "condition": "`compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every generated or single-field-perturbed input tuple, where `raw_client::proof` is the test-local HMAC implementation of the documented transcript; the equality over arbitrary inputs, not the change under perturbation, is the oracle; the campaign does not assert global injectivity, since HMAC-SHA256 over a larger input space must collide somewhere and a found collision would say nothing about transcript conformance. `always` because the transcript is a pure function evaluated on every handshake."
       },
       "fault_timing": "Only an external oracle detects a transcript change both sides apply.",
       "required_faults": "The committed inputs and the test-local HMAC oracle.",
