@@ -87,6 +87,7 @@ interface NativeAddon {
     createExternalProbe(length: number): Uint8Array;
     detachArrayBuffer(buffer: ArrayBuffer): boolean;
     registerCleanupProbe(path: string): void;
+    probeCleanupHooks(): void;
     nativeLeakDiagnostics(): number;
     activeExternalRefCount(): number;
     setExternalViewFailpoint(call: number): void;
@@ -133,6 +134,7 @@ interface NativeAddon {
         ) => void,
     ): boolean;
     watch(channel: number, callback: () => void): void;
+    isWatching(channel: number): boolean;
     readinessHandled(): boolean;
     release(channel: number, token: number): void;
     close(channel: number): void;
@@ -287,12 +289,14 @@ export function probeCapabilities(): NativeCapabilities {
         transferPrevention: false,
         cleanupHooks: false,
     };
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
-        return { available: false, ...base, reason: "node_detachment_unavailable" };
-    }
+    // Load the addon before the Bun check so an unavailable addon does not report as a Node
+    // detachment failure.
     const native = addon();
     if (!native)
         return { available: false, ...base, reason: "addon_unavailable" };
+    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
+        return { available: false, ...base, reason: "node_detachment_unavailable" };
+    }
     try {
         const napiVersion = native.napiVersion();
         if (napiVersion < 8) {
@@ -365,7 +369,14 @@ export function probeCapabilities(): NativeCapabilities {
                 reason: "detachment_unavailable",
             };
         }
-        if (typeof native.registerCleanupProbe !== "function") {
+        let cleanupHooks = false;
+        try {
+            native.probeCleanupHooks();
+            cleanupHooks = true;
+        } catch {
+            cleanupHooks = false;
+        }
+        if (!cleanupHooks) {
             return {
                 available: false,
                 ...base,
@@ -554,7 +565,12 @@ const readinessHandlers = new Map<number, () => void>();
 
 function dispatchReadiness(): void {
     try {
-        for (const handler of [...readinessHandlers.values()]) {
+        for (const [id, handler] of [...readinessHandlers]) {
+            // Handlers for unwatched channels are removed so unrelated wakes do not invoke them.
+            if (loaded?.isWatching(id) === false) {
+                readinessHandlers.delete(id);
+                continue;
+            }
             try {
                 handler();
             } catch {

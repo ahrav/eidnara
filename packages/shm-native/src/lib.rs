@@ -7,7 +7,7 @@ mod setup;
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -262,16 +262,18 @@ pub(crate) fn grant_matches_profile(grant: RingGrant) -> bool {
         && matches(geometry.max_leases, profile.max_leases())
 }
 
+/// Duplicates caller-supplied descriptor numbers with `fcntl`, which reports `EBADF` for
+/// closed descriptors. A `BorrowedFd` would assert a validity JavaScript cannot guarantee.
 fn clone_descriptors(fds: [i32; 3]) -> Result<[OwnedFd; 3]> {
     let mut descriptors = Vec::with_capacity(3);
     for fd in fds {
-        // SAFETY: N-API caller retains each descriptor through this synchronous clone.
-        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-        descriptors.push(
-            borrowed
-                .try_clone_to_owned()
-                .map_err(|_| error("shared-memory attachment failed"))?,
-        );
+        // SAFETY: `fcntl` accepts arbitrary descriptor numbers; a negative result is handled below.
+        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicate < 0 {
+            return Err(error("shared-memory attachment failed"));
+        }
+        // SAFETY: a non-negative `F_DUPFD_CLOEXEC` result is a fresh descriptor this process owns.
+        descriptors.push(unsafe { OwnedFd::from_raw_fd(duplicate) });
     }
     descriptors
         .try_into()
@@ -513,6 +515,24 @@ pub fn register_cleanup_probe(env: &Env, path: String) -> Result<()> {
 }
 
 #[napi]
+pub fn probe_cleanup_hooks(env: &Env) -> Result<()> {
+    lifecycle::probe_async_cleanup_hooks(env)
+}
+
+/// False once the reactor has dropped the channel, including after a dead peer.
+#[napi]
+pub fn is_watching(channel_id: u32) -> bool {
+    REGISTRY.with(|registry| {
+        registry.try_borrow().is_ok_and(|registry| {
+            registry
+                .reactor
+                .as_ref()
+                .is_some_and(|reactor| reactor.is_registered(channel_id))
+        })
+    })
+}
+
+#[napi]
 pub fn native_leak_diagnostics() -> u32 {
     napi_buffers::leak_diagnostics().min(u64::from(u32::MAX)) as u32
 }
@@ -550,10 +570,8 @@ pub fn active_channel_count() -> Result<u32> {
 pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
     {
         const GRANT_HEX_LEN: usize = RingGrant::encoded_len() * 2;
-        // The argument is decoded as a RAW value — before any bindgen
-        // numeric narrowing or property coercion — and every check below
-        // runs before the first fd open, mapping, page touch, or registry
-        // insertion, so a rejected descriptor has zero side effects.
+        // The raw descriptor is checked before bindgen narrowing or coercion.
+        // Rejected descriptors produce no side effects.
         if descriptor.get_type().map_err(|_| descriptor_error())? != ValueType::Object {
             return Err(descriptor_error());
         }
@@ -630,13 +648,15 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
         {
             return Err(descriptor_error());
         }
-        // The distinct-number check cannot detect `dup` aliases. An unopened fd is a
-        // resolution failure, not a malformed descriptor.
-        let files: Vec<BorrowedFd<'_>> = host_to_peer_fds
-            .into_iter()
-            .chain(peer_to_host_fds)
-            // SAFETY: N-API caller retains each descriptor through this synchronous call.
-            .map(|fd| unsafe { BorrowedFd::borrow_raw(fd) })
+        // Duplicating is the first descriptor operation: an unopened number fails here as a
+        // resolution failure. The distinct-number check cannot detect `dup` aliases, so the
+        // duplicates are compared as open files before any mapping or registry insertion.
+        let host_to_peer = clone_descriptors(host_to_peer_fds)?;
+        let peer_to_host = clone_descriptors(peer_to_host_fds)?;
+        let files: Vec<BorrowedFd<'_>> = host_to_peer
+            .iter()
+            .chain(&peer_to_host)
+            .map(AsFd::as_fd)
             .collect();
         setup::reject_aliased_files(&files).map_err(|failure| {
             if failure.kind() == std::io::ErrorKind::InvalidData {
@@ -653,8 +673,8 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
             host_to_peer_grant.encode().to_vec(),
             peer_to_host_grant.encode().to_vec(),
         )?;
-        let from_host = attach_ring(clone_descriptors(host_to_peer_fds)?, host_to_peer_grant)?;
-        let to_host = attach_ring(clone_descriptors(peer_to_host_fds)?, peer_to_host_grant)?;
+        let from_host = attach_ring(host_to_peer, host_to_peer_grant)?;
+        let to_host = attach_ring(peer_to_host, peer_to_host_grant)?;
         REGISTRY.with(|registry| {
             let mut registry = registry
                 .try_borrow_mut()

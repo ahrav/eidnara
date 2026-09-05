@@ -13,7 +13,15 @@ assert.equal(activeNativeChannels(), 0);
 const capability = probeCapabilities();
 if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
         assert.equal(capability.available, false);
-        assert.equal(capability.reason, "node_detachment_unavailable");
+        if (process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1") {
+                assert.equal(capability.reason, "node_detachment_unavailable");
+        } else {
+                assert.ok(
+                        capability.reason === "node_detachment_unavailable" ||
+                                capability.reason === "addon_unavailable",
+                        `unexpected Node reason: ${capability.reason}`,
+                );
+        }
 }
 assert.equal(
         activeNativeChannels(),

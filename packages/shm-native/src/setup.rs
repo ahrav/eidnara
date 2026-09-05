@@ -11,7 +11,7 @@ use rustix::net::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use shm_transport::backend::ring::RingGrant;
-use shm_transport::descriptor::{SETUP_DESCRIPTOR_COUNT, SETUP_MAPPING_COUNT};
+use shm_transport::descriptor::SETUP_DESCRIPTOR_COUNT;
 use subtle::ConstantTimeEq;
 
 use shm_transport::setup_auth::{
@@ -354,10 +354,6 @@ fn receive_grant(
 /// `KCMP_FILE` selects open-file-description comparison for `kcmp(2)` (`linux/kcmp.h`).
 const KCMP_FILE: libc::c_int = 0;
 
-/// Arena-mapping slots of the transferred bundle; all other slots are doorbells. Slot order
-/// is the wire order `Ring::attach` consumes: `[mapping, data, capacity]` per direction.
-const MAPPING_SLOTS: [usize; SETUP_MAPPING_COUNT] = [0, 3];
-
 /// `SCM_RIGHTS` installs a fresh fd per slot even when two slots name one open file.
 /// Duplicates are therefore detected on the open file description, never the fd number.
 /// The setup socket is included: a slot must not alias the stream being read.
@@ -373,11 +369,9 @@ fn reject_aliased_descriptors(descriptors: &[OwnedFd], stream: &UnixStream) -> i
 /// Rejects two slots that name one open file description. `files` holds the six ring
 /// descriptors in wire order, optionally followed by the setup socket.
 ///
-/// Every `eventfd` shares the kernel's anonymous inode, so `(st_dev, st_ino)` is identical
-/// across doorbells. `kcmp(2)` compares open file descriptions instead. `ENOSYS` and `EPERM`
-/// make `kcmp(2)` unavailable; the fallback checks the mapping descriptors and the socket by
-/// inode identity, which is unique for them. Aliased doorbells then pass; the worst they can
-/// do is cross-wake the two rings.
+/// `kcmp(2)` catches duplicates of any descriptor type. When `kcmp(2)` is unavailable,
+/// compare `(st_dev, st_ino)` instead: unique for memfd mappings and `socketpair` doorbells,
+/// but shared by every anonymous-inode descriptor such as an eventfd.
 pub(crate) fn reject_aliased_files(files: &[BorrowedFd<'_>]) -> io::Result<()> {
     for (index, first) in files.iter().enumerate() {
         for second in &files[index + 1..] {
@@ -393,9 +387,8 @@ pub(crate) fn reject_aliased_files(files: &[BorrowedFd<'_>]) -> io::Result<()> {
 
 fn reject_aliased_inodes(files: &[BorrowedFd<'_>]) -> io::Result<()> {
     let mut identities = BTreeSet::new();
-    let trailing = SETUP_DESCRIPTOR_COUNT..files.len();
-    for slot in MAPPING_SLOTS.into_iter().chain(trailing) {
-        let stat = rustix::fs::fstat(files[slot])?;
+    for file in files {
+        let stat = rustix::fs::fstat(file)?;
         if !identities.insert((stat.st_dev, stat.st_ino)) {
             return Err(invalid());
         }
@@ -595,74 +588,100 @@ mod tests {
         );
     }
 
-    #[test]
-    fn distinct_eventfds_are_not_aliases_but_a_dup_is() {
-        use std::os::fd::{AsFd, OwnedFd};
+    /// Builds a bundle shaped like the transport's: memfd mappings and `socketpair` doorbells.
+    fn bundle() -> Vec<std::os::fd::OwnedFd> {
         use std::os::unix::net::UnixStream;
 
-        use rustix::event::{EventfdFlags, eventfd};
-
-        let (stream, _peer) = UnixStream::pair().expect("socket pair");
-        let memfd = |name: &str| -> OwnedFd {
+        let memfd = |name: &str| {
             rustix::fs::memfd_create(name, rustix::fs::MemfdFlags::CLOEXEC).expect("memfd")
         };
-        let doorbell =
-            || eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK).expect("eventfd");
-
-        let bundle = vec![
+        let doorbell = || UnixStream::pair().expect("socketpair").0.into();
+        vec![
             memfd("host"),
             doorbell(),
             doorbell(),
             memfd("peer"),
             doorbell(),
             doorbell(),
-        ];
-        super::reject_aliased_descriptors(&bundle, &stream)
-            .expect("distinct eventfds share an inode yet must be accepted");
+        ]
+    }
+
+    #[test]
+    fn distinct_descriptors_are_accepted_and_a_dup_is_rejected() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixStream;
+
+        let (stream, _peer) = UnixStream::pair().expect("socket pair");
+        let bundle = bundle();
+        super::reject_aliased_descriptors(&bundle, &stream).expect("distinct bundle");
 
         let mut aliased_doorbell = bundle;
         aliased_doorbell[4] = aliased_doorbell[1].try_clone().expect("dup");
-        match super::same_open_file(aliased_doorbell[1].as_fd(), aliased_doorbell[4].as_fd()) {
-            Ok(Some(_)) => {
-                assert!(super::reject_aliased_descriptors(&aliased_doorbell, &stream).is_err());
-            }
-            // Without kcmp a doorbell alias is undetectable by design.
-            Ok(None) => {}
-            Err(error) => panic!("kcmp failed: {error}"),
-        }
-        let mut aliased_socket = aliased_doorbell;
-        aliased_socket[4] = doorbell();
+        assert!(super::reject_aliased_descriptors(&aliased_doorbell, &stream).is_err());
+
+        let mut aliased_mapping = aliased_doorbell;
+        aliased_mapping[4] = UnixStream::pair().expect("socketpair").0.into();
+        aliased_mapping[3] = aliased_mapping[0].try_clone().expect("dup");
+        assert!(super::reject_aliased_descriptors(&aliased_mapping, &stream).is_err());
+
+        let mut aliased_socket = aliased_mapping;
         aliased_socket[3] = stream.as_fd().try_clone_to_owned().expect("dup");
         assert!(super::reject_aliased_descriptors(&aliased_socket, &stream).is_err());
     }
 
     #[test]
-    fn inode_fallback_catches_a_duplicated_mapping() {
-        use std::os::fd::AsFd;
+    fn inode_fallback_rejects_the_same_aliases() {
+        use std::os::fd::{AsFd, BorrowedFd};
         use std::os::unix::net::UnixStream;
+
+        let (stream, _peer) = UnixStream::pair().expect("socket pair");
+        let bundle = bundle();
+        fn files<'a>(
+            bundle: &'a [std::os::fd::OwnedFd],
+            stream: &'a UnixStream,
+        ) -> Vec<BorrowedFd<'a>> {
+            bundle
+                .iter()
+                .map(AsFd::as_fd)
+                .chain([stream.as_fd()])
+                .collect()
+        }
+        super::reject_aliased_inodes(&files(&bundle, &stream)).expect("distinct bundle");
+
+        let mut aliased_doorbell = bundle;
+        aliased_doorbell[4] = aliased_doorbell[1].try_clone().expect("dup");
+        assert!(super::reject_aliased_inodes(&files(&aliased_doorbell, &stream)).is_err());
+
+        let mut aliased_mapping = aliased_doorbell;
+        aliased_mapping[4] = UnixStream::pair().expect("socketpair").0.into();
+        aliased_mapping[3] = aliased_mapping[0].try_clone().expect("dup");
+        assert!(super::reject_aliased_inodes(&files(&aliased_mapping, &stream)).is_err());
+    }
+
+    #[test]
+    fn kcmp_separates_eventfds_that_share_an_inode() {
+        use std::os::fd::AsFd;
 
         use rustix::event::{EventfdFlags, eventfd};
 
-        let (stream, _peer) = UnixStream::pair().expect("socket pair");
-        let mapping =
-            rustix::fs::memfd_create("host", rustix::fs::MemfdFlags::CLOEXEC).expect("memfd");
-        let doorbell =
-            || eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK).expect("eventfd");
-        let bundle = vec![
-            mapping.try_clone().expect("dup"),
-            doorbell(),
-            doorbell(),
-            mapping,
-            doorbell(),
-            doorbell(),
-        ];
-        let files: Vec<_> = bundle
-            .iter()
-            .map(AsFd::as_fd)
-            .chain([stream.as_fd()])
-            .collect();
-        assert!(super::reject_aliased_inodes(&files).is_err());
-        assert!(super::reject_aliased_descriptors(&bundle, &stream).is_err());
+        let first = eventfd(0, EventfdFlags::CLOEXEC).expect("eventfd");
+        let second = eventfd(0, EventfdFlags::CLOEXEC).expect("eventfd");
+        let inode = |fd: &std::os::fd::OwnedFd| {
+            let stat = rustix::fs::fstat(fd).expect("fstat");
+            (stat.st_dev, stat.st_ino)
+        };
+        assert_eq!(
+            inode(&first),
+            inode(&second),
+            "anonymous inodes are expected to collide"
+        );
+        if let Some(same) = super::same_open_file(first.as_fd(), second.as_fd()).expect("kcmp") {
+            assert!(!same, "kcmp must separate distinct eventfds");
+        }
+        let dup = first.try_clone().expect("dup");
+        if let Some(same) = super::same_open_file(first.as_fd(), dup.as_fd()).expect("kcmp") {
+            assert!(same, "kcmp must identify a dup");
+        }
     }
 
     #[test]

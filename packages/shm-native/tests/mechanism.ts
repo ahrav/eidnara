@@ -383,6 +383,70 @@ describe("raw N-API descriptor boundary", () => {
         expect(report.drained).toBe(true);
     });
 
+    test("a dead channel's handler is pruned once the reactor drops it", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        const script = join(scratch, "pruned-handler.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const dead = addon.createTestPair();\n` +
+                `const live = addon.createTestPair();\n` +
+                `const handlers = new Map();\n` +
+                `let deadCalls = 0; let liveDrained = 0;\n` +
+                `const dispatch = () => {\n` +
+                `  try {\n` +
+                `    for (const [id, handler] of [...handlers]) {\n` +
+                `      if (addon.isWatching(id) === false) { handlers.delete(id); continue; }\n` +
+                `      try { handler(); } catch {}\n` +
+                `    }\n` +
+                `  } finally { if (addon.readinessHandled()) queueMicrotask(dispatch); }\n` +
+                `};\n` +
+                `handlers.set(dead.second, () => { deadCalls += 1; while (addon.poll(dead.second, (t) => addon.release(dead.second, t))) {} });\n` +
+                `handlers.set(live.second, () => { while (addon.poll(live.second, (t) => { liveDrained += 1; addon.release(live.second, t); })) {} });\n` +
+                `addon.watch(dead.second, dispatch);\n` +
+                `addon.watch(live.second, dispatch);\n` +
+                `const header = new Uint8Array(21);\n` +
+                `const view = new DataView(header.buffer);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 2); view.setUint8(5, 3);\n` +
+                `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
+                `const publish = (channel, value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(channel, header, 1, 0, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
+                `addon.close(dead.first);\n` +
+                `await until(() => !addon.isWatching(dead.second));\n` +
+                `const deadCallsAfterDeath = deadCalls;\n` +
+                `for (let value = 1; value <= 3; value += 1) { publish(live.first, value); await until(() => liveDrained >= value); }\n` +
+                `console.log(JSON.stringify({ unwatched: !addon.isWatching(dead.second), deadCallsAfterDeath, deadCalls, liveDrained, handlers: handlers.size, deadPeerClosed: addon.peerClosed(dead.second) }));\n` +
+                `addon.close(dead.second); addon.close(live.first); addon.close(live.second);\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            unwatched: boolean;
+            deadCallsAfterDeath: number;
+            deadCalls: number;
+            liveDrained: number;
+            handlers: number;
+            deadPeerClosed: boolean;
+        };
+        expect(report.unwatched).toBe(true);
+        expect(report.deadPeerClosed).toBe(true);
+        expect(report.liveDrained).toBe(3);
+        // Three live wakes ran after the dead channel left the reactor; none reached its handler.
+        expect(report.deadCalls).toBe(report.deadCallsAfterDeath);
+        expect(report.handlers).toBe(1);
+    });
+
     test("readiness acknowledgement preserves a frame published during callback", async () => {
         const addon = loadRawAddon();
         if (!supportsMechanismTests(addon)) return;
