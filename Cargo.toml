@@ -27,7 +27,7 @@ opt-level = 3
 storage-types = { path = "crates/storage-types" }
 lease = { path = "crates/lease" }
 shm-transport = { path = "crates/shm-transport", default-features = false }
-rusqlite = { version = "0.39", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.39", features = ["bundled", "hooks", "functions"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 tempfile = "3"

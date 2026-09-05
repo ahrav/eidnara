@@ -103,6 +103,7 @@ fn lease_key(descriptor: &StorageDescriptor, db_file_name: &str) -> Result<Lease
 mod sqlite_backend {
     use super::*;
     use std::{
+        ffi::c_int,
         path::{Path, PathBuf},
         sync::Mutex,
         time::Duration,
@@ -327,6 +328,38 @@ mod sqlite_backend {
         ) -> rusqlite::Result<()> {
             self.conn.pragma_update(schema, name, value)
         }
+
+        /// Register the function before the first statement that fires a baseline trigger
+        /// calling it; SQLite resolves function names at statement preparation, not at
+        /// trigger creation. Registration is connection-local configuration, so no
+        /// authorizer sees it. Only the maintenance handle exposes it because registered
+        /// functions run arbitrary code during later statements.
+        ///
+        /// # Errors
+        ///
+        /// Returns the SQLite error from registering the function.
+        pub fn create_scalar_function<F, T>(
+            &self,
+            name: &str,
+            argument_count: c_int,
+            flags: rusqlite::functions::FunctionFlags,
+            function: F,
+        ) -> rusqlite::Result<()>
+        where
+            F: Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static,
+            T: rusqlite::types::ToSql,
+        {
+            self.conn
+                .create_scalar_function(name, argument_count, flags, function)
+        }
+
+        /// A cached statement lives at most one callback: installing a callback scope
+        /// sets an authorizer, and SQLite expires every prepared statement when an
+        /// authorizer is set. Size the cache for the distinct statements a single
+        /// callback issues rather than for the store's whole hot-query set.
+        pub fn set_prepared_statement_cache_capacity(&self, capacity: usize) {
+            self.conn.set_prepared_statement_cache_capacity(capacity);
+        }
     }
 
     impl<'a> GuardedConn<'a> {
@@ -363,12 +396,29 @@ mod sqlite_backend {
             self.conn.prepare(sql)
         }
 
+        /// Cached statements run under the callback's authorizer scope.
+        ///
+        /// Installing the scope expires every prepared statement on the connection.
+        /// Each callback re-prepares statements on first use. The cache saves work only
+        /// when one callback runs the same `sql` more than once.
+        ///
+        /// # Errors
+        ///
+        /// Returns the SQLite error from preparing `sql`.
+        pub fn prepare_cached(&self, sql: &str) -> rusqlite::Result<rusqlite::CachedStatement<'a>> {
+            self.conn.prepare_cached(sql)
+        }
+
         pub fn last_insert_rowid(&self) -> i64 {
             self.conn.last_insert_rowid()
         }
 
         pub fn changes(&self) -> u64 {
             self.conn.changes()
+        }
+
+        pub fn total_changes(&self) -> u64 {
+            self.conn.total_changes()
         }
     }
 
@@ -3538,6 +3588,74 @@ mod tests {
         store
             .with_conn_unfenced(|c| c.execute_batch("VACUUM"))
             .expect("VACUUM through the maintenance path");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_maintenance_registered_scalar_function_serves_reads_writes_and_triggers() {
+        let (root, d) = tmp();
+        let store = open_sqlite(
+            &d,
+            "CREATE TABLE t (k TEXT PRIMARY KEY, v TEXT);\
+             CREATE TRIGGER t_tag AFTER INSERT ON t BEGIN \
+               UPDATE t SET v = eidnara_tag(NEW.k) WHERE k = NEW.k; END;",
+        )
+        .expect("open with a trigger calling the function");
+        store
+            .with_conn_unfenced(|c| {
+                c.create_scalar_function(
+                    "eidnara_tag",
+                    1,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                        | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+                    |context| Ok(format!("tagged:{}", context.get::<String>(0)?)),
+                )
+            })
+            .expect("register");
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO t (k) VALUES ('a')", []))
+            .expect("insert fires the trigger");
+        let v: String = store
+            .with_conn(|c| c.query_row("SELECT eidnara_tag(v) FROM t", [], |r| r.get(0)))
+            .expect("read calls the function too");
+        assert_eq!(v, "tagged:tagged:a");
+        // The authorizer still denies `PRAGMA query_only = OFF` after function registration.
+        let r = store.with_conn(|c| c.execute("PRAGMA query_only = OFF", []));
+        assert!(matches!(r, Err(StoreError::Backend(_))), "{r:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cached_statements_run_under_the_callback_scope() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_unfenced(|c| {
+                c.set_prepared_statement_cache_capacity(4);
+                Ok(())
+            })
+            .expect("size the cache");
+        store
+            .with_conn_fenced(|tx| {
+                tx.prepare_cached("INSERT INTO kv (k, v) VALUES (?1, ?2)")?
+                    .execute(["a", "1"])?;
+                tx.prepare_cached("INSERT INTO kv (k, v) VALUES (?1, ?2)")?
+                    .execute(["b", "2"])
+            })
+            .expect("cached inserts inside the fenced write");
+        let n: i64 = store
+            .with_conn(|c| {
+                c.prepare_cached("SELECT COUNT(*) FROM kv")?
+                    .query_row([], |r| r.get(0))
+            })
+            .expect("cached read");
+        assert_eq!(n, 2);
+        // A cached write statement is still a write; the read scope refuses it.
+        let r = store.with_conn(|c| {
+            c.prepare_cached("INSERT INTO kv (k, v) VALUES (?1, ?2)")?
+                .execute(["c", "3"])
+        });
+        assert!(matches!(r, Err(StoreError::Backend(_))), "{r:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
