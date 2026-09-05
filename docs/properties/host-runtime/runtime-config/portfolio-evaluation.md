@@ -380,7 +380,7 @@ case, and the three-exit table, the non-yielding-callback condition, and the
 ceiling-versus-floor correction in the second. This disposition was scoped to
 `catalog.md`, `existing-checks.md`, and `fault-map.md`, and was forbidden from
 touching `evidence/`, `_lenses/`, source, tests, or CI. A second, smaller caveat:
-[../README.md](../README.md) lists this sub-part as owing
+[../README.md](../../README.md) lists this sub-part as owing
 `portfolio-evaluation.md`, which this file discharges, and its per-part record
 count of 14 is still correct; neither line was edited, because README is outside
 this disposition's file footprint.

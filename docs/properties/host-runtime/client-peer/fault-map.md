@@ -181,7 +181,7 @@ constructed dynamically.
 
 **The lens produced exactly one `sometimes` record and it complies with the
 METHOD coverage rule, so it is not duplicated here.**
-[client-a-a-close-completes-before-its-setup-goodbye-is-written](catalog.md#client-a-a-close-completes-before-its-setup-goodbye-is-written)
+[client-a-a-close-completes-before-its-setup-goodbye-is-written](../catalog.md#client-a-a-close-completes-before-its-setup-goodbye-is-written)
 asserts two independent preconditions jointly: `close()` observed returning with
 `within_deadline == true`, and the bridge thread observed still inside its loop
 body or its sleep at that moment. Verified against the rule. It is not paired with
@@ -215,7 +215,7 @@ rather than a new check.
 
 One record's oracle is a marker that must **not** fire, and it is listed
 separately because it is not a coverage check.
-[client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production](catalog.md#client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production)
+[client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production](../catalog.md#client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production)
 needs a marker at `client.rs:1557` that stays silent for a whole production-path
 campaign, paired with `client_validate_inbound_rejected_a_residue_frame_type`
 above. The pairing is what distinguishes "the arm is unreachable" from "the

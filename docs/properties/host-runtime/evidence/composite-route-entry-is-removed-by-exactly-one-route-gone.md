@@ -120,7 +120,7 @@ latch-tripping paths above.
 passes it to `host_runtime::run`; both re-printed at carry time. `composite.rs`
 contains zero `#[cfg]` attributes, verified by grep, so no part of the file is
 gated. The routed path that reaches `handle` and `route_gone` is Fact 1 of the
-catalog's [Reachability](../catalog.md#reachability) section.
+catalog's [Reachability: admission and dispatch](../catalog.md#reachability-admission-and-dispatch) section.
 
 ## Failure scenario
 

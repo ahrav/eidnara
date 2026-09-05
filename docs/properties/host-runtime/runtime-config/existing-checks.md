@@ -371,7 +371,7 @@ The fourth was added by a disposition pass; the first three are as synthesized.
    sub-part by the margin between consequence and coverage**, and it is
    compounded by the store never being constructed in-crate at all: its two
    production constructions are `serve.rs:162` and `:349`, both `.ok()`. Owned by
-   [rt-a-a-closure-store-open-failure-is-classified-not-swallowed](catalog.md#rt-a-a-closure-store-open-failure-is-classified-not-swallowed),
+   [rt-a-a-closure-store-open-failure-is-classified-not-swallowed](../catalog.md#rt-a-a-closure-store-open-failure-is-classified-not-swallowed),
    which is the catalog's only `medium` confidence record precisely because its
    two call sites are outside this footprint.
 
@@ -388,10 +388,10 @@ The fourth was added by a disposition pass; the first three are as synthesized.
    validated for zero and overflow at `:341-363` and for nothing else, so
    `shutdown_deadline` is proven nonzero and never proven to bound shutdown. Owned
    by
-   [rt-a-no-configured-limit-is-silently-clamped](catalog.md#rt-a-no-configured-limit-is-silently-clamped),
-   [rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval](catalog.md#rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval),
+   [rt-a-no-configured-limit-is-silently-clamped](../catalog.md#rt-a-no-configured-limit-is-silently-clamped),
+   [rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval](../catalog.md#rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval),
    and
-   [rt-a-every-published-configuration-field-changes-host-behaviour](catalog.md#rt-a-every-published-configuration-field-changes-host-behaviour).
+   [rt-a-every-published-configuration-field-changes-host-behaviour](../catalog.md#rt-a-every-published-configuration-field-changes-host-behaviour).
 
 3. **`shutdown_sequence`'s forced path makes five unbounded or re-armed decisions
    across three distinct exits, and the sub-part has one shutdown test, about a
@@ -408,7 +408,7 @@ The fourth was added by a disposition pass; the first three are as synthesized.
    test distinguishes. The one in-crate test (`:1326`) covers the shared Goodbye
    deadline, and `tests/lifecycle.rs`, the only CI-named binary that reaches this
    file, tests lifecycle records rather than drain composition. Owned by
-   [rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline](catalog.md#rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline),
+   [rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline](../catalog.md#rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline),
    and it is also where sub-part 2e's unresolved question about un-swept pending
    entries after `force_close_all_routes` has to be answered.
 

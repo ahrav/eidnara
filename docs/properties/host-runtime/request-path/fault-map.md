@@ -190,7 +190,7 @@ never constructed dynamically.
 METHOD coverage rule, so neither is duplicated here.** Verified against the rule
 individually.
 
-[req-a-a-handler-outliving-every-host-deadline-is-reached](catalog.md#req-a-a-handler-outliving-every-host-deadline-is-reached)
+[req-a-a-handler-outliving-every-host-deadline-is-reached](../catalog.md#req-a-a-handler-outliving-every-host-deadline-is-reached)
 asserts a conjunction of three independent legal facts: a handler has held its
 task and pending permits for longer than
 `max(frame_deadline, lifecycle_callback_deadline, route_close_budget)`,
@@ -200,12 +200,12 @@ Each is legal on a correct build, because `HostTiming` (`config.rs:199-218`) is
 deadline to the client. It is not paired with any `always(!X)`, and none of its
 three conjuncts is a violation. So it needs no companion marker.
 
-[req-a-both-admission-classes-and-the-rejection-bound-saturate](catalog.md#req-a-both-admission-classes-and-the-rejection-bound-saturate)
+[req-a-both-admission-classes-and-the-rejection-bound-saturate](../catalog.md#req-a-both-admission-classes-and-the-rejection-bound-saturate)
 asserts that each of five saturation states occurs at least once. All five are
 legal designed outcomes: `try_acquire_owned` is *specified* to fail rather than
 wait (`dispatch.rs:881-883`), and `busy_rejects` exhaustion is *specified* to
 cancel and discard (`:630-636`). The one pairing to be careful about is with
-[req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired](catalog.md#req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired),
+[req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired](../catalog.md#req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired),
 which is `always(terminal queued OR generation retired)`. `busy_rejects`
 exhaustion is the *precondition of the second disjunct*, not the negation of the
 `always`, so the pair is legal and is not the forbidden
@@ -408,7 +408,7 @@ zero CI execution of it.
 ## Map addition: the two records carried from `part-2b-wire-and-channels`
 
 Appended when the two composite records were carried into this sub-part; see
-[catalog.md](catalog.md#group-f-composite-route-ownership-and-panic-containment).
+[catalog.md](../catalog.md#group-f-composite-route-ownership-and-panic-containment).
 The 14-record map above is unchanged, and so are its totals. **"Non-vacuous
 today" carries the same meaning as above:** a developer can construct the required
 state with the current harness. It does not mean the check runs anywhere; under

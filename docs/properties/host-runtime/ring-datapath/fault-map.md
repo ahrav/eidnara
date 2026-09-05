@@ -66,7 +66,7 @@ other ways in.**
 > point is what the refactor deleted and is not constructible without rebuilding
 > it.** The distinction is exactly the one this sub-part's records need. Killing
 > a peer between `request_published` and `response_published` is the fault that
-> makes [ring-a-publish-failure-is-reported-as-a-clean-peer-close](catalog.md#ring-a-publish-failure-is-reported-as-a-clean-peer-close)
+> makes [ring-a-publish-failure-is-reported-as-a-clean-peer-close](../catalog.md#ring-a-publish-failure-is-reported-as-a-clean-peer-close)
 > and the `Corrupt`-versus-`CleanEof` asymmetry observable, and the three roles
 > that survive (`setup`, `active`, `idle`) are all quiescent points. The publish
 > hook the deleted harness used for `response_published` still exists
@@ -215,7 +215,7 @@ never constructed dynamically.
 
 **There are now two `sometimes` records.** The lens produced one; the portfolio
 disposition produced the second by rewriting
-[ring-a-host-doctor-emits-one-of-five-declared-terminal-classes](catalog.md#ring-a-host-doctor-emits-one-of-five-declared-terminal-classes)
+[ring-a-host-doctor-emits-one-of-five-declared-terminal-classes](../catalog.md#ring-a-host-doctor-emits-one-of-five-declared-terminal-classes)
 from `reachable` to `sometimes`. That record needs a marker name, since METHOD.md
 requires names to be constant and globally unique: assign
 `ring_doctor_reported_a_terminal_class_from_a_produced_condition`, one firing per
@@ -224,7 +224,7 @@ name. It complies with the coverage rule: a produced terminal condition is a
 legal operational state, and the marker is not paired with any `always(!X)` on the
 same predicate. The lens's own `sometimes` record complies too and is not
 duplicated here.
-[ring-a-ingress-wait-holds-a-lease-while-servicing-egress](catalog.md#ring-a-ingress-wait-holds-a-lease-while-servicing-egress)
+[ring-a-ingress-wait-holds-a-lease-while-servicing-egress](../catalog.md#ring-a-ingress-wait-holds-a-lease-while-servicing-egress)
 asserts two independent preconditions jointly - a lease held with `try_charge`
 having failed at least once, and the publish-from-wait branch at `:504-509`
 having executed in the same invocation. Verified against the rule: it is not
@@ -401,7 +401,7 @@ They are not.
 ## Map addition: the four records carried from `part-2b-wire-and-channels`
 
 Appended when the four wire-header records were carried into this sub-part; see
-[catalog.md](catalog.md#group-g-the-wire-header-decode-contract). The 14-record
+[catalog.md](../catalog.md#group-g-the-wire-header-decode-contract). The 14-record
 map above is unchanged, and so are its totals. **"Non-vacuous today" carries the
 same meaning as above:** a developer can construct the required state with the
 current harness. It does not mean the check runs anywhere; under `R0` none of
@@ -493,9 +493,9 @@ produce frames the host's own decoder refuses, and
 `docs/host-wire-protocol.md:296` requires the receiving peer to answer by
 retiring the connection with no error frame. That failure mode composes with two
 records above rather than standing alone -
-[ring-a-publish-failure-is-reported-as-a-clean-peer-close](catalog.md#ring-a-publish-failure-is-reported-as-a-clean-peer-close)
+[ring-a-publish-failure-is-reported-as-a-clean-peer-close](../catalog.md#ring-a-publish-failure-is-reported-as-a-clean-peer-close)
 and
-[ring-a-endpoint-thread-panic-is-reported-as-orderly-completion](catalog.md#ring-a-endpoint-thread-panic-is-reported-as-orderly-completion)
+[ring-a-endpoint-thread-panic-is-reported-as-orderly-completion](../catalog.md#ring-a-endpoint-thread-panic-is-reported-as-orderly-completion)
 - both of which establish that the host reports such an outcome as an orderly or
 clean close. So an emit-side contract break surfaces as an unattributable peer
 drop, which is the same attribution hole those two records already name from the

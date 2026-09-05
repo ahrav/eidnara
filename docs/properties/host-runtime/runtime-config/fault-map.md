@@ -99,7 +99,7 @@ conditionality map: `runtime::run` has exactly one non-test caller
 (`serve.rs:632`), nothing in the sequence is `cfg`-gated, and the only conditional
 steps are `set_publish_hook` (test-only), the setup-socket bind and publish pair,
 and the per-connection liveness loop. The one `explicit-config-only` record is
-[rt-a-every-published-configuration-field-changes-host-behaviour](catalog.md#rt-a-every-published-configuration-field-changes-host-behaviour),
+[rt-a-every-published-configuration-field-changes-host-behaviour](../catalog.md#rt-a-every-published-configuration-field-changes-host-behaviour),
 whose subject is what an embedder can set rather than what production does set;
 its row notes the consequence.
 
@@ -193,13 +193,13 @@ constructed dynamically.
 coverage rule, so neither is duplicated here.** Verified against the rule
 individually.
 
-[rt-a-the-activation-fast-probe-interval-is-entered](catalog.md#rt-a-the-activation-fast-probe-interval-is-entered)
+[rt-a-the-activation-fast-probe-interval-is-entered](../catalog.md#rt-a-the-activation-fast-probe-interval-is-entered)
 is a marker at `runtime.rs:1130`, fired when the fixed interval is selected. That
 branch is a *designed* outcome, not a violation: the comment structure around
 `:1129-1133` makes fast polling during activation the intent, and protocol `:596`
 requires the host to stay usable while storage opens. The one pairing to be
 careful about is with
-[rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval](catalog.md#rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval),
+[rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval](../catalog.md#rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval),
 which is `always(selected interval == health_interval whenever
 activation_in_progress is false)` - that record's first conjunct, and the only one
 of its two that is a pass/fail assertion at all. The marker fires when the
@@ -210,7 +210,7 @@ write by accident. The disposition that split that record into an assertable
 conjunct and a measured one does not change this argument: the marker pairs with
 the assertable conjunct, and the measured one asserts nothing to be paired with.
 
-[rt-a-an-initialized-handler-drains-without-publishing](catalog.md#rt-a-an-initialized-handler-drains-without-publishing)
+[rt-a-an-initialized-handler-drains-without-publishing](../catalog.md#rt-a-an-initialized-handler-drains-without-publishing)
 is a marker inside `PrePublicationCleanup::finish` (`:351`), fired only when
 initialization had returned `Ok`. It is a legal state on all three entries: the
 shutdown-token entry at `:831` is a specified early return, and the bind and
@@ -392,7 +392,7 @@ target.
    observing the permit pools rather than the outcome. Note that 2e's five-state
    saturation campaign reaches the same evidence from the admission side, so the
    cheaper path may be to let
-   [../part-2e-request-path/catalog.md#req-a-both-admission-classes-and-the-rejection-bound-saturate](../part-2e-request-path/catalog.md#req-a-both-admission-classes-and-the-rejection-bound-saturate)
+   [../part-2e-request-path/catalog.md#req-a-both-admission-classes-and-the-rejection-bound-saturate](../catalog.md#req-a-both-admission-classes-and-the-rejection-bound-saturate)
    own it and cite that result here.
 
 10. **`F8`, a stalling-peer fixture.** The only route to

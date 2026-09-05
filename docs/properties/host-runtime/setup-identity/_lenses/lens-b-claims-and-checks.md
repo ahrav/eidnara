@@ -39,7 +39,7 @@ Recorded in full under "Documentation describing deleted mechanisms".
 The re-scope's CI findings were re-derived, not copied; all hold. The
 line-level refinements and the one correction are identical to those recorded in
 the 2b sibling lens
-([../../part-2b-ring-datapath/_lenses/lens-b-claims-and-checks.md](../../part-2b-ring-datapath/_lenses/lens-b-claims-and-checks.md)),
+([../../part-2b-ring-datapath/_lenses/lens-b-claims-and-checks.md](../../ring-datapath/_lenses/lens-b-claims-and-checks.md)),
 so they are stated once there and only the two facts that differ for this
 sub-part appear here.
 

@@ -616,7 +616,7 @@ behaviour, and it resolves the re-scope open question at
 Required faults and enabling state: a peer that completes commit and then sends a
 huge length prefix, and separately one that sends a partial prefix and stalls
 while the connection is cancelled.
-Confidence: high - [evidence](../../evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md).
+Confidence: high - [evidence](../../evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap.md).
 Verified: the cap at `setup_socket.rs:361-363` precedes the `vec![0u8; len]` at
 `:364`, and the `select!` at `connection.rs:196-206` is `biased` with
 `read_cancel` first.

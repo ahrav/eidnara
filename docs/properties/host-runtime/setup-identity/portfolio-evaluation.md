@@ -323,7 +323,7 @@ Recorded, not mined.
 ## Biases requiring human judgment
 
 **This sub-part originates no new bias.** Both biases needing a human are recorded
-in [../part-2b-ring-datapath/portfolio-evaluation.md](../part-2b-ring-datapath/portfolio-evaluation.md)
+in [../part-2b-ring-datapath/portfolio-evaluation.md](../ring-datapath/portfolio-evaluation.md)
 and are stated there because that is where the records they govern live. Both reach
 into 2c and neither can be settled here.
 

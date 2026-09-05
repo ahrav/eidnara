@@ -448,10 +448,10 @@ case.
    a clean `Goodbye` and an unexpected setup-socket loss are distinct (`:296`,
    `:691`), and that Ping/Pong is owned independently of application waits
    (`:683`). Owned by
-   [client-a-a-close-completes-before-its-setup-goodbye-is-written](catalog.md#client-a-a-close-completes-before-its-setup-goodbye-is-written),
-   [client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye](catalog.md#client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye),
+   [client-a-a-close-completes-before-its-setup-goodbye-is-written](../catalog.md#client-a-a-close-completes-before-its-setup-goodbye-is-written),
+   [client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye](../catalog.md#client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye),
    and
-   [client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget](catalog.md#client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget).
+   [client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget](../catalog.md#client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget).
 
 2. **The retirement cause is discarded at exactly the point where it is the only
    diagnostic, and two tests pin the loss in place.** `retire` (`:1667`) receives
@@ -467,9 +467,9 @@ case.
    `connection_retired` at `:2408`, and another asserts `generation_retired` at
    `:2556` and `:3043` - so the suite ratifies the erasure. Nothing asserts what a
    late caller can learn about the cause. Owned by
-   [client-a-a-retired-generation-forgets-why-it-retired](catalog.md#client-a-a-retired-generation-forgets-why-it-retired)
+   [client-a-a-retired-generation-forgets-why-it-retired](../catalog.md#client-a-a-retired-generation-forgets-why-it-retired)
    and
-   [client-a-a-clean-host-close-and-a-transport-failure-share-one-code](catalog.md#client-a-a-clean-host-close-and-a-transport-failure-share-one-code).
+   [client-a-a-clean-host-close-and-a-transport-failure-share-one-code](../catalog.md#client-a-a-clean-host-close-and-a-transport-failure-share-one-code).
 
 3. **The route map is the one unbounded collection, it silently merges duplicate
    binds, and the bound it lacks is the one the document names.**
@@ -483,9 +483,9 @@ case.
    is never released either. Nothing tests either the growth or the merge. The two
    route tests that exist (`:3503`, `:3587`) cover the late-bind path, and neither
    runs in CI. Owned by
-   [client-a-live-route-handles-are-bounded-only-by-the-host](catalog.md#client-a-live-route-handles-are-bounded-only-by-the-host)
+   [client-a-live-route-handles-are-bounded-only-by-the-host](../catalog.md#client-a-live-route-handles-are-bounded-only-by-the-host)
    and
-   [client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle](catalog.md#client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle).
+   [client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle](../catalog.md#client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle).
 
 ## Sampling limits on this inventory
 

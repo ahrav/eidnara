@@ -125,7 +125,7 @@ checks, and the number CI executes is zero.
 > `shutdown_refuses_new_routes_and_new_routed_work` sends a `route.open` and a
 > routed request into one draining host and asserts `target_unavailable` at `:638`
 > and `server_busy` at `:657` - which is
-> [req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes](catalog.md#req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes)
+> [req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes](../catalog.md#req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes)
 > in full, in the record's own shape, including the parked handler that holds the
 > drain open (`:582`, `:590-606`). `lifecycle` is named at `ci.yml:178-179`
 > (Linux) and `:187` (macOS), so the check runs on two platforms. It is not in the
@@ -386,10 +386,10 @@ proves. The framing point that applies to all three: this is not thin coverage.
    highest-consequence findings in this catalog all land where in-crate coverage
    is thinnest. `tests/dispatch.rs` (20 tests) is the real coverage, and CI does
    not name it. Owned by
-   [req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame](catalog.md#req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame),
-   [req-a-a-handler-response-is-length-checked-and-never-content-checked](catalog.md#req-a-a-handler-response-is-length-checked-and-never-content-checked),
+   [req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame](../catalog.md#req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame),
+   [req-a-a-handler-response-is-length-checked-and-never-content-checked](../catalog.md#req-a-a-handler-response-is-length-checked-and-never-content-checked),
    and
-   [req-a-a-routed-terminal-carries-no-delivery-acknowledgement](catalog.md#req-a-a-routed-terminal-carries-no-delivery-acknowledgement).
+   [req-a-a-routed-terminal-carries-no-delivery-acknowledgement](../catalog.md#req-a-a-routed-terminal-carries-no-delivery-acknowledgement).
 
 2. **The silent exits emit no terminal, no cause, and no counter.** At `:1058`,
    `:1164`, `:1174`, and `:1199` the code emits no frame, records no cause, and
@@ -405,10 +405,10 @@ proves. The framing point that applies to all three: this is not thin coverage.
    with the same absence of a counter. Contrast `ring_transport.rs:209-228`,
    which maintains four lifecycle counters for a strictly less consequential set
    of events. Owned by
-   [req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired](catalog.md#req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired),
-   [req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining](catalog.md#req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining),
+   [req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired](../catalog.md#req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired),
+   [req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining](../catalog.md#req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining),
    and
-   [req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close](catalog.md#req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close).
+   [req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close](../catalog.md#req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close).
 
    **Ownership correction applied during disposition: one of the four exits is
    owned by nothing.** The three records above cover `:637-638` (pre-dispatch),
@@ -502,9 +502,9 @@ Stated so a later pass knows what was and was not looked at.
 ## Checks cited by the two records carried from `part-2b-wire-and-channels`
 
 Appended when the two composite records were carried into this sub-part; see
-[catalog.md](catalog.md#group-f-composite-route-ownership-and-panic-containment)
+[catalog.md](../catalog.md#group-f-composite-route-ownership-and-panic-containment)
 for the carry and
-[../part-2b-wire-and-channels/README.md](../part-2b-wire-and-channels/README.md)
+`part-2b-wire-and-channels/README.md` (source-tree only, not migrated)
 for the superseded directory. Nothing above changes. This section adds only the
 named checks those two records cite, so every check they name is in the
 inventory.
