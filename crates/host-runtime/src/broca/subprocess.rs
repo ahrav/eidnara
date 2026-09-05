@@ -1282,11 +1282,31 @@ impl PrivateDir {
 }
 
 impl Drop for PrivateDir {
+    /// A guard can be dropped on a runtime worker (a cleanup future abandoned while waiting for a blocking slot), so the recursive delete is handed to the cleanup thread rather than run inline. commentlint: allow(JUDGE)
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            let _ = fs::remove_dir_all(path);
+            defer_remove_dir(path);
         }
     }
+}
+
+/// One immortal thread performs best-effort removals for dropped [`PrivateDir`] guards.
+/// The queue is bounded like the spawn queue; a directory that cannot be queued stays for the startup run-dir sweep, which is the same fallback a failed `remove_dir_all` already relies on. commentlint: allow(JUDGE)
+fn defer_remove_dir(path: PathBuf) {
+    static CLEANUP: OnceLock<std::sync::mpsc::SyncSender<PathBuf>> = OnceLock::new();
+    let sender = CLEANUP.get_or_init(|| {
+        let (sender, paths) = std::sync::mpsc::sync_channel::<PathBuf>(BLOCKING_SLOTS);
+        std::thread::Builder::new()
+            .name("broca-cleanup".to_owned())
+            .spawn(move || {
+                while let Ok(path) = paths.recv() {
+                    let _ = fs::remove_dir_all(path);
+                }
+            })
+            .expect("spawn the broca-cleanup thread");
+        sender
+    });
+    let _ = sender.try_send(path);
 }
 
 /// A cleanup failure converts a completed run to a failure because sensitive files may remain.
