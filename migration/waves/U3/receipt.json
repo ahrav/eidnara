@@ -79,6 +79,11 @@
       "repo": "host",
       "blob_sha": "6b9cd0dbd6d9a2afe43373134b4d8d56054710f4",
       "reason": "source catalog part-2f-runtime-config merged into docs/properties/host-runtime/catalog.md"
+    },
+    {
+      "repo": "host",
+      "blob_sha": "da0c4eb8d9a48d171a33574b380752e183286751",
+      "reason": "filesystem write-permission probe left in the source catalog directory (six bytes, `probe`); a tool artifact, not a document, so it is not carried"
     }
   ],
   "property_impact": "migration/waves/U3/property-impact.json",
@@ -2123,7 +2128,7 @@
       },
       "destination": "docs/properties/shm-transport/portfolio-evaluation.md",
       "destination_sha256": "b31e51603c39caf86a855299a158cfe6897b1fdf4a92f66f5f611d37080f3793",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -2211,7 +2216,7 @@
       },
       "destination": "docs/properties/shm-transport/evidence/fuzz-harness-encoding-tracks-the-production-descriptor.md",
       "destination_sha256": "1f458ec31904aec6eb76aaef2cba7fbc894f7063f59483e956328ba3158d09dc",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -2718,7 +2723,7 @@
       },
       "destination": "docs/properties/shm-transport/evidence/measured-transfer-is-witnessed-by-the-data.md",
       "destination_sha256": "28321403f0c69f12157640e15b2be639251d4a1b184c3858d75f2a74b000ac8d",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3073,7 +3078,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md",
       "destination_sha256": "e20bdf164725dd8996e29b5214028a12dcaab03ffb71db295c24149781e5ecd7",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3099,7 +3104,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md",
       "destination_sha256": "cd684cb89bff05ddfddd3cc3dd71f485ee81dd1ed8f81ac773f6dfa855b48cee",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3138,7 +3143,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md",
       "destination_sha256": "4940e002442862212df44722df72ec26d3144a27627025c6e9333f35e9312080",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3151,7 +3156,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/a-zero-length-read-ends-the-read-instead-of-looping.md",
       "destination_sha256": "75b22ebdc8c7e5257705ccebbc78f33db4d90801575911b3f3cb9b6c2d5e4a9b",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3242,7 +3247,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/cancellation-preempts-every-bounded-frame-read.md",
       "destination_sha256": "16864b8d4db9aa464521bfbef6ba349b818578f83791564bf0f0f33140195284",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3307,7 +3312,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/draining-rendezvous-is-released-or-the-loss-is-declared.md",
       "destination_sha256": "2b414e8bf2e852159bd09c3e300b20a3f82ce2292161a967298b5678f12ac4c9",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3424,7 +3429,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md",
       "destination_sha256": "9cd0f939cd65ec5848567c5feb0e7029079b3d1a54a680ce17db76636ed660c3",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3450,7 +3455,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/no-framed-read-resumes-after-a-read-stop.md",
       "destination_sha256": "2a7f85449ea4008cbaa12442d55f0849ed8b8d1e2925e2491a91d2e240536d7c",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3463,7 +3468,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/no-generation-registers-after-the-drain-snapshot.md",
       "destination_sha256": "684dd19275c4a0b6bdab42e429832e1c4de7014392a5bffe2a4bbeab1902ac51",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3476,7 +3481,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/no-task-outlives-the-generation-it-serves.md",
       "destination_sha256": "cf5d9db3422ba4936cc57331eceacb87f7ceb9668f4d06530fe64683e90ebba6",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3489,7 +3494,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/no-writer-hook-panic-poisons-a-generation-lock.md",
       "destination_sha256": "745076ecc851ac2e4da8b1d029a44fa4cedb817aa49cb4b2c2406dcd7264d943",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3723,7 +3728,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/the-client-body-budget-refusal-drain-is-never-entered.md",
       "destination_sha256": "837634f433d8704b7aeb7f878a4429c06b8c9fb483d020883dc7bc97b19aa624",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -3762,7 +3767,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/the-writer-task-is-abortable-through-a-stated-owner.md",
       "destination_sha256": "18f8c98b996d7aa3004881b11e9e7c2f4a0c8edac5d9df6bc2c319c11062f576",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4282,7 +4287,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/client-a-a-retired-generation-forgets-why-it-retired.md",
       "destination_sha256": "75ca9f32a70014b5eccd0f211c028772cf32ce1c9c8109f282a5b9456cb8c667",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4295,7 +4300,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye.md",
       "destination_sha256": "621ea35a9bef2ff6b07d8478cb1920cee9c7e4c6228fa375ef0fc43ee95279ed",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4308,7 +4313,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/client-a-every-in-flight-request-is-settled-with-a-classified-send-outcome.md",
       "destination_sha256": "65af308fddf18344cc6bd92084b7358afd654a491a06ab9d51ee4917481eabe9",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4425,7 +4430,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/req-a-a-handler-outliving-every-host-deadline-is-reached.md",
       "destination_sha256": "b4e893d8620899210b6d3aa4ec6195380540bd94c3f80f14b0a59a8d76380659",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4477,7 +4482,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining.md",
       "destination_sha256": "1049179f1d79f11e1af42a06a35b15cc517008435d3afc6a1b2f3c30ed6f3f3e",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4490,7 +4495,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/req-a-a-routed-terminal-carries-no-delivery-acknowledgement.md",
       "destination_sha256": "51ff4c1ea783e22175b9ba349a97cc7a6b40da7ff24b3d3184d8f244d222e0b3",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4503,7 +4508,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame.md",
       "destination_sha256": "adfa1774d7d9381b6e1347a37ff5cc371d9c93fcfa442eb68cb14e07760127ec",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4529,7 +4534,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md",
       "destination_sha256": "45a3bdd4f21702feed5d3a42e5b70398a4b72d1d6321061499359894282a4351",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4568,7 +4573,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/req-a-no-emission-reaches-a-retired-generation-or-a-settled-correlation.md",
       "destination_sha256": "e6c3d19e4722b019105ec50527581c886b740ae385ae39a9bd5b8034e0139fcf",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4581,7 +4586,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes.md",
       "destination_sha256": "b9c5c1800318376bb2536ce4ae72dcd61dbc9a9f684c99d38af50c9fd9676d69",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4594,7 +4599,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/req-a-three-control-rejection-paths-carry-three-different-bounds.md",
       "destination_sha256": "b585abf0be7fb785bfb6e267a7e75e63e4cf8cf12712e5f100244ff3cd4bf7fb",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4633,7 +4638,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/rt-a-an-initialized-handler-drains-without-publishing.md",
       "destination_sha256": "df678ab5468087131620467b3242df45a55c7d8f6fe9163aa2c8d9349f15f1f2",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4698,7 +4703,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/rt-a-no-configured-limit-is-silently-clamped.md",
       "destination_sha256": "550e886563f8a94aa2303cfa57461ecb819fa9528ddf015ae974ff7ebc973057",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4724,7 +4729,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/rt-a-startup-refuses-every-configuration-it-cannot-fund.md",
       "destination_sha256": "13978cd55fac09425f12b80fca181deddb05ceef800ec5db871a8a0e6a122e26",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4763,7 +4768,7 @@
       },
       "destination": "docs/properties/host-runtime/evidence/rt-a-the-ingress-pool-derivation-cannot-underflow.md",
       "destination_sha256": "592f83c8700da1781cec75972bd4eb87a949d4ae400cbe870164597e943d785f",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4862,19 +4867,6 @@
     {
       "source": {
         "repo": "host",
-        "blob_sha": "da0c4eb8d9a48d171a33574b380752e183286751"
-      },
-      "destination": "docs/properties/host-runtime/lifecycle/.permission-probe",
-      "destination_sha256": "25be323556dad377abb57fe7ec8c4b99a6527f488dda28d0c9b686528659c909",
-      "transformation": "adapted",
-      "class": "human-authored",
-      "review_evidence": {
-        "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
-      }
-    },
-    {
-      "source": {
-        "repo": "host",
         "blob_sha": "4dd9fdc6a5f21626994460bcf857587b6f661fcd"
       },
       "destination": "docs/properties/host-runtime/lifecycle/existing-checks.md",
@@ -4892,7 +4884,7 @@
       },
       "destination": "docs/properties/host-runtime/lifecycle/fault-map.md",
       "destination_sha256": "237c5267a724a3afafc63f372291acbcaddbed5c279a608a02b31c73947ccec6",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
@@ -4905,7 +4897,7 @@
       },
       "destination": "docs/properties/host-runtime/lifecycle/portfolio-evaluation.md",
       "destination_sha256": "9bc2cd5821a7acedb9e14ca7cd4c8b1cd49c2bacb42f03124cd427fa02c04e53",
-      "transformation": "adapted",
+      "transformation": "verbatim",
       "class": "human-authored",
       "review_evidence": {
         "doc_rigor": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs"
