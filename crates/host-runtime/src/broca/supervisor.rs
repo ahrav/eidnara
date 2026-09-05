@@ -482,9 +482,10 @@ impl Supervisor {
 
     /// Cancels a live run, waits for its task, purges replay and charges, and installs a bounded tombstone.
     /// Delete installs a bounded tombstone; a second delete has no effect.
+    /// A replacement run admitted before delete installs its tombstone belongs to the deleted session, so delete cancels it too.
     pub async fn delete(&self, key: &SessionKey) -> Result<(), RequestError> {
         let _command = self.command_permit()?;
-        let run = {
+        let mut run = {
             let mut released = Released::default();
             let mut index = lock_index(&self.inner);
             if index.closed {
@@ -497,78 +498,101 @@ impl Supervisor {
                 Some(SessionEntry::Tombstone(_)) | None => return Ok(()),
             }
         };
-        run.cancel.cancel();
-        finish(
-            &self.inner,
-            &run,
-            TerminalOutcome::Cancelled {
-                message: "session deleted",
-            },
-        );
         // Reserve tombstone capacity before waiting so eviction cannot consume the deletion guard's budget.
-        let reserved_tombstone = self.inner.retained.try_charge(key.meta_bytes());
-        wait_work_done(&run).await;
+        let mut reserved_tombstone = self.inner.retained.try_charge(key.meta_bytes());
+        // `settlement` keeps the first failed verdict across replacement iterations.
+        let mut settlement = Ok(());
+        // Each iteration needs a racing admission in the window between eviction and this lock reacquisition; the tombstone installed on exit closes that window.
+        loop {
+            run.cancel.cancel();
+            finish(
+                &self.inner,
+                &run,
+                TerminalOutcome::Cancelled {
+                    message: "session deleted",
+                },
+            );
+            wait_work_done(&run).await;
+            settlement = settlement.and(Self::settlement_error(&run));
 
-        let mut released = Released::default();
-        let mut index = lock_index(&self.inner);
-        // Shutdown may have drained the index during the wait; never publish state into a closed index.
-        // `reserved_tombstone` releases its bytes on drop.
-        if index.closed {
-            drop(index);
-            return Err(closed_error());
-        }
-        // Only the delete that still owns `run` purges it, preventing double release.
-        let same_run = matches!(
-            index.sessions.get(key),
-            Some(SessionEntry::Live(current)) if Arc::ptr_eq(current, &run)
-        );
-        if same_run {
-            if let Some(charge) = reserved_tombstone {
-                released.charges.push(charge);
+            let mut released = Released::default();
+            let mut index = lock_index(&self.inner);
+            // Shutdown may have drained the index during the wait; never publish state into a closed index.
+            // `reserved_tombstone` releases its bytes on drop.
+            if index.closed {
+                drop(index);
+                return Err(closed_error());
             }
-            index.sessions.remove(key);
-            index.runs.remove(&run.run_id);
-            let mut state = lock_run(&run);
-            state.purged = true;
-            // Splitting `state.base_charge` under the index lock prevents a budget gap while replacing the run with a tombstone.
-            let tombstone_charge = state.base_charge.split_or_take(key.meta_bytes());
-            released.charges.push(std::mem::replace(
-                &mut state.base_charge,
-                ByteCharge::none(),
-            ));
-            released.replays.push(std::mem::take(&mut state.replay));
-            drop(state);
-            index.sessions.insert(
-                key.clone(),
-                SessionEntry::Tombstone(Tombstone {
-                    created_at: Instant::now(),
-                    _charge: tombstone_charge,
-                }),
+            // Only the delete that still owns `run` purges it, preventing double release.
+            let same_run = matches!(
+                index.sessions.get(key),
+                Some(SessionEntry::Live(current)) if Arc::ptr_eq(current, &run)
             );
-            run.notify.notify_waiters();
-        } else if !index.sessions.contains_key(key) {
-            // Install a tombstone if `run` was removed during `wait_work_done` so the deletion guard remains present.
-            // Use the reservation taken before the wait because the removed run's charges have already been released.
-            // Install an uncharged tombstone if both charge attempts fail rather than omit the deletion guard.
-            // Do not replace a different live run; it was installed after this run was removed.
-            let charge = reserved_tombstone
-                .or_else(|| self.inner.retained.try_charge(key.meta_bytes()))
-                .unwrap_or_else(ByteCharge::none);
-            index.sessions.insert(
-                key.clone(),
-                SessionEntry::Tombstone(Tombstone {
-                    created_at: Instant::now(),
-                    _charge: charge,
-                }),
-            );
-            // Run the terminal-session cap with the new tombstone protected so the cap cannot evict it.
-            enforce_terminal_cap(&self.inner, &mut index, "", Some(key), &mut released);
-        } else if let Some(charge) = reserved_tombstone {
-            released.charges.push(charge);
+            if same_run {
+                if let Some(charge) = reserved_tombstone.take() {
+                    released.charges.push(charge);
+                }
+                index.sessions.remove(key);
+                index.runs.remove(&run.run_id);
+                let mut state = lock_run(&run);
+                state.purged = true;
+                // Splitting `state.base_charge` under the index lock prevents a budget gap while replacing the run with a tombstone.
+                let tombstone_charge = state.base_charge.split_or_take(key.meta_bytes());
+                released.charges.push(std::mem::replace(
+                    &mut state.base_charge,
+                    ByteCharge::none(),
+                ));
+                released.replays.push(std::mem::take(&mut state.replay));
+                drop(state);
+                index.sessions.insert(
+                    key.clone(),
+                    SessionEntry::Tombstone(Tombstone {
+                        created_at: Instant::now(),
+                        _charge: tombstone_charge,
+                    }),
+                );
+                run.notify.notify_waiters();
+                drop(index);
+                break;
+            }
+            match index.sessions.get(key) {
+                None => {
+                    // Install a tombstone if `run` was removed during `wait_work_done` so the deletion guard remains present.
+                    // Use the reservation taken before the wait because the removed run's charges have already been released.
+                    // Install an uncharged tombstone if both charge attempts fail rather than omit the deletion guard.
+                    let charge = reserved_tombstone
+                        .take()
+                        .or_else(|| self.inner.retained.try_charge(key.meta_bytes()))
+                        .unwrap_or_else(ByteCharge::none);
+                    index.sessions.insert(
+                        key.clone(),
+                        SessionEntry::Tombstone(Tombstone {
+                            created_at: Instant::now(),
+                            _charge: charge,
+                        }),
+                    );
+                    // Run the terminal-session cap with the new tombstone protected so the cap cannot evict it.
+                    enforce_terminal_cap(&self.inner, &mut index, "", Some(key), &mut released);
+                    drop(index);
+                    break;
+                }
+                // A concurrent delete already installed the deletion guard.
+                Some(SessionEntry::Tombstone(_)) => {
+                    if let Some(charge) = reserved_tombstone.take() {
+                        released.charges.push(charge);
+                    }
+                    drop(index);
+                    break;
+                }
+                // A replacement admitted after eviction removed `run` during the wait belongs to the deleted session; cancel it too.
+                Some(SessionEntry::Live(replacement)) => {
+                    run = Arc::clone(replacement);
+                    drop(index);
+                }
+            }
         }
-        drop(index);
         // Retained bytes remain bounded whether tombstone charging succeeds or fails.
-        Self::settlement_error(&run)
+        settlement
     }
 
     /// `work_done` proves only that the run task returned, not that the backend process tree stopped or its private files were removed.

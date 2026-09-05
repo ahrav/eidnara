@@ -268,7 +268,13 @@ async fn run_pi(
         Err(err) => return subprocess::spawn_failure(Harness::Pi, &err),
     };
     // `run_pi` writes the compiled-in hook bytes to a 0600 file in the per-run 0700 directory so no installed hook path can be swapped under the daemon.
-    let hook_path = match dir.write_private(PI_BROCA_EXTENSION_FILE, PI_BROCA_EXTENSION_BYTES) {
+    let hook_path = match dir
+        .write_private_async(
+            PI_BROCA_EXTENSION_FILE.to_owned(),
+            PI_BROCA_EXTENSION_BYTES.to_vec(),
+        )
+        .await
+    {
         Ok(path) => path,
         Err(err) => {
             return subprocess::merge_cleanup(
@@ -280,7 +286,10 @@ async fn run_pi(
     // `run_pi` writes caller-private system prompts to a private 0600 file instead of passing them through argv.
     let system_prompt_path = match &request.system {
         None => None,
-        Some(system) => match dir.write_private("system-prompt.txt", system.as_bytes()) {
+        Some(system) => match dir
+            .write_private_async("system-prompt.txt".to_owned(), system.as_bytes().to_vec())
+            .await
+        {
             Ok(path) => Some(path),
             Err(err) => {
                 return subprocess::merge_cleanup(
@@ -293,36 +302,37 @@ async fn run_pi(
 
     // `request.prompt` travels only over stdin, so `run_pi` passes no positional message.
     // Node resolves sibling modules relative to the entrypoint path, so the descriptor path must lead back to the closure tree.
-    let mut args = vec![
-        entrypoint.module_path().to_string_lossy().into_owned(),
-        "--print".to_owned(),
-        "--mode".to_owned(),
-        "json".to_owned(),
-        "--no-session".to_owned(),
-        "--no-skills".to_owned(),
-        "--no-prompt-templates".to_owned(),
-        "--no-context-files".to_owned(),
+    // Path arguments stay `OsString` end to end: a lossy UTF-8 conversion would rename a non-UTF-8 path before the child resolves it.
+    let mut args: Vec<OsString> = vec![
+        entrypoint.module_path().as_os_str().to_owned(),
+        OsString::from("--print"),
+        OsString::from("--mode"),
+        OsString::from("json"),
+        OsString::from("--no-session"),
+        OsString::from("--no-skills"),
+        OsString::from("--no-prompt-templates"),
+        OsString::from("--no-context-files"),
         // The run exposes a closed tool surface: it maps the prompt to text.
-        "--no-tools".to_owned(),
+        OsString::from("--no-tools"),
         // `--no-approve` treats project-local settings and extensions as untrusted for the run.
-        "--no-approve".to_owned(),
-        "--no-extensions".to_owned(),
+        OsString::from("--no-approve"),
+        OsString::from("--no-extensions"),
     ];
     for extension in &resolved_extensions {
-        args.push("--extension".to_owned());
-        args.push(extension.module_path().to_string_lossy().into_owned());
+        args.push(OsString::from("--extension"));
+        args.push(extension.module_path().as_os_str().to_owned());
     }
-    args.push("--extension".to_owned());
-    args.push(hook_path.to_string_lossy().into_owned());
+    args.push(OsString::from("--extension"));
+    args.push(hook_path.into_os_string());
     if let Some(path) = &system_prompt_path {
-        args.push("--system-prompt".to_owned());
-        args.push(path.to_string_lossy().into_owned());
+        args.push(OsString::from("--system-prompt"));
+        args.push(path.as_os_str().to_owned());
     }
-    args.push("--model".to_owned());
-    args.push(model_ref);
+    args.push(OsString::from("--model"));
+    args.push(OsString::from(model_ref));
     if let Some(level) = &thinking_level {
-        args.push("--thinking".to_owned());
-        args.push(level.clone());
+        args.push(OsString::from("--thinking"));
+        args.push(OsString::from(level.clone()));
     }
 
     child_env.push((OsString::from(EIDNARA_PI_SUBAGENT_ENV), OsString::from("1")));

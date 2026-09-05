@@ -176,14 +176,14 @@ async fn run_opencode(
     };
 
     let args = vec![
-        "run".to_owned(),
-        "--model".to_owned(),
+        OsString::from("run"),
+        OsString::from("--model"),
         // `OpenCodeBackend` passes the canonical `provider/model` to OpenCode unchanged and performs no alias mapping.
-        format!("{}/{}", request.provider, request.model),
-        "--agent".to_owned(),
-        OPENCODE_BROCA_AGENT.to_owned(),
-        "--format".to_owned(),
-        "json".to_owned(),
+        OsString::from(format!("{}/{}", request.provider, request.model)),
+        OsString::from("--agent"),
+        OsString::from(OPENCODE_BROCA_AGENT),
+        OsString::from("--format"),
+        OsString::from("json"),
     ];
 
     child_env.push((

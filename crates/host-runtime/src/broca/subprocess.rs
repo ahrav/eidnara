@@ -238,7 +238,8 @@ impl Default for SubprocessLimits {
 /// `stdin` carries the prompt; argv carries flags and trusted paths, never caller text.
 pub struct SubprocessSpec {
     pub executable: PathBuf,
-    pub args: Vec<String>,
+    /// Path arguments use `OsString` so non-UTF-8 paths reach the child unchanged.
+    pub args: Vec<OsString>,
     /// The child uses `env_clear`; adapter-owned control variables follow snapshot variables and win collisions.
     pub env: Vec<(OsString, OsString)>,
     pub working_dir: PathBuf,
@@ -809,8 +810,18 @@ impl PrivateDir {
 
     /// Creates `name` as a fresh regular file forced to `0600` regardless of the inherited umask.
     pub fn write_private(&self, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+        Self::write_private_at(self.path(), name, bytes)
+    }
+
+    /// The managed data directory can sit on a slow filesystem, so async callers run the open/write/chmod sequence on the blocking pool.
+    pub async fn write_private_async(&self, name: String, bytes: Vec<u8>) -> io::Result<PathBuf> {
+        let dir = self.path().to_path_buf();
+        off_runtime(move || Self::write_private_at(&dir, &name, &bytes)).await?
+    }
+
+    fn write_private_at(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
         use std::io::Write;
-        let path = self.path().join(name);
+        let path = dir.join(name);
         // `create_new` rejects existing entries and symlinks, so success uses a previously absent pathname.
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -1575,11 +1586,29 @@ pub mod group_registry {
                 remove_swept_record(&path)?;
                 continue;
             }
-            let text = match fs::read_to_string(&path) {
-                Ok(text) => text,
-                // `NotFound` means another process removed the record after directory enumeration.
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
+            // A record names a kill target, so the sweep parses only a pinned regular file owned by this user.
+            // A planted foreign-owned file or symlink fails the sweep closed instead of driving `kill_process_group`.
+            let text = {
+                use std::os::unix::fs::MetadataExt;
+                let mut file = match fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(&path)
+                {
+                    Ok(file) => file,
+                    // `NotFound` means another process removed the record after directory enumeration.
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(err),
+                };
+                let meta = file.metadata()?;
+                if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
+                    return Err(io::Error::other(
+                        "a registry record is not a regular file owned by this user",
+                    ));
+                }
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut file, &mut text)?;
+                text
             };
             // A record that does not parse cannot identify a group.
             let Some(entry) = Entry::parse(&text) else {
