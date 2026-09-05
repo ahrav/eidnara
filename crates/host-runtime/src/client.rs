@@ -1805,9 +1805,23 @@ impl Inner {
             // `routes` is taken before `binds`, matching `open_route`.
             let routes = lock_unpoisoned(&self.routes);
             let mut binds = lock_unpoisoned(&self.binds);
+            let same_channel_other_epoch =
+                |other: &RouteHandle| other.channel == route.channel && other.epoch != route.epoch;
             match owner {
                 // A duplicate terminal for a route that is live or still being published is dropped (§6.2).
                 BindOwner::None if routes.contains(&route) || binds.publishing.contains(&route) => {
+                    return;
+                }
+                // A bind for a channel that already carries a live or in-flight route at another
+                // epoch means the host replaced that route; §6.2 permits channel reuse only after
+                // cleanup, so the retained handle can no longer be trusted.
+                BindOwner::None
+                    if routes.iter().any(same_channel_other_epoch)
+                        || binds.publishing.iter().any(same_channel_other_epoch) =>
+                {
+                    drop(binds);
+                    drop(routes);
+                    self.retire("invalid_route_response");
                     return;
                 }
                 BindOwner::None => {}
@@ -3206,14 +3220,33 @@ fn control_op(body: &[u8]) -> Option<String> {
 }
 
 /// Drops `value` without recursing into nested containers, so a hostile depth cannot
-/// overflow the stack the way the derived destructor would.
+/// overflow the stack the way the derived destructor would. Containers are consumed one
+/// child at a time through their own iterators, so a wide container is never copied into a
+/// second buffer and the extra memory stays proportional to nesting depth.
 fn drop_json_iteratively(value: Value) {
-    let mut pending = vec![value];
-    while let Some(node) = pending.pop() {
-        match node {
-            Value::Array(items) => pending.extend(items),
-            Value::Object(map) => pending.extend(map.into_iter().map(|(_, child)| child)),
-            _ => {}
+    enum Cursor {
+        Array(std::vec::IntoIter<Value>),
+        Object(serde_json::map::IntoIter),
+    }
+    let mut stack: Vec<Cursor> = Vec::new();
+    let mut next = Some(value);
+    loop {
+        match next.take() {
+            Some(Value::Array(items)) => stack.push(Cursor::Array(items.into_iter())),
+            Some(Value::Object(map)) => stack.push(Cursor::Object(map.into_iter())),
+            Some(_) => {}
+            None => {}
+        }
+        let Some(top) = stack.last_mut() else {
+            return;
+        };
+        next = match top {
+            Cursor::Array(items) => items.next(),
+            Cursor::Object(entries) => entries.next().map(|(_, child)| child),
+        };
+        if next.is_none() {
+            // An exhausted iterator owns no more values; dropping it is O(1).
+            stack.pop();
         }
     }
 }
@@ -4380,6 +4413,48 @@ mod tests {
             deep = Value::Array(vec![deep]);
         }
         drop_json_iteratively(deep);
+        // Wide containers are consumed through their own iterators, one child at a time.
+        let wide = Value::Array(
+            (0..1_000_000)
+                .map(|_| Value::Array(vec![Value::Null]))
+                .collect(),
+        );
+        drop_json_iteratively(wide);
+        let mut map = serde_json::Map::new();
+        for i in 0..100_000 {
+            map.insert(i.to_string(), Value::Array(vec![Value::Null]));
+        }
+        drop_json_iteratively(Value::Object(map));
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_bind_on_a_live_channel_at_another_epoch_retires() {
+        let (inner, _data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let live = route(1);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "op": "route.open",
+            "route_channel": live.channel,
+            "route_epoch": live.epoch + 40,
+        }))
+        .expect("body encodes");
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: 0,
+                epoch: 0,
+                corr: 4242,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(inner.retired.load(Ordering::Acquire));
+        assert!(
+            control_rx.try_recv().is_err(),
+            "the generation retires instead of sending a route Goodbye"
+        );
     }
 
     #[test]
