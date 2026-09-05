@@ -157,7 +157,7 @@ order, so no row was added, and none of the 38 surviving records was touched.
 | [every-declared-cli-reason-id-has-a-producer](#every-declared-cli-reason-id-has-a-producer) | reachability | high |
 | [every-callback-invocation-is-inside-the-redaction-guard](#every-callback-invocation-is-inside-the-redaction-guard) | safety | high |
 | [the-panic-hook-cannot-itself-fail](#the-panic-hook-cannot-itself-fail) | safety | medium |
-| [authentication-and-capacity-rejections-are-observable](#authentication-and-capacity-rejections-are-observable) | reachability | high |
+| [authentication-and-capacity-rejections-are-observable](#authentication-and-capacity-rejections-are-observable) | safety | high |
 | [the-largest-lifecycle-proof-runs-in-ci](#the-largest-lifecycle-proof-runs-in-ci) | reachability | high |
 | [negotiation-precedes-every-gated-frame-kind](#negotiation-precedes-every-gated-frame-kind) | safety | high |
 | [setup-selection-is-sticky-for-the-generation](#setup-selection-is-sticky-for-the-generation) | safety | high |
@@ -171,7 +171,7 @@ order, so no row was added, and none of the 38 surviving records was touched.
 | [oversize-control-drain-work-is-bounded-without-ingress-budget](#oversize-control-drain-work-is-bounded-without-ingress-budget) | safety | high |
 | [the-client-body-budget-refusal-drain-is-never-entered](#the-client-body-budget-refusal-drain-is-never-entered) | reachability | high |
 | [a-timely-pong-sustains-the-generation-within-a-bounded-round](#a-timely-pong-sustains-the-generation-within-a-bounded-round) | liveness | high |
-| [slow-egress-alone-does-not-retire-a-probed-generation](#slow-egress-alone-does-not-retire-a-probed-generation) | reachability | high |
+| [slow-egress-alone-does-not-retire-a-probed-generation](#slow-egress-alone-does-not-retire-a-probed-generation) | safety | high |
 | [manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector](#manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector) | safety | high |
 | [a-declaration-order-change-cannot-orphan-a-retained-generation](#a-declaration-order-change-cannot-orphan-a-retained-generation) | safety | high |
 | [the-atomic-directory-exchange-is-atomic-on-every-supported-platform](#the-atomic-directory-exchange-is-atomic-on-every-supported-platform) | safety | high |
@@ -1348,16 +1348,14 @@ Open questions: None.
 
 ### authentication-and-capacity-rejections-are-observable
 
-Type: reachability
+Type: safety
 Reachability: default-production - both rejection arms are on the default
 connection path: the authentication return and the connection-permit
 `try_acquire_owned` failure (`crates/host-runtime/src/connection.rs:130-138`).
 Status: active
 Exercised: not yet - no test triggers each rejection class and asserts an operator-visible record; the record itself finds there is no channel to carry one.
-Guarantee: A rejected connection produces some record an operator can see.
-Check: `reachable` - for each rejection class (authentication failure, connection
-capacity exhaustion, post-authentication drain refusal), some counter, log, or
-frame differs from the accepted case.
+Guarantee: Every rejected connection produces some record an operator can see.
+Check: `always` - for every rejection event (authentication failure, connection capacity exhaustion, post-authentication drain refusal), some counter, log line, or frame differs from the accepted case; three constant coverage markers, one per class, show that each class was constructed at least once, and are instrumentation rather than the assertion. This is a predicted violation at HEAD: the record finds no channel that carries any of the three. `always` because the guarantee is over every rejection, not over one example per class.
 Fault/timing angle: none. Verified: authentication failure returns with no counter,
 no log, and no rate signal, and the peer address is already dropped at accept, so
 a credential-probing client is indistinguishable from silence. Capacity exhaustion
@@ -2105,7 +2103,7 @@ Open questions:
 
 ### slow-egress-alone-does-not-retire-a-probed-generation
 
-Type: reachability
+Type: safety
 Reachability: explicit-config-only
 Status: active
 Exercised: not yet - no test fills the writer queue while liveness is
@@ -2113,13 +2111,13 @@ configured.
 Guarantee: Application egress backpressure, on its own, never retires a
 generation whose peer is answering Pings, and in particular never retires one
 when `invalidate_on_missed` is `false`.
-Check: `sometimes` - a constant marker `probe_queued_behind_saturated_egress`
+Check: `always` - in every window in which the coverage preconditions below hold, the generation is not retired and `probe.expired` stays false until the peer's Pong arrives, with `invalidate_on_missed` false; the catalog's own trace says `FrameSender::send` retires the generation when the writer queue stays saturated through the Ping admission deadline, so this is a predicted violation at HEAD rather than a pass. The two markers below are coverage instrumentation that shows the window was constructed, not the assertion. A constant marker `probe_queued_behind_saturated_egress`
 fires when all of these independent, legal preconditions hold at one instant: a
 `LivenessPolicy` is configured; `invalidate_on_missed` is `false`; the writer
 queue holds `writer_queue_frames` admitted frames; and a Ping tick is due. A
 second constant marker `pong_parked_pending_write_completion` fires when a
 matching Pong is observed while `probe.written_at.is_none()`, which is the park
-branch at `connection.rs:464`. `sometimes` rather than `reachable` because a
+branch at `connection.rs:464`. The markers use situation coverage rather than line coverage because a
 campaign can execute those lines while never producing the operational state:
 line coverage of `:464` proves the branch compiled and ran, whereas the
 property needs a full queue coinciding with a due tick, which is situation
@@ -2724,7 +2722,7 @@ are the last four rows and they live in
 | [ring-a-endpoint-thread-solely-owns-both-ring-endpoints](#ring-a-endpoint-thread-solely-owns-both-ring-endpoints) | safety | high |
 | [ring-a-no-producer-retains-a-committed-release-identity](#ring-a-no-producer-retains-a-committed-release-identity) | safety | high |
 | [ring-a-admission-charge-releases-on-every-endpoint-thread-exit](#ring-a-admission-charge-releases-on-every-endpoint-thread-exit) | safety | high |
-| [ring-a-host-never-quarantines-an-admission-charge](#ring-a-host-never-quarantines-an-admission-charge) | reachability | high |
+| [ring-a-host-never-quarantines-an-admission-charge](#ring-a-host-never-quarantines-an-admission-charge) | safety | high |
 | [ring-a-publish-failure-is-reported-as-a-clean-peer-close](#ring-a-publish-failure-is-reported-as-a-clean-peer-close) | safety | high |
 | [ring-a-endpoint-thread-panic-is-reported-as-orderly-completion](#ring-a-endpoint-thread-panic-is-reported-as-orderly-completion) | safety | high |
 | [ring-a-ring-unavailability-fails-closed-without-a-classified-reason](#ring-a-ring-unavailability-fails-closed-without-a-classified-reason) | safety | high |
@@ -2968,7 +2966,7 @@ Open questions:
 
 ### ring-a-host-never-quarantines-an-admission-charge
 
-Type: reachability
+Type: safety
 Reachability: default-production for the release path this record contrasts
 against, and **compiled-with-no-production-caller** for the subject itself.
 `admission.release()` (`ring_transport.rs:276`) runs on every endpoint exit of
@@ -2982,26 +2980,8 @@ code at all.
 Status: active
 Exercised: not yet - nothing in `host-runtime` can construct the state, so no host
 test can reach it.
-Guarantee: The host's quarantined-charge accounting is structurally always
-zero, because no `host-runtime` path calls `Admission::quarantine`; every endpoint
-exit, including one caused by ring corruption or a swallowed panic, releases the
-charge as if the storage were cleanly recycled.
-Check: `unreachable` - the code location `Admission::quarantine`
-(`profile.rs:561`) is never entered from any `host-runtime` call path.
-`unreachable` fits because the subject is a specific unentered function, not a
-forbidden state; the derived state claim (`snapshot().quarantined ==
-ResourceCharges::ZERO` for every host process) follows from it and is the
-cheaper screen. **One caveat is recorded rather than resolved.** METHOD.md
-reserves `unreachable` for a *forbidden* code location, and nobody forbids
-`Admission::quarantine`: `docs/shm-transport.md:21`, `:65`, and `:79`
-say it should be live. So this record is closer to a static architecture
-assertion than to a forbidden-location claim, and whether such assertions belong
-in this catalog at all is bias 1 in
-[portfolio-evaluation.md](ring-datapath/portfolio-evaluation.md). The independent evaluation
-raised the same objection against the release-identity record and it was applied
-there; it was not extended here, because that record's subject is an argument
-provenance at an *executed* function and this one's is a function that never
-executes. Resolving the bias decides this semantics choice.
+Guarantee: Every admission charge an endpoint takes is accounted exactly once at its exit: released, or quarantined when the exit is a ring-corruption exit that the transport contract (`docs/shm-transport.md:21`, `:65`, `:79`) says should quarantine; never both and never neither. The slug names the discovery-time finding that no `host-runtime` path calls `Admission::quarantine`, so today the quarantined side of that accounting is structurally zero and every corrupt exit releases as if the storage were cleanly recycled, which is a contract-versus-code disagreement, not a forbidden location.
+Check: `always` - across every endpoint exit in a campaign, including corrupt-ring and swallowed-panic exits, `released + quarantined` charges equal the charges taken (no leak, no double count), and for every exit the transport contract classifies as corrupt, `snapshot().quarantined` has grown by that endpoint's charge. The second clause is a predicted violation at HEAD, because `Admission::quarantine` (`profile.rs:561`) has no `host-runtime` caller; the check asserts the documented contract rather than freezing the gap. `always` because accounting must balance at every exit.
 Fault/timing angle: the window that matters is a `Corrupt` exit. When
 `Ring::try_receive` fails descriptor validation it calls `enter_quarantine()`
 inside the transport (`ring.rs:1098`), so the ring is terminally quarantined per
@@ -3044,6 +3024,7 @@ this record and
 can both be right, because one requires the charge to come back on every exit
 and the other asks whether a condemned ring is an exception.
 Open questions:
+- Is the missing quarantine caller a deferred feature or a decision that the host never quarantines? The transport document says the former; the record's second clause fails until one of them is implemented or the document changes. (needs human input)
 - Was host-side quarantine accounting deliberately dropped with
   `provider_recovery.rs`, or lost? Part 1's
   `quarantine-charge-transition-is-atomic` cited
@@ -7784,11 +7765,7 @@ Guarantee: Concurrent handler callbacks are bounded by the class-scoped
 `task_permits` pool, concurrent unsettled requests by the class-scoped
 `pending_permits` pool, both acquired non-blockingly on the read loop before any
 task is spawned, and each class is unreachable from the other.
-Check: `always` - assert that live handler callbacks never exceed the class's
-task-permit count, that unsettled requests never exceed its pending-permit
-count, and that both acquisitions are `try_acquire_owned` on the reader so
-exhaustion rejects instead of queueing. `always` because both bounds must hold
-at every instant.
+Check: `always` - assert that live handler callbacks never exceed the class's task-permit count, that unsettled requests never exceed its pending-permit count, that both acquisitions are `try_acquire_owned` on the reader so exhaustion rejects instead of queueing, and that each route class acquires only from its matching permit pair (`dispatch.rs:821`): with the general pools saturated a reserved-class request is admitted and with the reserved pools saturated a general-class request is admitted, and neither class ever holds a permit from the other pair (`saturated_broca_reserve_cannot_consume_a_general_slot` and `saturated_general_capacity_cannot_consume_the_broca_reserve` in `tests/dispatch.rs` are the existing forms). `always` because all four bounds must hold at every instant.
 Fault/timing angle: The task permit is released when the handler returns
 (`dispatch.rs:990`, inside the inner task) while the pending permit is held
 across the egress wait (`:933`, in the outer task). Under a slow peer the two
@@ -9526,9 +9503,7 @@ Exercised: not yet - nothing enumerates the fields against their consumers
 Guarantee: Every field an embedder can set on `HostConfig`, `HostLimits`,
 `HostTiming`, `LivenessPolicy`, or `HostInit` reaches at least one consumer, so
 setting it changes some observable host behaviour.
-Check: `always` - for each public configuration field, assert at least one read
-site outside `config.rs` and outside a `Debug` implementation. `always` because
-it is a property of the surface, evaluated once per field.
+Check: `always` - for each public configuration field, two host executions that differ only in that field produce the documented observable difference for its family: a limit field moves the admission boundary at which a request or connection is rejected, a timing field moves the instant at which the corresponding deadline fires under paused time, a liveness field changes the probe cadence or the retirement decision, and an init field changes the published value the client reads. A read site outside `config.rs` and outside a `Debug` implementation is a necessary screen, not the check: a field that is read and ignored fails. `always` because it is a property of the surface, evaluated once per field.
 Fault/timing angle: none. This is a static property of the wiring.
 Required faults and enabling state: none. The check is an enumeration, best
 expressed as a test that names each field and its consumer, or as a review gate.
@@ -9938,7 +9913,7 @@ Reachability: test-only - the fingerprint comparison runs only when a verifier i
 Status: active
 Exercised: yes - the committed vector is asserted, and an independent HMAC oracle reproduced it.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-broca-credential-v1"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
-Check: `always` - `credential_fingerprint(key, harness, provider) == committed literal` for the documented row; the per-value size cap rejects before fingerprinting.
+Check: `always` - for the documented row, `credential_fingerprint(key, harness, provider) == committed literal`; for every generated `(key, harness, provider name, value)` row in a campaign, `credential_fingerprint` equals an independent implementation of the documented derivation (`HMAC(derive(key, "eidnara-broca-credential-v1"), canonical_row)` with length-prefixed fields), including rows that differ only by moving one byte across a field boundary and rows with an empty field, which must yield distinct fingerprints; and the per-value size cap rejects before fingerprinting. `always` because the derivation is a pure function evaluated on every row.
 Fault/timing angle: A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.
 Required faults and enabling state: The documented inputs and an oracle outside the crate.
 Confidence: high - [evidence](evidence/credential-fingerprint-derives-from-the-product-domain.md). The domain separator is a renamed identity; the vector was regenerated once from a Python implementation of the documented derivation, which also reproduced the predecessor value from the predecessor domain.
@@ -10031,7 +10006,7 @@ Reachability: test-only - every request a composed `BrocaComponent` receives is 
 Status: active
 Exercised: yes - each valid operation decodes its exact schema, every enumerated malformed shape is rejected, and the 512 KiB boundary is exact.
 Guarantee: The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.
-Check: `always` - every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, and a rejected request leaves no run; every clause is an invariant over every request, so one `always` covers the conjunction.
+Check: `always` - every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, a bind naming a harness outside the supported set is rejected with exactly `invalid_identity` (`bind_requires_absolute_root_nonempty_session_and_supported_harness`, `crates/host-runtime/tests/broca_protocol.rs:372`, asserts the code at `:397`), and a rejected request or bind leaves no run state; every clause is an invariant over every request, so one `always` covers the conjunction.
 Fault/timing angle: A permissive decoder lets a harness smuggle fields the host does not validate.
 Required faults and enabling state: Malformed and boundary-sized bodies.
 Confidence: medium - [evidence](evidence/broca-protocol-shapes-are-closed.md). `each_valid_operation_decodes_its_exact_schema`, `every_malformed_shape_is_rejected_with_schema_violation`, `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over`, `malformed_requests_over_the_host_create_no_run_state`, `harness_vocabulary_is_closed` (`crates/host-runtime/tests/broca_protocol.rs`).
@@ -10077,7 +10052,7 @@ Reachability: test-only - every artifact fault in a composed `SynapseComponent` 
 Status: active
 Exercised: partial - missing, corrupt, extra, wrong-identity, and wrong-pooling artifacts disable the lane while the context module stays routable; a fault during inference itself is covered only by the deterministic engine.
 Guarantee: An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.
-Check: `always` - for every artifact fault, `activate` returns `Ok` with the lane disabled, and a context request issued afterwards completes within the campaign's request deadline; the existing test bounds it with the 5 s harness `BUDGET` (`crates/host-runtime/tests/support/synapse.rs:22`, `:265`), and the host itself imposes no dispatch deadline (see [req-a-a-handler-outliving-every-host-deadline-is-reached](#req-a-a-handler-outliving-every-host-deadline-is-reached)), so the bound must come from the campaign. The second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation.
+Check: `always` - for every artifact fault, `activate` returns `Ok` with the lane disabled, a bind to the disabled lane is refused with exactly `artifact_invalid` (`crates/host-runtime/tests/synapse_bundle.rs:241`, `tests/synapse_roundtrip.rs:93`), and a context request issued afterwards completes within the campaign's request deadline; the existing test bounds it with the 5 s harness `BUDGET` (`crates/host-runtime/tests/support/synapse.rs:22`, `:265`), and the host itself imposes no dispatch deadline (see [req-a-a-handler-outliving-every-host-deadline-is-reached](#req-a-a-handler-outliving-every-host-deadline-is-reached)), so the bound must come from the campaign. The second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation.
 Fault/timing angle: A host-fatal Synapse fault would take the product down for an optional lane.
 Required faults and enabling state: Each artifact fault class; an unconfigured component.
 Confidence: medium - [evidence](evidence/synapse-degrades-to-disabled-and-keeps-the-context-routable.md). `unconfigured_component_is_disabled_not_fatal`, `one_bit_changes_to_each_artifact_disable_the_lane`, `missing_artifact_disables_the_lane`, `wrong_ort_identity_disables_the_lane`, `corrupt_bundle_degrades_synapse_and_keeps_context_routable` (`crates/host-runtime/tests/synapse_bundle.rs`, `crates/host-runtime/tests/synapse_roundtrip.rs`).
@@ -10092,7 +10067,7 @@ Reachability: test-only - every Synapse request to a composed `SynapseComponent`
 Status: active
 Exercised: partial - constraint violations, unknown fields, excessive depth, oversize bodies, and replay reuse are covered with a deterministic engine that counts calls.
 Guarantee: A request that violates a constraint, carries an unknown field, exceeds the depth or size bound, names a different model, fingerprint, or epoch, or names a foreign job is rejected before the engine runs (as `schema_violation`, `substitution_rejected`, or `module_restarted` by class), and equal replays reuse one job and one inference.
-Check: `always` - `engine.calls` is unchanged by a rejected request, and equal replays produce exactly one inference; both are invariants over every request, so one `always` covers the conjunction.
+Check: `always` - `engine.calls` is unchanged by a rejected request; the rejection code matches the violation class exactly: `schema_violation` for a constraint violation, an unknown field, or an exceeded depth or size bound, `substitution_rejected` for a different model, fingerprint, or epoch, and `module_restarted` for a foreign or unknown job (`unknown_and_foreign_jobs_are_module_restarted`, `crates/host-runtime/tests/synapse_protocol.rs:1218`); and equal replays produce exactly one inference. Every clause is an invariant over every request, so one `always` covers the conjunction.
 Fault/timing angle: Validation after inference would spend model time on hostile input.
 Required faults and enabling state: Each violation class; replayed requests.
 Confidence: medium - [evidence](evidence/synapse-requests-are-validated-before-any-inference.md). `embed_query_rejects_every_constraint_violation`, `embed_batch_validation_creates_no_job_and_no_inference`, `an_unknown_top_level_field_is_rejected_without_reading_its_value`, `a_routed_depth_nine_request_is_a_schema_violation`, `equal_replays_reuse_one_job_and_one_inference` (`crates/host-runtime/tests/synapse_protocol.rs`).
