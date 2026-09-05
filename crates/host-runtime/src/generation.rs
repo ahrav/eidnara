@@ -756,7 +756,12 @@ impl GenerationStore {
                 &self.root_fd,
                 CURRENT_PROFILE_NAME,
             )
-            .map_err(|_| invalid("profile rename failed"))
+            .map_err(|e| match e {
+                rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => {
+                    GenerationError::InsufficientStorage
+                }
+                _ => invalid("profile rename failed"),
+            })
         });
         if result.is_err() {
             let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
@@ -1056,7 +1061,7 @@ fn validate_lifecycle_root_fd(fd: &OwnedFd, path: &Path) -> Result<(), Generatio
 fn open_child_dir(parent: &OwnedFd, name: &str) -> Option<OwnedFd> {
     let fd = crate::store_fs::open_dir_for_removal(parent, name).ok()?;
     let stat = rustix::fs::fstat(&fd).ok()?;
-    if (mode_bits(&stat) & 0o077) != 0 {
+    if (mode_bits(&stat) & 0o7777) != 0o700 {
         return None;
     }
     Some(fd)
@@ -1329,6 +1334,33 @@ mod tests {
         store
             .validate(&digest)
             .expect("generation validates once the extra directories are gone");
+
+        // Owner-only but not `0o700`: a read-only or sticky directory is still a different tree.
+        for mode in [0o500, 0o1700] {
+            std::fs::set_permissions(gen_dir.join("bin"), std::fs::Permissions::from_mode(mode))
+                .expect("dir mode");
+            assert!(
+                matches!(
+                    store.validate(&digest),
+                    Err(GenerationError::NativePayloadInvalid {
+                        detail: "generation subdirectory failed security checks"
+                    })
+                ),
+                "directory mode {mode:o} must not validate"
+            );
+        }
+        std::fs::set_permissions(gen_dir.join("bin"), std::fs::Permissions::from_mode(0o700))
+            .expect("restore dir mode");
+        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("root dir mode");
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "generation directory is missing or insecure"
+            })
+        ));
+        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore root dir mode");
 
         // Loose mode.
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");

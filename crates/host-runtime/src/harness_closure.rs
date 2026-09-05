@@ -148,6 +148,9 @@ impl ValidatedHarnessClosure {
     /// after `validate` without changing mode, link count, or size. Rehashing the opened
     /// descriptor closes that window for the object that is about to be launched; the cost is one
     /// read of the node per resolution, paid on the launch path rather than per request.
+    ///
+    /// `closure_path` must still identify the verified inode; pathname-based consumers such as
+    /// the macOS `module_path` could otherwise launch a replacement.
     pub fn resolve_node_descriptor(
         &self,
         node_path: &str,
@@ -161,12 +164,24 @@ impl ValidatedHarnessClosure {
         let fd = open_relative_file(&self.files_fd, node_path)
             .map_err(|_| invalid("resolved node is missing or insecure"))?;
         verify_node_file(&fd, node)?;
+        let closure_path = self.path.join(FILES_NAME).join(node_path);
+        let verified = rustix::fs::fstat(&fd).map_err(|_| invalid("closure node stat failed"))?;
+        let by_name = rustix::fs::statat(CWD, &closure_path, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| invalid("closure pathname no longer names the validated node"))?;
+        #[allow(clippy::unnecessary_cast)]
+        let same_inode = verified.st_dev as u64 == by_name.st_dev as u64
+            && verified.st_ino as u64 == by_name.st_ino as u64;
+        if !same_inode {
+            return Err(invalid(
+                "closure pathname no longer names the validated node",
+            ));
+        }
         // Hashing advanced the offset; a child opening `/dev/fd/N` shares it and must start at 0.
         rustix::fs::seek(&fd, rustix::fs::SeekFrom::Start(0))
             .map_err(|_| invalid("resolved node rewind failed"))?;
         Ok(ResolvedHarnessNode {
             descriptor_path: descriptor_path(fd.as_raw_fd()),
-            closure_path: self.path.join(FILES_NAME).join(node_path),
+            closure_path,
             fd,
         })
     }

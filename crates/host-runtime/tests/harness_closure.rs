@@ -257,6 +257,14 @@ fn retained_closure_survives_source_deletion_and_deduplicates_by_digest() {
         b"export const answer = 42",
         "path replacement must not change the retained closure object"
     );
+    assert_eq!(
+        second
+            .resolve_node_descriptor("node_modules/pi/dist/helper.js")
+            .err()
+            .map(|error| error.detail()),
+        Some("closure pathname no longer names the validated node"),
+        "a resolution after the swap must not hand out a pathname into the replacement"
+    );
 }
 
 #[test]
