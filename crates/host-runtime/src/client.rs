@@ -153,7 +153,9 @@ impl CallError {
     /// with string `code` and `message`, and an unsigned `retry_after_ms` when present.
     /// Unknown members are permitted.
     fn host_terminal(body: &[u8]) -> Option<Self> {
-        let value = serde_json::from_slice::<Value>(body).ok()?;
+        // Duplicate keys would let the last occurrence win silently; the host's own control
+        // decoding rejects them, so the same strict parser applies to its error bodies.
+        let value = crate::control::strict_json::parse(body).ok()?;
         let code = value.get("code")?.as_str()?;
         value.get("message")?.as_str()?;
         let retry_after = match value.get("retry_after_ms") {
@@ -2562,7 +2564,9 @@ async fn writer_loop(
             return Ok(());
         }
         let (completed_tx, completed_rx) = oneshot::channel();
-        let is_control = frame.publish.is_none();
+        // Only liveness traffic bypasses data. `Cancel` and `Goodbye` govern requests
+        // already queued ahead of them and must publish after those requests (§6.3).
+        let is_control = frame.publish.is_none() && frame.header.ty == FrameType::Pong;
         let ring_write = RingWrite {
             header: frame.header,
             body: frame.body,
@@ -2864,13 +2868,19 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
         )
     };
     check_string("module_id", &target.module_id, MAX_MODULE_ID_LEN, true).map_err(invalid)?;
-    check_string(
-        "project_root",
-        &identity.project_root.to_string_lossy(),
-        MAX_PROJECT_ROOT_LEN,
-        true,
-    )
-    .map_err(invalid)?;
+    // The path's bytes are inspected in place; a lossy copy would allocate before the length check.
+    let project_root = std::os::unix::ffi::OsStrExt::as_bytes(identity.project_root.as_os_str());
+    if project_root.len() > MAX_PROJECT_ROOT_LEN {
+        return Err(invalid(String::new()));
+    }
+    let project_root = std::str::from_utf8(project_root).map_err(|_| {
+        CallError::local(
+            SendOutcome::NotSent,
+            "invalid_identity",
+            "route identity path is not UTF-8",
+        )
+    })?;
+    check_string("project_root", project_root, MAX_PROJECT_ROOT_LEN, true).map_err(invalid)?;
     check_string("harness", &identity.harness, MAX_HARNESS_LEN, true).map_err(invalid)?;
     check_string("session", &identity.session, MAX_SESSION_LEN, true).map_err(invalid)?;
     if let Some(module) = &identity.consumer_module_id {
@@ -2925,10 +2935,16 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
 /// proportional to `max_bytes` on any caller-built value; the host applies the exact
 /// bound to what is sent.
 fn json_within_bounds(value: &Value, max_bytes: usize, max_depth: usize) -> bool {
+    // An encoding of exactly `max_bytes` is within the bound.
     let mut budget = max_bytes;
     let mut charge = |bytes: usize| -> bool {
-        budget = budget.saturating_sub(bytes);
-        budget > 0 || bytes == 0
+        match budget.checked_sub(bytes) {
+            Some(remaining) => {
+                budget = remaining;
+                true
+            }
+            None => false,
+        }
     };
     let mut frontier: Vec<(&Value, usize)> = vec![(value, 0)];
     while let Some((node, depth)) = frontier.pop() {
@@ -2938,10 +2954,16 @@ fn json_within_bounds(value: &Value, max_bytes: usize, max_depth: usize) -> bool
             Value::Number(_) => 1,
             // Quotes plus the raw bytes; escapes only lengthen the encoding.
             Value::String(text) => text.len() + 2,
-            // Brackets plus one separator per child; keys add quotes, a colon, and their bytes.
+            // Brackets plus one separator per child.
             Value::Array(items) => 2 + items.len().saturating_sub(1),
             Value::Object(map) => {
-                2 + map.len().saturating_sub(1) + map.keys().map(|key| key.len() + 3).sum::<usize>()
+                // Keys are charged one at a time so a very wide object stops at the cap.
+                for key in map.keys() {
+                    if !charge(key.len() + 3) {
+                        return false;
+                    }
+                }
+                2 + map.len().saturating_sub(1)
             }
         };
         if !charge(lower_bound) {
@@ -3755,6 +3777,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancel_stays_behind_the_request_it_governs() {
+        // `Cancel` follows the data lane so it publishes after the request it names.
+        let (inner, data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let (kind, _rx) = unary_sender();
+        let (key, _publish) = inner
+            .admit(
+                route(1),
+                Vec::new(),
+                false,
+                kind,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("admitted");
+        let (write, writes, control_writes) = fake_ring_writer();
+        let writer_inner = Arc::clone(&inner);
+        let writer = tokio::spawn(async move {
+            writer_loop(writer_inner, write, data_rx, control_rx).await;
+        });
+        let request = tokio::task::spawn_blocking(move || {
+            let request = writes
+                .recv_timeout(Duration::from_secs(2))
+                .expect("request reaches the bridge");
+            (request, writes)
+        })
+        .await
+        .expect("bridge receive task");
+        let (request, writes) = request;
+        inner
+            .send_control(
+                FrameType::Cancel,
+                pure_header_flags(),
+                FrameId {
+                    channel: key.channel,
+                    epoch: key.epoch,
+                    corr: key.corr,
+                },
+                None,
+            )
+            .expect("cancel admitted");
+        let cancel = tokio::task::spawn_blocking(move || {
+            writes
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the Cancel follows the request on the data lane")
+        })
+        .await
+        .expect("bridge receive task");
+        assert_eq!(cancel.header.ty, FrameType::Cancel);
+        assert!(
+            control_writes.try_recv().is_err(),
+            "a Cancel never takes the liveness lane"
+        );
+        inner.retire("test_done");
+        drop(request);
+        drop(cancel);
+        writer.await.expect("writer exits on cancel");
+    }
+
+    #[tokio::test]
     async fn a_pong_bypasses_a_data_backlog_that_fills_the_window() {
         // One in-flight slot is reserved for controls, and controls ride their own lane to the bridge.
         let (inner, data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
@@ -4464,6 +4544,19 @@ mod tests {
         identity.admission_facts = Some(serde_json::json!({"blob": "x".repeat(64)}));
         route_open_body(&target, &identity).expect("small facts encode");
 
+        // Exactly at the byte cap is accepted, matching the host's `>` comparison.
+        let mut identity = identity_fixture();
+        let exact = crate::control::MAX_ADMISSION_FACTS_BYTES - 2;
+        identity.admission_facts = Some(Value::String("x".repeat(exact)));
+        route_open_body(&target, &identity).expect("a value encoding to exactly the cap");
+        identity.admission_facts = Some(Value::String("x".repeat(exact + 1)));
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("one byte over the cap")
+                .code(),
+            "invalid_identity"
+        );
+
         // The bounds walk is exact on depth and never scans string contents.
         // (Building or dropping a `Value` far deeper than this recurses inside serde_json itself,
         // so the walk is exercised on a value the test thread can hold safely.)
@@ -4511,6 +4604,15 @@ mod tests {
                 .code(),
             "invalid_identity"
         );
+    }
+
+    #[test]
+    fn duplicate_recognized_error_fields_are_malformed() {
+        assert!(
+            CallError::host_terminal(br#"{"code":"first","code":"second","message":"m"}"#)
+                .is_none()
+        );
+        assert!(CallError::host_terminal(br#"{"code":"c","message":"a","message":"b"}"#).is_none());
     }
 
     #[test]
