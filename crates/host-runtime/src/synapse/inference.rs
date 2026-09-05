@@ -210,23 +210,11 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
 /// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
 /// Shortens `text` to at most `max_bytes` without splitting a character.
 fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
-    text.truncate(floor_char_boundary(text, max_bytes));
-}
-
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    let mut end = index.min(text.len());
+    let mut end = text.len().min(max_bytes);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    end
-}
-
-fn ceil_char_boundary(text: &str, index: usize) -> usize {
-    let mut end = index.min(text.len());
-    while !text.is_char_boundary(end) {
-        end += 1;
-    }
-    end
+    text.truncate(end);
 }
 
 /// The served-vector contract every engine must meet: `dims` finite components with an L2 norm within `UNIT_NORM_TOLERANCE` of 1.
@@ -347,12 +335,7 @@ impl Backend {
         };
         backend.structural_probe()?;
         backend.certify(&corpus, certification_rows, max_batch_text_bytes)?;
-        backend.long_input_probe(
-            &corpus,
-            max_text_bytes,
-            certification_rows,
-            max_batch_text_bytes,
-        )?;
+        backend.long_input_probe(&corpus, max_text_bytes, certification_rows)?;
         Ok(backend)
     }
 
@@ -506,13 +489,12 @@ impl Backend {
 
     /// Corpus texts are short, so a graph with a fixed short sequence axis passes every semantic probe and then fails an ordinary long request. This probe embeds a text at the advertised byte limit that reaches the truncation window; the result must be a valid vector, with no expectation to compare.
     /// Corpus phrases can tokenize sparsely, so every candidate's encoding is measured and the densest one is embedded; a lane whose candidates all fall short of `max_tokens` is not published.
-    /// The window is then exercised jointly with the batch axis: batched tokenization pads every row to the longest sequence, so the long text is embedded once more in the largest legal batch alongside short corpus items, whose rows must still match their expectations under that padding.
+    /// The window is then exercised jointly with the batch axis. The graph receives token tensors, not bytes, so `[batch_rows, max_tokens]` is certified directly with `batch_rows` copies of the window text, each row reproducing the singleton vector; the aggregate byte cap governs admission and does not narrow what the graph must survive. Batched tokenization pads every row to the longest sequence, so the window text is also embedded beside short corpus items, whose rows must still match their expectations under that padding.
     fn long_input_probe(
         &self,
         corpus: &Corpus,
         max_text_bytes: usize,
         batch_rows: usize,
-        max_batch_text_bytes: usize,
     ) -> Result<(), InferenceError> {
         let mut text = String::new();
         for item in corpus.items.iter().cycle() {
@@ -554,92 +536,55 @@ impl Backend {
                 "long-input probe returned a wrong item count".to_owned(),
             ));
         }
-        // `[batch_rows, max_tokens]` is the largest tensor a legal batch can produce: one text that reaches the window padded against short items, within the aggregate cap. That shape is legal when a window-reaching text fits in the bytes left beside `batch_rows - 1` shortest items, so that byte budget is measured directly. When no examined cut within it reaches the window, the batch is built from the full candidate with as many rows as still fit; an unexamined shorter prefix could make more rows legal, so the fallback is a bounded-cost probe, not a proof of the largest legal shape.
+        if batch_rows < 2 {
+            return Ok(());
+        }
+        let singleton = &vectors[0];
+        let full = vec![text.as_str(); batch_rows];
+        let full_rows = self.embed(&full)?;
+        let full_rows_match = full_rows.len() == batch_rows
+            && full_rows.iter().all(|row| {
+                !super::bundle::certification_mismatch(row, singleton, corpus.tolerance)
+            });
+        if !full_rows_match {
+            return Err(InferenceError::Artifact(format!(
+                "[{batch_rows}, {}] certification failed: batched window rows diverge from the singleton",
+                self.max_tokens
+            )));
+        }
         let short = corpus
             .items
             .iter()
             .min_by_key(|item| item.text.len())
             .expect("corpus parsing requires items");
-        let batch_rows = batch_rows.max(1);
-        let short_len = short.text.len().max(1);
-        let long_budget = max_batch_text_bytes
-            .saturating_sub((batch_rows - 1).saturating_mul(short_len))
-            .min(text.len());
-        let (text, rows) = match self.window_prefix_within(&text, long_budget)? {
-            Some(end) => (&text[..end], batch_rows),
-            None => {
-                let remaining = max_batch_text_bytes.saturating_sub(text.len());
-                (text.as_str(), batch_rows.min(1 + remaining / short_len))
-            }
-        };
-        if rows > 1 {
-            let mut texts = vec![text];
-            texts.extend(std::iter::repeat_n(short.text.as_str(), rows - 1));
-            let rows_out = self.embed(&texts)?;
-            let short_rows_match = rows_out.len() == texts.len()
-                && rows_out[1..].iter().all(|row| {
-                    !super::bundle::certification_mismatch(row, &short.expected, corpus.tolerance)
-                });
-            if !short_rows_match {
-                return Err(InferenceError::Artifact(
-                    "long-input batch certification failed".to_owned(),
-                ));
-            }
+        let mut padded = vec![text.as_str()];
+        padded.extend(std::iter::repeat_n(short.text.as_str(), batch_rows - 1));
+        let padded_rows = self.embed(&padded)?;
+        let short_rows_match = padded_rows.len() == padded.len()
+            && padded_rows[1..].iter().all(|row| {
+                !super::bundle::certification_mismatch(row, &short.expected, corpus.tolerance)
+            });
+        if !short_rows_match {
+            return Err(InferenceError::Artifact(
+                "long-input batch certification failed: short rows diverge under padding to the window".to_owned(),
+            ));
         }
         Ok(())
     }
 
-    /// End of a non-empty char-boundary prefix of `text` no longer than `budget` bytes that encodes to `max_tokens` tokens, or `None` when no examined cut does. `text` itself must reach the window.
-    /// Token counts are not monotone in prefix length, so the cuts come from the tokenizer rather than from a scan of every boundary: the budget itself, then the byte at which the truncated encoding of the whole text stopped consuming input and the boundaries just after it, because a cut inside a pre-token can re-encode that pre-token's tail into fewer tokens.
-    fn window_prefix_within(
-        &self,
-        text: &str,
-        budget: usize,
-    ) -> Result<Option<usize>, InferenceError> {
-        const BOUNDARIES_ABOVE_REACH: usize = 8;
-        let budget = floor_char_boundary(text, budget.min(text.len()));
-        if budget == 0 {
-            return Ok(None);
-        }
-        if self.token_count(&text[..budget])? >= self.max_tokens {
-            return Ok(Some(budget));
-        }
-        let (_, reach) = self.encode_probe(text)?;
-        let mut end = ceil_char_boundary(text, reach.max(1));
-        for _ in 0..=BOUNDARIES_ABOVE_REACH {
-            if end >= budget {
-                break;
-            }
-            if self.token_count(&text[..end])? >= self.max_tokens {
-                return Ok(Some(end));
-            }
-            end = ceil_char_boundary(text, end + 1);
-        }
-        Ok(None)
-    }
-
     /// Tokens in `text` after the tokenizer's truncation, so a count equal to `max_tokens` means the text reached the window.
     fn token_count(&self, text: &str) -> Result<usize, InferenceError> {
-        self.encode_probe(text).map(|(count, _)| count)
-    }
-
-    /// Token count of `text` after truncation, with the end byte of the furthest token the truncated encoding consumed. Special tokens report `(0, 0)` and do not move the reach.
-    fn encode_probe(&self, text: &str) -> Result<(usize, usize), InferenceError> {
         let model = self
             .model
             .lock()
             .map_err(|_| InferenceError::Invariant("inference state is poisoned".to_owned()))?;
-        let encoding = model.tokenizer.encode(text, true).map_err(|_| {
-            InferenceError::Artifact("tokenizer failed to encode the probe".to_owned())
-        })?;
-        let reach = encoding
-            .get_offsets()
-            .iter()
-            .map(|(_, end)| *end)
-            .max()
-            .unwrap_or(0)
-            .min(text.len());
-        Ok((encoding.get_ids().len(), reach))
+        model
+            .tokenizer
+            .encode(text, true)
+            .map(|encoding| encoding.get_ids().len())
+            .map_err(|_| {
+                InferenceError::Artifact("tokenizer failed to encode the probe".to_owned())
+            })
     }
 
     fn certify_batch(

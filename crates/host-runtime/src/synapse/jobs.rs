@@ -31,6 +31,8 @@ pub enum AdmitOutcome {
     Existing(JobDescriptor),
     /// Same retained key with a conflicting payload.
     Conflict,
+    /// Key not retained and not the canonical key of its payload.
+    KeyMismatch,
     /// New job admitted; the caller must start exactly one worker for it.
     Admitted { job_id: String, seq: u64 },
     /// Admission capacity is exhausted and nothing evictable remains.
@@ -370,13 +372,22 @@ impl JobTable {
         items: Vec<BatchItem>,
         dimensions: usize,
     ) -> AdmitOutcome {
-        self.admit_charged(key, items, dimensions, &mut ByteCharge::none())
+        let canonical_key = key.clone();
+        self.admit_charged(
+            key,
+            &canonical_key,
+            items,
+            dimensions,
+            &mut ByteCharge::none(),
+        )
     }
 
     /// `admit_charged` transfers `charge` only when it returns `Admitted`; all other outcomes leave it with the caller.
+    /// A retained `key` is classified against its retained payload before `canonical_key` is consulted, under the same lock, so reuse of a retained key with a changed payload is `Conflict` rather than a fresh-key mismatch.
     pub(crate) fn admit_charged(
         &self,
         key: String,
+        canonical_key: &str,
         items: Vec<BatchItem>,
         dimensions: usize,
         charge: &mut ByteCharge,
@@ -412,6 +423,8 @@ impl JobTable {
                     });
                 }
             }
+        } else if key != canonical_key {
+            return AdmitOutcome::KeyMismatch;
         }
 
         let Some(result_bytes) = result_bytes else {
@@ -917,7 +930,7 @@ mod tests {
 
         let mut candidate = budget.try_charge(job_bytes + 500).expect("candidate");
         let AdmitOutcome::Admitted { seq, .. } =
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut candidate)
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut candidate)
         else {
             panic!("admitted");
         };
@@ -958,14 +971,14 @@ mod tests {
 
         let mut first = budget.try_charge(job_bytes).expect("first");
         let AdmitOutcome::Admitted { .. } =
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut first)
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut first)
         else {
             panic!("admitted");
         };
 
         let mut replay = budget.try_charge(job_bytes).expect("replay");
         assert!(matches!(
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut replay),
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut replay),
             AdmitOutcome::Existing(_)
         ));
         assert_eq!(
@@ -975,11 +988,23 @@ mod tests {
         );
         drop(replay);
 
+        // A changed payload carries a different canonical key; the retained key still classifies it as a conflict rather than as a fresh-key mismatch.
         let other = vec![charged_item("b", "different")];
+        let other_canonical = "o".repeat(64);
         let mut conflict = budget.try_charge(1_000).expect("conflict");
         assert!(matches!(
-            jobs.admit_charged(key.clone(), other, 4, &mut conflict),
+            jobs.admit_charged(
+                key.clone(),
+                &other_canonical,
+                other.clone(),
+                4,
+                &mut conflict
+            ),
             AdmitOutcome::Conflict
+        ));
+        assert!(matches!(
+            jobs.admit_charged("f".repeat(64), &other_canonical, other, 4, &mut conflict),
+            AdmitOutcome::KeyMismatch
         ));
         assert_eq!(
             conflict.bytes(),
@@ -993,6 +1018,7 @@ mod tests {
         assert!(matches!(
             jobs.admit_charged(
                 "x".repeat(64),
+                &"x".repeat(64),
                 vec![charged_item("c", "gamma")],
                 4,
                 &mut closed
@@ -1022,7 +1048,8 @@ mod tests {
         let admit = |key: String, items: Vec<BatchItem>| {
             let bytes = job_input_bytes(&key, &items);
             let mut charge = budget.try_charge(bytes).expect("charge");
-            let AdmitOutcome::Admitted { seq, .. } = jobs.admit_charged(key, items, 4, &mut charge)
+            let AdmitOutcome::Admitted { seq, .. } =
+                jobs.admit_charged(key.clone(), &key, items, 4, &mut charge)
             else {
                 panic!("admitted");
             };
@@ -1076,7 +1103,8 @@ mod tests {
         let mut charge = budget
             .try_charge(job_input_bytes(&key, &items))
             .expect("charge");
-        let AdmitOutcome::Admitted { seq, .. } = jobs.admit_charged(key, items, 4, &mut charge)
+        let AdmitOutcome::Admitted { seq, .. } =
+            jobs.admit_charged(key.clone(), &key, items, 4, &mut charge)
         else {
             panic!("admitted");
         };
@@ -1102,7 +1130,7 @@ mod tests {
 
         let mut first = budget.try_charge(job_bytes).expect("charge");
         let AdmitOutcome::Admitted { seq, .. } =
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut first)
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut first)
         else {
             panic!("admitted");
         };
@@ -1110,7 +1138,7 @@ mod tests {
 
         let mut rejected = budget.try_charge(job_bytes).expect("rejected charge");
         assert!(matches!(
-            jobs.admit_charged(key.clone(), items.clone(), usize::MAX, &mut rejected),
+            jobs.admit_charged(key.clone(), &key, items.clone(), usize::MAX, &mut rejected),
             AdmitOutcome::ResultTooLarge
         ));
         drop(rejected);
@@ -1121,7 +1149,7 @@ mod tests {
 
         let mut second = budget.try_charge(job_bytes).expect("recharge");
         let AdmitOutcome::Admitted { seq: retry_seq, .. } =
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut second)
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut second)
         else {
             panic!("retry admitted");
         };
@@ -1141,7 +1169,7 @@ mod tests {
         let mut third = budget.try_charge(job_bytes).expect("third charge");
         assert!(
             matches!(
-                jobs.admit_charged(key.clone(), items.clone(), 4, &mut third),
+                jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut third),
                 AdmitOutcome::Existing(descriptor) if descriptor.status == "failed"
             ),
             "a permanent failure replays rather than re-running"

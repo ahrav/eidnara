@@ -1019,7 +1019,7 @@ async fn equal_replays_reuse_one_job_and_one_inference() {
         "equal replays run inference exactly once"
     );
 
-    // Resending a retained key over changed order, IDs, texts, or hashes fails the canonical-key check before the job table is consulted, and never reruns the job.
+    // Resending a retained key over changed order, IDs, texts, or hashes is classified against the retained payload before the canonical-key check, so it is an idempotency conflict and never reruns the job.
     for other in [
         items(&[("item:0", "different text")]),
         items(&[("item:1", "replay me")]),
@@ -1028,9 +1028,9 @@ async fn equal_replays_reuse_one_job_and_one_inference() {
         let mut conflicting = batch_params(&lane, &other);
         conflicting["request_key"] = request_key(&lane, &page).into();
         let frame = call(&mut client, channel, epoch, "embed.batch", conflicting).await;
-        assert_eq!(frame.error_code(), "schema_violation");
+        assert_eq!(frame.error_code(), "idempotency_conflict");
     }
-    // An unretained key that fails the canonical check gets the same verdict.
+    // An unretained key that fails the canonical check is a malformed request.
     let mut fresh = batch_params(&lane, &items(&[("item:9", "fresh text")]));
     fresh["request_key"] = sha256_hex("some other key").into();
     let frame = call(&mut client, channel, epoch, "embed.batch", fresh).await;

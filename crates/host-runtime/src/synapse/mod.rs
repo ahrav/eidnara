@@ -791,18 +791,14 @@ impl SynapseComponent {
         items: Vec<jobs::BatchItem>,
         mut charge: crate::wire::ByteCharge,
     ) -> RequestOutcome {
-        if request_key != canonical_key {
-            return app_error(
-                "schema_violation",
-                "request_key does not match the canonical payload",
-            );
-        }
         let retry_after_ms = self.inner.limits.retry_after_ms;
-        match self
-            .inner
-            .jobs
-            .admit_charged(request_key.clone(), items, lane.lane.dims, &mut charge)
-        {
+        match self.inner.jobs.admit_charged(
+            request_key.clone(),
+            &canonical_key,
+            items,
+            lane.lane.dims,
+            &mut charge,
+        ) {
             AdmitOutcome::Existing(descriptor) => {
                 respond(
                     ctx,
@@ -818,6 +814,10 @@ impl SynapseComponent {
             AdmitOutcome::Conflict => app_error(
                 "idempotency_conflict",
                 "the request_key is retained with a different payload",
+            ),
+            AdmitOutcome::KeyMismatch => app_error(
+                "schema_violation",
+                "request_key does not match the canonical payload",
             ),
             AdmitOutcome::Full => RequestOutcome::error_retry_after(
                 "queue_full",
