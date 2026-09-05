@@ -1082,12 +1082,16 @@ async fn result_pages_preserve_order_and_cursor_discipline() {
     assert_eq!(pages, 3);
     assert_eq!(collected, vec!["i0", "i1", "i2", "i3", "i4"]);
 
-    // Malformed, cross-job, and past-end cursors are schema violations.
+    // Malformed, cross-job, past-end, and non-canonical cursors are schema violations.
+    // `+2` and `02` are alternate encodings for boundary `2`, which the cursor schema rejects.
     for bad in [
         serde_json::Value::String("not-a-cursor".to_owned()),
         serde_json::Value::String(format!("{job_id}:3")),
         serde_json::Value::String(format!("{job_id}:999")),
         serde_json::Value::String("ffffffffffffffff-9:2".to_owned()),
+        serde_json::Value::String(format!("{job_id}:+2")),
+        serde_json::Value::String(format!("{job_id}:02")),
+        serde_json::Value::String(format!("{job_id}:")),
     ] {
         let frame = call(&mut client, channel, epoch, "embed.result", poll(bad)).await;
         assert_eq!(frame.error_code(), "schema_violation");

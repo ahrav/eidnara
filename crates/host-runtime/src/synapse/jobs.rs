@@ -105,12 +105,12 @@ impl Job {
     /// both key copies and the id/hash metadata. String contents only;
     /// struct and hash-bucket overhead stay outside the accounting claim.
     fn retained_input_bytes(&self) -> usize {
-        let meta: usize = self
-            .item_meta
-            .iter()
-            .map(|(id, hash)| id.len() + hash.len())
-            .sum();
-        2 * self.key.len() + meta
+        retained_input_bytes(
+            self.key.len(),
+            self.item_meta
+                .iter()
+                .map(|(id, hash)| (id.len(), hash.len())),
+        )
     }
 
     fn status(&self) -> &'static str {
@@ -151,6 +151,18 @@ pub(crate) fn escaped_string_bytes(s: &str) -> usize {
         .expect("serialized JSON string includes quotes")
 }
 
+/// Only the canonical decimal spelling of a number resolves: no sign, no leading zeros, at most 20 digits.
+/// Host-issued job IDs and cursors use this spelling, so any other spelling is a never-issued identifier.
+fn parse_canonical_decimal(digits: &str) -> Option<u64> {
+    if digits.is_empty() || digits.len() > 20 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if digits.len() > 1 && digits.starts_with('0') {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 /// While retained, a stored failure makes identical resubmissions report the same failure.
 fn failure_is_permanent(code: &str) -> bool {
     matches!(
@@ -164,6 +176,7 @@ fn failure_is_permanent(code: &str) -> bool {
     )
 }
 
+/// `parse_batch` verifies each `content_sha256` against its text before admission, so hashing the verified hash commits to the text bytes without a second pass over them.
 fn digest_payload(key: &str, items: &[BatchItem]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     let mut update = |bytes: &[u8]| {
@@ -174,7 +187,6 @@ fn digest_payload(key: &str, items: &[BatchItem]) -> [u8; 32] {
     for item in items {
         update(item.id.as_bytes());
         update(item.content_sha256.as_bytes());
-        update(item.text.as_bytes());
     }
     hasher.finalize().into()
 }
@@ -190,6 +202,18 @@ pub(crate) fn job_input_bytes(key: &str, items: &[BatchItem]) -> usize {
             .saturating_add(item.content_sha256.len());
     }
     bytes
+}
+
+/// The retained charge for a completed job: two key copies plus each item's id and hash lengths.
+/// Startup validation sizes the retained-metadata pool from this same rule so the two cannot drift.
+pub(crate) fn retained_input_bytes(
+    key_len: usize,
+    item_meta_lens: impl IntoIterator<Item = (usize, usize)>,
+) -> usize {
+    item_meta_lens.into_iter().fold(
+        2usize.saturating_mul(key_len),
+        |bytes, (id_len, hash_len)| bytes.saturating_add(id_len).saturating_add(hash_len),
+    )
 }
 
 /// The removal path releases `ByteCharge`s and drops `Job`s after releasing the table guard so retained vectors are freed outside the lock.
@@ -272,13 +296,7 @@ impl JobTable {
         }
         // Only canonical decimal representations resolve; `+1` and `007` must not resolve.
         // Reject noncanonical sequence numbers so each job has one valid ID.
-        if seq.is_empty() || seq.len() > 20 || !seq.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        if seq.len() > 1 && seq.starts_with('0') {
-            return None;
-        }
-        seq.parse().ok()
+        parse_canonical_decimal(seq)
     }
 
     pub fn key_is_retained(&self, key: &str) -> bool {
@@ -549,12 +567,13 @@ impl JobTable {
 
     /// Accept a cursor only when it names this job and its offset is a page boundary; allow previously served pages to be retried after a lost response.
     /// Allow an already-served page so a client can retry after a lost response.
+    /// The offset uses the same canonical-decimal rule as the job sequence so a never-issued spelling such as `+16` or `0016` is rejected.
     fn parse_cursor(&self, cursor: &str, seq: u64, boundaries: &[usize]) -> Option<usize> {
         let (job_id, offset) = cursor.rsplit_once(':')?;
         if self.parse_job_id(job_id) != Some(seq) {
             return None;
         }
-        let offset: usize = offset.parse().ok()?;
+        let offset = usize::try_from(parse_canonical_decimal(offset)?).ok()?;
         boundaries.contains(&offset).then_some(offset)
     }
 

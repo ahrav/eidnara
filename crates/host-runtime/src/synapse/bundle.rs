@@ -336,20 +336,13 @@ fn validate_manifest(manifest: &BundleManifest) -> Result<(), BundleError> {
 ///
 /// `per_waiter_charge_bound` uses the runtime accounting on worst-case-shaped inputs to avoid duplicated formulas drifting apart.
 fn max_queued_metadata_bytes(limits: &SynapseLimits) -> Option<u64> {
-    // `per_waiter_charge_bound` assumes JSON decoding can retain String capacity up to twice the decoded length.
-    fn worst_decoded(len: usize) -> String {
-        let mut decoded = String::with_capacity(len.saturating_mul(2));
-        decoded.extend(std::iter::repeat_n('a', len));
-        decoded
-    }
     let worst_item = jobs::BatchItem {
         id: worst_decoded(jobs::MAX_ITEM_ID_BYTES),
         content_sha256: worst_decoded(jobs::CONTENT_SHA256_BYTES),
         // Text bytes are budgeted separately by `max_queued_request_bytes`.
         text: String::new(),
     };
-    // The canonical request key must contain 64 lowercase hexadecimal characters.
-    let key = "a".repeat(64);
+    let key = canonical_key_shape();
     let per_item = u64::try_from(jobs::job_input_bytes("", std::slice::from_ref(&worst_item)))
         .expect("one item's charge fits u64");
     let per_job_key =
@@ -360,6 +353,40 @@ fn max_queued_metadata_bytes(limits: &SynapseLimits) -> Option<u64> {
     u64::try_from(limits.max_queued_jobs)
         .ok()?
         .checked_mul(per_job)
+}
+
+/// The input charge includes `String` capacity, so worst-case fields carry the twice-decoded-length capacity that `per_waiter_charge_bound` assumes.
+fn worst_decoded(len: usize) -> String {
+    let mut decoded = String::with_capacity(len.saturating_mul(2));
+    decoded.extend(std::iter::repeat_n('a', len));
+    decoded
+}
+
+/// `protocol::is_lower_hex_64` admits only 64-byte request keys, so this shape has every admitted key's length.
+fn canonical_key_shape() -> String {
+    "a".repeat(64)
+}
+
+/// The worst retained charge for one completed job, computed by the runtime rule on the largest item shape.
+fn max_retained_job_bytes(limits: &SynapseLimits) -> u64 {
+    let item_lens = std::iter::repeat_n(
+        (jobs::MAX_ITEM_ID_BYTES, jobs::CONTENT_SHA256_BYTES),
+        limits.max_batch_items,
+    );
+    u64::try_from(jobs::retained_input_bytes(
+        canonical_key_shape().len(),
+        item_lens,
+    ))
+    .expect("one job's retained charge fits u64")
+}
+
+/// The worst `embed.result` request charge, computed by the runtime rule on maximal decoded fields.
+fn max_result_request_bytes() -> usize {
+    super::owned_input_bytes(&super::protocol::Request::EmbedResult {
+        job_id: worst_decoded(super::protocol::MAX_JOB_ID_BYTES),
+        request_key: worst_decoded(canonical_key_shape().len()),
+        cursor: Some(worst_decoded(super::protocol::MAX_CURSOR_BYTES)),
+    })
 }
 
 pub(crate) fn validate_serving_limits(
@@ -426,15 +453,11 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
 
     // Each embed.result request reserves result-page metadata from the scratch pool.
     // Result requests retain decoded job-ID and cursor capacity while reserving page metadata.
-    // Decoded request buffers can retain twice their decoded length as capacity.
     // The validator rejects configurations whose result-page metadata and request charge exceed reservable_scratch; otherwise every embed.result poll returns queue_full.
     let page_meta_bytes = limits
         .page_item_bound()
         .saturating_mul(jobs::MAX_ITEM_ID_BYTES + jobs::CONTENT_SHA256_BYTES);
-    let result_request_bytes = 2
-        * (super::protocol::MAX_JOB_ID_BYTES + super::protocol::MAX_CURSOR_BYTES + 64)
-        + super::RESPONSE_SCRATCH_BYTES;
-    let result_worst_case = page_meta_bytes.saturating_add(result_request_bytes);
+    let result_worst_case = page_meta_bytes.saturating_add(max_result_request_bytes());
     if result_worst_case as u64 > reservable_scratch {
         return Err(err(format!(
             "worst-case result-page metadata plus its request charge ({result_worst_case} \
@@ -513,12 +536,8 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
     // The validator prevents retained metadata from exceeding its reserved scratch-pool slice.
     // Overflowing the retained-metadata reservation can starve the worst advertised request until expiry.
     // Completing batches can exhaust the retained-metadata reservation without new requests.
-    let retained_worst = (limits.max_retained_jobs as u64).saturating_mul(
-        128u64.saturating_add(
-            (limits.max_batch_items as u64)
-                .saturating_mul((jobs::MAX_ITEM_ID_BYTES + jobs::CONTENT_SHA256_BYTES) as u64),
-        ),
-    );
+    let retained_worst =
+        (limits.max_retained_jobs as u64).saturating_mul(max_retained_job_bytes(limits));
     if retained_worst > crate::config::RETAINED_METADATA_RESERVED_BYTES {
         return Err(err(format!(
             "worst-case retained job metadata ({retained_worst} bytes) exceeds its reserved \

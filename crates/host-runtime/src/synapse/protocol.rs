@@ -836,7 +836,11 @@ fn parse_batch(
     for raw in &params.items {
         check_string("item id", &raw.0.id, MAX_ITEM_ID_BYTES, true).map_err(schema)?;
         check_string("item text", &raw.0.text, limits.max_text_bytes, true).map_err(schema)?;
+        // The aggregate cap is checked before hashing so an oversize batch never pays for hashing or copying text beyond the cap.
         total_text_bytes += raw.0.text.len();
+        if total_text_bytes > limits.max_batch_text_bytes {
+            return Err(schema("aggregate item text exceeds the batch cap"));
+        }
         let actual = sha256_hex(raw.0.text.as_bytes());
         if raw.0.content_sha256 != actual {
             return Err(schema("item content_sha256 does not match its text"));
@@ -852,9 +856,6 @@ fn parse_batch(
             content_sha256: actual,
             text: raw.0.text.to_string(),
         });
-    }
-    if total_text_bytes > limits.max_batch_text_bytes {
-        return Err(schema("aggregate item text exceeds the batch cap"));
     }
     let canonical_key = canonical_request_key(lane, &items);
     Ok(Request::EmbedBatch {
