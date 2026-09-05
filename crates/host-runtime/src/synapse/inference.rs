@@ -554,7 +554,7 @@ impl Backend {
                 "long-input probe returned a wrong item count".to_owned(),
             ));
         }
-        // `[batch_rows, max_tokens]` is the largest tensor a legal batch can produce: one text that reaches the window padded against short items, within the aggregate cap. That shape is legal when a window-reaching text fits in the bytes left beside `batch_rows - 1` shortest items, so that byte budget is measured directly; when no examined prefix within it reaches the window, the largest shape this candidate supports is probed instead.
+        // `[batch_rows, max_tokens]` is the largest tensor a legal batch can produce: one text that reaches the window padded against short items, within the aggregate cap. That shape is legal when a window-reaching text fits in the bytes left beside `batch_rows - 1` shortest items, so that byte budget is measured directly. When no examined cut within it reaches the window, the batch is built from the full candidate with as many rows as still fit; an unexamined shorter prefix could make more rows legal, so the fallback is a bounded-cost probe, not a proof of the largest legal shape.
         let short = corpus
             .items
             .iter()
