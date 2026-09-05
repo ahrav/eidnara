@@ -189,9 +189,10 @@ When these records were written, shared memory was explicit, test-only, and
 non-default, and TCP was the production transport. At U3 the fixed sparse ring
 is the only application transport, there is no TCP path and no fallback, and a
 transport failure is terminal for the affected connection
-(`docs/shm-transport.md:5-7`). The latent framing and the per-record
-`Reaches production` column below predate that change. Two consequences ran
-through every record when they were written:
+(`docs/shm-transport.md:5-7`). The latent framing below predates that change;
+the per-record `Reaches production` column is derived from each record's
+current `Reachability`. Two consequences ran through every record when they
+were written:
 
 1. Most of these properties are **latent** — they guard a path that no shipped
    configuration selects. That lowers urgency, not validity: the release gate
@@ -207,66 +208,70 @@ decide whether to ship the transport. A defect there is live today.
 
 ## Index
 
+The `Reaches production` column is derived from each record's `Reachability`
+and `Status` at U3: `yes` for `default-production`, `no` for `test-only`,
+and `n/a - invalidated` for an invalidated record.
+
 | Slug | Type | Confidence | Reaches production |
 | --- | --- | --- | --- |
-| [quarantine-authority-survives-peer-writes](#quarantine-authority-survives-peer-writes) | safety | high | no |
-| [quarantine-gates-cover-every-storage-mutation](#quarantine-gates-cover-every-storage-mutation) | safety | high | no |
-| [attach-refuses-a-quarantined-object](#attach-refuses-a-quarantined-object) | safety | high | no |
+| [quarantine-authority-survives-peer-writes](#quarantine-authority-survives-peer-writes) | safety | high | yes |
+| [quarantine-gates-cover-every-storage-mutation](#quarantine-gates-cover-every-storage-mutation) | safety | high | yes |
+| [attach-refuses-a-quarantined-object](#attach-refuses-a-quarantined-object) | safety | high | yes |
 | [quarantine-charge-transition-is-atomic](#quarantine-charge-transition-is-atomic) | safety | high | yes |
 | [charge-release-never-silently-strands](#charge-release-never-silently-strands) | safety | medium | yes |
-| [custody-terminal-transition-exactly-once](#custody-terminal-transition-exactly-once) | safety | high | yes |
-| [reservation-charge-visible-with-non-free-state](#reservation-charge-visible-with-non-free-state) | safety | high | no |
-| [publication-visibility-derives-only-from-the-published-cursor](#publication-visibility-derives-only-from-the-published-cursor) | safety | high | no |
-| [no-frame-observable-before-commit](#no-frame-observable-before-commit) | safety | high | no |
-| [publish-signal-implies-committed-frame](#publish-signal-implies-committed-frame) | safety | medium | no |
-| [release-authority-bound-to-lease-ownership](#release-authority-bound-to-lease-ownership) | safety | high | no |
-| [release-exactly-once-per-sequence](#release-exactly-once-per-sequence) | safety | high | no |
-| [receive-failure-leaves-no-wedged-slot](#receive-failure-leaves-no-wedged-slot) | safety | high | no |
+| [custody-terminal-transition-exactly-once](#custody-terminal-transition-exactly-once) | safety | high | n/a - invalidated |
+| [reservation-charge-visible-with-non-free-state](#reservation-charge-visible-with-non-free-state) | safety | high | yes |
+| [publication-visibility-derives-only-from-the-published-cursor](#publication-visibility-derives-only-from-the-published-cursor) | safety | high | yes |
+| [no-frame-observable-before-commit](#no-frame-observable-before-commit) | safety | high | yes |
+| [publish-signal-implies-committed-frame](#publish-signal-implies-committed-frame) | safety | medium | yes |
+| [release-authority-bound-to-lease-ownership](#release-authority-bound-to-lease-ownership) | safety | high | yes |
+| [release-exactly-once-per-sequence](#release-exactly-once-per-sequence) | safety | high | yes |
+| [receive-failure-leaves-no-wedged-slot](#receive-failure-leaves-no-wedged-slot) | safety | high | yes |
 | [release-failure-is-observable](#release-failure-is-observable) | liveness | medium | yes |
-| [attach-reconciles-or-refuses-stale-shared-cursors](#attach-reconciles-or-refuses-stale-shared-cursors) | safety | high | no |
-| [crashed-producer-does-not-wedge-the-sequence](#crashed-producer-does-not-wedge-the-sequence) | liveness | high | no |
-| [dead-peer-charges-are-reclaimed-or-declared](#dead-peer-charges-are-reclaimed-or-declared) | safety | high | no |
-| [cancelled-frame-disposition-is-declared](#cancelled-frame-disposition-is-declared) | safety | high | no |
-| [validated-spans-are-disjoint-and-inside-the-arena](#validated-spans-are-disjoint-and-inside-the-arena) | safety | high | no |
-| [no-rust-reference-over-peer-writable-payload](#no-rust-reference-over-peer-writable-payload) | safety | high | no |
-| [reclaim-advance-bounded-by-the-producer-reservation](#reclaim-advance-bounded-by-the-producer-reservation) | safety | medium | no |
-| [attach-binds-geometry-to-a-local-profile](#attach-binds-geometry-to-a-local-profile) | safety | high | no |
-| [one-profile-name-denotes-one-geometry](#one-profile-name-denotes-one-geometry) | safety | high | no |
-| [native-boundary-not-weaker-than-its-wrapper](#native-boundary-not-weaker-than-its-wrapper) | safety | high | no |
-| [operation-counters-are-observed-not-declared](#operation-counters-are-observed-not-declared) | safety | high | evidence |
-| [measured-transfer-is-witnessed-by-the-data](#measured-transfer-is-witnessed-by-the-data) | safety | high | evidence |
+| [attach-reconciles-or-refuses-stale-shared-cursors](#attach-reconciles-or-refuses-stale-shared-cursors) | safety | high | yes |
+| [crashed-producer-does-not-wedge-the-sequence](#crashed-producer-does-not-wedge-the-sequence) | liveness | high | yes |
+| [dead-peer-charges-are-reclaimed-or-declared](#dead-peer-charges-are-reclaimed-or-declared) | safety | high | yes |
+| [cancelled-frame-disposition-is-declared](#cancelled-frame-disposition-is-declared) | safety | high | yes |
+| [validated-spans-are-disjoint-and-inside-the-arena](#validated-spans-are-disjoint-and-inside-the-arena) | safety | high | yes |
+| [no-rust-reference-over-peer-writable-payload](#no-rust-reference-over-peer-writable-payload) | safety | high | yes |
+| [reclaim-advance-bounded-by-the-producer-reservation](#reclaim-advance-bounded-by-the-producer-reservation) | safety | medium | yes |
+| [attach-binds-geometry-to-a-local-profile](#attach-binds-geometry-to-a-local-profile) | safety | high | yes |
+| [one-profile-name-denotes-one-geometry](#one-profile-name-denotes-one-geometry) | safety | high | yes |
+| [native-boundary-not-weaker-than-its-wrapper](#native-boundary-not-weaker-than-its-wrapper) | safety | high | yes |
+| [operation-counters-are-observed-not-declared](#operation-counters-are-observed-not-declared) | safety | high | no |
+| [measured-transfer-is-witnessed-by-the-data](#measured-transfer-is-witnessed-by-the-data) | safety | high | no |
 | [traceability-pointers-resolve](#traceability-pointers-resolve) | safety | high | n/a - invalidated |
-| [negative-tests-fail-for-their-stated-reason](#negative-tests-fail-for-their-stated-reason) | safety | high | evidence |
+| [negative-tests-fail-for-their-stated-reason](#negative-tests-fail-for-their-stated-reason) | safety | high | no |
 | [documented-close-order-has-a-production-driver](#documented-close-order-has-a-production-driver) | reachability | high | no |
 | [capability-probe-gates-every-advertised-mechanism](#capability-probe-gates-every-advertised-mechanism) | safety | high | no |
-| [clean-reclamation-is-reachable](#clean-reclamation-is-reachable) | reachability | high | no |
+| [clean-reclamation-is-reachable](#clean-reclamation-is-reachable) | reachability | high | n/a - invalidated |
 | [test-only-surface-absent-from-the-shipped-addon](#test-only-surface-absent-from-the-shipped-addon) | safety | high | yes |
-| [decoder-totality-over-arbitrary-bytes](#decoder-totality-over-arbitrary-bytes) | safety | high | no |
-| [accepted-decode-consumes-its-declared-width](#accepted-decode-consumes-its-declared-width) | safety | high | no |
-| [identity-and-schema-rejection-is-one-contract](#identity-and-schema-rejection-is-one-contract) | safety | high | no |
-| [grant-reserved-bytes-are-rejected-unless-zero](#grant-reserved-bytes-are-rejected-unless-zero) | safety | high | no |
-| [fuzz-harness-encoding-tracks-the-production-descriptor](#fuzz-harness-encoding-tracks-the-production-descriptor) | safety | high | evidence |
+| [decoder-totality-over-arbitrary-bytes](#decoder-totality-over-arbitrary-bytes) | safety | high | yes |
+| [accepted-decode-consumes-its-declared-width](#accepted-decode-consumes-its-declared-width) | safety | high | yes |
+| [identity-and-schema-rejection-is-one-contract](#identity-and-schema-rejection-is-one-contract) | safety | high | yes |
+| [grant-reserved-bytes-are-rejected-unless-zero](#grant-reserved-bytes-are-rejected-unless-zero) | safety | high | yes |
+| [fuzz-harness-encoding-tracks-the-production-descriptor](#fuzz-harness-encoding-tracks-the-production-descriptor) | safety | high | no |
 | [macos-object-creation-outcome-is-attributed](#macos-object-creation-outcome-is-attributed) | reachability | medium | n/a - invalidated |
 | [attach-validation-is-not-platform-weakened](#attach-validation-is-not-platform-weakened) | safety | high | n/a - invalidated |
 | [macos-object-creation-leaks-no-shm-name](#macos-object-creation-leaks-no-shm-name) | safety | medium | n/a - invalidated |
-| [layout-region-offsets-are-real-page-aligned](#layout-region-offsets-are-real-page-aligned) | safety | high | no |
-| [page-size-dependent-setup-runs-on-a-non-4096-page-host](#page-size-dependent-setup-runs-on-a-non-4096-page-host) | reachability | high | no |
-| [iceoryx-descriptor-rejection-is-terminal-or-declared](#iceoryx-descriptor-rejection-is-terminal-or-declared) | safety | high | n/a — invalidated |
-| [iceoryx-receive-expectation-tracks-the-delivered-stream](#iceoryx-receive-expectation-tracks-the-delivered-stream) | safety | high | n/a — invalidated |
-| [iceoryx-cross-process-pairing-is-reachable-or-declared](#iceoryx-cross-process-pairing-is-reachable-or-declared) | reachability | high | n/a — invalidated |
-| [iceoryx-completion-is-observable-to-the-host](#iceoryx-completion-is-observable-to-the-host) | safety | high | n/a — invalidated |
-| [iceoryx-saturation-is-bounded-non-blocking-backpressure](#iceoryx-saturation-is-bounded-non-blocking-backpressure) | liveness | high | n/a — invalidated |
+| [layout-region-offsets-are-real-page-aligned](#layout-region-offsets-are-real-page-aligned) | safety | high | yes |
+| [page-size-dependent-setup-runs-on-a-non-4096-page-host](#page-size-dependent-setup-runs-on-a-non-4096-page-host) | reachability | high | yes |
+| [iceoryx-descriptor-rejection-is-terminal-or-declared](#iceoryx-descriptor-rejection-is-terminal-or-declared) | safety | high | n/a - invalidated |
+| [iceoryx-receive-expectation-tracks-the-delivered-stream](#iceoryx-receive-expectation-tracks-the-delivered-stream) | safety | high | n/a - invalidated |
+| [iceoryx-cross-process-pairing-is-reachable-or-declared](#iceoryx-cross-process-pairing-is-reachable-or-declared) | reachability | high | n/a - invalidated |
+| [iceoryx-completion-is-observable-to-the-host](#iceoryx-completion-is-observable-to-the-host) | safety | high | n/a - invalidated |
+| [iceoryx-saturation-is-bounded-non-blocking-backpressure](#iceoryx-saturation-is-bounded-non-blocking-backpressure) | liveness | high | n/a - invalidated |
 | [wire-header-fully-validated-before-any-consumer-acts](#wire-header-fully-validated-before-any-consumer-acts) | safety | high | yes |
 | [ingress-charge-matches-the-bytes-copied-from-shared-storage](#ingress-charge-matches-the-bytes-copied-from-shared-storage) | safety | high | yes |
 | [every-shm-header-consumer-applies-its-role-gate](#every-shm-header-consumer-applies-its-role-gate) | safety | medium | yes |
-| [header-rejection-effect-does-not-depend-on-the-catching-layer](#header-rejection-effect-does-not-depend-on-the-catching-layer) | safety | high | no |
+| [header-rejection-effect-does-not-depend-on-the-catching-layer](#header-rejection-effect-does-not-depend-on-the-catching-layer) | safety | high | yes |
 | [runtime-directory-authentication-is-a-precondition-not-a-container](#runtime-directory-authentication-is-a-precondition-not-a-container) | safety | high | n/a - invalidated |
-| [backpressure-converges-in-a-bounded-reclaim-window](#backpressure-converges-in-a-bounded-reclaim-window) | liveness | high | no |
-| [receive-resumes-when-lease-capacity-clears](#receive-resumes-when-lease-capacity-clears) | liveness | high | no |
-| [neither-direction-starves-the-other](#neither-direction-starves-the-other) | liveness | high | no |
-| [reclamation-keeps-pace-with-completion](#reclamation-keeps-pace-with-completion) | liveness | high | no |
-| [lease-saturation-is-reached-then-drains](#lease-saturation-is-reached-then-drains) | reachability | high | no |
-| [duplex-overlap-is-reached](#duplex-overlap-is-reached) | reachability | high | no |
+| [backpressure-converges-in-a-bounded-reclaim-window](#backpressure-converges-in-a-bounded-reclaim-window) | liveness | high | yes |
+| [receive-resumes-when-lease-capacity-clears](#receive-resumes-when-lease-capacity-clears) | liveness | high | yes |
+| [neither-direction-starves-the-other](#neither-direction-starves-the-other) | liveness | high | yes |
+| [reclamation-keeps-pace-with-completion](#reclamation-keeps-pace-with-completion) | liveness | high | yes |
+| [lease-saturation-is-reached-then-drains](#lease-saturation-is-reached-then-drains) | reachability | high | yes |
+| [duplex-overlap-is-reached](#duplex-overlap-is-reached) | reachability | high | yes |
 | [attach-validates-doorbell-sockets](#attach-validates-doorbell-sockets) | safety | high | yes |
 | [wake-published-during-readiness-callback-is-not-lost](#wake-published-during-readiness-callback-is-not-lost) | liveness | high | yes |
 | [queued-write-needs-no-second-wake](#queued-write-needs-no-second-wake) | liveness | high | yes |
@@ -442,8 +447,9 @@ duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: not yet — needs `quarantined` pre-seeded near `u64::MAX` so the
-`checked_add` fails.
+Exercised: not yet - no test forces the `checked_add` overflow; at HEAD the
+ordering defect the source tree had is gone, so the missing test is a regression
+guard rather than a demonstration of a live defect.
 Guarantee: A `quarantine()` that returns an error leaves the charges in exactly
 one accounting bucket; charges never disappear from both `active` and
 `quarantined`.
@@ -452,33 +458,36 @@ and assert `active + quarantined` is unchanged from before the call. Semantics
 revised from `always`: review established that a valid public execution cannot
 reach the overflow, because admission checks `active + requested + quarantined`
 against the host limits under the same mutex (`profile.rs:434-468`), so the sum
-cannot approach the bound. The ordering defect is real and worth pinning, but it
-is reachable only through a synthetic seam, and the record says so rather than
-implying a live path.
-Fault/timing angle: no concurrency needed. The transition decrements `active`
-first and then performs a fallible add, with an early return between them.
+cannot approach the bound. The ordering defect the source tree had is fixed at
+HEAD and is worth pinning against regression, but it is reachable only through a
+synthetic seam, and the record says so rather than implying a live path.
+Fault/timing angle: no concurrency needed. At HEAD both totals are computed into
+locals before either is stored (`crates/shm-transport/src/profile.rs:518-531`),
+so a failed `checked_sub` or `checked_add` returns with `accounting` unchanged;
+the source tree decremented `active` first and then performed the fallible add
+with an early return between them.
 Required faults and enabling state: an accounting state where
 `quarantined + retained` overflows, or an injected failure at that point.
 Confidence: high — [evidence](evidence/quarantine-charge-transition-is-atomic.md).
-Verified by direct read of `crates/shm-transport/src/profile.rs:522-542`:
-line 527-530 sets `accounting.active = active.checked_sub(charges)?`, then line
-537-540 sets `accounting.quarantined = quarantined.checked_add(retained)?` with
-`.ok_or(AdmissionError::ChargeOverflow)?`. On that error path `active` has
-already been reduced and `quarantined` is never raised. The host caller that
-discarded the error, `provider_recovery.rs:187`'s `admission.quarantine().ok()`,
-was deleted by the ring-transport refactor. `Admission::quarantine` now has no
-non-test caller anywhere in the tree; the only two call sites are
-`crates/shm-transport/tests/contract.rs:368` and `:479`. The ordering defect
-is unchanged, so the record stays active, but it moved from
-`Reaches production: yes` to `no`.
-Existing check: `crates/shm-transport/tests/contract.rs:349`
-`host_admission_retains_quarantined_commitments` — asserts the success path
-only. Status unaudited.
-Impact: charges vanish from both counters, so the operator-visible snapshot
-under-reports and the admission budget silently over-admits later. Directly
-contradicts "quarantine retains the exact charges" and "charges stay visible"
-(former `docs/shm-transport.md:79`, `:90`, `:112`; the rewritten document keeps
-the weaker statements at `:21` and `:92`).
+Verified by direct read of `AdmissionController::quarantine`
+(`crates/shm-transport/src/profile.rs:518-531`) at HEAD: `active` and
+`quarantined` are each computed with `checked_sub` / `checked_add` into locals
+under the accounting mutex, and only after both succeed are
+`accounting.active` and `accounting.quarantined` assigned; the code comment
+states the intent. The source tree's version (then `profile.rs:522-542`) stored
+the reduced `active` before the fallible add, which is the defect this record
+was written against. The property therefore holds by construction at HEAD and
+the record stays active as the regression contract.
+Existing check: `host_admission_retains_quarantined_commitments`
+(`crates/shm-transport/tests/profile.rs:50`) asserts the success path only; no
+test drives the error path. Status unaudited.
+Impact: if a future reorder stored one bucket before the other's checked
+operation, charges would vanish from both counters on the error path, so the
+operator-visible snapshot would under-report and the admission budget would
+silently over-admit later. That is the source tree's defect; at HEAD the
+rewritten document's statements that active and quarantined charges are
+reported separately (`docs/shm-transport.md:21`) and that quarantined charges
+stay within the process bound (`:92`) are consistent with the code.
 Open questions: None.
 
 ### charge-release-never-silently-strands
@@ -1226,26 +1235,28 @@ Required faults and enabling state: a concurrent peer write to leased bytes. The
 property is violated statically, so the audit form needs no fault; the *impact*
 demonstration does.
 Confidence: high — [evidence](evidence/no-rust-reference-over-peer-writable-payload.md).
-Verified by direct read of `crates/shm-transport/src/lease.rs`:
-`checksum` builds a slice with
-`std::slice::from_raw_parts(self.base.as_ptr(), self.len)` at line 71, while
-`copy_to` correctly uses `copy_nonoverlapping` at line 63 and `read_byte` uses
-`read_volatile`. The SAFETY argument for the slice cites the peer *contract*,
-and the source document (former `docs/shm-transport.md:116`) explicitly declined
-to guarantee that contract against a misbehaving peer; the rewritten document
-makes no statement about it, so the premise is unresolved rather than documented.
-Existing check: none.
-Impact: one method's soundness rests on a premise the documentation disclaims,
-while its siblings in the same file avoid the issue. Additionally
-`LeaseSpan::as_mut_ptr` hands a mutable pointer out of a by-value receiver, and
-the addon wires it into external buffers for *receive* segments too, so
-JavaScript can write memory the host is concurrently reading.
+Verified by direct read of `crates/shm-transport/src/lease.rs` at HEAD:
+`LeaseSpan::checksum` (`:70-77`) folds one `read_volatile` per byte and its
+comment states that no `&[u8]` is formed because the peer may write at any
+time; `copy_to` (`:60-67`) delegates to `volatile_copy`, a word-at-a-time
+volatile copy; the file contains no `from_raw_parts`. The source tree's
+`checksum` built a slice with `std::slice::from_raw_parts` under a SAFETY
+argument that cited the peer contract, which the source document (former
+`docs/shm-transport.md:116`) explicitly declined to guarantee; that finding is
+resolved at HEAD, and the rewritten document makes no statement about peer
+misbehaviour either way.
+Existing check: none asserts the read paths are reference-free; the guarantee
+holds by inspection.
+Impact: at HEAD every read path is volatile, so the data-race hazard this record
+was written against is absent. The residual is `LeaseSpan::as_mut_ptr`, which
+hands a mutable pointer out of a by-value receiver; the addon wires it into
+external buffers for *receive* segments too, so JavaScript can write memory the
+host is concurrently reading.
 Open questions:
 
-- Is `checksum` reachable from any non-bench caller? If it is bench-only,
-  gating it removes the finding; if it is part of the intended read API, the
-  slice needs to go. (partial: the only observed call sites are the bench and
-  tests)
+- Should the audit be mechanised, for example a test or lint that fails if
+  `lease.rs` ever contains `from_raw_parts` or forms a slice over arena bytes,
+  so the resolved finding cannot silently return? (needs human input)
 
 ### reclaim-advance-bounded-by-the-producer-reservation
 
@@ -1319,46 +1330,52 @@ Open questions: None.
 ### one-profile-name-denotes-one-geometry
 
 Type: safety
-Reachability: default-production — the host issues its grant geometry on every
-accepted connection (`crates/host-runtime/src/connection.rs:148`, from
-`ring_transport.rs:32` and `:47-50`), and the client attaches through the addon
-by default (`packages/plugin/src/shared/host-client/connection.ts:393`), so
-the disagreement is live on the shipped path.
+Reachability: default-production - the host stamps `host-test-ring-v1` and its
+geometry into every grant (`crates/host-runtime/src/ring_transport.rs:30-39`,
+which is `host_test_ring_profile`), and the shipped addon attaches under the same
+id; the former TypeScript client in `packages/plugin` is not in this tree.
 Status: active
-Exercised: not yet — needs a cross-artifact equality assertion; the
-contradiction is present today.
+Exercised: partial - `host_test_ring_profile_names_one_geometry`
+(`crates/shm-transport/tests/profile.rs:202`) pins the Rust geometry against
+literals and the addon fixture spells the same literals
+(`packages/shm-native/tests/mechanism.ts:106-110`); no test asserts the fixture
+against the Rust profile, so agreement is maintained by hand.
 Guarantee: Every artifact naming profile `host-test-ring-v1` derives its
 geometry from one source, so the name uniquely determines depth, arena bytes,
 lease cap, and layout overhead.
 Check: `always` — assert the TypeScript grant constants, the addon test
 fixture's constants, and the Rust qualified profile are pairwise equal, and that
 the TypeScript layout overhead equals `Layout::new(depth, arena).total - arena`.
-Fault/timing angle: no fault needed. The disagreement is live and masked because
-the addon enforces no geometry (see the previous property) and because the
-total-bytes cap is loose enough to admit both overheads.
+Fault/timing angle: no fault needed. A drift between the fixture and the profile
+would be masked because the addon enforces no geometry (see the previous
+property) and because the total-bytes cap is loose enough to admit more than one
+overhead.
 Required faults and enabling state: none; this is a static consistency property.
 Confidence: high — [evidence](evidence/one-profile-name-denotes-one-geometry.md).
-Three artifacts name one profile with two geometries: the host issues depth 8 and
-8 leases (`ring_transport.rs:47-50`, from `DESCRIPTOR_DEPTH` at `:32`), the
-transport's own `ring_profile` is depth 32
-and 32 leases (`profile.rs:706`, `:709`), and the addon test fixture encodes 32
-(`packages/shm-native/tests/mechanism.ts:91-95`). Each is internally
-consistent; together they contradict. A fourth artifact used to participate: the
-TypeScript validator at `packages/plugin/src/shared/host-client/shm-grant.ts:66-69`
-hard-rejected anything but 8. That file was deleted by the ring-transport refactor
-and no replacement validator pins a geometry, so the contradiction now has one
-fewer witness but is unchanged in kind, and the client-side guard that would have
-caught a depth-32 grant is gone.
+At HEAD the contradiction this record was written against is resolved. The host's
+`ring_profile()` (`crates/host-runtime/src/ring_transport.rs:38-39`) returns
+`host_test_ring_profile` (`crates/shm-transport/src/profile.rs:679-692`: depth
+8, eight leases), and the addon fixture encodes depth 8, a 64 MiB arena, and
+eight leases under the same id (`packages/shm-native/tests/mechanism.ts:106-110`).
+The depth-32 `ring_profile(hardware)` helper (`profile.rs:699-706`) takes an
+arbitrary caller-supplied id for tests and local tools and is not a second
+definition of `host-test-ring-v1`. The source tree's fixture encoded 32 and its
+TypeScript validator in `packages/plugin` hard-rejected anything but 8; neither
+is in this tree.
 Existing check: `ring_profile_pins_per_connection_grant_geometry`
-(`ring_transport.rs:822`) pins Rust only. Status unaudited.
-Impact: this is the mechanism behind defect `daf6e244`, where a stale hardcoded
+(`crates/host-runtime/src/ring_transport.rs:904`) and
+`host_test_ring_profile_names_one_geometry`
+(`crates/shm-transport/tests/profile.rs:202`) pin the Rust side; the
+TypeScript fixture is unchecked. Status unaudited.
+Impact: this was the mechanism behind defect `daf6e244`, where a stale hardcoded
 layout total silently weakened five hardening tests for over a day. The
-arrangement guarantees recurrence.
+arrangement that produced it is gone; recurrence needs the fixture and the
+profile to drift apart again with nothing asserting their equality.
 Open questions:
 
-- Is the depth-32 fixture a deliberate model of `create_test_pair` (which uses
-  `ring_profile`), in which case the profile string is knowingly overloaded
-  across two geometries? (needs human input)
+- Should the addon fixture's geometry constants be derived from or asserted
+  against the Rust profile, so the equality is checked rather than maintained by
+  hand? (needs human input)
 
 ### native-boundary-not-weaker-than-its-wrapper
 
@@ -2291,8 +2308,9 @@ duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: not yet — no test asserts any layout offset against the runtime page
-size, and no CI host has a non-4096 page executing this code.
+Exercised: not yet - no test asserts a layout offset against a non-4096 page
+size, and no CI host has a non-4096 page executing this code; at HEAD the
+offsets are derived from `system_page_size()`, so the gap is a regression guard.
 Guarantee: Every layout offset the code page-aligns is a multiple of the running
 kernel's page size, so each region the layout separates occupies its own real
 pages.
@@ -2305,30 +2323,29 @@ Required faults and enabling state: none beyond a host whose
 `sysconf(_SC_PAGESIZE)` is not 4096, or an injectable page size in the layout
 computation.
 Confidence: high — [evidence](evidence/layout-region-offsets-are-real-page-aligned.md).
-`Layout::new` (`ring.rs:141-182`) uses the 4096 constant at `:158-163`,
-`:164-169`, and `:170-172`, while `system_page_size()` (`:194-200`) has exactly
-one caller, `verify_prefaulted` (`:1009`). The divergence was computed, not
-estimated: at depth 8 under a 16384-byte page, `arena % 16384 = 4096`,
-`lifecycle % 16384 = 4096`, and `total % 16384 = 8192`; at depth 32 the figures
-are 12288, 12288, and 0. Depth 32 passes the total condition only because
-67,125,248 is 4097 x 16384.
-Existing check: `residency_vector_tracks_runtime_page_size` (`ring.rs:1785-1795`)
-asserts the pure `residency_vector_len` helper at 16 KiB and 64 KiB. It touches
-no layout offset and no mapping.
-Impact: on a 16 KiB-page host the lifecycle page — magic, layout version,
-geometry, incarnation, lane, and the `quarantined` flag — shares one real page
-with the arena's final 4096 bytes (12288 at depth 32), which are peer-writable
-payload. Any page-granular mechanism, including `mprotect` to make the control
-page read-only to one role, can no longer separate control state from payload.
-The arena start is likewise off a real page boundary, and at depth 2 and 8 the
-mapping carries 8192 addressable, never-initialised bytes past `mapping.len`.
+At HEAD `Layout::new` (`crates/shm-transport/src/backend/ring.rs:227-282`) reads
+`page_size = system_page_size()` (`:374-383`), refuses an `arena_bytes` that is
+not a multiple of it (`InvalidLayout`), aligns `arena` and `lifecycle` to
+`page_size`, and sets `total = lifecycle + page_size`, so the three offsets the
+Check names are page multiples by construction on every host. The source tree's
+`Layout::new` used a 4096 literal for those three alignments while
+`system_page_size()` had one caller in the prefault path; the divergence
+computed against it (`arena % 16384 = 4096` at depth 8, and so on) is the defect
+this record was written against and does not apply to this tree.
+Existing check: none asserts a layout offset under a non-4096 page;
+`residency_vector_len` (`ring.rs:386`) takes the page size as a parameter and
+the `mincore` accounting (`:1855-1863`) uses the runtime value.
+Impact: if a 4096 literal returned to any of the three alignments, then on a
+16 KiB-page host the lifecycle page (magic, layout version, geometry,
+incarnation, lane, and the `quarantined` flag) would share one real page with
+the arena's final bytes, which are peer-writable payload, and page-granular
+mechanisms such as `mprotect` could no longer separate control state from
+payload. At HEAD that cannot happen without a source change.
 Open questions:
 
-- Are `arena` and `lifecycle` contractually page-separated, or is 4096 standing
-  in for cacheline separation? Nothing records the intent, and the answer decides
-  whether this is a defect or over-alignment. (needs human input)
-- Should `total` be rounded to the runtime page size so the mapping carries no
-  addressable slack past `len`? (needs human input)
+- No CI host has a non-4096 page. Is an injectable page size, or an aarch64
+  large-page job, worth adding so the alignment is asserted rather than
+  inferred from the code? (needs human input)
 
 ### page-size-dependent-setup-runs-on-a-non-4096-page-host
 
@@ -2345,50 +2362,45 @@ Status: active
 Exercised: not yet — the only page-size assertion in the tree is a pure-function
 unit test, and it runs only on a 4096-page x86-64 runner; since PR #131 removed
 the macOS CI leg, CI provisions no non-4096-page host at all.
-Guarantee: The full setup path that depends on page size — layout, `ftruncate`,
-`mmap`, both prefault walks, `mincore`, and the `PrefaultFailed` gate — executes
-on a host whose kernel page size is not 4096.
-Check: `reachable` — assert `Ring::create` runs to completion where
-`sysconf(_SC_PAGESIZE) != 4096`, and that `verify_prefaulted()` returns true
+Guarantee: The full setup and reclamation path that depends on page size
+(`Layout::new`, `ftruncate`, `mmap`, the `mincore` residency accounting, and
+`MADV_REMOVE` page removal) executes on a host whose kernel page size is not
+4096.
+Check: `reachable` - assert `Ring::create`, one publish and release, and one
+reclaim run to completion where `sysconf(_SC_PAGESIZE) != 4096`, and that the
+`mincore` residency count agrees with `residency_vector_len` for that page size,
 rather than merely that creation did not error. Location and environment
 coverage: the code exists and is never executed under the condition that matters.
-It must not assert a page-size violation.
+It must not assert a page-size violation. The source tree's prefault walks,
+`verify_prefaulted`, and `PrefaultFailed` gate named by the former check do not
+exist in this tree.
 Fault/timing angle: none; the condition is environmental and constant per host.
 Required faults and enabling state: a runner whose page size is not 4096 — an
 aarch64 Linux kernel with 16 KiB or 64 KiB pages — or an injectable page size.
 Confidence: high — [evidence](evidence/page-size-dependent-setup-runs-on-a-non-4096-page-host.md).
-The `a5568707` diff touched only `verify_prefaulted`, adding `system_page_size`
-and `residency_vector_len`, and left `Layout::new` plus both prefault walks on
-4096 — including `arena.rs:229`, a bare literal that does not reference the
-constant. CI was read directly at the time; re-read at HEAD `bdf72f46a` after
-PR #131 (merge `5d638e3e8`), `the source repository`ci.yml`workflow` has only
-`ubuntu-latest` jobs — the macOS leg that ran
-`--test contract --test fuzz_corpus` is gone, so nothing in CI runs any of this
-crate off Linux. The `mincore` mismatch the fix repaired reproduces exactly in
-arithmetic:
-16386 entries sized against 4097 written, leaving 12289 zero.
-Existing check: `residency_vector_tracks_runtime_page_size` (`ring.rs:1785-1795`),
-a pure-function assertion with no mapping. The macOS CI leg that excluded it via
-`--test` selection was removed with PR #131; no macOS job remains.
-Impact: the configuration in which the previous defect lived has never been
-executed end to end, so the residual defects in
-`layout-region-offsets-are-real-page-aligned` are invisible to CI, as is any
-future change reintroducing a 4096 assumption into the residency path. PR #131
-removed the macOS job, so CI provisions no 16 KiB host at all; closing the gap
-now requires an aarch64 Linux large-page job or an injectable page size rather
-than a returning macOS runner.
+At HEAD `Layout::new` (`crates/shm-transport/src/backend/ring.rs:227-282`),
+`residency_vector_len` (`:386`), and the `mincore` accounting (`:1855-1863`)
+all take the page size from `system_page_size()` (`:374-383`); there is no
+prefault walk and no 4096 literal in the layout. The source tree's history
+(`a5568707` fixing only `verify_prefaulted` while `Layout::new` stayed on 4096,
+and the `mincore` mismatch of 16386 entries sized against 4097 written) is the
+defect class this record guards against. CI (`.github/workflows/ci.yml`) runs
+Linux x86-64 only, so nothing executes this crate under a non-4096 page.
+Existing check: none names a non-4096 page. `residency_vector_len` is a pure
+function of `(mapping_len, page_size)` and the reclamation tests
+(`reclaimed_pages_leave_residency_and_reuse_as_zeroes`,
+`repeated_subpage_releases_eventually_remove_complete_pages`) run at the host's
+page size only.
+Impact: the configuration in which the source tree's defect lived has never been
+executed end to end here, so a future change reintroducing a 4096 assumption
+into the layout or residency path would be invisible to CI. Closing the gap
+requires an aarch64 Linux large-page job or an injectable page size; the Darwin
+question is settled for this tree (no macOS build exists, see the invalidated
+Darwin records).
 Open questions:
 
 - Add an aarch64 Linux job with a large-page kernel, or make the page size
   injectable so the path can be driven on any host? (needs human input)
-- The former question about `macos-latest` provisioning a 16384-byte page is
-  moot: PR #131 removed the macOS job, so CI has no 16 KiB host of any
-  provenance.
-- Is Darwin still a supported release surface? PR #131 (merge `5d638e3e8`)
-  deleted the Darwin npm packages and the macOS CI jobs while the
-  `cfg(target_os = "macos")` code path remains (`ring.rs:2176`, uncalled,
-  behind the `ring.rs:1-2` compile error). If not, non-4096-page coverage must
-  come from Linux, not from a restored macOS runner. (needs human input)
 
 ---
 
@@ -4021,7 +4033,7 @@ Check: `always` - `host_test_ring_profile()` matches the literal id, depth, leas
 Fault/timing angle: A peer that echoes the id exercises whatever geometry the host built; if the id survived a geometry change the peer's bounds would be silently wrong.
 Required faults and enabling state: None; the check is a literal comparison.
 Confidence: high - [evidence](evidence/one-profile-id-names-one-ring-geometry-in-code.md). The id is a renamed identity, so the record is `core` for U3; the sibling record `one-profile-name-denotes-one-geometry` states the cross-peer half and keeps its source status.
-Existing check: `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/src/profile.rs`), added at U3; the addon's setup fixture and `packages/shm-native/tests/mechanism.ts` name the same id.
+Existing check: `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs:202`), added at U3; the addon's setup fixture and `packages/shm-native/tests/mechanism.ts` name the same id.
 Impact: A peer sized for a different depth over- or under-runs the ring.
 Open questions: None.
 
@@ -4046,8 +4058,8 @@ Type: liveness
 Reachability: default-production - `watch` callbacks and readiness acknowledgement go through the scheduler; `poll` reads the ring directly and consults the reactor only for readiness.
 Status: active
 Exercised: partial - one unit test covers acknowledgement waiting, and `packages/shm-native/tests/mechanism.ts` covers a frame published during a callback; no test covers a lost eventfd wake with no frame behind it.
-Guarantee: A pending callback runs only after the readiness it waited on is acknowledged, and an interrupted wait retries until success or close rather than reporting a spurious wake.
-Check: `always` - a callback never runs before its acknowledgement, and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. `always` because the ordering must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`.
+Guarantee: At most one readiness callback batch is in flight: the next readiness notification is delivered only after the previous batch has been acknowledged through `readinessHandled()`, and an interrupted wait retries until success or close rather than reporting a spurious wake.
+Check: `always` - `dispatchReadiness` (`packages/shm-native/index.ts:515-525`) runs every registered handler and calls `readinessHandled()` in its `finally`, and `wait_until_handled` (`packages/shm-native/src/scheduling.rs`) does not release a new wake while the pending flag is set, so no second dispatch begins before the first is acknowledged; and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. The handler runs first and the acknowledgement follows it; the ordering this record forbids is a second dispatch ahead of that acknowledgement. `always` because it must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`.
 Fault/timing angle: A missed or duplicated wake leaves the JavaScript side spinning or stalled.
 Required faults and enabling state: A readiness event with no pending callback; a signal interrupting the wait.
 Confidence: medium - [evidence](evidence/addon-scheduling-wakes-only-on-acknowledged-readiness.md). `pending_callback_waits_for_acknowledgement` and `interrupted_wait_retries_until_success_or_close` (`packages/shm-native/src/scheduling.rs`).

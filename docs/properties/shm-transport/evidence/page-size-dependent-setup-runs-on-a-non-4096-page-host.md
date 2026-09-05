@@ -159,3 +159,8 @@ executed and its own probe passed. It must not assert a page-size violation.
   coverage — at HEAD no CI host has a non-4096 page. Citation corrections: the
   `ci.yml` matrix and macOS step lines cited above (`:132`, `:159-166`,
   `:168-175`) no longer exist at HEAD.
+
+### Q: Do the prefault mechanisms the check names exist at HEAD? (added 2026-09-05)
+
+- Checked: `rg 'verify_prefaulted|PrefaultFailed|prefault' crates/shm-transport/src crates/host-runtime/src` returns nothing. `Layout::new` (`ring.rs:227-282`), `residency_vector_len` (`:386`), and the `mincore` accounting (`:1855-1863`) take the page size from `system_page_size()`. CI runs Linux x86-64 only.
+- Conclusion: no. The check is re-stated against the runtime-aligned setup and reclamation path; the record stays active because no non-4096-page host executes it.

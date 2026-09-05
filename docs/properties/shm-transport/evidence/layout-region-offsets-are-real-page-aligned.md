@@ -131,3 +131,8 @@ addressable bytes past `len`.
 - Conclusion: resolved with answer on the arithmetic, unresolved on the
   requirement. The divergence is exact and reproducible; whether page separation
   is a contract needs the design owner.
+
+### Q: Does `Layout::new` still use a 4096 literal at HEAD? (added 2026-09-05)
+
+- Checked: `Layout::new` (`crates/shm-transport/src/backend/ring.rs:227-282`) reads `page_size = system_page_size()` (`:374-383`), rejects an `arena_bytes` that is not a multiple of it, aligns `arena` and `lifecycle` to `page_size`, and sets `total = lifecycle + page_size`. No 4096 literal remains in the layout.
+- Conclusion: no. The offsets are page multiples by construction; the divergence computed in the trail above applies to the source tree only. No test asserts this under a non-4096 page.

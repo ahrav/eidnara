@@ -168,3 +168,8 @@ the two geometries the name means.
   grants through `grantHex()` from the depth-8 fixtures module instead. The
   instruction points at a file that can no longer be kept in sync, and following
   it would put a depth-32 literal into a depth-8 suite.
+
+### Q: Do the artifacts still disagree at HEAD? (added 2026-09-05)
+
+- Checked: host `ring_profile()` (`crates/host-runtime/src/ring_transport.rs:38-39`) returns `host_test_ring_profile` (`crates/shm-transport/src/profile.rs:679-692`, depth 8, eight leases); the addon fixture (`packages/shm-native/tests/mechanism.ts:106-110`) encodes depth 8, a 64 MiB arena, and eight leases under `host-test-ring-v1`; the depth-32 `ring_profile(hardware)` (`profile.rs:699-706`) takes an arbitrary id and is not a definition of that profile. `ring_profile_pins_per_connection_grant_geometry` is at `ring_transport.rs:904`; `host_test_ring_profile_names_one_geometry` is at `crates/shm-transport/tests/profile.rs:202`. `packages/plugin` is not in this tree.
+- Conclusion: no. The contradiction is resolved; the record stays active as the cross-artifact equality contract, which no test asserts against the TypeScript fixture.

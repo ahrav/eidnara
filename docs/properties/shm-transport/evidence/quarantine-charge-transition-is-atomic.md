@@ -190,3 +190,8 @@ lifecycle-record and manifest quarantines in `lifecycle.rs` and `generation.rs`.
 This is a reachability change rather than a supersession because the guarded code
 survives and is still defective. A future host path that quarantines charges
 re-exposes it with no further change.
+
+### Q: Is the ordering defect present at HEAD? (added 2026-09-05)
+
+- Checked: `AdmissionController::quarantine` (`crates/shm-transport/src/profile.rs:518-531`) computes `active = accounting.active.checked_sub(charges)?` and `quarantined = accounting.quarantined.checked_add(retained)?` into locals and assigns both fields only after both succeed; the comment states that a failed checked operation leaves `accounting` unchanged. `host_admission_retains_quarantined_commitments` is at `crates/shm-transport/tests/profile.rs:50` and covers the success path only.
+- Conclusion: no. The record stays active as a regression contract; the trail above describes the source tree's ordering.

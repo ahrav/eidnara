@@ -117,3 +117,8 @@ second thread writes it, under `-Zsanitizer=thread`.
   read path is unsound" to "a public API method invites an unsound read, and one
   benchmark takes it". The sibling finding about `as_mut_ptr` and the writable
   receive-path ArrayBuffer is independent of this answer and is live.
+
+### Q: Does `checksum` still form a slice at HEAD? (added 2026-09-05)
+
+- Checked: `LeaseSpan::checksum` (`crates/shm-transport/src/lease.rs:70-77`) folds one `read_volatile` per byte and its comment says no `&[u8]` is formed; `copy_to` (`:60-67`) delegates to `volatile_copy`; `rg from_raw_parts crates/shm-transport/src/lease.rs` returns nothing. `LeaseSpan::as_mut_ptr` is still present.
+- Conclusion: no. The finding the trail above describes is resolved; the residual impact is `as_mut_ptr` only.
