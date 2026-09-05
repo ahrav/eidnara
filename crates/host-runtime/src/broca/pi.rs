@@ -136,7 +136,10 @@ impl LlmExecutionBackend for PiBackend {
         if self.descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
             return Some("extension_budget_exceeded");
         }
-        let closure = &self.descriptor.closure;
+        // The probe re-verifies the whole closure exactly as `run_pi` does before launch, so a rejected send and a failed run report the same subreason. commentlint: allow(JUDGE)
+        let Ok(closure) = self.descriptor.closure.revalidate() else {
+            return Some("closure_incomplete");
+        };
         let mut required = [
             &self.descriptor.interpreter_node,
             &self.descriptor.entrypoint_node,
@@ -527,14 +530,12 @@ fn pi_line_probe_signal(line: &[u8]) -> ProbeSignal {
     if message_requests_tools(message) {
         return ProbeSignal::Quiet;
     }
-    let decisive = value.get("type").and_then(serde_json::Value::as_str) == Some("agent_end");
+    // Every Pi terminal arms provisionally: a compatibility transcript can resume with `message_start` or `auto_retry_*` after `agent_end`, and the parser then requires a later terminal, so the drain deadline must be revocable rather than kill the continuation. commentlint: allow(JUDGE)
     match message
         .get("stopReason")
         .and_then(serde_json::Value::as_str)
     {
-        Some("stop" | "length") => ProbeSignal::Decisive,
-        Some("error" | "aborted") if decisive => ProbeSignal::Decisive,
-        Some("error" | "aborted") => ProbeSignal::Provisional,
+        Some("stop" | "length" | "error" | "aborted") => ProbeSignal::Provisional,
         _ => ProbeSignal::Quiet,
     }
 }

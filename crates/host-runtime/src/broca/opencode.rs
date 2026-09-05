@@ -85,14 +85,15 @@ impl LlmExecutionBackend for OpenCodeBackend {
         ))
     }
 
-    /// Resolving the executable node re-proves the same closure invariants `run_opencode` requires, so a rejected send and a failed run report the same subreason.
+    /// The probe re-verifies the whole closure and resolves the executable exactly as `run_opencode` does before launch, so a rejected send and a failed run report the same subreason. commentlint: allow(JUDGE)
     fn unavailable_reason(&self, harness: Harness) -> Option<&'static str> {
         if harness != Harness::OpenCode {
             return None;
         }
         self.runtime
             .closure
-            .resolve_node_descriptor(&self.runtime.executable_node)
+            .revalidate()
+            .and_then(|fresh| fresh.resolve_node_descriptor(&self.runtime.executable_node))
             .is_err()
             .then_some("closure_incomplete")
     }
