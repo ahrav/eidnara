@@ -10,12 +10,10 @@ use fastembed::{
     UserDefinedEmbeddingModel,
 };
 
-use super::bundle::{Corpus, SelectedOutput, VerifiedBundle};
+use super::bundle::{Corpus, CorpusItem, SelectedOutput, VerifiedBundle};
 #[cfg(target_os = "linux")]
 use super::bundle::{OpenRegularFileError, open_regular_file, validate_sha256_hex};
 
-/// `NORM_TOLERANCE` permits a returned vector's L2 norm to differ from 1.0 by at most 1e-3; larger deviations are invariant failures.
-const NORM_TOLERANCE: f64 = 1e-3;
 /// CPU ONNX Runtime contains executable code and static runtime tables, not model weights.
 /// The 512 MiB limit bounds the verification source buffer and sealed memfd copy to 1 GiB.
 const MAX_ORT_LIBRARY_BYTES: u64 = 512 * 1024 * 1024;
@@ -362,7 +360,7 @@ impl Backend {
             .map(|v| f64::from(*v).powi(2))
             .sum::<f64>()
             .sqrt();
-        if (norm - 1.0).abs() > NORM_TOLERANCE {
+        if (norm - 1.0).abs() > super::bundle::UNIT_NORM_TOLERANCE {
             return Err(InferenceError::Invariant(
                 "vector is not L2-normalized".to_owned(),
             ));
@@ -384,18 +382,31 @@ impl Backend {
     /// certify rejects structurally healthy models with semantically incorrect output.
     /// load rejects semantically wrong models before returning a backend that can serve vectors.
     fn certify(&self, corpus: &Corpus) -> Result<(), InferenceError> {
+        let matches = |got: &[f32], item: &CorpusItem| {
+            got.iter()
+                .zip(&item.expected)
+                .all(|(g, e)| (g - e).abs() <= corpus.tolerance)
+        };
         for item in &corpus.items {
             let got = self.embed(&[item.text.as_str()])?;
-            let got = &got[0];
-            let mismatch = got
-                .iter()
-                .zip(&item.expected)
-                .any(|(g, e)| (g - e).abs() > corpus.tolerance);
-            if mismatch {
+            if !matches(&got[0], item) {
                 return Err(InferenceError::Artifact(
                     "semantic certification failed".to_owned(),
                 ));
             }
+        }
+        // Routed batches pass every item to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so the corpus is also certified as one multi-row call with every row attributed.
+        let texts: Vec<&str> = corpus.items.iter().map(|item| item.text.as_str()).collect();
+        let rows = self.embed(&texts)?;
+        if rows.len() != corpus.items.len()
+            || !rows
+                .iter()
+                .zip(&corpus.items)
+                .all(|(row, item)| matches(row, item))
+        {
+            return Err(InferenceError::Artifact(
+                "multi-row semantic certification failed".to_owned(),
+            ));
         }
         Ok(())
     }

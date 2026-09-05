@@ -664,12 +664,17 @@ async fn read_terminals(
             }
             continue;
         }
-        if frame.ver != raw_client::WIRE_VERSION
+        // Only `Response` and `Error` may settle a pending call; any other type is a protocol violation that invalidates the run rather than evidence.
+        if !matches!(frame.ty, raw_client::TY_RESPONSE | raw_client::TY_ERROR)
+            || frame.ver != raw_client::WIRE_VERSION
             || frame.channel != wire.channel
             || frame.epoch != wire.epoch
             || frame.flags != raw_client::FLAGS_RESPONSE_TEXT_LAST
         {
-            return Err("terminal frame violates route or flag contract".to_owned());
+            return Err(format!(
+                "terminal frame violates the type, route, or flag contract (type {})",
+                frame.ty
+            ));
         }
         let sender = wire.pending.lock().await.remove(&frame.corr);
         let Some(sender) = sender else {
@@ -1295,6 +1300,14 @@ async fn execute_batch(
             let result = &json["result"];
             if let Some(vectors) = result["vectors"].as_array() {
                 validate_batch_page(&json, &expected_items)?;
+                // A page is either final (`done:true`, no cursor) or a nonempty continuation (`done:false`, string cursor); anything else is a malformed envelope, not evidence.
+                let final_page = result["done"] == true && result.get("next_cursor").is_none();
+                let continuation = result["done"] == false
+                    && !vectors.is_empty()
+                    && result["next_cursor"].is_string();
+                if !final_page && !continuation {
+                    return Err(format!("malformed vector page envelope: {json}"));
+                }
                 for vector in vectors {
                     collected.push(
                         vector["id"]
@@ -1371,7 +1384,8 @@ async fn execute_batch(
     }
 }
 
-/// A descriptor that is not attributed to the submitted batch, or that is not in a pending shape, is a protocol regression rather than a job to poll.
+/// A descriptor that is not attributed to the submitted batch, or whose shape the host never emits, is a protocol regression rather than a job to poll.
+/// An idempotent replay after a lost response can return the same job already `ready` or `failed`; both are valid descriptors, and polling reports the outcome.
 fn validate_batch_descriptor(
     json: &serde_json::Value,
     request_key: &str,
@@ -1382,10 +1396,13 @@ fn validate_batch_descriptor(
         .ok_or_else(|| format!("batch descriptor omitted job_id: {json}"))?;
     if result["request_key"] != request_key
         || result["done"] != false
-        || !matches!(result["status"].as_str(), Some("queued" | "running"))
+        || !matches!(
+            result["status"].as_str(),
+            Some("queued" | "running" | "ready" | "failed")
+        )
     {
         return Err(format!(
-            "batch descriptor is not a pending descriptor for this batch: {json}"
+            "batch descriptor is not a descriptor for this batch: {json}"
         ));
     }
     Ok(job_id.to_owned())

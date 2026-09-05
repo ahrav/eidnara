@@ -16,6 +16,8 @@ const MAX_EXTERNAL_INITIALIZERS: usize = 16;
 const MAX_ARTIFACT_NAME_BYTES: usize = 255;
 const MAX_PROVENANCE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_MODEL_NAME_BYTES: usize = 128;
+/// Served vectors and corpus expectations are unit-normalized; an L2 norm farther than this from 1.0 is an invariant failure on output and a rejected corpus on input.
+pub(crate) const UNIT_NORM_TOLERANCE: f64 = 1e-3;
 pub(crate) const MAX_DIMS: u64 = 16_384;
 const MAX_MAX_TOKENS: u64 = 1_048_576;
 /// `MAX_TABLE_EPOCH` prevents TypeScript JSON-number rounding from changing `table_epoch`.
@@ -848,6 +850,16 @@ fn parse_corpus(bytes: &[u8], dims: usize) -> Result<Corpus, BundleError> {
         }
         if item.expected.len() != dims || item.expected.iter().any(|v| !v.is_finite()) {
             return Err(err("corpus expected vector invalid"));
+        }
+        // A non-unit expectation cannot certify a unit-normalized output: at high dimensions an all-zero vector matches any dense unit vector elementwise within a loose tolerance.
+        let norm = item
+            .expected
+            .iter()
+            .map(|v| f64::from(*v).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        if (norm - 1.0).abs() > UNIT_NORM_TOLERANCE {
+            return Err(err("corpus expected vector is not unit-normalized"));
         }
         items.push(CorpusItem {
             text: item.text,

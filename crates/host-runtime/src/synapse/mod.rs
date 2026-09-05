@@ -647,7 +647,16 @@ impl SynapseComponent {
                         content_sha256: &content_sha256,
                         vector,
                     }];
-                    respond_vectors(ctx, &lane.lane, &items, true, None).await
+                    // Output reservation can wait on egress, so the deadline covers response construction too; dropping the future releases any reservation it holds.
+                    match tokio::time::timeout_at(
+                        deadline,
+                        respond_vectors(ctx, &lane.lane, &items, true, None),
+                    )
+                    .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(_) => expired_query(),
+                    }
                 }
                 None => {
                     mark_failing(
@@ -1019,6 +1028,7 @@ impl CompositeComponent for SynapseComponent {
     /// Shutdown closes admission and cancels queued wrappers before joining every started native call through its incarnation.
     /// Shutdown never aborts a started native call.
     /// The lane ends `Disabled` so a late `bind`, `health`, or `embed_blocking` observes the shutdown instead of a ready lane whose admission is closed.
+    /// `embed_blocking` calls are not tracked, so shutdown takes the CPU permit after disabling the lane: an in-flight blocking call holds that permit until it returns, and a call that read `Ready` earlier rechecks the state after acquiring it.
     async fn shutdown(&self) -> Result<(), crate::composite::ShutdownError> {
         self.inner.closing.cancel();
         self.inner.jobs.close_admission();
@@ -1030,6 +1040,8 @@ impl CompositeComponent for SynapseComponent {
         *self.inner.lock_state() = LaneState::Disabled {
             reason: SHUT_DOWN_REASON.to_owned(),
         };
+        // Taking the permit joins an in-flight `embed_blocking` call.
+        drop(self.inner.cpu.acquire().await);
         Ok(())
     }
 }
