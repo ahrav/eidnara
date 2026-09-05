@@ -25,8 +25,8 @@ use host_runtime::synapse::{
 };
 use host_runtime::{
     BindOutcome, CancellationToken, CompositeComponent, HealthReport, HostConfig, HostInit,
-    InitError, ManifestSnapshot, PrimaryComponent, RequestCtx, RequestOutcome, RouteHandle,
-    RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
+    HostLimits, InitError, ManifestSnapshot, PrimaryComponent, RequestCtx, RequestOutcome,
+    RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
 };
 use perf_measurement::{
     AttemptDisposition, AttemptRecord, DeterministicRng, LatencySummary, LogicalDisposition,
@@ -367,7 +367,12 @@ struct HostThread {
 }
 
 impl HostThread {
-    fn start(component: SynapseComponent, data_dir: std::path::PathBuf) -> Result<Self, String> {
+    /// `retained_result_bytes` is the lane's declared retention cap; the host budget must cover it above the resident floor plus one inbound body or startup refuses the composite.
+    fn start(
+        component: SynapseComponent,
+        data_dir: std::path::PathBuf,
+        retained_result_bytes: u64,
+    ) -> Result<Self, String> {
         let composite = StaticComposite::new(PerfPrimary, component, PlaceholderBroca)
             .map_err(|error| format!("compose host: {error}"))?;
         let shutdown = CancellationToken::new();
@@ -388,6 +393,12 @@ impl HostThread {
                                 HostConfig {
                                     data_dir: Some(data_dir),
                                     daemon_ver: "eidnara-host/synapse-perf".to_owned(),
+                                    limits: HostLimits {
+                                        max_resident_bytes: host_runtime::config::MIN_RESIDENT_BYTES
+                                            + u64::from(host_runtime::MAX_FRAME_BODY_LEN)
+                                            + retained_result_bytes,
+                                        ..Default::default()
+                                    },
                                     ..Default::default()
                                 },
                                 run_shutdown,
@@ -1092,12 +1103,11 @@ async fn execute_batch(
             };
             first_send.get_or_insert(reply.sent_ns);
             if reply.frame.ty == raw_client::TY_RESPONSE {
-                let result = &json["result"];
-                let job_id = result["job_id"]
-                    .as_str()
-                    .ok_or_else(|| format!("batch descriptor omitted job_id: {json}"))?
-                    .to_owned();
-                break (job_id, result["retry_after_ms"].as_u64().unwrap_or(50));
+                let job_id = validate_batch_descriptor(&json, &request_key)?;
+                break (
+                    job_id,
+                    json["result"]["retry_after_ms"].as_u64().unwrap_or(50),
+                );
             }
             let code = json["code"].as_str().unwrap_or("unparsable");
             if code == "module_restarted" {
@@ -1334,6 +1344,7 @@ async fn execute_batch(
                 }
                 continue;
             }
+            validate_pending_envelope(&json, &job_id)?;
             let served_delay = result["retry_after_ms"].as_u64().unwrap_or(served_poll_cap);
             let delay_ms = ctx
                 .opts
@@ -1358,6 +1369,40 @@ async fn execute_batch(
             }
         }
     }
+}
+
+/// A descriptor that is not attributed to the submitted batch, or that is not in a pending shape, is a protocol regression rather than a job to poll.
+fn validate_batch_descriptor(
+    json: &serde_json::Value,
+    request_key: &str,
+) -> Result<String, String> {
+    let result = &json["result"];
+    let job_id = result["job_id"]
+        .as_str()
+        .ok_or_else(|| format!("batch descriptor omitted job_id: {json}"))?;
+    if result["request_key"] != request_key
+        || result["done"] != false
+        || !matches!(result["status"].as_str(), Some("queued" | "running"))
+    {
+        return Err(format!(
+            "batch descriptor is not a pending descriptor for this batch: {json}"
+        ));
+    }
+    Ok(job_id.to_owned())
+}
+
+/// A pending result envelope must name the polled job and carry a pending status; a page later accepted after a malformed envelope would record a completed request on corrupt evidence.
+fn validate_pending_envelope(json: &serde_json::Value, job_id: &str) -> Result<(), String> {
+    let result = &json["result"];
+    if result["job_id"] != job_id
+        || result["done"] != false
+        || !matches!(result["status"].as_str(), Some("queued" | "running"))
+    {
+        return Err(format!(
+            "pending result envelope is malformed for job {job_id}: {json}"
+        ));
+    }
+    Ok(())
 }
 
 /// The delayed engine returns this vector for every text; a completed request must carry exactly it.
@@ -1893,9 +1938,14 @@ async fn run(
     if let Arm::Batch(shape) = opts.arm {
         limits.max_page_vectors = shape.page_vectors();
     }
+    let retained_result_bytes = limits.max_retained_result_bytes;
     let component = SynapseComponent::ready_with_engine(lane(), engine, limits)
         .map_err(|error| format!("validate Synapse limits: {error}"))?;
-    let host = HostThread::start(component, data_root.path().to_path_buf())?;
+    let host = HostThread::start(
+        component,
+        data_root.path().to_path_buf(),
+        retained_result_bytes,
+    )?;
     let publication = data_root
         .path()
         .join("eidnara")

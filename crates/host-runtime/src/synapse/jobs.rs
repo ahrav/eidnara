@@ -62,6 +62,8 @@ pub struct ResultPage {
     pub vectors: Vec<(String, String, Arc<[f32]>)>,
     pub done: bool,
     pub next_cursor: Option<String>,
+    /// The boundary `next_cursor` names. The caller passes it to [`JobTable::mark_cursor_issued`] once the response carrying the cursor exists, so a poll whose response fails does not make that boundary acceptable.
+    pub next_boundary: Option<usize>,
 }
 
 enum JobState {
@@ -72,7 +74,7 @@ enum JobState {
     Ready {
         vectors: Vec<Arc<[f32]>>,
         boundaries: Vec<usize>,
-        /// Highest page boundary this job has returned as a `next_cursor`.
+        /// Highest page boundary whose `next_cursor` reached a built response.
         /// Cursors are issued in page order, so every issued boundary is at most this value; a boundary above it is never-issued and must be rejected even though it is a legal page start.
         issued_through: usize,
     },
@@ -555,7 +557,7 @@ impl JobTable {
         if job.key != key {
             return PollOutcome::KeyMismatch;
         }
-        match &mut job.state {
+        match &job.state {
             JobState::Queued { .. } | JobState::Running => PollOutcome::Pending {
                 status: job.status(),
             },
@@ -589,19 +591,33 @@ impl JobTable {
                     })
                     .collect();
                 let done = next_boundary >= vectors.len();
-                let next_cursor = (!done).then(|| {
-                    // The cursor is issued once the page carrying it is served, so a replayed page re-issues the same boundary.
-                    *issued_through = (*issued_through).max(next_boundary);
-                    format!("{}:{next_boundary}", self.job_id(seq))
-                });
+                let next_cursor = (!done).then(|| format!("{}:{next_boundary}", self.job_id(seq)));
                 // A served page marks the job as in use so retention prefers evicting jobs nobody is reading.
                 job.last_polled_at = Some(Instant::now());
                 PollOutcome::Page(ResultPage {
                     vectors: page,
                     done,
                     next_cursor,
+                    next_boundary: (!done).then_some(next_boundary),
                 })
             }
+        }
+    }
+
+    /// Records that a response carrying the cursor for `boundary` was built, making that boundary replayable.
+    /// The mark is deferred to the caller because a page `poll` returns can still fail output reservation or be abandoned; marking inside `poll` would accept a cursor the client never received.
+    /// Unknown or non-ready jobs are ignored: the job may have expired or been evicted between the poll and the response.
+    pub fn mark_cursor_issued(&self, job_id: &str, boundary: usize) {
+        let Some(seq) = self.parse_job_id(job_id) else {
+            return;
+        };
+        let mut jobs = self.lock_jobs();
+        if let Some(Job {
+            state: JobState::Ready { issued_through, .. },
+            ..
+        }) = jobs.by_seq.get_mut(&seq)
+        {
+            *issued_through = (*issued_through).max(boundary);
         }
     }
 
@@ -1215,8 +1231,15 @@ mod tests {
         let PollOutcome::Page(first) = jobs.poll(&job_id, "paged", None) else {
             panic!("the first page is served from a null cursor");
         };
-        let second_cursor = first.next_cursor.expect("the first page issues a cursor");
+        let second_cursor = first.next_cursor.expect("the first page carries a cursor");
         assert_eq!(second_cursor, format!("{job_id}:1"));
+
+        // A polled page whose response never got built issues nothing.
+        assert!(matches!(
+            jobs.poll(&job_id, "paged", Some(&second_cursor)),
+            PollOutcome::BadCursor
+        ));
+        jobs.mark_cursor_issued(&job_id, first.next_boundary.expect("non-final page"));
 
         // The issued boundary resolves; the one after it is still unissued.
         assert!(matches!(
@@ -1227,7 +1250,10 @@ mod tests {
             panic!("an issued cursor serves its page");
         };
         assert_eq!(second.vectors[0].0, "b");
-        let third_cursor = second.next_cursor.expect("the second page issues a cursor");
+        let third_cursor = second
+            .next_cursor
+            .expect("the second page carries a cursor");
+        jobs.mark_cursor_issued(&job_id, second.next_boundary.expect("non-final page"));
 
         // Replaying an earlier issued cursor stays valid after later pages were served.
         assert!(matches!(

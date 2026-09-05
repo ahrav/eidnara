@@ -41,6 +41,7 @@ pub struct SynapseLimits {
     pub max_queued_jobs: usize,
     pub max_queued_request_bytes: u64,
     pub max_retained_jobs: usize,
+    /// Retained result vectors are declared to the host as `retained_resident_bytes`, so `HostLimits::max_resident_bytes` must leave room for this cap above the resident floor.
     pub max_retained_result_bytes: u64,
     pub max_batch_items: usize,
     pub max_batch_text_bytes: usize,
@@ -359,7 +360,11 @@ impl SynapseComponent {
         if let Some(reason) = lane_failure_reason(&self.inner) {
             return Err(InferenceError::Artifact(reason));
         }
-        embed_via(&self.inner, &lane, texts)
+        // A panicking backend is quarantined the same way the routed workers quarantine a panicked blocking task; the caller sees the same `Invariant` instead of an unwind that leaves the lane `Ready`.
+        let joined =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lane.backend.embed(texts)))
+                .map_err(|_| PanickedBackend);
+        settle_inference(&self.inner, joined)
     }
 }
 
@@ -387,18 +392,19 @@ const BUSY_REASON: &str = "the synapse lane is busy";
 
 const SHUT_DOWN_REASON: &str = "the synapse lane is shut down";
 
-fn embed_via(
-    inner: &SynapseInner,
-    lane: &ReadyLane,
-    texts: &[&str],
-) -> Result<Vec<Vec<f32>>, InferenceError> {
-    settle_inference(inner, Ok(lane.backend.embed(texts)))
+/// A backend panic caught on the synchronous path; it settles like a panicked blocking task.
+struct PanickedBackend;
+
+impl From<tokio::task::JoinError> for PanickedBackend {
+    fn from(_: tokio::task::JoinError) -> Self {
+        Self
+    }
 }
 
-/// `Invariant` failures and panicked blocking tasks mark the lane failing before any sink receives the error, preventing later callers from receiving vectors from a suspect backend.
+/// `Invariant` failures and panicked backends mark the lane failing before any sink receives the error, preventing later callers from receiving vectors from a suspect backend.
 fn settle_inference(
     inner: &SynapseInner,
-    joined: Result<Result<Vec<Vec<f32>>, InferenceError>, tokio::task::JoinError>,
+    joined: Result<Result<Vec<Vec<f32>>, InferenceError>, impl Into<PanickedBackend>>,
 ) -> Result<Vec<Vec<f32>>, InferenceError> {
     match joined {
         Ok(Ok(vectors)) => Ok(vectors),
@@ -407,7 +413,7 @@ fn settle_inference(
             Err(InferenceError::Invariant(reason))
         }
         Ok(Err(other)) => Err(other),
-        Err(_join) => {
+        Err(_panicked) => {
             let reason = "inference task panicked".to_owned();
             mark_failing(inner, reason.clone());
             Err(InferenceError::Invariant(reason))
@@ -415,9 +421,11 @@ fn settle_inference(
     }
 }
 
-/// A distinct error wrapper prevents an engine from spoofing cancellation.
+/// A distinct error wrapper prevents an engine from spoofing cancellation or expiry.
 enum QueryFault {
     Cancelled,
+    /// The deadline passed before the worker held the CPU permit, so no engine call was made.
+    Expired,
     Engine(InferenceError),
 }
 
@@ -595,6 +603,11 @@ impl SynapseComponent {
                 ))));
                 return;
             };
+            // The handler drops its receiver at the deadline, but a handler still hashing or descheduled has not dropped it yet; this check keeps an expired query from consuming the serialized lane.
+            if tokio::time::Instant::now() >= deadline {
+                let _ = tx.send(Err(QueryFault::Expired));
+                return;
+            }
             // A predecessor's invariant failure can mark the serialized lane while a query waits for the permit.
             // The failing-lane branch reports the lane's existing fault rather than creating a new one.
             if let Some(reason) = lane_failure_reason(&inner) {
@@ -645,6 +658,7 @@ impl SynapseComponent {
                 }
             },
             Err(QueryFault::Cancelled) => app_error("cancelled", "the host is shutting down"),
+            Err(QueryFault::Expired) => expired_query(),
             Err(QueryFault::Engine(InferenceError::Input(reason))) => {
                 app_error("schema_violation", &reason)
             }
@@ -837,6 +851,12 @@ impl SynapseComponent {
                 )
                 .await;
                 drop(meta_charge);
+                // The boundary becomes replayable only once a response carrying its cursor exists; a failed reservation leaves it never-issued.
+                if let (RequestOutcome::Response { .. }, Some(boundary)) =
+                    (&outcome, page.next_boundary)
+                {
+                    self.inner.jobs.mark_cursor_issued(&job_id, boundary);
+                }
                 outcome
             }
         }
@@ -860,6 +880,8 @@ impl CompositeComponent for SynapseComponent {
         crate::handler::ResourceDeclaration {
             // The declared hold bound is the permit count so the startup starvation guard sees exactly the queries that can park.
             general_task_hold_bound: self.inner.limits.query_admission_permits().unwrap_or(1),
+            // Retained result vectors live outside every `ByteCharge`; declaring their cap makes the runtime subtract it from ingress so a full retention set and a full ingress pool cannot coexist above `max_resident_bytes`.
+            retained_resident_bytes: self.inner.limits.max_retained_result_bytes,
             ..Default::default()
         }
     }

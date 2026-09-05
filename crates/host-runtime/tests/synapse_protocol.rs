@@ -1101,6 +1101,17 @@ async fn result_pages_preserve_order_and_cursor_discipline() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
+    // Only the first page has been served, so its cursor (boundary 2) is issued and boundary 4 is a legal page start that was never issued.
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.result",
+        poll(serde_json::Value::String(format!("{job_id}:4"))),
+    )
+    .await;
+    assert_eq!(frame.error_code(), "schema_violation");
+
     let mut collected = Vec::new();
     let mut cursor = serde_json::Value::Null;
     let mut pages = 0;
