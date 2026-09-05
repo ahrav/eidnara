@@ -2056,7 +2056,8 @@ Pings were written, and additionally assert the per-round inductive invariant th
 makes the finite run stand for the unbounded guarantee: after each timely Pong the
 liveness state carries no counter, deadline, or flag that depends on how many
 rounds have passed (the `expired` predicate at `connection.rs:755-760` reads only
-the current probe's `sent` and `answered_at`), so round `k + 1` is decided by the
+each outstanding probe's `written_at` and `sent`, and an answered probe is removed
+from `pings`), so round `k + 1` is decided by the
 same inputs as round 1; (b) with `invalidate_on_missed: true`, answer nothing,
 advance to `write_completion + pong_deadline`, and assert `gen.token` is
 cancelled; and assert it is *not* cancelled at `write_completion +
