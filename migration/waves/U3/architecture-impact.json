@@ -106,7 +106,7 @@
       "iteration": 2,
       "analyzed": {
         "repo": "eidnara",
-        "commit": "d663db8d813f4aa87334513e90e06b271bc2663b",
+        "commit": "a471c90c94e9c6aeaa2ac4f2feacebe0d0d4dfcc",
         "scope_hash": "87e35d19b514c0eea6c0494086e60b4219fbc6fed2ca3a1b3c0d5abea0198da4",
         "modules": [
           "crates/host-runtime",
@@ -114,7 +114,7 @@
           "crates/tokenizer",
           "packages/shm-native"
         ],
-        "modules_hash": "0b1f916f4b6def5de58c7037c95e4ec8b93f56bc0a60aa8953ea817e9f2bdb62"
+        "modules_hash": "a18ff0309c6280eea805a321e74565cccbad3fa7ad0b412b382950d4e3249007"
       },
       "report_hash": "7af72397113a4c591625297e6e42591b2668a94479e2d380a2e130fd445c3579",
       "report_path": "/tmp/arch-u3-it2/architecture-review-U3-post-integration-iteration2c.html",

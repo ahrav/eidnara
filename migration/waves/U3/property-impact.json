@@ -5024,8 +5024,8 @@
       "evidence_pointer": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
       "evidence_digest": "39663d0fb9760032ecbc72b31efb1fb43938c5a1281b336324e19ea24424020e",
       "check_pointer": "crates/host-runtime/src/broca/subprocess.rs#credential_fingerprint_matches_the_committed_vector",
-      "check_hash": "42cd25ffbc48fd7efcefa10110511e59d777b4a8e5e58acb5660ea3ed15fe874",
-      "code_hash": "7a705ccea97dd113a3941689175db07c1869946f7270bef24d6f0c6376d5f993",
+      "check_hash": "88ba49bf01f5697061eed1c9c66e54ecd48a47863c1a20f17d2782a3ddb0417a",
+      "code_hash": "c5f4c9db8664b9b21c1b1f81fb6540bde20320b325e5ba863c4890d0331a217a",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],

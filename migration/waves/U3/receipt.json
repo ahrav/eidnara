@@ -1234,7 +1234,7 @@
         "blob_sha": "978fbe6f682f1990b6352dd8d7d039a0b636966a"
       },
       "destination": "crates/host-runtime/src/broca/subprocess.rs",
-      "destination_sha256": "42cd25ffbc48fd7efcefa10110511e59d777b4a8e5e58acb5660ea3ed15fe874",
+      "destination_sha256": "88ba49bf01f5697061eed1c9c66e54ecd48a47863c1a20f17d2782a3ddb0417a",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "71f1d0f580e786c4980bf90a2d55161e1344aec7e91916be37c04c4a8b493c77",
+      "destination_sha256": "3cf0afd8d433986447d12dd1cf3b1c107657348ee0092299464594ab4f302c64",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5644,7 +5644,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "4ccd4f1ca5d04ed42b5ac6d76e06e0712f440e11ae8d6a626bbd86c1ad63de8d",
+      "destination_sha256": "a0b39a042aedf89e15f4c128ac72ae99cf6412dd3be2c37e24058eec494c94ec",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
