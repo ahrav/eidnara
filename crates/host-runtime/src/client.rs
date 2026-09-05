@@ -161,10 +161,13 @@ impl CallError {
     /// `None` means the body is not a canonical `ErrorBody` (§6.2): a JSON object
     /// with string `code` and `message`, and an unsigned `retry_after_ms` when present.
     /// Unknown members are permitted.
-    fn host_terminal(body: &[u8]) -> Option<Self> {
-        // Only the recognized members are materialized; unknown members are skipped in the
-        // stream so a large ignored member never costs a second body-sized allocation.
-        let fields = ErrorBodyFields::scan(body)?;
+    ///
+    /// `max_depth` is the whole-body nesting bound (§7.1) for a channel-0 body; a routed error
+    /// body is bounded only by framing and its unknown members are skipped without a depth check.
+    fn host_terminal(body: &[u8], max_depth: Option<usize>) -> Option<Self> {
+        // Only the recognized members are materialized; unknown members and the message are
+        // skipped over in the raw input so a large member never costs a second allocation.
+        let fields = ErrorBodyFields::scan(body, max_depth)?;
         let code = fields.code.as_str();
         let retry_after = fields.retry_after_ms.map(Duration::from_millis);
         // Raw terminal messages may contain request, credential, or identity data.
@@ -599,8 +602,6 @@ impl Client {
                         let mut binds = lock_unpoisoned(&self.inner.binds);
                         binds.publishing.remove(&handle);
                         if binds.torn_down.remove(&handle) {
-                            // The bind's whole record ends here; nothing else will insert it.
-                            binds.delivered_by.remove(&handle);
                             return Err(CallError::local(
                                 SendOutcome::Terminal,
                                 "route_gone",
@@ -1095,14 +1096,43 @@ enum BindOwner {
 struct BindTracking {
     publishing: HashSet<RouteHandle>,
     torn_down: HashSet<RouteHandle>,
-    /// Highest epoch ever delivered for each channel on this generation. A later bind on the
-    /// same channel must carry a strictly greater epoch, or a delayed `Goodbye` from the old
-    /// incarnation would exactly match and tear down the new route.
-    epoch_watermark: HashMap<u16, u32>,
-    /// The correlation whose response delivered each live or in-flight handle. An unmatched
-    /// response for the same handle is a duplicate terminal only if it carries this
-    /// correlation; any other correlation is a distinct bind that reused the handle.
-    delivered_by: HashMap<RouteHandle, u64>,
+    /// The latest bind the host installed on each channel this generation, kept for the whole
+    /// generation and bounded by the channel space. A later bind on the channel must carry a
+    /// strictly greater epoch, or a delayed `Goodbye` from the old incarnation would exactly
+    /// match and tear down the new route; a response repeating the recorded epoch *and*
+    /// correlation is a duplicate terminal and is dropped, even after the route closed.
+    channel_history: HashMap<u16, ChannelBind>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ChannelBind {
+    epoch: u32,
+    /// The correlation whose response delivered the bind.
+    correlation: u64,
+}
+
+impl BindTracking {
+    /// Whether a bind for `handle` delivered by `correlation` may be accepted, and if so
+    /// records it. `Ok(false)` is a duplicate of the recorded bind; `Err(())` is a reuse that
+    /// does not advance the epoch.
+    fn accept(&mut self, handle: RouteHandle, correlation: u64) -> Result<bool, ()> {
+        match self.channel_history.get(&handle.channel) {
+            Some(prior) if prior.epoch == handle.epoch && prior.correlation == correlation => {
+                Ok(false)
+            }
+            Some(prior) if handle.epoch <= prior.epoch => Err(()),
+            _ => {
+                self.channel_history.insert(
+                    handle.channel,
+                    ChannelBind {
+                        epoch: handle.epoch,
+                        correlation,
+                    },
+                );
+                Ok(true)
+            }
+        }
+    }
 }
 
 /// A unary response held for its caller. `_charge` returns the body's bytes to
@@ -1616,7 +1646,10 @@ impl Inner {
             FrameType::Response | FrameType::Error | FrameType::StreamEnd => {
                 // A malformed `Error` body is structurally illegal (§6.2) and closes the generation whether or not a correlation matches.
                 let host_error = if header.ty == FrameType::Error {
-                    match CallError::host_terminal(&body) {
+                    match CallError::host_terminal(
+                        &body,
+                        (header.channel == 0).then_some(crate::control::MAX_CONTROL_DEPTH),
+                    ) {
                         Some(error) => Some(error),
                         None => {
                             drop(charge);
@@ -1689,14 +1722,16 @@ impl Inner {
                                         // A handle whose earlier bind was torn down before its
                                         // opener resumed still has one marker outstanding; a reuse
                                         // would let two openers share it. A reused channel must
-                                        // advance its epoch past every earlier route on it.
+                                        // advance its epoch past every earlier bind on it; a matched
+                                        // response has a pending entry, so it is never a duplicate.
+                                        let mut binds = binds;
                                         routes.iter().any(same_channel)
                                             || binds.publishing.iter().any(same_channel)
                                             || binds.torn_down.contains(&handle)
-                                            || binds
-                                                .epoch_watermark
-                                                .get(&handle.channel)
-                                                .is_some_and(|highest| handle.epoch <= *highest)
+                                            || !matches!(
+                                                binds.accept(handle, header.corr),
+                                                Ok(true)
+                                            )
                                     }
                                 {
                                     drop(charge);
@@ -1712,12 +1747,7 @@ impl Inner {
                                         // that lands before the insert must be remembered. The
                                         // channel scan above makes this insert's failure unreachable.
                                         if let Some(handle) = bound {
-                                            let mut binds = lock_unpoisoned(&self.binds);
-                                            binds.publishing.insert(handle);
-                                            binds.delivered_by.insert(handle, header.corr);
-                                            binds
-                                                .epoch_watermark
-                                                .insert(handle.channel, handle.epoch);
+                                            lock_unpoisoned(&self.binds).publishing.insert(handle);
                                         }
                                         Ok(RetainedResponse {
                                             response: Response {
@@ -1909,59 +1939,42 @@ impl Inner {
             // `routes` is taken before `binds`, matching `open_route`.
             let routes = lock_unpoisoned(&self.routes);
             let mut binds = lock_unpoisoned(&self.binds);
-            let same_channel_other_epoch =
-                |other: &RouteHandle| other.channel == route.channel && other.epoch != route.epoch;
             match owner {
-                // A duplicate terminal for a route that is live or still being published is
-                // dropped (§6.2) only when it repeats the correlation that delivered the handle.
-                // A different correlation is a distinct bind that reused the handle: the host
-                // replaced the route and the retained handle can no longer be trusted.
-                BindOwner::None { correlation }
-                    if routes.contains(&route) || binds.publishing.contains(&route) =>
-                {
-                    if binds.delivered_by.get(&route) == Some(&correlation) {
+                BindOwner::None { correlation } => match binds.accept(route, correlation) {
+                    // A repeat of the recorded bind is a duplicate terminal and is dropped
+                    // (§6.2), whether the route is live, publishing, or already closed.
+                    Ok(false) => return,
+                    // The host installed a new route on this channel. Any live or in-flight
+                    // route there was replaced without cleanup, so the retained handle can no
+                    // longer be trusted; otherwise the stranded bind is released below.
+                    Ok(true) => {
+                        let same_channel = |other: &RouteHandle| other.channel == route.channel;
+                        if routes.iter().any(same_channel)
+                            || binds.publishing.iter().any(same_channel)
+                        {
+                            drop(binds);
+                            drop(routes);
+                            self.retire("invalid_route_response");
+                            return;
+                        }
+                    }
+                    // A reuse that does not advance the epoch would let a delayed `Goodbye`
+                    // for the old incarnation match the new route.
+                    Err(()) => {
+                        drop(binds);
+                        drop(routes);
+                        self.retire("invalid_route_response");
                         return;
                     }
-                    drop(binds);
-                    drop(routes);
-                    self.retire("invalid_route_response");
-                    return;
-                }
-                // A bind for a channel that already carries a live or in-flight route at another
-                // epoch means the host replaced that route; §6.2 permits channel reuse only after
-                // cleanup, so the retained handle can no longer be trusted.
-                BindOwner::None { .. }
-                    if routes.iter().any(same_channel_other_epoch)
-                        || binds.publishing.iter().any(same_channel_other_epoch) =>
-                {
-                    drop(binds);
-                    drop(routes);
-                    self.retire("invalid_route_response");
-                    return;
-                }
-                BindOwner::None { .. }
-                    if binds
-                        .epoch_watermark
-                        .get(&route.channel)
-                        .is_some_and(|highest| route.epoch <= *highest) =>
-                {
-                    drop(binds);
-                    drop(routes);
-                    self.retire("invalid_route_response");
-                    return;
-                }
-                BindOwner::None { .. } => {
-                    // The host installed this route; a later bind on the channel must outrank it.
-                    binds.epoch_watermark.insert(route.channel, route.epoch);
-                }
-                // The response's own caller is gone, so its tracking ends here.
+                },
+                // The response's own caller is gone, so its tracking ends here. The bind was
+                // already recorded when it was delivered or when retention refused it.
                 BindOwner::Abandoned => {
                     if routes.contains(&route) {
                         return;
                     }
                     binds.publishing.remove(&route);
                     binds.torn_down.remove(&route);
-                    binds.delivered_by.remove(&route);
                 }
             }
         }
@@ -2026,7 +2039,6 @@ impl Inner {
                 }
                 return false;
             }
-            lock_unpoisoned(&self.binds).delivered_by.remove(&route);
             drop(routes);
             let keys: Vec<_> = pending
                 .keys()
@@ -3320,9 +3332,10 @@ struct ErrorBodyFields {
 }
 
 impl ErrorBodyFields {
-    fn scan(body: &[u8]) -> Option<Self> {
+    fn scan(body: &[u8], max_depth: Option<usize>) -> Option<Self> {
         use serde::de::{DeserializeSeed, Deserializer, MapAccess, Visitor};
-        struct Fields;
+        use serde_json::value::RawValue;
+        struct Fields(Option<usize>);
         impl<'de> Visitor<'de> for Fields {
             type Value = Option<ErrorBodyFields>;
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3339,20 +3352,23 @@ impl ErrorBodyFields {
                                 return Ok(None);
                             }
                             // Retained only up to the bound; a longer code is nonconforming
-                            // and is never copied in full.
-                            let Ok(BoundedCode(value)) = map.next_value::<BoundedCode>() else {
-                                return Ok(None);
-                            };
-                            code = Some(value);
+                            // and decodes as a placeholder past the bound, never a full copy.
+                            let raw = map.next_value::<&RawValue>()?;
+                            code = Some(match decode_short_string(raw, MAX_ERROR_CODE_BYTES) {
+                                None => return Ok(None),
+                                Some(Some(value)) => value,
+                                Some(None) => " ".repeat(MAX_ERROR_CODE_BYTES + 1),
+                            });
                         }
                         Some("message") => {
                             if message_seen {
                                 return Ok(None);
                             }
-                            // The text is redacted; only its type is checked.
-                            let Ok(IgnoredString) = map.next_value::<IgnoredString>() else {
+                            // The text is redacted; only its type is checked, on the raw
+                            // input, so an escape-heavy message is never unescaped.
+                            if !map.next_value::<&RawValue>()?.get().starts_with('"') {
                                 return Ok(None);
-                            };
+                            }
                             message_seen = true;
                         }
                         Some("retry_after_ms") => {
@@ -3365,13 +3381,15 @@ impl ErrorBodyFields {
                             retry = Some(Some(value));
                         }
                         _ => {
-                            // Unknown values are skipped without materializing them, but they
-                            // still count toward the §7.1 nesting bound (this object is depth 1).
-                            let Ok(BoundedDepth) = map
-                                .next_value_seed(DepthBound(crate::control::MAX_CONTROL_DEPTH - 1))
-                            else {
+                            // Unknown values are skipped in the raw input; on channel 0 they
+                            // still count toward the nesting bound (this object is depth 1).
+                            let raw = map.next_value::<&RawValue>()?;
+                            if self
+                                .0
+                                .is_some_and(|max_depth| 1 + raw_json_depth(raw.get()) > max_depth)
+                            {
                                 return Ok(None);
-                            };
+                            }
                         }
                     }
                 }
@@ -3384,145 +3402,92 @@ impl ErrorBodyFields {
                 }
             }
         }
-        struct Seed;
+        struct Seed(Option<usize>);
         impl<'de> DeserializeSeed<'de> for Seed {
             type Value = Option<ErrorBodyFields>;
             fn deserialize<D: Deserializer<'de>>(
                 self,
                 deserializer: D,
             ) -> Result<Self::Value, D::Error> {
-                deserializer.deserialize_map(Fields)
+                deserializer.deserialize_map(Fields(self.0))
             }
         }
         let mut deserializer = serde_json::Deserializer::from_slice(body);
-        let fields = Seed.deserialize(&mut deserializer).ok()??;
+        let fields = Seed(max_depth).deserialize(&mut deserializer).ok()??;
         deserializer.end().ok()?;
         Some(fields)
     }
 }
 
-/// A host error code, retained in full only up to `MAX_ERROR_CODE_BYTES`; a longer string
-/// decodes as one nonconforming placeholder byte past the bound rather than a full copy.
-struct BoundedCode(String);
+/// Every JSON escape decodes to fewer bytes than it occupies, and `\uXXXX` is the tightest
+/// at six source bytes per decoded byte; a raw string longer than this cannot decode within
+/// `max_decoded` bytes, so it is never decoded at all.
+const fn raw_string_bound(max_decoded: usize) -> usize {
+    2 + 6 * max_decoded
+}
 
-impl<'de> serde::Deserialize<'de> for BoundedCode {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct V;
-        impl serde::de::Visitor<'_> for V {
-            type Value = BoundedCode;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("an error code")
-            }
-            fn visit_str<E>(self, v: &str) -> Result<BoundedCode, E> {
-                if v.len() <= MAX_ERROR_CODE_BYTES {
-                    Ok(BoundedCode(v.to_owned()))
-                } else {
-                    Ok(BoundedCode(" ".repeat(MAX_ERROR_CODE_BYTES + 1)))
-                }
-            }
-        }
-        deserializer.deserialize_str(V)
+/// Decodes a raw JSON string whose decoded form fits in `max_decoded` bytes. `None` is not a
+/// string; `Some(None)` is a string that decodes past the bound, recognized from its raw length
+/// or its decoded length without ever holding more than `raw_string_bound(max_decoded)` bytes.
+fn decode_short_string(
+    raw: &serde_json::value::RawValue,
+    max_decoded: usize,
+) -> Option<Option<String>> {
+    let raw = raw.get();
+    if !raw.starts_with('"') {
+        return None;
     }
+    if raw.len() > raw_string_bound(max_decoded) {
+        return Some(None);
+    }
+    let decoded: String = serde_json::from_str(raw).ok()?;
+    Some((decoded.len() <= max_decoded).then_some(decoded))
+}
+
+/// Nesting depth of a syntactically valid raw JSON value: each open object or array is one
+/// level, scalars are zero, and delimiters inside strings are inert (§7.1).
+fn raw_json_depth(raw: &str) -> usize {
+    let mut depth = 0usize;
+    let mut deepest = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in raw.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 /// A top-level key, retained only when it could name a recognized member; a longer key is an
-/// unknown member and is discarded during decoding rather than copied.
+/// unknown member and is skipped in the raw input rather than unescaped or copied.
 struct BoundedKey(Option<String>);
 
 const MAX_RECOGNIZED_KEY_BYTES: usize = 32;
 
 impl<'de> serde::Deserialize<'de> for BoundedKey {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct V;
-        impl serde::de::Visitor<'_> for V {
-            type Value = BoundedKey;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("an object key")
-            }
-            fn visit_str<E>(self, v: &str) -> Result<BoundedKey, E> {
-                Ok(BoundedKey(
-                    (v.len() <= MAX_RECOGNIZED_KEY_BYTES).then(|| v.to_owned()),
-                ))
-            }
-        }
-        deserializer.deserialize_str(V)
-    }
-}
-
-/// Skips one JSON value while refusing any nesting deeper than the seed's remaining depth.
-struct DepthBound(usize);
-struct BoundedDepth;
-
-impl<'de> serde::de::DeserializeSeed<'de> for DepthBound {
-    type Value = BoundedDepth;
-    fn deserialize<D: serde::Deserializer<'de>>(
-        self,
-        deserializer: D,
-    ) -> Result<BoundedDepth, D::Error> {
-        use serde::de::{Error, MapAccess, SeqAccess, Visitor};
-        struct V(usize);
-        impl<'de> Visitor<'de> for V {
-            type Value = BoundedDepth;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a JSON value within the nesting bound")
-            }
-            fn visit_bool<E>(self, _: bool) -> Result<BoundedDepth, E> {
-                Ok(BoundedDepth)
-            }
-            fn visit_i64<E>(self, _: i64) -> Result<BoundedDepth, E> {
-                Ok(BoundedDepth)
-            }
-            fn visit_u64<E>(self, _: u64) -> Result<BoundedDepth, E> {
-                Ok(BoundedDepth)
-            }
-            fn visit_f64<E>(self, _: f64) -> Result<BoundedDepth, E> {
-                Ok(BoundedDepth)
-            }
-            fn visit_str<E>(self, _: &str) -> Result<BoundedDepth, E> {
-                Ok(BoundedDepth)
-            }
-            fn visit_unit<E>(self) -> Result<BoundedDepth, E> {
-                Ok(BoundedDepth)
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<BoundedDepth, A::Error> {
-                let remaining = self
-                    .0
-                    .checked_sub(1)
-                    .ok_or_else(|| A::Error::custom("too deep"))?;
-                while seq.next_element_seed(DepthBound(remaining))?.is_some() {}
-                Ok(BoundedDepth)
-            }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<BoundedDepth, A::Error> {
-                let remaining = self
-                    .0
-                    .checked_sub(1)
-                    .ok_or_else(|| A::Error::custom("too deep"))?;
-                while map.next_key::<serde::de::IgnoredAny>()?.is_some() {
-                    map.next_value_seed(DepthBound(remaining))?;
-                }
-                Ok(BoundedDepth)
-            }
-        }
-        deserializer.deserialize_any(V(self.0))
-    }
-}
-
-/// Accepts a JSON string without retaining it.
-struct IgnoredString;
-
-impl<'de> serde::Deserialize<'de> for IgnoredString {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct V;
-        impl serde::de::Visitor<'_> for V {
-            type Value = IgnoredString;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a string")
-            }
-            fn visit_str<E>(self, _: &str) -> Result<IgnoredString, E> {
-                Ok(IgnoredString)
-            }
-        }
-        deserializer.deserialize_str(V)
+        let raw = <&'de serde_json::value::RawValue>::deserialize(deserializer)?;
+        // Object keys are always strings, so the only non-`Some` outcome is a long key.
+        Ok(BoundedKey(
+            decode_short_string(raw, MAX_RECOGNIZED_KEY_BYTES).flatten(),
+        ))
     }
 }
 
@@ -3858,6 +3823,11 @@ fn bounded_text(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::wire::response_flags;
+
+    /// A channel-0 error body, bounded by the control nesting limit.
+    fn control_terminal(body: &[u8]) -> Option<CallError> {
+        CallError::host_terminal(body, Some(crate::control::MAX_CONTROL_DEPTH))
+    }
 
     fn test_inner(
         queued_bytes: usize,
@@ -4872,44 +4842,61 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_reused_channel_must_advance_its_epoch() {
-        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let deliver = |key: PendingKey, handle: RouteHandle| {
-            let body = serde_json::to_vec(&serde_json::json!({
-                "op": "route.open",
-                "route_channel": handle.channel,
-                "route_epoch": handle.epoch,
-            }))
-            .expect("body encodes");
-            inner.dispatch(
-                EnvelopeHeader {
-                    len: u32::try_from(body.len()).expect("fits"),
-                    ver: PROTOCOL_VERSION,
-                    ty: FrameType::Response,
-                    flags: response_flags(false, false),
-                    channel: 0,
-                    epoch: 0,
-                    corr: key.corr,
-                },
-                body,
-                ByteCharge::none(),
-            );
-        };
+    /// Dispatches a `route.open` response binding `handle` for the pending correlation `corr`.
+    fn deliver_bind(inner: &Arc<Inner>, corr: u64, handle: RouteHandle) {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "op": "route.open",
+            "route_channel": handle.channel,
+            "route_epoch": handle.epoch,
+        }))
+        .expect("body encodes");
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: 0,
+                epoch: 0,
+                corr,
+            },
+            body,
+            ByteCharge::none(),
+        );
+    }
+
+    /// Admits a unary control request and drains its queued frame.
+    fn open_control(
+        inner: &Arc<Inner>,
+        data_rx: &mut mpsc::Receiver<QueuedFrame>,
+    ) -> (
+        PendingKey,
+        oneshot::Receiver<Result<RetainedResponse, CallError>>,
+    ) {
         let control = RouteHandle {
             channel: 0,
             epoch: 0,
         };
-        let open = |inner: &Arc<Inner>, data_rx: &mut mpsc::Receiver<QueuedFrame>| {
-            let (tx, rx) = oneshot::channel();
-            let (key, publish) = inner
-                .admit(control, Vec::new(), false, PendingKind::Unary(tx), deadline)
-                .expect("control request admitted");
-            assert!(bridge_claims(&publish));
-            let _ = data_rx.try_recv();
-            (key, rx)
-        };
+        let (tx, rx) = oneshot::channel();
+        let (key, publish) = inner
+            .admit(
+                control,
+                Vec::new(),
+                false,
+                PendingKind::Unary(tx),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .expect("control request admitted");
+        assert!(bridge_claims(&publish));
+        let _ = data_rx.try_recv();
+        (key, rx)
+    }
+
+    #[tokio::test]
+    async fn a_reused_channel_must_advance_its_epoch() {
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deliver = |key: PendingKey, handle: RouteHandle| deliver_bind(&inner, key.corr, handle);
+        let open = open_control;
         let first = RouteHandle {
             channel: 40,
             epoch: 77,
@@ -4922,11 +4909,7 @@ mod tests {
         );
         drop(rx);
         // The opener never inserted it, so the route is fully cleaned up on the client.
-        {
-            let mut binds = lock_unpoisoned(&inner.binds);
-            binds.publishing.remove(&first);
-            binds.delivered_by.remove(&first);
-        }
+        lock_unpoisoned(&inner.binds).publishing.remove(&first);
         // The same channel at a strictly greater epoch is a legal reuse.
         let (key, _rx) = open(&inner, &mut data_rx);
         deliver(
@@ -4937,14 +4920,75 @@ mod tests {
             },
         );
         assert!(!inner.retired.load(Ordering::Acquire));
-        {
-            let mut binds = lock_unpoisoned(&inner.binds);
-            binds.publishing.clear();
-            binds.delivered_by.clear();
-        }
+        lock_unpoisoned(&inner.binds).publishing.clear();
         // The old epoch again is not.
         let (key, _rx) = open(&inner, &mut data_rx);
         deliver(key, first);
+        assert!(inner.retired.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn a_repeated_bind_terminal_after_close_is_dropped() {
+        let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let handle = RouteHandle {
+            channel: 41,
+            epoch: 5,
+        };
+        let (key, rx) = open_control(&inner, &mut data_rx);
+        deliver_bind(&inner, key.corr, handle);
+        rx.await.expect("settled").expect("bind delivered");
+        // The opener publishes the route, the caller uses it, then closes it.
+        {
+            let mut binds = lock_unpoisoned(&inner.binds);
+            assert!(binds.publishing.remove(&handle));
+            lock_unpoisoned(&inner.routes).insert(handle);
+        }
+        assert!(inner.settle_route(handle));
+        while control_rx.try_recv().is_ok() {}
+        // A delayed repeat of the delivering response is a duplicate terminal (§6.2): no
+        // cleanup `Goodbye`, no retirement.
+        deliver_bind(&inner, key.corr, handle);
+        assert!(!inner.retired.load(Ordering::Acquire));
+        assert!(
+            control_rx.try_recv().is_err(),
+            "a duplicate terminal sends nothing"
+        );
+        // The same handle under a different correlation is a distinct bind that failed to
+        // advance the epoch.
+        deliver_bind(&inner, key.corr + 1, handle);
+        assert!(inner.retired.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn a_bind_refused_by_retention_still_claims_its_epoch() {
+        let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let _exhausted = inner
+            .unary_budget
+            .charge(CLIENT_RETAINED_RESPONSE_BYTES)
+            .expect("the whole retention budget");
+        let handle = RouteHandle {
+            channel: 42,
+            epoch: 3,
+        };
+        let (key, rx) = open_control(&inner, &mut data_rx);
+        deliver_bind(&inner, key.corr, handle);
+        let error = rx
+            .await
+            .expect("settled")
+            .expect_err("retention is exhausted");
+        assert_eq!(error.code(), "response_retention_exhausted");
+        assert!(!inner.retired.load(Ordering::Acquire));
+        let cleanup = control_rx
+            .try_recv()
+            .expect("the abandoned bind is released");
+        assert_eq!(cleanup.header.ty, FrameType::Goodbye);
+        assert_eq!(cleanup.header.channel, handle.channel);
+        assert_eq!(cleanup.header.epoch, handle.epoch);
+        // The host installed the route even though this client discarded it, so a later bind
+        // on the channel must still outrank it.
+        drop(_exhausted);
+        let (key, _rx) = open_control(&inner, &mut data_rx);
+        deliver_bind(&inner, key.corr, handle);
         assert!(inner.retired.load(Ordering::Acquire));
     }
 
@@ -5046,10 +5090,6 @@ mod tests {
         let binds = lock_unpoisoned(&inner.binds);
         assert!(binds.torn_down.is_empty());
         assert!(binds.publishing.is_empty());
-        assert!(
-            binds.delivered_by.is_empty(),
-            "no record outlives the consumed marker"
-        );
         drop(binds);
         drop(client);
     }
@@ -5080,23 +5120,19 @@ mod tests {
     fn a_host_code_at_the_host_limit_survives_the_prefix() {
         let code = "c".repeat(MAX_ERROR_CODE_BYTES);
         let body = serde_json::to_vec(&serde_json::json!({"code": code, "message": "m"})).unwrap();
-        let error = CallError::host_terminal(&body).expect("canonical body");
+        let error = control_terminal(&body).expect("canonical body");
         assert_eq!(error.code(), format!("host.{code}"));
         let over = "c".repeat(MAX_ERROR_CODE_BYTES + 1);
         let body = serde_json::to_vec(&serde_json::json!({"code": over, "message": "m"})).unwrap();
         assert_eq!(
-            CallError::host_terminal(&body)
-                .expect("canonical body")
-                .code(),
+            control_terminal(&body).expect("canonical body").code(),
             "host.remote_error"
         );
         // A frame-sized code is bounded during the scan rather than copied.
         let huge = "c".repeat(1 << 20);
         let body = serde_json::to_vec(&serde_json::json!({"code": huge, "message": "m"})).unwrap();
         assert_eq!(
-            CallError::host_terminal(&body)
-                .expect("canonical body")
-                .code(),
+            control_terminal(&body).expect("canonical body").code(),
             "host.remote_error"
         );
     }
@@ -5908,13 +5944,10 @@ mod tests {
 
     #[test]
     fn duplicate_recognized_error_fields_are_malformed() {
-        assert!(
-            CallError::host_terminal(br#"{"code":"first","code":"second","message":"m"}"#)
-                .is_none()
-        );
-        assert!(CallError::host_terminal(br#"{"code":"c","message":"a","message":"b"}"#).is_none());
+        assert!(control_terminal(br#"{"code":"first","code":"second","message":"m"}"#).is_none());
+        assert!(control_terminal(br#"{"code":"c","message":"a","message":"b"}"#).is_none());
         // Unknown members, even repeated, are ignored (§7.4).
-        assert!(CallError::host_terminal(br#"{"code":"c","message":"m","x":1,"x":2}"#).is_some());
+        assert!(control_terminal(br#"{"code":"c","message":"m","x":1,"x":2}"#).is_some());
     }
 
     #[test]
@@ -5966,15 +5999,69 @@ mod tests {
             "[".repeat(crate::control::MAX_CONTROL_DEPTH),
             "]".repeat(crate::control::MAX_CONTROL_DEPTH)
         );
-        assert!(CallError::host_terminal(deep_unknown.as_bytes()).is_none());
+        assert!(control_terminal(deep_unknown.as_bytes()).is_none());
+        // A routed error body is bounded by framing only; the same nesting is skipped.
+        assert!(CallError::host_terminal(deep_unknown.as_bytes(), None).is_some());
         let shallow_unknown = r#"{"code":"c","message":"m","x":[[1]]}"#;
-        assert!(CallError::host_terminal(shallow_unknown.as_bytes()).is_some());
+        assert!(control_terminal(shallow_unknown.as_bytes()).is_some());
+        // Delimiters inside strings never count toward depth.
+        let bracket_strings = format!(
+            r#"{{"code":"c","message":"m","x":"{}\"{}"}}"#,
+            "[".repeat(crate::control::MAX_CONTROL_DEPTH),
+            "{".repeat(crate::control::MAX_CONTROL_DEPTH)
+        );
+        assert!(control_terminal(bracket_strings.as_bytes()).is_some());
         // A huge unknown key is skipped; `BoundedKey` retains nothing past the recognized length.
         let long_key = format!(
             r#"{{"code":"c","message":"m","{}":1}}"#,
             "k".repeat(1 << 16)
         );
-        assert!(CallError::host_terminal(long_key.as_bytes()).is_some());
+        assert!(control_terminal(long_key.as_bytes()).is_some());
+    }
+
+    #[test]
+    fn escaped_recognized_keys_are_still_recognized_within_the_raw_bound() {
+        let escaped = r#"{"\u0063ode":"c","\u006dessage":"m","retry_after_\u006ds":5}"#;
+        let error = control_terminal(escaped.as_bytes()).expect("canonical body");
+        assert_eq!(error.code(), "host.c");
+        assert_eq!(error.retry_after(), Some(Duration::from_millis(5)));
+        // The same key repeated under another spelling is still a repeat.
+        let repeated = r#"{"code":"c","\u0063ode":"d","message":"m"}"#;
+        assert!(control_terminal(repeated.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn short_string_decoding_never_holds_more_than_the_raw_bound() {
+        use serde_json::value::RawValue;
+        let raw = |text: &str| serde_json::from_str::<Box<RawValue>>(text).expect("valid json");
+        // An escape-heavy string at the bound decodes; one raw byte more is refused unread.
+        let at_bound = format!(r#""{}""#, r"\u0041".repeat(MAX_ERROR_CODE_BYTES));
+        assert_eq!(at_bound.len(), raw_string_bound(MAX_ERROR_CODE_BYTES));
+        assert_eq!(
+            decode_short_string(&raw(&at_bound), MAX_ERROR_CODE_BYTES),
+            Some(Some("A".repeat(MAX_ERROR_CODE_BYTES)))
+        );
+        let long_code = format!(r#""{}""#, r"\u0041".repeat(MAX_ERROR_CODE_BYTES + 1));
+        assert_eq!(
+            decode_short_string(&raw(&long_code), MAX_ERROR_CODE_BYTES),
+            Some(None)
+        );
+        // Within the raw bound, the decoded length still decides.
+        let plain_long = format!(r#""{}""#, "c".repeat(MAX_ERROR_CODE_BYTES + 1));
+        assert_eq!(
+            decode_short_string(&raw(&plain_long), MAX_ERROR_CODE_BYTES),
+            Some(None)
+        );
+        assert_eq!(decode_short_string(&raw("1"), MAX_ERROR_CODE_BYTES), None);
+        // An escape-heavy message of frame size is type-checked without being unescaped.
+        let message = r"\u0041".repeat(1 << 18);
+        let body = format!(r#"{{"code":"c","message":"{message}"}}"#);
+        assert_eq!(
+            control_terminal(body.as_bytes()).expect("canonical").code(),
+            "host.c"
+        );
+        let body = format!(r#"{{"code":"c","message":["{message}"]}}"#);
+        assert!(control_terminal(body.as_bytes()).is_none());
     }
 
     #[test]
@@ -6001,12 +6088,11 @@ mod tests {
 
     #[test]
     fn a_host_terminal_carries_its_retry_delay() {
-        let error =
-            CallError::host_terminal(br#"{"code":"queue_full","message":"m","retry_after_ms":50}"#)
-                .expect("canonical body");
-        assert_eq!(error.retry_after(), Some(Duration::from_millis(50)));
-        let error = CallError::host_terminal(br#"{"code":"queue_full","message":"m"}"#)
+        let error = control_terminal(br#"{"code":"queue_full","message":"m","retry_after_ms":50}"#)
             .expect("canonical body");
+        assert_eq!(error.retry_after(), Some(Duration::from_millis(50)));
+        let error =
+            control_terminal(br#"{"code":"queue_full","message":"m"}"#).expect("canonical body");
         assert_eq!(error.retry_after(), None);
         for body in [
             &br#"{"code":"queue_full","message":"m","retry_after_ms":"soon"}"#[..],
@@ -6015,7 +6101,7 @@ mod tests {
             br#"{"code":"queue_full","message":"m","retry_after_ms":1.5}"#,
         ] {
             assert!(
-                CallError::host_terminal(body).is_none(),
+                control_terminal(body).is_none(),
                 "a present retry_after_ms must be an unsigned integer: {}",
                 String::from_utf8_lossy(body)
             );
@@ -6721,9 +6807,13 @@ mod tests {
             "the fixture owns this route"
         );
         // The fixture's route was delivered by this correlation; a repeat of it is a duplicate.
-        lock_unpoisoned(&inner.binds)
-            .delivered_by
-            .insert(owned, FIRST_APPLICATION_CORRELATION);
+        lock_unpoisoned(&inner.binds).channel_history.insert(
+            owned.channel,
+            ChannelBind {
+                epoch: owned.epoch,
+                correlation: FIRST_APPLICATION_CORRELATION,
+            },
+        );
         let body = serde_json::to_vec(&serde_json::json!({
             "op": "route.open",
             "route_channel": owned.channel,
@@ -7102,7 +7192,7 @@ mod tests {
             "message": sentinel
         }))
         .expect("serialize");
-        let error = CallError::host_terminal(&body).expect("canonical error body");
+        let error = control_terminal(&body).expect("canonical error body");
         let rendered = format!("{error:?} {error}");
         assert_eq!(error.outcome(), SendOutcome::Terminal);
         assert_eq!(error.code(), "host.stable_code");
@@ -7194,15 +7284,14 @@ mod tests {
             br#"["code","message"]"#,
         ] {
             assert!(
-                CallError::host_terminal(body).is_none(),
+                control_terminal(body).is_none(),
                 "{} must be rejected",
                 String::from_utf8_lossy(body)
             );
         }
-        let error = CallError::host_terminal(
-            br#"{"code":"c","message":"m","retry_after_ms":5,"extra":true}"#,
-        )
-        .expect("unknown members are permitted");
+        let error =
+            control_terminal(br#"{"code":"c","message":"m","retry_after_ms":5,"extra":true}"#)
+                .expect("unknown members are permitted");
         assert_eq!(error.code(), "host.c");
     }
 
