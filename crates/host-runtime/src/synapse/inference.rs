@@ -210,11 +210,23 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
 /// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
 /// Shortens `text` to at most `max_bytes` without splitting a character.
 fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
-    let mut end = text.len().min(max_bytes);
+    text.truncate(floor_char_boundary(text, max_bytes));
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut end = index.min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    text.truncate(end);
+    end
+}
+
+fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    let mut end = index.min(text.len());
+    while !text.is_char_boundary(end) {
+        end += 1;
+    }
+    end
 }
 
 /// The served-vector contract every engine must meet: `dims` finite components with an L2 norm within `UNIT_NORM_TOLERANCE` of 1.
@@ -577,46 +589,57 @@ impl Backend {
         Ok(())
     }
 
-    /// End of a non-empty char-boundary prefix of `text` no longer than `budget` bytes that reaches `max_tokens`, or `None` when none of the examined prefixes does.
-    /// Token counts are not monotone in prefix length: the character after a boundary can merge with the characters before it and lower the count at that boundary. The longest prefix within the budget is measured first, then the boundaries just below it, which covers a merge at the cut without scanning every boundary of a megabyte-scale candidate.
+    /// End of a non-empty char-boundary prefix of `text` no longer than `budget` bytes that encodes to `max_tokens` tokens, or `None` when no examined cut does. `text` itself must reach the window.
+    /// Token counts are not monotone in prefix length, so the cuts come from the tokenizer rather than from a scan of every boundary: the budget itself, then the byte at which the truncated encoding of the whole text stopped consuming input and the boundaries just after it, because a cut inside a pre-token can re-encode that pre-token's tail into fewer tokens.
     fn window_prefix_within(
         &self,
         text: &str,
         budget: usize,
     ) -> Result<Option<usize>, InferenceError> {
-        const BOUNDARIES_BELOW_BUDGET: usize = 8;
-        let mut end = budget.min(text.len());
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
+        const BOUNDARIES_ABOVE_REACH: usize = 8;
+        let budget = floor_char_boundary(text, budget.min(text.len()));
+        if budget == 0 {
+            return Ok(None);
         }
-        for _ in 0..=BOUNDARIES_BELOW_BUDGET {
-            if end == 0 {
-                return Ok(None);
+        if self.token_count(&text[..budget])? >= self.max_tokens {
+            return Ok(Some(budget));
+        }
+        let (_, reach) = self.encode_probe(text)?;
+        let mut end = ceil_char_boundary(text, reach.max(1));
+        for _ in 0..=BOUNDARIES_ABOVE_REACH {
+            if end >= budget {
+                break;
             }
             if self.token_count(&text[..end])? >= self.max_tokens {
                 return Ok(Some(end));
             }
-            end -= 1;
-            while end > 0 && !text.is_char_boundary(end) {
-                end -= 1;
-            }
+            end = ceil_char_boundary(text, end + 1);
         }
         Ok(None)
     }
 
     /// Tokens in `text` after the tokenizer's truncation, so a count equal to `max_tokens` means the text reached the window.
     fn token_count(&self, text: &str) -> Result<usize, InferenceError> {
+        self.encode_probe(text).map(|(count, _)| count)
+    }
+
+    /// Token count of `text` after truncation, with the end byte of the furthest token the truncated encoding consumed. Special tokens report `(0, 0)` and do not move the reach.
+    fn encode_probe(&self, text: &str) -> Result<(usize, usize), InferenceError> {
         let model = self
             .model
             .lock()
             .map_err(|_| InferenceError::Invariant("inference state is poisoned".to_owned()))?;
-        model
-            .tokenizer
-            .encode(text, true)
-            .map(|encoding| encoding.get_ids().len())
-            .map_err(|_| {
-                InferenceError::Artifact("tokenizer failed to encode the probe".to_owned())
-            })
+        let encoding = model.tokenizer.encode(text, true).map_err(|_| {
+            InferenceError::Artifact("tokenizer failed to encode the probe".to_owned())
+        })?;
+        let reach = encoding
+            .get_offsets()
+            .iter()
+            .map(|(_, end)| *end)
+            .max()
+            .unwrap_or(0)
+            .min(text.len());
+        Ok((encoding.get_ids().len(), reach))
     }
 
     fn certify_batch(
