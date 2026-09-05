@@ -236,8 +236,9 @@ them a re-derived fault requirement:
 
 ## Eventfd delivery pass (Group N), 2026-08-31
 
-PR #131 (merge `5d638e3e8`) replaced polling with sparse eventfd doorbells and
-page-granular reclamation. The seven Group N records need four fault classes
+PR #131 (merge `5d638e3e8`) replaced polling with sparse doorbells and
+page-granular reclamation; in this tree the doorbells are `socketpair` ends,
+not eventfds (see the doorbell mechanism pass at the top of `catalog.md`). The seven Group N records need four fault classes
 the map above does not name. Because signals are written only when a waiter
 was parked, the recurring hazard is the lost wake, whose only symptom is a
 healthy channel that stopped — so the enabling situations below matter more
@@ -247,13 +248,13 @@ while testing nothing.
 | Class | Description | Available today |
 | --- | --- | --- |
 | F14 lost-wake construction | A parked waiter (nonzero epoch in the shared wake page, or a bridge blocked in its charge/write poll) plus a concurrent publisher or releaser, with the oracle that progress resumes inside an explicit bound | **Partial** — `two_process_zero_copy_exchange_uses_authenticated_grant` and `ring_bridge_drains_inbound_and_queued_writes` park a real waiter, but the wake always lands mid-block; nothing schedules it into the arm sequence |
-| F15 doorbell fd substitution | A doorbell slot in the setup transfer carrying a blocking eventfd, a non-eventfd, or a dead descriptor | **Partial** — `doorbell_attachment_requires_nonblocking_eventfd` builds both bad descriptors, but only against `Doorbell::from_fd`; no harness substitutes one into a full attach handshake |
+| F15 doorbell fd substitution | A doorbell slot in the setup transfer carrying a regular file, an eventfd, an unconnected socket, or a dead descriptor | **Partial** - `doorbell_attachment_requires_connected_unix_stream_socket` builds the first three bad descriptors, but only against `Doorbell::from_fd`; no harness substitutes one into a full attach handshake |
 | F16 wake race scheduling | Landing a `signal_wake` between a waiter's generation read and its blocking poll — a window of tens of instructions | **No** — needs true concurrency (F4) with repetition, or a loom/shuttle model (F5); neither exists |
 | F17 reclamation over the arena wrap | A released byte run that shares a page with a live lease, and separately one that crosses the arena end; amplified by a non-4096 page size (F11) | **Partial** — the pure function is swept across three page sizes and the live-neighbor case is constructed in-process; the trailing-partial-page exception has never been reached with a wrapped cursor, and none of it runs on a non-4096 host |
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| attach-validates-doorbell-eventfds | F15 in a full attach: one substituted doorbell in an otherwise valid `[OwnedFd; 3]` | Partial — unit-level rejection arms exist; the attach-ordering claim (no partial state on rejection) is untested |
+| attach-validates-doorbell-sockets | F15 in a full attach: one substituted doorbell in an otherwise valid `[OwnedFd; 3]` | Partial — unit-level rejection arms exist; the attach-ordering claim (no partial state on rejection) is untested |
 | wake-published-during-readiness-callback-is-not-lost | A publication strictly inside an unacknowledged callback (F14); enabling situation `shm_publish_during_readiness_callback` | Partial — constructed at the raw-addon level (`mechanism.ts:211-278`); the `NativeChannel` wrapper and multi-channel variants are not |
 | queued-write-needs-no-second-wake | Two or more writes queued before one coalesced wake is drained, then silence; enabling situation `shm_queued_writes_exceed_one_per_wake` | **Yes** — `ring_bridge_drains_inbound_and_queued_writes` builds exactly this and bounds each completion at 250 ms |
 | released-charges-wake-blocked-readers | Read-budget exhaustion with the bridge parked in its charge poll, then a concurrent `ByteCharge` drop (F14 with a shrunken budget); enabling situation `shm_read_budget_exhausted_with_parked_bridge`, witnessed as `read_budget.used == capacity` at the moment a further frame is published, followed by bounded resumption after one `ByteCharge` drop (in-module test; `used()` is `#[cfg(test)]`) | No — the blocking arm has never executed under any test |

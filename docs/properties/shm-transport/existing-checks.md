@@ -221,8 +221,8 @@ Cargo feature. No check was added, removed, or re-audited. Statuses remain
 
 ## Eventfd delivery checks, merge `5d638e3e8` (2026-08-31)
 
-PR #131 replaced polling with sparse eventfd delivery and added the checks
-below. All statuses are unaudited. Two corrections to the inventory above,
+PR #131 replaced polling with sparse doorbell delivery and added the checks
+below; in this tree the doorbells are `socketpair` ends, not eventfds. All statuses are unaudited. Two corrections to the inventory above,
 both verified at HEAD:
 
 - The "In-crate unit tests: exactly one" claim is stale. The `#[cfg(test)]`
@@ -239,7 +239,9 @@ both verified at HEAD:
 
 | Test | Claim asserted | Status |
 | --- | --- | --- |
-| `doorbell_attachment_requires_nonblocking_eventfd` (`:2248`) | A blocking eventfd and a nonblocking non-eventfd are both rejected as `DoorbellFailed` | unaudited — exercises `Doorbell::from_fd` directly, never a full `Ring::attach` |
+| `doorbell_attachment_requires_connected_unix_stream_socket` (`:3021`) | A regular file, an eventfd, and an unconnected `AF_UNIX` stream socket are rejected as `DoorbellFailed`; a created peer end is accepted | unaudited - exercises `Doorbell::from_fd` directly, never a full `Ring::attach` |
+| `doorbell_never_blocks_after_either_end_clears_nonblock` (`:3062`) | With `O_NONBLOCK` cleared on both ends, `drain`, `signal`, a bounded `wait_until`, and a million further signals complete inside two seconds | unaudited |
+| `closed_peer_doorbell_fails_instead_of_blocking` (`:3088`) | After the creating side drops, `signal` and `drain` on the attached end return `DoorbellFailed` | unaudited |
 | `removal_ranges_exclude_partial_pages_and_split_once_at_wrap` (`:2279`) | Across 4/16/64 KiB pages: a sub-page run removes nothing, an unaligned run removes only its interior page, a wrapping run splits into two exact ranges | unaudited |
 | `reclaimed_pages_leave_residency_and_reuse_as_zeroes` (`:2300`, Linux) | After release and reclaim, residency drops to zero and reused bytes read as zeros | unaudited |
 | `repeated_subpage_releases_eventually_remove_complete_pages` (`:2319`, Linux) | Sub-page releases converge to whole-page removal at exactly the page boundary | unaudited |

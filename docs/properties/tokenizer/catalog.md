@@ -6,8 +6,15 @@ from this file; the record contract is [`../METHOD.md`](../METHOD.md).
 ## Provenance and scope
 
 - Discovery at U3 against `host@39e8230`. The crate is a port of the `ai-tokenizer` claude encoding. Its contract is
-  bit-faithfulness to that oracle for every pre-token piece of at most `MAX_PIECE_BYTES`, plus bounded merge work for
-  longer pieces, whose ids may differ from the oracle at chunk seams (`crates/tokenizer/src/lib.rs`, crate docs).
+  bit-faithfulness to that oracle for every pre-token piece of at most `MAX_PIECE_BYTES`, with three deliberate
+  exceptions documented in `crates/tokenizer/src/lib.rs` (crate docs): pieces longer than the cap are chunked and may
+  differ from the oracle at chunk seams; a pre-token equal to an `Object.prototype` member name that is not a vocabulary
+  entry (`valueOf`, `hasOwnProperty`, `isPrototypeOf`, `toLocaleString`, `propertyIsEnumerable`) is encoded as bytes
+  where stock `ai-tokenizer@1.0.6` emits a function-valued "token"; and a candidate byte slice starting with a UTF-8
+  BOM (`EF BB BF`) is scored with the BOM present where the oracle's `TextDecoder` strips it. The golden corpus pins the
+  corrected prototype-name ids by running the oracle with a null-prototype encoder copy (`gen/gen-token-golden.ts`), and
+  `bom_before_newline_is_preserved` (`crates/tokenizer/tests/token_golden.rs`) pins the BOM case against the crate's own
+  single-character encodings; a campaign must not treat either divergence as a regression.
 - No workspace crate depends on `tokenizer` and nothing outside `crates/tokenizer` calls `encode_ordinary` or
   `estimate_tokens`; the workspace is `publish = false`. Every record is therefore `test-only` at HEAD. Reclassify to
   `default-production` in the wave that adds the first production caller.
@@ -20,8 +27,8 @@ Type: safety
 Reachability: test-only - no workspace crate depends on `tokenizer`; only `crates/tokenizer/tests/token_golden.rs` and the crate's unit tests call `encode_ordinary` and `estimate_tokens`.
 Status: active
 Exercised: yes - 36 golden cases regenerated from the `ai-tokenizer` oracle pass, and a token-count estimate is checked against them.
-Guarantee: `encode_ordinary` produces the same token ids as `ai-tokenizer`'s claude encoding for every golden case, and `estimate_tokens` returns their count.
-Check: `always` - `encode_ordinary(text) == golden.ids` for every case; `estimate_tokens(text) == golden.ids.len()`.
+Guarantee: `encode_ordinary` produces the same token ids as `ai-tokenizer`'s claude encoding for every golden case, and `estimate_tokens` returns their count. The oracle is the null-prototype-patched encoder described in Provenance and scope, so the two documented oracle defects are excluded from parity by construction.
+Check: `always` - `encode_ordinary(text) == golden.ids` for every case; `estimate_tokens(text) == golden.ids.len()`. Parity is asserted against the committed golden, never against a live stock `ai-tokenizer`, so the prototype-name and BOM corrections cannot register as failures.
 Fault/timing angle: A vocabulary or pre-tokenizer divergence that keeps counts equal but changes ids.
 Required faults and enabling state: The golden corpus, produced by the oracle and not by the crate.
 Confidence: high - [evidence](evidence/tokenizer-encoding-matches-the-independent-oracle.md). The corpus texts that named the predecessor were replaced at U3 and the golden regenerated once with `gen/gen-token-golden.ts` against the oracle.
@@ -34,14 +41,14 @@ Open questions: None.
 Type: safety
 Reachability: test-only - the asset is embedded with `include_str!` and read on first use, but no workspace crate depends on `tokenizer`, so only the crate's tests reach it.
 Status: active
-Exercised: partial - the generator rejects duplicate ranks and requires all 256 single bytes; no Rust test asserts the embedded asset's completeness.
-Guarantee: The embedded `claude.tiktoken` asset has unique ranks and covers every single byte, so every input encodes without a fallback.
-Check: `always` - ranks are unique and 256 single-byte tokens exist in the asset.
-Fault/timing angle: A truncated or duplicated asset makes some bytes unencodable.
+Exercised: partial - the generator rejects duplicate ranks, rejects duplicate token byte sequences, and requires all 256 single bytes; no Rust test asserts the embedded asset's completeness or uniqueness.
+Guarantee: The embedded `claude.tiktoken` asset has unique ranks, unique token byte sequences, and covers every single byte, so every input encodes without a fallback and every byte sequence maps to exactly one rank.
+Check: `always` - ranks are unique, decoded token byte sequences are unique, and 256 single-byte tokens exist in the asset. Byte-sequence uniqueness is load-bearing on the Rust side: `tokenizer()` (`crates/tokenizer/src/lib.rs`) inserts each decoded token into an `FxHashMap<Vec<u8>, Rank>`, so a duplicated sequence under a new rank would silently replace the earlier rank and change encoded ids while rank uniqueness and single-byte coverage still held.
+Fault/timing angle: A truncated asset makes some bytes unencodable; a duplicated token sequence changes ids silently.
 Required faults and enabling state: None; static asset check.
-Confidence: medium - [evidence](evidence/tokenizer-vocabulary-is-embedded-and-complete.md). `gen/gen-claude-vocab.ts` enforces both conditions when it writes the asset; the Rust side trusts the asset.
+Confidence: medium - [evidence](evidence/tokenizer-vocabulary-is-embedded-and-complete.md). `gen/gen-claude-vocab.ts` enforces all three conditions when it writes the asset (duplicate ranks and duplicate token byte sequences each abort the write); the Rust side trusts the asset.
 Existing check: The generator's checks; no Rust check; unaudited.
-Impact: Encoding panics or silently drops bytes.
+Impact: Encoding panics or silently drops bytes, or a duplicated token silently changes ids.
 Open questions: None.
 
 ### tokenizer-over-long-pieces-are-chunked-and-bounded

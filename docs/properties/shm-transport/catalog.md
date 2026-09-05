@@ -10,6 +10,42 @@ deleted.
 Provenance: source catalogs at `host@39e823037`; see [../README.md](../README.md).
 System `the`host` source checkout at `9c1eb4d1`, 2026-08-29.
 
+## Doorbell mechanism pass, 2026-09-05
+
+The doorbells in this tree are not eventfds. `Doorbell`
+(`crates/shm-transport/src/backend/ring.rs:510-520`) wraps one end of an
+`AF_UNIX` `SOCK_STREAM` `socketpair` created with `SOCK_CLOEXEC | SOCK_NONBLOCK`
+(`Doorbell::create`, `:527-549`); the peer's end is moved out by `attachment`
+(`:1127-1143`) and travels in the setup transfer beside the mapping.
+`Doorbell::from_fd` (`:552-570`) admits only a connected `AF_UNIX` stream socket:
+`SO_DOMAIN`, `SO_TYPE`, and a successful `getpeername`. `signal` (`:596-619`)
+sends one byte with `MSG_DONTWAIT | MSG_NOSIGNAL` and treats `EAGAIN` as delivered,
+because the peer already holds unread wake bytes; `drain` (`:622-648`) receives
+at most `DRAIN_BYTES` (256, `:524`) with `MSG_DONTWAIT`, treats `EAGAIN` as empty,
+and treats a zero-length read (`:638`) as the peer having closed its end;
+`wait_until` (`:650-683`) polls the local end. Each end is its own open file
+description, so a peer clearing `O_NONBLOCK` on its end cannot make the local end
+block (`doorbell_never_blocks_after_either_end_clears_nonblock`, `:3062-3085`),
+and a closed peer end fails `signal` and `drain` instead of blocking
+(`closed_peer_doorbell_fails_instead_of_blocking`, `:3088-3094`).
+
+`attach-validates-doorbell-eventfds` is rewritten as
+`attach-validates-doorbell-sockets` against this gate. The Group N intro and
+the records listed here keep the parked-epoch wake protocol, which is unchanged
+in `signal_wake` (`:2014`) and `arm_data_wait` (`:1066`), but their prose
+named the eventfd as the doorbell and their coalescing, blocking, and dead-peer
+claims were derived against eventfd counter semantics. Each carries an open
+question until it is re-derived against the byte-stream semantics above:
+`attach-reconciles-or-refuses-stale-shared-cursors`,
+`dead-peer-charges-are-reclaimed-or-declared`,
+`backpressure-converges-in-a-bounded-reclaim-window`,
+`receive-resumes-when-lease-capacity-clears`,
+`neither-direction-starves-the-other`, `duplex-overlap-is-reached`,
+`capacity-recheck-after-a-wake-race`. The bridge's private `worker_wake`
+(`crates/host-runtime/src/client.rs:1796-1816`) and the addon reactor's control
+descriptor (`packages/shm-native/src/scheduling.rs:105`) are eventfds, and the
+records that name them are unaffected.
+
 ## Eventfd reconciliation pass, 2026-08-31
 
 This catalog, `existing-checks.md`, and `fault-map.md` were reconciled against
@@ -224,14 +260,14 @@ decide whether to ship the transport. A defect there is live today.
 | [ingress-charge-matches-the-bytes-copied-from-shared-storage](#ingress-charge-matches-the-bytes-copied-from-shared-storage) | safety | high | yes |
 | [every-shm-header-consumer-applies-its-role-gate](#every-shm-header-consumer-applies-its-role-gate) | safety | medium | yes |
 | [header-rejection-effect-does-not-depend-on-the-catching-layer](#header-rejection-effect-does-not-depend-on-the-catching-layer) | safety | high | no |
-| [runtime-directory-authentication-is-a-precondition-not-a-container](#runtime-directory-authentication-is-a-precondition-not-a-container) | safety | high | no |
+| [runtime-directory-authentication-is-a-precondition-not-a-container](#runtime-directory-authentication-is-a-precondition-not-a-container) | safety | high | n/a - invalidated |
 | [backpressure-converges-in-a-bounded-reclaim-window](#backpressure-converges-in-a-bounded-reclaim-window) | liveness | high | no |
 | [receive-resumes-when-lease-capacity-clears](#receive-resumes-when-lease-capacity-clears) | liveness | high | no |
 | [neither-direction-starves-the-other](#neither-direction-starves-the-other) | liveness | high | no |
 | [reclamation-keeps-pace-with-completion](#reclamation-keeps-pace-with-completion) | liveness | high | no |
 | [lease-saturation-is-reached-then-drains](#lease-saturation-is-reached-then-drains) | reachability | high | no |
 | [duplex-overlap-is-reached](#duplex-overlap-is-reached) | reachability | high | no |
-| [attach-validates-doorbell-eventfds](#attach-validates-doorbell-eventfds) | safety | high | yes |
+| [attach-validates-doorbell-sockets](#attach-validates-doorbell-sockets) | safety | high | yes |
 | [wake-published-during-readiness-callback-is-not-lost](#wake-published-during-readiness-callback-is-not-lost) | liveness | high | yes |
 | [queued-write-needs-no-second-wake](#queued-write-needs-no-second-wake) | liveness | high | yes |
 | [released-charges-wake-blocked-readers](#released-charges-wake-blocked-readers) | liveness | medium | yes |
@@ -930,7 +966,7 @@ is dead and every symptom is a normal backpressure code.
 Required faults and enabling state: an actual process termination while leases
 are held — not a clean shutdown — followed by an attach.
 Confidence: high — [evidence](evidence/attach-reconciles-or-refuses-stale-shared-cursors.md).
-`Ring::attach` validates identity and geometry and wires the eventfd doorbells
+`Ring::attach` validates identity and geometry and wires the socketpair doorbells
 (`ring.rs:783-798`, `:2067-2098`; the pre-#131 prefault step is gone); it never
 inspects `published`, `consumed`,
 `completed`, `arena_write`, `arena_reclaimed`, or `quarantined`. Reclamation
@@ -946,6 +982,12 @@ Open questions:
 
 - Is a peer crash meant to be recoverable at all? If yes, something must reset
   the cursors or force quarantine; today it does neither. (needs human input)
+- Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
+  references were written against the source tree's eventfd doorbells. The
+  tree's doorbells are `socketpair` ends (doorbell mechanism pass at the top of
+  this file). Re-derive the coalescing, blocking, and dead-peer claims against
+  `signal`, `drain`, and `wait_until` (`ring.rs:596-683`) and refresh the
+  line references.
 
 ### crashed-producer-does-not-wedge-the-sequence
 
@@ -1004,8 +1046,13 @@ sentinel-triggered teardown completes, or the accounting snapshot exposes them
 as a distinct "unreclaimable" class that the admission contract accounts for.
 `always` because the obligation applies at every peer death, not at one code
 point.
-Fault/timing angle: under the eventfd mechanism a dead peer is pure silence.
-It never signals `data_ready`, so the endpoint arms the data wait
+Fault/timing angle: a dead peer closes its doorbell end, and the socketpair
+doorbell reports that: `drain` reads zero bytes and returns `DoorbellFailed`
+(`ring.rs:638`), `signal` fails on the closed peer, and `poll` sees hang-up
+(`closed_peer_doorbell_fails_instead_of_blocking`, `ring.rs:3088-3094`). The
+rest of this angle was written against the source tree's eventfd doorbells,
+under which a dead peer was pure silence: it never signalled `data_ready`, so
+the endpoint armed the data wait
 (`crates/host-runtime/src/ring_transport.rs:429`) and parks in the readiness select
 (`:441-474`); the ring path alone never produces an error, a wake, or a
 suspect, and a parked endpoint is indistinguishable from an idle one.
@@ -1036,15 +1083,23 @@ per-identity tuple: readmission at a one-connection cap witnesses that enough
 capacity returned, not that the killed candidate's exact tuple did.
 Impact: if release fails after a peer death, then with single-candidate limits
 one dead peer permanently ends shared-memory eligibility for the process while
-readiness still reports healthy — and under blocking eventfd waits nothing on
-the ring path would ever surface it, because the endpoint parks silently
-instead of visibly polling an empty ring.
+readiness still reports healthy. Under the source tree's blocking eventfd
+waits nothing on the ring path surfaced it, because the endpoint parked
+silently instead of visibly polling an empty ring. With socketpair doorbells
+the closed peer end surfaces as `DoorbellFailed` on the next `drain` or
+`signal`; whether that reaches the release path is part of the open question.
 Open questions:
 
 - None open on the former release-versus-suspect fork: both close paths end in
   the unconditional `admission.release()` at `ring_transport.rs:276` at HEAD,
   which resolves that question by code change. What remains untested is the
   per-identity ledger oracle described in the evidence file.
+- Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
+  references were written against the source tree's eventfd doorbells. The
+  tree's doorbells are `socketpair` ends (doorbell mechanism pass at the top of
+  this file). Re-derive the coalescing, blocking, and dead-peer claims against
+  `signal`, `drain`, and `wait_until` (`ring.rs:596-683`) and refresh the
+  line references.
 
 ### cancelled-frame-disposition-is-declared
 
@@ -2908,14 +2963,12 @@ Open questions:
 ### runtime-directory-authentication-is-a-precondition-not-a-container
 
 Type: safety
-Reachability: default-production — the ring transport is built unconditionally
-(`crates/host-runtime/src/runtime.rs:876`) and every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:148`), so this code is on the
-shipped path. This replaces the test-only, non-default framing in the
-product-context section above, which predates the ring-transport refactor.
-Status: active
-Exercised: not yet — no test references the runtime directory at all, and
-revalidation is never negative-tested.
+Reachability: default-production - label retained from the source catalog and
+not supported at HEAD; the runtime directory this record authenticates does not
+exist in the U3 tree, so no reachability class applies. See Invalidated.
+Status: invalidated
+Exercised: not yet - no test referenced the runtime directory in the source
+tree, and the U3 tree has no runtime directory to test.
 Guarantee: The runtime directory is admitted only when its by-path and
 by-descriptor views name one inode that is a directory owned by the effective user
 at mode 0700, and that conjunction is re-established before every ring creation.
@@ -2957,13 +3010,20 @@ own directory under our name and have our `Drop` remove theirs, a narrow same-us
 denial primitive. What is actually worth guarding is a belief: a future change
 storing something real here would inherit an authentication covering only the
 container.
+Invalidated: the U3 tree has no runtime directory. `crates/shm-transport/src`
+contains no `RuntimeDir`, `Ring::create_in`, `validate`, or `remove_dir`;
+`Mapping::create` (`ring.rs:397-398`) takes only a length and creates an
+anonymous memfd through `create_linux_memfd` (`:2905`), so ring creation
+touches no filesystem path at all. There is no code left to hold or violate
+this property. What the record established is that the source tree's directory
+held no object on any platform, so its authentication guarded a belief rather
+than a container, and that its `Drop` removed by path without revalidating.
 Open questions:
 
-- Is the directory a remnant of an earlier file-backed design, or a deliberate
-  environment sanity check? The doc comment at `ring.rs:543` implies the object is
-  under it; it is not. Git archaeology was not performed. (needs human input)
-- Should `Drop` revalidate before removing, that being the one unauthenticated use
-  of the path? (needs human input)
+- If a path-bearing ring object ever returns, reopen this record: the
+  authentication it needs is the one `Mapping::attach` applies to the memfd
+  (`validate_seals`, `validate_object`), not a directory check. (needs human
+  input)
 
 ---
 
@@ -3008,7 +3068,7 @@ poll: between attempts the producer parks a generation-bound epoch
 draining the doorbell (`:1020`), rechecks the generation (`:1012`, `:1031`),
 and blocks in `capacity_ready.wait_until(deadline)` (`:1035`). `release`
 signals `capacity_ready` (`:1236-1241`) through `signal_wake` (`:1418`), which
-bumps the generation and writes the eventfd only when a waiter was parked, so
+bumps the generation and rings the doorbell only when a waiter was parked, so
 the hazard is a lost wake rather than a slow poll, and doorbell wake latency
 replaces the former 50-microsecond poll quantum as the floor on any asserted
 bound. `POLL_INTERVAL` survives only in
@@ -3026,12 +3086,14 @@ reclaim loop exits only at the first gap, an error, or an exhausted prefix
 because `slot_ptr` maps sequence to `(sequence - 1) % descriptor_depth`
 (`:1438`) and the depth gate already puts that slot's previous user at or
 below `completed`, hence freed (`:1554`).
-Existing check: partial —
+Existing check: partial -
 `two_process_zero_copy_exchange_uses_authenticated_grant`
-(`tests/ring.rs:551-592`). A `reserve_until` with a five-second deadline
-(`:575-582`) converges after the child releases, and an elapsed-time assertion
-(`:583`) keeps it from passing vacuously. Status unaudited. The give-up path is
-pinned separately at `:181-185`.
+(`tests/ring.rs:483-533`). A `reserve_until` with a five-second deadline
+(`:518-524`) converges after the child releases and the conservation check
+(`:530-532`) proves the release was reclaimed, but nothing measures elapsed
+time, so the test cannot show that `reserve_until` was ever blocked: a
+reclaimer that freed capacity before the wait began passes it identically.
+Status unaudited. The non-vacuity oracle this record needs does not exist yet.
 Impact: this is the only statement in the catalog that the transport makes forward
 progress in normal operation. A recovery-chain defect presents as
 `ProducerError::Deadline`, which the host converts into a failed publish, a
@@ -3042,6 +3104,12 @@ Open questions:
 - What inner bound should the cross-process arm assert? The existing test pairs a
   50 ms sleep with a five-second deadline, three orders of magnitude of slack, so
   it measures no latency and a per-pass reclaimer would pass it.
+- Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
+  references were written against the source tree's eventfd doorbells. The
+  tree's doorbells are `socketpair` ends (doorbell mechanism pass at the top of
+  this file). Re-derive the coalescing, blocking, and dead-peer claims against
+  `signal`, `drain`, and `wait_until` (`ring.rs:596-683`) and refresh the
+  line references.
 
 ### receive-resumes-when-lease-capacity-clears
 
@@ -3075,7 +3143,7 @@ same thread-confined receiver. The hazard is representational: the declining
 return is used both for saturation (`ring.rs:1063-1068`) and for an empty ring
 (`:1073-1075`), and the saturation gate is taken before `consumed` or `published`
 is read at all, so the value carries no reason. A second hazard is new with the
-eventfd mechanism: a release whose `data_ready` signal is lost leaves a parked
+doorbell mechanism: a release whose `data_ready` signal is lost leaves a parked
 `wait_for_data` consumer asleep until its deadline even though the state gates
 would pass, so the recovery assertion must use a direct `try_receive` to test
 the state and a parked waiter to test the wake, not one call for both.
@@ -3104,6 +3172,12 @@ Open questions:
   `release-authority-bound-to-lease-ownership`, so it is the one shipped consumer
   that plausibly reaches the cap. Whether the property is latent or live depends
   on that answer. (needs human input)
+- Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
+  references were written against the source tree's eventfd doorbells. The
+  tree's doorbells are `socketpair` ends (doorbell mechanism pass at the top of
+  this file). Re-derive the coalescing, blocking, and dead-peer claims against
+  `signal`, `drain`, and `wait_until` (`ring.rs:596-683`) and refresh the
+  line references.
 
 ### neither-direction-starves-the-other
 
@@ -3129,7 +3203,7 @@ test. The only per-lane stall bound the code enforces is `frame_deadline` on the
 `ring.rs:980`). The inbound lane has no equivalent bound — see the
 Fault/timing angle — so the ratio arm holds only while the application drains
 inbound. The former `frame_deadline / POLL_INTERVAL` derivation is void: waits
-park on eventfd doorbells with no retry quantum, and `POLL_INTERVAL` survives
+park on socketpair doorbells with no retry quantum, and `POLL_INTERVAL` survives
 only in `crates/host-runtime/tests/support/process_resources.rs`. Bounded drain: stop
 offering both ways, poll until stable within an explicit bound, then require
 both queues empty, all descriptors free on both rings, and no close reported,
@@ -3182,6 +3256,12 @@ Open questions:
 - Should the inbound send be bounded, or is the sender-side admission timeout the
   intended backstop? The two give different failure attributions for one cause.
   (needs human input)
+- Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
+  references were written against the source tree's eventfd doorbells. The
+  tree's doorbells are `socketpair` ends (doorbell mechanism pass at the top of
+  this file). Re-derive the coalescing, blocking, and dead-peer claims against
+  `signal`, `drain`, and `wait_until` (`ring.rs:596-683`) and refresh the
+  line references.
 
 ### reclamation-keeps-pace-with-completion
 
@@ -3326,7 +3406,7 @@ harness were read: all are lockstep, single-direction, or resource-counter based
 That also established that two endpoint-loop paths, the post-receive outbound
 take (`ring_transport.rs:416-421`) and the outbound service inside the
 ingress-budget wait (`:533-538`), are unreachable under the existing traffic
-shape; under the eventfd mechanism the idle path instead arms the data doorbell
+shape; under the doorbell mechanism the idle path instead arms the data doorbell
 (`:429`) and parks in the readiness select (`:459`).
 Existing check: none. In the main negotiation test each peer send is immediately
 followed by a peer receive, so two frames are never outstanding in opposite
@@ -3343,98 +3423,105 @@ Open questions:
 - Should the marker distinguish overlap below capacity, which exercises the
   alternation, from overlap with the outbound lane at capacity, which is the only
   state making the starvation property refutable?
+- Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
+  references were written against the source tree's eventfd doorbells. The
+  tree's doorbells are `socketpair` ends (doorbell mechanism pass at the top of
+  this file). Re-derive the coalescing, blocking, and dead-peer claims against
+  `signal`, `drain`, and `wait_until` (`ring.rs:596-683`) and refresh the
+  line references.
 
 ---
 
 ## Group N: doorbell delivery and demand paging
 
 PR #131 (merge `5d638e3e8`) replaced the transport's polling with sparse
-eventfd doorbells and made reclamation return pages with `MADV_REMOVE`. The
+doorbells and made reclamation return pages with `MADV_REMOVE`; in this tree
+the doorbells are `socketpair` ends, not eventfds (see the doorbell mechanism
+pass at the top of this file). The
 new mechanism family is: two doorbells per ring (`ring.rs:723-724`), a shared
 parked-epoch wake protocol (`signal_wake`, `ring.rs:1418-1432`; `arm_data_wait`,
 `:828-854`), a one-in-flight readiness reactor in the addon
 (`packages/shm-native/src/scheduling.rs:79`), and page-granular reclamation
-(`removal_ranges`, `ring.rs:221-273`). Because signals are sparse — the eventfd
-is written only when a waiter was parked — the dominant new hazard class is the
+(`removal_ranges`, `ring.rs:221-273`). Because signals are sparse (the doorbell
+is rung only when a waiter was parked) the dominant new hazard class is the
 lost wake: a defect here presents as a healthy channel that stopped making
 progress, with no error, quarantine, or counter. Each record below was
 discovered from a fix commit inside the PR's own branch history and then
 re-verified against HEAD code; the commit is the trigger, the code is the
 evidence.
 
-### attach-validates-doorbell-eventfds
+### attach-validates-doorbell-sockets
 
 Type: safety
-Reachability: default-production — the ring transport is built unconditionally
+Reachability: default-production - the ring transport is built unconditionally
 (`crates/host-runtime/src/runtime.rs:741`), every accepted connection prepares a
-duplex ring (`crates/host-runtime/src/connection.rs:117`), and the client bridge
-attaches transferred descriptors through this gate
-(`crates/host-runtime/src/client.rs:1827`).
+duplex ring (`crates/host-runtime/src/connection.rs:117`), and every attach of
+transferred descriptors goes through `Ring::attach`, which routes both doorbell
+slots through this gate (`crates/shm-transport/src/backend/ring.rs:1006`).
 Status: active
-Exercised: yes — `doorbell_attachment_requires_nonblocking_eventfd`
-(`crates/shm-transport/src/backend/ring.rs:2248-2270`) constructs both
-rejection arms, a blocking eventfd and a nonblocking non-eventfd; the positive
-arm is every cross-process attach (`ring_child_exchange`,
+Exercised: yes - `doorbell_attachment_requires_connected_unix_stream_socket`
+(`ring.rs:3021-3059`) rejects a regular file, an eventfd, and an unconnected
+`AF_UNIX` stream socket, and accepts the peer end of a created doorbell. The
+positive arm in a full attach is every cross-process attach (`ring_child_exchange`,
 `tests/ring.rs:537-566`). No test substitutes a bad doorbell into a full
-`Ring::attach` call.
-Guarantee: `Ring::attach` accepts a doorbell descriptor only when it is a live
-nonblocking eventfd, and rejects anything else as `DoorbellFailed` before the
-ring is usable. Attach-time only: this says nothing about whether the
-descriptor stays nonblocking afterwards, which holds only for a peer that does
-not mutate the shared file-status flags (see Open questions).
-Check: `always` — at every successful attach, both doorbell descriptors carry
-`O_NONBLOCK` in `F_GETFL` and readlink to `anon_inode:[eventfd]`
-(`ring.rs:397-409`). `always` because the property must hold at every
-evaluation of the attach gate; there is no optional path and no state to reach
-first.
-Fault/timing angle: none at the gate itself. The consequence of a miss is
-timing-shaped: `signal` and `drain` (`ring.rs:416-448`) rely on `EAGAIN` for
-their sparse semantics, so a blocking descriptor converts the first empty
-`drain` (`arm_data_wait`, `:846`) into an unbounded block on the bridge or
-reactor thread. The same harm is reachable after a passing gate if a peer
-clears `O_NONBLOCK` on the shared open file description; that window is a
-separate uncovered gap, recorded under Open questions.
+`Ring::attach` call, so the ordering claim (mapping validated first, no partial
+state on rejection) is untested.
+Guarantee: `Ring::attach` accepts a doorbell descriptor only when it is a
+connected `AF_UNIX` stream socket, and rejects anything else as `DoorbellFailed`
+before the ring is usable. The gate does not inspect `O_NONBLOCK`, and does not
+need to: each socketpair end is its own open file description and every
+doorbell operation passes `MSG_DONTWAIT`, so a peer cannot make the local end
+block by mutating flags on its own end.
+Check: `always` - at every successful attach, both doorbell descriptors report
+`SO_DOMAIN == AF_UNIX` and `SO_TYPE == SOCK_STREAM` and `getpeername` succeeds
+(`Doorbell::from_fd`, `ring.rs:552-570`). `always` because the property must
+hold at every evaluation of the attach gate; there is no optional path and no
+state to reach first.
+Fault/timing angle: none at the gate itself. The consequence of a miss is that
+`signal` (`:596-619`) and `drain` (`:622-648`) run `send` and `recv` on a
+descriptor that is not a stream socket: on a regular file or eventfd they fail
+with `ENOTSOCK` and the ring reports `DoorbellFailed` on first use rather than
+at attach; on an unconnected socket `send` fails with `ENOTCONN`. The former
+unbounded-block hazard of a blocking eventfd does not apply: `MSG_DONTWAIT` is
+per call, and `doorbell_never_blocks_after_either_end_clears_nonblock`
+(`:3062-3085`) clears `O_NONBLOCK` on both ends and still completes a million
+signals and a bounded wait.
 Required faults and enabling state: a peer transferring a non-conforming
-descriptor in a doorbell slot of the setup handshake — fault class F15
-(doorbell fd substitution). No shared state needs preparation.
-Confidence: high — [evidence](evidence/attach-validates-doorbell-eventfds.md).
-Both gate predicates and both attach call sites were read directly. High
-confidence in the attach-time claim only: the guarantee is scoped to the moment
-of attach and does not extend past it, because `O_NONBLOCK` lives in the open
-file description that `SCM_RIGHTS` shares with the sender
-(`setup_socket.rs:149`, `:215-227`), so a peer holding the other descriptor can
-clear it with `F_SETFL` after the gate passes. The earlier reading of "no
-post-attach `F_SETFL`" was an in-crate search and could not establish that
-cross-process property.
-Existing check: `doorbell_attachment_requires_nonblocking_eventfd`
-(`ring.rs:2248-2270`), unit-level against `Doorbell::from_fd` directly; status
+descriptor in a doorbell slot of the setup handshake, fault class F15 (doorbell
+fd substitution). No shared state needs preparation.
+Confidence: high - [evidence](evidence/attach-validates-doorbell-sockets.md).
+`Doorbell::from_fd`, `socket_option` (`:699`), the `Ring::attach` call site, and the
+three doorbell unit tests were read directly at HEAD. This record replaces
+`attach-validates-doorbell-eventfds`, whose eventfd gate (`O_NONBLOCK` in
+`F_GETFL` plus a `/proc/self/fd` readlink) does not exist in this tree; its
+post-attach flag-mutation open question is closed by the socketpair design and
+the test named above.
+Existing check: `doorbell_attachment_requires_connected_unix_stream_socket`
+(`ring.rs:3021-3059`), `doorbell_never_blocks_after_either_end_clears_nonblock`
+(`:3062-3085`), `closed_peer_doorbell_fails_instead_of_blocking` (`:3088-3094`);
+all unit-level against `Doorbell` directly, never a full `Ring::attach`; status
 unaudited.
-Impact: a wedged setup with no error — the attaching thread blocks forever
-inside a doorbell read, indistinguishable from a slow peer, on the thread that
-also services every other channel event.
+Impact: a ring whose first `signal` or `drain` fails with `DoorbellFailed`,
+surfacing as a setup or first-frame failure on the affected connection rather
+than a wedge; the attach-ordering half, if wrong, leaks a validated mapping on a
+rejected doorbell.
 Open questions:
 
-- The identity half of the gate depends on `/proc/self/fd`; it fails closed
-  elsewhere, which couples doorbell attach to Linux. Is that intended for the
-  macOS ring path? (needs human input)
-- The post-attach mutation window is uncovered. A peer that clears `O_NONBLOCK`
-  on the shared open file description after attach reinstates the unbounded
-  block this gate exists to prevent, since `drain` (`ring.rs:430-448`) only
-  distinguishes `EAGAIN` and both callers drain when the eventfd is expected to
-  be empty and unguarded by a `poll` (`:846`, `:861`). No record owns that
-  window and no test constructs it. Queue discovery: is the durable fix a
-  re-check of `F_GETFL` before each blocking-capable read, a `poll`-guarded
-  `drain`, or accepting the exposure and scoping the guarantee to a
-  non-mutating peer? (needs human input)
+- A full-`Ring::attach` negative is missing: substitute one doorbell slot in an
+  otherwise valid `[OwnedFd; 3]` and assert `DoorbellFailed` with no mapping
+  side effects. Today's tests call `Doorbell::from_fd` directly. Queue it?
 
 ### wake-published-during-readiness-callback-is-not-lost
 
 Type: liveness
-Reachability: default-production — the addon readiness path is the production
-client delivery path: `ShmFrameChannel` registers its handler via
-`startReadiness`
-(`packages/plugin/src/shared/host-client/shm-frame-channel.ts:110`), which
-wires the reactor (`packages/shm-native/src/lib.rs:1109-1131`).
+Reachability: default-production - the addon readiness path is the shipped
+client's delivery path: `NativeChannel.startReadiness`
+(`packages/shm-native/index.ts:608`) is the wrapper's public readiness entry
+point and wires the reactor through `watch` (`packages/shm-native/src/lib.rs`).
+The downstream consumer that registers a handler (`ShmFrameChannel` in the
+source tree's `packages/plugin`) is not in this tree; the in-tree callers are
+`packages/shm-native/tests/mechanism.ts:174-178`. The label rests on the addon
+being the shipped client, not on an in-tree production caller.
 Status: active
 Exercised: yes — `readiness acknowledgement preserves a frame published during
 callback` (`packages/shm-native/tests/mechanism.ts:211-278`) publishes
@@ -3632,8 +3719,8 @@ park, and an unconditional oracle would reject a correct implementation.
 window (one iteration) is what a racing test can refute.
 Fault/timing angle: the vulnerable window is generation-read (`:994`) to poll
 entry, a few dozen instructions. The publisher bumps the generation SeqCst and
-writes the eventfd only when it swapped a parked epoch
-(`signal_wake`, `:1426-1429`); the drain at `:1016` is why the second
+rings the doorbell only when it swapped a parked epoch
+(`signal_wake`, `:2014`); the drain at `:1016` is why the second
 `try_reserve` exists — it can consume a stale token whose capacity would
 otherwise be represented only by the byte just discarded. Correctness rests on
 SeqCst pairing that no tool validates (fault class F5).
@@ -3663,6 +3750,12 @@ Open questions:
   and kept in sync manually, including the Release-not-SeqCst parked resets
   (`ring.rs:1004`, `:1013`, and the other exit arms through `:1042`). Queue
   it?
+- Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
+  references were written against the source tree's eventfd doorbells. The
+  tree's doorbells are `socketpair` ends (doorbell mechanism pass at the top of
+  this file). Re-derive the coalescing, blocking, and dead-peer claims against
+  `signal`, `drain`, and `wait_until` (`ring.rs:596-683`) and refresh the
+  line references.
 
 ### reclamation-excludes-pages-with-live-wrapped-bytes
 
@@ -3839,8 +3932,8 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   `receive-resumes-when-lease-capacity-clears`,
   `neither-direction-starves-the-other`, `reclamation-keeps-pace-with-completion`,
   `lease-saturation-is-reached-then-drains`, `duplex-overlap-is-reached`. One
-  mechanism carries them: `signal_wake` bumps a generation and writes the
-  eventfd only when a waiter was parked, so every record's hazard is some form
+  mechanism carries them: `signal_wake` bumps a generation and rings the
+  doorbell only when a waiter was parked, so every record's hazard is some form
   of lost wake. Suspected dominance: `capacity-recheck-after-a-wake-race`
   holding would make the producer half of
   `backpressure-converges-in-a-bounded-reclaim-window` likely to hold, since
@@ -3848,9 +3941,9 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   `wake-published-during-readiness-callback-is-not-lost` presupposes
   `reactor-callback-is-one-in-flight`, because a double acknowledgement
   releases an epoch whose re-arm never ran and manufactures the lost wake the
-  first record excludes. `attach-validates-doorbell-eventfds` sits upstream of
+  first record excludes. `attach-validates-doorbell-sockets` sits upstream of
   the entire cluster: none of the wake properties are meaningful over a
-  descriptor that is not a nonblocking eventfd.
+  descriptor that is not a connected `AF_UNIX` stream socket.
 - **Wake delivery outside the ring pages.**
   `queued-write-needs-no-second-wake` and
   `released-charges-wake-blocked-readers` are the same coalesced-eventfd hazard

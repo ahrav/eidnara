@@ -2,7 +2,7 @@
 
 ## Status
 
-The fixed sparse ring is the only application transport. Production support is Linux x64 with glibc only. Clients use the owner-only Unix setup socket to authenticate, receive two memfds and four eventfds, validate the current release identity, attach, and commit activation. Application frames never use the setup socket or eventfds.
+The fixed sparse ring is the only application transport. Production support is Linux x64 with glibc only. Clients use the owner-only Unix setup socket to authenticate, receive two memfds and four doorbell socket ends, validate the current release identity, attach, and commit activation. Application frames never use the setup socket or the doorbells.
 
 There is no runtime transport selector, alternate shared-memory backend, compatibility reader, or degraded data path. A transport failure is terminal for the affected connection.
 
@@ -39,7 +39,7 @@ Setup proceeds through these phases:
 
 1. Authenticate the peer over the owner-only Unix socket.
 2. Admit the fixed ring charge.
-3. Transfer exactly two memfds and four eventfds.
+3. Transfer exactly two memfds and four doorbell descriptors. Each doorbell is one end of a connected `AF_UNIX` stream `socketpair`; the receiver accepts nothing else in a doorbell slot.
 4. Validate the profile, wire version, descriptor schema, grants, and activation token.
 5. Attach both directions and commit activation.
 6. Keep the setup socket open as the peer-lifetime sentinel.
@@ -52,13 +52,15 @@ Clean `Goodbye` and unexpected setup-socket closure are distinct. Unexpected clo
 
 `RingTransport::diagnostics` (`crates/host-runtime/src/ring_transport.rs`) produces the report described here. The `eidnara daemon doctor` command that renders it belongs to the product daemon crate and is not delivered in this tree; see the scope boundaries in `docs/host-wire-protocol.md`. Until that command lands, the report is reachable only through the host runtime API and its tests.
 
-The report is either a healthy fixed ring or one terminal class:
+The report is either a healthy fixed ring or one terminal class. The contract reserves five class names:
 
 - `missing_addon`
 - `identity_mismatch`
 - `setup_failure`
 - `peer_death`
 - `resource_exhaustion`
+
+At HEAD the host report emits only one of them: `error_class` is `setup_failure` when the admission controller's accounting snapshot fails, and `null` otherwise. Peer death and exhaustion appear as the `peer_death.observed` and `exhaustion.observed` counters in a healthy report, not as terminal classes, and a missing addon or identity mismatch is observed by the client, never by the host report. The other four names are reserved for the doctor command and are not wired into `RingTransport::diagnostics`.
 
 A healthy report includes only bounded, aggregate data:
 

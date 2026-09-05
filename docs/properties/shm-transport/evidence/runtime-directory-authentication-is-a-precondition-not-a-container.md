@@ -147,3 +147,8 @@ have.
   platforms. That fixes its priority as low and its impact as availability-only,
   and it is the reason the record is written to say what the authentication does
   *not* cover.
+
+### Q: Does the U3 tree have a runtime directory? (added 2026-09-05)
+
+- Checked: `rg -n 'RuntimeDir|create_in|remove_dir' crates/shm-transport/src` returns nothing. `Mapping::create` (`crates/shm-transport/src/backend/ring.rs:397-398`) takes only a length and calls `create_linux_memfd` (`:2905`); `Ring::create` (`:914`) takes a profile and a lane. No path is touched during ring creation. The host's `secure_runtime_dir` in `crates/host-runtime/src/lifecycle.rs` is the daemon's data directory, not the ring object container this record described.
+- Conclusion: no. The record is marked `invalidated` in the catalog; the `ring.rs` line references in the trail above resolve against the source tree.

@@ -274,7 +274,7 @@ Refinements 1-4 applied 2026-08-31.
 ### Lens 1: harness fit
 
 Routing is mostly clean. Five of the seven records need no fault harness at
-all: `attach-validates-doorbell-eventfds` completes with a full-attach
+all: `attach-validates-doorbell-sockets` completes with a full-attach
 negative that is plain fd plumbing; `wake-published-during-readiness-callback-is-not-lost`
 and `reactor-callback-is-one-in-flight` live at the raw-addon JS level where
 the existing `mechanism.ts` shape already constructs the race by publishing
