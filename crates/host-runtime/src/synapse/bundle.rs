@@ -931,7 +931,7 @@ mod tests {
         // embedding-space scalar and nothing else, so an input the pre-image omits leaves
         // the fingerprint equal to `before`.
         type Mutation = (&'static str, fn(&mut BundleManifest, &str));
-        let fields: [Mutation; 18] = [
+        let fields: [Mutation; 19] = [
             ("model_file", |m, h| m.model_file.sha256 = h.to_owned()),
             ("external_initializers[0].sha256", |m, h| {
                 m.external_initializers[0].sha256 = h.to_owned()
@@ -944,6 +944,15 @@ mod tests {
             }),
             ("external_initializers[1].name", |m, _| {
                 m.external_initializers[1].name = "renamed-second.bin".to_owned()
+            }),
+            // A name whose byte length (12) differs from its character count (11); the
+            // pre-image prefixes the byte length, and this is the case that distinguishes
+            // the two.
+            ("external_initializers[0].name (multibyte)", |m, _| {
+                let name = "w\u{eb}ights.bin";
+                assert_eq!(name.len(), 12);
+                assert_eq!(name.chars().count(), 11);
+                m.external_initializers[0].name = name.to_owned();
             }),
             ("tokenizer.tokenizer", |m, h| {
                 m.tokenizer.tokenizer.sha256 = h.to_owned()

@@ -523,6 +523,34 @@ fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
     // Every node path and dependency edge is present in the canonical text as many times
     // as the fixture names it.
     let canonical_text = String::from_utf8(canonical).expect("utf8");
+    // A multibyte identifier: the canonical form must carry its UTF-8 bytes rather than a
+    // `\\u` escape, and the digest must follow the external canonicalization of the same
+    // text edit. A serializer that started escaping non-ASCII would change the digest of
+    // every such manifest while leaving the ASCII fixture untouched.
+    let multibyte = "p\u{ef}";
+    assert_eq!(multibyte.len(), 3);
+    assert_eq!(multibyte.chars().count(), 2);
+    let edited_text = text.replacen("\"harness\": \"pi\"", "\"harness\": \"p\u{ef}\"", 1);
+    assert_ne!(
+        edited_text, text,
+        "the fixture must name the harness \"pi\" once"
+    );
+    let edited: ClosureManifest = serde_json::from_str(&edited_text).expect("decode edited");
+    assert_eq!(edited.harness, multibyte);
+    let edited_raw: serde_json::Value = serde_json::from_str(&edited_text).expect("parse");
+    let edited_canonical =
+        serde_json::to_vec_pretty(&json_with_sorted_keys(&edited_raw)).expect("pretty");
+    assert!(
+        edited_canonical
+            .windows(multibyte.len())
+            .any(|window| window == multibyte.as_bytes()),
+        "the canonical form must carry the identifier's UTF-8 bytes"
+    );
+    assert!(!String::from_utf8_lossy(&edited_canonical).contains("\\u00ef"));
+    assert_eq!(
+        manifest_digest(&edited).expect("digest"),
+        format!("{:x}", Sha256::digest(&edited_canonical))
+    );
     for node in &manifest.nodes {
         let needle = format!("\"{}\"", node.path);
         let in_fixture = text.matches(needle.as_str()).count();

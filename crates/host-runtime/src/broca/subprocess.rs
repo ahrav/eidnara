@@ -1724,6 +1724,52 @@ mod tests {
             .collect()
     }
 
+    /// Rows that hold the same bytes but split them differently across adjacent fields
+    /// must encode differently; the pure encoder is used because `credential_fingerprint`
+    /// refuses empty and unsupported fields before canonicalization.
+    #[test]
+    fn canonical_row_boundaries_separate_adjacent_fields() {
+        let key = [0x42u8; 32];
+        type Row<'a> = (&'a str, &'a str, &'a str, &'a [u8]);
+        let pairs: [[Row<'_>; 2]; 5] = [
+            // One byte moves from the end of harness to the start of the canonical name.
+            [
+                ("opencodea", "nthropic", "ANTHROPIC_API_KEY", b"secret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+            // From the end of the canonical name to the start of the variable name.
+            [
+                ("opencode", "anthropicA", "NTHROPIC_API_KEY", b"secret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+            // From the end of the variable name to the start of the value.
+            [
+                ("opencode", "anthropic", "ANTHROPIC_API_KE", b"Ysecret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+            // An empty name with the bytes pushed into the value.
+            [
+                ("opencode", "anthropic", "", b"ANTHROPIC_API_KEYsecret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+            // An empty harness with the bytes pushed into the canonical name.
+            [
+                ("", "opencodeanthropic", "ANTHROPIC_API_KEY", b"secret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+        ];
+        for [left, right] in pairs {
+            let encode = |(harness, canonical, name, value): Row<'_>| {
+                documented_fingerprint(&key, harness, canonical, name, value)
+            };
+            assert_ne!(
+                encode(left),
+                encode(right),
+                "{left:?} and {right:?} carry the same bytes and must still encode apart"
+            );
+        }
+    }
+
     /// Every generated row agrees with the documented derivation, rows that differ in any
     /// input yield distinct fingerprints, and empty or oversize values are refused before
     /// fingerprinting.
