@@ -505,7 +505,7 @@ fn manifest_digest_changes_when_any_field_changes() {
     // digest is computed. A field the canonical form drops leaves the digest equal to
     // `before`.
     type Mutation = (&'static str, fn(&mut ClosureManifest));
-    let mutations: [Mutation; 13] = [
+    let mutations: [Mutation; 19] = [
         ("harness", |m| m.harness.push('x')),
         ("package", |m| m.package.push('x')),
         ("version", |m| m.version.push('x')),
@@ -515,31 +515,70 @@ fn manifest_digest_changes_when_any_field_changes() {
         ("source_roots", |m| {
             m.source_roots.push("zz-extra-root".to_owned())
         }),
-        // The launch fields must name nodes, so the node path moves with them; the new
+        // The launch fields must name nodes, so the node path moves with them; each new
         // path keeps the nodes sorted.
         ("interpreter", |m| {
             m.nodes[0].path = "bin/node2".to_owned();
             m.interpreter = Some("bin/node2".to_owned());
         }),
+        ("entrypoint", |m| {
+            let path = "node_modules/@earendil-works/pi-coding-agent/dist/cli2.js".to_owned();
+            m.nodes[1].path = path.clone();
+            m.entrypoint = Some(path);
+        }),
         ("extensions", |m| m.extensions.clear()),
+        ("nodes[0].source_root", |m| {
+            m.nodes[0].source_root = "pi-install".to_owned()
+        }),
         ("nodes[0].source_path", |m| m.nodes[0].source_path.push('x')),
         ("nodes[0].sha256", |m| {
             m.nodes[0].sha256 = format!("{:0>64}", "1")
         }),
         ("nodes[0].size_bytes", |m| m.nodes[0].size_bytes += 1),
-        ("nodes[1].dependencies", |m| {
+        // A module may become data without changing its mode or its edges.
+        ("nodes[2].kind", |m| m.nodes[2].kind = NodeKind::Data),
+        // The static edge to helper.js may become a finite dynamic edge.
+        ("nodes[1].dependencies[0].kind", |m| {
+            m.nodes[1].dependencies[0].kind = DependencyKind::FiniteDynamic;
+        }),
+        // Retargeting the finite dynamic edge from the extension to the addon's sibling
+        // keeps the edge list sorted and leaves the native edge untouched.
+        ("nodes[1].dependencies[1].path", |m| {
+            m.nodes[1].dependencies[1].path =
+                "node_modules/@earendil-works/pi-coding-agent/native/addon.node".to_owned();
+            m.nodes[1].dependencies[1].kind = DependencyKind::Native;
+        }),
+        ("nodes[1].dependencies.len", |m| {
             m.nodes[1].dependencies.truncate(1)
         }),
         ("nodes[1].source_path", |m| m.nodes[1].source_path.push('x')),
         ("nodes[1].sha256", |m| {
             m.nodes[1].sha256 = format!("{:0>64}", "2")
         }),
+        // Every node must be reachable, so the new data node hangs off the entrypoint.
+        ("nodes.len", |m| {
+            let mut extra = m.nodes[2].clone();
+            extra.path = "zz/extra.data".to_owned();
+            extra.kind = NodeKind::Data;
+            extra.dependencies.clear();
+            m.nodes.push(extra);
+            m.nodes[1].dependencies.push(ClosureDependency {
+                path: "zz/extra.data".to_owned(),
+                kind: DependencyKind::Static,
+            });
+        }),
     ];
+    // `mode` is fixed by `kind`, so a different mode is refused before hashing rather than
+    // hashed differently.
+    let mut other_mode = baseline.clone();
+    other_mode.nodes[2].mode = 0o700;
+    assert!(manifest_digest(&other_mode).is_err());
     let mut seen = std::collections::BTreeSet::from([before.clone()]);
     for (name, mutate) in mutations {
         let mut manifest = baseline.clone();
         mutate(&mut manifest);
-        let after = manifest_digest(&manifest).expect("digest");
+        let after = manifest_digest(&manifest)
+            .unwrap_or_else(|error| panic!("{name} left the manifest invalid: {error:?}"));
         assert_ne!(before, after, "{name} does not participate in the digest");
         assert!(
             seen.insert(after),

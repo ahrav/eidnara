@@ -1729,12 +1729,13 @@ mod tests {
         ];
         // Each (harness, provider) names the variable the row reads and the canonical name
         // that enters the transcript; the two Pi aliases canonicalize onto shared names.
-        let providers: [(&str, &str, &str, &str); 7] = [
+        let providers: [(&str, &str, &str, &str); 8] = [
             ("opencode", "anthropic", "ANTHROPIC_API_KEY", "anthropic"),
             ("opencode", "google", "GEMINI_API_KEY", "google"),
             ("opencode", "openai", "OPENAI_API_KEY", "openai"),
             ("pi", "anthropic", "ANTHROPIC_API_KEY", "anthropic"),
             ("pi", "google", "GEMINI_API_KEY", "google"),
+            ("pi", "google-antigravity", "GEMINI_API_KEY", "google"),
             ("pi", "openai", "OPENAI_API_KEY", "openai"),
             ("pi", "openai-codex", "OPENAI_API_KEY", "openai"),
         ];
