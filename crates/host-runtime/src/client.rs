@@ -455,6 +455,7 @@ impl Client {
         let bridge_wake = Arc::downgrade(&ring_tx.wake);
         let inner = Arc::new(Inner {
             generation: CLIENT_GENERATIONS.fetch_add(1, Ordering::Relaxed),
+            ping_watermark: Mutex::new(0),
             daemon_id: info.daemon_id,
             daemon_ver: authenticated.daemon_ver,
             closed: AtomicBool::new(false),
@@ -521,7 +522,13 @@ impl Client {
         target: RouteTarget,
         identity: RouteIdentity,
     ) -> Result<ClientRoute, CallError> {
+        let mut identity = identity;
         if self.inner.closed.load(Ordering::Acquire) {
+            // The caller's facts may be arbitrarily deep; they are dismantled iteratively
+            // before this frame drops them.
+            if let Some(facts) = identity.admission_facts.take() {
+                drop_json_iteratively(facts);
+            }
             return Err(CallError::local(
                 SendOutcome::NotSent,
                 "client_closed",
@@ -531,7 +538,6 @@ impl Client {
         // The clock starts before encoding: identity is caller-controlled input, and its
         // clone and serialization spend the operation's budget like any other stage.
         let deadline = Instant::now() + CLIENT_ROUTE_OPEN_TIMEOUT;
-        let mut identity = identity;
         let body = match route_open_body(&target, &identity) {
             Ok(body) => body,
             Err(error) => {
@@ -593,6 +599,8 @@ impl Client {
                         let mut binds = lock_unpoisoned(&self.inner.binds);
                         binds.publishing.remove(&handle);
                         if binds.torn_down.remove(&handle) {
+                            // The bind's whole record ends here; nothing else will insert it.
+                            binds.delivered_by.remove(&handle);
                             return Err(CallError::local(
                                 SendOutcome::Terminal,
                                 "route_gone",
@@ -1122,6 +1130,8 @@ enum PendingKind {
 struct Inner {
     /// Distinguishes this connection's routes from a reconnected client's; see `ClientRoute`.
     generation: u64,
+    /// Highest host `Ping` correlation seen; the host's namespace is monotonic (§8.3).
+    ping_watermark: Mutex<u64>,
     daemon_id: [u8; DAEMON_ID_LEN],
     daemon_ver: String,
     closed: AtomicBool,
@@ -1570,6 +1580,18 @@ impl Inner {
     fn dispatch(self: &Arc<Self>, header: EnvelopeHeader, body: Vec<u8>, charge: ByteCharge) {
         match header.ty {
             FrameType::Ping => {
+                // §8.3: the host's Ping correlations are a monotonic no-reuse namespace of
+                // their own; a repeat or a step backwards is a protocol violation.
+                {
+                    let mut watermark = lock_unpoisoned(&self.ping_watermark);
+                    if header.corr <= *watermark {
+                        drop(watermark);
+                        drop(charge);
+                        self.retire("protocol_violation");
+                        return;
+                    }
+                    *watermark = header.corr;
+                }
                 // `Pong` echoes `Ping` flags exactly.
                 let _ = self.send_control(
                     FrameType::Pong,
@@ -1855,6 +1877,7 @@ impl Inner {
         if !is_tagged_control_body(body)
             || serde_json::from_slice::<Value>(body)
                 .is_ok_and(|value| exceeds_control_depth(&value))
+            || !control_recognized_keys_are_unique(body)
         {
             self.retire("protocol_violation");
             return;
@@ -3660,6 +3683,19 @@ fn drop_json_iteratively(value: Value) {
     }
 }
 
+/// Whether a channel-0 response body repeats none of the recognized members of its
+/// operation. A body naming an unknown operation has no recognized members beyond `op`.
+fn control_recognized_keys_are_unique(body: &[u8]) -> bool {
+    let recognized: &[&str] = match control_op(body).as_deref() {
+        Some(OP_ROUTE_OPEN) => &["op", "route_channel", "route_epoch"],
+        Some(OP_HOST_STATUS) => &["op", "health", "metrics", "shared_memory"],
+        _ => &["op"],
+    };
+    recognized_keys_are_unique(body, recognized)
+        && (control_op(body).as_deref() != Some(OP_HOST_STATUS)
+            || nested_recognized_keys_are_unique(body, "metrics", &["components"]))
+}
+
 fn names_route_open(body: &[u8]) -> bool {
     control_op(body).as_deref() == Some(OP_ROUTE_OPEN)
 }
@@ -3809,6 +3845,7 @@ mod tests {
         (
             Arc::new(Inner {
                 generation: CLIENT_GENERATIONS.fetch_add(1, Ordering::Relaxed),
+                ping_watermark: Mutex::new(0),
                 daemon_id: [0; DAEMON_ID_LEN],
                 daemon_ver: "eidnara-host/0.0.0-test".to_owned(),
                 closed: AtomicBool::new(false),
@@ -4807,6 +4844,112 @@ mod tests {
             control_op(br#"{"op":"host.shutdown","x":1,"x":2}"#).as_deref(),
             Some("host.shutdown")
         );
+    }
+
+    #[tokio::test]
+    async fn a_reused_host_ping_correlation_retires() {
+        let (inner, _data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let ping = |corr: u64| EnvelopeHeader {
+            len: 0,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Ping,
+            flags: pure_header_flags(),
+            channel: 0,
+            epoch: 0,
+            corr,
+        };
+        inner.dispatch(ping(5), Vec::new(), ByteCharge::none());
+        inner.dispatch(ping(6), Vec::new(), ByteCharge::none());
+        assert_eq!(control_rx.try_recv().expect("pong").header.corr, 5);
+        assert_eq!(control_rx.try_recv().expect("pong").header.corr, 6);
+        assert!(!inner.retired.load(Ordering::Acquire));
+        // A repeat, then (on a fresh generation) a step backwards, each retire.
+        inner.dispatch(ping(6), Vec::new(), ByteCharge::none());
+        assert!(inner.retired.load(Ordering::Acquire));
+        assert!(
+            control_rx.try_recv().is_err(),
+            "no Pong for a reused correlation"
+        );
+
+        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        inner.dispatch(ping(9), Vec::new(), ByteCharge::none());
+        inner.dispatch(ping(3), Vec::new(), ByteCharge::none());
+        assert!(inner.retired.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_status_with_duplicate_recognized_fields_retires() {
+        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let body = br#"{"op":"host.status","health":"ok","health":"failing"}"#.to_vec();
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: 0,
+                epoch: 0,
+                corr: 4242,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(inner.retired.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn a_consumed_teardown_marker_takes_its_ownership_record_with_it() {
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let bound = RouteHandle {
+            channel: 9,
+            epoch: 3,
+        };
+        let responder_inner = Arc::clone(&inner);
+        let responder = tokio::spawn(async move {
+            let frame = data_rx.recv().await.expect("route.open request");
+            let body = serde_json::to_vec(&serde_json::json!({
+                "op": "route.open",
+                "route_channel": bound.channel,
+                "route_epoch": bound.epoch,
+            }))
+            .expect("body encodes");
+            responder_inner.dispatch(
+                EnvelopeHeader {
+                    len: u32::try_from(body.len()).expect("fits"),
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType::Response,
+                    flags: response_flags(false, false),
+                    channel: 0,
+                    epoch: 0,
+                    corr: frame.header.corr,
+                },
+                body,
+                ByteCharge::none(),
+            );
+            responder_inner.settle_route_from_host(bound);
+        });
+        let client = Client {
+            inner: Arc::clone(&inner),
+        };
+        let target = RouteTarget {
+            kind: TargetKind::ToolProvider,
+            module_id: "context".to_owned(),
+        };
+        let error = client
+            .open_route(target, identity_fixture())
+            .await
+            .expect_err("torn down before publication");
+        assert_eq!(error.code(), "route_gone");
+        responder.await.expect("responder");
+        let binds = lock_unpoisoned(&inner.binds);
+        assert!(binds.torn_down.is_empty());
+        assert!(binds.publishing.is_empty());
+        assert!(
+            binds.delivered_by.is_empty(),
+            "no record outlives the consumed marker"
+        );
+        drop(binds);
+        drop(client);
     }
 
     #[tokio::test]
