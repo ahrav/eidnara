@@ -1,5 +1,15 @@
 # slow-egress-alone-does-not-retire-a-probed-generation
 
+## Anchors
+
+Line references below were re-verified against the current tree: `FrameSender`
+is `frame_channel.rs:590-600` with `send` at `:609` and the admission race at
+`:640-653`; `frame_sender` is `:681-700`; the liveness loop is
+`connection.rs:733-845` with the probe insert at `:783-792` and the completion
+hook at `:810-820`; the ring transport constructs the sender at
+`ring_transport.rs:226`; `writer_queue_frames` defaults to 64 at `config.rs:88`.
+The investigation log keeps the pre-refactor numbers it was written against.
+
 ## Discovery trigger
 
 Gap G3 named three missing claims, the third being "that a saturated application
@@ -11,12 +21,12 @@ deliberately shaped as a situation-coverage marker.
 
 ## Evidence trail
 
-**There is no host-side control lane.** `frame_channel.rs:758-767` defines
+**There is no host-side control lane.** `frame_channel.rs:590-597` defines
 `FrameSender` with a single `tx: mpsc::Sender<QueuedOutboundFrame>`. Its
-constructor `frame_sender` at `:856-872` creates that channel at `:862` with
+constructor `frame_sender` at `:681-700` creates that channel at `:686` with
 capacity `queue_frames`. There is no second channel, no priority queue, and no
-reserved slot. `connection.rs:178-186` passes
-`shared.limits.writer_queue_frames`, default 64 (`config.rs:141`).
+reserved slot. `ring_transport.rs:226` passes
+`queue_frames` from `shared.limits.writer_queue_frames`, default 64 (`config.rs:88`).
 
 The client does reserve control capacity. `client.rs:954` describes a
 `queue_budget` "so ordinary data traffic can never starve a Pong, Cancel" and
@@ -25,7 +35,7 @@ host has no equivalent, so a host Ping is an ordinary FIFO entry behind whatever
 application frames are already queued.
 
 **Mechanism one, handled: the deadline is anchored at completion.** The probe
-insert at `connection.rs:1403-1411` records the enqueue instant with
+insert at `connection.rs:783-792` records the enqueue instant with
 `written_at: None`. The completion hook at `:1426-1447` overwrites `probe.sent`
 with `completed_at` (`:1443`) and sets `written_at` (`:1444`). Both the deadline
 wake (`:1358`) and the expiry scan (`:1372`) skip probes with `written_at` unset,

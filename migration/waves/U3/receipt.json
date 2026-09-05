@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "682c2bf667cfa2723e4945f56c00ed4d66c58807a26d89dad3c2b28a09b7f406",
+      "destination_sha256": "6aad52d74ddf3cc4df0fd07c3c883b9cb09623382cb33ae379f2cc19d0e2dfd0",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "c184f10e881d6f8a396079454dfa9cb6700e3aee7c8525c1960ccbc3802655e0",
+      "destination_sha256": "d01d0b049d7822ad7a54f2d006d70a662c71c469377e1ea3bf9c020b89f652ee",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3770,7 +3770,7 @@
         "blob_sha": "d95b5b8631167d7ac267c8e7324617033779c8ce"
       },
       "destination": "docs/properties/host-runtime/evidence/slow-egress-alone-does-not-retire-a-probed-generation.md",
-      "destination_sha256": "66de8dc01204c34b7a3f43415bc78ad3c763c239426c5e2ed67576ac70f60bf4",
+      "destination_sha256": "7cd019e7d6c15fd418517fca805439ff2dee7789db23898d5c4fbb89341b1da6",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "630cee9e8c2fd7df3244602d086ba44df3ae5ad8b0b7e29481d89558b4dbafb4",
+      "destination_sha256": "a62fb5011856f95dc6ac515c2f121e42da2359d5f8f70b7ea8e0fff9155f8cce",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

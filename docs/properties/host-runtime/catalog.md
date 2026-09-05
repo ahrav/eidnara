@@ -249,8 +249,12 @@ disposition should fail to compile.
 Fault/timing angle: a peer-driven close racing queued off-reader emissions. The
 `ReadExit::HostCancelled if !gen.token.is_cancelled()` guard means a *new*
 cancellation source silently falls into the silent-close arm.
-Required faults and enabling state: each of the eleven read-exit sites, with
-queued emissions in flight.
+Required faults and enabling state: each `ReadExit` construction site in the current
+`read_loop` (fourteen between `connection.rs:354` and `:518`, several covering more
+than one input cause; the source catalog's count of eleven predates the ring
+transport), with queued emissions in flight. The census is regenerated from the
+function, not carried forward, so a campaign's input list is the live set of
+construction sites and the conditions attached to each.
 Confidence: high - [evidence](evidence/close-disposition-is-a-total-function-of-the-read-exit-cause.md). this property is derived from an incident chain, not a
 hypothesis. Five successive commits corrected one decision: cancel without
 discard still flushed queued frames; keying on the host-wide `draining` flag gave
@@ -459,7 +463,7 @@ policy is configured (`crates/host-runtime/src/connection.rs:279`),
 `crates/host-runtime/examples/` or the bench, sets `liveness`; the daemon that will build the
 production config is scheduled for U4 (`docs/properties/README.md:52`).
 Status: active
-Exercised: yes - `tests/lifecycle.rs:468`
+Exercised: yes - `tests/lifecycle.rs:406`
 `ping_and_consumer_correlations_do_not_cross_settle` constructs a numerically
 equal consumer correlation. That file runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`).
 Guarantee: Host-originated ping correlations and consumer-originated correlations
@@ -533,7 +537,7 @@ Status: active
 Exercised: not yet - practically unreachable by exhaustion.
 Guarantee: A correlation is never reused or wrapped; at exhaustion the sender
 retires the generation instead.
-Check: `always` - ingress holds by the strict watermark. Egress: seed `next_ping_corr` (`connection.rs:75`, allocated by `fetch_add` at `:780`) at `u64::MAX` before the next tick and assert that the generation retires without writing a Ping carrying a reused or wrapped correlation; an allocator that stops incrementing, returns an error, or saturates without retiring fails the check, because the guarantee requires both halves, no reuse and retirement at exhaustion. Predicted to fail at HEAD: `fetch_add` wraps and no retirement path exists.
+Check: `always` - ingress holds by the strict watermark. Egress: seed `next_ping_corr` (`connection.rs:75`, allocated by `fetch_add` at `:780`) at `u64::MAX`, let the next tick allocate and complete the `u64::MAX` Ping, which the protocol permits as one final request (`docs/host-wire-protocol.md:711`), then trigger one more tick and assert that the second attempt retires the generation without writing a Ping carrying correlation `0` or any reused value; an allocator that stops incrementing, returns an error, or saturates without retiring fails the check, because the guarantee requires both halves, no reuse and retirement at exhaustion. Predicted to fail at HEAD: `fetch_add` wraps and no retirement path exists.
 Fault/timing angle: none. The ping counter uses an unbounded `fetch_add`, so the
 2^64-th ping wraps to correlation 0, and a ping with correlation 0 violates the
 frame-shape rule the host's own client-side matching enforces.
@@ -5193,10 +5197,16 @@ grant send; the permits and charge are released once the endpoint thread the
 refusal cancels has exited, which the code does not bound in time.
 Check: `always` - evaluated at the close of an explicit bounded window. Drive a
 peer that authenticates and then stalls at each post-grant I/O position in turn:
-before the `Activate` message, mid-length-prefix, after `Activate` (so the host
-blocks in the `Activated` write against a full peer buffer), before `Commit`, and
-after `Commit` (blocking the `Committed` write); at each position **stop all peer
-activity**, which is what makes the window fault-free; then assert two bounds in
+before the `Activate` message, mid-length-prefix, and before `Commit`, which the
+existing `setup` peer shape (`tests/shm_failure_modes.rs:43-57`, stopping after
+`receive_grant`) reaches directly or with one more consumed message; and, for the
+two write positions, after `Activate` and after `Commit`, only with an I/O shim or
+host-side buffer prefill that demonstrably blocks the `Activated` and `Committed`
+writes, because those replies are small enough to land in the Unix-socket buffer
+of a peer that merely stops reading, and a campaign without such a shim would
+time out later on the following read and pass with the write deadlines removed;
+at each position **stop all peer activity**, which is what makes the window
+fault-free; then assert two bounds in
 sequence: `activate_server` returns its timeout by `transport_setup_deadline`
 measured from the deadline anchor, and the teardown that follows it, the discard
 and cancel at `connection.rs:166-169` and the ring-charge release the endpoint
@@ -7211,22 +7221,20 @@ executes in CI. The named-versus-unnamed distinction and the `ci.yml` line numbe
 below describe the source repository's workflow at authoring time and are kept as
 provenance; they are not coverage gaps here.
 
-**One correction to that framing, applied during disposition, and it is the only
-CI-executed check on any record in this catalog.** "Zero executed by CI" is true
-of the 121 tests in the five source files and six subject binaries. It is not true
-of this sub-part's *record coverage*, because one record is asserted exactly by a
-test in a binary CI does name.
-`tests/lifecycle.rs:570-651` `shutdown_refuses_new_routes_and_new_routed_work`
-drives a `route.open` and a routed request into one draining host and asserts
-`target_unavailable` and `server_busy` respectively, which is
+**Provenance of the "one CI-executed check" correction.** The source catalog
+recorded that exactly one record in this sub-part was asserted by a CI-named
+binary: `tests/lifecycle.rs:570-651`
+`shutdown_refuses_new_routes_and_new_routed_work`, which drives a `route.open`
+and a routed request into one draining host and asserts `target_unavailable`
+and `server_busy`, covering
 [req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes](#req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes)
-in full; `lifecycle` runs at `ci.yml:168-169` on Linux. The former macOS run of
-the same pair was removed with every other macOS job by PR #131 (merge
-`5d638e3e8`); `ci.yml` at HEAD contains only `ubuntu-latest` jobs. The
-binary was excluded from the six because its *subject* is the host lifecycle
-rather than the request path, which is a defensible scope call and is exactly how
-the check went uncredited. Counting by binary subject rather than by assertion is
-what produced the error.
+in full. That count was the source workflow's; in this tree it does not hold,
+because `ci.yml:118` and `:126` run the whole workspace, so every record's
+test in this sub-part executes in CI and the per-part fault map's C0 row is
+satisfied rather than partial. The former macOS run of the lifecycle pair was
+removed with every other macOS job by PR #131 (merge `5d638e3e8`); `ci.yml` at
+HEAD contains only `ubuntu-latest` jobs, so platform coverage, not execution, is
+the remaining gap.
 
 The four doctests are the exception and they matter. All four are
 `compile_fail`, all four are in `handler.rs`, and all four execute because
@@ -9473,8 +9481,7 @@ three the signal either does not exist or exists by accident.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `tests/lifecycle.rs:496` `liveness_is_disabled_by_default`
-asserts no Ping arrives within 500 ms on a default host
+Exercised: partial - `tests/lifecycle.rs:496` `liveness_is_disabled_by_default` asserts no Ping arrives within 500 ms on a default host (`:502-518`), which covers the frame half only; nothing observes whether a `liveness_loop` task was spawned at `connection.rs:267`, so a loop started with a longer first interval passes unchanged and the whole-incarnation no-spawn half of the check is unasserted (evidence names the missing task-level marker).
 Guarantee: With `liveness` unset, the host arms no Ping timer, sends no Ping, and
 never invalidates a connection for a missing Pong.
 Check: `always` - whenever `shared.liveness.is_none()`, assert no `liveness_loop`
@@ -10098,7 +10105,7 @@ Open questions:
 Type: safety
 Reachability: test-only - every request a composed `BrocaComponent` receives is decoded against the closed shape set. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
-Exercised: yes - each valid operation decodes its exact schema, every enumerated malformed shape is rejected, and the 512 KiB boundary is exact.
+Exercised: partial - each valid operation decodes its exact schema, every enumerated malformed shape is rejected, and the 512 KiB boundary is exact; two cases remain open (evidence, "What a test must construct"): the array-params case uses an empty array and cannot detect a decoder that accepts a correctly sized positional sequence, and the host-level rejection test does not observe release of its resident scratch charge, so the exact-schema and no-state halves are not fully exercised.
 Guarantee: The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.
 Check: `always` - every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, a bind naming a harness outside the supported set is rejected with exactly `invalid_identity` (`bind_requires_absolute_root_nonempty_session_and_supported_harness`, `crates/host-runtime/tests/broca_protocol.rs:372`, asserts the code at `:397`), and a rejected request or bind leaves no run state; every clause is an invariant over every request, so one `always` covers the conjunction.
 Fault/timing angle: A permissive decoder lets a harness smuggle fields the host does not validate.
