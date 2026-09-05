@@ -2,7 +2,7 @@
 
 ## Status
 
-The fixed sparse ring is the only application transport. Production support is Linux x64 with glibc only. Clients use the owner-only Unix setup socket to authenticate, receive two memfds and four doorbell socket ends, validate the current release identity, attach, and commit activation. Application frames never use the setup socket or the doorbells.
+The fixed sparse ring is the only application transport. Production support is Linux x64 with glibc only. Clients use the owner-only Unix setup socket to authenticate, receive two memfds and four doorbell socket ends, validate the current release identity, attach, and commit activation. Application frame bytes never travel over the setup socket or the doorbells; the doorbells carry the readiness and capacity wakes (`signal_wake` on `data_ready` at publish and on `capacity_ready` at release) that frame progress depends on, so a client that omits them leaves a parked peer stalled.
 
 There is no runtime transport selector, alternate shared-memory backend, compatibility reader, or degraded data path. A transport failure is terminal for the affected connection.
 
@@ -95,4 +95,4 @@ Exact-capacity admission succeeds. Capacity plus one fails without creating anot
 
 Shared-memory production support is `linux-x64-gnu` only. When the addon is loaded from the platform package, `payload-manifest.json` and its SHA-256 entry are verified before loading (`packageAddonPath` in `packages/shm-native/index.ts`). When a `shm_native.node` sits beside `index.ts`, which is what the package's own `build:native` script produces, `requireAddon` loads that file directly and reads no manifest and no checksum; that local source-build path is trusted by location. Build profile and target identity are checked before setup on both paths. Managed Rust clients use the same setup protocol, ring profile, wire version, and descriptor schema.
 
-Clean-install gates must complete one cross-process application round trip on Linux x64. A missing package, addon, manifest, checksum, or platform capability fails the gate; unsupported or omitted results are not success states.
+Clean-install gates are a requirement this tree does not yet implement. The intended gate installs `@eidnara/host-linux-x64-gnu`, loads the addon through `packageAddonPath` so the manifest and checksum are exercised, and completes one cross-process application round trip on Linux x64; a missing package, addon, manifest, checksum, or platform capability must fail it, and unsupported or omitted results are not success states. At HEAD the native CI step (`.github/workflows/ci.yml`) runs `build:native`, which places the adjacent `shm_native.node`, and then the addon test suites, which use in-process test pairs; nothing installs the platform package or drives a host-to-addon setup, so a missing or corrupt package, manifest, or checksum passes CI today.

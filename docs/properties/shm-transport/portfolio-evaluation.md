@@ -509,3 +509,147 @@ labelled, and the group's one safety-of-data record
 the set. The portfolio-level weaknesses are the two invalid-or-unobservable
 markers (implementability findings 1 and 2) and the shared blind side: the
 group proves wakes arrive and never asks whether wake processing stops.
+
+## Whole-portfolio evaluation, 2026-09-05 (fresh context, 71 records)
+
+The earlier sections evaluated 58 records at discovery and then the seven Group N
+records; the U3 additions and the post-refactor gap-closure records had never
+been evaluated as one set. This pass was run by a fresh-context evaluator given
+`../METHOD.md`, `catalog.md`, `existing-checks.md`, `fault-map.md`, the
+generated index, and the code, and told not to open this file, the evidence
+directory, or git history. It read all 71 records, fully verified every citation
+in 28 of them across Groups A through N and the U3 additions, and spot-checked
+the rest. Findings are reproduced with its citations; the disposition is ours.
+
+### Disposition summary
+
+| Category | Count | Status |
+| --- | --- | --- |
+| refinement | 16 | 15 applied; the whole-catalog `ring.rs` re-anchor is queued with a HEAD anchor table added to `catalog.md` |
+| gap | 6 | queued for a follow-up discovery pass; the host-test inventory gap is closed in `existing-checks.md` |
+| bias | 3 | require human judgment, listed below |
+
+### Refinements applied
+
+1. **Stale `ring.rs` anchors in 31 records.** `try_reserve` is at `:1149` not
+   `:693-726`, `try_receive` at `:1312`, `Ring::release` at `:1469`,
+   `reserve_until` at `:1237`, `probe` at `:1848`, `conservation` at `:1558`,
+   `abort_reservation` at `:2283`, `DuplexRing::create` at `:2631`,
+   `removal_ranges` at `:307`, `GRANT_BYTES` at `:45`. Disposition: a
+   generated HEAD anchor table is at the top of `catalog.md`; the per-record
+   rewrite is queued (gap 6 below).
+2. **`operation-counters-are-observed-not-declared`.** The transport now counts
+   its own syscalls (`SyscallCounters`, `page_removals`, `syscall_counters()`,
+   pinned by `syscall_counters_track_only_actual_ring_syscalls`), the counter
+   set is the seven fields in `evidence.rs:7-22`, and the cited check moved to
+   `tests/evidence.rs` with two siblings. Record re-derived; the residual is
+   which counters are observed versus computed.
+3. **`measured-transfer-is-witnessed-by-the-data`.** The bench folds received
+   bytes into the checksum and fails the run against an independent expectation
+   (`hardware_envelope.rs:656-664`, `:742-748`). Verdict flipped to a
+   regression contract.
+4. **`identity-and-schema-rejection-is-one-contract`.** Both readers quarantine
+   on every rejection (`quarantine_with` at `ring.rs:1316-1318`, `:2073-2075`).
+   Disposition arm and its `needs human input` question dropped; enforcement
+   arm kept.
+5. **`header-rejection-effect-does-not-depend-on-the-catching-layer`.**
+   `enter_quarantine` has four direct callers and twenty via `quarantine_with`,
+   not one. Confidence basis rewritten; the two-layer question survives.
+6. **`receive-failure-leaves-no-wedged-slot`.** All post-commit-point branches
+   pass through the quarantine wrapper, so the un-quarantined wedge cannot
+   occur; `unreachable` kept, angle and impact rewritten.
+7. **`decoder-totality-over-arbitrary-bytes`,
+   `fuzz-harness-encoding-tracks-the-production-descriptor`.**
+   `harness_replays_terminate_on_arbitrary_lengths` does not exist in this tree
+   (`contract.rs` has eleven tests, none of that name). Existing check set to
+   the corpus replays and the grant fixture pin, with the gap named.
+8. **Fault map F2.** Marked available in-process: sixteen forged-shared-state
+   unit tests store values into the shared pages (`ring.rs:3190`, `:3210`,
+   `:3228`, `:3247`, `:3682`, `:3857`, `:4043`, `:4257`, `:4274`, `:4292`, and
+   the doorbell tests). Ranking recomputed against the cross-process half.
+9. **Fault map F10 and F11.** F10 retired (all three macOS records are
+   invalidated); F11 marked not available (CI has one `ubuntu-latest` job).
+10. **`dead-peer-charges-are-reclaimed-or-declared`.** Catalog and fault map
+    reconciled to `partial` on `shm_failure_modes.rs:213`; F1's injection
+    points and `Victim::kill` (`:154-161`) recorded.
+11. **`reservation-charge-visible-with-non-free-state`.** Both arena-plan early
+    returns restore `SLOT_FREE` (`ring.rs:1201`, `:1207`); the window is the
+    CAS-to-store interval on the success path only, and the contradicting
+    SAFETY comment is at `:1637`.
+12. **`charge-release-never-silently-strands`.** `AdmissionController::release`
+    (`profile.rs:498-506`) read directly; Confidence to high, anchors fixed.
+13. **Four records deriving reachability from `packages/plugin`.**
+    `publish-signal-implies-committed-frame`,
+    `native-boundary-not-weaker-than-its-wrapper`,
+    `test-only-surface-absent-from-the-shipped-addon`, and
+    `reactor-callback-is-one-in-flight` re-derived from in-tree anchors, with
+    the absent directory named as a source-tree reference.
+14. **`existing-checks.md` duplicate line sets.** The per-merge tables from
+    2026-08-31 are retired in favour of the regenerated inventories; the Group N
+    intro's `signal_wake` and `arm_data_wait` anchors now match the doorbell
+    pass.
+15. **Preamble contradiction.** The 2026-08-30 note that
+    `quarantine-charge-transition-is-atomic` and `release-failure-is-observable`
+    moved to `Reaches production: no` now says that was then and both are
+    `default-production` at U3.
+16. **Fault map scope.** Six U3 records added to the Map; the count corrected to
+    71; the older leverage ranking marked superseded.
+
+### Gaps queued
+
+1. **`Ring::trim`** (`ring.rs:2259`) punches arena pages with three dedicated
+   tests (`:3150`, `:3276`, `:4183`) and no record; the live-byte exclusion
+   property covers `reclaim_completed` only. Add a `trim` counterpart and a
+   producer-authority record.
+2. **Diagnostics contract.** `RingTransport` publishes `peer_deaths` and
+   `reclamations` (`ring_transport.rs:86-87`, `:188-189`), pinned by
+   `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts`
+   (`:862`), and six records say "no counter fires". Add one record and use it
+   as the oracle for the dead-peer and release-failure records.
+3. **Quarantine wake protocol.** Three tests (`ring.rs:3116`, `:3294`, `:3314`)
+   assert a quarantine raised while a peer is parked is delivered; no record.
+4. **Redaction.** Three tests (`contract.rs:446`, `:714`, `profile.rs:22`) and
+   the `redacted_debug!` macro assert sentinels never reach logs; no record.
+5. **Unattached tests.** 82 of the inventoried tests are named by no record and
+   the back-link column is filled for a minority; complete it and triage the
+   forged-shared-state, `probe`, and redaction clusters.
+6. **Whole-catalog `ring.rs` re-anchor** for the 31 records in refinement 1.
+
+The host-test inventory gap the evaluator raised is closed: nine
+`crates/host-runtime` tests are now inventoried in `existing-checks.md`.
+
+### Biases requiring human judgment
+
+1. **What does `Reaches production` mean?** The derivation maps
+   `default-production` to yes and `test-only` to no and drops METHOD's
+   `explicit-config-only` (unused, so vacuous). It also conflates code
+   reachability with state reachability: `lease-saturation-is-reached-then-drains`
+   and `receive-resumes-when-lease-capacity-clears` are `default-production`
+   while their own bodies show the saturated state is unreachable in the shipped
+   host (`max_leases` is 8, `receive_one` holds one lease per call). Decide
+   whether the column means "the code runs" or "the state occurs", and split it
+   if both are wanted.
+2. **Invalidated records carry a live `reachability` in `index.json`.** Four
+   invalidated records report `default-production` although their bodies say no
+   class applies. Either add an explicit `n/a` value or require
+   `status == active` in every consumer.
+3. **Twelve invalidated records occupy roughly 900 lines** with source-tree
+   anchors that resolve against neither HEAD nor each other, and the latent/TCP
+   preamble is retracted in every active record but still opens the file. Move
+   invalidated records to an appendix, promote Group K's one transferable
+   finding (a same-instance harness cannot prove a two-address-space predicate)
+   into the live text, and date-stamp or delete the preamble.
+
+### Verdict for the whole portfolio
+
+The evaluator's verdict, which we adopt: the property selection is strong and
+self-aware, but the set was not ready to hand to campaign planning because its
+anchoring had drifted against the transport it describes, three substantive
+claims were false rather than mis-numbered (in-transport syscall counting
+exists, the bench checksum is computed from received bytes, both readers
+quarantine on every error), and the fault map mis-stated its own top-ranked
+investment. Fifteen of the sixteen refinements are applied above; the sixteenth,
+the per-record `ring.rs` re-anchor, has a HEAD anchor table in its place. With
+the four missing property areas (`trim`, diagnostics, quarantine wake,
+redaction) and the back-link triage still queued, the set is a solid basis for a
+campaign but not a finished one.

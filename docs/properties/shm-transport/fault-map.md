@@ -25,8 +25,8 @@ nothing. That is the failure mode this file exists to prevent.
 
 | Class | Description | Available today |
 | --- | --- | --- |
-| F1 process kill | `SIGKILL` at a chosen point, signal-9 wait status required, observation window anchored to reap | **Partial, and weaker than this map assumed** — `ed487e11` deleted `crates/host-runtime/tests/support/shm_process.rs`, the reusable harness that implemented the full class, along with the provider it drove. What survives at `e447c927` is an inline primitive in one test file: `Victim::kill` at `crates/host-runtime/tests/shm_failure_modes.rs:141-145` sends `SIGKILL`, reaps, and asserts `status.signal() == SIGKILL`. It has no reap-anchored observation window, and its only injection points are the connection roles `setup`, `active`, and `idle` (`:233-240`). None of the transport-level kill points this map depends on — a receiver holding leases, a producer between reserve and commit, a peer committed without a goodbye — has an implementation any more |
-| F2 hostile peer writes | A peer that writes shared control pages: the quarantine byte, cursors, slot fields, a pending descriptor | **No** — all three fuzz targets model immutable byte decoders; nothing models a mutating peer |
+| F1 process kill | `SIGKILL` at a chosen point, signal-9 wait status required, observation window anchored to reap | **Partial, and weaker than this map assumed** — `ed487e11` deleted `crates/host-runtime/tests/support/shm_process.rs`, the reusable harness that implemented the full class, along with the provider it drove. What survives at `e447c927` is an inline primitive in one test file: `Victim::kill` at `crates/host-runtime/tests/shm_failure_modes.rs:141-145` sends `SIGKILL`, reaps, and asserts `status.signal() == SIGKILL`. It has no reap-anchored observation window, and its only injection points are the connection roles `setup`, `active`, and `idle` (`:233-240`). None of the transport-level kill points this map depends on — a receiver holding leases, a producer between reserve and commit, a peer committed without a goodbye — has an implementation any more At HEAD the injection points are the three connection roles in `crates/host-runtime/tests/shm_failure_modes.rs:213-224` with `Victim::kill` at `:154-161`. |
+| F2 hostile peer writes | A peer that writes shared control pages: the quarantine byte, cursors, slot fields, a pending descriptor | **Yes in-process, no cross-process** (revised 2026-09-05) - the source tree had only immutable-decoder fuzz targets; at HEAD an in-process forged-shared-state fixture stores values straight into the shared pages in at least sixteen unit tests in `crates/shm-transport/src/backend/ring.rs`: `forged_consumer_cursors_fail_waits_instead_of_parking` (`:3247`), `forged_active_lease_count_quarantines_on_release` (`:3190`), `rewound_arena_write_quarantines_instead_of_overlapping_a_live_frame` (`:3210`), `rewound_published_cursor_quarantines_even_with_a_freed_slot` (`:3228`), `oversized_active_lease_count_quarantines_on_receive` (`:3857`), `health_check_bounds_do_not_overflow_on_forged_cursors` (`:3682`), `forged_arena_write_quarantines_instead_of_underflowing` (`:4043`), `impossible_slot_state_quarantines_the_receiver` (`:4274`), `forged_reclaim_length_quarantines_the_producer` (`:4292`), `quarantine_survives_peer_clearing_shared_flag` (`:4257`), and the doorbell tests. No second process performs the writes |
 | F3 deterministic failpoints | Forced failure at a named internal point: lease construction, span materialization, accounting overflow, alias detach, charge release | **Partial** — an external-view creation failpoint exists in the addon; no failpoint exists for lease or span construction, accounting arithmetic, or charge release |
 | F4 true concurrency | Producer and receiver progressing independently, not in lockstep | **No** — the only cross-process test is lockstep with a sleep |
 | F5 weak memory | A weakly-ordered target where a permitted reordering is observable, or a model checker standing in for one | **No** — no loom, shuttle, Miri, or ThreadSanitizer anywhere |
@@ -39,9 +39,9 @@ nothing. That is the failure mode this file exists to prevent.
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| quarantine-authority-survives-peer-writes | A quarantine trigger, **then** F2 writing zero to the flag | No — F2 missing |
-| quarantine-gates-cover-every-storage-mutation | An open reservation **and** a quarantine raised during its lifetime (F2 or a corrupt-frame trigger from the peer) | No |
-| attach-refuses-a-quarantined-object | A quarantine trigger, then a fresh attach with the same grant | No |
+| quarantine-authority-survives-peer-writes | A quarantine trigger, **then** F2 writing zero to the flag | Yes, in-process - `quarantine_survives_peer_clearing_shared_flag` and `shared_quarantine_flag_latches_locally_when_observed` |
+| quarantine-gates-cover-every-storage-mutation | An open reservation **and** a quarantine raised during its lifetime (F2 or a corrupt-frame trigger from the peer) | Yes - `commit_after_quarantine_is_refused_and_aborts` |
+| attach-refuses-a-quarantined-object | A quarantine trigger, then a fresh attach with the same grant | Yes for the transport half - `attach_refuses_a_quarantined_ring`; the addon-side entry and claim are unasserted |
 | quarantine-charge-transition-is-atomic | F9: `quarantined + retained` overflows, or F3 at that point | No |
 | charge-release-never-silently-strands | A poisoned accounting mutex (panic while holding), or an inconsistent `active` | No |
 | custody-terminal-transition-exactly-once | Two terminal transitions racing (F4 at the host level), or an incarnation bump between admission and release | Partial — sequential cases covered; the race and the incarnation case are not |
@@ -55,7 +55,7 @@ nothing. That is the failure mode this file exists to prevent.
 | release-failure-is-observable | F3: a release that fails while the surrounding operation is otherwise clean | No |
 | attach-reconciles-or-refuses-stale-shared-cursors | F1 killing a receiver holding leases, then an attach | No — was "Partial, F1 exists"; the kill harness that made it partial was deleted by `ed487e11` and the surviving inline primitive cannot kill a lease-holding receiver |
 | crashed-producer-does-not-wedge-the-sequence | F1 between reserve and commit | No — was "Partial, F1 exists"; same cause, and this injection point was already unused |
-| dead-peer-charges-are-reclaimed-or-declared | F1 on a committed peer without a goodbye | No — was "**Yes**, pinned by an existing test"; the pinning test `killed_victim_holding_active_charges_is_never_reclaimed` was deleted across `ed487e11` and `dde0c051`, and nothing in `shm_failure_modes.rs` at `e447c927` replaces it. This row was the only **Yes** in the F1 column |
+| dead-peer-charges-are-reclaimed-or-declared | F1 on a committed peer without a goodbye | Partial (revised 2026-09-05) - `setup_active_and_idle_sigkill_each_return_exact_capacity` (`crates/host-runtime/tests/shm_failure_modes.rs:213`) kills setup, active, and idle victims and witnesses readmission at a one-connection cap; no per-identity ledger and no declared-exception arm |
 | cancelled-frame-disposition-is-declared | Cancellation or overload arriving between a successful receive and the ingress charge (F3 for determinism) | No |
 | validated-spans-are-disjoint-and-inside-the-arena | Attacker-controlled descriptor fields **and** an arena larger than the minimum | Partial — fuzzing covers fields but pins the arena at the minimum |
 | no-rust-reference-over-peer-writable-payload | Audit form needs no fault; the impact demonstration needs F2 mutating leased bytes | Audit yes, demonstration no |
@@ -71,6 +71,12 @@ nothing. That is the failure mode this file exists to prevent.
 | capability-probe-gates-every-advertised-mechanism | F6: a runtime lacking the cleanup hook | No |
 | clean-reclamation-is-reachable | None to observe the gap | No — reachable only via a fake backend |
 | test-only-surface-absent-from-the-shipped-addon | None; F7 | No |
+| setup-proof-vectors-pin-the-shared-hmac-transcript | None; static comparison against committed literals produced by an external HMAC oracle | Yes - three call sites of one implementation compared against the same literals, plus `raw_client::proof` as an independent oracle |
+| one-profile-id-names-one-ring-geometry-in-code | None; static comparison of the profile against literals | Partial - id, depth, lease bound, and descriptor charge are literal; the arena charge is compared against `2 * MIN_ARENA_BYTES` |
+| addon-reservations-drop-before-the-ring | A channel with live borrowing reservations at close; a detachment failure for the quarantine path | Partial - drop order asserted in-process; detachment under Bun only; no test drives the failure path |
+| addon-scheduling-wakes-only-on-acknowledged-readiness | A readiness event with no pending callback; a signal interrupting the wait | Partial - both constructed against scheduler internals, not through `watch` |
+| addon-scheduling-reaches-peer-eof-and-interrupted-wait | Peer close while a wait is pending; a signal delivered to the waiting thread | Partial - both situations constructed at unit level; neither reached through the public surface |
+| addon-grant-decoding-is-the-shared-setup-envelope | A grant message from the host; a peer that closes after the grant | No for cross-side agreement - the addon decodes its own literal; no shared fixture, no live host-to-addon test |
 
 ## Gap-closure records (Groups I through M)
 
@@ -79,8 +85,8 @@ classes the original map did not name.
 
 | Class | Description | Available today |
 | --- | --- | --- |
-| F10 macOS ring execution | A macOS host that actually constructs a `Ring` | **No** — the macOS CI step names two integration files and excludes the lib target, so no macOS job reaches `Ring::create` |
-| F11 non-4096 page host | A kernel page size other than 4096, or an injectable page size in the layout and prefault paths | **No** — and note CI already provisions a 16 KiB host every run, which is precisely the one that constructs no `Ring` |
+| F10 macOS ring execution | A macOS host that actually constructs a `Ring` | **Retired** (2026-09-05) - the three macOS records are invalidated; `ring.rs:18-19` refuses every non-Linux build, so this class has no property left to unblock |
+| F11 non-4096 page host | A kernel page size other than 4096, or an injectable page size in the layout and reclamation paths | **No** (revised 2026-09-05) - `.github/workflows/ci.yml` has one `ubuntu-latest` job and no macOS job, so CI provisions no non-4096 host; the source tree's "16 KiB host every run" no longer applies. Needs an aarch64 large-page runner or an injectable page size |
 | F12 duplex-capable peer | A peer harness able to hold frames outstanding in both directions at once | **No** — the test peer's send and receive are both synchronous and thread-confined |
 | F13 iceoryx cross-process pairing (invalidated: `0f336d3c` deleted the iceoryx backend) | Two processes sharing one iceoryx service | **No, and not constructible** — the service name is random, private, and has no accessor; the port bounds are consumed by the creator. Requires an API change |
 
@@ -125,16 +131,19 @@ pair can report overlap that never existed.
 
 ### Revised leverage ranking
 
-Counting the full 58-record catalog:
+Counting the full 71-record catalog (revised 2026-09-05; the 2026-08-30 ranking
+under "Highest-leverage missing capability" is superseded and kept as history):
 
-1. **F2, a mutating-peer fixture** — now unblocks 9 properties.
+1. **F2, a cross-process mutating peer** - the in-process fixture exists at HEAD
+   (see the F2 row), so what remains unblocked is the cross-process half, which
+   matters for the records whose window needs a second address space.
 2. **F3, internal failpoints** — 6 properties.
-3. **F11, a non-4096 page host or injectable page size** — 2 properties, and it
-   is nearly free: CI already provisions a 16 KiB host every run.
+3. **F11, a non-4096 page host or injectable page size** - 2 properties, and it
+   is not free: CI has no such host, so this is a new runner or a code seam.
 4. **F12, a duplex-capable peer** — 2 properties, and without it the whole
    normal-operation liveness group is vacuous.
-5. **F10, macOS ring execution** — 3 properties, and it would also settle whether
-   the documented macOS omission rests on anything.
+5. **F10, macOS ring execution** - retired; its three properties are invalidated
+   and no macOS build of the crate exists.
 6. **F4, non-lockstep cross-process traffic** — 4 properties.
 7. **F8, cross-artifact assertions** — 3 properties.
 8. **F13** — requires an API change, so it is a design decision rather than a

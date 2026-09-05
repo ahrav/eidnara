@@ -347,72 +347,35 @@ because `0f336d3c` deleted that suite, the iceoryx backend, and the `iceoryx`
 Cargo feature. No check was added, removed, or re-audited. Statuses remain
 `unaudited`.
 
-## Eventfd delivery checks, merge `5d638e3e8` (2026-08-31)
+## Doorbell delivery checks (superseded inventory retired 2026-09-05)
 
-PR #131 replaced polling with sparse doorbell delivery and added the checks
-below; in this tree the doorbells are `socketpair` ends, not eventfds. All statuses are unaudited. Two corrections to the inventory above,
-both verified at HEAD:
+The 2026-08-31 pass added per-merge tables for the checks PR #131 introduced in
+the source tree: six new `backend/ring.rs` unit tests, a rewritten
+`tests/ring.rs`, three `scheduling.rs` unit tests, two `client.rs` bridge
+tests, two `mechanism.ts` readiness suites, and a `packages/plugin` suite. Those
+tables described the source tree: they counted seven in-crate tests where this
+tree has 59, named `repeated_subpage_releases_eventually_remove_complete_pages`,
+which does not exist here, carried line numbers that no longer resolve, and
+cited a `packages/plugin` directory that is not in this tree. They are retired.
+The regenerated inventories above are the single source for every in-crate and
+integration test; host-runtime tests are inventoried in the section below.
 
-- The "In-crate unit tests: exactly one" claim is stale. The `#[cfg(test)]`
-  module in `crates/shm-transport/src/backend/ring.rs` now holds seven
-  tests, and `packages/shm-native/src/scheduling.rs` holds three.
-- Two `tests/ring.rs` names in the table above moved:
-  `sealed_object_prefault_repeated_setup_and_stress_conservation` is now
-  `sealed_sparse_object_repeated_setup_and_stress_conservation` (`:309`), and
-  `attach_rejects_unsealed_objects_and_tampered_grants` is now part of
-  `artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected`
-  (`:360`). Their verdicts were not re-derived.
+## Host-runtime tests that bear on transport records
 
-### `crates/shm-transport/src/backend/ring.rs` unit tests — 6 new
+Inventoried 2026-09-05. These live in `crates/host-runtime/tests` and were
+outside the earlier inventory's scope, but catalog records depend on them.
 
-| Test | Claim asserted | Status |
+| Test | Claim asserted (from the name) | Status |
 | --- | --- | --- |
-| `doorbell_attachment_requires_connected_unix_stream_socket` (`:3021`) | A regular file, an eventfd, and an unconnected `AF_UNIX` stream socket are rejected as `DoorbellFailed`; a created peer end is accepted | unaudited - exercises `Doorbell::from_fd` directly, never a full `Ring::attach` |
-| `doorbell_never_blocks_after_either_end_clears_nonblock` (`:3062`) | With `O_NONBLOCK` cleared on both ends, `drain`, `signal`, a bounded `wait_until`, and a million further signals complete inside two seconds | unaudited |
-| `closed_peer_doorbell_fails_instead_of_blocking` (`:3088`) | After the creating side drops, `signal` and `drain` on the attached end return `DoorbellFailed` | unaudited |
-| `removal_ranges_exclude_partial_pages_and_split_once_at_wrap` (`:2279`) | Across 4/16/64 KiB pages: a sub-page run removes nothing, an unaligned run removes only its interior page, a wrapping run splits into two exact ranges | unaudited |
-| `reclaimed_pages_leave_residency_and_reuse_as_zeroes` (`:2300`, Linux) | After release and reclaim, residency drops to zero and reused bytes read as zeros | unaudited |
-| `repeated_subpage_releases_eventually_remove_complete_pages` (`:2319`, Linux) | Sub-page releases converge to whole-page removal at exactly the page boundary | unaudited |
-| `partial_page_reclaim_preserves_live_neighbor` (`:2337`, Linux) | Reclaiming one frame leaves a live lease's bytes on the shared page intact | unaudited |
-| `page_removal_failure_quarantines_before_capacity_publication` (`:2355`, Linux) | A failed `madvise` quarantines with `completed` and `arena_reclaimed` still zero | unaudited — uses the test-only `FAIL_NEXT_PAGE_REMOVAL` failpoint (`:276-283`) |
-
-(`residency_vector_tracks_runtime_page_size`, `:2272`, predates the merge and
-is inventoried above.)
-
-### `crates/shm-transport/tests/ring.rs` — rewritten by the merge
-
-| Test | Claim asserted | Status |
-| --- | --- | --- |
-| `two_process_zero_copy_exchange_uses_authenticated_grant` (`:483-533`) | Now transfers three descriptors (`[OwnedFd; 3]`, mapping plus both doorbells), blocks a `reserve_until` behind the child's held lease with a 5 s deadline, and requires 25 ms minimum elapsed | unaudited — still lockstep; the release always lands mid-block, never in the arm window |
-| `ring_child_exchange` (`:537-566`) | Child attaches by descriptor, blocks in `wait_for_data` on the data doorbell, verifies payload, releases | unaudited |
-
-### `packages/shm-native/src/scheduling.rs` unit tests — 3 new
-
-| Test | Claim asserted | Status |
-| --- | --- | --- |
-| `pending_callback_waits_for_acknowledgement` (`:320`) | `wait_until_handled` does not return on a control write while `pending` holds, and returns true once cleared | unaudited |
-| `setup_socket_eof_is_reactor_readiness` (`:351`) | A dropped setup peer surfaces as an epoll event with the registered channel data | unaudited |
-| `interrupted_wait_retries_until_success_or_close` (`:369`) | `EINTR` retries; a set `closing` flag short-circuits to `None` | unaudited |
-
-### `crates/host-runtime/src/client.rs` bridge tests — 2 relevant
-
-| Test | Claim asserted | Status |
-| --- | --- | --- |
-| `ring_bridge_drains_inbound_and_queued_writes` (`:4003`) | Eight writes queued with no per-write wake all complete within 250 ms each after one edge; the inbound frame is not starved behind them | unaudited |
-| `ring_bridge_retires_when_host_drops_setup_socket` (`:4079`) | A dropped setup socket terminates the bridge | unaudited |
-
-### `packages/shm-native/tests/mechanism.ts` — 2 new readiness suites
-
-| Test | Claim asserted | Status |
-| --- | --- | --- |
-| `one channel handler failure does not starve later channels` (`:168-205`) | A throwing handler on channel 1 does not prevent delivery on channel 2, within a 1 s bound | unaudited — self-skips when the addon is absent |
-| `readiness acknowledgement preserves a frame published during callback` (`:211-278`) | A frame published inside callback 1 arrives via exactly one further callback (`callbacks === 2`, `received == [1, 2]`) | unaudited — raw addon; the `NativeChannel` wrapper path is untested for this race |
-
-### `packages/plugin/src/shared/host-client/shm-frame-channel.test.ts`
-
-| Test | Claim asserted | Status |
-| --- | --- | --- |
-| `production shared-memory delivery has no timer polling` (`:35`) | The channel source contains neither `setInterval` nor `.poll(` | unaudited — a source-text grep, not a behavioral check; it cannot see polling hidden behind a helper |
+| `clean_close_returns_exact_single_connection_capacity` (`shm_failure_modes.rs:202`) | A clean close returns exactly one connection's capacity | unaudited |
+| `setup_active_and_idle_sigkill_each_return_exact_capacity` (`shm_failure_modes.rs:213`) | SIGKILL of a setup, active, or idle victim returns exact capacity | unaudited; cited by `dead-peer-charges-are-reclaimed-or-declared` |
+| `repeated_crashes_do_not_ratchet_single_connection_capacity` (`shm_failure_modes.rs:225`) | Repeated crashes do not ratchet capacity down | unaudited |
+| `exact_capacity_succeeds_and_plus_one_creates_no_ring_resources` (`shm_failure_modes.rs:257`) | Exact capacity admits; capacity plus one creates no ring resources | unaudited |
+| `daemon_restart_discards_old_rings_and_accepts_fresh_client` (`shm_failure_modes.rs:302`) | A daemon restart discards old rings and accepts a fresh client | unaudited |
+| `short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` (`shm_soak.rs:82`) | A short soak keeps fd, mapping, thread, and RSS envelopes bounded | unaudited |
+| `long_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` (`shm_soak.rs:88`) | A long soak keeps the same envelopes bounded | unaudited |
+| `ring_profile_pins_per_connection_grant_geometry` (`src/ring_transport.rs:904`) | The host profile's grant geometry is pinned | unaudited; cited by `one-profile-name-denotes-one-geometry` |
+| `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts` (`src/ring_transport.rs:862`) | The diagnostics report carries identity, bounds, accounting, and lifecycle counts | unaudited |
 
 ### Still quiet after the merge
 
