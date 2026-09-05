@@ -4158,8 +4158,9 @@ cannot escape a rejected path. No allocation occurs: the function returns a
 `Copy` struct.
 Existing check: `wire.rs:722` `reject_truncated_headers_and_unsupported_versions`
 and `wire.rs:745` `reject_unknown_frame_type_and_reserved_flag_encodings`, both
-table-driven over single hand-picked inputs. Neither runs in CI, under this
-sub-part's `R0`. Status unaudited. **One citation repaired at carry time:** the
+table-driven over single hand-picked inputs. Both run in CI in this tree through
+`cargo test --workspace --all-targets` (`ci.yml:118`, `:126`); the source catalog's
+`R0` finding is provenance. Status unaudited. **One citation repaired at carry time:** the
 second test's span is `:745-774`, not `:745-773`; the closing brace is at 774
 and the lens range truncated it by one line.
 Impact: today, none observable, and the reason was refreshed at carry time. All
@@ -4226,7 +4227,7 @@ forbids a future fixture from losing that property, and the test asserts on
 Existing check: `wire.rs:703` `little_endian_and_frozen_prefix_layout` (encode
 direction, distinctive values, plus `buf.len() == HEADER_LEN` at `:718`);
 `wire.rs:680` `round_trip_request`; `wire.rs:693` `round_trip_all_frame_types`.
-None runs in CI, under this sub-part's `R0`. Status unaudited.
+All run in CI in this tree through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`); the source catalog's `R0` finding (no lib target built) is provenance. Status unaudited.
 Impact: this bijection is what makes the frozen-prefix promise in the module
 header [wire.rs:16-18] mean anything, and it is the only reason a peer's
 independently written codec can interoperate. A drifted offset that still
@@ -4280,8 +4281,8 @@ Existing check: `wire.rs:745` `reject_unknown_frame_type_and_reserved_flag_encod
 `epoch_boundaries_round_trip_and_control_channel_epoch_is_reserved`, plus the
 end-to-end `tests/protocol_vectors.rs:351`
 `structural_corruption_is_rejected_before_dispatch` and `:504`
-`pure_header_frames_accept_any_valid_priority`. None runs in CI. Status
-unaudited. **Three citations repaired at carry time**, and this is the record the
+`pure_header_frames_accept_any_valid_priority`. All run in CI in this tree through
+`cargo test --workspace --all-targets` (`ci.yml:118`, `:126`). Status unaudited. **Three citations repaired at carry time**, and this is the record the
 earlier triage predicted would need a refresh because
 `tests/protocol_vectors.rs` changed (976 lines at `1c193ae0`, 762 at `HEAD`,
 under `63c4d277`). First, the in-file span is `:745-774`, not `:745-773`.
@@ -4324,15 +4325,15 @@ bytes decode successfully and pass inbound validation on a conforming peer.
 Check: `always` - for arbitrary `(ty, flags, id, body)`, and for each production encoder, `encode_owned_frame` (`wire.rs:543`, re-verified) and `encode_split_frame` (`:578`) with bodies below, at, and above the split threshold, either the encoder returns `Err`, or `decode_header` on its output returns `Ok` and the result satisfies the pure-header, Sheddable, channel-and-epoch, and reserved-bit rules. `always` because it must hold on every emission, and the forbidden state - a frame the local decoder would reject - has no detection point on the emitting side.
 Fault/timing angle: none; this is a static contract gap. Four concrete holes,
 all re-verified at carry time and all reachable from the crate's public surface
-(O7): `Flags(0b1100_0000)` sets reserved bits, which [wire.rs:323] rejects;
-`Flags(0b0000_0110)` sets reserved priority, which [wire.rs:326] rejects;
-`encode_owned_frame(FrameType::Ping, .., body)` with a nonempty body emits
-`len != 0` on a pure-header type, since `Ping` is in `is_pure_header`'s set
-[wire.rs:86-88] and `encode_owned_frame` [wire.rs:571-602] tests only
-`body.len() > MAX_BODY_LEN` at [:577], which [wire.rs:340] rejects; and
-`FrameId::routed` [wire.rs:525-531] copies `RouteHandle`'s channel and epoch
-without checking that a nonzero channel carries a nonzero epoch, which
-[wire.rs:352] rejects.
+(O7; anchors re-verified against this tree): `Flags(0b1100_0000)` sets reserved
+bits, which [wire.rs:328-330] rejects; `Flags(0b0000_0110)` sets reserved
+priority, which [wire.rs:331-333] rejects; `encode_owned_frame(FrameType::Ping,
+.., body)` with a nonempty body emits `len != 0` on a pure-header type, since
+`Ping` is in `is_pure_header`'s set [wire.rs:80-82] and `encode_owned_frame`
+[wire.rs:543-571] tests only `body.len() > MAX_BODY_LEN` at [:549], which
+[wire.rs:345] rejects; and `FrameId::routed` [wire.rs:498] copies
+`RouteHandle`'s channel and epoch without checking that a nonzero channel
+carries a nonzero epoch, which [wire.rs:350-352] rejects.
 Required faults and enabling state: none beyond a caller passing an
 out-of-contract value. For the `FrameId::routed` hole specifically, a
 `RouteHandle` with a nonzero channel and epoch 0. **The lens left whether the
@@ -4351,9 +4352,10 @@ though not with epoch 0: `routing.rs:715-718` builds a stale-epoch handle and
 paths.
 Confidence: high - [evidence](evidence/encoder-never-emits-a-frame-its-own-decoder-rejects.md). The gap is high confidence and unchanged: all encoders were read end to end and
 the only rejection in either production encoder is the body-length cap, at
-[wire.rs:577] and [:618]. `Flags::new` [wire.rs:146-156] cannot produce the
-illegal flag values, and the two host flag helpers `response_flags`
-[wire.rs:636-638] and `pure_header_flags` [wire.rs:642-644] both go through it,
+[wire.rs:549] in `encode_owned_frame` and [:588] in `encode_split_frame`
+(re-verified). `Flags::new` [wire.rs:139] cannot produce the illegal flag
+values, and the two host flag helpers `response_flags` [wire.rs:605] and
+`pure_header_flags` [wire.rs:609] both go through it,
 so the in-tree host emission paths are safe today by construction rather than by
 enforcement. **Two things the lens recorded are corrected here.** First, the
 lens counted three production encoders and cited a third cap at [wire.rs:548];
@@ -9641,7 +9643,7 @@ Exercised: not yet - nothing enumerates the fields against their consumers
 Guarantee: Every field an embedder can set on `HostConfig`, `HostLimits`,
 `HostTiming`, `LivenessPolicy`, or `HostInit` reaches at least one consumer, so
 setting it changes some observable host behaviour.
-Check: `always` - for each public configuration field, two host executions that differ only in that field produce the documented observable difference for its family: a limit field moves the admission boundary at which a request or connection is rejected, a timing field moves the instant at which the corresponding deadline fires under paused time, a liveness field changes the probe cadence or the retirement decision, and an init field arrives unchanged in the `HostInit` passed to `HostHandler::initialize` (`handler.rs:532`), asserted at the handler rather than through client-visible behaviour, because the host does not publish `host_capabilities` or `storage` and a conforming handler may ignore them. A read site outside `config.rs` and outside a `Debug` implementation is a necessary screen, not the check: a field that is read and ignored fails. `always` because it is a property of the surface, evaluated once per field.
+Check: `always` - for each public configuration field, two host executions that differ only in that field produce the documented observable difference for its family: a limit field moves the admission boundary at which a request or connection is rejected, a timing field moves the instant at which the corresponding deadline fires under paused time, a liveness field changes the probe cadence or the retirement decision, an init field arrives unchanged in the `HostInit` passed to `HostHandler::initialize` (`handler.rs:532`), asserted at the handler rather than through client-visible behaviour, because the host does not publish `host_capabilities` or `storage` and a conforming handler may ignore them; and each direct `HostConfig` field has its own oracle: `data_dir` moves the managed directory the host resolves and publishes into (`instance::data_dir_path`, `instance.rs:130`, called from `runtime.rs:566`), `daemon_ver` changes the value published with the setup socket (`runtime.rs:710`) and echoed in the `ServerProof`, and `payload_manifest_digest` changes the digest the instance record carries (`runtime.rs:567`, validated as 64 lowercase hex characters) so a client reading the publication observes the difference. A read site outside `config.rs` and outside a `Debug` implementation is a necessary screen, not the check: a field that is read and ignored fails. `always` because it is a property of the surface, evaluated once per field.
 Fault/timing angle: none. This is a static property of the wiring.
 Required faults and enabling state: none. The check is an enumeration, best
 expressed as a test that names each field and its consumer, or as a review gate.
