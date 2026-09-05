@@ -30,6 +30,7 @@ mod routing;
 mod runtime;
 #[doc(hidden)]
 pub mod setup_socket;
+mod store_fs;
 // Ring setup and tests name raw envelope types, while the managed client API
 // exposes only responses, stream items, and call errors.
 #[doc(hidden)]
@@ -41,12 +42,13 @@ pub use auth::{
     SERVER_PROOF_DOMAIN, ServerProof, authenticate_client, authenticate_server, compute_proof,
 };
 pub use client::{
-    CLIENT_CONTROL_QUEUE_FRAMES, CLIENT_DATA_QUEUE_FRAMES, CLIENT_FRAME_TIMEOUT,
+    CLIENT_CANCEL_QUEUE_FRAMES, CLIENT_CLEANUP_QUEUE_FRAMES, CLIENT_CONTROL_QUEUE_FRAMES,
+    CLIENT_DATA_QUEUE_FRAMES, CLIENT_DATA_QUEUED_BYTES, CLIENT_FRAME_TIMEOUT,
     CLIENT_HANDSHAKE_TIMEOUT, CLIENT_MAX_LIVE_STREAMS, CLIENT_MAX_PENDING_REQUESTS,
     CLIENT_QUEUED_BYTES, CLIENT_REQUEST_TIMEOUT, CLIENT_RETAINED_RESPONSE_BYTES,
     CLIENT_ROUTE_OPEN_TIMEOUT, CLIENT_SHUTDOWN_TIMEOUT, CLIENT_STREAM_QUEUE_ITEMS, CallError,
-    Client, ClientError, HostStatusSnapshot, RequestOptions, Response, ResponseStream, SendOutcome,
-    StreamItem,
+    Client, ClientError, ClientRoute, HostStatusSnapshot, RequestOptions, Response, ResponseStream,
+    SendOutcome, StreamItem,
 };
 pub use composite::{
     CompositeComponent, PrimaryComponent, SecondaryComponent, ShutdownError, StaticComposite,

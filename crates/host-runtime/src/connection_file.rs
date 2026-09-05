@@ -16,7 +16,9 @@ use rustix::{
     fs::{Mode, OFlags, openat},
 };
 use serde::{Deserialize, Serialize};
+use shm_transport::setup_auth::DAEMON_VER_PREFIX;
 
+use crate::store_fs::same_snapshot;
 use crate::{
     instance::{S_IFDIR, S_IFMT, is_safe_ancestor, is_secure_regular, mode_bits, read_all_fd},
     wire::PROTOCOL_VERSION,
@@ -78,6 +80,23 @@ impl ConnectionInfo {
         }
         if self.daemon_ver.is_empty() {
             return Err(ConnectionFileError::Invalid("empty daemon version"));
+        }
+        // The client later authenticates whatever version the file names, so a file that
+        // escapes the published prefix must be refused here rather than trusted downstream.
+        if !self.daemon_ver.starts_with(DAEMON_VER_PREFIX) {
+            return Err(ConnectionFileError::Invalid(
+                "daemon version lacks the published prefix",
+            ));
+        }
+        // The client requires the authenticated version to equal this value, and the server
+        // cannot send a `ServerProof` above `MAX_AUTH_MESSAGE_LEN`, so such a file can never
+        // complete a handshake.
+        if crate::auth::server_proof_message_bytes(&self.daemon_ver)
+            > crate::auth::MAX_AUTH_MESSAGE_LEN as usize
+        {
+            return Err(ConnectionFileError::Invalid(
+                "daemon version cannot fit the authentication frame",
+            ));
         }
         Ok(())
     }
@@ -308,16 +327,6 @@ fn checked_stat(fd: &OwnedFd, path: &Path) -> Result<rustix::fs::Stat, Connectio
     Ok(stat)
 }
 
-fn same_snapshot(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
-    left.st_dev == right.st_dev
-        && left.st_ino == right.st_ino
-        && left.st_size == right.st_size
-        && left.st_mtime == right.st_mtime
-        && left.st_mtime_nsec == right.st_mtime_nsec
-        && left.st_ctime == right.st_ctime
-        && left.st_ctime_nsec == right.st_ctime_nsec
-}
-
 fn io_error(op: &'static str, path: &Path, source: io::Error) -> ConnectionFileError {
     ConnectionFileError::Io {
         op,
@@ -365,8 +374,48 @@ mod tests {
             key: vec![7; KEY_LEN],
             daemon_id: [8; DAEMON_ID_LEN],
             pid: 9,
-            daemon_ver: "test".to_owned(),
+            daemon_ver: format!("{DAEMON_VER_PREFIX}test"),
         }
+    }
+
+    #[test]
+    fn daemon_version_must_carry_the_published_prefix() {
+        assert!(info().validate().is_ok());
+        for daemon_ver in ["", "test", "v1", "eidnara-host", "Eidnara-host/1"] {
+            let mut candidate = info();
+            candidate.daemon_ver = daemon_ver.to_owned();
+            assert!(
+                matches!(candidate.validate(), Err(ConnectionFileError::Invalid(_))),
+                "daemon_ver {daemon_ver:?} must fail validation"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_version_must_fit_the_authentication_frame() {
+        let versioned = |len: usize| format!("{DAEMON_VER_PREFIX}{}", "v".repeat(len));
+        let cap = crate::auth::MAX_AUTH_MESSAGE_LEN as usize;
+        let first_rejected = (0..=cap)
+            .find(|&len| crate::auth::server_proof_message_bytes(&versioned(len)) > cap)
+            .expect("some prefixed version exceeds the auth frame");
+
+        let mut fits = info();
+        fits.daemon_ver = versioned(first_rejected - 1);
+        assert!(fits.validate().is_ok());
+
+        let mut oversized = info();
+        oversized.daemon_ver = versioned(first_rejected);
+        assert!(
+            serde_json::to_vec_pretty(&oversized)
+                .expect("serialize")
+                .len()
+                < MAX_CONNECTION_FILE_LEN,
+            "the file itself is under the file cap, so only the auth bound can reject it"
+        );
+        assert!(matches!(
+            oversized.validate(),
+            Err(ConnectionFileError::Invalid(_))
+        ));
     }
 
     /// A FIFO at the configured path must be rejected rather than waited on.
@@ -392,12 +441,18 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("owner-only fifo");
 
+        // Parent validation must succeed on its own before the FIFO is probed. Both the parent
+        // and the file checks report `Insecure`, so otherwise `read_for_client` could reject an
+        // insecure parent before it ever checks that `path` is a FIFO.
+        let (_parent, name) = open_parent(&path).expect("owner-only scratch dir passes validation");
+        assert_eq!(name, "connection.json");
+
         // No writer is ever opened, so a blocking open can never complete.
         // A worker thread lets the test fail on a blocking FIFO open without wedging the suite.
         let (tx, rx) = std::sync::mpsc::channel();
         let probe = path.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(read_for_client(&probe).map_err(|error| format!("{error:?}")));
+            let _ = tx.send(read_for_client(&probe));
         });
         let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
 
@@ -406,10 +461,10 @@ mod tests {
 
         let outcome = outcome.expect("the open must not block on a writer that never arrives");
         let error = outcome.expect_err("a FIFO is not a connection file");
-        assert!(
-            error.contains("Insecure"),
-            "expected an insecure-type rejection, got {error}"
-        );
+        match error {
+            ConnectionFileError::Insecure { path: rejected } => assert_eq!(rejected, path),
+            other => panic!("expected an insecure-type rejection of the FIFO, got {other:?}"),
+        }
     }
 
     #[test]

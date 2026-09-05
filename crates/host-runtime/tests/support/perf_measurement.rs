@@ -166,13 +166,36 @@ pub fn open_loop_offset_ns(slot: u64, rate_per_sec: u64) -> u64 {
         .expect("scheduled offset exceeds u64 nanoseconds")
 }
 
+/// The first slot whose offset is at or after `at_ns`: the inverse of
+/// [`open_loop_offset_ns`], so `open_loop_offset_ns(result) >= at_ns` and the slot before it
+/// is strictly earlier. Lets a saturated open-loop sender skip every overdue slot in one step.
+///
+/// Callers must invoke [`validate_open_loop_rate`] before calling this function.
+pub fn first_slot_at_or_after(at_ns: u64, rate_per_sec: u64) -> u64 {
+    let numerator = u128::from(at_ns) * u128::from(rate_per_sec);
+    u64::try_from(numerator.div_ceil(1_000_000_000u128)).expect("slot index fits u64")
+}
+
 /// A run needs at least `TAIL_SAMPLE_FLOOR` successful post-warmup observations to publish p99.9.
 pub fn tail_publishable(successful_observations: u64) -> bool {
-    successful_observations >= TAIL_SAMPLE_FLOOR
+    quantile_publishable(successful_observations, 999)
+}
+
+/// `quantile_sample_floor` scales `TAIL_SAMPLE_FLOOR` so every quantile rests on the same number of observations above it.
+///
+/// `TAIL_SAMPLE_FLOOR` places 30 observations above p99.9; the same 30 observations above p99 need 3,000 samples.
+/// `quantile_per_mille` is the quantile scaled by 1,000 (`999` for p99.9, `990` for p99) and must be below 1,000.
+pub fn quantile_sample_floor(quantile_per_mille: u64) -> u64 {
+    assert!(quantile_per_mille < 1_000, "quantile must be below 1.0");
+    TAIL_SAMPLE_FLOOR / (1_000 - quantile_per_mille)
+}
+
+pub fn quantile_publishable(observations: u64, quantile_per_mille: u64) -> bool {
+    observations >= quantile_sample_floor(quantile_per_mille)
 }
 
 /// `LatencySummary` uses nearest-rank percentiles; `p999_ns` is `None` below `TAIL_SAMPLE_FLOOR`.
-/// headline suppressed).
+/// `count`, `p50_ns`–`p99_ns`, and `max_ns` are always published so a short run still reports its body.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LatencySummary {
     pub count: u64,
@@ -368,7 +391,7 @@ impl HoldWindow {
         }
     }
 
-    /// already outside.
+    /// Instants before `start_ns` classify as `Warmup`, so a request opened ahead of the window is excluded with the warmup prefix.
     pub fn classify(&self, opened_ns: u64) -> WindowClass {
         if opened_ns < self.warmup_end_ns {
             WindowClass::Warmup

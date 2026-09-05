@@ -8,9 +8,6 @@ repository.workspace = true
 publish.workspace = true
 description = "Directly linked host for the context, Synapse, and Broca components."
 
-[lints.clippy]
-duplicate_mod = "allow"
-
 [dependencies]
 serde = { workspace = true }
 hmac = { workspace = true }
@@ -19,6 +16,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 fastembed = { version = "=6.0.0", default-features = false, features = ["ort-load-dynamic"] }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "ndarray", "std"] }
+tokenizers = { version = "=0.22.2", default-features = false }
 tokio = { workspace = true, features = ["process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 rustix = { workspace = true, features = ["event", "fs", "net", "pipe", "process", "thread"] }

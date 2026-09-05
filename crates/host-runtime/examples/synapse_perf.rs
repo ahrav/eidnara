@@ -3,6 +3,7 @@
 //! Open-loop work preserves absolute scheduled-send timestamps.
 //! Closed-loop work holds fixed concurrency.
 //! The harness retains every wire call and caller-level operation as NDJSON before the validated summary.
+//! The warmup request and its wire calls are retained too; `WindowClass::Warmup` excludes them from estimates.
 
 #[path = "../tests/support/perf_measurement.rs"]
 mod perf_measurement;
@@ -12,7 +13,7 @@ mod process_resources;
 #[path = "../tests/support/raw_client.rs"]
 mod raw_client;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ use tokio::sync::{Mutex, oneshot};
 const ROOT: &str = "/workspace/synapse-perf";
 const STARTUP_BUDGET: Duration = Duration::from_secs(10);
 const DRAIN_BUDGET: Duration = Duration::from_secs(10);
-const PACING_SLACK: Duration = Duration::from_millis(2);
+const PACING_SLACK: Duration = Duration::from_micros(50);
 const MAX_CENSORED_PER_MILLE: u128 = 10;
 const MAX_TOTAL_ATTEMPTS: u32 = 4;
 const QUERY_DEADLINE: Duration = Duration::from_secs(3);
@@ -411,6 +412,7 @@ impl HostThread {
         }
     }
 
+    /// A drain that outlives `DRAIN_BUDGET` is reported without joining the host thread: the host is wedged, so a join would hang the harness for as long as the host does, and the caller exits the process on this error, which tears the detached thread down.
     fn shutdown(mut self) -> Result<(), String> {
         self.shutdown.cancel();
         let result = self
@@ -441,7 +443,8 @@ struct RoutedWire {
     /// An unknown correlation poisons the wire for every unrelated request.
     /// Only calls without a terminal leave a correlation stored.
     ///
-    /// The giving-up caller inserts the correlation into `tombstones` before removing it from `pending`; the reader checks `pending` before `tombstones`, so a live correlation remains in at least one map.
+    /// A correlation lives in exactly one map. The giving-up caller moves it from `pending` to `tombstones` while holding the `pending` lock, and only if the reader has not already claimed it; the reader checks `pending` before `tombstones`.
+    /// A terminal the reader claimed while the caller was timing out therefore leaves no tombstone behind.
     tombstones: Mutex<std::collections::BTreeSet<u64>>,
     next_corr: AtomicU64,
     channel: u16,
@@ -453,6 +456,10 @@ struct RoutedWire {
     /// A write that completes after `deadline` can perturb later load.
     /// The harness counts an over-deadline write and invalidates the repetition because the write perturbs later load.
     overdeadline_writes: AtomicU64,
+    /// Longest interval from a caller reaching the send path to its request being stamped sent.
+    ///
+    /// First-send lag folds writer contention in with runtime-queue delay; this maximum isolates the shared-writer share.
+    writer_wait_max_ns: AtomicU64,
 }
 
 enum WireCallError {
@@ -495,6 +502,7 @@ impl RoutedWire {
             origin,
             reader_error: Mutex::new(None),
             overdeadline_writes: AtomicU64::new(0),
+            writer_wait_max_ns: AtomicU64::new(0),
         });
         let reader_wire = Arc::clone(&wire);
         tokio::spawn(async move {
@@ -519,6 +527,10 @@ impl RoutedWire {
         self.overdeadline_writes.load(Ordering::Relaxed)
     }
 
+    fn writer_wait_max_ns(&self) -> u64 {
+        self.writer_wait_max_ns.load(Ordering::Relaxed)
+    }
+
     /// `at` uses the `Self::elapsed_ns` clock, so scheduled instants and recorded sends are directly comparable.
     fn ns_at(&self, at: Instant) -> u64 {
         u64::try_from(at.saturating_duration_since(self.origin).as_nanos()).unwrap_or(u64::MAX)
@@ -529,19 +541,19 @@ impl RoutedWire {
     /// The caller starts the deadline timer before waiting for `writer`, so writer contention cannot extend the effective deadline.
     ///
     /// `write_all` is not cancel-safe: dropping it mid-frame leaves a partial request on the shared connection.
-    /// finished.
+    /// A write that starts before `deadline` therefore runs to completion even if the deadline passes while it is in progress.
     async fn call(&self, body: Vec<u8>, deadline: Instant) -> Result<WireReply, WireCallError> {
         if let Some(error) = self.reader_error.lock().await.clone() {
             return Err(WireCallError::Transport(error));
         }
         let (corr, rx, sent_ns) = {
+            let pre_lock = Instant::now();
             let Ok(writer) = tokio::time::timeout_at(deadline.into(), self.writer.lock()).await
             else {
                 return Err(WireCallError::ExpiredBeforeSend);
             };
             let mut writer = writer;
             // Avoid starting a frame after the deadline expires.
-            // deadline.
             if Instant::now() >= deadline {
                 return Err(WireCallError::ExpiredBeforeSend);
             }
@@ -549,6 +561,10 @@ impl RoutedWire {
             let (tx, rx) = oneshot::channel();
             self.pending.lock().await.insert(corr, tx);
             let sent_ns = self.elapsed_ns();
+            self.writer_wait_max_ns.fetch_max(
+                sent_ns.saturating_sub(self.ns_at(pre_lock)),
+                Ordering::Relaxed,
+            );
             let mut frame = raw_client::header(
                 u32::try_from(body.len())
                     .map_err(|_| WireCallError::Transport("request too large".to_owned()))?,
@@ -587,11 +603,14 @@ impl RoutedWire {
                     .unwrap_or_else(|| "connection closed while awaiting reply".to_owned()),
             )),
             Err(_) => {
-                // Installing the tombstone before removing `pending` keeps `corr` in `pending ∪ tombstones` throughout the transition.
-                self.tombstones.lock().await.insert(corr);
-                // Unclaimed tombstones are bounded by calls that never receive a terminal.
+                // Holding `pending` across the move keeps `corr` in exactly one map, and the removal result tells whether the reader already claimed the terminal; a claimed correlation must not become a tombstone or it would never be removed.
                 // Tombstones are never evicted because any tombstone can still receive a late terminal.
-                self.pending.lock().await.remove(&corr);
+                {
+                    let mut pending = self.pending.lock().await;
+                    if pending.remove(&corr).is_some() {
+                        self.tombstones.lock().await.insert(corr);
+                    }
+                }
                 // The timeout path re-checks `reader_error` because the reader can fail after the earlier check.
                 if let Some(error) = self.reader_error.lock().await.clone() {
                     return Err(WireCallError::Transport(error));
@@ -1175,8 +1194,6 @@ async fn execute_batch(
                         let retryable = reply.frame.ty == raw_client::TY_ERROR
                             && matches!(code, Some("queue_full" | "timeout"));
                         // `queue_full` retries until the deadline under the shared cap; other transients allow four attempts.
-                        // `queue_full` retries until the deadline under the shared cap; other transients allow four attempts.
-                        // `queue_full` retries until the deadline under the shared cap; other transients allow four attempts.
                         let attempt_cap = if code == Some("queue_full") {
                             perf_measurement::QUEUE_FULL_MAX_ATTEMPTS
                         } else {
@@ -1343,6 +1360,29 @@ async fn execute_batch(
     }
 }
 
+/// The delayed engine returns this vector for every text; a completed request must carry exactly it.
+const GOLDEN_VECTOR: [f64; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+/// Every component is compared, so corruption in any dimension is a validation failure rather than a completed request.
+/// A component that is not a JSON number fails the comparison the same way.
+fn validate_golden_vector(id: &str, item: &serde_json::Value) -> Result<(), String> {
+    let vector = item["vector"]
+        .as_array()
+        .ok_or_else(|| format!("vector {id} omitted its payload: {item}"))?;
+    let matches = vector.len() == GOLDEN_VECTOR.len()
+        && vector
+            .iter()
+            .zip(GOLDEN_VECTOR)
+            .all(|(value, want)| value.as_f64() == Some(want));
+    if !matches {
+        return Err(format!(
+            "vector {id} payload is not the golden vector: {item}"
+        ));
+    }
+    Ok(())
+}
+
+/// A query response carries one item attributed to the query itself; a wrong `id` or hash is an attribution regression, not a completed request.
 fn validate_vectors(json: &serde_json::Value, expected: usize) -> Result<(), String> {
     let result = &json["result"];
     let vectors = result["vectors"]
@@ -1354,13 +1394,17 @@ fn validate_vectors(json: &serde_json::Value, expected: usize) -> Result<(), Str
         || result["table_epoch"] != 1
         || result["dims"] != 8
         || vectors.len() != expected
-        || vectors.iter().any(|item| {
-            item["vector"]
-                .as_array()
-                .is_none_or(|vector| vector.len() != 8 || vector[0].as_f64() != Some(1.0))
-        })
     {
         return Err(format!("invalid vector response: {json}"));
+    }
+    let query_sha = perf_measurement::sha256_hex(QUERY_TEXT.as_bytes());
+    for item in vectors {
+        if item["id"] != "query" || item["content_sha256"] != query_sha.as_str() {
+            return Err(format!(
+                "query response is not attributed to the query: {json}"
+            ));
+        }
+        validate_golden_vector("query", item)?;
     }
     Ok(())
 }
@@ -1403,20 +1447,7 @@ fn validate_batch_page(
             }
             Some(_) => {}
         }
-        let vector = item["vector"]
-            .as_array()
-            .ok_or_else(|| format!("vector {id} omitted its payload: {json}"))?;
-        if vector.len() != 8 || vector[0].as_f64() != Some(1.0) {
-            return Err(format!(
-                "vector {id} payload is not the golden vector: {json}"
-            ));
-        }
-        // Values that are neither integral nor floating-point never reach the ledger.
-        if vector.iter().any(|value| value.as_f64().is_none()) {
-            return Err(format!(
-                "vector {id} carries a non-finite component: {json}"
-            ));
-        }
+        validate_golden_vector(id, item)?;
     }
     Ok(())
 }
@@ -1462,19 +1493,18 @@ async fn execute(
     }
 }
 
-async fn warm(ctx: &RunContext) -> Result<(), String> {
+/// The warmup request's logical row is returned so it joins the raw evidence.
+///
+/// Its first send precedes the hold window, so `HoldWindow::stamp` classifies the row and its owned attempts as `Warmup`.
+/// A discarded warmup row would leave its attempts without an owner, and `stamp` would classify them `AfterWindow`.
+async fn warm(ctx: &RunContext) -> Result<LogicalRecord, String> {
     let record = execute(ctx, 0, None).await;
     if record.disposition != LogicalDisposition::Completed {
         return Err(format!("warmup did not complete: {record:?}"));
     }
-    ctx.attempts.lock().await.clear();
-    ctx.fatal_errors.lock().await.clear();
-    ctx.connection_loss.store(0, Ordering::Relaxed);
-    Ok(())
+    Ok(record)
 }
 
-///
-/// two interpretable.
 struct LoadOutcome {
     records: Vec<LogicalRecord>,
     send_lag_max_ns: u64,
@@ -1550,8 +1580,6 @@ fn open_loop_send_lag(records: &[LogicalRecord], rate: u64) -> (u64, u64) {
 }
 
 /// `start` maps `window`'s nanosecond offsets to the caller's clock.
-///
-/// partitioned by.
 fn window_boundaries(window: &perf_measurement::HoldWindow, start: Instant) -> (Instant, Instant) {
     (
         start + Duration::from_nanos(window.warmup_end_ns.saturating_sub(window.start_ns)),
@@ -1681,23 +1709,29 @@ struct Summary {
     transport_floor_ns: u64,
     host_build_id: Option<&'static str>,
     ledger: perf_measurement::SynapseLedgerSummary,
-    attempt_latency: Option<LatencySummary>,
-    logical_latency: Option<LatencySummary>,
-    permit_wait: Option<SignedSummary>,
+    /// Attempt latency keyed by wire method; one distribution over every method would mix polls with submissions.
+    attempt_latency: BTreeMap<&'static str, GatedLatency>,
+    /// Only `Completed` requests contribute; rejections and censored requests are counted in `ledger`.
+    logical_latency: Option<GatedLatency>,
+    /// Query success latency minus the configured engine delay and transport floor.
+    ///
+    /// The residual is negative when a reply beats the configured floors, so it is signed rather than clamped.
+    latency_residual_ns: Option<SignedSummary>,
     poll_distribution: Option<CountSummary>,
-    service_time: Option<LatencySummary>,
+    service_time: Option<GatedLatency>,
     service_time_mean_ns: Option<f64>,
     service_time_cv: Option<f64>,
     service_measured_samples: u64,
     service_excluded_samples: u64,
     send_lag_max_ns: u64,
+    /// The shared-writer share of `send_lag_max_ns`, taken over every wire call of the run.
+    writer_wait_max_ns: u64,
     missed_slots: u64,
     hold_window_start_ns: u64,
     warmup_end_ns: u64,
     hold_window_end_ns: u64,
     warmup_offered: u64,
     warmup_attempts: u64,
-    /// `window: "after_window"`.
     after_window_offered: u64,
     after_window_attempts: u64,
     censored_per_mille: f64,
@@ -1705,9 +1739,75 @@ struct Summary {
     task_window_start_ns: Option<u64>,
     task_window_end_ns: Option<u64>,
     connection_loss_errors: u64,
-    /// inadmissible.
+    /// A nonzero count makes the repetition inadmissible: a write completing after its deadline perturbs later load.
     overdeadline_writes: u64,
     fatal_errors: Vec<String>,
+}
+
+/// `GatedLatency` publishes each tail quantile only when the sample count and censoring support it.
+///
+/// A quantile below its sample floor rests on too few observations above it.
+/// A quantile `q` is also suppressed when `censored_per_mille` exceeds `1000 * (1 - q)`: the censored mass could occupy the entire tail above `q`, so the observed value is not identifiable.
+#[derive(Debug, PartialEq, serde::Serialize)]
+struct GatedLatency {
+    count: u64,
+    p50_ns: u64,
+    p90_ns: u64,
+    p95_ns: u64,
+    p99_ns: Option<u64>,
+    p999_ns: Option<u64>,
+    max_ns: u64,
+}
+
+impl GatedLatency {
+    fn from_unsorted(samples: Vec<u64>, censored_per_mille: f64) -> Option<Self> {
+        let base = LatencySummary::from_unsorted(samples)?;
+        let gate = |value: Option<u64>, quantile_per_mille: u64| {
+            let identifiable = censored_per_mille <= (1_000 - quantile_per_mille) as f64;
+            (identifiable && perf_measurement::quantile_publishable(base.count, quantile_per_mille))
+                .then_some(value)
+                .flatten()
+        };
+        Some(Self {
+            count: base.count,
+            p50_ns: base.p50_ns,
+            p90_ns: base.p90_ns,
+            p95_ns: base.p95_ns,
+            p99_ns: gate(Some(base.p99_ns), 990),
+            p999_ns: gate(base.p999_ns, 999),
+            max_ns: base.max_ns,
+        })
+    }
+}
+
+fn attempt_latency_by_method(
+    attempts: &[AttemptRecord],
+    censored_per_mille: f64,
+) -> BTreeMap<&'static str, GatedLatency> {
+    let mut samples: BTreeMap<&'static str, Vec<u64>> = BTreeMap::new();
+    for attempt in attempts {
+        samples
+            .entry(attempt.method.wire_name())
+            .or_default()
+            .push(attempt.latency_ns);
+    }
+    samples
+        .into_iter()
+        .filter_map(|(method, latencies)| {
+            GatedLatency::from_unsorted(latencies, censored_per_mille).map(|gated| (method, gated))
+        })
+        .collect()
+}
+
+fn logical_latency(records: &[LogicalRecord], censored_per_mille: f64) -> Option<GatedLatency> {
+    GatedLatency::from_unsorted(
+        records
+            .iter()
+            .filter(|request| request.disposition == LogicalDisposition::Completed)
+            .map(|request| request.latency_ns)
+            .collect(),
+        censored_per_mille,
+    )
 }
 
 #[derive(serde::Serialize)]
@@ -1819,8 +1919,7 @@ async fn run(
         connection_loss: Arc::new(AtomicU64::new(0)),
         opts,
     };
-    warm(&ctx).await?;
-    service.lock().expect("service samples").clear();
+    let warmup = warm(&ctx).await?;
     let load = run_load(ctx.clone()).await;
     let LoadOutcome {
         mut records,
@@ -1829,6 +1928,7 @@ async fn run(
         window,
         task_window,
     } = load;
+    records.insert(0, warmup);
     let mut attempts = ctx.attempts.lock().await.clone();
     window.stamp(&mut records, &mut attempts);
     let logical = records;
@@ -1839,20 +1939,15 @@ async fn run(
     let fatal_errors = ctx.fatal_errors.lock().await.clone();
     let connection_loss_errors = ctx.connection_loss.load(Ordering::Relaxed);
     let ledger = perf_measurement::validate_synapse_ledgers(&logical_estimates, &attempt_estimates);
-    let attempt_latency = LatencySummary::from_unsorted(
-        attempt_estimates
-            .iter()
-            .map(|attempt| attempt.latency_ns)
-            .collect(),
-    );
-    let logical_latency = LatencySummary::from_unsorted(
-        logical_estimates
-            .iter()
-            .filter(|request| !is_censored(request.disposition))
-            .map(|request| request.latency_ns)
-            .collect(),
-    );
-    let permit_wait = SignedSummary::from_unsorted(
+    let censored = censored_count(&ledger);
+    let censored_per_mille = if ledger.offered == 0 {
+        0.0
+    } else {
+        censored as f64 * 1_000.0 / ledger.offered as f64
+    };
+    let attempt_latency = attempt_latency_by_method(&attempt_estimates, censored_per_mille);
+    let logical_latency = logical_latency(&logical_estimates, censored_per_mille);
+    let latency_residual_ns = SignedSummary::from_unsorted(
         attempt_estimates
             .iter()
             .filter(|attempt| {
@@ -1882,15 +1977,9 @@ async fn run(
         .filter(|sample| sample.window.is_measured())
         .map(|sample| sample.service_ns)
         .collect();
-    let service_time = LatencySummary::from_unsorted(service_measured.clone());
+    let service_time = GatedLatency::from_unsorted(service_measured.clone(), censored_per_mille);
     let service_time_mean_ns = mean(&service_measured);
     let service_time_cv = coefficient_of_variation(&service_measured);
-    let censored = censored_count(&ledger);
-    let censored_per_mille = if ledger.offered == 0 {
-        0.0
-    } else {
-        censored as f64 * 1_000.0 / ledger.offered as f64
-    };
     let summary = Summary {
         kind: "synapse_perf_summary",
         variant: opts.variant,
@@ -1906,7 +1995,7 @@ async fn run(
         ledger,
         attempt_latency,
         logical_latency,
-        permit_wait,
+        latency_residual_ns,
         poll_distribution,
         service_time,
         service_time_mean_ns,
@@ -1914,6 +2003,7 @@ async fn run(
         service_measured_samples: service_measured.len() as u64,
         service_excluded_samples: (service_samples.len() - service_measured.len()) as u64,
         send_lag_max_ns,
+        writer_wait_max_ns: ctx.wire.writer_wait_max_ns(),
         missed_slots,
         hold_window_start_ns: window.start_ns,
         warmup_end_ns: window.warmup_end_ns,
@@ -1973,14 +2063,6 @@ fn coefficient_of_variation(samples: &[u64]) -> Option<f64> {
 
 fn censored_count(ledger: &perf_measurement::SynapseLedgerSummary) -> u64 {
     ledger.timed_out.saturating_add(ledger.in_flight)
-}
-
-/// percentiles omit.
-fn is_censored(disposition: LogicalDisposition) -> bool {
-    matches!(
-        disposition,
-        LogicalDisposition::TimedOut | LogicalDisposition::InFlight
-    )
 }
 
 fn emit(
@@ -2084,10 +2166,12 @@ fn main() {
                 || empty_window
             {
                 eprintln!(
-                    "synapse_perf failed: invalid repetition (ledger={}, fatal={}, missed_slots={}, censored_per_mille={:.3}, poll_max={} vs ceiling {}, overdeadline_writes={}, measured_offered={})",
+                    "synapse_perf failed: invalid repetition (ledger={}, fatal={}, missed_slots={}, send_lag_max_ns={}, writer_wait_max_ns={}, censored_per_mille={:.3}, poll_max={} vs ceiling {}, overdeadline_writes={}, measured_offered={})",
                     summary.ledger.valid,
                     summary.fatal_errors.len(),
                     summary.missed_slots,
+                    summary.send_lag_max_ns,
+                    summary.writer_wait_max_ns,
                     summary.censored_per_mille,
                     summary
                         .poll_distribution
@@ -2150,6 +2234,87 @@ mod tests {
         assert_eq!(mean(&[]), None);
     }
 
+    #[test]
+    fn logical_latency_counts_only_completed_requests() {
+        let mut records = vec![
+            logical(1, LogicalDisposition::Completed),
+            logical(2, LogicalDisposition::Completed),
+            logical(3, LogicalDisposition::Rejected),
+            logical(4, LogicalDisposition::TimedOut),
+            logical(5, LogicalDisposition::InFlight),
+        ];
+        records[2].latency_ns = 1_000;
+        let summary = logical_latency(&records, 0.0).expect("two completed samples");
+        assert_eq!(summary.count, 2);
+        assert_eq!(summary.max_ns, 1);
+        assert!(logical_latency(&records[2..], 0.0).is_none());
+    }
+
+    #[test]
+    fn attempt_latency_is_keyed_by_wire_method() {
+        let attempt = |attempt_id, method, latency_ns| AttemptRecord {
+            logical_id: 1,
+            attempt_id,
+            method,
+            disposition: if method == SynapseMethod::Result {
+                AttemptDisposition::Poll
+            } else {
+                AttemptDisposition::Success
+            },
+            code: None,
+            retry_after_ms: None,
+            actual_send_ns: 0,
+            terminal_ns: latency_ns,
+            latency_ns,
+            window: WindowClass::Measured,
+        };
+        let attempts = [
+            attempt(1, SynapseMethod::Batch, 500),
+            attempt(2, SynapseMethod::Result, 10),
+            attempt(3, SynapseMethod::Result, 30),
+        ];
+        let by_method = attempt_latency_by_method(&attempts, 0.0);
+        assert_eq!(
+            by_method.keys().copied().collect::<Vec<_>>(),
+            ["embed.batch", "embed.result"]
+        );
+        assert_eq!(by_method["embed.batch"].count, 1);
+        assert_eq!(by_method["embed.result"].count, 2);
+        assert_eq!(by_method["embed.result"].max_ns, 30);
+        assert!(attempt_latency_by_method(&[], 0.0).is_empty());
+    }
+
+    #[test]
+    fn gated_latency_applies_per_quantile_floor_and_censoring() {
+        let p99_floor = perf_measurement::quantile_sample_floor(990);
+        let p999_floor = perf_measurement::quantile_sample_floor(999);
+        assert_eq!(p99_floor, 3_000);
+        assert_eq!(p999_floor, perf_measurement::TAIL_SAMPLE_FLOOR);
+
+        let below = GatedLatency::from_unsorted((1..p99_floor).collect(), 0.0).unwrap();
+        assert_eq!(below.p99_ns, None);
+        assert_eq!(below.p999_ns, None);
+        assert_eq!(below.p50_ns, 1_500);
+
+        let p99_only = GatedLatency::from_unsorted((1..=p99_floor).collect(), 0.0).unwrap();
+        assert_eq!(p99_only.p99_ns, Some(2_970));
+        assert_eq!(p99_only.p999_ns, None);
+
+        let full = GatedLatency::from_unsorted((1..=p999_floor).collect(), 0.0).unwrap();
+        assert!(full.p99_ns.is_some());
+        assert!(full.p999_ns.is_some());
+
+        // Censoring above 1 per mille hides p99.9; above 10 per mille it hides p99 as well.
+        let p999_censored = GatedLatency::from_unsorted((1..=p999_floor).collect(), 1.5).unwrap();
+        assert!(p999_censored.p99_ns.is_some());
+        assert_eq!(p999_censored.p999_ns, None);
+        let p99_censored = GatedLatency::from_unsorted((1..=p999_floor).collect(), 10.5).unwrap();
+        assert_eq!(p99_censored.p99_ns, None);
+        assert_eq!(p99_censored.p999_ns, None);
+        let at_boundary = GatedLatency::from_unsorted((1..=p999_floor).collect(), 10.0).unwrap();
+        assert!(at_boundary.p99_ns.is_some());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn call_writes_strictly_increasing_correlations_under_concurrency() {
         const CALLERS: usize = 256;
@@ -2177,12 +2342,13 @@ mod tests {
             origin: Instant::now(),
             reader_error: Mutex::new(None),
             overdeadline_writes: AtomicU64::new(0),
+            writer_wait_max_ns: AtomicU64::new(0),
         });
         let mut callers = tokio::task::JoinSet::new();
         for _ in 0..CALLERS {
             let wire = Arc::clone(&wire);
             callers.spawn(async move {
-                // expire.
+                // No reader answers, so every call runs to its deadline and reports `Timeout`.
                 let deadline = Instant::now() + Duration::from_secs(1);
                 match wire.call(b"{}".to_vec(), deadline).await {
                     Err(WireCallError::Timeout { .. }) => {}
@@ -2199,6 +2365,7 @@ mod tests {
         }
         let corrs = server.await.expect("server task");
         assert_eq!(corrs.len(), CALLERS);
+        assert!(wire.writer_wait_max_ns() <= 1_000_000_000);
         for pair in corrs.windows(2) {
             assert!(
                 pair[0] < pair[1],

@@ -607,6 +607,7 @@ fn ring_arm_setup(attempt: &mut Attempt, pair: (u32, u32)) -> Result<ChildHost, 
     attempt.manifest_mut().affinity = Some(serde_json::json!({
         "requested": [pair.0, pair.1],
         "load_effective": load_affinity,
+        "caveat": "the load tokio worker and the host-ring-client bridge thread share one CPU; ring-arm latency includes same-core handoffs the atomic floor does not",
     }));
     Ok(host)
 }
@@ -741,12 +742,14 @@ fn collect_ring_open(attempt: &mut Attempt, pair: (u32, u32)) -> Result<(), Stri
     // Unanswered measured requests invalidate the attempt.
     // Publishing only completed requests would bias latency toward successful requests.
     // Delete
+    // A missed slot is a request withheld at the in-flight cap (ring.rs `MissedSlot`); publishing the point would omit exactly the requests carrying the most queueing delay. commentlint: allow(JUDGE)
     let transport_failures = result.outcomes.peer_closed
         + result.outcomes.write_failure
-        + result.outcomes.unresolved_at_drain;
+        + result.outcomes.unresolved_at_drain
+        + result.outcomes.missed_slot;
     if transport_failures > 0 {
         return Err(format!(
-            "{transport_failures} transport-failure outcome(s) in the measured window \
+            "{transport_failures} transport-failure or missed-slot outcome(s) in the measured window \
              (outcomes: {:?}); the attempt is invalid",
             result.outcomes
         ));
@@ -766,10 +769,9 @@ fn collect_ring_open(attempt: &mut Attempt, pair: (u32, u32)) -> Result<(), Stri
     ] {
         attempt.add_histogram(file, hist)?;
     }
+    // `sched_to_completion` includes tokio's ~1ms `sleep_until` quantization at the offered rates, so only its raw histogram is kept. commentlint: allow(JUDGE)
     let results = serde_json::json!({
         "offered_rate_per_sec": rate,
-        "sched_p50_ns": result.sched_to_completion.value_at_quantile(0.50),
-        "sched_p99_ns": result.sched_to_completion.value_at_quantile(0.99),
         "issue_p50_ns": result.issue_to_completion.value_at_quantile(0.50),
         "issue_p99_ns": result.issue_to_completion.value_at_quantile(0.99),
         "lag_p99_ns": result.scheduler_lag.value_at_quantile(0.99),
@@ -890,14 +892,25 @@ fn plan_arms() -> Vec<String> {
 
 /// Expands one block into the collection sequence the script's
 /// `budget_block` executes: the counterbalanced same-L3 arms with
-/// `ring-open` fanned out per offered rate (rate order as given, never
-/// reversed), then the cross-NUMA paired tail in its own counterbalanced
-/// order.
-pub fn plan_block_entries(same_l3: &[String], cross: &[String], rates: &[u64]) -> Vec<String> {
+/// `ring-open` fanned out per offered rate, then the cross-NUMA paired
+/// tail in its own counterbalanced order. `reverse_rates` mirrors the
+/// arm-level ABBA reversal onto the rate sweep so within-block position
+/// is not confounded with offered rate.
+pub fn plan_block_entries(
+    same_l3: &[String],
+    cross: &[String],
+    rates: &[u64],
+    reverse_rates: bool,
+) -> Vec<String> {
     let mut entries = Vec::new();
     for arm in same_l3 {
         if arm == ARM_RING_OPEN {
-            entries.extend(rates.iter().map(|rate| format!("{arm}@same-l3:r{rate}")));
+            let fan = |rate: &u64| format!("{arm}@same-l3:r{rate}");
+            if reverse_rates {
+                entries.extend(rates.iter().rev().map(fan));
+            } else {
+                entries.extend(rates.iter().map(fan));
+            }
         } else {
             entries.push(format!("{arm}@same-l3"));
         }
@@ -999,7 +1012,7 @@ fn render_plan() -> Result<String, String> {
         out.push_str(&format!(
             "block {:02}: {}\n",
             block + 1,
-            plan_block_entries(same_l3, cross, &rates).join(" -> ")
+            plan_block_entries(same_l3, cross, &rates, block % 2 == 1).join(" -> ")
         ));
     }
     Ok(out)
@@ -1211,18 +1224,21 @@ fn aggregate(run_dir: &Path) -> Result<String, String> {
                     break;
                 }
             }
+            // The atomic arm records batch means, not per-request samples; its tail
+            // and max are not comparable to ring-serial's and are not published.
+            let per_request = arm.name.as_str() != ARM_ATOMIC;
             entry.insert(
                 "merged".to_owned(),
                 serde_json::json!({
                     "samples": total,
                     "p50_ns": merged.value_at_quantile(0.50),
-                    "p99_ns": merged.value_at_quantile(0.99),
-                    "p999_ns": if perf_measurement::tail_publishable(total) && headline_ok {
+                    "p99_ns": if per_request { serde_json::json!(merged.value_at_quantile(0.99)) } else { serde_json::Value::Null },
+                    "p999_ns": if per_request && perf_measurement::tail_publishable(total) && headline_ok {
                         serde_json::json!(merged.value_at_quantile(0.999))
                     } else {
                         serde_json::Value::Null
                     },
-                    "max_ns": merged.max(),
+                    "max_ns": if per_request { serde_json::json!(merged.max()) } else { serde_json::Value::Null },
                 }),
             );
         }
@@ -1232,9 +1248,7 @@ fn aggregate(run_dir: &Path) -> Result<String, String> {
             // manifest's results object is otherwise unprotected on its
             // way into summary.json.
             for a in &complete {
-                let checks: [(&str, &str, f64); 5] = [
-                    ("sched_to_completion.hist", "sched_p50_ns", 0.50),
-                    ("sched_to_completion.hist", "sched_p99_ns", 0.99),
+                let checks: [(&str, &str, f64); 3] = [
                     ("issue_to_completion.hist", "issue_p50_ns", 0.50),
                     ("issue_to_completion.hist", "issue_p99_ns", 0.99),
                     ("scheduler_lag.hist", "lag_p99_ns", 0.99),
@@ -1420,10 +1434,10 @@ fn aggregate(run_dir: &Path) -> Result<String, String> {
             "run_block": g.run_block,
             "class": g.class,
             "pair": g.pair,
-            "atomic_rtt_ns": g.atomic_rtt_ns,
+            "atomic_batch_mean_rtt_ns": g.atomic_rtt_ns,
             "ring_p50_ns": g.ring_p50_ns,
-            "gap_ns": g.gap_ns,
-            "ratio": g.ratio,
+            "ring_p50_minus_atomic_batch_mean_ns": g.gap_ns,
+            "ring_p50_over_atomic_batch_mean": g.ratio,
         })).collect::<Vec<_>>(),
         "gap_stats": gap_stats,
     });

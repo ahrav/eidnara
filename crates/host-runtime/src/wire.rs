@@ -21,14 +21,26 @@ use std::{error::Error, fmt, sync::Arc};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub const PROTOCOL_VERSION: u8 = 2;
+/// `PROTOCOL_VERSION` must equal `WIRE_V2_VERSION` so setup and ring frames use one wire version.
+pub use shm_transport::setup_auth::PROTOCOL_VERSION;
 
-pub const HEADER_LEN: usize = 21;
+const _: () = assert!(
+    PROTOCOL_VERSION == shm_transport::descriptor::WIRE_V2_VERSION,
+    "setup-handshake and ring wire versions must agree"
+);
+
+pub const HEADER_LEN: usize = shm_transport::WIRE_V2_HEADER_BYTES;
 
 /// `FROZEN_PREFIX_LEN` counts the `len` and `ver` bytes fixed across all envelope versions.
 pub const FROZEN_PREFIX_LEN: usize = 5;
 
-pub const MAX_FRAME_BODY_LEN: u32 = 64 * 1024 * 1024;
+/// One body cap shared with the ring keeps every encoded body publishable.
+pub const MAX_FRAME_BODY_LEN: u32 = shm_transport::MAX_FRAME_BYTES as u32;
+
+const _: () = assert!(
+    shm_transport::MAX_FRAME_BYTES <= u32::MAX as usize,
+    "frame body cap must fit the u32 `len` header field"
+);
 
 /// `EIDNARA_MODULE_ID_ENV` identifies the module under which a supervised child registers.
 /// The environment-variable name is protocol surface and must remain byte-identical.
@@ -373,8 +385,11 @@ pub const MAX_BODY_LEN: u32 = MAX_FRAME_BODY_LEN;
 
 pub const MAX_CONTROL_BODY_LEN: u32 = 65_536;
 
-///
-/// wait.
+/// `charge` serves queued acquisitions in FIFO order and satisfies each full request before
+/// later waiters, so a maximum-size waiter holds back every smaller waiter queued behind it.
+/// Callers sharing a pool between peers must bound each peer's largest queued charge or give
+/// small frames their own pool. Released bytes satisfy queued waiters before increasing the
+/// free count, so `try_charge` cannot bypass them.
 #[derive(Clone)]
 pub struct ByteBudget {
     semaphore: Arc<Semaphore>,
@@ -394,16 +409,22 @@ impl ByteBudget {
         self.capacity
     }
 
-    pub async fn charge(&self, bytes: u32) -> ByteCharge {
+    /// Waits until `bytes` are free and holds them. Returns `None` only when `bytes` exceeds
+    /// `capacity`: no release can ever satisfy such a request, so awaiting it would never
+    /// complete. Unlike `try_charge`, a `None` here is always permanent.
+    pub async fn charge(&self, bytes: u32) -> Option<ByteCharge> {
+        if bytes as usize > self.capacity {
+            return None;
+        }
         let permit = self
             .semaphore
             .clone()
             .acquire_many_owned(bytes)
             .await
             .expect("byte budget semaphore is never closed");
-        ByteCharge {
+        Some(ByteCharge {
             permit: Some(permit),
-        }
+        })
     }
 
     pub fn try_charge(&self, bytes: usize) -> Option<ByteCharge> {
@@ -509,6 +530,27 @@ pub struct EncodeError {
     pub body_len: usize,
 }
 
+pub fn frame_header(
+    ty: FrameType,
+    flags: Flags,
+    id: FrameId,
+    body_len: usize,
+) -> Result<EnvelopeHeader, EncodeError> {
+    if body_len > MAX_BODY_LEN as usize {
+        return Err(EncodeError { body_len });
+    }
+    let len = u32::try_from(body_len).map_err(|_| EncodeError { body_len })?;
+    Ok(EnvelopeHeader {
+        len,
+        ver: PROTOCOL_VERSION,
+        ty,
+        flags,
+        channel: id.channel,
+        epoch: id.epoch,
+        corr: id.corr,
+    })
+}
+
 /// The writer emits the frame in one logical write.
 #[cfg(test)]
 pub fn encode_frame(
@@ -517,23 +559,7 @@ pub fn encode_frame(
     id: FrameId,
     body: &[u8],
 ) -> Result<Vec<u8>, EncodeError> {
-    if body.len() > MAX_BODY_LEN as usize {
-        return Err(EncodeError {
-            body_len: body.len(),
-        });
-    }
-    let len = u32::try_from(body.len()).map_err(|_| EncodeError {
-        body_len: body.len(),
-    })?;
-    let header = EnvelopeHeader {
-        len,
-        ver: PROTOCOL_VERSION,
-        ty,
-        flags,
-        channel: id.channel,
-        epoch: id.epoch,
-        corr: id.corr,
-    };
+    let header = frame_header(ty, flags, id, body.len())?;
     let mut buf = Vec::with_capacity(HEADER_LEN + body.len());
     buf.extend_from_slice(&header.encode());
     buf.extend_from_slice(body);
@@ -546,23 +572,8 @@ pub fn encode_owned_frame(
     id: FrameId,
     mut body: Vec<u8>,
 ) -> Result<Vec<u8>, EncodeError> {
-    if body.len() > MAX_BODY_LEN as usize {
-        return Err(EncodeError {
-            body_len: body.len(),
-        });
-    }
     let body_len = body.len();
-    let len = u32::try_from(body_len).map_err(|_| EncodeError { body_len })?;
-    let header = EnvelopeHeader {
-        len,
-        ver: PROTOCOL_VERSION,
-        ty,
-        flags,
-        channel: id.channel,
-        epoch: id.epoch,
-        corr: id.corr,
-    }
-    .encode();
+    let header = frame_header(ty, flags, id, body_len)?.encode();
     // Exact-size growth avoids `reserve` doubling a full-capacity body.
     body.reserve_exact(HEADER_LEN);
     body.resize(body_len + HEADER_LEN, 0);
@@ -584,21 +595,7 @@ pub fn encode_split_frame(
     if body.len() < SPLIT_WRITE_MIN_BODY {
         return Ok((encode_owned_frame(ty, flags, id, body)?, Vec::new()));
     }
-    let body_len = body.len();
-    if body_len > MAX_BODY_LEN as usize {
-        return Err(EncodeError { body_len });
-    }
-    let len = u32::try_from(body_len).map_err(|_| EncodeError { body_len })?;
-    let header = EnvelopeHeader {
-        len,
-        ver: PROTOCOL_VERSION,
-        ty,
-        flags,
-        channel: id.channel,
-        epoch: id.epoch,
-        corr: id.corr,
-    }
-    .encode();
+    let header = frame_header(ty, flags, id, body.len())?.encode();
     Ok((header.to_vec(), body))
 }
 
@@ -918,7 +915,7 @@ mod tests {
     #[tokio::test]
     async fn body_charge_and_reservation_share_one_ingress_pool() {
         let budget = ByteBudget::new(100);
-        let body_charge = budget.charge(60).await;
+        let body_charge = budget.charge(60).await.expect("within capacity");
         assert!(
             budget.try_charge(50).is_none(),
             "a reservation must see the body's pressure"
@@ -932,6 +929,23 @@ mod tests {
             "an untransferred reservation restores its exact permits"
         );
         drop(body_charge);
+        assert_eq!(budget.available(), 100);
+    }
+
+    #[tokio::test]
+    async fn charge_above_capacity_fails_instead_of_waiting_forever() {
+        let budget = ByteBudget::new(100);
+        // No release can ever satisfy 101 permits on a 100-permit semaphore, so the await
+        // must resolve to `None` rather than park; the timeout catches a regression.
+        let oversized = tokio::time::timeout(std::time::Duration::from_secs(1), budget.charge(101))
+            .await
+            .expect("an over-capacity charge must not block");
+        assert!(oversized.is_none());
+        assert_eq!(budget.available(), 100, "a refused charge holds nothing");
+        // Exactly `capacity` is still a satisfiable request.
+        let full = budget.charge(100).await.expect("capacity itself fits");
+        assert_eq!(full.bytes(), 100);
+        drop(full);
         assert_eq!(budget.available(), 100);
     }
 }

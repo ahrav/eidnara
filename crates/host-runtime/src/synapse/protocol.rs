@@ -1,7 +1,7 @@
 //! Synapse validates four request operations, canonicalizes request keys across languages, and encodes responses.
-//! encoding.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
@@ -17,6 +17,8 @@ const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub(crate) const MAX_JOB_ID_BYTES: usize = 128;
 pub(crate) const MAX_CURSOR_BYTES: usize = 128;
 pub(crate) const MAX_DEADLINE_MS: u64 = 3_600_000;
+/// `DEFAULT_DEADLINE_MS` applies when a query omits `deadline_ms`; `MAX_DEADLINE_MS` is the ceiling a client may request.
+pub(crate) const DEFAULT_DEADLINE_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestError {
@@ -71,14 +73,115 @@ pub enum Request {
 // Typed deserialization avoids materializing a `serde_json::Value` tree.
 // ---------------------------------------------------------------------------
 
-/// `params` is skipped because its schema depends on `method`; `IgnoredAny` avoids materializing it.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MethodEnvelope<'a> {
-    #[serde(borrow)]
-    pub(crate) method: Cow<'a, str>,
-    #[serde(default, rename = "params")]
-    _params: serde::de::IgnoredAny,
+/// `DecodedEnvelope` carries `params` decoded in the same pass that read `method`.
+enum DecodedEnvelope<'de> {
+    ModelsList,
+    Query(QueryParams<'de>),
+    Batch(BatchParams<'de>),
+    Result(ResultParams<'de>),
+    /// `params` preceded `method`, so its type was unknown when it was skipped.
+    Deferred(Cow<'de, str>),
+}
+
+/// `EnvelopeSeed` reads the `{method, params}` envelope once, dispatching `params` on the already-read `method`.
+/// The envelope accepts only objects, rejects unknown and duplicate fields, and requires `method`.
+/// The item bound is runtime configuration, so the batch branch needs a seed rather than a derived `Deserialize`.
+struct EnvelopeSeed {
+    max_items: usize,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for EnvelopeSeed {
+    type Value = DecodedEnvelope<'de>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        struct EnvelopeVisitor {
+            max_items: usize,
+        }
+
+        impl<'de> serde::de::Visitor<'de> for EnvelopeVisitor {
+            type Value = DecodedEnvelope<'de>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let mut method: Option<Cow<'de, str>> = None;
+                let mut saw_params = false;
+                let mut deferred = false;
+                let mut decoded: Option<DecodedEnvelope<'de>> = None;
+                while let Some(key) = map.next_key::<BorrowedCow<'de>>()? {
+                    match key.0.as_ref() {
+                        "method" => {
+                            if method.is_some() {
+                                return Err(A::Error::duplicate_field("method"));
+                            }
+                            method = Some(map.next_value::<BorrowedCow<'de>>()?.0);
+                        }
+                        "params" => {
+                            if saw_params {
+                                return Err(A::Error::duplicate_field("params"));
+                            }
+                            saw_params = true;
+                            match method.as_deref() {
+                                None => {
+                                    map.next_value::<serde::de::IgnoredAny>()?;
+                                    deferred = true;
+                                }
+                                Some("models.list") => {
+                                    map.next_value::<MapOnly<NoParams>>()?;
+                                    decoded = Some(DecodedEnvelope::ModelsList);
+                                }
+                                Some("embed.query") => {
+                                    decoded = Some(DecodedEnvelope::Query(
+                                        map.next_value::<MapOnly<QueryParams<'de>>>()?.0,
+                                    ));
+                                }
+                                Some("embed.batch") => {
+                                    decoded = Some(DecodedEnvelope::Batch(map.next_value_seed(
+                                        BatchParamsSeed {
+                                            max_items: self.max_items,
+                                        },
+                                    )?));
+                                }
+                                Some("embed.result") => {
+                                    decoded = Some(DecodedEnvelope::Result(
+                                        map.next_value::<MapOnly<ResultParams<'de>>>()?.0,
+                                    ));
+                                }
+                                Some(_) => {
+                                    return Err(A::Error::custom("unsupported synapse method"));
+                                }
+                            }
+                        }
+                        other => return Err(A::Error::unknown_field(other, &["method", "params"])),
+                    }
+                }
+                let method = method.ok_or_else(|| A::Error::missing_field("method"))?;
+                if deferred {
+                    return Ok(DecodedEnvelope::Deferred(method));
+                }
+                match method.as_ref() {
+                    "models.list" => Ok(DecodedEnvelope::ModelsList),
+                    "embed.query" | "embed.batch" | "embed.result" => {
+                        decoded.ok_or_else(|| A::Error::missing_field("params"))
+                    }
+                    _ => Err(A::Error::custom("unsupported synapse method")),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(EnvelopeVisitor {
+            max_items: self.max_items,
+        })
+    }
 }
 
 /// A derived `Deserialize` accepts JSON sequences and fills fields positionally.
@@ -196,7 +299,6 @@ struct ResultParams<'a> {
 }
 
 /// The request decoder classifies malformed JSON and typed-deserialization failures as `schema_violation`.
-/// those carry.
 fn decode<'a, T: serde::Deserialize<'a>>(body: &'a [u8]) -> Result<T, RequestError> {
     serde_json::from_slice(body).map_err(|err| schema(err.to_string()))
 }
@@ -568,8 +670,30 @@ pub(crate) fn decode_request(
     lane: &LaneInfo,
     limits: &SynapseLimits,
 ) -> Result<Request, RequestError> {
-    let envelope: MapOnly<MethodEnvelope> = decode(body)?;
-    match envelope.0.method.as_ref() {
+    use serde::de::DeserializeSeed;
+    let max_items = body_item_bound(body.len(), limits.max_batch_items);
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    let envelope = EnvelopeSeed { max_items }
+        .deserialize(&mut deserializer)
+        .map_err(|err| schema(err.to_string()))?;
+    deserializer.end().map_err(|err| schema(err.to_string()))?;
+    match envelope {
+        DecodedEnvelope::ModelsList => Ok(Request::ModelsList),
+        DecodedEnvelope::Query(params) => parse_query(params, lane, limits),
+        DecodedEnvelope::Batch(params) => parse_batch(params, lane, limits),
+        DecodedEnvelope::Result(params) => parse_result(params, lane),
+        DecodedEnvelope::Deferred(method) => decode_typed(body, &method, lane, limits),
+    }
+}
+
+/// `decode_typed` re-reads `body` with the method-specific envelope type once `method` is known.
+fn decode_typed(
+    body: &[u8],
+    method: &str,
+    lane: &LaneInfo,
+    limits: &SynapseLimits,
+) -> Result<Request, RequestError> {
+    match method {
         "models.list" => {
             let _: MapOnly<OptionalParams<NoParams>> = decode(body)?;
             Ok(Request::ModelsList)
@@ -601,26 +725,31 @@ pub fn parse_request_unreserved(
     decode_request(body, lane, limits)
 }
 
-/// clients retry.
+/// `unservable_body_error` reports a schema violation rather than `queue_full` because `required > capacity`:
+/// retrying without shrinking the request cannot make the reservation admissible.
+/// The message tells the client only that its body is too large; `required` and `capacity` stay server-side.
 pub(crate) fn unservable_body_error(
     body_len: usize,
     required: usize,
     capacity: usize,
 ) -> RequestError {
+    debug_assert!(
+        required > capacity,
+        "unservable_body_error requires a reservation above capacity"
+    );
     schema(format!(
-        "request body of {body_len} bytes needs {required} resident bytes, \
-         above this host's {capacity}-byte resident capacity"
+        "request body of {body_len} bytes is too large for this host"
     ))
 }
 
 const RESERVE_PER_ITEM_BYTES: usize = 640;
 
-/// diagnostic.
+/// `RESERVE_ENVELOPE_BYTES` covers the decoded envelope fields, the request key, and one bounded diagnostic.
 const RESERVE_ENVELOPE_BYTES: usize = 4096;
 
 const RESERVE_BODY_FACTOR: usize = 3;
 
-/// bound.
+/// `RESERVE_MIN_ITEM_BODY_BYTES` prevents small bodies from reserving `max_batch_items`.
 const RESERVE_MIN_ITEM_BODY_BYTES: usize = 64;
 
 fn body_item_bound(body_len: usize, max_batch_items: usize) -> usize {
@@ -635,7 +764,6 @@ pub(crate) fn parse_reservation_bytes(body_len: usize, limits: &SynapseLimits) -
         .checked_add(RESERVE_ENVELOPE_BYTES)
 }
 
-/// embedding space.
 fn check_constraints(
     model: &str,
     fingerprint: &str,
@@ -664,6 +792,17 @@ fn check_constraints(
     Ok(())
 }
 
+/// Embedding text is application content bounded only by byte length, so U+0000 is legal in it; `check_string` rejects NUL because it also guards identifiers.
+fn check_text(field: &str, value: &str, max_bytes: usize) -> Result<(), RequestError> {
+    if value.is_empty() {
+        return Err(schema(format!("{field} must be nonempty")));
+    }
+    if value.len() > max_bytes {
+        return Err(schema(format!("{field} exceeds {max_bytes} bytes")));
+    }
+    Ok(())
+}
+
 fn parse_query(
     params: QueryParams<'_>,
     lane: &LaneInfo,
@@ -677,7 +816,7 @@ fn parse_query(
         params.accept_declared,
         lane,
     )?;
-    check_string("text", &params.text, limits.max_text_bytes, true).map_err(schema)?;
+    check_text("text", &params.text, limits.max_text_bytes)?;
     if let Some(ms) = params.deadline_ms
         && (ms == 0 || ms > MAX_DEADLINE_MS)
     {
@@ -709,19 +848,21 @@ fn parse_batch(
         return Err(schema("item count out of bounds"));
     }
     let mut items = Vec::with_capacity(params.items.len());
+    let mut seen_ids: HashSet<&str> = HashSet::with_capacity(params.items.len());
     let mut total_text_bytes = 0usize;
     for raw in &params.items {
+        // The aggregate cap is checked before this item's string scan and hash so an overflowing item costs no per-byte work.
+        total_text_bytes = total_text_bytes.saturating_add(raw.0.text.len());
+        if total_text_bytes > limits.max_batch_text_bytes {
+            return Err(schema("aggregate item text exceeds the batch cap"));
+        }
         check_string("item id", &raw.0.id, MAX_ITEM_ID_BYTES, true).map_err(schema)?;
-        check_string("item text", &raw.0.text, limits.max_text_bytes, true).map_err(schema)?;
-        total_text_bytes += raw.0.text.len();
+        check_text("item text", &raw.0.text, limits.max_text_bytes)?;
         let actual = sha256_hex(raw.0.text.as_bytes());
         if raw.0.content_sha256 != actual {
             return Err(schema("item content_sha256 does not match its text"));
         }
-        if items
-            .iter()
-            .any(|existing: &BatchItem| existing.id == raw.0.id)
-        {
+        if !seen_ids.insert(raw.0.id.as_ref()) {
             return Err(schema("duplicate item id"));
         }
         items.push(BatchItem {
@@ -729,9 +870,6 @@ fn parse_batch(
             content_sha256: actual,
             text: raw.0.text.to_string(),
         });
-    }
-    if total_text_bytes > limits.max_batch_text_bytes {
-        return Err(schema("aggregate item text exceeds the batch cap"));
     }
     let canonical_key = canonical_request_key(lane, &items);
     Ok(Request::EmbedBatch {
@@ -800,13 +938,7 @@ fn json_string(value: &str) -> String {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    crate::instance::hex(&Sha256::digest(bytes))
 }
 
 fn is_lower_hex_64(value: &str) -> bool {
@@ -892,31 +1024,56 @@ impl serde::Serialize for VectorItemsBody<'_> {
 
 const VECTOR_BODY_ENVELOPE: usize = 256;
 
+/// The bytes of a vector body outside its items: the escaped model name, the fingerprint, the escaped cursor, and the fixed envelope.
+/// `next_cursor` is charged at its escaped length because this function is reachable from any string, even though host-issued cursors contain no escapable byte.
+fn vector_body_fixed_bytes(model: &str, fingerprint: &str, next_cursor: Option<&str>) -> usize {
+    super::jobs::escaped_string_bytes(model)
+        .saturating_add(fingerprint.len())
+        .saturating_add(next_cursor.map_or(0, super::jobs::escaped_string_bytes))
+        .saturating_add(VECTOR_BODY_ENVELOPE)
+}
+
 /// `vector_body_reservation` upper-bounds serialized vector-body length using the job table's per-item accounting.
 /// A page that satisfies the job table's page cap fits the reservation.
-/// The reservation charges `lane.model` at its escaped length; the manifest permits 128 unconstrained bytes, which can occupy 768 escaped bytes.
-/// TODO: Charge `next_cursor` at its escaped length.
-/// unchanged.
+/// Saturation keeps an overflowing sum from wrapping into an under-reservation; the wire layer rejects a saturated value as oversized.
 pub fn vector_body_reservation(
     lane: &LaneInfo,
     items: &[VectorItemView<'_>],
     next_cursor: Option<&str>,
 ) -> usize {
-    let items: usize = items
+    items
         .iter()
-        .map(|item| {
-            super::jobs::JobTable::encoded_item_cost(
+        .fold(0usize, |total, item| {
+            total.saturating_add(super::jobs::JobTable::encoded_item_cost(
                 item.vector.len(),
                 item.id,
                 item.content_sha256,
-            )
+            ))
         })
-        .sum();
-    items
-        + super::jobs::escaped_string_bytes(&lane.model)
-        + lane.fingerprint.len()
-        + next_cursor.map_or(0, str::len)
-        + VECTOR_BODY_ENVELOPE
+        .saturating_add(vector_body_fixed_bytes(
+            &lane.model,
+            &lane.fingerprint,
+            next_cursor,
+        ))
+}
+
+/// Upper bound on any result-page body the pager can emit under `limits` for a lane of `dims` dimensions.
+/// The pager closes a page at `max_page_encoded_bytes` but always places its first item, so one worst-case item is the floor.
+/// Lane fields take their manifest maxima: a fully escaped model name, a 64-byte fingerprint, and a fully escaped cursor of the longest accepted length.
+pub(crate) fn max_vector_body_bytes(dims: usize, limits: &SynapseLimits) -> usize {
+    let worst_id = "\u{1}".repeat(MAX_ITEM_ID_BYTES);
+    let worst_hash = "0".repeat(super::jobs::CONTENT_SHA256_BYTES);
+    let worst_item = super::jobs::JobTable::encoded_item_cost(dims, &worst_id, &worst_hash);
+    let worst_model = "\u{1}".repeat(super::bundle::MAX_MODEL_NAME_BYTES);
+    let worst_cursor = "\u{1}".repeat(MAX_CURSOR_BYTES);
+    limits
+        .max_page_encoded_bytes
+        .max(worst_item)
+        .saturating_add(vector_body_fixed_bytes(
+            &worst_model,
+            &worst_hash,
+            Some(&worst_cursor),
+        ))
 }
 
 pub fn write_vector_body<W: std::io::Write>(
@@ -1154,6 +1311,91 @@ mod tests {
     }
 
     #[test]
+    fn the_item_that_crosses_the_text_cap_is_rejected_before_its_hash_is_checked() {
+        let limits = SynapseLimits {
+            max_batch_text_bytes: 5,
+            ..SynapseLimits::default()
+        };
+        let lane = lane();
+        // The overflowing item carries a bogus hash; the aggregate error proves the cap fired before hashing.
+        let overflow = format!(
+            "[{},{{\"id\":\"b\",\"text\":\"two\",\"content_sha256\":\"zzz\"}}]",
+            item_json("a", "one"),
+        );
+        let error = parse_request_unreserved(&batch_body(&lane, &overflow), false, &lane, &limits)
+            .expect_err("six text bytes exceed a five-byte cap");
+        assert_eq!(error.code, "schema_violation");
+        assert!(
+            error
+                .message
+                .contains("aggregate item text exceeds the batch cap"),
+            "{}",
+            error.message
+        );
+
+        let exact = format!("[{},{}]", item_json("a", "one"), item_json("b", "tw"));
+        let key = canonical_request_key(&lane, &[item("a", "one"), item("b", "tw")]);
+        let body = String::from_utf8(batch_body(&lane, &exact))
+            .expect("utf8")
+            .replace(&"0".repeat(64), &key)
+            .into_bytes();
+        parse_request_unreserved(&body, false, &lane, &limits).expect("exactly five bytes parse");
+    }
+
+    #[test]
+    fn embedding_text_may_contain_nul_while_identifiers_may_not() {
+        let limits = SynapseLimits::default();
+        let lane = lane();
+        let text = "nul\u{0}inside";
+        let query = format!(
+            concat!(
+                "{{\"method\":\"embed.query\",\"params\":{{",
+                "\"model\":\"{}\",\"required_fingerprint\":\"{}\",",
+                "\"required_epoch\":{},\"allow_equivalent\":false,",
+                "\"accept_declared\":false,\"text\":\"nul\\u0000inside\"}}}}"
+            ),
+            lane.model, lane.fingerprint, lane.table_epoch
+        )
+        .into_bytes();
+        match parse_request_unreserved(&query, false, &lane, &limits).expect("NUL text parses") {
+            Request::EmbedQuery { text: parsed, .. } => assert_eq!(parsed, text),
+            _ => panic!("query request expected"),
+        }
+
+        let items_json = format!(
+            "[{{\"id\":\"a\",\"text\":\"nul\\u0000inside\",\"content_sha256\":\"{}\"}}]",
+            sha256_hex(text.as_bytes())
+        );
+        let key = canonical_request_key(&lane, &[item("a", text)]);
+        let body = String::from_utf8(batch_body(&lane, &items_json))
+            .expect("utf8")
+            .replace(&"0".repeat(64), &key)
+            .into_bytes();
+        parse_request_unreserved(&body, false, &lane, &limits).expect("NUL item text parses");
+
+        let nul_id = format!("[{}]", item_json("a\\u0000b", "one"));
+        let error = parse_request_unreserved(&batch_body(&lane, &nul_id), false, &lane, &limits)
+            .expect_err("a NUL in an identifier is refused");
+        assert_eq!(error.code, "schema_violation");
+        assert!(error.message.contains("item id"), "{}", error.message);
+    }
+
+    #[test]
+    fn duplicate_item_ids_are_rejected() {
+        let lane = lane();
+        let dup = format!("[{},{}]", item_json("a", "one"), item_json("a", "two"));
+        let error = parse_request_unreserved(
+            &batch_body(&lane, &dup),
+            false,
+            &lane,
+            &SynapseLimits::default(),
+        )
+        .expect_err("repeated id");
+        assert_eq!(error.code, "schema_violation");
+        assert_eq!(error.message, "duplicate item id");
+    }
+
+    #[test]
     fn the_seeded_batch_path_keeps_strict_schema_behavior() {
         let limits = SynapseLimits::default();
         let lane = lane();
@@ -1258,6 +1500,114 @@ mod tests {
 
     // -----------------------------------------------------------------
     // -----------------------------------------------------------------
+
+    #[test]
+    fn a_worst_case_component_page_fits_its_output_reservation() {
+        // Every component after the first takes the longest finite `f32` encoding; the
+        // first component restores the unit norm so the vector passes engine validation.
+        for dims in [8usize, 192, 256, 384, 768, 1024, 16_384] {
+            let mut vector = vec![-1.000_000_1e-6_f32; dims];
+            vector[0] = 1.0;
+            let hash = sha256_hex(b"worst");
+            let views = [VectorItemView {
+                id: "worst-case",
+                content_sha256: &hash,
+                vector: &vector,
+            }];
+            let mut lane = lane();
+            lane.dims = dims;
+            // The second cursor is never host-issued; it exercises the escaped-length charge this public function must honor.
+            let escaped_cursor = "\"\\\n\u{1}".repeat(MAX_CURSOR_BYTES / 4);
+            for cursor in [
+                "0123456789abcdef-18446744073709551615:18446744073709551615",
+                escaped_cursor.as_str(),
+            ] {
+                let reservation = vector_body_reservation(&lane, &views, Some(cursor));
+                let mut body = Vec::new();
+                write_vector_body(&mut body, &lane, &views, false, Some(cursor))
+                    .expect("serializes");
+                assert!(
+                    body.len() <= reservation,
+                    "dims {dims}: body {} bytes exceeds reservation {reservation}",
+                    body.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn params_before_method_decodes_like_method_before_params() {
+        let limits = SynapseLimits::default();
+        let lane = lane();
+        let items = [item("a", "one"), item("b", "two")];
+        let key = canonical_request_key(&lane, &items);
+        let query_params = serde_json::json!({
+            "model": lane.model, "required_fingerprint": lane.fingerprint,
+            "required_epoch": lane.table_epoch, "allow_equivalent": false,
+            "accept_declared": false, "text": "hello", "deadline_ms": 250,
+        });
+        let batch_params = serde_json::json!({
+            "model": lane.model, "required_fingerprint": lane.fingerprint,
+            "required_epoch": lane.table_epoch, "allow_equivalent": false,
+            "accept_declared": false, "request_key": key,
+            "items": items.iter().map(|item| serde_json::json!({
+                "id": item.id, "text": item.text, "content_sha256": item.content_sha256,
+            })).collect::<Vec<_>>(),
+        });
+        let result_params = serde_json::json!({
+            "model": lane.model, "required_fingerprint": lane.fingerprint,
+            "required_epoch": lane.table_epoch, "allow_equivalent": false,
+            "accept_declared": false, "job_id": "0123456789abcdef-7",
+            "request_key": key, "cursor": "0123456789abcdef-7:2",
+        });
+        for (method, params) in [
+            ("models.list", serde_json::json!({})),
+            ("embed.query", query_params),
+            ("embed.batch", batch_params),
+            ("embed.result", result_params),
+        ] {
+            let method_first =
+                format!("{{\"method\":{},\"params\":{params}}}", json_string(method)).into_bytes();
+            let params_first =
+                format!("{{\"params\":{params},\"method\":{}}}", json_string(method)).into_bytes();
+            let fast = parse_request_unreserved(&method_first, false, &lane, &limits)
+                .unwrap_or_else(|e| panic!("{method} method-first: {}", e.message));
+            let deferred = parse_request_unreserved(&params_first, false, &lane, &limits)
+                .unwrap_or_else(|e| panic!("{method} params-first: {}", e.message));
+            assert_eq!(fast, deferred, "{method}");
+        }
+        for (case, body) in [
+            (
+                "unsupported method-first",
+                br#"{"method":"nope","params":{}}"#.to_vec(),
+            ),
+            (
+                "unsupported params-first",
+                br#"{"params":{},"method":"nope"}"#.to_vec(),
+            ),
+            (
+                "unknown field after params",
+                br#"{"method":"models.list","params":{},"x":1}"#.to_vec(),
+            ),
+            (
+                "duplicate params",
+                br#"{"method":"models.list","params":{},"params":{}}"#.to_vec(),
+            ),
+            (
+                "duplicate method",
+                br#"{"method":"models.list","method":"models.list"}"#.to_vec(),
+            ),
+            ("missing method", br#"{"params":{}}"#.to_vec()),
+            (
+                "query without params",
+                br#"{"method":"embed.query"}"#.to_vec(),
+            ),
+            ("array envelope", br#"["models.list"]"#.to_vec()),
+        ] {
+            let error = parse_request_unreserved(&body, false, &lane, &limits).expect_err(case);
+            assert_eq!(error.code, "schema_violation", "{case}: {}", error.message);
+        }
+    }
 
     #[test]
     fn the_maximum_reservation_fits_the_scratch_pool_at_every_legal_config() {

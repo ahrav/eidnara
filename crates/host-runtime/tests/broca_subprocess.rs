@@ -9,7 +9,7 @@
 //! Fixture mode runs instead of the test list.
 //! The adapter must own argv, so the default libtest harness cannot run these fixtures.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
@@ -917,10 +917,13 @@ fn fixture_closure_uncached(
     let store = HarnessClosureStore::open(&store_root).expect("closure store");
     Arc::new(
         store
-            .materialize(&ClosureCandidate {
-                manifest,
-                source_roots,
-            })
+            .materialize(
+                &ClosureCandidate {
+                    manifest,
+                    source_roots,
+                },
+                &BTreeSet::new(),
+            )
             .expect("fixture closure"),
     )
 }

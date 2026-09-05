@@ -138,8 +138,9 @@ async fn charge_frame_or_cancel(
         () = request_cancelled => None,
         () = generation.token.cancelled() => None,
         charge = timeout_at(deadline, budget.charge(bytes)) => match charge {
-            Ok(charge) => Some(charge),
-            Err(_) => {
+            Ok(Some(charge)) => Some(charge),
+            // `None` means the frame exceeds the budget's capacity and no release can ever admit it.
+            Ok(None) | Err(_) => {
                 generation.token.cancel();
                 None
             }
@@ -229,9 +230,12 @@ pub async fn emit_frame(
     id: FrameId,
     body: Vec<u8>,
 ) -> Result<(), ()> {
-    emit_frame_with_written(budget, generation, ty, flags, id, body, None).await
+    let deadline = generation.writer.admission_deadline();
+    emit_frame_with_written(budget, generation, ty, flags, id, body, None, deadline).await
 }
 
+/// `deadline` bounds charging, enqueueing, and write completion in one admission window.
+#[allow(clippy::too_many_arguments)]
 async fn emit_frame_with_written(
     budget: &crate::wire::ByteBudget,
     generation: &GenerationCore,
@@ -240,6 +244,7 @@ async fn emit_frame_with_written(
     id: FrameId,
     body: Vec<u8>,
     written: Option<Box<dyn FnOnce(Instant) + Send>>,
+    deadline: Instant,
 ) -> Result<(), ()> {
     if body.len() > crate::wire::MAX_BODY_LEN as usize
         || generation.writer.is_retired()
@@ -247,7 +252,6 @@ async fn emit_frame_with_written(
     {
         return Err(());
     }
-    let deadline = generation.writer.admission_deadline();
     let charge = if body.is_empty() {
         crate::wire::ByteCharge::none()
     } else {
@@ -628,6 +632,7 @@ pub async fn handle_host_shutdown<H: HostHandler>(
                 // A prior attempt already linearized the stop; this request
                 // still settles with its own correlated success.
                 let (written, completed) = oneshot::channel();
+                let deadline = generation.writer.admission_deadline();
                 let settled = if emit_frame_with_written(
                     &shared.egress_budget,
                     generation,
@@ -638,15 +643,17 @@ pub async fn handle_host_shutdown<H: HostHandler>(
                     Some(Box::new(move |_| {
                         let _ = written.send(());
                     })),
+                    deadline,
                 )
                 .await
                 .is_err()
                 {
                     false
                 } else {
-                    tokio::time::timeout_at(generation.writer.admission_deadline(), completed)
-                        .await
-                        .is_ok()
+                    matches!(
+                        tokio::time::timeout_at(deadline, completed).await,
+                        Ok(Ok(()))
+                    )
                 };
                 if !settled {
                     generation.token.cancel();
@@ -744,7 +751,6 @@ pub(crate) async fn emit_authoritative_rejection<H: HostHandler>(
     id: FrameId,
     code: &'static str,
     message: &'static str,
-    written_tx: oneshot::Sender<()>,
 ) {
     let Ok((body, deadline)) =
         charged_error_body(&shared.egress_budget, generation, code, message, None).await
@@ -766,9 +772,7 @@ pub(crate) async fn emit_authoritative_rejection<H: HostHandler>(
                 tail: Vec::new(),
                 direct: None,
                 charge,
-                written: Some(Box::new(move |_completed_at| {
-                    let _ = written_tx.send(());
-                })),
+                written: None,
             },
             deadline,
         )
@@ -1083,14 +1087,19 @@ pub async fn open_route<H: HostHandler>(
     });
     let outcome = match shared.lifecycle_join("bind", bind_task).await {
         Ok(Some(outcome)) => outcome,
-        Ok(None) | Err(crate::runtime::LifecycleFailure { stopped: true }) => {
-            shared.registry.take_rejected_bind(handle);
-            if run_route_gone(&shared, handle).await {
-                shared.registry.finalize_close(handle);
-            }
+        Ok(None) | Err(crate::runtime::LifecycleFailure { running: None }) => {
+            close_unpublished_bind(&shared, handle).await;
             return;
         }
-        Err(crate::runtime::LifecycleFailure { stopped: false }) => return,
+        Err(crate::runtime::LifecycleFailure {
+            running: Some(aborted),
+        }) => {
+            // Route-gone runs only after the callback has stopped; the handler must not see
+            // both `bind` and `route_gone` executing for one handle.
+            let _ = aborted.await;
+            close_unpublished_bind(&shared, handle).await;
+            return;
+        }
     };
 
     match outcome {
@@ -1129,11 +1138,7 @@ pub async fn open_route<H: HostHandler>(
                 } else {
                     (code, message)
                 };
-            shared.registry.take_rejected_bind(handle);
-            let stopped = run_route_gone(&shared, handle).await;
-            if stopped {
-                shared.registry.finalize_close(handle);
-            }
+            close_unpublished_bind(&shared, handle).await;
             let code = if code.is_empty() {
                 "bind_rejected".to_owned()
             } else {
@@ -1175,18 +1180,18 @@ async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: Rou
     });
     match shared.lifecycle_join("route_gone", task).await {
         Ok(()) => true,
-        Err(failure) => failure.stopped,
+        Err(failure) => failure.running.is_none(),
     }
 }
 
-pub async fn settle_route<H: HostHandler>(
-    shared: &Arc<HostShared<H>>,
-    handle: RouteHandle,
-) -> bool {
-    settle_route_work(shared, handle, shared.registry.begin_close(handle)).await
+/// A bind that observed its handle without publishing the route still owes route-gone before the handle closes.
+async fn close_unpublished_bind<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: RouteHandle) {
+    shared.registry.take_rejected_bind(handle);
+    if run_route_gone(shared, handle).await {
+        shared.registry.finalize_close(handle);
+    }
 }
 
-/// stall them.
 pub(crate) async fn close_route_decision<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     handle: RouteHandle,

@@ -141,27 +141,31 @@ struct ConnResult {
     inflight_full: u64,
 }
 
+/// Returns the routed stream and the first unused correlation after `route_open`.
 async fn open_route(
     info: &raw_client::Discovered,
     session: &str,
-) -> (tokio::net::UnixStream, u16, u32) {
+) -> (tokio::net::UnixStream, u16, u32, u64) {
     let mut client = RawClient::connect(info).await.expect("auth");
     let (channel, epoch) = client
         .route_open(MODULE_ID, "/perf", "perf", session)
         .await
         .expect("route");
-    (client.into_stream(), channel, epoch)
+    let first_free_corr = client.next_corr();
+    (client.into_stream(), channel, epoch, first_free_corr)
 }
 
 async fn run_conn(
-    conn: (tokio::net::UnixStream, u16, u32),
+    conn: (tokio::net::UnixStream, u16, u32, u64),
     idx: usize,
     opts: Opts,
     start: Instant,
     warmup: Duration,
 ) -> ConnResult {
-    let (stream, channel, epoch) = conn;
-    let (read_half, mut write_half) = stream.into_split();
+    let (stream, channel, epoch, first_free_corr) = conn;
+    let (read_half, write_half) = stream.into_split();
+    // The sender and the reader's Pong echo share the socket; each holds the lock for one whole frame so frames never interleave.
+    let write_half = Arc::new(tokio::sync::Mutex::new(write_half));
     let body = Arc::new(body_bytes(&opts));
     let expect_fixture = opts.workload == Workload::Json;
     // The response-length cap permits raw workload requests with multi-megabyte echoed bodies.
@@ -194,9 +198,11 @@ async fn run_conn(
         let measured_sent = Arc::clone(&measured_sent);
         let sender_done = Arc::clone(&sender_done);
         let body = Arc::clone(&body);
+        let write_half = Arc::clone(&write_half);
         let conns = opts.conns as u64;
         tokio::spawn(async move {
-            let mut corr: u64 = 1_000_000;
+            // Pre-incremented before each send, so the first request uses `first_free_corr`.
+            let mut corr: u64 = first_free_corr - 1;
             let mut k: u64 = 0;
             let mut inflight_full = 0u64;
             // Connection `idx` owns every `conns`-th global arrival slot, preserving the aggregate offered rate even when `rate` does not divide 1e9.
@@ -269,7 +275,7 @@ async fn run_conn(
                     corr,
                 );
                 frame.extend_from_slice(&body);
-                if write_half.write_all(&frame).await.is_err() {
+                if write_half.lock().await.write_all(&frame).await.is_err() {
                     // The sender marks the request terminal so the reader records `WriteFailure` instead of `UnresolvedAtDrain`.
                     if window_ns >= warmup_ns {
                         measured_sent.fetch_add(1, Ordering::Release);
@@ -283,7 +289,7 @@ async fn run_conn(
                 }
             }
             sender_done.notify_one();
-            (inflight_full, write_half)
+            inflight_full
         })
     };
 
@@ -447,6 +453,15 @@ async fn run_conn(
                     result.closed_early = true;
                     break;
                 }
+                // A host with liveness enabled retires a generation whose Pings go unanswered.
+                if frame.ty == raw_client::TY_PING {
+                    let pong =
+                        raw_client::header(0, raw_client::TY_PONG, frame.flags, 0, 0, frame.corr);
+                    if write_half.lock().await.write_all(&pong).await.is_err() {
+                        result.closed_early = true;
+                        break;
+                    }
+                }
                 // GOODBYE for `(channel, epoch)` or `(0, 0)` closes the connection.
                 if frame.ty == raw_client::TY_GOODBYE
                     && ((frame.channel, frame.epoch) == (channel, epoch)
@@ -539,7 +554,7 @@ async fn run_conn(
     // A bounded sender join prevents write_all from wedging the run after the peer stops reading.
     let mut sender = sender;
     result.inflight_full = match tokio::time::timeout(DRAIN_BUDGET, &mut sender).await {
-        Ok(Ok((count, _write_half))) => count,
+        Ok(Ok(count)) => count,
         Ok(Err(_)) => 0,
         Err(_) => {
             sender.abort();
@@ -565,10 +580,10 @@ async fn run_conn(
 }
 
 async fn run_stall(info: raw_client::Discovered, opts: Opts) {
-    let (stream, channel, epoch) = open_route(&info, "stall").await;
+    let (stream, channel, epoch, first_free_corr) = open_route(&info, "stall").await;
     let (_read_half, mut write_half) = stream.into_split();
     let body = vec![0u8; opts.payload.max(5)];
-    for corr in 1..=opts.stall_big as u64 {
+    for corr in first_free_corr..first_free_corr + opts.stall_big as u64 {
         let header = raw_client::header(
             body.len() as u32,
             TY_REQUEST,

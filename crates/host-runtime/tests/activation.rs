@@ -305,6 +305,7 @@ async fn expected_artifact_faults_degrade_only_their_lane() {
 struct OrderingState {
     publication: PathBuf,
     initialize_saw_publication: AtomicBool,
+    activate_invoked: AtomicBool,
     activate_saw_publication: AtomicBool,
 }
 
@@ -358,6 +359,7 @@ impl PrimaryComponent for OrderingPrimary {
     async fn activate(&self) -> Result<(), InitError> {
         self.activate_saw_publication
             .store(self.publication.exists(), Ordering::SeqCst);
+        self.activate_invoked.store(true, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -369,6 +371,7 @@ async fn bootstrap_precedes_publication_and_activation_follows_it() {
     let primary = OrderingPrimary(Arc::new(OrderingState {
         publication: publication.clone(),
         initialize_saw_publication: AtomicBool::new(true),
+        activate_invoked: AtomicBool::new(false),
         activate_saw_publication: AtomicBool::new(false),
     }));
     let composite = StaticComposite::new(
@@ -385,11 +388,16 @@ async fn bootstrap_precedes_publication_and_activation_follows_it() {
         tokio::spawn(async move { host_runtime::run(composite, config, run_shutdown).await });
     wait_for_publication(&publication).await;
 
+    // Polling `activate_invoked` separates "activation never ran" from "activation ran too early".
     let deadline = tokio::time::Instant::now() + BUDGET;
-    while !primary.activate_saw_publication.load(Ordering::SeqCst) {
+    while !primary.activate_invoked.load(Ordering::SeqCst) {
         assert!(tokio::time::Instant::now() < deadline, "activation runs");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    assert!(
+        primary.activate_saw_publication.load(Ordering::SeqCst),
+        "activation must run only after the transport publishes"
+    );
     assert!(
         !primary.initialize_saw_publication.load(Ordering::SeqCst),
         "pre-publication bootstrap must run before the transport publishes"

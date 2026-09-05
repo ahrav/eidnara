@@ -23,7 +23,8 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::os::fd::RawFd;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -31,11 +32,12 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::arena::{ArenaCounts, ArenaError, ArenaSpan, MAX_FRAME_BYTES, SpanPlan};
+use crate::backend::sys;
 use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor, Incarnation,
     MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES, WIRE_V2_VERSION, check_wire_header,
 };
-use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, volatile_copy};
+use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, copy_in};
 use crate::profile::TargetProfile;
 
 const MAPPING_MAGIC: u64 = 0x4d43_5348_4d52_3031;
@@ -56,28 +58,37 @@ const SLOT_RECEIVER_HELD: u8 = 3;
 const SLOT_RECEIVER_LEASED: u8 = 4;
 const SLOT_RELEASE_PENDING: u8 = 5;
 
+/// Explicit padding lets `Mapping::shared_page` hand out `&Page` over peer-writable memory: a
+/// shared reference permits foreign mutation only of bytes inside an atomic or an `UnsafeCell`,
+/// and implicit padding is neither.
+const CONTROL_PAGE_PADDING: usize = CACHELINE - 2 * size_of::<AtomicU64>();
+
 #[repr(C, align(128))]
 struct ProducerPage {
     published: AtomicU64,
     arena_write: AtomicU64,
+    _padding: UnsafeCell<[u8; CONTROL_PAGE_PADDING]>,
 }
 
 #[repr(C, align(128))]
 struct ConsumerPage {
     consumed: AtomicU64,
     active_leases: AtomicU64,
+    _padding: UnsafeCell<[u8; CONTROL_PAGE_PADDING]>,
 }
 
 #[repr(C, align(128))]
 struct ReclaimPage {
     completed: AtomicU64,
     arena_reclaimed: AtomicU64,
+    _padding: UnsafeCell<[u8; CONTROL_PAGE_PADDING]>,
 }
 
 #[repr(C, align(128))]
 struct WakeEpoch {
     generation: AtomicU64,
     parked: AtomicU64,
+    _padding: UnsafeCell<[u8; CONTROL_PAGE_PADDING]>,
 }
 
 #[repr(C)]
@@ -135,13 +146,16 @@ impl SharedDescriptor {
 #[repr(C, align(128))]
 struct DescriptorSlot {
     state: AtomicU8,
+    _state_padding: UnsafeCell<[u8; 7]>,
     completion_sequence: AtomicU64,
     reservation_len: AtomicU64,
     descriptor: UnsafeCell<SharedDescriptor>,
+    _padding: UnsafeCell<[u8; 112]>,
 }
 
 // `DescriptorSlot` tail padding can hide `SharedDescriptor` layout changes from a slot-size
-// assertion; these assertions reject them at compile time.
+// assertion; these assertions reject them at compile time. The padding-field checks keep every
+// byte of a page inside an atomic or an `UnsafeCell`.
 const _: () = {
     use std::mem::offset_of;
     assert!(size_of::<SharedDescriptor>() == 120);
@@ -158,15 +172,38 @@ const _: () = {
     assert!(offset_of!(SharedDescriptor, span_lengths) == 104);
     assert!(size_of::<DescriptorSlot>() == 256);
     assert!(offset_of!(DescriptorSlot, state) == 0);
+    assert!(offset_of!(DescriptorSlot, _state_padding) == 1);
     assert!(offset_of!(DescriptorSlot, completion_sequence) == 8);
     assert!(offset_of!(DescriptorSlot, reservation_len) == 16);
     assert!(offset_of!(DescriptorSlot, descriptor) == 24);
+    assert!(offset_of!(DescriptorSlot, _padding) == 144);
     assert!(size_of::<ProducerPage>() == CACHELINE);
+    assert!(offset_of!(ProducerPage, _padding) == 16);
     assert!(size_of::<ConsumerPage>() == CACHELINE);
+    assert!(offset_of!(ConsumerPage, _padding) == 16);
     assert!(size_of::<ReclaimPage>() == CACHELINE);
+    assert!(offset_of!(ReclaimPage, _padding) == 16);
     assert!(size_of::<WakeEpoch>() == CACHELINE);
+    assert!(offset_of!(WakeEpoch, _padding) == 16);
     assert!(size_of::<LifecyclePage>() == CACHELINE);
 };
+
+impl DescriptorSlot {
+    /// One volatile read of the whole descriptor. The peer may write the cell at any time, so
+    /// the result is an untrusted snapshot, never a reference into the cell.
+    fn read_descriptor(&self) -> SharedDescriptor {
+        // SAFETY: `get()` points at a live `SharedDescriptor` inside the mapping (initialized
+        // by `initialize_mapping`), every field is a plain integer valid for all bit patterns,
+        // and no `&SharedDescriptor` into the cell exists in this process.
+        unsafe { std::ptr::read_volatile(self.descriptor.get()) }
+    }
+
+    fn write_descriptor(&self, descriptor: SharedDescriptor) {
+        // SAFETY: as in `read_descriptor`; the slot state machine gives the writer exclusive
+        // ownership of the cell while it is producer-reserved.
+        unsafe { std::ptr::write_volatile(self.descriptor.get(), descriptor) }
+    }
+}
 
 #[repr(C, align(128))]
 struct LifecyclePage {
@@ -179,6 +216,20 @@ struct LifecyclePage {
     incarnation: [u8; 16],
     lane: u32,
     quarantined: AtomicU8,
+}
+
+/// Volatile copy of the plain `LifecyclePage` fields. Those fields are peer-writable and not
+/// atomic, so no `&LifecyclePage` is ever formed; `validate_lifecycle` compares this copy.
+#[derive(Clone, Copy)]
+struct LifecycleSnapshot {
+    magic: u64,
+    layout_version: u16,
+    descriptor_depth: u64,
+    arena_bytes: u64,
+    max_leases: u64,
+    total_bytes: u64,
+    incarnation: [u8; 16],
+    lane: u32,
 }
 
 /// The producer's own cursors as this handle last wrote them. Shared memory is peer-writable,
@@ -218,6 +269,7 @@ struct Layout {
     data_wake: usize,
     capacity_wake: usize,
     slots: usize,
+    depth: usize,
     arena: usize,
     lifecycle: usize,
     total: usize,
@@ -285,10 +337,26 @@ impl Layout {
             data_wake,
             capacity_wake,
             slots,
+            depth,
             arena,
             lifecycle,
             total,
         })
+    }
+
+    /// Byte offset of slot `index`; an index at or past `depth` would land in the arena, so it
+    /// is refused here rather than by the mapping bound.
+    fn slot_offset(&self, index: usize) -> Result<usize, RingError> {
+        if index >= self.depth {
+            return Err(RingError::InvalidLayout);
+        }
+        self.slots
+            .checked_add(
+                index
+                    .checked_mul(size_of::<DescriptorSlot>())
+                    .ok_or(RingError::ArithmeticOverflow)?,
+            )
+            .ok_or(RingError::ArithmeticOverflow)
     }
 }
 
@@ -362,29 +430,22 @@ fn removal_ranges(
 static FAIL_NEXT_PAGE_REMOVAL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn remove_pages(base: *mut u8, offset: usize, len: usize) -> libc::c_int {
+fn remove_pages(base: NonNull<u8>, offset: usize, len: usize) -> Result<(), RingError> {
     #[cfg(test)]
     if FAIL_NEXT_PAGE_REMOVAL.swap(false, Ordering::AcqRel) {
-        return -1;
+        return Err(RingError::PageRemovalFailed);
     }
-    // SAFETY: caller supplies a live page-aligned range inside the shared mapping.
-    unsafe { libc::madvise(base.add(offset).cast(), len, libc::MADV_REMOVE) }
+    // SAFETY: caller supplies a page-aligned range inside the live shared mapping with no
+    // live byte in it.
+    unsafe { sys::madvise_remove(base, offset, len) }.map_err(|_| RingError::PageRemovalFailed)
 }
 
 fn system_page_size() -> usize {
     static PAGE_SIZE_CACHE: OnceLock<usize> = OnceLock::new();
-    *PAGE_SIZE_CACHE.get_or_init(|| {
-        // SAFETY: sysconf has no pointer or lifetime preconditions.
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        usize::try_from(page_size)
-            .ok()
-            .filter(|size| *size > 0)
-            .unwrap_or(PAGE_SIZE)
+    *PAGE_SIZE_CACHE.get_or_init(|| match sys::page_size() {
+        0 => PAGE_SIZE,
+        size => size,
     })
-}
-
-fn residency_vector_len(mapping_len: usize, page_size: usize) -> usize {
-    mapping_len.div_ceil(page_size.max(1))
 }
 
 struct Mapping {
@@ -398,22 +459,16 @@ impl Mapping {
         let fd = create_linux_memfd(len)?;
 
         validate_object(&fd, len)?;
-        let raw = fd.as_raw_fd();
-        // SAFETY: fd has exact nonzero length, flags request shared read/write mapping.
-        let mapped = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                raw,
-                0,
-            )
-        };
-        if mapped == libc::MAP_FAILED {
-            return Err(RingError::ObjectSetupFailed);
-        }
-        let base = NonNull::new(mapped.cast()).ok_or(RingError::ObjectSetupFailed)?;
+        let base = sys::mmap_shared(fd.as_fd(), len).map_err(|_| RingError::ObjectSetupFailed)?;
+        Ok(Self { fd, base, len })
+    }
+
+    /// Anonymous private mapping with a placeholder descriptor, for accessor tests that must
+    /// run under Miri, which cannot map a memfd.
+    #[cfg(test)]
+    fn anonymous(len: usize) -> Result<Self, RingError> {
+        let fd = sys::eventfd().map_err(|_| RingError::ObjectSetupFailed)?;
+        let base = sys::mmap_anonymous(len).map_err(|_| RingError::ObjectSetupFailed)?;
         Ok(Self { fd, base, len })
     }
 
@@ -423,21 +478,7 @@ impl Mapping {
         // mapping and leave a page whose first touch is `SIGBUS`.
         validate_seals(&fd)?;
         validate_object(&fd, len)?;
-        // SAFETY: sealed fd was size-validated before mapping.
-        let mapped = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd.as_raw_fd(),
-                0,
-            )
-        };
-        if mapped == libc::MAP_FAILED {
-            return Err(RingError::ObjectSetupFailed);
-        }
-        let base = NonNull::new(mapped.cast()).ok_or(RingError::ObjectSetupFailed)?;
+        let base = sys::mmap_shared(fd.as_fd(), len).map_err(|_| RingError::ObjectSetupFailed)?;
         Ok(Self { fd, base, len })
     }
 
@@ -455,6 +496,164 @@ impl Mapping {
         // SAFETY: checked offset remains inside mapping.
         Ok(unsafe { self.base.as_ptr().add(offset).cast() })
     }
+
+    /// # Safety
+    ///
+    /// Every byte of `T`, padding included, must lie inside an atomic or an `UnsafeCell`, so
+    /// that concurrent peer writes anywhere in the page are permitted behind `&T`. Peer stores
+    /// are assumed atomic-width; a peer that tears a store violates the protocol.
+    unsafe fn shared_page<T>(&self, offset: usize) -> Result<&T, RingError> {
+        let ptr = self.ptr_at::<T>(offset)?;
+        // SAFETY: bounds: `ptr_at` checked `offset + size_of::<T>()` against `self.len`.
+        // Lifetime: the mapping is unmapped only in `Drop`, after `&self` ends.
+        // Alignment: `Layout::new` places every page on a `CACHELINE` boundary.
+        // Validity: atomics and `UnsafeCell<[u8; N]>` accept every bit pattern.
+        // Aliasing: the caller ensures every byte of `T` is atomic or inside an `UnsafeCell`.
+        Ok(unsafe { &*ptr })
+    }
+
+    fn producer(&self, layout: Layout) -> Result<&ProducerPage, RingError> {
+        // SAFETY: `ProducerPage` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
+        unsafe { self.shared_page(layout.producer) }
+    }
+
+    fn consumer(&self, layout: Layout) -> Result<&ConsumerPage, RingError> {
+        // SAFETY: `ConsumerPage` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
+        unsafe { self.shared_page(layout.consumer) }
+    }
+
+    fn reclaim(&self, layout: Layout) -> Result<&ReclaimPage, RingError> {
+        // SAFETY: `ReclaimPage` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
+        unsafe { self.shared_page(layout.reclaim) }
+    }
+
+    fn data_wake(&self, layout: Layout) -> Result<&WakeEpoch, RingError> {
+        // SAFETY: `WakeEpoch` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
+        unsafe { self.shared_page(layout.data_wake) }
+    }
+
+    fn capacity_wake(&self, layout: Layout) -> Result<&WakeEpoch, RingError> {
+        // SAFETY: `WakeEpoch` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
+        unsafe { self.shared_page(layout.capacity_wake) }
+    }
+
+    /// Slot at ring index `index` (not sequence); the caller reduces modulo depth.
+    fn slot(&self, layout: Layout, index: usize) -> Result<&DescriptorSlot, RingError> {
+        // SAFETY: `DescriptorSlot` has no implicit padding; every byte is atomic or inside an
+        // `UnsafeCell`.
+        unsafe { self.shared_page(layout.slot_offset(index)?) }
+    }
+
+    fn lifecycle_snapshot(&self, layout: Layout) -> Result<LifecycleSnapshot, RingError> {
+        let page = self.ptr_at::<LifecyclePage>(layout.lifecycle)?;
+        // SAFETY: `ptr_at` bounds-checked the page; `addr_of!` projects each field without
+        // forming a reference, and every field read is a plain integer or byte array valid for
+        // all bit patterns, so a concurrent peer write yields a wrong value, never UB.
+        unsafe {
+            use std::ptr::{addr_of, read_volatile};
+            Ok(LifecycleSnapshot {
+                magic: read_volatile(addr_of!((*page).magic)),
+                layout_version: read_volatile(addr_of!((*page).layout_version)),
+                descriptor_depth: read_volatile(addr_of!((*page).descriptor_depth)),
+                arena_bytes: read_volatile(addr_of!((*page).arena_bytes)),
+                max_leases: read_volatile(addr_of!((*page).max_leases)),
+                total_bytes: read_volatile(addr_of!((*page).total_bytes)),
+                incarnation: read_volatile(addr_of!((*page).incarnation)),
+                lane: read_volatile(addr_of!((*page).lane)),
+            })
+        }
+    }
+
+    /// The one atomic field of the lifecycle page. Only that field is referenced; the plain
+    /// fields around it stay behind the raw pointer.
+    fn lifecycle_quarantined(&self, layout: Layout) -> Result<&AtomicU8, RingError> {
+        let page = self.ptr_at::<LifecyclePage>(layout.lifecycle)?;
+        // SAFETY: `ptr_at` bounds-checked the page and the mapping outlives `&self`;
+        // `addr_of!` projects the field without touching its neighbors, and an `AtomicU8`
+        // tolerates concurrent foreign stores through a shared reference.
+        Ok(unsafe { &*std::ptr::addr_of!((*page).quarantined) })
+    }
+
+    /// Pages of `[offset, offset + len)` the kernel reports resident via `mincore`.
+    fn resident_pages(&self, offset: usize, len: usize) -> Result<usize, RingError> {
+        let end = offset
+            .checked_add(len)
+            .ok_or(RingError::ArithmeticOverflow)?;
+        if end > self.len {
+            return Err(RingError::InvalidLayout);
+        }
+        let mut residency = vec![0u8; sys::residency_vector_len(len, system_page_size())];
+        // SAFETY: `offset + len <= self.len` was checked above, and the mapping lives as long
+        // as `&self`.
+        unsafe { sys::mincore(self.base, offset, len, &mut residency) }
+            .map_err(|_| RingError::ObjectValidationFailed)?;
+        Ok(residency.into_iter().filter(|entry| entry & 1 == 1).count())
+    }
+
+    /// Writes a whole page. Only `initialize_mapping` calls this, on a mapping no peer has yet.
+    fn initialize_page<T>(&self, offset: usize, value: T) -> Result<(), RingError> {
+        let ptr = self.ptr_at::<T>(offset)?;
+        // SAFETY: `ptr_at` bounds-checked the range and `Layout` aligns every page offset for
+        // `T`; the mapping is fresh and unshared until `Ring::create` returns, so nothing else
+        // reads or writes it during this store.
+        unsafe { ptr.write(value) };
+        Ok(())
+    }
+
+    /// Pointer into the arena for `[offset, offset + len)`, checked against `arena_bytes` and
+    /// the mapping length. Callers copy through it or wrap it in a `LeaseSpan`.
+    fn arena_ptr(
+        &self,
+        layout: Layout,
+        arena_bytes: usize,
+        offset: usize,
+        len: usize,
+    ) -> Result<*mut u8, RingError> {
+        let end = offset
+            .checked_add(len)
+            .ok_or(RingError::ArithmeticOverflow)?;
+        if end > arena_bytes {
+            return Err(RingError::InvalidLayout);
+        }
+        let start = layout
+            .arena
+            .checked_add(offset)
+            .ok_or(RingError::ArithmeticOverflow)?;
+        if start
+            .checked_add(len)
+            .ok_or(RingError::ArithmeticOverflow)?
+            > self.len
+        {
+            return Err(RingError::InvalidLayout);
+        }
+        // SAFETY: `start + len <= self.len`, so the pointer stays inside the mapping.
+        Ok(unsafe { self.base.as_ptr().add(start) })
+    }
+}
+
+/// Marks a wake epoch parked for one generation and clears the marker on drop, so every exit
+/// from a park loop, including `?` and `continue`, unparks.
+struct ParkGuard<'a>(&'a WakeEpoch);
+
+impl<'a> ParkGuard<'a> {
+    /// Records the current generation and stores a nonzero `parked` bound to it.
+    fn arm(wake: &'a WakeEpoch) -> (u64, Self) {
+        let generation = wake.generation.load(Ordering::SeqCst);
+        wake.parked
+            .store(generation.wrapping_add(1), Ordering::SeqCst);
+        (generation, Self(wake))
+    }
+}
+
+impl Drop for ParkGuard<'_> {
+    fn drop(&mut self) {
+        self.0.parked.store(0, Ordering::Release);
+    }
 }
 
 impl fmt::Debug for Mapping {
@@ -465,8 +664,9 @@ impl fmt::Debug for Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // SAFETY: base and len came from successful mmap and are unmapped once here.
-        unsafe { libc::munmap(self.base.as_ptr().cast(), self.len) };
+        // SAFETY: base and len came from one successful mmap_shared and are unmapped once
+        // here, in Drop, after every borrow of the mapping has ended.
+        let _ = unsafe { sys::munmap(self.base, self.len) };
     }
 }
 
@@ -512,7 +712,7 @@ impl SyscallCounters {
 /// affect `local`. `MSG_DONTWAIT` prevents blocking regardless of status flags, and
 /// `MSG_NOSIGNAL` keeps a closed peer end from raising `SIGPIPE`.
 struct Doorbell {
-    local: OwnedFd,
+    local: UnixStream,
     /// The peer's end. `attachment` moves it out, so after the handoff only the peer holds
     /// that end and its exit is visible here as EOF or `EPIPE`.
     remote: Cell<Option<OwnedFd>>,
@@ -525,45 +725,31 @@ const DRAIN_BYTES: usize = 256;
 
 impl Doorbell {
     fn create() -> Result<Self, RingError> {
-        let mut raw = [0 as libc::c_int; 2];
-        // SAFETY: `raw` is writable storage for the two descriptors socketpair returns.
-        let result = unsafe {
-            libc::socketpair(
-                libc::AF_UNIX,
-                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                0,
-                raw.as_mut_ptr(),
-            )
-        };
-        if result != 0 {
-            return Err(RingError::DoorbellFailed);
-        }
-        // SAFETY: successful socketpair returns two new owned descriptors.
-        let (local, remote) =
-            unsafe { (OwnedFd::from_raw_fd(raw[0]), OwnedFd::from_raw_fd(raw[1])) };
+        let (local, remote) = UnixStream::pair().map_err(|_| RingError::DoorbellFailed)?;
+        local
+            .set_nonblocking(true)
+            .and_then(|()| remote.set_nonblocking(true))
+            .map_err(|_| RingError::DoorbellFailed)?;
         Ok(Self {
             local,
-            remote: Cell::new(Some(remote)),
+            remote: Cell::new(Some(remote.into())),
             counters: Cell::new(SyscallCounters::default()),
         })
     }
 
-    /// Accepts only a connected `AF_UNIX` stream socket.
+    /// Accepts only a connected `AF_UNIX` stream socket. `UnixStream` itself admits any fd,
+    /// and `peer_addr` proves only that the peer is `AF_UNIX`, so the socket type is checked
+    /// here: `drain` reads a zero-length `recv` as peer close, which a datagram or seqpacket
+    /// socket makes ambiguous.
     fn from_fd(fd: OwnedFd) -> Result<Self, RingError> {
-        if socket_option(&fd, libc::SO_DOMAIN)? != libc::AF_UNIX
-            || socket_option(&fd, libc::SO_TYPE)? != libc::SOCK_STREAM
+        if sys::socket_type(fd.as_fd()).map_err(|_| RingError::DoorbellFailed)? != libc::SOCK_STREAM
         {
             return Err(RingError::DoorbellFailed);
         }
-        // SAFETY: an all-zero sockaddr_un is valid output storage for getpeername.
-        let mut peer: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-        let mut len = size_of::<libc::sockaddr_un>() as libc::socklen_t;
-        // SAFETY: `peer` and `len` describe writable storage of the declared size.
-        if unsafe { libc::getpeername(fd.as_raw_fd(), (&raw mut peer).cast(), &raw mut len) } != 0 {
-            return Err(RingError::DoorbellFailed);
-        }
+        let local = UnixStream::from(fd);
+        local.peer_addr().map_err(|_| RingError::DoorbellFailed)?;
         Ok(Self {
-            local: fd,
+            local,
             remote: Cell::new(None),
             counters: Cell::new(SyscallCounters::default()),
         })
@@ -585,6 +771,7 @@ impl Doorbell {
     fn duplicate(&self) -> Result<OwnedFd, RingError> {
         self.local
             .try_clone()
+            .map(OwnedFd::from)
             .map_err(|_| RingError::DoorbellFailed)
     }
 
@@ -597,22 +784,14 @@ impl Doorbell {
         let token = [1u8];
         loop {
             self.record(false);
-            // SAFETY: pointer and length describe one initialized byte.
-            let result = unsafe {
-                libc::send(
-                    self.local.as_raw_fd(),
-                    token.as_ptr().cast(),
-                    token.len(),
-                    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
-                )
+            let error = match sys::send_token(self.local.as_fd(), &token) {
+                Ok(sent) if sent == token.len() => return Ok(()),
+                Ok(_) => return Err(RingError::DoorbellFailed),
+                Err(error) => error,
             };
-            if result == token.len() as isize {
-                return Ok(());
-            }
-            let error = std::io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::EAGAIN) => return Ok(()),
-                Some(libc::EINTR) => continue,
+            match error.kind() {
+                std::io::ErrorKind::WouldBlock => return Ok(()),
+                std::io::ErrorKind::Interrupted => continue,
                 _ => return Err(RingError::DoorbellFailed),
             }
         }
@@ -623,25 +802,14 @@ impl Doorbell {
         let mut buffer = [0u8; DRAIN_BYTES];
         loop {
             self.record(false);
-            // SAFETY: pointer and length describe writable storage of `DRAIN_BYTES`.
-            let result = unsafe {
-                libc::recv(
-                    self.local.as_raw_fd(),
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len(),
-                    libc::MSG_DONTWAIT,
-                )
+            let error = match sys::recv_tokens(self.local.as_fd(), &mut buffer) {
+                Ok(0) => return Err(RingError::DoorbellFailed),
+                Ok(_) => return Ok(()),
+                Err(error) => error,
             };
-            if result > 0 {
-                return Ok(());
-            }
-            if result == 0 {
-                return Err(RingError::DoorbellFailed);
-            }
-            let error = std::io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::EAGAIN) => return Ok(()),
-                Some(libc::EINTR) => continue,
+            match error.kind() {
+                std::io::ErrorKind::WouldBlock => return Ok(()),
+                std::io::ErrorKind::Interrupted => continue,
                 _ => return Err(RingError::DoorbellFailed),
             }
         }
@@ -656,63 +824,21 @@ impl Doorbell {
             .as_millis()
             .saturating_add(1)
             .min(i32::MAX as u128) as i32;
-        let mut descriptor = libc::pollfd {
-            fd: self.local.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
         // A signal that landed between the caller's last recheck and this call makes the
         // blocking poll return at once; the probe keeps such a call out of `parks`.
         self.record(false);
-        // SAFETY: poll receives one initialized pollfd.
-        if unsafe { libc::poll(&mut descriptor, 1, 0) } > 0 {
+        if sys::poll_readable(self.local.as_fd(), 0).unwrap_or(false) {
             return Ok(true);
         }
         self.record(true);
-        // SAFETY: poll receives one initialized pollfd.
-        let result = unsafe { libc::poll(&mut descriptor, 1, timeout) };
-        if result > 0 {
-            Ok(true)
-        } else if result == 0 {
-            Ok(false)
-        } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-            Ok(Instant::now() < deadline)
-        } else {
-            Err(RingError::DoorbellFailed)
+        match sys::poll_readable(self.local.as_fd(), timeout) {
+            Ok(ready) => Ok(ready),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                Ok(Instant::now() < deadline)
+            }
+            Err(_) => Err(RingError::DoorbellFailed),
         }
     }
-}
-
-fn set_cloexec(fd: &OwnedFd) -> Result<(), RingError> {
-    // SAFETY: F_GETFD and F_SETFD act on a live owned descriptor.
-    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
-    if flags < 0 {
-        return Err(RingError::ObjectValidationFailed);
-    }
-    // SAFETY: same descriptor; only the close-on-exec bit changes.
-    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-        return Err(RingError::ObjectValidationFailed);
-    }
-    Ok(())
-}
-
-fn socket_option(fd: &OwnedFd, option: libc::c_int) -> Result<libc::c_int, RingError> {
-    let mut value: libc::c_int = 0;
-    let mut len = size_of::<libc::c_int>() as libc::socklen_t;
-    // SAFETY: `value` and `len` describe writable storage of the declared size.
-    let result = unsafe {
-        libc::getsockopt(
-            fd.as_raw_fd(),
-            libc::SOL_SOCKET,
-            option,
-            (&raw mut value).cast(),
-            &raw mut len,
-        )
-    };
-    if result != 0 || len != size_of::<libc::c_int>() as libc::socklen_t {
-        return Err(RingError::DoorbellFailed);
-    }
-    Ok(value)
 }
 
 /// Everything a peer needs to attach: layout version, incarnation, lane, and geometry. Sent
@@ -971,7 +1097,7 @@ impl Ring {
         // a child this process later execs would hold the mapping and the peer's doorbell ends
         // open and hide this side's exit from the peer.
         for descriptor in &descriptors {
-            set_cloexec(descriptor)?;
+            sys::set_cloexec(descriptor.as_fd()).map_err(|_| RingError::ObjectValidationFailed)?;
         }
         let [mapping_fd, data_ready, capacity_ready] = descriptors;
         let layout = grant.checked_layout()?;
@@ -981,23 +1107,18 @@ impl Ring {
         validate_lifecycle(&mapping, layout, grant)?;
         // Nothing this handle will own has been written yet, so the cursors as attached are
         // the baseline its own writes advance from.
-        let producer = mapping.ptr_at::<ProducerPage>(layout.producer)?;
-        let consumer = mapping.ptr_at::<ConsumerPage>(layout.consumer)?;
-        let reclaim = mapping.ptr_at::<ReclaimPage>(layout.reclaim)?;
-        // SAFETY: the pages were bounds-checked and hold initialized atomics.
-        let (producer_cursors, consumer_cursors) = unsafe {
-            (
-                ProducerCursors {
-                    published: (*producer).published.load(Ordering::Acquire),
-                    arena_write: (*producer).arena_write.load(Ordering::Acquire),
-                    completed: (*reclaim).completed.load(Ordering::Acquire),
-                    arena_reclaimed: (*reclaim).arena_reclaimed.load(Ordering::Acquire),
-                },
-                ConsumerCursors {
-                    consumed: (*consumer).consumed.load(Ordering::Acquire),
-                    active_leases: (*consumer).active_leases.load(Ordering::Acquire),
-                },
-            )
+        let producer = mapping.producer(layout)?;
+        let consumer = mapping.consumer(layout)?;
+        let reclaim = mapping.reclaim(layout)?;
+        let producer_cursors = ProducerCursors {
+            published: producer.published.load(Ordering::Acquire),
+            arena_write: producer.arena_write.load(Ordering::Acquire),
+            completed: reclaim.completed.load(Ordering::Acquire),
+            arena_reclaimed: reclaim.arena_reclaimed.load(Ordering::Acquire),
+        };
+        let consumer_cursors = ConsumerCursors {
+            consumed: consumer.consumed.load(Ordering::Acquire),
+            active_leases: consumer.active_leases.load(Ordering::Acquire),
         };
         let ring = Self {
             mapping,
@@ -1064,58 +1185,57 @@ impl Ring {
     /// not by this handle's own releases: release runs on the thread that would block here.
     /// Release leases, then poll again, before blocking.
     pub fn arm_data_wait(&self) -> Result<bool, RingError> {
+        match self.arm_data_wait_guarded()? {
+            Some(guard) => {
+                // The caller owns `parked` until `complete_data_wait` clears it.
+                std::mem::forget(guard);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// `arm_data_wait` that returns the live guard instead of handing `parked` to the caller;
+    /// dropping the guard unparks. `None` means blocking is not correct and the caller should
+    /// poll again.
+    fn arm_data_wait_guarded(&self) -> Result<Option<ParkGuard<'_>>, RingError> {
         if self.is_quarantined() {
             return Err(RingError::Quarantined);
         }
         if self.data_available()? {
-            return Ok(false);
+            return Ok(None);
         }
-        let wake = self.data_wake_ptr()?;
-        // SAFETY: wake page remains mapped and atomics were initialized before activation.
-        let generation = unsafe { (*wake).generation.load(Ordering::SeqCst) };
-        unsafe {
-            (*wake)
-                .parked
-                .store(generation.wrapping_add(1), Ordering::SeqCst)
-        };
+        let wake = self.data_wake()?;
+        let (generation, guard) = ParkGuard::arm(wake);
         if !self.armed_wait_holds(wake, generation)? {
-            return Ok(false);
+            return Ok(None);
         }
-        if let Err(error) = self.data_ready.drain() {
-            // SAFETY: wake page remains mapped and atomics were initialized before activation.
-            unsafe { (*wake).parked.store(0, Ordering::Release) };
-            return Err(self.quarantine_with(error));
+        self.data_ready
+            .drain()
+            .map_err(|error| self.quarantine_with(error))?;
+        if !self.armed_wait_holds(wake, generation)? {
+            return Ok(None);
         }
-        self.armed_wait_holds(wake, generation)
+        Ok(Some(guard))
     }
 
     /// Re-checks, after `parked` is set, that blocking is still correct: no quarantine, no
     /// data, and no wake generation change. `enter_quarantine` rings the doorbell only for a
     /// handle it sees parked, so a quarantine that lands between the first check and the
-    /// `parked` store sends no token; this re-check covers that window. Clears `parked` on
-    /// every path that does not return `Ok(true)`.
-    fn armed_wait_holds(&self, wake: *mut WakeEpoch, generation: u64) -> Result<bool, RingError> {
-        // SAFETY: wake page remains mapped and atomics were initialized before activation.
-        let unpark = || unsafe { (*wake).parked.store(0, Ordering::Release) };
+    /// `parked` store sends no token; this re-check covers that window. The caller's
+    /// `ParkGuard` clears `parked` on every path that does not return `Ok(true)`.
+    fn armed_wait_holds(&self, wake: &WakeEpoch, generation: u64) -> Result<bool, RingError> {
         if self.is_quarantined() {
-            unpark();
             return Err(RingError::Quarantined);
         }
-        let available = self.data_available().inspect_err(|_| unpark())?;
-        // SAFETY: same page as above.
-        if available || unsafe { (*wake).generation.load(Ordering::SeqCst) } != generation {
-            unpark();
-            return Ok(false);
-        }
-        Ok(true)
+        let available = self.data_available()?;
+        Ok(!available && wake.generation.load(Ordering::SeqCst) == generation)
     }
 
     /// Clears the parked marker set by `arm_data_wait` and drains the doorbell token. A
     /// doorbell failure means the peer closed its end, which quarantines the ring.
     pub fn complete_data_wait(&self) -> Result<(), RingError> {
-        let wake = self.data_wake_ptr()?;
-        // SAFETY: wake page remains mapped and atomics were initialized before activation.
-        unsafe { (*wake).parked.store(0, Ordering::Release) };
+        self.data_wake()?.parked.store(0, Ordering::Release);
         self.data_ready
             .drain()
             .map_err(|error| self.quarantine_with(error))
@@ -1125,13 +1245,11 @@ impl Ring {
     /// set, paired with the grant. Callable once per created ring; an attached ring or a
     /// second call fails with `DoorbellFailed`.
     pub fn attachment(&self) -> Result<RingAttachment, RingError> {
-        // SAFETY: F_DUPFD_CLOEXEC duplicates owned valid descriptor.
-        let raw = unsafe { libc::fcntl(self.raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-        if raw < 0 {
-            return Err(RingError::ObjectSetupFailed);
-        }
-        // SAFETY: successful fcntl returns a newly owned descriptor.
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let fd = self
+            .mapping
+            .fd()
+            .try_clone()
+            .map_err(|_| RingError::ObjectSetupFailed)?;
         Ok(RingAttachment {
             descriptors: [
                 fd,
@@ -1178,44 +1296,34 @@ impl Ring {
         let sequence = published
             .checked_add(1)
             .ok_or(ProducerError::SequenceExhausted)?;
-        let slot = self.slot_ptr(sequence).map_err(ProducerError::Ring)?;
+        let slot = self.slot(sequence).map_err(ProducerError::Ring)?;
         // `outstanding < depth` means this slot's previous occupant was reclaimed and stored
         // `SLOT_FREE`, so any other state is corruption rather than backpressure.
-        // SAFETY: slot points to initialized atomics in mapping.
-        unsafe {
-            (*slot)
-                .state
-                .compare_exchange(
-                    SLOT_FREE,
-                    SLOT_PRODUCER_RESERVED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .map_err(|_| {
-                    ProducerError::Ring(self.quarantine_with(RingError::InvalidSharedState))
-                })?;
-        }
+        slot.state
+            .compare_exchange(
+                SLOT_FREE,
+                SLOT_PRODUCER_RESERVED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| {
+                ProducerError::Ring(self.quarantine_with(RingError::InvalidSharedState))
+            })?;
         let plan = match SpanPlan::reserve(self.arena_bytes(), write, reclaimed, bound) {
             Ok(plan) => plan,
             Err(ArenaError::Exhausted) => {
-                // SAFETY: producer owns reserved slot and no descriptor was published.
-                unsafe { (*slot).state.store(SLOT_FREE, Ordering::Release) };
+                slot.state.store(SLOT_FREE, Ordering::Release);
                 return Err(ProducerError::Exhausted);
             }
             Err(error) => {
-                // SAFETY: same rollback as exhaustion.
-                unsafe { (*slot).state.store(SLOT_FREE, Ordering::Release) };
+                slot.state.store(SLOT_FREE, Ordering::Release);
                 // Cursors the protocol cannot produce are a fault, not backpressure.
                 self.enter_quarantine();
                 return Err(ProducerError::Arena(error));
             }
         };
-        // SAFETY: reserved slot is producer-owned until commit or drop.
-        unsafe {
-            (*slot)
-                .reservation_len
-                .store(plan.allocation_len(), Ordering::Relaxed)
-        };
+        slot.reservation_len
+            .store(plan.allocation_len(), Ordering::Relaxed);
         // `SpanPlan::reserve` checked this sum.
         self.reserved_end
             .set(Some(plan.allocation_start() + plan.allocation_len()));
@@ -1246,57 +1354,32 @@ impl Ring {
                 Err(ProducerError::Exhausted) => return Err(ProducerError::Deadline),
                 result => return result,
             }
-            let wake = self.capacity_wake_ptr().map_err(ProducerError::Ring)?;
-            // SAFETY: wake page remains mapped and atomics were initialized before activation.
-            let generation = unsafe { (*wake).generation.load(Ordering::SeqCst) };
-            // A nonzero parked value identifies this generation-bound park epoch.
-            unsafe {
-                (*wake)
-                    .parked
-                    .store(generation.wrapping_add(1), Ordering::SeqCst)
-            };
+            let wake = self.capacity_wake().map_err(ProducerError::Ring)?;
+            // The guard clears `parked` on every exit from this iteration, including `?`.
+            let (generation, _guard) = ParkGuard::arm(wake);
             match self.try_reserve(bound, wire_header) {
                 Err(ProducerError::Exhausted) if Instant::now() < deadline => {}
-                Err(ProducerError::Exhausted) => {
-                    unsafe { (*wake).parked.store(0, Ordering::Release) };
-                    return Err(ProducerError::Deadline);
-                }
-                result => {
-                    unsafe { (*wake).parked.store(0, Ordering::Release) };
-                    return result;
-                }
+                Err(ProducerError::Exhausted) => return Err(ProducerError::Deadline),
+                result => return result,
             }
-            if unsafe { (*wake).generation.load(Ordering::SeqCst) } != generation {
-                unsafe { (*wake).parked.store(0, Ordering::Release) };
+            if wake.generation.load(Ordering::SeqCst) != generation {
                 continue;
             }
-            if let Err(error) = self.capacity_ready.drain() {
-                unsafe { (*wake).parked.store(0, Ordering::Release) };
-                return Err(ProducerError::Ring(self.quarantine_with(error)));
-            }
+            self.capacity_ready
+                .drain()
+                .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
             match self.try_reserve(bound, wire_header) {
                 Err(ProducerError::Exhausted) if Instant::now() < deadline => {}
-                Err(ProducerError::Exhausted) => {
-                    unsafe { (*wake).parked.store(0, Ordering::Release) };
-                    return Err(ProducerError::Deadline);
-                }
-                result => {
-                    unsafe { (*wake).parked.store(0, Ordering::Release) };
-                    return result;
-                }
+                Err(ProducerError::Exhausted) => return Err(ProducerError::Deadline),
+                result => return result,
             }
-            if unsafe { (*wake).generation.load(Ordering::SeqCst) } != generation {
-                unsafe { (*wake).parked.store(0, Ordering::Release) };
+            if wake.generation.load(Ordering::SeqCst) != generation {
                 continue;
             }
-            let ready = match self.capacity_ready.wait_until(deadline) {
-                Ok(ready) => ready,
-                Err(error) => {
-                    unsafe { (*wake).parked.store(0, Ordering::Release) };
-                    return Err(ProducerError::Ring(self.quarantine_with(error)));
-                }
-            };
-            unsafe { (*wake).parked.store(0, Ordering::Release) };
+            let ready = self
+                .capacity_ready
+                .wait_until(deadline)
+                .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
             if !ready && Instant::now() >= deadline {
                 return Err(ProducerError::Deadline);
             }
@@ -1326,7 +1409,7 @@ impl Ring {
     }
 
     fn try_receive_inner(&self) -> Result<Option<ReceiveLease<'_>>, RingError> {
-        let consumer = self.consumer_ptr()?;
+        let consumer = self.consumer()?;
         let ConsumerCursors {
             consumed,
             active_leases: active,
@@ -1344,43 +1427,31 @@ impl Ring {
         let sequence = consumed
             .checked_add(1)
             .ok_or(RingError::SequenceExhausted)?;
-        let slot = self.slot_ptr(sequence)?;
-        // SAFETY: consumer alone transitions published slot to held.
-        unsafe {
-            (*slot)
-                .state
-                .compare_exchange(
-                    SLOT_PUBLISHED,
-                    SLOT_RECEIVER_HELD,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .map_err(|_| RingError::InvalidSharedState)?;
-        }
-        // SAFETY: acquire publication made descriptor visible; one read snapshots all fields.
-        let shared = unsafe { std::ptr::read_volatile((*slot).descriptor.get()) };
+        let slot = self.slot(sequence)?;
+        slot.state
+            .compare_exchange(
+                SLOT_PUBLISHED,
+                SLOT_RECEIVER_HELD,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| RingError::InvalidSharedState)?;
+        // The acquire exchange above pairs with the producer's release of `published`.
+        let shared = slot.read_descriptor();
         let expected = ReleaseIdentity::new(self.grant.incarnation, self.grant.lane, sequence);
         let validated = shared
             .snapshot()
             .validate(expected, self.arena_bytes())
             .map_err(RingError::Descriptor)?;
-        // SAFETY: validated span offsets and lengths fit arena and usize on this mapping.
-        let first =
-            unsafe { self.lease_span(validated.span(0).ok_or(RingError::InvalidSharedState)?)? };
+        let first = self.lease_span(validated.span(0).ok_or(RingError::InvalidSharedState)?)?;
         let second = if validated.span_count() == 2 {
-            // SAFETY: validated second span exists and fits mapping.
-            Some(unsafe {
-                self.lease_span(validated.span(1).ok_or(RingError::InvalidSharedState)?)?
-            })
+            Some(self.lease_span(validated.span(1).ok_or(RingError::InvalidSharedState)?)?)
         } else {
             None
         };
-        // SAFETY: consumer owns state and cursor; descriptor stays immutable until release.
-        unsafe {
-            (*slot).state.store(SLOT_RECEIVER_LEASED, Ordering::Release);
-            Self::advance_cursor(&(*consumer).consumed, consumed, sequence)?;
-            Self::advance_cursor(&(*consumer).active_leases, active, active + 1)?;
-        }
+        slot.state.store(SLOT_RECEIVER_LEASED, Ordering::Release);
+        Self::advance_cursor(&consumer.consumed, consumed, sequence)?;
+        Self::advance_cursor(&consumer.active_leases, active, active + 1)?;
         self.consumer_cursors.set(ConsumerCursors {
             consumed: sequence,
             active_leases: active + 1,
@@ -1388,18 +1459,14 @@ impl Ring {
         self.consumer.set(true);
         let body_len =
             usize::try_from(validated.body_len()).map_err(|_| RingError::InvalidLayout)?;
-        // SAFETY: lease borrows self, spans stay mapped, callback context cannot outlive self.
-        let lease = unsafe {
-            ReceiveLease::new(
-                [Some(first), second],
-                validated.span_count(),
-                body_len,
-                validated.wire_header(),
-                validated.identity(),
-                (self as *const Self).cast(),
-                ring_release_callback,
-            )
-        }
+        let lease = ReceiveLease::new(
+            [Some(first), second],
+            validated.span_count(),
+            body_len,
+            validated.wire_header(),
+            validated.identity(),
+            self,
+        )
         .map_err(RingError::Lease)?;
         Ok(Some(lease))
     }
@@ -1417,22 +1484,14 @@ impl Ring {
             if Instant::now() >= deadline {
                 return Ok(false);
             }
-            if !self.arm_data_wait()? {
+            let Some(_guard) = self.arm_data_wait_guarded()? else {
                 continue;
-            }
-            let wake = self.data_wake_ptr()?;
-            let ready = match self.data_ready.wait_until(deadline) {
-                Ok(ready) => ready,
-                Err(error) => {
-                    // SAFETY: wake page remains mapped and atomics were initialized before
-                    // activation.
-                    unsafe { (*wake).parked.store(0, Ordering::Release) };
-                    return Err(self.quarantine_with(error));
-                }
             };
+            let ready = self
+                .data_ready
+                .wait_until(deadline)
+                .map_err(|error| self.quarantine_with(error))?;
             if !ready && Instant::now() >= deadline {
-                // SAFETY: wake page remains mapped and atomics were initialized before activation.
-                unsafe { (*wake).parked.store(0, Ordering::Release) };
                 return Ok(false);
             }
             self.complete_data_wait()?;
@@ -1485,9 +1544,7 @@ impl Ring {
         if sequence == 0 {
             return Err(LeaseError::InvalidSequence);
         }
-        let consumer = self
-            .consumer_ptr()
-            .map_err(|_| LeaseError::InvalidSequence)?;
+        let consumer = self.consumer().map_err(|_| LeaseError::InvalidSequence)?;
         // A peer-rewritten count would wrap or undercount on decrement and turn every later
         // receive into permanent backpressure.
         let ConsumerCursors {
@@ -1503,10 +1560,9 @@ impl Ring {
             return Err(LeaseError::Quarantined);
         }
         let slot = self
-            .slot_ptr(sequence)
+            .slot(sequence)
             .map_err(|_| LeaseError::InvalidSequence)?;
-        // SAFETY: descriptor remains immutable until release.
-        let descriptor = unsafe { std::ptr::read_volatile((*slot).descriptor.get()) };
+        let descriptor = slot.read_descriptor();
         if descriptor.incarnation != identity.incarnation().into_bytes() {
             return Err(LeaseError::WrongIncarnation);
         }
@@ -1516,15 +1572,12 @@ impl Ring {
         if descriptor.sequence != sequence {
             return Err(LeaseError::InvalidSequence);
         }
-        // SAFETY: release transitions only exact live lease.
-        let changed = unsafe {
-            (*slot).state.compare_exchange(
-                SLOT_RECEIVER_LEASED,
-                SLOT_RELEASE_PENDING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-        };
+        let changed = slot.state.compare_exchange(
+            SLOT_RECEIVER_LEASED,
+            SLOT_RELEASE_PENDING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         if let Err(observed) = changed {
             return Err(
                 if observed == SLOT_RELEASE_PENDING || observed == SLOT_FREE {
@@ -1534,19 +1587,15 @@ impl Ring {
                 },
             );
         }
-        // SAFETY: release publishes completion after all receiver reads.
-        unsafe {
-            (*slot)
-                .completion_sequence
-                .store(sequence, Ordering::Release);
-            Self::advance_cursor(&(*consumer).active_leases, active, active - 1)
-                .map_err(|_| LeaseError::Quarantined)?;
-        }
+        // The release store publishes completion after every receiver read.
+        slot.completion_sequence.store(sequence, Ordering::Release);
+        Self::advance_cursor(&consumer.active_leases, active, active - 1)
+            .map_err(|_| LeaseError::Quarantined)?;
         self.consumer_cursors.set(ConsumerCursors {
             consumed,
             active_leases: active - 1,
         });
-        self.signal_wake(self.capacity_wake_ptr(), &self.capacity_ready)
+        self.signal_wake(self.capacity_wake(), &self.capacity_ready)
             .map_err(|_| LeaseError::Quarantined)
     }
 
@@ -1610,19 +1659,16 @@ impl Ring {
     }
 
     fn cursor_snapshot(&self) -> Result<CursorSnapshot, RingError> {
-        let producer = self.producer_ptr()?;
-        let consumer = self.consumer_ptr()?;
-        let reclaim = self.reclaim_ptr()?;
-        // SAFETY: the pages were bounds-checked and hold initialized atomics.
-        Ok(unsafe {
-            CursorSnapshot {
-                published: (*producer).published.load(Ordering::Acquire),
-                arena_write: (*producer).arena_write.load(Ordering::Acquire),
-                consumed: (*consumer).consumed.load(Ordering::Acquire),
-                active_leases: (*consumer).active_leases.load(Ordering::Acquire),
-                completed: (*reclaim).completed.load(Ordering::Acquire),
-                arena_reclaimed: (*reclaim).arena_reclaimed.load(Ordering::Acquire),
-            }
+        let producer = self.producer()?;
+        let consumer = self.consumer()?;
+        let reclaim = self.reclaim()?;
+        Ok(CursorSnapshot {
+            published: producer.published.load(Ordering::Acquire),
+            arena_write: producer.arena_write.load(Ordering::Acquire),
+            consumed: consumer.consumed.load(Ordering::Acquire),
+            active_leases: consumer.active_leases.load(Ordering::Acquire),
+            completed: reclaim.completed.load(Ordering::Acquire),
+            arena_reclaimed: reclaim.arena_reclaimed.load(Ordering::Acquire),
         })
     }
 
@@ -1631,11 +1677,10 @@ impl Ring {
         let mut bytes = ArenaCounts::default();
         let mut charged = 0u64;
         for index in 0..self.grant.descriptor_depth {
-            let slot = self.slot_ptr(index + 1)?;
-            // SAFETY: slot atomics remain mapped.
-            let state = unsafe { (*slot).state.load(Ordering::Acquire) };
-            // SAFETY: reservation length is atomic and assigned before non-free state is observed.
-            let len = unsafe { (*slot).reservation_len.load(Ordering::Relaxed) };
+            let slot = self.slot(index + 1)?;
+            let state = slot.state.load(Ordering::Acquire);
+            // The reservation length is assigned before any non-free state becomes visible.
+            let len = slot.reservation_len.load(Ordering::Relaxed);
             match state {
                 SLOT_FREE => descriptors.free += 1,
                 SLOT_PRODUCER_RESERVED => {
@@ -1787,15 +1832,10 @@ impl Ring {
         let mut sequence = completed;
         while sequence < published {
             sequence += 1;
-            let slot = self.slot_ptr(sequence)?;
-            // SAFETY: slot atomics and descriptor remain mapped.
-            let (state, reservation_len, descriptor) = unsafe {
-                (
-                    (*slot).state.load(Ordering::Acquire),
-                    (*slot).reservation_len.load(Ordering::Acquire),
-                    std::ptr::read_volatile((*slot).descriptor.get()),
-                )
-            };
+            let slot = self.slot(sequence)?;
+            let state = slot.state.load(Ordering::Acquire);
+            let reservation_len = slot.reservation_len.load(Ordering::Acquire);
+            let descriptor = slot.read_descriptor();
             if !matches!(
                 state,
                 SLOT_PUBLISHED | SLOT_RECEIVER_LEASED | SLOT_RELEASE_PENDING
@@ -1825,9 +1865,8 @@ impl Ring {
             let sequence = published
                 .checked_add(offset)
                 .ok_or(RingError::SequenceExhausted)?;
-            let slot = self.slot_ptr(sequence)?;
-            // SAFETY: slot atomics remain mapped.
-            let state = unsafe { (*slot).state.load(Ordering::Acquire) };
+            let slot = self.slot(sequence)?;
+            let state = slot.state.load(Ordering::Acquire);
             let allowed = state == SLOT_FREE || (offset == 1 && state == SLOT_PRODUCER_RESERVED);
             if !allowed {
                 return Err(RingError::InvalidSharedState);
@@ -1855,21 +1894,8 @@ impl Ring {
     /// Arena pages the kernel reports resident via `mincore`. Tests use it to check that a
     /// sparse ring stays sparse.
     pub fn resident_arena_pages(&self) -> Result<usize, RingError> {
-        let page_size = system_page_size();
-        let arena_len = self.arena_bytes();
-        let mut residency = vec![0u8; residency_vector_len(arena_len, page_size)];
-        // SAFETY: arena offset and length lie inside live mapping.
-        let result = unsafe {
-            libc::mincore(
-                self.mapping.base.as_ptr().add(self.layout.arena).cast(),
-                arena_len,
-                residency.as_mut_ptr().cast(),
-            )
-        };
-        if result != 0 {
-            return Err(RingError::ObjectValidationFailed);
-        }
-        Ok(residency.into_iter().filter(|entry| entry & 1 == 1).count())
+        self.mapping
+            .resident_pages(self.layout.arena, self.arena_bytes())
     }
 
     /// Mappings this ring holds; always one. Exists so callers charge admission uniformly.
@@ -1888,12 +1914,11 @@ impl Ring {
     /// ignored here: the ring is already terminal and the wake is best effort.
     pub fn enter_quarantine(&self) {
         self.quarantined.set(true);
-        if let Ok(page) = self.lifecycle_ptr() {
-            // SAFETY: lifecycle page remains mapped and flag is atomic.
-            unsafe { (*page).quarantined.store(1, Ordering::Release) };
+        if let Ok(flag) = self.mapping.lifecycle_quarantined(self.layout) {
+            flag.store(1, Ordering::Release);
         }
-        let _ = self.signal_wake(self.data_wake_ptr(), &self.data_ready);
-        let _ = self.signal_wake(self.capacity_wake_ptr(), &self.capacity_ready);
+        let _ = self.signal_wake(self.data_wake(), &self.data_ready);
+        let _ = self.signal_wake(self.capacity_wake(), &self.capacity_ready);
     }
 
     /// True if this handle latched quarantine or the shared flag is set. Observing the shared
@@ -1904,11 +1929,9 @@ impl Ring {
             return true;
         }
         let observed = self
-            .lifecycle_ptr()
-            .map(|page| {
-                // SAFETY: lifecycle page remains mapped and flag is atomic.
-                unsafe { (*page).quarantined.load(Ordering::Acquire) != 0 }
-            })
+            .mapping
+            .lifecycle_quarantined(self.layout)
+            .map(|flag| flag.load(Ordering::Acquire) != 0)
             .unwrap_or(true);
         if observed {
             self.quarantined.set(true);
@@ -1934,16 +1957,13 @@ impl Ring {
 
     /// Loads the producer-owned cursors and checks them against this handle's own record.
     fn verified_producer_cursors(&self) -> Result<ProducerCursors, RingError> {
-        let producer = self.producer_ptr()?;
-        let reclaim = self.reclaim_ptr()?;
-        // SAFETY: both pages were bounds-checked and hold initialized atomics.
-        let shared = unsafe {
-            ProducerCursors {
-                published: (*producer).published.load(Ordering::Acquire),
-                arena_write: (*producer).arena_write.load(Ordering::Acquire),
-                completed: (*reclaim).completed.load(Ordering::Acquire),
-                arena_reclaimed: (*reclaim).arena_reclaimed.load(Ordering::Acquire),
-            }
+        let producer = self.producer()?;
+        let reclaim = self.reclaim()?;
+        let shared = ProducerCursors {
+            published: producer.published.load(Ordering::Acquire),
+            arena_write: producer.arena_write.load(Ordering::Acquire),
+            completed: reclaim.completed.load(Ordering::Acquire),
+            arena_reclaimed: reclaim.arena_reclaimed.load(Ordering::Acquire),
         };
         if shared != self.producer_cursors.get() {
             return Err(RingError::InvalidSharedState);
@@ -1954,9 +1974,8 @@ impl Ring {
     /// Loads `published` and rejects a value below the greatest one this handle has seen or
     /// more than `descriptor_depth` ahead of `consumed`, which no producer can reach.
     fn verified_published(&self, consumed: u64) -> Result<u64, RingError> {
-        let producer = self.producer_ptr()?;
-        // SAFETY: producer page holds initialized shared atomics; acquire pairs with publication.
-        let published = unsafe { (*producer).published.load(Ordering::Acquire) };
+        // Acquire pairs with the producer's release store in `publish_commit`.
+        let published = self.producer()?.published.load(Ordering::Acquire);
         let queued = published
             .checked_sub(consumed)
             .ok_or(RingError::InvalidSharedState)?;
@@ -1969,13 +1988,10 @@ impl Ring {
 
     /// Loads the consumer-owned cursors and checks them against this handle's own record.
     fn verified_consumer_cursors(&self) -> Result<ConsumerCursors, RingError> {
-        let consumer = self.consumer_ptr()?;
-        // SAFETY: the page was bounds-checked and holds initialized atomics.
-        let shared = unsafe {
-            ConsumerCursors {
-                consumed: (*consumer).consumed.load(Ordering::Acquire),
-                active_leases: (*consumer).active_leases.load(Ordering::Acquire),
-            }
+        let consumer = self.consumer()?;
+        let shared = ConsumerCursors {
+            consumed: consumer.consumed.load(Ordering::Acquire),
+            active_leases: consumer.active_leases.load(Ordering::Acquire),
         };
         if shared != self.consumer_cursors.get() {
             return Err(RingError::InvalidSharedState);
@@ -1987,62 +2003,46 @@ impl Ring {
         self.grant.arena_bytes as usize
     }
 
-    fn producer_ptr(&self) -> Result<*mut ProducerPage, RingError> {
-        self.mapping.ptr_at(self.layout.producer)
+    fn producer(&self) -> Result<&ProducerPage, RingError> {
+        self.mapping.producer(self.layout)
     }
 
-    fn consumer_ptr(&self) -> Result<*mut ConsumerPage, RingError> {
-        self.mapping.ptr_at(self.layout.consumer)
+    fn consumer(&self) -> Result<&ConsumerPage, RingError> {
+        self.mapping.consumer(self.layout)
     }
 
-    fn reclaim_ptr(&self) -> Result<*mut ReclaimPage, RingError> {
-        self.mapping.ptr_at(self.layout.reclaim)
+    fn reclaim(&self) -> Result<&ReclaimPage, RingError> {
+        self.mapping.reclaim(self.layout)
     }
 
-    fn data_wake_ptr(&self) -> Result<*mut WakeEpoch, RingError> {
-        self.mapping.ptr_at(self.layout.data_wake)
+    fn data_wake(&self) -> Result<&WakeEpoch, RingError> {
+        self.mapping.data_wake(self.layout)
     }
 
-    fn capacity_wake_ptr(&self) -> Result<*mut WakeEpoch, RingError> {
-        self.mapping.ptr_at(self.layout.capacity_wake)
-    }
-
-    fn lifecycle_ptr(&self) -> Result<*mut LifecyclePage, RingError> {
-        self.mapping.ptr_at(self.layout.lifecycle)
+    fn capacity_wake(&self) -> Result<&WakeEpoch, RingError> {
+        self.mapping.capacity_wake(self.layout)
     }
 
     fn signal_wake(
         &self,
-        wake: Result<*mut WakeEpoch, RingError>,
+        wake: Result<&WakeEpoch, RingError>,
         doorbell: &Doorbell,
     ) -> Result<(), RingError> {
         let wake = wake?;
-        // SAFETY: wake page remains mapped and is shared through atomics.
-        unsafe {
-            (*wake).generation.fetch_add(1, Ordering::SeqCst);
-            if (*wake).parked.swap(0, Ordering::SeqCst) != 0 {
-                doorbell.signal()?;
-            }
+        wake.generation.fetch_add(1, Ordering::SeqCst);
+        if wake.parked.swap(0, Ordering::SeqCst) != 0 {
+            doorbell.signal()?;
         }
         Ok(())
     }
 
-    fn slot_ptr(&self, sequence: u64) -> Result<*mut DescriptorSlot, RingError> {
+    fn slot(&self, sequence: u64) -> Result<&DescriptorSlot, RingError> {
         if sequence == 0 || self.grant.descriptor_depth == 0 {
             return Err(RingError::InvalidSharedState);
         }
         let index = (sequence - 1) % self.grant.descriptor_depth;
-        let offset = self
-            .layout
-            .slots
-            .checked_add(
-                usize::try_from(index)
-                    .map_err(|_| RingError::ArithmeticOverflow)?
-                    .checked_mul(size_of::<DescriptorSlot>())
-                    .ok_or(RingError::ArithmeticOverflow)?,
-            )
-            .ok_or(RingError::ArithmeticOverflow)?;
-        self.mapping.ptr_at(offset)
+        let index = usize::try_from(index).map_err(|_| RingError::ArithmeticOverflow)?;
+        self.mapping.slot(self.layout, index)
     }
 
     /// Shadow entry for `sequence`; `sequence` is nonzero because callers derive it from a
@@ -2052,21 +2052,18 @@ impl Ring {
         &self.published_allocations[index]
     }
 
-    unsafe fn lease_span<'lease>(
-        &'lease self,
-        span: ArenaSpan,
-    ) -> Result<LeaseSpan<'lease>, RingError> {
+    /// Wraps a validated span of the arena. `span` came from `FrameDescriptor::validate` or
+    /// `SpanPlan`, both of which bound it to the arena; `arena_ptr` re-checks anyway.
+    fn lease_span<'lease>(&'lease self, span: ArenaSpan) -> Result<LeaseSpan<'lease>, RingError> {
         let offset = usize::try_from(span.offset()).map_err(|_| RingError::InvalidLayout)?;
         let len = usize::try_from(span.len()).map_err(|_| RingError::InvalidLayout)?;
-        let end = offset
-            .checked_add(len)
-            .ok_or(RingError::ArithmeticOverflow)?;
-        if end > self.arena_bytes() {
-            return Err(RingError::InvalidLayout);
-        }
-        // SAFETY: descriptor validation bounded span within mapped arena.
-        let ptr = unsafe { self.mapping.base.as_ptr().add(self.layout.arena + offset) };
-        // SAFETY: pointer and length remain valid while self is borrowed.
+        let ptr = self
+            .mapping
+            .arena_ptr(self.layout, self.arena_bytes(), offset, len)?;
+        // SAFETY: `arena_ptr` checked `[offset, offset + len)` against both the arena and the
+        // mapping length, and the mapping (owned by `self`) stays mapped for `'lease`. No
+        // `&[u8]` over the arena is ever formed in this crate; access goes through volatile
+        // or atomic reads.
         unsafe { LeaseSpan::new(ptr, len) }.map_err(RingError::Lease)
     }
 
@@ -2076,7 +2073,7 @@ impl Ring {
     }
 
     fn reclaim_completed_inner(&self) -> Result<(), RingError> {
-        let reclaim = self.reclaim_ptr()?;
+        let reclaim = self.reclaim()?;
         let cursors = self.verified_producer_cursors()?;
         let ProducerCursors {
             completed,
@@ -2088,16 +2085,15 @@ impl Ring {
         let mut run_len = 0u64;
         loop {
             let next = last.checked_add(1).ok_or(RingError::SequenceExhausted)?;
-            let slot = self.slot_ptr(next)?;
-            // SAFETY: acquire pairs with receiver release publication.
-            if unsafe { (*slot).completion_sequence.load(Ordering::Acquire) } != next {
+            let slot = self.slot(next)?;
+            // Acquire pairs with the receiver's release store of `completion_sequence`.
+            if slot.completion_sequence.load(Ordering::Acquire) != next {
                 break;
             }
-            if unsafe { (*slot).state.load(Ordering::Acquire) } != SLOT_RELEASE_PENDING {
+            if slot.state.load(Ordering::Acquire) != SLOT_RELEASE_PENDING {
                 return Err(RingError::InvalidSharedState);
             }
-            // SAFETY: pending descriptor remains immutable.
-            let descriptor = unsafe { std::ptr::read_volatile((*slot).descriptor.get()) };
+            let descriptor = slot.read_descriptor();
             let expected = ReleaseIdentity::new(self.grant.incarnation, self.grant.lane, next);
             let validated = descriptor
                 .snapshot()
@@ -2137,20 +2133,15 @@ impl Ring {
             self.punch_dead_pages(new_reclaimed, arena_write, false)?;
         }
         for sequence in completed + 1..=last {
-            let slot = self.slot_ptr(sequence)?;
+            let slot = self.slot(sequence)?;
             self.allocation_shadow(sequence).set(None);
-            // SAFETY: removal succeeded and producer exclusively publishes reclaimed capacity.
-            unsafe {
-                (*slot).reservation_len.store(0, Ordering::Relaxed);
-                (*slot).completion_sequence.store(0, Ordering::Relaxed);
-                (*slot).state.store(SLOT_FREE, Ordering::Release);
-            }
+            slot.reservation_len.store(0, Ordering::Relaxed);
+            slot.completion_sequence.store(0, Ordering::Relaxed);
+            slot.state.store(SLOT_FREE, Ordering::Release);
         }
-        // SAFETY: capacity becomes visible only after every removal succeeds.
-        unsafe {
-            Self::advance_cursor(&(*reclaim).arena_reclaimed, reclaimed, new_reclaimed)?;
-            Self::advance_cursor(&(*reclaim).completed, completed, last)?;
-        }
+        // Capacity becomes visible only after every removal succeeded.
+        Self::advance_cursor(&reclaim.arena_reclaimed, reclaimed, new_reclaimed)?;
+        Self::advance_cursor(&reclaim.completed, completed, last)?;
         self.producer_cursors.set(ProducerCursors {
             completed: last,
             arena_reclaimed: new_reclaimed,
@@ -2203,10 +2194,7 @@ impl Ring {
         let remove = |offset, len| {
             self.page_removals
                 .set(self.page_removals.get().wrapping_add(1));
-            if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
-                return Err(RingError::PageRemovalFailed);
-            }
-            Ok(())
+            remove_pages(self.mapping.base, offset, len)
         };
         if everything && live_end == reclaimed {
             let start = punched & !(page_size_u64 - 1);
@@ -2287,12 +2275,9 @@ impl Ring {
                 self.quarantine_with(error);
             }
         }
-        if let Ok(slot) = self.slot_ptr(sequence) {
-            // SAFETY: reservation owner calls only before publication.
-            unsafe {
-                (*slot).reservation_len.store(0, Ordering::Relaxed);
-                (*slot).state.store(SLOT_FREE, Ordering::Release);
-            }
+        if let Ok(slot) = self.slot(sequence) {
+            slot.reservation_len.store(0, Ordering::Relaxed);
+            slot.state.store(SLOT_FREE, Ordering::Release);
         }
     }
 
@@ -2313,9 +2298,7 @@ impl Ring {
         {
             self.page_removals
                 .set(self.page_removals.get().wrapping_add(1));
-            if remove_pages(self.mapping.base.as_ptr(), offset, len) != 0 {
-                return Err(RingError::PageRemovalFailed);
-            }
+            remove_pages(self.mapping.base, offset, len)?;
         }
         Ok(())
     }
@@ -2347,13 +2330,13 @@ impl Ring {
             span_offsets: [spans[0].offset(), spans[1].offset()],
             span_lengths: [spans[0].len(), spans[1].len()],
         };
-        let slot = self.slot_ptr(sequence).map_err(ProducerError::Ring)?;
-        let producer = self.producer_ptr().map_err(ProducerError::Ring)?;
+        // Both pages are re-fetched in `publish_commit`; checking them here keeps every
+        // failure before the first shared-state write.
+        self.slot(sequence).map_err(ProducerError::Ring)?;
+        self.producer().map_err(ProducerError::Ring)?;
         Ok(PreparedCommit {
             identity,
             descriptor,
-            slot,
-            producer,
             // `SpanPlan::reserve` checked this sum.
             next_write: plan.allocation_start() + plan.allocation_len(),
         })
@@ -2365,8 +2348,6 @@ impl Ring {
         let PreparedCommit {
             identity,
             descriptor,
-            slot,
-            producer,
             next_write,
         } = prepared;
         self.allocation_shadow(identity.sequence()).set(Some((
@@ -2374,26 +2355,25 @@ impl Ring {
             descriptor.allocation_len,
         )));
         let cursors = self.producer_cursors.get();
-        // SAFETY: producer exclusively owns reserved slot and arena range.
-        unsafe {
-            std::ptr::write_volatile((*slot).descriptor.get(), descriptor);
-            (*slot).state.store(SLOT_PUBLISHED, Ordering::Relaxed);
-            Self::advance_cursor(&(*producer).arena_write, cursors.arena_write, next_write)
-                .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
-            Self::advance_cursor(
-                &(*producer).published,
-                cursors.published,
-                identity.sequence(),
-            )
+        let slot = self
+            .slot(identity.sequence())
             .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
-        }
+        let producer = self
+            .producer()
+            .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
+        slot.write_descriptor(descriptor);
+        slot.state.store(SLOT_PUBLISHED, Ordering::Relaxed);
+        Self::advance_cursor(&producer.arena_write, cursors.arena_write, next_write)
+            .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
+        Self::advance_cursor(&producer.published, cursors.published, identity.sequence())
+            .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
         self.producer_cursors.set(ProducerCursors {
             published: identity.sequence(),
             arena_write: next_write,
             ..cursors
         });
         self.reserved_end.set(None);
-        if let Err(error) = self.signal_wake(self.data_wake_ptr(), &self.data_ready) {
+        if let Err(error) = self.signal_wake(self.data_wake(), &self.data_ready) {
             self.enter_quarantine();
             return Err(ProducerError::Ring(error));
         }
@@ -2426,14 +2406,14 @@ impl Ring {
             let offset = (absolute % self.grant.arena_bytes) as usize;
             let available = self.arena_bytes() - offset;
             let take = available.min(bytes.len() - copied);
-            // SAFETY: active reservation owns range and chunk remains inside arena mapping.
-            unsafe {
-                volatile_copy(
-                    bytes.as_ptr().add(copied),
-                    self.mapping.base.as_ptr().add(self.layout.arena + offset),
-                    take,
-                );
-            }
+            let destination = self
+                .mapping
+                .arena_ptr(self.layout, self.arena_bytes(), offset, take)
+                .map_err(ProducerError::Ring)?;
+            // SAFETY: `arena_ptr` checked `[offset, offset + take)` against the arena and the
+            // mapping, and no Rust reference covers arena bytes; the reservation owns this
+            // arena range until commit or abort, so no reader has a lease over it.
+            unsafe { copy_in(&bytes[copied..copied + take], destination) };
             copied += take;
         }
         Ok(())
@@ -2450,18 +2430,13 @@ impl fmt::Debug for Ring {
 struct PreparedCommit {
     identity: ReleaseIdentity,
     descriptor: SharedDescriptor,
-    slot: *mut DescriptorSlot,
-    producer: *mut ProducerPage,
     next_write: u64,
 }
 
-unsafe fn ring_release_callback(
-    context: *const (),
-    identity: ReleaseIdentity,
-) -> Result<(), LeaseError> {
-    // SAFETY: ReceiveLease ties context to live borrowed Ring.
-    let ring = unsafe { &*context.cast::<Ring>() };
-    ring.release(identity)
+impl ReleaseSink for Ring {
+    fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError> {
+        Ring::release(self, identity)
+    }
 }
 
 /// A reserved slot and arena range the producer fills then commits. Dropping without
@@ -2504,8 +2479,8 @@ impl ProducerReservation<'_> {
         let Some(span) = self.plan.span(index) else {
             return Ok(None);
         };
-        // SAFETY: reservation keeps ring mapping and arena range live.
-        unsafe { self.ring.lease_span(span) }
+        self.ring
+            .lease_span(span)
             .map(Some)
             .map_err(ProducerError::Ring)
     }
@@ -2771,59 +2746,57 @@ fn initialize_mapping(
     layout: Layout,
     grant: RingGrant,
 ) -> Result<(), RingError> {
-    let producer = mapping.ptr_at::<ProducerPage>(layout.producer)?;
-    let consumer = mapping.ptr_at::<ConsumerPage>(layout.consumer)?;
-    let reclaim = mapping.ptr_at::<ReclaimPage>(layout.reclaim)?;
-    let data_wake = mapping.ptr_at::<WakeEpoch>(layout.data_wake)?;
-    let capacity_wake = mapping.ptr_at::<WakeEpoch>(layout.capacity_wake)?;
-    // SAFETY: fresh mapping is exclusively initialized before publication.
-    unsafe {
-        producer.write(ProducerPage {
+    mapping.initialize_page(
+        layout.producer,
+        ProducerPage {
             published: AtomicU64::new(0),
             arena_write: AtomicU64::new(0),
-        });
-        consumer.write(ConsumerPage {
+            _padding: UnsafeCell::new([0; CONTROL_PAGE_PADDING]),
+        },
+    )?;
+    mapping.initialize_page(
+        layout.consumer,
+        ConsumerPage {
             consumed: AtomicU64::new(0),
             active_leases: AtomicU64::new(0),
-        });
-        reclaim.write(ReclaimPage {
+            _padding: UnsafeCell::new([0; CONTROL_PAGE_PADDING]),
+        },
+    )?;
+    mapping.initialize_page(
+        layout.reclaim,
+        ReclaimPage {
             completed: AtomicU64::new(0),
             arena_reclaimed: AtomicU64::new(0),
-        });
-        data_wake.write(WakeEpoch {
-            generation: AtomicU64::new(0),
-            parked: AtomicU64::new(0),
-        });
-        capacity_wake.write(WakeEpoch {
-            generation: AtomicU64::new(0),
-            parked: AtomicU64::new(0),
-        });
+            _padding: UnsafeCell::new([0; CONTROL_PAGE_PADDING]),
+        },
+    )?;
+    for offset in [layout.data_wake, layout.capacity_wake] {
+        mapping.initialize_page(
+            offset,
+            WakeEpoch {
+                generation: AtomicU64::new(0),
+                parked: AtomicU64::new(0),
+                _padding: UnsafeCell::new([0; CONTROL_PAGE_PADDING]),
+            },
+        )?;
     }
     for index in 0..grant.descriptor_depth {
-        let offset = layout
-            .slots
-            .checked_add(
-                usize::try_from(index)
-                    .map_err(|_| RingError::ArithmeticOverflow)?
-                    .checked_mul(size_of::<DescriptorSlot>())
-                    .ok_or(RingError::ArithmeticOverflow)?,
-            )
-            .ok_or(RingError::ArithmeticOverflow)?;
-        let slot = mapping.ptr_at::<DescriptorSlot>(offset)?;
-        // SAFETY: each fresh slot is initialized once before activation.
-        unsafe {
-            slot.write(DescriptorSlot {
+        let index = usize::try_from(index).map_err(|_| RingError::ArithmeticOverflow)?;
+        mapping.initialize_page(
+            layout.slot_offset(index)?,
+            DescriptorSlot {
                 state: AtomicU8::new(SLOT_FREE),
+                _state_padding: UnsafeCell::new([0; 7]),
                 completion_sequence: AtomicU64::new(0),
                 reservation_len: AtomicU64::new(0),
                 descriptor: UnsafeCell::new(SharedDescriptor::ZERO),
-            });
-        }
+                _padding: UnsafeCell::new([0; 112]),
+            },
+        )?;
     }
-    let lifecycle = mapping.ptr_at::<LifecyclePage>(layout.lifecycle)?;
-    // SAFETY: fresh lifecycle page is initialized once before activation.
-    unsafe {
-        lifecycle.write(LifecyclePage {
+    mapping.initialize_page(
+        layout.lifecycle,
+        LifecyclePage {
             magic: MAPPING_MAGIC,
             layout_version: LAYOUT_VERSION,
             descriptor_depth: grant.descriptor_depth,
@@ -2833,9 +2806,8 @@ fn initialize_mapping(
             incarnation: grant.incarnation.into_bytes(),
             lane: grant.lane,
             quarantined: AtomicU8::new(0),
-        });
-    }
-    Ok(())
+        },
+    )
 }
 
 fn validate_lifecycle(
@@ -2843,28 +2815,15 @@ fn validate_lifecycle(
     layout: Layout,
     expected: RingGrant,
 ) -> Result<(), RingError> {
-    let lifecycle = mapping.ptr_at::<LifecyclePage>(layout.lifecycle)?;
-    // SAFETY: bounds validated; integer fields have all-bit valid representations.
-    let snapshot = unsafe {
-        (
-            std::ptr::read_volatile(std::ptr::addr_of!((*lifecycle).magic)),
-            std::ptr::read_volatile(std::ptr::addr_of!((*lifecycle).layout_version)),
-            std::ptr::read_volatile(std::ptr::addr_of!((*lifecycle).descriptor_depth)),
-            std::ptr::read_volatile(std::ptr::addr_of!((*lifecycle).arena_bytes)),
-            std::ptr::read_volatile(std::ptr::addr_of!((*lifecycle).max_leases)),
-            std::ptr::read_volatile(std::ptr::addr_of!((*lifecycle).total_bytes)),
-            std::ptr::read_volatile(std::ptr::addr_of!((*lifecycle).incarnation)),
-            std::ptr::read_volatile(std::ptr::addr_of!((*lifecycle).lane)),
-        )
-    };
-    if snapshot.0 != MAPPING_MAGIC
-        || snapshot.1 != expected.layout_version
-        || snapshot.2 != expected.descriptor_depth
-        || snapshot.3 != expected.arena_bytes
-        || snapshot.4 != expected.max_leases
-        || snapshot.5 != expected.total_bytes
-        || snapshot.6 != expected.incarnation.into_bytes()
-        || snapshot.7 != expected.lane
+    let snapshot = mapping.lifecycle_snapshot(layout)?;
+    if snapshot.magic != MAPPING_MAGIC
+        || snapshot.layout_version != expected.layout_version
+        || snapshot.descriptor_depth != expected.descriptor_depth
+        || snapshot.arena_bytes != expected.arena_bytes
+        || snapshot.max_leases != expected.max_leases
+        || snapshot.total_bytes != expected.total_bytes
+        || snapshot.incarnation != expected.incarnation.into_bytes()
+        || snapshot.lane != expected.lane
     {
         return Err(RingError::InvalidGrant);
     }
@@ -2872,20 +2831,14 @@ fn validate_lifecycle(
 }
 
 fn validate_object(fd: &OwnedFd, expected_len: usize) -> Result<(), RingError> {
-    // SAFETY: zeroed stat is valid output storage for fstat.
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: fd is owned and stat points to writable storage.
-    if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } != 0 {
-        return Err(RingError::ObjectValidationFailed);
-    }
-    // SAFETY: geteuid has no preconditions.
-    let current_uid = unsafe { libc::geteuid() };
-    let type_valid = stat.st_mode & libc::S_IFMT == libc::S_IFREG;
-    if stat.st_uid != current_uid
-        || stat.st_size < 0
-        || stat.st_size as usize != expected_len
+    let stat = sys::fstat(fd.as_fd()).map_err(|_| RingError::ObjectValidationFailed)?;
+    let current_uid = sys::geteuid();
+    let type_valid = stat.mode & libc::S_IFMT == libc::S_IFREG;
+    if stat.uid != current_uid
+        || stat.size < 0
+        || stat.size as usize != expected_len
         || !type_valid
-        || stat.st_mode & 0o077 != 0
+        || stat.mode & 0o077 != 0
     {
         return Err(RingError::ObjectValidationFailed);
     }
@@ -2893,53 +2846,177 @@ fn validate_object(fd: &OwnedFd, expected_len: usize) -> Result<(), RingError> {
 }
 
 fn validate_seals(fd: &OwnedFd) -> Result<(), RingError> {
-    // SAFETY: F_GET_SEALS reads flags from an owned valid descriptor.
-    let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
-    let required = libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
-    if seals < 0 || seals & required != required {
+    let seals = sys::get_seals(fd.as_fd()).map_err(|_| RingError::ObjectValidationFailed)?;
+    if seals & sys::RING_SEALS != sys::RING_SEALS {
         return Err(RingError::ObjectValidationFailed);
     }
     Ok(())
 }
 
 fn create_linux_memfd(len: usize) -> Result<OwnedFd, RingError> {
-    let name = c"shm-transport";
-    // SAFETY: static name is valid and flags request sealing support.
-    let raw = unsafe {
-        libc::syscall(
-            libc::SYS_memfd_create,
-            name.as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        ) as libc::c_int
-    };
-    if raw < 0 {
-        return Err(RingError::ObjectSetupFailed);
-    }
-    // SAFETY: successful memfd_create returns newly owned descriptor.
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let fd = sys::memfd_create(c"shm-transport").map_err(|_| RingError::ObjectSetupFailed)?;
     let len = libc::off_t::try_from(len).map_err(|_| RingError::ArithmeticOverflow)?;
-    // SAFETY: fd is valid and length was checked.
-    if unsafe { libc::ftruncate(fd.as_raw_fd(), len) } != 0
-        // SAFETY: fd is valid and mode removes group/other access.
-        || unsafe { libc::fchmod(fd.as_raw_fd(), 0o600) } != 0
-    {
-        return Err(RingError::ObjectSetupFailed);
-    }
+    sys::ftruncate(fd.as_fd(), len)
+        .and_then(|()| sys::fchmod(fd.as_fd(), 0o600))
+        .map_err(|_| RingError::ObjectSetupFailed)?;
     Ok(fd)
 }
 
 fn seal_object(fd: &OwnedFd) -> Result<(), RingError> {
-    let seals = libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
-    // SAFETY: fd supports seals because it was created with MFD_ALLOW_SEALING.
-    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
-        return Err(RingError::ObjectSetupFailed);
+    sys::add_seals(fd.as_fd(), sys::RING_SEALS).map_err(|_| RingError::ObjectSetupFailed)
+}
+
+/// Accessor tests over an anonymous mapping. Miri cannot map a memfd, punch pages, or open a
+/// doorbell, so this module exercises the one layer of `ring.rs` that touches raw memory
+/// without constructing a `Ring`.
+#[cfg(test)]
+mod miri {
+    use std::sync::atomic::Ordering;
+
+    use super::{
+        DescriptorSlot, Incarnation, LAYOUT_VERSION, Layout, MAPPING_MAGIC, Mapping, RingError,
+        RingGrant, SLOT_FREE, SLOT_PUBLISHED, SharedDescriptor, initialize_mapping,
+        validate_lifecycle,
+    };
+
+    const DEPTH: usize = 4;
+
+    fn fixture() -> (Mapping, Layout, RingGrant) {
+        let arena_bytes = super::system_page_size();
+        let layout = Layout::new(DEPTH, arena_bytes).unwrap();
+        let grant = RingGrant {
+            layout_version: LAYOUT_VERSION,
+            incarnation: Incarnation::from_bytes([9; 16]),
+            lane: 3,
+            descriptor_depth: DEPTH as u64,
+            arena_bytes: arena_bytes as u64,
+            max_leases: 2,
+            total_bytes: layout.total as u64,
+        };
+        let mapping = Mapping::anonymous(layout.total).unwrap();
+        initialize_mapping(&mapping, layout, grant).unwrap();
+        (mapping, layout, grant)
     }
-    Ok(())
+
+    #[test]
+    fn every_page_accessor_reads_the_initialized_zero_state() {
+        let (mapping, layout, _) = fixture();
+        assert_eq!(
+            mapping
+                .producer(layout)
+                .unwrap()
+                .published
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            mapping
+                .consumer(layout)
+                .unwrap()
+                .consumed
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            mapping
+                .reclaim(layout)
+                .unwrap()
+                .completed
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            mapping
+                .data_wake(layout)
+                .unwrap()
+                .parked
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            mapping
+                .capacity_wake(layout)
+                .unwrap()
+                .generation
+                .load(Ordering::Relaxed),
+            0
+        );
+        for index in 0..DEPTH {
+            let slot = mapping.slot(layout, index).unwrap();
+            assert_eq!(slot.state.load(Ordering::Relaxed), SLOT_FREE);
+            assert_eq!(slot.read_descriptor().sequence, 0);
+        }
+        assert_eq!(
+            mapping
+                .lifecycle_quarantined(layout)
+                .unwrap()
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn slot_index_past_depth_is_refused_before_any_dereference() {
+        let (mapping, layout, _) = fixture();
+        assert!(matches!(
+            mapping.slot(layout, DEPTH),
+            Err(RingError::InvalidLayout | RingError::ArithmeticOverflow)
+        ));
+        assert!(matches!(
+            mapping.ptr_at::<DescriptorSlot>(mapping.len),
+            Err(RingError::InvalidLayout)
+        ));
+    }
+
+    #[test]
+    fn descriptor_round_trips_through_the_volatile_cell() {
+        let (mapping, layout, _) = fixture();
+        let slot = mapping.slot(layout, 1).unwrap();
+        let written = SharedDescriptor {
+            sequence: 17,
+            lane: 3,
+            body_len: 40,
+            allocation_start: 128,
+            allocation_len: 64,
+            span_count: 1,
+            span_offsets: [128, 0],
+            span_lengths: [40, 0],
+            ..SharedDescriptor::ZERO
+        };
+        slot.write_descriptor(written);
+        slot.state.store(SLOT_PUBLISHED, Ordering::Release);
+        let read = slot.read_descriptor();
+        assert_eq!(read.sequence, 17);
+        assert_eq!(read.allocation_start, 128);
+        assert_eq!(read.span_lengths, [40, 0]);
+        assert_eq!(slot.state.load(Ordering::Acquire), SLOT_PUBLISHED);
+    }
+
+    #[test]
+    fn lifecycle_snapshot_sees_a_write_made_through_the_raw_page() {
+        let (mapping, layout, grant) = fixture();
+        validate_lifecycle(&mapping, layout, grant).unwrap();
+        let snapshot = mapping.lifecycle_snapshot(layout).unwrap();
+        assert_eq!(snapshot.magic, MAPPING_MAGIC);
+        assert_eq!(snapshot.lane, 3);
+        let page = mapping
+            .ptr_at::<super::LifecyclePage>(layout.lifecycle)
+            .unwrap();
+        // SAFETY: `ptr_at` bounds-checked the page; this is the peer's view, a raw write to a
+        // plain field with no reference outstanding.
+        unsafe { std::ptr::write_volatile(std::ptr::addr_of_mut!((*page).lane), 4) };
+        assert_eq!(mapping.lifecycle_snapshot(layout).unwrap().lane, 4);
+        assert!(matches!(
+            validate_lifecycle(&mapping, layout, grant),
+            Err(RingError::InvalidGrant)
+        ));
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
@@ -2953,7 +3030,7 @@ mod tests {
 
     use super::{
         Doorbell, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError, RingGrant,
-        SyscallCounters, removal_ranges, residency_vector_len, wire_v2_header,
+        SyscallCounters, removal_ranges, sys, wire_v2_header,
     };
 
     fn ring() -> Ring {
@@ -2992,6 +3069,11 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
+            ring.data_wake().unwrap().parked.load(Ordering::Acquire),
+            0,
+            "a timed-out data wait must not leave the consumer marked parked"
+        );
+        assert_eq!(
             ring.syscall_counters().since(before),
             SyscallCounters {
                 doorbell: 3,
@@ -3005,16 +3087,9 @@ mod tests {
         assert_eq!(ring.syscall_counters().since(before).page_removals, 1);
     }
 
-    fn clear_nonblock(fd: &OwnedFd) {
-        // SAFETY: F_GETFL and F_SETFL act on a live owned descriptor.
-        unsafe {
-            let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
-            assert!(flags >= 0);
-            assert_eq!(
-                libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK),
-                0
-            );
-        }
+    fn clear_nonblock(fd: impl AsFd) {
+        let stream = UnixStream::from(fd.as_fd().try_clone_to_owned().unwrap());
+        stream.set_nonblocking(false).unwrap();
     }
 
     #[test]
@@ -3025,23 +3100,23 @@ mod tests {
             Err(RingError::DoorbellFailed)
         ));
 
-        // SAFETY: eventfd returns a fresh owned descriptor on success.
-        let eventfd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        assert!(eventfd >= 0);
-        // SAFETY: the successful eventfd result transfers ownership here.
-        let eventfd = unsafe { OwnedFd::from_raw_fd(eventfd) };
+        let eventfd = sys::eventfd().unwrap();
         assert!(matches!(
             Doorbell::from_fd(eventfd),
             Err(RingError::DoorbellFailed)
         ));
 
-        // SAFETY: socket returns a fresh owned descriptor on success.
-        let unconnected = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-        assert!(unconnected >= 0);
-        // SAFETY: the successful socket result transfers ownership here.
-        let unconnected = unsafe { OwnedFd::from_raw_fd(unconnected) };
+        let unconnected = sys::unix_stream_socket().unwrap();
         assert!(matches!(
             Doorbell::from_fd(unconnected),
+            Err(RingError::DoorbellFailed)
+        ));
+
+        // `drain` reads a zero-length `recv` as peer close, which a datagram socket makes
+        // ambiguous, so `SO_TYPE` must reject it even though it is connected and `AF_UNIX`.
+        let (datagram, _datagram_peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        assert!(matches!(
+            Doorbell::from_fd(OwnedFd::from(datagram)),
             Err(RingError::DoorbellFailed)
         ));
 
@@ -3116,9 +3191,8 @@ mod tests {
     fn quarantine_wakes_a_parked_peer() {
         let ring = ring();
         let attached = ring.attachment().unwrap().attach().unwrap();
-        let wake = attached.data_wake_ptr().unwrap();
-        // SAFETY: shared wake page is mapped by both handles.
-        unsafe { (*wake).parked.store(1, Ordering::SeqCst) };
+        let wake = attached.data_wake().unwrap();
+        wake.parked.store(1, Ordering::SeqCst);
         ring.enter_quarantine();
         assert!(
             attached
@@ -3137,13 +3211,10 @@ mod tests {
         reservation.write(&[1]).unwrap();
         ring.enter_quarantine();
         assert_eq!(reservation.commit(1), Err(ProducerError::Quarantined));
-        let slot = ring.slot_ptr(1).unwrap();
-        let producer = ring.producer_ptr().unwrap();
-        // SAFETY: test-owned ring keeps both pages mapped.
-        unsafe {
-            assert_eq!((*slot).state.load(Ordering::Acquire), super::SLOT_FREE);
-            assert_eq!((*producer).published.load(Ordering::Acquire), 0);
-        }
+        let slot = ring.slot(1).unwrap();
+        let producer = ring.producer().unwrap();
+        assert_eq!(slot.state.load(Ordering::Acquire), super::SLOT_FREE);
+        assert_eq!(producer.published.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -3166,23 +3237,17 @@ mod tests {
         publish(&ring, &[2; 4096]);
         ring.try_receive().unwrap().unwrap().release().unwrap();
         let live = ring.try_receive().unwrap().unwrap();
-        let slot = ring.slot_ptr(1).unwrap();
-        // SAFETY: test-owned ring keeps the slot mapped.
-        unsafe {
-            let mut descriptor = std::ptr::read_volatile((*slot).descriptor.get());
-            descriptor.allocation_len = 8192;
-            std::ptr::write_volatile((*slot).descriptor.get(), descriptor);
-        }
+        let slot = ring.slot(1).unwrap();
+        let mut descriptor = slot.read_descriptor();
+        descriptor.allocation_len = 8192;
+        slot.write_descriptor(descriptor);
         assert!(matches!(
             ring.try_reserve(0, wire_v2_header(0).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
         ));
         assert!(ring.is_quarantined());
-        let reclaim = ring.reclaim_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the reclaim page mapped.
-        unsafe {
-            assert_eq!((*reclaim).arena_reclaimed.load(Ordering::Acquire), 0);
-        }
+        let reclaim = ring.reclaim().unwrap();
+        assert_eq!(reclaim.arena_reclaimed.load(Ordering::Acquire), 0);
         assert_eq!(live.segment(0).unwrap().read_byte(0), Some(2));
     }
 
@@ -3191,19 +3256,15 @@ mod tests {
         let ring = ring();
         publish(&ring, &[1]);
         let lease = ring.try_receive().unwrap().unwrap();
-        let consumer = ring.consumer_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the consumer page mapped.
-        unsafe { (*consumer).active_leases.store(0, Ordering::Release) };
+        let consumer = ring.consumer().unwrap();
+        consumer.active_leases.store(0, Ordering::Release);
         assert_eq!(lease.release(), Err(LeaseError::Quarantined));
         assert!(ring.is_quarantined());
-        // SAFETY: same mapping.
-        unsafe {
-            assert_eq!(
-                (*consumer).active_leases.load(Ordering::Acquire),
-                0,
-                "the count must not wrap"
-            );
-        }
+        assert_eq!(
+            consumer.active_leases.load(Ordering::Acquire),
+            0,
+            "the count must not wrap"
+        );
     }
 
     #[test]
@@ -3211,11 +3272,10 @@ mod tests {
         let ring = ring();
         publish(&ring, &[1; 4096]);
         let live = ring.try_receive().unwrap().unwrap();
-        let producer = ring.producer_ptr().unwrap();
+        let producer = ring.producer().unwrap();
         // In range for `SpanPlan::reserve` (`write >= reclaimed`, used bytes fit), so only the
         // handle's own record can tell it apart from a legitimate cursor.
-        // SAFETY: test-owned ring keeps the producer page mapped.
-        unsafe { (*producer).arena_write.store(0, Ordering::Release) };
+        producer.arena_write.store(0, Ordering::Release);
         assert!(matches!(
             ring.try_reserve(4096, wire_v2_header(4096).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
@@ -3229,13 +3289,10 @@ mod tests {
         let ring = ring();
         publish(&ring, &[1]);
         publish(&ring, &[2]);
-        let producer = ring.producer_ptr().unwrap();
-        let slot = ring.slot_ptr(2).unwrap();
-        // SAFETY: test-owned ring keeps both pages mapped.
-        unsafe {
-            (*producer).published.store(1, Ordering::Release);
-            (*slot).state.store(super::SLOT_FREE, Ordering::Release);
-        }
+        let producer = ring.producer().unwrap();
+        let slot = ring.slot(2).unwrap();
+        producer.published.store(1, Ordering::Release);
+        slot.state.store(super::SLOT_FREE, Ordering::Release);
         assert!(matches!(
             ring.try_reserve(1, wire_v2_header(1).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
@@ -3246,13 +3303,10 @@ mod tests {
     #[test]
     fn forged_consumer_cursors_fail_waits_instead_of_parking() {
         let ring = ring();
-        let consumer = ring.consumer_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the consumer page mapped.
-        unsafe {
-            (*consumer)
-                .active_leases
-                .store(ring.grant().max_leases + 1, Ordering::Release)
-        };
+        let consumer = ring.consumer().unwrap();
+        consumer
+            .active_leases
+            .store(ring.grant().max_leases + 1, Ordering::Release);
         let started = std::time::Instant::now();
         assert!(matches!(
             ring.wait_for_data(started + std::time::Duration::from_secs(5)),
@@ -3262,9 +3316,8 @@ mod tests {
         assert!(ring.is_quarantined());
 
         let fresh = self::ring();
-        let consumer = fresh.consumer_ptr().unwrap();
-        // SAFETY: same as above for the fresh ring.
-        unsafe { (*consumer).consumed.store(7, Ordering::Release) };
+        let consumer = fresh.consumer().unwrap();
+        consumer.consumed.store(7, Ordering::Release);
         assert!(matches!(
             fresh.arm_data_wait(),
             Err(RingError::InvalidSharedState)
@@ -3293,21 +3346,23 @@ mod tests {
     #[test]
     fn armed_wait_recheck_sees_a_quarantine_that_sent_no_token() {
         let ring = ring();
-        assert!(ring.arm_data_wait().unwrap());
-        let wake = ring.data_wake_ptr().unwrap();
-        let lifecycle = ring.lifecycle_ptr().unwrap();
-        // SAFETY: test-owned ring keeps both pages mapped.
-        let generation = unsafe {
-            // A peer that quarantined before observing `parked` writes only the flag.
-            (*lifecycle).quarantined.store(1, Ordering::Release);
-            (*wake).generation.load(Ordering::SeqCst)
-        };
+        let guard = ring.arm_data_wait_guarded().unwrap().unwrap();
+        let wake = ring.data_wake().unwrap();
+        let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
+        // A peer that quarantined before observing `parked` writes only the flag.
+        lifecycle.store(1, Ordering::Release);
+        let generation = wake.generation.load(Ordering::SeqCst);
         assert!(matches!(
             ring.armed_wait_holds(wake, generation),
             Err(RingError::Quarantined)
         ));
-        // SAFETY: same page.
-        assert_eq!(unsafe { (*wake).parked.load(Ordering::Acquire) }, 0);
+        assert_ne!(
+            wake.parked.load(Ordering::Acquire),
+            0,
+            "predicate does not unpark"
+        );
+        drop(guard);
+        assert_eq!(wake.parked.load(Ordering::Acquire), 0, "guard drop unparks");
     }
 
     #[test]
@@ -3320,9 +3375,8 @@ mod tests {
             Err(RingError::DoorbellFailed)
         ));
         assert!(ring.is_quarantined());
-        let wake = ring.data_wake_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the wake page mapped.
-        assert_eq!(unsafe { (*wake).parked.load(Ordering::Acquire) }, 0);
+        let wake = ring.data_wake().unwrap();
+        assert_eq!(wake.parked.load(Ordering::Acquire), 0);
 
         let ring = self::ring();
         let attached = ring.attachment().unwrap().attach().unwrap();
@@ -3345,28 +3399,10 @@ mod tests {
         let ring = ring();
         let (descriptors, grant) = ring.attachment().unwrap().into_parts();
         let [_, data_ready, capacity_ready] = descriptors;
-        // SAFETY: static name and flags are valid for memfd_create.
-        let raw = unsafe {
-            libc::syscall(
-                libc::SYS_memfd_create,
-                c"shm-short-test".as_ptr(),
-                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-            ) as libc::c_int
-        };
-        assert!(raw >= 0);
-        // SAFETY: successful memfd_create returned a new owned descriptor.
-        let short = unsafe { OwnedFd::from_raw_fd(raw) };
-        // SAFETY: fd is valid; the length is one page short of the grant.
-        unsafe {
-            assert_eq!(
-                libc::ftruncate(
-                    short.as_raw_fd(),
-                    (ring.object_size() - super::system_page_size()) as libc::off_t
-                ),
-                0
-            );
-            assert_eq!(libc::fchmod(short.as_raw_fd(), 0o600), 0);
-        }
+        let short = sys::memfd_create(c"shm-short-test").unwrap();
+        let short_len = (ring.object_size() - super::system_page_size()) as libc::off_t;
+        sys::ftruncate(short.as_fd(), short_len).unwrap();
+        sys::fchmod(short.as_fd(), 0o600).unwrap();
         super::seal_object(&short).unwrap();
         assert!(matches!(
             Ring::attach([short, data_ready, capacity_ready], grant),
@@ -3390,23 +3426,18 @@ mod tests {
 
         for forge in [
             |ring: &Ring| {
-                let consumer = ring.consumer_ptr().unwrap();
-                // SAFETY: test-owned ring keeps the consumer page mapped.
-                unsafe {
-                    (*consumer)
-                        .active_leases
-                        .store(ring.grant().max_leases + 1, Ordering::Release)
-                };
+                let consumer = ring.consumer().unwrap();
+                consumer
+                    .active_leases
+                    .store(ring.grant().max_leases + 1, Ordering::Release)
             },
             |ring: &Ring| {
-                let consumer = ring.consumer_ptr().unwrap();
-                // SAFETY: test-owned ring keeps the consumer page mapped.
-                unsafe { (*consumer).consumed.store(5, Ordering::Release) };
+                let consumer = ring.consumer().unwrap();
+                consumer.consumed.store(5, Ordering::Release);
             },
             |ring: &Ring| {
-                let producer = ring.producer_ptr().unwrap();
-                // SAFETY: test-owned ring keeps the producer page mapped.
-                unsafe { (*producer).arena_write.store(4096, Ordering::Release) };
+                let producer = ring.producer().unwrap();
+                producer.arena_write.store(4096, Ordering::Release);
             },
         ] {
             let ring = self::ring();
@@ -3427,10 +3458,9 @@ mod tests {
         publish(&ring, &[1]);
         publish(&ring, &[2]);
         ring.try_receive().unwrap().unwrap().release().unwrap();
-        let producer = ring.producer_ptr().unwrap();
+        let producer = ring.producer().unwrap();
         // `published == consumed` now, which an unguarded check reads as empty.
-        // SAFETY: test-owned ring keeps the producer page mapped.
-        unsafe { (*producer).published.store(1, Ordering::Release) };
+        producer.published.store(1, Ordering::Release);
         let started = std::time::Instant::now();
         assert!(matches!(
             ring.wait_for_data(started + std::time::Duration::from_secs(5)),
@@ -3445,29 +3475,15 @@ mod tests {
         let ring = ring();
         let (descriptors, grant) = ring.attachment().unwrap().into_parts();
         for descriptor in &descriptors {
-            // SAFETY: F_GETFD and F_SETFD act on a live owned descriptor.
-            unsafe {
-                let flags = libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD);
-                assert!(flags >= 0);
-                assert_eq!(
-                    libc::fcntl(
-                        descriptor.as_raw_fd(),
-                        libc::F_SETFD,
-                        flags & !libc::FD_CLOEXEC
-                    ),
-                    0
-                );
-            }
+            sys::clear_cloexec(descriptor.as_fd()).unwrap();
         }
         let raw = descriptors.each_ref().map(AsRawFd::as_raw_fd);
         let attached = Ring::attach(descriptors, grant).unwrap();
         for fd in raw {
-            // SAFETY: the attached ring keeps these descriptors open.
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-            assert!(flags >= 0);
-            assert_ne!(
-                flags & libc::FD_CLOEXEC,
-                0,
+            // SAFETY: the attached ring keeps these descriptors open until `drop(attached)`.
+            let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+            assert!(
+                sys::is_cloexec(borrowed).unwrap(),
                 "descriptor {fd} stayed inheritable"
             );
         }
@@ -3478,18 +3494,14 @@ mod tests {
     fn attach_refuses_a_mapping_whose_cursors_already_break_the_protocol() {
         for forge in [
             |ring: &Ring| {
-                let consumer = ring.consumer_ptr().unwrap();
-                // SAFETY: test-owned ring keeps the consumer page mapped.
-                unsafe {
-                    (*consumer)
-                        .active_leases
-                        .store(ring.grant().max_leases + 1, Ordering::Release)
-                };
+                let consumer = ring.consumer().unwrap();
+                consumer
+                    .active_leases
+                    .store(ring.grant().max_leases + 1, Ordering::Release)
             },
             |ring: &Ring| {
-                let consumer = ring.consumer_ptr().unwrap();
-                // SAFETY: test-owned ring keeps the consumer page mapped.
-                unsafe { (*consumer).consumed.store(3, Ordering::Release) };
+                let consumer = ring.consumer().unwrap();
+                consumer.consumed.store(3, Ordering::Release);
             },
         ] {
             let ring = ring();
@@ -3514,37 +3526,20 @@ mod tests {
         let ring = ring();
         let mut reservation = ring.try_reserve(4, wire_v2_header(4).unwrap()).unwrap();
         reservation.write(&[1; 4]).unwrap();
-        let slot = ring.slot_ptr(1).unwrap();
-        // SAFETY: test-owned ring keeps the slot mapped; this mimics the first store of commit.
-        unsafe {
-            (*slot)
-                .state
-                .store(super::SLOT_PUBLISHED, Ordering::Release)
-        };
+        let slot = ring.slot(1).unwrap();
+        slot.state.store(super::SLOT_PUBLISHED, Ordering::Release);
         ring.probe().unwrap();
-        // SAFETY: restore the reservation's own state so the abort below is well-formed.
-        unsafe {
-            (*slot)
-                .state
-                .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release)
-        };
+        slot.state
+            .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release);
         reservation.abort();
 
         publish(&ring, &[2; 4]);
         let lease = ring.try_receive().unwrap().unwrap();
-        // SAFETY: mimic the slot transition of `release` before its count decrement.
-        unsafe {
-            (*slot)
-                .state
-                .store(super::SLOT_RELEASE_PENDING, Ordering::Release)
-        };
+        slot.state
+            .store(super::SLOT_RELEASE_PENDING, Ordering::Release);
         ring.probe().unwrap();
-        // SAFETY: restore so the lease's release finds the slot it expects.
-        unsafe {
-            (*slot)
-                .state
-                .store(super::SLOT_RECEIVER_LEASED, Ordering::Release)
-        };
+        slot.state
+            .store(super::SLOT_RECEIVER_LEASED, Ordering::Release);
         lease.release().unwrap();
         ring.probe().unwrap();
     }
@@ -3558,12 +3553,11 @@ mod tests {
         let first = ring.try_receive().unwrap().unwrap();
         let second = ring.try_receive().unwrap().unwrap();
         let third = ring.try_receive().unwrap().unwrap();
-        let consumer = ring.consumer_ptr().unwrap();
+        let consumer = ring.consumer().unwrap();
         // The consumer flag is cleared so only the cross-field bound, not this handle's own
         // record, can catch the forgery; that is the producer-side probe's view.
         ring.consumer.set(false);
-        // SAFETY: test-owned ring keeps the consumer page mapped.
-        unsafe { (*consumer).active_leases.store(0, Ordering::Release) };
+        consumer.active_leases.store(0, Ordering::Release);
         assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
         assert!(ring.is_quarantined());
         drop((first, second, third));
@@ -3572,10 +3566,9 @@ mod tests {
     #[test]
     fn attach_refuses_a_phantom_lease_count_that_a_probe_would_tolerate() {
         let ring = ring();
-        let consumer = ring.consumer_ptr().unwrap();
+        let consumer = ring.consumer().unwrap();
         // One transition's worth of skew is legal mid-operation but not on an idle mapping.
-        // SAFETY: test-owned ring keeps the consumer page mapped.
-        unsafe { (*consumer).active_leases.store(1, Ordering::Release) };
+        consumer.active_leases.store(1, Ordering::Release);
         assert!(matches!(
             ring.attachment().unwrap().attach(),
             Err(RingError::InvalidSharedState)
@@ -3586,10 +3579,9 @@ mod tests {
     fn published_running_ahead_of_depth_quarantines_before_any_delivery() {
         let ring = ring();
         publish(&ring, &[1]);
-        let producer = ring.producer_ptr().unwrap();
+        let producer = ring.producer().unwrap();
         let depth = ring.grant().descriptor_depth;
-        // SAFETY: test-owned ring keeps the producer page mapped.
-        unsafe { (*producer).published.store(depth + 1, Ordering::Release) };
+        producer.published.store(depth + 1, Ordering::Release);
         assert!(matches!(
             ring.try_receive(),
             Err(RingError::InvalidSharedState)
@@ -3598,9 +3590,8 @@ mod tests {
 
         let ring = self::ring();
         publish(&ring, &[1]);
-        let producer = ring.producer_ptr().unwrap();
-        // SAFETY: same as above for the fresh ring.
-        unsafe { (*producer).published.store(depth + 1, Ordering::Release) };
+        let producer = ring.producer().unwrap();
+        producer.published.store(depth + 1, Ordering::Release);
         assert!(matches!(
             ring.wait_for_data(std::time::Instant::now() + std::time::Duration::from_secs(5)),
             Err(RingError::InvalidSharedState)
@@ -3611,14 +3602,10 @@ mod tests {
     #[test]
     fn attach_refuses_an_orphaned_receiver_slot() {
         let ring = ring();
-        let slot = ring.slot_ptr(1).unwrap();
+        let slot = ring.slot(1).unwrap();
         // Cursors all zero, one slot receiver-owned: no honest history produces this.
-        // SAFETY: test-owned ring keeps the slot mapped.
-        unsafe {
-            (*slot)
-                .state
-                .store(super::SLOT_RELEASE_PENDING, Ordering::Release)
-        };
+        slot.state
+            .store(super::SLOT_RELEASE_PENDING, Ordering::Release);
         assert!(matches!(
             ring.attachment().unwrap().attach(),
             Err(RingError::InvalidSharedState)
@@ -3635,9 +3622,8 @@ mod tests {
         ring.probe().unwrap();
         // Two receiver-owned slots with `consumed` rewound to zero is two transitions of skew.
         ring.consumer.set(false);
-        let consumer = ring.consumer_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the consumer page mapped.
-        unsafe { (*consumer).consumed.store(0, Ordering::Release) };
+        let consumer = ring.consumer().unwrap();
+        consumer.consumed.store(0, Ordering::Release);
         assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
         assert!(ring.is_quarantined());
         drop((first, second));
@@ -3666,10 +3652,9 @@ mod tests {
         let prepared = ring
             .prepare_commit(1, reservation.plan, 1, reservation.wire_header)
             .unwrap();
-        let lifecycle = ring.lifecycle_ptr().unwrap();
+        let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
         // The peer quarantines after `commit`'s check would have passed.
-        // SAFETY: test-owned ring keeps the lifecycle page mapped.
-        unsafe { (*lifecycle).quarantined.store(1, Ordering::Release) };
+        lifecycle.store(1, Ordering::Release);
         assert_eq!(
             ring.publish_commit(prepared),
             Err(ProducerError::Quarantined)
@@ -3681,13 +3666,10 @@ mod tests {
     #[test]
     fn health_check_bounds_do_not_overflow_on_forged_cursors() {
         let ring = ring();
-        let producer = ring.producer_ptr().unwrap();
-        let consumer = ring.consumer_ptr().unwrap();
-        // SAFETY: test-owned ring keeps both pages mapped.
-        unsafe {
-            (*producer).published.store(u64::MAX, Ordering::Release);
-            (*consumer).consumed.store(u64::MAX, Ordering::Release);
-        }
+        let producer = ring.producer().unwrap();
+        let consumer = ring.consumer().unwrap();
+        producer.published.store(u64::MAX, Ordering::Release);
+        consumer.consumed.store(u64::MAX, Ordering::Release);
         assert!(matches!(ring.probe(), Err(RingError::InvalidSharedState)));
     }
 
@@ -3723,9 +3705,8 @@ mod tests {
     fn receive_that_raced_a_quarantine_is_not_reported_as_delivered() {
         let ring = ring();
         publish(&ring, &[1]);
-        let lifecycle = ring.lifecycle_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the lifecycle page mapped.
-        unsafe { (*lifecycle).quarantined.store(1, Ordering::Release) };
+        let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
+        lifecycle.store(1, Ordering::Release);
         // The wrapper's first check catches this; the inner path's own success is what the
         // post-check guards, so drive it directly.
         let lease = ring.try_receive_inner().unwrap();
@@ -3737,17 +3718,14 @@ mod tests {
     #[test]
     fn two_producer_reserved_slots_are_impossible() {
         let ring = ring();
-        let first = ring.slot_ptr(1).unwrap();
-        let second = ring.slot_ptr(2).unwrap();
-        // SAFETY: test-owned ring keeps both slots mapped.
-        unsafe {
-            (*first)
-                .state
-                .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release);
-            (*second)
-                .state
-                .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release);
-        }
+        let first = ring.slot(1).unwrap();
+        let second = ring.slot(2).unwrap();
+        first
+            .state
+            .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release);
+        second
+            .state
+            .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release);
         assert!(matches!(
             ring.attachment().unwrap().attach(),
             Err(RingError::InvalidSharedState)
@@ -3766,10 +3744,9 @@ mod tests {
             "empty ring: blocking is correct"
         );
         lease.release().unwrap();
-        let wake = consumer.data_wake_ptr().unwrap();
-        // SAFETY: shared wake page is mapped by both handles.
+        let wake = consumer.data_wake().unwrap();
         assert_ne!(
-            unsafe { (*wake).parked.load(Ordering::Acquire) },
+            wake.parked.load(Ordering::Acquire),
             0,
             "a release must not clear the consumer's own parked marker"
         );
@@ -3788,14 +3765,11 @@ mod tests {
     #[test]
     fn attach_refuses_a_write_cursor_beyond_the_committed_frames() {
         let ring = ring();
-        let producer = ring.producer_ptr().unwrap();
+        let producer = ring.producer().unwrap();
         // Every slot free, yet the arena reads as full: nothing could ever be released.
-        // SAFETY: test-owned ring keeps the producer page mapped.
-        unsafe {
-            (*producer)
-                .arena_write
-                .store(ring.grant().arena_bytes, Ordering::Release)
-        };
+        producer
+            .arena_write
+            .store(ring.grant().arena_bytes, Ordering::Release);
         assert!(matches!(
             ring.attachment().unwrap().attach(),
             Err(RingError::InvalidSharedState)
@@ -3806,11 +3780,8 @@ mod tests {
     fn attach_refuses_a_live_slot_whose_descriptor_does_not_validate() {
         let ring = ring();
         publish(&ring, &[1]);
-        let slot = ring.slot_ptr(1).unwrap();
-        // SAFETY: test-owned ring keeps the slot mapped.
-        unsafe {
-            std::ptr::write_volatile((*slot).descriptor.get(), super::SharedDescriptor::ZERO)
-        };
+        let slot = ring.slot(1).unwrap();
+        slot.write_descriptor(super::SharedDescriptor::ZERO);
         assert!(matches!(
             ring.attachment().unwrap().attach(),
             Err(RingError::Descriptor(_))
@@ -3818,9 +3789,8 @@ mod tests {
 
         let ring = self::ring();
         publish(&ring, &[1; 100]);
-        let slot = ring.slot_ptr(1).unwrap();
-        // SAFETY: same as above for the fresh ring.
-        unsafe { (*slot).reservation_len.store(99, Ordering::Release) };
+        let slot = ring.slot(1).unwrap();
+        slot.reservation_len.store(99, Ordering::Release);
         assert!(matches!(
             ring.attachment().unwrap().attach(),
             Err(RingError::InvalidSharedState)
@@ -3857,9 +3827,8 @@ mod tests {
     fn oversized_active_lease_count_quarantines_on_receive() {
         let ring = ring();
         publish(&ring, &[1]);
-        let consumer = ring.consumer_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the consumer page mapped.
-        unsafe { (*consumer).active_leases.store(u64::MAX, Ordering::Release) };
+        let consumer = ring.consumer().unwrap();
+        consumer.active_leases.store(u64::MAX, Ordering::Release);
         assert!(matches!(
             ring.try_receive(),
             Err(RingError::InvalidSharedState)
@@ -3959,15 +3928,12 @@ mod tests {
             "stale identity must not complete recycled slot"
         );
         assert!(ring.is_quarantined());
-        let slot = ring.slot_ptr(stale_id.sequence()).unwrap();
-        // SAFETY: test-owned ring keeps the slot mapped.
-        unsafe {
-            assert_eq!(
-                (*slot).state.load(Ordering::Acquire),
-                super::SLOT_RECEIVER_LEASED,
-                "the recycled slot stays leased to the fresh frame"
-            );
-        }
+        let slot = ring.slot(stale_id.sequence()).unwrap();
+        assert_eq!(
+            slot.state.load(Ordering::Acquire),
+            super::SLOT_RECEIVER_LEASED,
+            "the recycled slot stays leased to the fresh frame"
+        );
         assert_eq!(fresh.segment(0).unwrap().read_byte(0), Some(0xa5));
         assert_eq!(fresh.release(), Err(LeaseError::Quarantined));
     }
@@ -3975,12 +3941,10 @@ mod tests {
     #[test]
     fn shared_quarantine_flag_latches_locally_when_observed() {
         let ring = ring();
-        let lifecycle = ring.lifecycle_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the lifecycle page mapped.
-        unsafe { (*lifecycle).quarantined.store(1, Ordering::Release) };
+        let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
+        lifecycle.store(1, Ordering::Release);
         assert!(ring.is_quarantined());
-        // SAFETY: same mapping.
-        unsafe { (*lifecycle).quarantined.store(0, Ordering::Release) };
+        lifecycle.store(0, Ordering::Release);
         assert!(
             ring.is_quarantined(),
             "a cleared shared flag must not revive the ring"
@@ -3995,13 +3959,9 @@ mod tests {
     #[test]
     fn foreign_slot_state_on_reserve_is_a_fault_not_backpressure() {
         let ring = ring();
-        let slot = ring.slot_ptr(1).unwrap();
-        // SAFETY: test-owned ring keeps the slot mapped.
-        unsafe {
-            (*slot)
-                .state
-                .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release)
-        };
+        let slot = ring.slot(1).unwrap();
+        slot.state
+            .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release);
         assert!(matches!(
             ring.try_reserve(1, wire_v2_header(1).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
@@ -4014,9 +3974,8 @@ mod tests {
         let ring = ring();
         // Dropping the peer end makes the next wake signal fail with EPIPE.
         ring.data_ready.remote.take();
-        let wake = ring.data_wake_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the wake page mapped.
-        unsafe { (*wake).parked.store(1, Ordering::Release) };
+        let wake = ring.data_wake().unwrap();
+        wake.parked.store(1, Ordering::Release);
 
         let mut reservation = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
         reservation.write(&[9]).unwrap();
@@ -4025,18 +3984,15 @@ mod tests {
             Err(ProducerError::Ring(RingError::DoorbellFailed))
         ));
         assert!(ring.is_quarantined());
-        let slot = ring.slot_ptr(1).unwrap();
-        let producer = ring.producer_ptr().unwrap();
-        // SAFETY: test-owned ring keeps both pages mapped.
-        unsafe {
-            assert_eq!(
-                (*slot).state.load(Ordering::Acquire),
-                super::SLOT_PUBLISHED,
-                "a published slot must not be rolled back to free"
-            );
-            assert_eq!((*slot).reservation_len.load(Ordering::Acquire), 1);
-            assert_eq!((*producer).published.load(Ordering::Acquire), 1);
-        }
+        let slot = ring.slot(1).unwrap();
+        let producer = ring.producer().unwrap();
+        assert_eq!(
+            slot.state.load(Ordering::Acquire),
+            super::SLOT_PUBLISHED,
+            "a published slot must not be rolled back to free"
+        );
+        assert_eq!(slot.reservation_len.load(Ordering::Acquire), 1);
+        assert_eq!(producer.published.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -4045,13 +4001,10 @@ mod tests {
         let arena_len = ring.arena_bytes();
         publish(&ring, &vec![1; arena_len / 2]);
         ring.try_receive().unwrap().unwrap().release().unwrap();
-        let producer = ring.producer_ptr().unwrap();
-        // SAFETY: test-owned ring keeps the producer page mapped.
-        unsafe {
-            (*producer)
-                .arena_write
-                .store(3 * arena_len as u64, Ordering::Release)
-        };
+        let producer = ring.producer().unwrap();
+        producer
+            .arena_write
+            .store(3 * arena_len as u64, Ordering::Release);
         assert!(matches!(
             ring.try_reserve(0, wire_v2_header(0).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
@@ -4092,8 +4045,8 @@ mod tests {
     #[test]
     fn residency_vector_tracks_runtime_page_size() {
         let mapping_len = 128 * 1024 + 1;
-        assert_eq!(residency_vector_len(mapping_len, 16 * 1024), 9);
-        assert_eq!(residency_vector_len(mapping_len, 64 * 1024), 3);
+        assert_eq!(sys::residency_vector_len(mapping_len, 16 * 1024), 9);
+        assert_eq!(sys::residency_vector_len(mapping_len, 64 * 1024), 3);
     }
 
     #[test]
@@ -4233,6 +4186,60 @@ mod tests {
     }
 
     #[test]
+    fn reserve_until_deadline_leaves_the_capacity_wake_unparked() {
+        let ring = ring();
+        let arena_len = ring.arena_bytes();
+        publish(&ring, &vec![1; arena_len]);
+        let started = Instant::now();
+        assert_eq!(
+            ring.reserve_until(
+                1,
+                wire_v2_header(1).unwrap(),
+                started + Duration::from_millis(30),
+            )
+            .unwrap_err(),
+            ProducerError::Deadline
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let wake = ring.capacity_wake().unwrap();
+        assert_eq!(
+            wake.parked.load(Ordering::Acquire),
+            0,
+            "a timed-out park must not leave the producer marked parked"
+        );
+    }
+
+    #[test]
+    fn stale_capacity_token_after_a_drain_does_not_deadlock_the_next_park() {
+        let ring = ring();
+        let arena_len = ring.arena_bytes();
+        publish(&ring, &vec![1; arena_len]);
+        let attachment = ring.attachment().unwrap();
+        let (done, wait_for_done) = std::sync::mpsc::channel::<()>();
+        let peer = std::thread::spawn(move || {
+            let consumer = attachment.attach().unwrap();
+            consumer.capacity_ready.signal().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            consumer.try_receive().unwrap().unwrap().release().unwrap();
+            let _ = wait_for_done.recv();
+        });
+        let started = Instant::now();
+        ring.reserve_until(
+            1,
+            wire_v2_header(1).unwrap(),
+            started + Duration::from_secs(10),
+        )
+        .unwrap()
+        .abort();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stale token must cause at most a spurious wake, never a missed one"
+        );
+        done.send(()).unwrap();
+        peer.join().unwrap();
+    }
+
+    #[test]
     fn page_removal_failure_quarantines_before_capacity_publication() {
         let ring = ring();
         let arena_len = ring.arena_bytes();
@@ -4245,12 +4252,9 @@ mod tests {
             Err(ProducerError::Ring(RingError::PageRemovalFailed))
         ));
         assert!(ring.is_quarantined());
-        let reclaim = ring.reclaim_ptr().unwrap();
-        // SAFETY: test-owned ring keeps reclaim page mapped.
-        unsafe {
-            assert_eq!((*reclaim).completed.load(Ordering::Acquire), 0);
-            assert_eq!((*reclaim).arena_reclaimed.load(Ordering::Acquire), 0);
-        }
+        let reclaim = ring.reclaim().unwrap();
+        assert_eq!(reclaim.completed.load(Ordering::Acquire), 0);
+        assert_eq!(reclaim.arena_reclaimed.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -4258,9 +4262,8 @@ mod tests {
         let ring = ring();
         publish(&ring, &[1]);
         ring.enter_quarantine();
-        let lifecycle = ring.lifecycle_ptr().unwrap();
-        // SAFETY: test-owned ring keeps reclaim page mapped.
-        unsafe { (*lifecycle).quarantined.store(0, Ordering::Release) };
+        let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
+        lifecycle.store(0, Ordering::Release);
         assert!(ring.is_quarantined());
         assert!(matches!(ring.try_receive(), Err(RingError::Quarantined)));
         assert_eq!(
@@ -4274,13 +4277,9 @@ mod tests {
     fn impossible_slot_state_quarantines_the_receiver() {
         let ring = ring();
         publish(&ring, &[1]);
-        let slot = ring.slot_ptr(1).unwrap();
-        // SAFETY: test-owned ring keeps reclaim page mapped.
-        unsafe {
-            (*slot)
-                .state
-                .store(super::SLOT_RELEASE_PENDING, Ordering::Release)
-        };
+        let slot = ring.slot(1).unwrap();
+        slot.state
+            .store(super::SLOT_RELEASE_PENDING, Ordering::Release);
         assert!(matches!(
             ring.try_receive(),
             Err(RingError::InvalidSharedState)
@@ -4294,13 +4293,10 @@ mod tests {
         let arena_len = ring.arena_bytes() as u64;
         publish(&ring, &[1; 16]);
         ring.try_receive().unwrap().unwrap().release().unwrap();
-        let slot = ring.slot_ptr(1).unwrap();
-        // SAFETY: test-owned ring keeps reclaim page mapped.
-        unsafe {
-            let mut descriptor = std::ptr::read_volatile((*slot).descriptor.get());
-            descriptor.allocation_len = arena_len;
-            std::ptr::write_volatile((*slot).descriptor.get(), descriptor);
-        }
+        let slot = ring.slot(1).unwrap();
+        let mut descriptor = slot.read_descriptor();
+        descriptor.allocation_len = arena_len;
+        slot.write_descriptor(descriptor);
         assert!(matches!(
             ring.try_reserve(0, wire_v2_header(0).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))

@@ -3,7 +3,7 @@
 
 use crate::control::check_string;
 use crate::synapse::protocol::{
-    MapOnly, MethodEnvelope, NoParams, OptionalParams, RequiredParams, depth_exceeds, schema,
+    MapOnly, NoParams, OptionalParams, RequiredParams, depth_exceeds, schema,
 };
 
 pub use crate::synapse::protocol::RequestError;
@@ -155,6 +155,16 @@ fn preflight(body: &[u8], binary: bool) -> Result<(), RequestError> {
         return Err(schema("request body too deeply nested"));
     }
     Ok(())
+}
+
+/// The first decode pass reads only `method`; `params` is skipped with `IgnoredAny` because its schema depends on the method and the second pass decodes it typed. commentlint: allow(JUDGE)
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MethodEnvelope<'a> {
+    #[serde(borrow)]
+    method: std::borrow::Cow<'a, str>,
+    #[serde(default, rename = "params")]
+    _params: serde::de::IgnoredAny,
 }
 
 fn decode_request(body: &[u8]) -> Result<Request, RequestError> {
