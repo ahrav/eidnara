@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "c5a7019aa2b15bc63712dba1ae7f938a209ed092c85a60aeddfd9f2c89c9b53e",
+  "source_sha256": "6777a91dd2cd3fdeed2957ef30f581a60ce99f1d3d325ad3384d069c4a3c6daf",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -3863,7 +3863,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/harness-closure-manifest-digest-is-canonical.md). The fixture's `schema` field is a renamed identity, so the digest was regenerated once; a Python `json.dumps(sort_keys=True, indent=2)` digest reproduced the predecessor value from the predecessor schema string and the new value from the new one."
       },
-      "existing_check": "`canonical_manifest_digest_is_pinned`, `manifest_digest_is_stable_under_key_reordering`, `manifest_digest_changes_when_any_field_changes`, and the strict-decode tests (`crates/host-runtime/tests/harness_closure.rs`); audited at U3.",
+      "existing_check": "`canonical_manifest_digest_is_pinned`, `manifest_digest_is_stable_under_key_reordering`, `manifest_digest_changes_when_any_field_changes`, `launch_roots_participate_in_the_digest_on_their_own`, and the strict-decode tests (`crates/host-runtime/tests/harness_closure.rs`); audited at U3.",
       "impact": "A closure verified by one side is rejected by the other, or a tampered closure passes.",
       "open_questions": [],
       "extra": {}
@@ -3904,7 +3904,7 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "the committed tiny fixture's fingerprint is recomputed from its manifest and pinned as a literal; each artifact hash is changed alone and shown to move the fingerprint; single-bit artifact changes are caught by each artifact's own digest at load."
+        "note": "the committed tiny fixture's fingerprint is recomputed from its manifest and pinned as a literal; each artifact hash and each embedding-space scalar is changed alone and shown to move the fingerprint; single-bit artifact changes are caught by each artifact's own digest at load."
       },
       "guarantee": "The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.",
       "check": {
@@ -3917,7 +3917,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/synapse-bundle-fingerprint-covers-every-artifact.md). The pre-image's first line is a renamed identity; the fixture manifest's fingerprint was regenerated once with the generator's Python `canonical_fingerprint`, which also reproduced the predecessor value from the predecessor line."
       },
-      "existing_check": "`the_committed_fixture_carries_its_canonical_fingerprint`, `a_bundle_manifest_outside_the_committed_digest_does_not_load`, `one_bit_changes_to_each_artifact_disable_the_lane` (`crates/host-runtime/tests/synapse_bundle.rs`), and `every_artifact_hash_participates_in_the_fingerprint` (`crates/host-runtime/src/synapse/bundle.rs`); audited at U3.",
+      "existing_check": "`the_committed_fixture_carries_its_canonical_fingerprint`, `a_bundle_manifest_outside_the_committed_digest_does_not_load`, `one_bit_changes_to_each_artifact_disable_the_lane` (`crates/host-runtime/tests/synapse_bundle.rs`), and `every_artifact_hash_and_embedding_scalar_participates_in_the_fingerprint` (`crates/host-runtime/src/synapse/bundle.rs`); audited at U3.",
       "impact": "A different model produces embeddings under the identity of the certified one.",
       "open_questions": [],
       "extra": {}

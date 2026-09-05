@@ -112,11 +112,13 @@ regenerated.
 Two checks establish the pre-image's coverage in code rather than by reading
 the function against its Python mirror:
 
-- `every_artifact_hash_participates_in_the_fingerprint` (the `#[cfg(test)]`
-  module of `bundle.rs`) changes each artifact `sha256` of the test manifest
-  alone (`model_file`, both `external_initializers`, the four tokenizer
-  artifacts, `corpus`) and asserts `canonical_fingerprint` changes and that no
-  two mutations produce the same fingerprint. An artifact hash added to
+- `every_artifact_hash_and_embedding_scalar_participates_in_the_fingerprint`
+  (the `#[cfg(test)]` module of `bundle.rs`) changes each artifact `sha256`
+  of the test manifest alone (`model_file`, both `external_initializers`, the
+  four tokenizer artifacts, `corpus`) and each embedding-space scalar alone
+  (`pooling`, `quantization`, each `output` selector form, `max_tokens`,
+  `dims`, `table_epoch`), and asserts `canonical_fingerprint` changes and
+  that no two mutations produce the same fingerprint. An input added to
   `BundleManifest` but omitted from the pre-image fails the test once its
   mutation is listed.
 - `the_committed_fixture_carries_its_canonical_fingerprint` pins the literal
@@ -152,8 +154,10 @@ artifact integrity, not fingerprint coverage.
   fingerprint comparison, so the disabling reason is `hash mismatch`, which
   the test asserts. The fingerprint line for that artifact is never reached.
   The test proves load-time artifact integrity, not pre-image coverage.
-- Missing evidence: none. `every_artifact_hash_participates_in_the_fingerprint`
-  mutates each manifest `sha256` field alone and asserts the fingerprint moves.
+- Missing evidence: none.
+  `every_artifact_hash_and_embedding_scalar_participates_in_the_fingerprint`
+  mutates each manifest `sha256` field and each embedding-space scalar alone and
+  asserts the fingerprint moves.
 - Conclusion: resolved. Coverage of every artifact by the pre-image is proven
   by the struct-level mutation test; the reading of `:584-612` against the
   mirror is corroboration.

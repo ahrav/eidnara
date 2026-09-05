@@ -1847,13 +1847,13 @@
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/a-retired-generation-emits-nothing-and-mutates-nothing.md"
@@ -2304,13 +2304,13 @@
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/lifecycle.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/stopping-precedes-unpublication-on-every-path.md"
@@ -2489,13 +2489,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/generation.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/persisted-state-quarantine-caps-agree.md"
@@ -2584,13 +2584,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/authentication-and-capacity-rejections-are-observable.md"
@@ -3025,13 +3025,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-publish-failure-is-reported-as-a-clean-peer-close.md"
@@ -3365,13 +3365,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/encoder-never-emits-a-frame-its-own-decoder-rejects.md"
@@ -4989,19 +4989,19 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), a key-reordering test over the fixture text, and a per-field mutation campaign; regenerated once at U3 for the renamed schema id.",
+      "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), a key-reordering test over the fixture text, a per-field mutation campaign, and an isolated launch-root test; regenerated once at U3 for the renamed schema id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "evidence_digest": "8b4a1ba9140dd123b8ea3c1a706a734703b6d96c28837ae3ab0e1e814f53d77e",
+      "evidence_digest": "136f0bcaa912cfdd82eed8e00d550569f28709082260a27b8b3b535045cb14cf",
       "check_pointer": "crates/host-runtime/tests/harness_closure.rs#canonical_manifest_digest_is_pinned",
-      "check_hash": "d4f3c9983f030bd88a8ac7531c1297b0aea9a647fba71b2e4c4361a3c8887cd5",
-      "code_hash": "7540e3d863d6e9ccd5a6780938f6692b9c491ace9ebc61e759894bda17a0a831",
+      "check_hash": "3b0dbfc7d7176683b1795d8888fb85c62269240e78f7d611f5f237795eaaeb6f",
+      "code_hash": "c2fa0fbc57350f32c0fe115d74c115e28ac62b6c4e7e8cea4a25f7f8b78d71e3",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "8b4a1ba9140dd123b8ea3c1a706a734703b6d96c28837ae3ab0e1e814f53d77e",
+        "digest": "136f0bcaa912cfdd82eed8e00d550569f28709082260a27b8b3b535045cb14cf",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5050,19 +5050,19 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint), the committed fingerprint pinned as a literal, a structural test that changes each artifact hash alone and asserts the fingerprint moves, plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
+      "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint), the committed fingerprint pinned as a literal, a structural test that changes each artifact hash and each embedding-space scalar alone and asserts the fingerprint moves, plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "evidence_digest": "7051d704ade396ee33b2d9f311c8a9a0712f86d32cc851fe856d351433755a59",
+      "evidence_digest": "0a9ea25fdc8de7a44029dd7c6c3a233582fe6ced408a993d8c810a307d01ff4e",
       "check_pointer": "crates/host-runtime/tests/synapse_bundle.rs#the_committed_fixture_carries_its_canonical_fingerprint",
       "check_hash": "2bd1119b04d575d60614e2e51fd6ca2e8b256dc8f5a27d17fb8e47cb428f9e88",
-      "code_hash": "a4d7c3cf9536aa7b33105e0d944393661b18f534afb0e3e5d5573d8b49794fbf",
+      "code_hash": "cf85889540f738f512e0f70c045c474b214f178dbcbeb597e4fe5740d64e6262",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "7051d704ade396ee33b2d9f311c8a9a0712f86d32cc851fe856d351433755a59",
+        "digest": "0a9ea25fdc8de7a44029dd7c6c3a233582fe6ced408a993d8c810a307d01ff4e",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
