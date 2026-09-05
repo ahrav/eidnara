@@ -297,7 +297,8 @@ impl Backend {
             zero_token_inputs_possible,
         };
         backend.structural_probe()?;
-        backend.certify(&corpus)?;
+        // `validate_serving_limits` has already bounded the recommended rows by the host's batch cap, so the multi-row certification call never exceeds a batch the lane can serve.
+        backend.certify(&corpus, manifest.recommended_batch.rows as usize)?;
         Ok(backend)
     }
 
@@ -388,7 +389,8 @@ impl Backend {
     /// certify uses a corpus that detects incorrect output selection, pooling, and truncation.
     /// certify rejects structurally healthy models with semantically incorrect output.
     /// load rejects semantically wrong models before returning a backend that can serve vectors.
-    fn certify(&self, corpus: &Corpus) -> Result<(), InferenceError> {
+    /// `batch_rows` bounds the multi-row check to the manifest's recommended batch, which serving limits cap at `max_batch_items`; the corpus itself may hold more items than any routed request.
+    fn certify(&self, corpus: &Corpus, batch_rows: usize) -> Result<(), InferenceError> {
         let matches = |got: &[f32], item: &CorpusItem| {
             got.iter()
                 .zip(&item.expected)
@@ -402,14 +404,12 @@ impl Backend {
                 ));
             }
         }
-        // Routed batches pass every item to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so the corpus is also certified as one multi-row call with every row attributed.
-        let texts: Vec<&str> = corpus.items.iter().map(|item| item.text.as_str()).collect();
+        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so a representative multi-row call is certified too, with every row attributed to its item.
+        let batch = &corpus.items[..corpus.items.len().min(batch_rows.max(1))];
+        let texts: Vec<&str> = batch.iter().map(|item| item.text.as_str()).collect();
         let rows = self.embed(&texts)?;
-        if rows.len() != corpus.items.len()
-            || !rows
-                .iter()
-                .zip(&corpus.items)
-                .all(|(row, item)| matches(row, item))
+        if rows.len() != batch.len()
+            || !rows.iter().zip(batch).all(|(row, item)| matches(row, item))
         {
             return Err(InferenceError::Artifact(
                 "multi-row semantic certification failed".to_owned(),

@@ -1450,7 +1450,9 @@ fn validate_vectors(json: &serde_json::Value, expected: usize) -> Result<(), Str
     let vectors = result["vectors"]
         .as_array()
         .ok_or_else(|| format!("response omitted vectors: {json}"))?;
+    // A query response is always final, so a cursor on it is a paging regression rather than a completed request.
     if result["done"] != true
+        || result.get("next_cursor").is_some()
         || result["model"] != MODEL
         || result["fingerprint"] != FINGERPRINT
         || result["table_epoch"] != 1

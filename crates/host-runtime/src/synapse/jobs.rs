@@ -407,6 +407,11 @@ impl JobTable {
             return AdmitOutcome::Full;
         }
 
+        // Result capacity is reserved here, before inference allocates the vectors, so retained bytes plus every in-flight reservation stay within the cap the lane declares to the host; publishing a result can then never overshoot it.
+        if !self.reserve_result_bytes(&mut jobs, result_bytes, &mut released) {
+            return AdmitOutcome::Full;
+        }
+
         // `failed_replay` is removed before insertion so `by_key` never overwrites a live job's index entry.
         if let Some(seq) = failed_replay {
             released.job(Self::remove(&mut jobs, seq));
@@ -737,6 +742,41 @@ impl JobTable {
                 let Some(seq) = keep else { return };
                 released.job(Self::remove(jobs, seq));
                 return;
+            };
+            released.job(Self::remove(jobs, seq));
+        }
+    }
+
+    /// Evicts completed jobs, oldest by [`Job::retention_rank`] first, until `result_bytes` fits beside the retained results and every queued or running job's reservation.
+    /// Returns `false` when nothing evictable remains and the in-flight reservations alone leave no room; the caller reports that as admission being full.
+    fn reserve_result_bytes(
+        &self,
+        jobs: &mut Jobs,
+        result_bytes: u64,
+        released: &mut Released,
+    ) -> bool {
+        loop {
+            let in_flight: u64 = jobs
+                .by_seq
+                .values()
+                .filter(|job| !job.is_completed())
+                .map(|job| job.reserved_result_bytes)
+                .fold(0, u64::saturating_add);
+            let needed = jobs
+                .retained_result_bytes
+                .saturating_add(in_flight)
+                .saturating_add(result_bytes);
+            if needed <= self.limits.max_retained_result_bytes {
+                return true;
+            }
+            let victim = jobs
+                .by_seq
+                .values()
+                .filter(|job| job.is_completed())
+                .min_by_key(|job| job.retention_rank())
+                .map(|job| job.seq);
+            let Some(seq) = victim else {
+                return false;
             };
             released.job(Self::remove(jobs, seq));
         }
@@ -1195,6 +1235,54 @@ mod tests {
             AdmitOutcome::ResultTooLarge
         ));
         assert!(!jobs.key_is_retained("oversize"));
+    }
+
+    #[test]
+    fn admission_reserves_result_capacity_before_inference_allocates_it() {
+        let dimensions = 2;
+        let one_result =
+            result_bytes(1, dimensions, 1 + CONTENT_SHA256_BYTES).expect("small result size");
+        let limits = SynapseLimits {
+            max_retained_result_bytes: one_result,
+            ..SynapseLimits::default()
+        };
+        let jobs = JobTable::new(limits);
+        let item = |id: &str| vec![charged_item(id, "alpha")];
+
+        let AdmitOutcome::Admitted {
+            job_id: first_id,
+            seq: first,
+        } = jobs.admit_uncharged_for_tests("first".to_owned(), item("a"), dimensions)
+        else {
+            panic!("first job is admitted");
+        };
+        jobs.start(first).expect("first job starts");
+        jobs.publish_ready(first, vec![vec![0.5; dimensions]]);
+        assert!(matches!(
+            jobs.poll(&first_id, "first", None),
+            PollOutcome::Page(_)
+        ));
+
+        // The retained result fills the cap, so admitting a second job evicts it before any inference runs.
+        let AdmitOutcome::Admitted { seq: second, .. } =
+            jobs.admit_uncharged_for_tests("second".to_owned(), item("b"), dimensions)
+        else {
+            panic!("second job is admitted by evicting the retained result");
+        };
+        assert!(
+            matches!(jobs.poll(&first_id, "first", None), PollOutcome::Restarted),
+            "the retained result was evicted at admission"
+        );
+        assert_eq!(jobs.lock_jobs().retained_result_bytes, 0);
+
+        // With the cap held by an in-flight reservation and nothing completed to evict, admission is full.
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("third".to_owned(), item("c"), dimensions),
+            AdmitOutcome::Full
+        ));
+        jobs.start(second).expect("second job starts");
+        jobs.publish_ready(second, vec![vec![0.5; dimensions]]);
+        assert_eq!(jobs.lock_jobs().retained_result_bytes, one_result);
     }
 
     #[test]
