@@ -172,16 +172,22 @@ impl EnvSnapshot {
     ) -> Result<String, CredentialRowError> {
         let canonical = canonical_provider(harness, provider)?;
         let row = self.provider_row(harness, canonical)?;
-        let encoded = |field: &str| format!("{}:{field}", field.len());
-        let mut message = encoded(CREDENTIAL_FINGERPRINT_CANONICALIZATION)
-            + &encoded(harness)
-            + &encoded(canonical);
+        // Fields enter the transcript as their raw OS bytes, so two credentials that differ
+        // only in bytes a lossy UTF-8 conversion would collapse still fingerprint apart.
+        let mut message = Vec::new();
+        let mut encoded = |field: &[u8]| {
+            message.extend_from_slice(format!("{}:", field.len()).as_bytes());
+            message.extend_from_slice(field);
+        };
+        encoded(CREDENTIAL_FINGERPRINT_CANONICALIZATION.as_bytes());
+        encoded(harness.as_bytes());
+        encoded(canonical.as_bytes());
         for (name, value) in row {
-            let name = name.to_string_lossy();
-            let value = value.to_string_lossy();
-            message.push_str(&encoded(&name));
-            message.push_str(&encoded(&value.len().to_string()));
-            message.push_str(&encoded(&value));
+            let name = name.as_encoded_bytes();
+            let value = value.as_encoded_bytes();
+            encoded(name);
+            encoded(value.len().to_string().as_bytes());
+            encoded(value);
         }
         let mut derive =
             Hmac::<Sha256>::new_from_slice(connection_key).expect("HMAC accepts any key length");
@@ -189,7 +195,7 @@ impl EnvSnapshot {
         let derived = derive.finalize().into_bytes();
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&derived).expect("HMAC accepts any key length");
-        mac.update(message.as_bytes());
+        mac.update(&message);
         Ok(mac
             .finalize()
             .into_bytes()
@@ -1650,7 +1656,8 @@ pub mod group_registry {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStringExt;
 
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -1693,15 +1700,15 @@ mod tests {
         harness: &str,
         canonical: &str,
         name: &str,
-        value: &str,
+        value: &[u8],
     ) -> String {
-        let field = |text: &str| format!("{}:{text}", text.len());
+        let field = |text: &[u8]| [format!("{}:", text.len()).as_bytes(), text].concat();
         let message = [
-            field(CREDENTIAL_FINGERPRINT_CANONICALIZATION),
-            field(harness),
-            field(canonical),
-            field(name),
-            field(&value.len().to_string()),
+            field(CREDENTIAL_FINGERPRINT_CANONICALIZATION.as_bytes()),
+            field(harness.as_bytes()),
+            field(canonical.as_bytes()),
+            field(name.as_bytes()),
+            field(value.len().to_string().as_bytes()),
             field(value),
         ]
         .concat();
@@ -1709,7 +1716,7 @@ mod tests {
         derive.update(CREDENTIAL_FINGERPRINT_DOMAIN.as_bytes());
         let derived = derive.finalize().into_bytes();
         let mut mac = Hmac::<Sha256>::new_from_slice(&derived).expect("derived key");
-        mac.update(message.as_bytes());
+        mac.update(&message);
         mac.finalize()
             .into_bytes()
             .iter()
@@ -1748,8 +1755,22 @@ mod tests {
         let multibyte = "s\u{e9}cr\u{e9}t";
         assert_eq!(multibyte.len(), 8);
         assert_eq!(multibyte.chars().count(), 6);
-        let values: [&str; 7] = [
-            "secret", "s", "1:a", "3:abc", "sec:ret", multibyte, &longest,
+        // Two values that are not UTF-8 and differ in one byte; a lossy conversion maps
+        // both to the same replacement character.
+        let raw_80 = OsString::from_vec(vec![0x80]);
+        let raw_81 = OsString::from_vec(vec![0x81]);
+        assert!(raw_80.to_str().is_none());
+        assert_eq!(raw_80.to_string_lossy(), raw_81.to_string_lossy());
+        let values: [&OsStr; 9] = [
+            OsStr::new("secret"),
+            OsStr::new("s"),
+            OsStr::new("1:a"),
+            OsStr::new("3:abc"),
+            OsStr::new("sec:ret"),
+            OsStr::new(multibyte),
+            OsStr::new(&longest),
+            &raw_80,
+            &raw_81,
         ];
 
         // Fingerprint to the row that produced it. A second row landing on an existing
@@ -1760,7 +1781,7 @@ mod tests {
                 for value in values {
                     let snapshot = EnvSnapshot::capture_from(vec![(
                         OsString::from(variable),
-                        OsString::from(value),
+                        value.to_os_string(),
                     )])
                     .expect("snapshot");
                     let actual = snapshot
@@ -1768,7 +1789,13 @@ mod tests {
                         .expect("fingerprint");
                     assert_eq!(
                         actual,
-                        documented_fingerprint(key, harness, canonical, variable, value),
+                        documented_fingerprint(
+                            key,
+                            harness,
+                            canonical,
+                            variable,
+                            value.as_encoded_bytes()
+                        ),
                         "{harness}/{provider} value {value:?} disagrees with the documented derivation"
                     );
                     // The alias and its canonical provider name enter the same transcript,
@@ -1783,7 +1810,8 @@ mod tests {
             }
         }
         // Eight (harness, provider) pairs canonicalize onto six rows, so the campaign
-        // yields exactly keys x six rows x values distinct fingerprints.
+        // yields exactly keys x six rows x values distinct fingerprints; the two raw
+        // byte values count separately, which a lossy conversion would not allow.
         assert_eq!(seen.len(), keys.len() * 6 * values.len());
 
         // An empty value is refused before fingerprinting.

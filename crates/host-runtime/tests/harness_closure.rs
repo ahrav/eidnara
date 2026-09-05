@@ -488,6 +488,54 @@ fn manifest_digest_is_stable_under_key_reordering() {
     );
 }
 
+/// Sorts every object's keys so the text matches the canonical form's key order.
+fn json_with_sorted_keys(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            serde_json::Value::Object(
+                keys.into_iter()
+                    .map(|key| (key.clone(), json_with_sorted_keys(&map[key])))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(json_with_sorted_keys).collect())
+        }
+        scalar => scalar.clone(),
+    }
+}
+
+/// The digest is reproduced from the fixture's own JSON text, never from the crate's
+/// `Serialize` impl, so a field the impl dropped (a node path, a dependency edge) would
+/// leave the two digests different even though every in-crate mutation still moved it.
+#[test]
+fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
+    let text = std::fs::read_to_string(fixture).expect("read closure fixture");
+    let manifest: ClosureManifest = serde_json::from_str(&text).expect("decode closure fixture");
+    let raw: serde_json::Value = serde_json::from_str(&text).expect("parse fixture text");
+    let canonical = serde_json::to_vec_pretty(&json_with_sorted_keys(&raw)).expect("pretty");
+    let external = format!("{:x}", Sha256::digest(&canonical));
+    assert_eq!(manifest_digest(&manifest).expect("digest"), external);
+    // Every node path and dependency edge is present in the canonical text as many times
+    // as the fixture names it.
+    let canonical_text = String::from_utf8(canonical).expect("utf8");
+    for node in &manifest.nodes {
+        let needle = format!("\"{}\"", node.path);
+        let in_fixture = text.matches(needle.as_str()).count();
+        assert!(in_fixture >= 1);
+        assert_eq!(
+            canonical_text.matches(needle.as_str()).count(),
+            in_fixture,
+            "node path {} occurs a different number of times in the canonical form",
+            node.path
+        );
+    }
+}
+
 #[test]
 fn manifest_digest_changes_when_any_field_changes() {
     let fixture =

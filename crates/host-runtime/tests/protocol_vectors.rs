@@ -168,10 +168,16 @@ fn production_proof_matches_the_oracle_across_perturbed_tuples() {
 
     // The baseline version is covered by the baseline tuple; these vary the version's
     // bytes and its length prefix.
+    // The multibyte version has a byte length (19) that differs from its character count
+    // (18), so a length prefix counted in characters diverges from the oracle.
+    let multibyte = "eidnara-h\u{f6}st/0.1.0";
+    assert_eq!(multibyte.len(), 19);
+    assert_eq!(multibyte.chars().count(), 18);
     let versions = [
         "eidnara-host/0.1.1",
         "e",
         "eidnara-host/10.100.1000-rc.1+build.12345678901234567890",
+        multibyte,
     ];
     type Tuple = (String, Vec<u8>, [u8; 32], [u8; 32], &'static str, [u8; 16]);
     let mut tuples: Vec<Tuple> = Vec::new();
