@@ -675,8 +675,11 @@ impl JobTable {
             return None;
         }
         let offset = usize::try_from(parse_canonical_decimal(offset)?).ok()?;
-        (boundaries.contains(&offset) && authenticator == self.cursor_authenticator(seq, offset))
-            .then_some(offset)
+        // Constant-time comparison keeps a forged authenticator from being refined byte by byte through timing.
+        let expected = self.cursor_authenticator(seq, offset);
+        let authentic: bool =
+            subtle::ConstantTimeEq::ct_eq(authenticator.as_bytes(), expected.as_bytes()).into();
+        (boundaries.contains(&offset) && authentic).then_some(offset)
     }
 
     /// `MAX_F32_JSON_BYTES` is the longest `serde_json` encoding of a finite `f32`, e.g. `-0.0000010000001`.

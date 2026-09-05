@@ -401,10 +401,11 @@ impl SynapseComponent {
 }
 
 /// The reason is retained uncharged for the component lifetime and cloned into status and error paths, so it is bounded to the shared diagnostic cap.
+/// A lane disabled at runtime by an artifact fault can still have workers in flight; an invariant failure or panic from one of them must surface as `Failing`, so both `Ready` and `Disabled` transition.
 fn mark_failing(inner: &SynapseInner, mut reason: String) {
     protocol::bound_diagnostic(&mut reason);
     let mut state = inner.lock_state();
-    if matches!(&*state, LaneState::Ready(_)) {
+    if matches!(&*state, LaneState::Ready(_) | LaneState::Disabled { .. }) {
         *state = LaneState::Failing { reason };
     }
 }
@@ -639,6 +640,14 @@ impl SynapseComponent {
         received_at: tokio::time::Instant,
         text_charge: crate::wire::ByteCharge,
     ) -> RequestOutcome {
+        let deadline = received_at
+            + std::time::Duration::from_millis(
+                deadline_ms.unwrap_or(protocol::DEFAULT_DEADLINE_MS),
+            );
+        // A query that spent its deadline on parsing is reported expired here, before it takes an admission slot or spawns a worker, and before saturation could misreport it as `queue_full`.
+        if tokio::time::Instant::now() >= deadline {
+            return expired_query();
+        }
         // Shutdown closes `query_admission` before it drains the tracker, so a closed semaphore reports cancellation rather than overload.
         let query_permit = match Arc::clone(&self.inner.query_admission).try_acquire_owned() {
             Ok(permit) => permit,
@@ -656,10 +665,6 @@ impl SynapseComponent {
         // The handler's copy of the admission permit is released once the verdict arrives; the worker's copy remains held through native calls that can outlive request deadlines.
         let handler_query_permit = Arc::new(query_permit);
         let worker_query_permit = Arc::clone(&handler_query_permit);
-        let deadline = received_at
-            + std::time::Duration::from_millis(
-                deadline_ms.unwrap_or(protocol::DEFAULT_DEADLINE_MS),
-            );
         let content_sha256 = protocol::sha256_hex(text.as_bytes());
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<Vec<f32>>, QueryFault>>();
         let inner = Arc::clone(&self.inner);
