@@ -5108,20 +5108,17 @@ Check: `always` - drive N abandoned setups through each distinct exit and assert
 the ring accounting reported at `ring_transport.rs:186-190` returns to its
 pre-attempt value. `always` because the accounting must balance after every
 attempt, not eventually.
-Fault/timing angle: one exit is not covered by the discard pattern. The
-`timeout_at` at `connection.rs:157-164` abandons a `spawn_blocking` task that
-tokio cannot abort, so the `PreparedRing` is dropped inside the detached task and
-the surrounding code has no `sender` to `discard()` or `root` to `cancel()`.
-**That exit does release the charge, and the mechanism is now established rather
-than deferred to 2b.** Dropping the `PreparedRing` drops the `FrameSender` it
-carries (`frame_channel.rs:685-694`), which is the sole holder of the queue's
-`mpsc::Sender`, so the endpoint thread's `queue.recv()` returns `None` and
-`run_endpoint` returns (`ring_transport.rs:437-440`). Control then reaches
-`admission.release()` at `ring_transport.rs:291`, which sits outside the
-`catch_unwind` at `:279-290` and runs on every exit. The `Admission` guard's own
-`Drop` (`profile.rs:581-586`) is the backstop rather than the mechanism. So the
-obligation this record states is met on all four exits, and the record is a
-regression property rather than an open question about one of them.
+Fault/timing angle: the `prepare`-timeout exit is now explicit rather than
+implicit. `timeout_at` (`connection.rs:121-124`) cannot abort the `spawn_blocking`
+task, so on timeout `connection.rs:128-134` moves the join handle into a tracked
+async task that awaits the late result and calls `late.sender.discard()` and
+`late.root.cancel()`, the same pair the other three exits call inline
+(`:166-169`, `:180-185`). The earlier mechanism, sender-drop closing the queue so
+`run_endpoint` returns (`ring_transport.rs:437-440`) and reaches
+`admission.release()` at `:291`, still holds as the backstop, with the `Admission`
+guard's `Drop` (`profile.rs:581-586`) behind it. A campaign on this exit asserts
+that the tracked late-cleanup task runs and performs both explicit operations,
+then that the accounting returns to baseline.
 Required faults and enabling state: three exits need a peer that stalls after
 `receive_grant`, which `shm_failure_modes.rs:44-58` already builds. The fourth
 needs `ring.prepare` to miss `transport_setup_deadline`, and **a near-zero
@@ -5134,7 +5131,8 @@ inside `prepare` - which is 2b's R1 and has no seam - or a barrier that holds th
 blocking task past the deadline. That is why this record stays `partial`.
 Confidence: high - [evidence](evidence/setup-a-an-abandoned-setup-strands-no-ring-charge.md).
 Verified by inspection: the discard-and-cancel pairs at `connection.rs:166-169`
-and `:180-185`, and their absence at `:157-164`. Verified for this disposition and
+and `:180-185`, and the tracked late-cleanup task that performs the same pair on
+the `prepare`-timeout exit at `:128-134`. Verified for this disposition and
 previously recorded as unverified: `FrameSender` holds the queue's only
 `mpsc::Sender` (`frame_channel.rs:685-694`), `run_endpoint` returns when
 `queue.recv()` yields `None` (`ring_transport.rs:437-440`), and
@@ -5153,12 +5151,7 @@ above changes is the shape of the gap: the risk is not that the charge is
 stranded today, it is that the only thing returning it on that exit is a
 channel-closure side effect three files away, which a refactor that gave the
 endpoint thread another sender clone would silently remove.
-Open questions:
-- Should the `prepare`-timeout exit cancel the ring it abandoned explicitly,
-  rather than relying on sender-drop closing the queue? The behaviour is correct
-  today and the coupling is implicit. 2b records the same question from the
-  transport side under
-  `ring-a-ring-unavailability-fails-closed-without-a-classified-reason`.
+Open questions: None.
 
 
 ### setup-a-a-stalled-setup-is-torn-down-within-the-transport-setup-deadline
@@ -5175,7 +5168,7 @@ nothing asserts that the host tore the setup down or when.
 Guarantee: A peer that authenticates and then stalls anywhere in the post-grant
 setup exchange has its connection torn down, and its handshake and connection
 permits and ring charge released, refused within one `transport_setup_deadline` of the
-grant send and released within a stated teardown bound after that refusal.
+grant send and released by the time the endpoint thread the refusal cancels has exited.
 Check: `always` - evaluated at the close of an explicit bounded window. Drive a
 peer that authenticates and then stalls at each post-grant I/O position in turn:
 before the `Activate` message, mid-length-prefix, after `Activate` (so the host
@@ -5185,11 +5178,14 @@ activity**, which is what makes the window fault-free; then assert two bounds in
 sequence: `activate_server` returns its timeout by `transport_setup_deadline`
 measured from the deadline anchor, and the teardown that follows it, the discard
 and cancel at `connection.rs:166-169` and the ring-charge release the endpoint
-thread performs at `ring_transport.rs:273-274`, completes within its own explicit
-bound stated by the campaign (one `lifecycle_callback_deadline` is the largest
-budget the host attaches to any teardown step); the refusal cannot precede the
-deadline it waits for, so requiring release at that same instant would fail a
-compliant path or hide the cleanup behind an unbounded poll. The bound is stated
+thread performs at `ring_transport.rs:273-274`, completes by the endpoint thread's exit, observed by awaiting the
+endpoint's completion signal (`done_rx`, awaited by the tracked io task at
+`ring_transport.rs:284`) rather than a wall-clock duration, since no
+`lifecycle_callback_deadline` or join timeout wraps the endpoint task and a
+duration bound would fail on scheduling alone; the release is unconditional once
+the thread exits (`admission.release()`, `:273-274`). The refusal cannot precede
+the deadline it waits for, so requiring release at that same instant would fail a
+compliant path. The bound is stated
 in the unit the code bounds, a **single absolute deadline**:
 `activate_server` computes `deadline = Instant::now() + timeout` **once**
 (`setup_socket.rs:244-246`) and threads that same `Instant` through every
@@ -9957,7 +9953,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every closure manifest the host stores or verifies is digested this way.
 Status: active
-Exercised: yes - the committed fixture's digest is asserted, and an independent canonical-JSON digest reproduced both the predecessor and the current value.
+Exercised: partial - the committed fixture's digest is asserted and an independent canonical-JSON digest reproduced both the predecessor and the current value, but the suite perturbs only `extensions` and no test reorders JSON object keys, so the every-field sensitivity and key-order invariance halves of the check are not exercised (evidence, "What a test must construct").
 Guarantee: The manifest digest is SHA-256 over the manifest serialized as key-sorted, two-space-indented JSON, so any manifest with the same fields hashes the same regardless of field order, and the committed `pi-valid.json` fixture digests to `5386c200...f911`.
 Check: `always` - `manifest_digest(fixture) == committed literal`; the digest changes when any field changes and is unchanged under key reordering.
 Fault/timing angle: A digest that depended on serialization order would let two equal manifests disagree; a digest over a different canonical form would break the TypeScript twin, which lands with the packages in U7 and reads this fixture.
@@ -10019,7 +10015,7 @@ Reachability: test-only - every run path of a composed `BrocaComponent` releases
 Status: active
 Exercised: partial - success, failure, cancel, transport detach, and shutdown paths are covered in-process; a backend that never exits is covered only through the escalation timers.
 Guarantee: Every run path returns its pending permits, task permits, and byte charges to the supervisor baseline, and host shutdown drains the supervisor to zero state; when an uncooperative backend outlives the termination grace, shutdown reports the unresolved count to the caller instead of claiming zero state.
-Check: `always` - after every terminal, the supervisor's pending permits and task permits equal their starting values and `finish` (`crates/host-runtime/src/broca/supervisor.rs:938`) has released the run's excess bytes, while the retained session's base charge and replay frames are still held for `terminal_retention`; the full byte-budget baseline is required only once `remove_session` (`:1059`) has removed that entry by expiry, cap eviction, deletion, or shutdown; after shutdown, either the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or the count is nonzero and exactly equals the number of runs whose final `work_unresolved` verdict is set (`supervisor.rs:629-634` counts unproven teardowns, not processes live at inspection time, and a process may exit after `terminate_group` fails to confirm it), with no permit, charge, or run state retained; a zero count with retained state, or a nonzero count that is not surfaced to the caller, fails the check.
+Check: `always` - at terminal commitment the run slot is released; once `work_done` is set or the run task has quiesced, the supervisor's pending permits and task permits equal their starting values and the run's excess bytes are released, because the run task retains `_backend_permit` until backend teardown finishes (`crates/host-runtime/src/broca/supervisor.rs:748-782`), `finish` (`:938`) releases the excess only when `work_done` is already true (`:989-995`), and `DoneGuard` releases it at task exit otherwise (`:792-809`), so a committed `Cancelled` terminal may legitimately coexist with a held backend permit until then; while the retained session's base charge and replay frames are still held for `terminal_retention`; the full byte-budget baseline is required only once `remove_session` (`:1059`) has removed that entry by expiry, cap eviction, deletion, or shutdown; after shutdown, either the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or the count is nonzero and exactly equals the number of runs whose final `work_unresolved` verdict is set (`supervisor.rs:629-634` counts unproven teardowns, not processes live at inspection time, and a process may exit after `terminate_group` fails to confirm it), with no permit, charge, or run state retained; a zero count with retained state, or a nonzero count that is not surfaced to the caller, fails the check.
 Fault/timing angle: A leaked permit shrinks the admission pool until the host restarts.
 Required faults and enabling state: Each terminal path: success, error, cancel, detach, shutdown.
 Confidence: medium - [evidence](evidence/broca-permits-and-charges-return-to-baseline.md). `every_path_returns_permits_and_charges_to_baseline`, `host_shutdown_drains_the_supervisor_to_zero_state`, `transport_detach_paths_leave_the_run_untouched` (`crates/host-runtime/tests/broca_supervisor.rs`).

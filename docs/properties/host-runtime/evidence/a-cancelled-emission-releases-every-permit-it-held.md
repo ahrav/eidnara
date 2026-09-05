@@ -123,17 +123,21 @@ Concretely: set `limits.max_pending_requests` low, open enough concurrent
 control requests to hold every pending permit, and shrink `egress_budget` so the
 emissions block inside their charge acquisition rather than completing. For the
 reject pool, exhaust `pending_permits` first so control requests take the
-`server_busy` path at `connection.rs:669`, then send more than a few so
-`busy_rejects` fills without reaching 32 (at 32 the generation retires and the
-observable changes). Then force the abort - a shutdown whose drain misses its
-deadline reaches `abort_all` at `runtime.rs:1182`.
+`server_busy` path, then send more than a few so `busy_rejects` fills without
+reaching 32 (at 32 the generation retires and the observable changes). The
+acquisitions and bindings to instrument are the current ones: `connection.rs:570`,
+`:589`, `:605`, `:624`, `:632`, `:663` and `dispatch.rs:589-595`; `connection.rs:669`
+is now the boundary before `emit_catalog_response`, not the admission path. Then
+force the abort - a shutdown whose drain misses its deadline reaches `abort_all` at
+`runtime.rs:1041`, and a tracker wait that misses reaches the second at `:1049`.
 
 Oracle: `pending_permits.available_permits()` and
 `gen.busy_rejects.available_permits()` both return to their configured
 capacities, and `egress_budget.available()` returns to its baseline. The
-mutation control that makes the test worth writing is to hoist one binding above
-its `async move` - for instance move `connection.rs:706` to just before `:705` -
-and confirm the test fails. Without that control the test passes on both the
+mutation control that makes the test worth writing is to hoist one permit binding
+out of the `async move` that owns it, at one of the acquisition sites listed above,
+and confirm the test fails; `connection.rs:706` is now the charge-timeout
+cancellation and is not a safe mutation target. Without that control the test passes on both the
 correct and the leaking code, because a happy-path completion releases the
 permit either way.
 

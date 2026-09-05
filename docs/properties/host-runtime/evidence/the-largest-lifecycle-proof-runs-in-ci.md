@@ -131,15 +131,17 @@ every line reference above is current.
 
 ## What a test must construct
 
-Nothing runtime. The check is a static assertion over the workflow files: parse
-every `run:` block in `the source repository workflows directory *.yml`, collect each `--test <name>`
-argument paired with `-p host-runtime` (and each nextest profile's `default-filter`),
-and assert that `lifecycle`, `activation`, and `host_roundtrip` appear. To make it
-resistant to the substring trap that produced `lifecycle_cli`, the extraction must
-key on the package argument and match target names exactly, not by containment. A
-stronger form asserts the complement - that the named set equals the full
-`cargo metadata` target set for the package - so a newly added binary is unnamed
-loudly rather than silently. The macOS half needs a separate assertion: that at
+Nothing runtime. The check is over the workflow's executed test list, not its
+literal arguments: `ci.yml:118` and `:126` run `cargo test --workspace --all-targets`,
+which executes every integration binary without naming it, so an extractor that
+collects only `--test <name>` paired with `-p host-runtime` collects nothing from
+the compliant workflow and false-fails. Instead, recognise unfiltered workspace or
+all-target invocations as executing the full `cargo metadata` target set, and
+assert against the executed list (the run's `--format json` or JUnit output) that
+the five named proofs ran: a test removed, renamed, filtered, or marked
+`#[ignore]` then fails the check while its binary still executes. Where a job does
+name targets, match names exactly rather than by containment, which is the
+substring trap that produced `lifecycle_cli`. The macOS half needs a separate assertion: that at
 least one in-crate test from this scope executes under `runner.os == 'macOS'`,
 which today would fail against the single filter at `ci.yml:179-180`.
 
