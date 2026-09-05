@@ -157,26 +157,54 @@ async fn run_opencode(
             provider_code: None,
         });
     }
+    // Setup races cancellation and `setup_deadline` so stalled closure-store or directory I/O cannot block cancellation before spawning a child.
+    let setup_deadline = tokio::time::Instant::now() + limits.run_timeout;
     // Closure resolution precedes the private directory so an unavailable harness creates no on-disk state.
     // Resolution opens and stats the node, so it runs on the blocking pool rather than on a runtime worker.
     let closure = Arc::clone(&runtime.closure);
     let executable = runtime.executable_node.clone();
-    let executable_node =
-        match subprocess::off_runtime(move || closure.resolve_node_descriptor(&executable).ok())
-            .await
-        {
-            Ok(Some(node)) => node,
-            Ok(None) => {
-                return subprocess::harness_unavailable_failure(
-                    Harness::OpenCode,
-                    "closure_incomplete",
-                );
-            }
-            Err(err) => return subprocess::spawn_failure(Harness::OpenCode, &err),
-        };
-    let dir = match PrivateDir::create_async(state_root.clone(), "broca-opencode").await {
-        Ok(dir) => dir,
-        Err(err) => return subprocess::spawn_failure(Harness::OpenCode, &err),
+    let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
+        closure.resolve_node_descriptor(&executable).ok()
+    }));
+    // An abandoned resolution only reads the closure store, so it leaves no residue. commentlint: allow(JUDGE)
+    let executable_node = match subprocess::race_setup(&cancel, setup_deadline, &mut resolve).await
+    {
+        Ok(Ok(Some(node))) => node,
+        Ok(Ok(None)) => {
+            return subprocess::harness_unavailable_failure(
+                Harness::OpenCode,
+                "closure_incomplete",
+            );
+        }
+        Ok(Err(err)) => return subprocess::spawn_failure(Harness::OpenCode, &err),
+        Err(abort) => return subprocess::setup_aborted_terminal(Harness::OpenCode, abort),
+    };
+    let mut create = std::pin::pin!(PrivateDir::create_async(
+        state_root.clone(),
+        "broca-opencode"
+    ));
+    let dir = match subprocess::race_setup(&cancel, setup_deadline, &mut create).await {
+        Ok(Ok(dir)) => dir,
+        Ok(Err(err)) => return subprocess::spawn_failure(Harness::OpenCode, &err),
+        Err(abort) => {
+            // The in-flight creation gets a grace period to return its directory for cleanup.
+            // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort. commentlint: allow(JUDGE)
+            let cleanup = match tokio::time::timeout(limits.termination_grace, &mut create).await {
+                Ok(Ok(dir)) => {
+                    match tokio::time::timeout(limits.termination_grace, dir.cleanup_async()).await
+                    {
+                        Ok(cleanup) => cleanup,
+                        Err(_) => Err(subprocess::cleanup_unproven()),
+                    }
+                }
+                Ok(Err(_)) => Ok(()),
+                Err(_) => Err(subprocess::cleanup_unproven()),
+            };
+            return subprocess::merge_cleanup(
+                subprocess::setup_aborted_terminal(Harness::OpenCode, abort),
+                cleanup,
+            );
+        }
     };
 
     let args = vec![

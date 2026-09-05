@@ -226,6 +226,22 @@ async fn run_pi_with_provider_fallback(
     run_pi(retry, request, events, cancel, canonical).await
 }
 
+/// Bounds cleanup so a stalled filesystem cannot wedge the setup-abort path; an elapsed bound reports the cleanup as unproven. commentlint: allow(JUDGE)
+async fn abort_setup_with_dir(
+    abort: subprocess::SetupAbort,
+    dir: PrivateDir,
+    grace: std::time::Duration,
+) -> BackendTerminal {
+    let cleanup = match tokio::time::timeout(grace, dir.cleanup_async()).await {
+        Ok(cleanup) => cleanup,
+        Err(_) => Err(subprocess::cleanup_unproven()),
+    };
+    subprocess::merge_cleanup(
+        subprocess::setup_aborted_terminal(Harness::Pi, abort),
+        cleanup,
+    )
+}
+
 async fn run_pi(
     run: PiRun,
     request: BackendRequest,
@@ -251,13 +267,16 @@ async fn run_pi(
     if descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
         return subprocess::harness_unavailable_failure(Harness::Pi, "extension_budget_exceeded");
     }
+    // Setup races cancellation and `setup_deadline` so stalled closure-store or directory I/O cannot block cancellation before spawning a child.
+    let setup_deadline =
+        deadline.unwrap_or_else(|| tokio::time::Instant::now() + limits.run_timeout);
     // Closure resolution precedes the private directory so an unavailable harness never writes the caller-private system prompt to disk.
     // Resolution opens and stats every node, so it runs on the blocking pool in one hop rather than on a runtime worker.
     let closure = Arc::clone(&descriptor.closure);
     let interpreter_node = descriptor.interpreter_node.clone();
     let entrypoint_node = descriptor.entrypoint_node.clone();
     let extension_nodes = descriptor.provider_extension_nodes.clone();
-    let resolved = subprocess::off_runtime(move || {
+    let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
         let interpreter = closure.resolve_node_descriptor(&interpreter_node).ok()?;
         let entrypoint = closure.resolve_node_descriptor(&entrypoint_node).ok()?;
         let mut extensions = Vec::with_capacity(extension_nodes.len());
@@ -265,8 +284,12 @@ async fn run_pi(
             extensions.push(closure.resolve_node_descriptor(node).ok()?);
         }
         Some((interpreter, entrypoint, extensions))
-    })
-    .await;
+    }));
+    // An abandoned resolution only reads the closure store, so it leaves no residue. commentlint: allow(JUDGE)
+    let resolved = match subprocess::race_setup(&cancel, setup_deadline, &mut resolve).await {
+        Ok(resolved) => resolved,
+        Err(abort) => return subprocess::setup_aborted_terminal(Harness::Pi, abort),
+    };
     let (interpreter, entrypoint, resolved_extensions) = match resolved {
         Ok(Some(resolved)) => resolved,
         Ok(None) => {
@@ -275,41 +298,82 @@ async fn run_pi(
         Err(err) => return subprocess::spawn_failure(Harness::Pi, &err),
     };
 
-    let dir = match PrivateDir::create_async(state_root.clone(), "broca-pi").await {
-        Ok(dir) => dir,
-        Err(err) => return subprocess::spawn_failure(Harness::Pi, &err),
+    let mut create = std::pin::pin!(PrivateDir::create_async(state_root.clone(), "broca-pi"));
+    let dir = match subprocess::race_setup(&cancel, setup_deadline, &mut create).await {
+        Ok(Ok(dir)) => dir,
+        Ok(Err(err)) => return subprocess::spawn_failure(Harness::Pi, &err),
+        Err(abort) => {
+            // The in-flight creation gets a grace period to return its directory for cleanup.
+            // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort. commentlint: allow(JUDGE)
+            let cleanup = match tokio::time::timeout(limits.termination_grace, &mut create).await {
+                Ok(Ok(dir)) => {
+                    match tokio::time::timeout(limits.termination_grace, dir.cleanup_async()).await
+                    {
+                        Ok(cleanup) => cleanup,
+                        Err(_) => Err(subprocess::cleanup_unproven()),
+                    }
+                }
+                Ok(Err(_)) => Ok(()),
+                Err(_) => Err(subprocess::cleanup_unproven()),
+            };
+            return subprocess::merge_cleanup(
+                subprocess::setup_aborted_terminal(Harness::Pi, abort),
+                cleanup,
+            );
+        }
     };
     // `run_pi` writes the compiled-in hook bytes to a 0600 file in the per-run 0700 directory so no installed hook path can be swapped under the daemon.
-    let hook_path = match dir
-        .write_private_async(
+    let hook_write = {
+        let mut write = std::pin::pin!(dir.write_private_async(
             PI_BROCA_EXTENSION_FILE.to_owned(),
             PI_BROCA_EXTENSION_BYTES.to_vec(),
-        )
-        .await
-    {
-        Ok(path) => path,
-        Err(err) => {
+        ));
+        match subprocess::race_setup(&cancel, setup_deadline, &mut write).await {
+            Ok(written) => Ok(written),
+            Err(abort) => {
+                // The in-flight write gets a grace period to land inside the directory before that directory is removed. commentlint: allow(JUDGE)
+                let _ = tokio::time::timeout(limits.termination_grace, &mut write).await;
+                Err(abort)
+            }
+        }
+    };
+    let hook_path = match hook_write {
+        Ok(Ok(path)) => path,
+        Ok(Err(err)) => {
             return subprocess::merge_cleanup(
                 subprocess::spawn_failure(Harness::Pi, &err),
                 dir.cleanup_async().await,
             );
         }
+        Err(abort) => return abort_setup_with_dir(abort, dir, limits.termination_grace).await,
     };
     // `run_pi` writes caller-private system prompts to a private 0600 file instead of passing them through argv.
-    let system_prompt_path = match &request.system {
-        None => None,
-        Some(system) => match dir
-            .write_private_async("system-prompt.txt".to_owned(), system.as_bytes().to_vec())
-            .await
-        {
-            Ok(path) => Some(path),
-            Err(err) => {
-                return subprocess::merge_cleanup(
-                    subprocess::spawn_failure(Harness::Pi, &err),
-                    dir.cleanup_async().await,
-                );
+    let system_prompt_write = match &request.system {
+        None => Ok(None),
+        Some(system) => {
+            let mut write = std::pin::pin!(
+                dir.write_private_async("system-prompt.txt".to_owned(), system.as_bytes().to_vec())
+            );
+            match subprocess::race_setup(&cancel, setup_deadline, &mut write).await {
+                Ok(written) => Ok(Some(written)),
+                Err(abort) => {
+                    // The in-flight write gets a grace period to land inside the directory before that directory is removed. commentlint: allow(JUDGE)
+                    let _ = tokio::time::timeout(limits.termination_grace, &mut write).await;
+                    Err(abort)
+                }
             }
-        },
+        }
+    };
+    let system_prompt_path = match system_prompt_write {
+        Ok(None) => None,
+        Ok(Some(Ok(path))) => Some(path),
+        Ok(Some(Err(err))) => {
+            return subprocess::merge_cleanup(
+                subprocess::spawn_failure(Harness::Pi, &err),
+                dir.cleanup_async().await,
+            );
+        }
+        Err(abort) => return abort_setup_with_dir(abort, dir, limits.termination_grace).await,
     };
 
     // `request.prompt` travels only over stdin, so `run_pi` passes no positional message.

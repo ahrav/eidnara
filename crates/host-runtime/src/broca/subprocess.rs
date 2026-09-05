@@ -475,16 +475,34 @@ pub async fn run(
         let signalled = kill_group(group, rustix::process::Signal::KILL).is_ok();
         let members_gone = wait_other_members_gone(group, limits.termination_grace).await;
         let group_gone = signalled && members_gone;
-        // Cleanup detaches because the registrar can remain stalled after the run deadline.
-        // An unproven teardown keeps the record on disk for a successor sweep. commentlint: allow(JUDGE)
-        tokio::spawn(async move {
-            let record = registrar.await.ok().flatten();
-            if group_gone && let Some(record) = record {
-                let _ = off_runtime(move || record.remove()).await;
-            }
-            // Receiving the spawner's reply drops the dead child, letting `kill_on_drop` reap it. commentlint: allow(JUDGE)
-            drop(spawn_reply.await);
-        });
+        let mut registrar = registrar;
+        // A registrar that settles within the grace yields an exact record verdict; one still
+        // stalled has an unknown record fate, so the run conservatively reports the record
+        // retained (when teardown is proven) and detaches best-effort removal. commentlint: allow(JUDGE)
+        let record_retained =
+            match tokio::time::timeout(limits.termination_grace, &mut registrar).await {
+                Ok(joined) => match joined.ok().flatten() {
+                    Some(record) if group_gone => tokio::time::timeout(
+                        limits.termination_grace,
+                        remove_record_off_runtime(record),
+                    )
+                    .await
+                    .unwrap_or(true),
+                    // An unproven teardown intentionally retains the record for a successor sweep, matching the drain-loop paths. commentlint: allow(JUDGE)
+                    _ => false,
+                },
+                Err(_) => {
+                    tokio::spawn(async move {
+                        let record = registrar.await.ok().flatten();
+                        if group_gone && let Some(record) = record {
+                            let _ = off_runtime(move || record.remove()).await;
+                        }
+                    });
+                    group_gone
+                }
+            };
+        // Dropping `spawn_reply` makes the spawner-side send fail, so the dead child is dropped there and `kill_on_drop` reaps it. commentlint: allow(JUDGE)
+        drop(spawn_reply);
         return Ok(SubprocessResult {
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -494,7 +512,7 @@ pub async fn run(
                 SubprocessEnd::TeardownUnconfirmed
             },
             prompt_delivered: false,
-            record_retained: false,
+            record_retained,
         });
     }
     let spawned = spawned
@@ -506,7 +524,7 @@ pub async fn run(
         Err(err) => {
             // A record published before an `exec` failure covers an empty group (the child exited without executing harness code), so only the record needs removing. commentlint: allow(JUDGE)
             if let Some(record) = group_record
-                && record.remove().is_err()
+                && remove_record_off_runtime(record).await
             {
                 return Err(io::Error::other(SpawnRecordRetained { kind: err.kind() }));
             }
@@ -551,11 +569,8 @@ pub async fn run(
             .await
             .is_ok();
         let mut record_retained = false;
-        if group_gone
-            && let Some(record) = group_record.take()
-            && record.remove().is_err()
-        {
-            record_retained = true;
+        if group_gone && let Some(record) = group_record.take() {
+            record_retained = remove_record_off_runtime(record).await;
         }
         return Ok(SubprocessResult {
             stdout: Vec::new(),
@@ -726,10 +741,8 @@ pub async fn run(
     // The record is removed only once the group is proven gone; otherwise the host retains it for a later sweep.
     let mut record_retained = false;
     let end = if group_gone {
-        if let Some(record) = group_record.take()
-            && record.remove().is_err()
-        {
-            record_retained = true;
+        if let Some(record) = group_record.take() {
+            record_retained = remove_record_off_runtime(record).await;
         }
         end
     } else {
@@ -834,6 +847,12 @@ async fn kill_group_fenced(
         }
     }
     kill_group(group, signal)
+}
+
+/// Removes a crash-ownership record on the blocking pool and reports whether it was retained. commentlint: allow(JUDGE)
+/// The registry shares a filesystem with record creation, which already runs off-runtime; a stalled removal must likewise stall a pool thread rather than a runtime worker. commentlint: allow(JUDGE)
+async fn remove_record_off_runtime(record: group_registry::GroupRecord) -> bool {
+    !matches!(off_runtime(move || record.remove()).await, Ok(Ok(())))
 }
 
 /// Runs a synchronous `/proc` or filesystem step on the blocking pool so it never stalls a runtime worker.
@@ -973,6 +992,51 @@ impl std::fmt::Display for CleanupFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "sensitive temp {CLEANUP_FAILURE_MARKER} ({})", self.kind)
     }
+}
+
+/// A cleanup whose blocking work was still in flight when the caller stopped waiting; residue may exist, so the run reports a cleanup failure rather than claiming the files are gone. commentlint: allow(JUDGE)
+pub(crate) fn cleanup_unproven() -> CleanupFailure {
+    CleanupFailure {
+        kind: io::ErrorKind::TimedOut,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupAbort {
+    Cancelled,
+    DeadlineExpired,
+}
+
+/// Races one pre-spawn setup step against cancellation and the setup deadline so a stalled filesystem cannot wedge cancel, delete, or shutdown before a child exists. commentlint: allow(JUDGE)
+/// The caller keeps the pinned step and decides whether to grace-wait it for accurate residue reporting. commentlint: allow(JUDGE)
+pub(crate) async fn race_setup<F: std::future::Future + Unpin>(
+    cancel: &CancellationToken,
+    deadline: tokio::time::Instant,
+    step: &mut F,
+) -> Result<F::Output, SetupAbort> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(SetupAbort::Cancelled),
+        () = tokio::time::sleep_until(deadline) => Err(SetupAbort::DeadlineExpired),
+        value = step => Ok(value),
+    }
+}
+
+/// Terminal for a run stopped during pre-spawn setup; no child existed, so there is no teardown question. commentlint: allow(JUDGE)
+pub(crate) fn setup_aborted_terminal(harness: Harness, abort: SetupAbort) -> BackendTerminal {
+    let name = harness.as_str();
+    let message = match abort {
+        SetupAbort::Cancelled => format!("{name} backend run was cancelled during setup"),
+        SetupAbort::DeadlineExpired => {
+            format!("{name} backend setup exhausted the run budget")
+        }
+    };
+    BackendTerminal::Failed(BackendError {
+        class: ErrorClass::Transient,
+        message,
+        retry_after_secs: None,
+        provider_code: None,
+    })
 }
 
 /// This run's sensitive files use a fresh directory forced to `0700` despite the inherited umask.
