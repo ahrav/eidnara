@@ -629,12 +629,14 @@ async fn respond_vectors(
 }
 
 impl SynapseComponent {
+    /// `received_at` is the handler-entry instant, so the deadline covers preflight, reservation, and decoding rather than restarting after them.
     async fn handle_query(
         &self,
         ctx: &RequestCtx,
         lane: Arc<ReadyLane>,
         text: String,
         deadline_ms: Option<u64>,
+        received_at: tokio::time::Instant,
         text_charge: crate::wire::ByteCharge,
     ) -> RequestOutcome {
         // Shutdown closes `query_admission` before it drains the tracker, so a closed semaphore reports cancellation rather than overload.
@@ -654,7 +656,7 @@ impl SynapseComponent {
         // The handler's copy of the admission permit is released once the verdict arrives; the worker's copy remains held through native calls that can outlive request deadlines.
         let handler_query_permit = Arc::new(query_permit);
         let worker_query_permit = Arc::clone(&handler_query_permit);
-        let deadline = tokio::time::Instant::now()
+        let deadline = received_at
             + std::time::Duration::from_millis(
                 deadline_ms.unwrap_or(protocol::DEFAULT_DEADLINE_MS),
             );
@@ -1013,6 +1015,8 @@ impl CompositeComponent for SynapseComponent {
     }
 
     async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
+        // A request-scoped deadline runs from here so a large body cannot buy itself a fresh deadline after parsing.
+        let received_at = tokio::time::Instant::now();
         let Some(lane) = self.ready_lane() else {
             return app_error("artifact_invalid", "the synapse lane is unavailable");
         };
@@ -1072,7 +1076,7 @@ impl CompositeComponent for SynapseComponent {
             Request::EmbedQuery { text, deadline_ms } => {
                 let text_charge = charge.split_or_take(text.capacity());
                 let _handler_charge = charge;
-                self.handle_query(&ctx, lane, text, deadline_ms, text_charge)
+                self.handle_query(&ctx, lane, text, deadline_ms, received_at, text_charge)
                     .await
             }
             Request::EmbedBatch {

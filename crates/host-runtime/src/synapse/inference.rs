@@ -335,7 +335,12 @@ impl Backend {
         };
         backend.structural_probe()?;
         backend.certify(&corpus, certification_rows, max_batch_text_bytes)?;
-        backend.long_input_probe(&corpus, max_text_bytes)?;
+        backend.long_input_probe(
+            &corpus,
+            max_text_bytes,
+            certification_rows,
+            max_batch_text_bytes,
+        )?;
         Ok(backend)
     }
 
@@ -489,10 +494,13 @@ impl Backend {
 
     /// Corpus texts are short, so a graph with a fixed short sequence axis passes every semantic probe and then fails an ordinary long request. This probe embeds a text at the advertised byte limit that reaches the truncation window; the result must be a valid vector, with no expectation to compare.
     /// Corpus phrases can tokenize sparsely, so every candidate's encoding is measured and the densest one is embedded; a lane whose candidates all fall short of `max_tokens` is not published.
+    /// The window is then exercised jointly with the batch axis: batched tokenization pads every row to the longest sequence, so the long text is embedded once more in the largest legal batch alongside short corpus items, whose rows must still match their expectations under that padding.
     fn long_input_probe(
         &self,
         corpus: &Corpus,
         max_text_bytes: usize,
+        batch_rows: usize,
+        max_batch_text_bytes: usize,
     ) -> Result<(), InferenceError> {
         let mut text = String::new();
         for item in corpus.items.iter().cycle() {
@@ -533,6 +541,30 @@ impl Backend {
             return Err(InferenceError::Artifact(
                 "long-input probe returned a wrong item count".to_owned(),
             ));
+        }
+        // `[batch_rows, max_tokens]` is the largest tensor a legal batch can produce: one maximal text padded against short items, within the aggregate cap.
+        let short = corpus
+            .items
+            .iter()
+            .min_by_key(|item| item.text.len())
+            .expect("corpus parsing requires items");
+        let remaining = max_batch_text_bytes.saturating_sub(text.len());
+        let rows = batch_rows
+            .max(1)
+            .min(1 + remaining / short.text.len().max(1));
+        if rows > 1 {
+            let mut texts = vec![text.as_str()];
+            texts.extend(std::iter::repeat_n(short.text.as_str(), rows - 1));
+            let rows_out = self.embed(&texts)?;
+            let short_rows_match = rows_out.len() == texts.len()
+                && rows_out[1..].iter().all(|row| {
+                    !super::bundle::certification_mismatch(row, &short.expected, corpus.tolerance)
+                });
+            if !short_rows_match {
+                return Err(InferenceError::Artifact(
+                    "long-input batch certification failed".to_owned(),
+                ));
+            }
         }
         Ok(())
     }
