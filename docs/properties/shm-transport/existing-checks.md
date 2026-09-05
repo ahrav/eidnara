@@ -391,9 +391,23 @@ Code with no executed check:
 
 ## Concurrency verification tooling
 
-**None found.** No loom, shuttle, Miri, or ThreadSanitizer configuration exists
-anywhere in the repository. Every memory-ordering choice in the ring backend is
-currently unvalidated by any tool, and the only cross-process test is lockstep.
+**Miri only, on the accessor layer.** CI runs a required "Rust unsafe boundary
+under Miri" step (`.github/workflows/ci.yml:128-139`) that installs a dated
+nightly and runs `cargo miri test -p shm-transport --lib -- lease:: backend::ring::miri`,
+failing unless at least one test passed. The selected module `backend::ring::miri`
+(`crates/shm-transport/src/backend/ring.rs:2873-3014`) holds four tests over an
+anonymous mapping (`every_page_accessor_reads_the_initialized_zero_state`,
+`slot_index_past_depth_is_refused_before_any_dereference`,
+`descriptor_round_trips_through_the_volatile_cell`,
+`lifecycle_snapshot_sees_a_write_made_through_the_raw_page`, all unaudited), and
+the `lease::` filter covers the lease-module unit tests. Miri cannot map a
+memfd, punch pages, or open a doorbell, so the gate covers the raw page
+accessors and the lease copy paths, not a constructed `Ring`, not the doorbell
+wake protocol, and not any cross-thread interleaving. No loom, shuttle, or
+ThreadSanitizer configuration exists; every memory-ordering choice in the ring
+backend beyond single-thread validity is unvalidated by any tool, and the only
+cross-process test is lockstep. A valgrind memcheck run over `tests/ring.rs`
+(`ci.yml:141-148`) sits beside Miri and checks the same single-process class.
 
 ## Citation sweep, 2026-08-30
 
