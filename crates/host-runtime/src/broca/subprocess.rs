@@ -753,9 +753,14 @@ pub async fn run(
             // After both streams reach EOF, the code waits up to `limits.drain_grace` for the leader to exit without reaping it; its zombie pins the pgid until the descendant sweep completes.
             let exit = wait_exited_unreaped(group, limits.drain_grace).await;
             if exit != LeaderExit::Running {
-                let signalled = kill_group_fenced(group, exit, rustix::process::Signal::KILL)
-                    .await
-                    .is_ok();
+                let signalled = kill_group_fenced(
+                    group,
+                    exit,
+                    rustix::process::Signal::KILL,
+                    limits.termination_grace,
+                )
+                .await
+                .is_ok();
                 // A fenced `KILL` only signals; the code retains the process-group fence until the sweep completes to prevent signaling a recycled pgid.
                 // The teardown succeeds only after the process group is observed gone.
                 // The teardown checks member disappearance while the unreaped leader pins the pgid.
@@ -871,17 +876,22 @@ async fn kill_group_fenced(
     group: Option<rustix::process::Pid>,
     exit: LeaderExit,
     signal: rustix::process::Signal,
+    grace: Duration,
 ) -> io::Result<()> {
     if exit == LeaderExit::ExitedUnfenced {
         let Some(pid) = group else { return Ok(()) };
         let pgid = pid.as_raw_nonzero().get();
-        let live = off_runtime(move || {
-            group_registry::group_has_members(pgid)
-                .or_else(|_| group_registry::group_has_members(pgid))
-                .unwrap_or(true)
-        })
+        // Expiry and scan errors treat the group as live to prioritize descendant cleanup over a possibly recycled pgid.
+        let live = tokio::time::timeout(
+            grace,
+            off_runtime(move || {
+                group_registry::group_has_members(pgid)
+                    .or_else(|_| group_registry::group_has_members(pgid))
+                    .unwrap_or(true)
+            }),
+        )
         .await
-        .unwrap_or(true);
+        .map_or(true, |scan| scan.unwrap_or(true));
         if !live {
             return Ok(());
         }
@@ -940,9 +950,11 @@ fn queue_spawn(
         reply: tokio::sync::oneshot::Sender<io::Result<tokio::process::Child>>,
         handle: tokio::runtime::Handle,
     }
-    static SPAWNER: OnceLock<std::sync::mpsc::Sender<SpawnJob>> = OnceLock::new();
+    static SPAWNER: OnceLock<std::sync::mpsc::SyncSender<SpawnJob>> = OnceLock::new();
     let sender = SPAWNER.get_or_init(|| {
-        let (sender, jobs) = std::sync::mpsc::channel::<SpawnJob>();
+        // The queue is bounded at the backend-process cap so a stalled spawn causes later runs to fail fast instead of retaining unbounded jobs, pipe descriptors, and blocked registrars.
+        let (sender, jobs) =
+            std::sync::mpsc::sync_channel::<SpawnJob>(super::config::MAX_BACKEND_PROCESSES);
         std::thread::Builder::new()
             .name("broca-spawner".to_owned())
             .spawn(move || {
@@ -960,13 +972,18 @@ fn queue_spawn(
     });
     let (reply, spawned) = tokio::sync::oneshot::channel();
     sender
-        .send(SpawnJob {
+        .try_send(SpawnJob {
             command,
             handshake_fds: (pid_report_write, exec_barrier_read),
             reply,
             handle: tokio::runtime::Handle::current(),
         })
-        .map_err(|_| io::Error::other("the broca-spawner thread is gone"))?;
+        .map_err(|err| match err {
+            std::sync::mpsc::TrySendError::Full(_) => io::Error::other(SpawnerBacklogged),
+            std::sync::mpsc::TrySendError::Disconnected(_) => {
+                io::Error::other("the broca-spawner thread is gone")
+            }
+        })?;
     Ok(spawned)
 }
 
@@ -1030,7 +1047,7 @@ async fn terminate_group(
         // SIGKILL cannot be caught; the bound limits time spent waiting for exit.
         exit = wait_exited_unreaped(group, grace).await;
     }
-    let signalled = kill_group_fenced(group, exit, rustix::process::Signal::KILL).await;
+    let signalled = kill_group_fenced(group, exit, rustix::process::Signal::KILL, grace).await;
     // Check that no other group members remain before reaping the leader so its zombie pins the pgid.
     // Wait for members to disappear rather than treating `SIGKILL` delivery as teardown proof.
     let members_gone = wait_other_members_gone(group, grace).await;
@@ -1317,6 +1334,18 @@ impl std::fmt::Display for RegistrationFailed {
 
 impl std::error::Error for RegistrationFailed {}
 
+/// The spawner's bounded queue is full behind a stalled harness start; no child was forked for this run, so a later attempt can succeed and `spawn_failure` classifies this transient. commentlint: allow(JUDGE)
+#[derive(Debug)]
+struct SpawnerBacklogged;
+
+impl std::fmt::Display for SpawnerBacklogged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the spawn queue is full behind a stalled harness start")
+    }
+}
+
+impl std::error::Error for SpawnerBacklogged {}
+
 /// Spawn failed after publishing a crash-ownership record whose removal also failed.
 /// Its `Display` carries [`RECORD_RETAINED_MARKER`] so settlement latches the retained record.
 #[derive(Debug)]
@@ -1375,6 +1404,21 @@ pub(crate) fn spawn_failure(harness: Harness, err: &io::Error) -> BackendTermina
             message: format!(
                 "{} backend crash-ownership registration failed before \
                  the child could start; the run may be retried",
+                harness.as_str()
+            ),
+            retry_after_secs: None,
+            provider_code: None,
+        });
+    }
+    if err
+        .get_ref()
+        .is_some_and(|inner| inner.is::<SpawnerBacklogged>())
+    {
+        return BackendTerminal::Failed(BackendError {
+            class: ErrorClass::Transient,
+            message: format!(
+                "{} backend spawn queue is full behind a stalled harness \
+                 start; the run may be retried",
                 harness.as_str()
             ),
             retry_after_secs: None,
