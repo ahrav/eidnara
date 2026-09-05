@@ -37,10 +37,13 @@ maps whatever the grant declares, with no step that compares the two.
   only bound on attach geometry. It rejects `layout_version != LAYOUT_VERSION`,
   `descriptor_depth == 0`, `arena_bytes < MAX_FRAME_BYTES`, `max_leases == 0`,
   and `max_leases > descriptor_depth` (`:462-469`), then requires `layout.total ==
-  total` (`:474-476`). Depth has a floor of 1 and no ceiling; the only thing
-  stopping a huge depth is that the resulting `total` must be arithmetically
-  consistent, and `Layout::new` returns `ArithmeticOverflow` only at `usize`
-  overflow.
+  total` (`:474-476`). In the source tree depth had a floor of 1 and no
+  ceiling, so only `usize` overflow stopped a huge depth. At HEAD `Layout::new`
+  refuses `depth == 0 || depth > MAX_DESCRIPTOR_DEPTH`
+  (`crates/shm-transport/src/backend/ring.rs:234-235`, with
+  `MAX_DESCRIPTOR_DEPTH = 4096` at `:50`) and `RingGrant::checked_layout`
+  (`:812-819`) runs it before any grant is accepted, so an absolute ceiling
+  exists; what is still missing is the match against a local profile.
 - `crates/shm-transport/src/backend/ring.rs:1639-1670` — `validate_lifecycle`.
   It compares the mapped lifecycle page against the *grant*: magic, layout
   version, depth, arena bytes, max leases, total bytes, incarnation, and lane
@@ -78,11 +81,14 @@ that same grant. The attaching process maps roughly 1 MiB of extra control regio
 that its admission charge never accounted for, and the local accounting now
 describes an object that was never mapped.
 
-The larger version is the one the TypeScript cap exists for: nothing inside Rust
-places a ceiling on depth or total bytes, so a self-consistent grant with a very
-large depth reaches `mmap` with only `shm-grant.ts:170` in the way. Any caller
-that reaches `Ring::attach` without that wrapper — the addon's own raw boundary,
-the Rust test peer, a future non-TypeScript client — has no such ceiling.
+The larger version was the one the TypeScript cap existed for: in the source tree
+nothing inside Rust placed a ceiling on depth or total bytes, so a self-consistent
+grant with a very large depth reached `mmap` with only `shm-grant.ts:170` in the
+way. At HEAD the ceiling is in Rust (`MAX_DESCRIPTOR_DEPTH`, `ring.rs:50`,
+enforced at `:234-235`), so every caller that reaches `Ring::attach` — the
+addon's own raw boundary, the Rust test peer, a future non-TypeScript client — is
+bounded at 4096 descriptors; the record's remaining content is the absence of a
+profile match below that bound.
 
 ## Timing windows and dependencies
 

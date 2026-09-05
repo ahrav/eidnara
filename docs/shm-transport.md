@@ -75,7 +75,7 @@ A healthy report includes only bounded, aggregate data:
 The terminal-class list above is the host report's vocabulary. The native client does not emit it as structured values. Its diagnostic surface at HEAD is:
 
 - Startup failures throw `NativeStartupError` with a `reason` from the closed set in `packages/shm-native/index.ts`: `missing_addon`, `unsupported_platform`, `missing_manifest`, `wrong_platform_payload`, `missing_checksum`, `checksum_mismatch`, `debug_build`, `wrong_platform_binary`, `capability_unavailable`. Only `missing_addon` is shared with the host list.
-- Setup failures cross N-API as generic errors with one of two fixed messages: `shared-memory identity mismatch` for an identity or authentication refusal, and `shared-memory setup failed` for every other setup, transfer, or deadline failure (`setup_error` in `packages/shm-native/src/lib.rs`).
+- Setup failures cross N-API as generic errors with one of five fixed messages (`packages/shm-native/src/lib.rs`): `shared-memory identity mismatch` for an identity or authentication refusal (`setup_error`, `:640`); `shared-memory setup failed` for other setup, transfer, or deadline failures and for a pending setup that no longer exists (`:642`, `:731`); `shared-memory attachment failed` when the granted ring cannot be attached (`:689`, `:694`); `native setup identity exhausted` when the pending-setup table has no free id (`:703`); and `shared-memory setup was cancelled` when the caller cancels before completion (`:744`, `:794`).
 - Peer death is exposed as the `peerClosed()` boolean on the channel, not as an event or class.
 - Ring exhaustion surfaces as the fixed message `shared-memory ring is full`.
 

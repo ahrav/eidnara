@@ -16,7 +16,7 @@ wildcard pass that questioned the framing itself.
 | Category | Count | Status |
 | --- | --- | --- |
 | refinement | 4 | applied to the catalog |
-| gap | 5 | queued for a follow-up discovery pass |
+| gap | 5 | four closed on 2026-09-05 by new records (gaps 1, 3, 4, 5); gap 2 still queued |
 | bias | 3 | require human judgment, listed below |
 
 ## Refinements applied
@@ -133,8 +133,9 @@ is mostly sound; every Check except the vocabulary record's can be implemented
 with `token_golden.rs` and `include_str!` as stated, and insisting on the
 committed fixture over a live oracle is correctly reflected in the code. The gap
 that matters is breadth, not depth: the pre-tokenizer pattern, determinism, the
-BOM divergence, and totality of `encode_ordinary` each have claim-bearing tests
-and no record, which `METHOD.md:140` says must not happen. Two records
-over-claimed and are now corrected. For a crate with no production caller the
-set is a starting point, not complete: gaps 1, 3, and 5 are cheap, orphan
-existing tests, and cover the properties a first caller will depend on.
+BOM divergence, and totality of `encode_ordinary` each had claim-bearing tests
+and no record, which `METHOD.md:140` says must not happen; all four now have
+records. Two records over-claimed and are now corrected. For a crate with no
+production caller the set is a starting point: gaps 1, 3, 4, and 5 were cheap,
+orphan existing tests, and are closed above; gap 2, Unicode-table skew, remains
+queued and needs a human decision on the authoritative Unicode version.

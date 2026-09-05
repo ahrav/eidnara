@@ -19,13 +19,15 @@ entry point that creates a usable handle should observe it.
   not compared.** This resolves the catalog's open question and lifts the basis
   from reported to verified (line numbers re-verified at post-#131 HEAD: the
   field reads are `:2074-2085` and the comparison is `:2086-2096`).
-- `ring.rs:783-798` is `Ring::attach`. It computes the layout at `:785`, converts
-  `total_bytes` at `:786`, maps at `:787`, calls `validate_lifecycle` at `:788`,
-  and returns the `Ring`, wiring the two transferred eventfd doorbells
-  (`:789-797`; the pre-#131 `prefault_read` step is gone from attach). There is no
-  quarantine check on this path, which is consistent with the grep result: the
-  only five `is_quarantined` call sites are `ring.rs:913`, `:1056`, `:1176`,
-  `:1251`, and `:1337`, all per-operation.
+- In the source tree, `ring.rs:783-798` was `Ring::attach`: it computed the
+  layout, converted `total_bytes`, mapped, called `validate_lifecycle`, and
+  returned the `Ring` wiring the two transferred doorbells, with no quarantine
+  check on the path; the only `is_quarantined` call sites were per-operation.
+  At HEAD that gap is closed: `Ring::attach` (`ring.rs:969-1029`) checks
+  `ring.is_quarantined()` at `:1020-1022` and returns `RingError::Quarantined`
+  before handing the ring out, and `attach_refuses_a_quarantined_ring`
+  (`:3715-3719`) pins it. The record stands as a regression contract on that
+  gate.
 - `ring.rs:136` shows `quarantined: AtomicU8` is a `LifecyclePage` field, so it
   is present in the very page `validate_lifecycle` reads. The omission is a
   choice of fields, not an absence of data.
@@ -112,7 +114,8 @@ already attached" (`lib.rs:108`).
   No other read of the flag occurs anywhere on the attach path. The claim is
   confirmed.
 - Missing evidence: none for this question.
-- Conclusion: resolved. `validate_lifecycle` does not read `quarantined`, so
-  attach admits a quarantined object. The catalog's medium confidence can be
-  raised to high, and the caveat about not having re-read the tuple can be
-  dropped.
+- Conclusion: resolved for the source tree, where `validate_lifecycle` did not
+  read `quarantined` and attach admitted a quarantined object. At HEAD the
+  attach path has an explicit `is_quarantined()` gate (`ring.rs:1020-1022`)
+  with a unit test (`:3715-3719`), so the defect is fixed and the record guards
+  the gate rather than reporting a live admission.

@@ -319,23 +319,38 @@ Code with no executed check:
    observation, and the only page-size assertion in the tree does not run there
    either. Two macOS-specific fixes have no executed check. Four of the twelve
    tests in `ring.rs` are additionally Linux-gated; the other eight would run on
-   macOS if the file were in the macOS command.
+   macOS if the file were in the macOS command. Re-verified at HEAD
+   (2026-09-05): there is no macOS path to be quiet about; `ring.rs:18-19`
+   refuses every non-Linux build and the three macOS records are invalidated.
 2. Layout and prefault arithmetic still use a compile-time page-size constant
    while residency verification was made runtime-aware. Nothing asserts the
-   layout total is a multiple of the real page size.
+   layout total is a multiple of the real page size. Re-verified at HEAD
+   (2026-09-05): no longer true. `Layout::new` reads `system_page_size()`
+   (`ring.rs:228`), refuses an arena that is not a multiple of it (`:231`),
+   aligns every region with `align_up(.., page_size)`, and re-checks the
+   offsets against the runtime page size (`:317-318`); the quiet area is now
+   only that no test runs on a non-4096 host.
 3. The arena padding conservation term is never produced by any production path;
    its only nonzero value is a synthetic one in a test.
 4. `abort_reservation`, the sole charge-return path for commit failures, aborts,
    and drops, is infallible and silent on pointer failure.
 5. Peer-originated quarantine. Nothing tests it, and no check distinguishes
-   self-quarantine from peer-quarantine.
+   self-quarantine from peer-quarantine. Re-verified at HEAD (2026-09-05): now
+   tested by `shared_quarantine_flag_latches_locally_when_observed`
+   (`ring.rs:3976`), `quarantine_survives_peer_clearing_shared_flag` (`:4257`),
+   and `quarantine_wakes_a_parked_peer` (`:3116`).
 6. The process-wide attach claim has no test at any level; the commit that added
    it records that in-crate tests cannot link the addon runtime.
 7. Attach is only ever exercised against a ring created in the same process, so
    the lifecycle equality check is only ever fed grants that process encoded.
+   Re-verified at HEAD (2026-09-05): `two_process_zero_copy_exchange_uses_authenticated_grant`
+   (`tests/ring.rs:483`) attaches in a child process (`ring_child_exchange`,
+   `:537`) to a grant the parent encoded.
 8. The wire-header setter has no test, though a mismatch is exactly what commit
    validation rejects.
-9. Runtime-directory revalidation is never negative-tested.
+9. Runtime-directory revalidation is never negative-tested. Invalidated at HEAD:
+   no `RuntimeDir` exists in this tree and the covering record is
+   `Status: invalidated`.
 10. The iceoryx segment-growth path never executed; every test wrote tiny
     payloads. Invalidated at `e447c927`: `0f336d3c` deleted the backend, and the
     covering catalog records are `Status: invalidated`.

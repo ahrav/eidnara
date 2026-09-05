@@ -160,6 +160,23 @@ from someone who owns the transport, not a code change.
    added five backend and five platform records, so the concentration is now 11 of
    58 with both boundaries represented; the labelling question stands.
 
+## Verdict, initial 32-record pass
+
+The evaluator's verdict was "not fit for full handoff", and after applying the
+refinements that assessment is partly addressed and partly still open.
+
+What is ready to hand to `/testing:test-strategy` now: the fourteen records the
+evaluator classified as observable through current interfaces or artifacts, which
+includes the whole evidence-integrity group and most of the attach-side and
+cross-artifact records. Several of these need no harness investment at all.
+
+What is not ready: the nine records blocked on a normative decision (bias 3), and
+the seven queued gaps (G1 to G7). Handing over the blocked records first would
+spend harness effort encoding a guess about intended behaviour.
+
+The gap closure section below records G1 to G7 as closed on 2026-08-29; the
+verdict is kept here, in sequence, as the state it described.
+
 ## Gap closure, 2026-08-29
 
 All seven queued gaps were mined in a follow-up pass. The catalog went from 32
@@ -204,27 +221,6 @@ What did not change: the seven gaps were genuine omissions rather than scope
 decisions, and closing them did not overturn any original record. The transport
 crate and addon are byte-identical between the commit the original records cite
 and the commit the closure records were verified against.
-
-## Re-evaluation trigger
-
-A fresh portfolio pass is now warranted, and for the reason the earlier trigger
-named: closure added whole categories (decode contract, platform, second
-backend, normal-operation liveness) rather than additions inside existing ones.
-The 58-record set has not been evaluated as a whole by an independent reader.
-
-## Verdict
-
-The evaluator's verdict was "not fit for full handoff", and after applying the
-refinements that assessment is partly addressed and partly still open.
-
-What is ready to hand to `/testing:test-strategy` now: the fourteen records the
-evaluator classified as observable through current interfaces or artifacts, which
-includes the whole evidence-integrity group and most of the attach-side and
-cross-artifact records. Several of these need no harness investment at all.
-
-What is not ready: the nine records blocked on a normative decision (bias 3), and
-the seven queued gaps (G1 to G7). Handing over the blocked records first would
-spend harness effort encoding a guess about intended behaviour.
 
 ## Re-evaluation trigger
 

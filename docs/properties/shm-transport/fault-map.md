@@ -131,7 +131,7 @@ pair can report overlap that never existed.
 
 ### Revised leverage ranking
 
-Counting the full 71-record catalog (revised 2026-09-05; the 2026-08-30 ranking
+Counting the full 78-record catalog (revised 2026-09-05; the 2026-08-30 ranking
 under "Highest-leverage missing capability" is superseded and kept as history):
 
 1. **F2, a cross-process mutating peer** - the in-process fixture exists at HEAD

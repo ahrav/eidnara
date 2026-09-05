@@ -299,6 +299,8 @@ and `n/a - invalidated` for an invalidated record.
 | [capability-probe-gates-every-advertised-mechanism](#capability-probe-gates-every-advertised-mechanism) | safety | high | yes |
 | [clean-reclamation-is-reachable](#clean-reclamation-is-reachable) | reachability | high | n/a - invalidated |
 | [test-only-surface-absent-from-the-shipped-addon](#test-only-surface-absent-from-the-shipped-addon) | safety | high | yes |
+| [diagnostics-report-lifecycle-counts-in-a-fixed-shape](#diagnostics-report-lifecycle-counts-in-a-fixed-shape) | safety | high | yes |
+| [transport-debug-output-redacts-every-sentinel](#transport-debug-output-redacts-every-sentinel) | safety | high | no |
 | [decoder-totality-over-arbitrary-bytes](#decoder-totality-over-arbitrary-bytes) | safety | high | yes |
 | [accepted-decode-consumes-its-declared-width](#accepted-decode-consumes-its-declared-width) | safety | high | yes |
 | [identity-and-schema-rejection-is-one-contract](#identity-and-schema-rejection-is-one-contract) | safety | high | yes |
@@ -319,6 +321,7 @@ and `n/a - invalidated` for an invalidated record.
 | [every-shm-header-consumer-applies-its-role-gate](#every-shm-header-consumer-applies-its-role-gate) | safety | medium | yes |
 | [header-rejection-effect-does-not-depend-on-the-catching-layer](#header-rejection-effect-does-not-depend-on-the-catching-layer) | safety | high | yes |
 | [runtime-directory-authentication-is-a-precondition-not-a-container](#runtime-directory-authentication-is-a-precondition-not-a-container) | safety | high | n/a - invalidated |
+| [raw-native-attach-rejects-hostile-descriptors-without-effects](#raw-native-attach-rejects-hostile-descriptors-without-effects) | safety | high | yes |
 | [backpressure-converges-in-a-bounded-reclaim-window](#backpressure-converges-in-a-bounded-reclaim-window) | liveness | high | yes |
 | [receive-resumes-when-lease-capacity-clears](#receive-resumes-when-lease-capacity-clears) | liveness | high | yes |
 | [neither-direction-starves-the-other](#neither-direction-starves-the-other) | liveness | high | yes |
@@ -332,19 +335,16 @@ and `n/a - invalidated` for an invalidated record.
 | [capacity-recheck-after-a-wake-race](#capacity-recheck-after-a-wake-race) | liveness | medium | yes |
 | [reclamation-excludes-pages-with-live-wrapped-bytes](#reclamation-excludes-pages-with-live-wrapped-bytes) | safety | high | yes |
 | [reactor-callback-is-one-in-flight](#reactor-callback-is-one-in-flight) | safety | high | yes |
+| [trim-removes-only-dead-pages-below-the-write-cursor](#trim-removes-only-dead-pages-below-the-write-cursor) | safety | high | no |
+| [quarantine-wakes-a-parked-waiter](#quarantine-wakes-a-parked-waiter) | liveness | high | yes |
 | [setup-proof-vectors-pin-the-shared-hmac-transcript](#setup-proof-vectors-pin-the-shared-hmac-transcript) | safety | high | yes |
 | [one-profile-id-names-one-ring-geometry-in-code](#one-profile-id-names-one-ring-geometry-in-code) | safety | high | yes |
 | [addon-reservations-drop-before-the-ring](#addon-reservations-drop-before-the-ring) | safety | medium | yes |
 | [addon-scheduling-wakes-only-on-acknowledged-readiness](#addon-scheduling-wakes-only-on-acknowledged-readiness) | liveness | medium | yes |
-| [addon-scheduling-reaches-peer-eof-and-interrupted-wait](#addon-scheduling-reaches-peer-eof-and-interrupted-wait) | reachability | medium | yes |
-| [addon-grant-decoding-is-the-shared-setup-envelope](#addon-grant-decoding-is-the-shared-setup-envelope) | safety | low | yes |
-| [raw-native-attach-rejects-hostile-descriptors-without-effects](#raw-native-attach-rejects-hostile-descriptors-without-effects) | safety | high | yes |
-| [diagnostics-report-lifecycle-counts-in-a-fixed-shape](#diagnostics-report-lifecycle-counts-in-a-fixed-shape) | safety | high | yes |
-| [transport-debug-output-redacts-every-sentinel](#transport-debug-output-redacts-every-sentinel) | safety | high | no |
-| [trim-removes-only-dead-pages-below-the-write-cursor](#trim-removes-only-dead-pages-below-the-write-cursor) | safety | high | no |
-| [quarantine-wakes-a-parked-waiter](#quarantine-wakes-a-parked-waiter) | liveness | high | yes |
 | [readiness-redispatch-is-bounded-under-persistent-arm-failure](#readiness-redispatch-is-bounded-under-persistent-arm-failure) | liveness | high | yes |
 | [each-channel-wake-survives-a-shared-acknowledgement](#each-channel-wake-survives-a-shared-acknowledgement) | liveness | high | yes |
+| [addon-scheduling-reaches-peer-eof-and-interrupted-wait](#addon-scheduling-reaches-peer-eof-and-interrupted-wait) | reachability | medium | yes |
+| [addon-grant-decoding-is-the-shared-setup-envelope](#addon-grant-decoding-is-the-shared-setup-envelope) | safety | low | yes |
 
 ---
 
@@ -410,7 +410,6 @@ statements that active and quarantined charges are reported separately
 rest on a byte the peer controls. At HEAD the latch makes the peer's write
 inert.
 Open questions:
-
 - The source document's explicit non-guarantee about malicious peers (former
   `docs/shm-transport.md:116`) is absent from the rewritten document, which
   makes no statement about peer misbehaviour either way. Did it extend to
@@ -461,7 +460,6 @@ The abort path matters most where quarantine was raised *because* a JavaScript
 alias may still be attached to the aborted range
 (`packages/shm-native/src/lib.rs:283-287`).
 Open questions:
-
 - Is "a reservation admitted before quarantine may still publish" the intended
   contract? If so it belongs in the documented close ordering, which currently
   reads as unconditional.
@@ -600,7 +598,6 @@ Existing check: none.
 Impact: `active` diverges permanently from the live set, so admission refuses
 candidates the host can afford, or accepts ones it cannot.
 Open questions:
-
 - Under what conditions can `checked_sub` actually fail here? If it is
   unreachable, this becomes `always-or-unreached` plus a reachability check
   rather than a live risk. (partial: the arithmetic is reachable only through a
@@ -657,7 +654,6 @@ which described an incarnation-bearing release protocol that never existed and
 whose surrounding
 machinery has since been removed.
 Open questions:
-
 - Does the documented sentence describe intended future behaviour, or is it
   simply wrong and should be deleted? Adding an incarnation-bearing release
   protocol would be a real design change, so this needs an owner's decision
@@ -711,7 +707,6 @@ under-counts producer-reserved bytes. The larger finding is the contract-vs-code
 contradiction in a SAFETY comment, which is exactly the kind of statement a
 future reader will rely on.
 Open questions:
-
 - Which is wrong, the comment or the order? Either store `reservation_len`
   before the CAS, or stop trusting it in `conservation()`.
 - Are `conservation()` and `probe()` test-only? If any cross-process production
@@ -766,7 +761,6 @@ hazard plus an accounting-accuracy bug rather than undefined behaviour. It
 becomes unsoundness the moment any reader reaches descriptor or arena bytes from
 slot state.
 Open questions:
-
 - Is the relaxed state store intentional, given `abort_reservation` and
   `reclaim_completed` use `Release` for the same field (`ring.rs:2294`, `:2146`)?
   If intentional, the reasoning belongs in the code.
@@ -839,7 +833,6 @@ rather than commit success. Status unaudited.
 Impact: a sender that believes a frame was published when it was not, with no
 retry, on a transport whose failure mode is otherwise fail-closed.
 Open questions:
-
 - Does the client's `FrameSendTicket.cancel()`/`onPublish` contract mean "handed
   to the transport" or "committed"? The two differ only on commit failure.
   (needs human input)
@@ -896,7 +889,6 @@ Impact: none live; the record is a regression contract. Widening
 identity for a caller that forgot its lease, restores a read-after-recycle on
 leased bytes with no malformed input required.
 Open questions:
-
 - Should the visibility be pinned by a compile-fail test under
   `crates/shm-transport/tests`, or is the `pub(crate)` marker considered
   sufficient under the crate's review practice? (needs human input)
@@ -1040,7 +1032,6 @@ drop path would strand a charge or an unreclaimed frame with no counter, log, or
 terminal state, and the arena bytes would stay unreclaimable with nothing
 telling the operator. At HEAD the quarantine is the signal.
 Open questions:
-
 - The signal is quarantine, which is terminal for the direction. Is that the
   intended response to a drop-time release failure, or should the drop path
   report without condemning the ring? (needs human input)
@@ -1100,7 +1091,6 @@ lease and descriptor capacity reported as ordinary backpressure. The
 there is no field a reconciliation could read; the setup-socket sentinel, not the
 ring, is what detects the death.
 Open questions:
-
 - Is a peer crash meant to be recoverable at all? If yes, something must reset
   the cursors or force quarantine; today it does neither. (needs human input)
 - Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
@@ -1215,7 +1205,6 @@ silently instead of visibly polling an empty ring. With socketpair doorbells
 the closed peer end surfaces as `DoorbellFailed` on the next `drain` or
 `signal`; whether that reaches the release path is part of the open question.
 Open questions:
-
 - None open on the former release-versus-suspect fork: both close paths end in
   the unconditional `admission.release()` at `ring_transport.rs:273` at HEAD,
   which resolves that question by code change. What remains untested is the
@@ -1268,7 +1257,6 @@ Impact: silent single-frame loss on a channel whose documented failure posture i
 fail-closed. If the channel is meant to be lossless up to close, `consumed`
 advancing before delivery is the wrong commit point.
 Open questions:
-
 - Is losing one acquired-but-undelivered frame on cancel or overload an accepted
   contract term? (needs human input)
 
@@ -1355,7 +1343,6 @@ hands a mutable pointer out of a by-value receiver; the addon wires it into
 external buffers for *receive* segments too, so JavaScript can write memory the
 host is concurrently reading.
 Open questions:
-
 - Should the audit be mechanised, for example a test or lint that fails if
   `lease.rs` ever contains `from_raw_parts` or forms a slice over arena bytes,
   so the resolved finding cannot silently return? (needs human input)
@@ -1494,7 +1481,6 @@ layout total silently weakened five hardening tests for over a day. The
 arrangement that produced it is gone; recurrence needs the fixture and the
 profile to drift apart again with nothing asserting their equality.
 Open questions:
-
 - Should the addon fixture's geometry constants be derived from or asserted
   against the Rust profile, so the equality is checked rather than maintained by
   hand? (needs human input)
@@ -1549,7 +1535,6 @@ and retains nothing, is carried by
 `raw-native-attach-rejects-hostile-descriptors-without-effects`; the
 direction-binding gap above is restated in that record's open questions.
 Open questions:
-
 - Carried to `raw-native-attach-rejects-hostile-descriptors-without-effects`.
 
 ---
@@ -1629,7 +1614,6 @@ selection gate cannot detect the operation it names; a body copy added to a
 nominally zero-copy arm would report `body_copies == 0` and pass. This is the
 gate that decides whether a shared-memory provider may ship.
 Open questions:
-
 - Is `OperationCounters` intended to be wired to real instrumentation, or is it
   permanently a report-schema type? If the latter, the "counts copies" language
   in the source document (former `docs/shm-transport.md:25`) overstated what any
@@ -1804,7 +1788,6 @@ requirement PASS, but the PASS rests on a type nothing in production drives. The
 documented "drains published data" stage has no counterpart in either real close
 path.
 Open questions:
-
 - Is the state machine intended to become the driver, or is it a specification
   artifact? If specification-only, which code is normative for close ordering?
   (needs human input)
@@ -1849,7 +1832,6 @@ fails before application traffic (`docs/shm-transport.md:15`) and that
 unsupported or omitted results are not success states (`:98`); at HEAD the probe
 is consistent with that.
 Open questions:
-
 - An earlier draft asserted that the code's step order differs from the
   document's numbering. That is **not supported**: steps one through eight appear
   in documented order. Two real divergences replace it. There is an undocumented
@@ -1904,7 +1886,6 @@ reclamation and quarantine as two outcomes (former `:87-90` also prescribed
 distinct experiments for them),
 and now describes no code at all.
 Open questions:
-
 - The documentation at `docs/shm-transport.md:49` and `:92` (former `:87-90`)
   still describes a two-outcome recovery model that no longer exists. Should it be rewritten to the
   unconditional-release behaviour, or is the recovery model intended to return?
@@ -1945,7 +1926,6 @@ debug-build clause is retired: `packages/shm-native/package.json` builds with
 `cargo build --release -p shm-native` and copies
 `target/release/libshm_native.so` to `shm_native.node`.
 Open questions:
-
 - Is a `cfg`- or feature-gated split intended before this transport becomes
   selectable, or is the surface considered acceptable because the transport is
   test-only? (needs human input)
@@ -1996,7 +1976,6 @@ describe; this report is the one surface where a peer death or a reclamation
 that did happen is countable, so it is the oracle those records should use, and
 a missed `record_*` call turns a real event back into silence.
 Open questions:
-
 - Should a host-level test drive the three events through `connection.rs`
   rather than calling `record_*` directly, so the wiring at `:172`, `:185`,
   and `:193` is pinned? (needs human input)
@@ -2048,7 +2027,6 @@ Impact: a sentinel in a log line is a replayable credential for whoever reads
 the log; the transport's defence is this macro, and its type list is
 maintained by hand.
 Open questions:
-
 - Should the type list be derived rather than enumerated, for instance by a
   test that asserts every type carrying a sentinel field routes through the
   macro? (needs human input)
@@ -2112,7 +2090,6 @@ nowhere in the tree. Narrowing `GRANT_BYTES` turns `ring.rs:768` into an
 unconditional panic on every call, and a harness offset edit does the same to
 `read_u64`; no property currently forbids either.
 Open questions:
-
 - Should `GRANT_BYTES` be derived from its field widths, as `SAMPLE_PREFIX_BYTES`
   is (`sample.rs:19`), rather than written as a literal?
 - Is the harness's zero-margin offset arithmetic deliberate? (needs human input)
@@ -2164,7 +2141,6 @@ oracle and the one whose offsets are hand-written literals. A change making a
 region inert leaves the length gate satisfied and every read in bounds, so
 whether any test notices depends on which seeds happen to distinguish the fields.
 Open questions:
-
 - Is `SamplePrefix`'s prefix-plus-slack policy permanent, or an accommodation for
   iceoryx loan granularity that another backend would not need? (needs human
   input)
@@ -2228,7 +2204,6 @@ rewritten under a live lease is accepted by `release` and rejected by
 head-of-line blocked the reclaim loop with no terminal state, which is the end
 state this record was written against.
 Open questions:
-
 - Is omitting the schema check in `Ring::release` intentional, on the grounds
   that the release path builds no body view? If so it belongs in a comment,
   because the field is read from peer-writable memory by the next reader.
@@ -2281,7 +2256,6 @@ rather than rejecting it. The only thing standing against that is the fuzz
 round-trip assertion, which is doing forward-compatibility work its comment does
 not claim.
 Open questions:
-
 - Is `encode`'s unconditional zeroing intended to make the type version-2-only,
   or should a relay preserve unknown reserved bytes? (needs human input)
 - Should the descriptor's 12 padding bytes get the same declared-and-enforced
@@ -2341,7 +2315,6 @@ total keeps the length gate satisfied and the bit count at 864. And two of the
 five identity conditions in the load-bearing `validate` function are covered only
 by tabled unit cases, never by fuzzing.
 Open questions:
-
 - Should the harness encode the shared struct's 120-byte image rather than a
   packed 108-byte private shape? Keeping them different is defensible and
   cheaper; unifying them would give the padding a decode contract and force
@@ -2421,7 +2394,6 @@ What the record established is that the source tree's Darwin object-creation
 path was never executed under observation, and that restoring it would
 activate creation without seals and an unverified attach predicate at once.
 Open questions:
-
 - If a Darwin surface returns, reopen this record with a call site, a macOS
   build, and a runner; the source-tree line references above resolve against
   `host@bdf72f46a`, not this tree. (needs human input)
@@ -2507,7 +2479,6 @@ gate it contrasted against is the one the U3 tree ships, exercised by
 `artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected`
 (`tests/ring.rs:300-381`).
 Open questions:
-
 - If a Darwin surface returns, what substitutes for `F_SEAL_SHRINK`? Darwin
   has no seals. Reopen this record with that answer. (needs human input)
 
@@ -2571,7 +2542,6 @@ one-statement window between `shm_open` and `shm_unlink` in which a failure
 left a name in the Darwin namespace with no retained handle, and that
 `memfd_create` objects on Linux have no such window because they are anonymous.
 Open questions:
-
 - If a Darwin surface returns, should its object creation own an unwind matching
   `RuntimeDir`, or never unlink the name before `ftruncate`? Reopen this
   record with that answer. (needs human input)
@@ -2619,7 +2589,6 @@ the arena's final bytes, which are peer-writable payload, and page-granular
 mechanisms such as `mprotect` could no longer separate control state from
 payload. At HEAD that cannot happen without a source change.
 Open questions:
-
 - No CI host has a non-4096 page. Is an injectable page size, or an aarch64
   large-page job, worth adding so the alignment is asserted rather than
   inferred from the code? (needs human input)
@@ -2675,7 +2644,6 @@ requires an aarch64 Linux large-page job or an injectable page size; the Darwin
 question is settled for this tree (no macOS build exists, see the invalidated
 Darwin records).
 Open questions:
-
 - Add an aarch64 Linux job with a large-page kernel, or make the page size
   injectable so the path can be driven on any host? (needs human input)
 
@@ -2770,7 +2738,6 @@ had no terminal state after a rejected descriptor — the ring's quarantine had 
 counterpart — and that the absence was invisible because `backend/mod.rs`
 declared no trait, so no parity gap was a compile error.
 Open questions:
-
 - Is the loopback shape intended to be permanent? The ledger reads differently
   under each answer and no repository file states one. (needs human input)
 - If iceoryx is meant to reach a designated host, does it owe a terminal state at
@@ -2831,7 +2798,6 @@ expectation advance, over process-local `Cell<u64>` rather than shared pages, so
 one rejected sample stranded the expectation permanently with no shared cursor to
 reconcile against.
 Open questions:
-
 - Was the `Cell<u64>` pair intended as a same-instance smoke-test device rather
   than a transport cursor? If so the record scopes down to a documentation
   obligation. (needs human input)
@@ -2894,7 +2860,6 @@ to declare. What the record established, and the part that outlives the backend,
 is the topology argument in the preceding paragraph: it is a statement about
 same-instance harnesses, so it binds any future second backend.
 Open questions:
-
 - The two questions about `selectable: true` and about disjoint loopback-smoke and
   `selectable` lists are moot: `0f336d3c` left one transport arm and removed the
   `selectable` key. The general form survives and belongs to whichever gate
@@ -2960,7 +2925,6 @@ move semantics rather than by a check — sound, but silent — so it exposed no
 observation from which outstanding samples could be counted, and an explicitly
 released lease was indistinguishable from an abandoned one.
 Open questions:
-
 - Is `stale_node_observed` (`iceoryx.rs:178-189`) intended as the readiness
   surface? It is an associated function over global dead-node entries, keyed to
   nothing about a given instance's samples. (needs human input)
@@ -3025,7 +2989,6 @@ indefinitely on the one thread that could have drained it, and ordinary receive
 backpressure was reported as a channel-ending fault — the opposite of the ring's
 `Exhausted`-plus-`Ok(None)` split, which survives.
 Open questions:
-
 - Does any designated host's global config override the backpressure strategy? No
   repository file sets it and no test asserts it, and the two possible values give
   opposite uncontracted outcomes: unbounded blocking, or silent frame loss.
@@ -3105,7 +3068,6 @@ frame deadline on a frame already known illegal, and the transport cannot
 compensate, because `host-runtime` depends on `shm-transport` and so `FrameType`,
 `Flags`, and the protocol version are unreachable from the validating crate.
 Open questions:
-
 - The control-cap branch (`ring_transport.rs:503-514`) releases the lease and
   answers `Rejected` rather than closing, a fourth disposition. Is a per-channel
   body cap a header rule or an admission rule? (needs human input)
@@ -3157,7 +3119,6 @@ balanced-but-wrong case, charge 64 MiB and copy 64 bytes, is a cheap
 budget-exhaustion primitive, because the ingress wait loop is what other receives
 block on and the resulting overload close is classified clean.
 Open questions:
-
 - Should the equality also be asserted host-side, given the host owns the header
   format while the transport owns the only check? (needs human input)
 - Whether any consumer above the inbound event compares the header length to the
@@ -3209,7 +3170,6 @@ stays open, with no diagnostic, counter, or close reason, which is the implicit
 profile extension the wire document forbids. The record straddles the part
 boundary, since the peer consumer lives in `packages/plugin`, assigned to Part 5.
 Open questions:
-
 - Is the shared-memory frame channel reachable in any shipped configuration, or
   only through an injected factory? Empty registries are reported for Part 1 as a
   whole and were not re-derived for the client package. (partial)
@@ -3279,7 +3239,6 @@ and sees `Exhausted` then `Deadline`, codes meaning try again later. In neither
 case is the failing field recorded anywhere, and `enter_quarantine` is itself
 best-effort, no-oping if the lifecycle pointer computation fails.
 Open questions:
-
 - Is the transport path's ring quarantine intended for all header rejections, or
   an artifact of descriptor validation sitting below the trust boundary? The
   documented close ordering covers unknown alias state, not a protocol rejection.
@@ -3347,7 +3306,6 @@ this property. What the record established is that the source tree's directory
 held no object on any platform, so its authentication guarded a belief rather
 than a container, and that its `Drop` removed by path without revalidating.
 Open questions:
-
 - If a path-bearing ring object ever returns, reopen this record: the
   authentication it needs is the one `Mapping::attach` applies to the memfd
   (`validate_seals`, `validate_object`), not a directory check. (needs human
@@ -3398,7 +3356,6 @@ descriptor maps attacker-chosen geometry into the process. The record replaces
 `native-boundary-not-weaker-than-its-wrapper`, whose wrapper decoder does not
 exist in this tree.
 Open questions:
-
 - Nothing binds a grant to its direction: field position is the only role
   assignment, so a descriptor with swapped lane fields would put two producers
   on one single-producer lane. Is that reachable from any caller, or latent?
@@ -3480,7 +3437,6 @@ progress in normal operation. A recovery-chain defect presents as
 cancelled generation, and a suspect record: a transport fault reported on a
 channel whose peer was draining correctly.
 Open questions:
-
 - What inner bound should the cross-process arm assert? The existing test pairs a
   50 ms sleep with a five-second deadline, three orders of magnitude of slack, so
   it measures no latency and a per-pass reclaimer would pass it.
@@ -3551,7 +3507,6 @@ wait and parks on the doorbell (`ring_transport.rs:426`, `:456`) and no error,
 quarantine, or counter fires: the silent capacity-loss signature of
 `attach-reconciles-or-refuses-stale-shared-cursors`, reached with no crash.
 Open questions:
-
 - Resolved (2026-09-05): the addon receive path does saturate where the Rust
   host cannot. `poll` inserts every lease into `channel.active`
   (`packages/shm-native/src/lib.rs:1220`) and only `release` (`:1278`,
@@ -3636,7 +3591,6 @@ retired generation or an unclean close attributed to the transport. Because the
 endpoint owns its thread and runtime, the damage is confined to the opposite lane
 rather than other host tasks, which is also why no existing test would notice.
 Open questions:
-
 - What is the normative service ratio? `frame_deadline` is caller-supplied, so the
   worst case cannot be derived from this crate and a test must pin it from its own
   configuration. (needs human input)
@@ -3763,7 +3717,6 @@ made the existing assertion weak. A never-fired marker under a Rust-host-only
 campaign is itself a finding: it reports that the host receiver cannot exercise
 lease backpressure, and that only an addon caller retaining leases can.
 Open questions:
-
 - Should a second profile with a cap above one be added purely to make this
   situation reachable, or should the eight-lease cap be reconsidered given that no
   shipped consumer can approach it? (needs human input)
@@ -3819,7 +3772,6 @@ ratio arm evaluates a condition over an empty set and its drain arm degrades int
 a plain round-trip test the suite already performs. A never-fired marker reports a
 harness gap rather than an implementation defect, which is the honest reading.
 Open questions:
-
 - Do the addon or TypeScript client suites already drive both directions
   concurrently? They were not examined, so the harness gap may be narrower than
   stated.
@@ -3909,7 +3861,6 @@ surfacing as a setup or first-frame failure on the affected connection rather
 than a wedge; the attach-ordering half, if wrong, leaks a validated mapping on a
 rejected doorbell.
 Open questions:
-
 - A full-`Ring::attach` negative is missing: substitute one doorbell slot in an
   otherwise valid `[OwnedFd; 3]` and assert `DoorbellFailed` with no mapping
   side effects. Today's tests call `Doorbell::from_fd` directly. Queue it?
@@ -3960,7 +3911,6 @@ Impact: a delivered frame sits invisible until an unrelated event; on an
 otherwise idle channel, forever. The client sees a response that never
 arrives; the host sees a healthy setup socket. Silent, no counter fires.
 Open questions:
-
 - The raw addon makes honoring `readinessHandled`'s return the caller's
   obligation. Should the contract be enforced natively (redispatch from Rust)
   rather than by convention? (needs human input)
@@ -4083,7 +4033,6 @@ Impact: a read-heavy channel with no outbound writes wedges permanently at the
 first budget exhaustion — frames accumulate unread, the producer exhausts and
 reports deadlines, and the defect is attributed to the peer.
 Open questions:
-
 - Can any shipped workload exceed `CLIENT_INBOUND_FRAME_BYTES` in flight, or
   is the blocking arm latent until frame sizes grow? (needs human input)
 
@@ -4146,7 +4095,6 @@ full ring, reported as a transport failure on a channel whose receiver was
 draining correctly. Intermittent, load-dependent, and unreproducible by any
 lockstep test.
 Open questions:
-
 - A loom model of a hand transcription of the protocol is the cheapest
   oracle — the atomics live in an mmapped page loom cannot instrument, so
   `reserve_until` and `signal_wake` must be transcribed over loom atomics
@@ -4220,7 +4168,6 @@ validation already passed. The receiver delivers zeroed payload with a valid
 header; nothing downstream can detect it. This is the only record in this
 group whose failure is data loss rather than lost progress.
 Open questions:
-
 - The trailing-partial-page exception with a wrapped `arena_write` is
   untested; the guard's soundness argument is recorded in the evidence file
   but unexecuted.
@@ -4287,7 +4234,6 @@ Impact: overlapping dispatchers interleave over the thread-confined registry —
 acknowledgement releases a reactor epoch whose re-arm never ran, which
 manufactures the lost wake the previous record guards against.
 Open questions:
-
 - The terminal-path non-gated callback (`scheduling.rs:184-189`) can overlap
   an unacknowledged one exactly once, on a dying reactor. Acceptable by
   design? (needs human input)
@@ -4341,7 +4287,6 @@ role gate lets the consumer punch pages under the producer's reservation.
 Because no shipped caller exists today, the record is a regression contract for
 the first caller rather than a live exposure.
 Open questions:
-
 - Is `trim` intended for a host idle-connection path, or is it a test-only
   hook that should be `cfg(test)`? (needs human input)
 
@@ -4395,7 +4340,6 @@ Impact: a lost wake here is the difference between a dead peer being reported
 within one poll and a connection hanging for its full deadline, which the host
 then classifies as a timeout rather than a peer death.
 Open questions:
-
 - Does `enter_quarantine` ring the capacity doorbell as well as the data
   doorbell, so a producer parked on capacity is released too? Only the
   data-side wake is pinned. (needs human input)
@@ -4574,7 +4518,6 @@ Confidence: high - [evidence](evidence/one-profile-id-names-one-ring-geometry-in
 Existing check: `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs:202`), added at U3; the addon's setup fixture and `packages/shm-native/tests/mechanism.ts` name the same id.
 Impact: A peer sized for a different depth over- or under-runs the ring.
 Open questions:
-
 - Should `host_test_ring_profile_names_one_geometry` compare `arena_bytes` against a spelled 128 MiB (two 64 MiB arenas) instead of `2 * MIN_ARENA_BYTES`, so a constant change is caught? Queue it?
 
 ### addon-reservations-drop-before-the-ring
@@ -4650,7 +4593,6 @@ Impact: one dead channel starves every other channel and every macrotask in the
 client process until the application closes it; the failure presents as a hung
 event loop rather than as a peer-death error.
 Open questions:
-
 - Should `readiness_handled` distinguish `Ok(false)` (redispatch) from `Err`
   (unregister and surface), or should the wrapper cap consecutive redispatches
   and force-close the offending channel? (needs human input)
@@ -4696,7 +4638,6 @@ unaudited.
 Impact: one channel stalls until its next unrelated edge while the process looks
 healthy; with a request/response protocol on that channel, the stall is a hang.
 Open questions:
-
 - Should the walk return per-channel results so the dispatcher can run only
   the handlers with visible data, which would make this property structural
   rather than emergent? (needs human input)

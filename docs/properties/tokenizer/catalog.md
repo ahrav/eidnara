@@ -82,7 +82,6 @@ Confidence: high - [evidence](evidence/tokenizer-over-long-pieces-are-chunked-an
 Existing check: `over_long_piece_is_chunked_and_bounded`, `over_long_cjk_piece_keeps_char_boundaries`, `long_text_without_over_long_piece_is_unaffected_by_bound` (`crates/tokenizer/tests/token_golden.rs`) and `char_chunks_respect_boundaries_and_cap` (`crates/tokenizer/src/lib.rs:213`); unaudited.
 Impact: Worst-case encoding latency regresses from bounded to seconds, or a campaign demands oracle equality for a long unpunctuated input that the crate deliberately does not promise.
 Open questions:
-
 - The three tests derive their input sizes from `MAX_PIECE_BYTES`, so raising the cap to a value that restores near-quadratic cost leaves them green. Should the cap be asserted as a literal and a time-bounded check added, or should the latency claim move to its own record with T5 as its oracle?
 
 ### tokenizer-pattern-is-upstream-with-ecmascript-whitespace
