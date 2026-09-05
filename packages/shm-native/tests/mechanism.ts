@@ -74,7 +74,9 @@ describe("native mechanism gate", () => {
         );
         const child = spawnSync(process.execPath, [script], {
             encoding: "utf8",
+            timeout: 10_000,
         });
+        expect(child.signal).toBeNull();
         expect(child.stderr).toBe("");
         expect(child.status).toBe(0);
         expect(readFileSync(marker, "utf8")).toBe("clean");

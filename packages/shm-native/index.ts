@@ -524,7 +524,6 @@ class ChannelLiveness {
 }
 
 /** Module-private transition for a lease whose token the addon already consumed. */
-const markConsumed = Symbol("markConsumed");
 
 export class NativeProducerReservation {
     private active = true;
@@ -647,10 +646,6 @@ export class NativeReceiveLease {
         return segment;
     }
 
-    [markConsumed](): void {
-        this.retire();
-    }
-
     release(): void {
         if (this.isReleased()) throw new Error("receive lease is already released");
         // A failure after the addon detached the token cannot be retried; the wrapper releases
@@ -678,7 +673,13 @@ export class NativeReceiveLease {
     }
 }
 
-const readinessHandlers = new Map<number, () => void>();
+interface ReadinessRegistration {
+    handler: () => void;
+    /** Told when the handler threw and was unregistered, so the owner can re-arm or close. */
+    onDropped?: (error: unknown) => void;
+}
+
+const readinessHandlers = new Map<number, ReadinessRegistration>();
 
 const REDISPATCH_MICROTASK_BUDGET = 16;
 let consecutiveMicrotaskRedispatches = 0;
@@ -697,19 +698,25 @@ function scheduleRedispatch(): void {
 
 function dispatchReadiness(): void {
     try {
-        for (const [id, handler] of [...readinessHandlers]) {
+        for (const [id, registration] of [...readinessHandlers]) {
             // Handlers for unwatched channels are removed so unrelated wakes do not invoke them.
             if (loaded?.isWatching(id) === false) {
                 readinessHandlers.delete(id);
                 continue;
             }
             try {
-                handler();
-            } catch {
+                registration.handler();
+            } catch (error) {
                 // One failed channel cannot starve readiness for other channels. A handler that
                 // threw before draining leaves its frame visible with no further wake, so it is
-                // unregistered rather than left to stall silently; `startReadiness` re-arms it.
+                // unregistered and its owner is told; `startReadiness` re-arms it. Without the
+                // notification the owner would have no trigger and the channel would stall.
                 readinessHandlers.delete(id);
+                try {
+                    registration.onDropped?.(error);
+                } catch {
+                    // A failing drop callback must not disturb other channels' dispatch.
+                }
             }
         }
     } finally {
@@ -810,9 +817,9 @@ export class NativeChannel {
         );
     }
 
-    startReadiness(handler: () => void): void {
+    startReadiness(handler: () => void, onDropped?: (error: unknown) => void): void {
         this.assertOpen();
-        readinessHandlers.set(this.id, handler);
+        readinessHandlers.set(this.id, { handler, onDropped });
         try {
             this.native.watch(this.id, dispatchReadiness);
         } catch (error) {
@@ -823,24 +830,29 @@ export class NativeChannel {
 
     drainOne(deliver: (lease: NativeReceiveLease) => void): boolean {
         this.assertOpen();
-        return this.native.poll(this.id, (token, header, segments) => {
-            const lease = new NativeReceiveLease(
-                this.native,
-                this.id,
-                token,
-                segments,
-                header,
-                this.liveness,
-            );
-            // A throwing `deliver` makes the addon detach and release the token, so a wrapper
-            // that escaped the callback must not present itself as active afterwards.
-            try {
+        let escaped: NativeReceiveLease | undefined;
+        try {
+            return this.native.poll(this.id, (token, header, segments) => {
+                const lease = new NativeReceiveLease(
+                    this.native,
+                    this.id,
+                    token,
+                    segments,
+                    header,
+                    this.liveness,
+                );
+                escaped = lease;
                 deliver(lease);
-            } catch (error) {
-                lease[markConsumed]();
-                throw error;
-            }
-        });
+                escaped = undefined;
+            });
+        } catch (error) {
+            // A throwing `deliver` normally makes the addon detach and release the token, but if
+            // that native cleanup itself fails the token is re-registered and stays releasable.
+            // The check runs after `poll` has unwound (the registry is busy inside it), and the
+            // wrapper retires only on confirmed absence of its token.
+            escaped?.retireIfConsumed();
+            throw error;
+        }
     }
 
     /**

@@ -1,6 +1,5 @@
 //! This module provides a deterministic scriptable backend and a real-loopback composite host for Broca tests.
 //! The composite host uses a real loopback with a `BrocaComponent` tertiary.
-//! `BrocaComponent`.
 
 #![allow(dead_code)]
 
@@ -121,7 +120,7 @@ impl ScriptedBackend {
         (backend, gate)
     }
 
-    /// cancellation.
+    /// The backend blocks on the gate and ignores the cancellation token, so a cancel must settle through the supervisor's own teardown rather than through backend cooperation.
     pub fn gated_ignoring_cancel(text: &'static str) -> (Arc<Self>, Arc<tokio::sync::Semaphore>) {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let run_gate = Arc::clone(&gate);
@@ -258,7 +257,6 @@ pub fn send_params(prompt: &str, system: Option<&str>, model: &str) -> serde_jso
     params
 }
 
-/// The helper returns every `StreamData` body in order, followed by the transport terminal frame.
 /// The helper returns every `StreamData` body in order, followed by the transport terminal frame.
 pub async fn drain_subscribe(
     client: &mut raw_client::RawClient,

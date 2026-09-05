@@ -546,7 +546,7 @@ pub(crate) fn open_secure_dir_existing(dir_path: &Path) -> Result<Option<OwnedFd
 
 /// `secure_runtime_dir` traverses and validates `dir_path` without following symlinks.
 /// `secure_runtime_dir` normalizes newly created components to mode 0700.
-/// `secure_runtime_dir` rejects a pre-existing final directory that group or other principals could write; repair is reserved for umask damage on directories this call created.
+/// `secure_runtime_dir` rejects a pre-existing final directory that group or other principals could write (`0o775`, `0o777`); a directory with only wider read or execute bits (`0o755`) is tightened to `0o700`. Every caller — the instance guard, lifecycle coordination, the generation and closure stores, and the Broca group registry — therefore fails closed at startup or open on a writable directory rather than adopting it. commentlint: allow(JUDGE)
 /// `secure_runtime_dir` returns a pinned descriptor for the final directory after validating its ownership and mode.
 pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceError> {
     let flags = HARDENED_DIR_FLAGS;

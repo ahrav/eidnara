@@ -20,6 +20,12 @@
       "optionalDependencies": {
         "@eidnara/host-linux-x64-gnu": "0.38.0",
       },
+      "peerDependencies": {
+        "@types/node": ">=22.20.0",
+      },
+      "optionalPeers": [
+        "@types/node",
+      ],
     },
   },
   "packages": {
