@@ -13,10 +13,13 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   whose mechanism moved keep their status and cite the file that owns the mechanism now.
 - Every line citation inside the `Check:` field of an active record is verified against this tree, because
   those are the lines a campaign instruments; a construct the tree no longer has is named as removed rather than
-  given a line. One exemption: a check whose subject lives in a package that is not in this tree (today only
-  `ring-a-host-doctor-emits-one-of-five-declared-terminal-classes`, whose classifier is in `packages/plugin`)
-  keeps its source-repository citations, and the record says so and marks the check deferred; those anchors
-  are not resolvable here and are not claimed verified. Citations in the other fields are verified where the record says `re-verified`; the rest are the
+  given a line. One exemption: a check whose subject lives in a package that is not in this tree keeps its
+  source-repository citations, and the record says so; those anchors are not resolvable here and are not
+  claimed verified. Today that is two records, both depending on `packages/plugin`:
+  `ring-a-host-doctor-emits-one-of-five-declared-terminal-classes` (the classifier) and
+  `setup-a-only-an-authenticated-grant-enters-the-native-channel-registry` (the shipped-plugin call-graph
+  census over `shm-frame-channel.ts`); the in-tree half of the second, the three `insert_channel` sites in
+  `packages/shm-native/src/lib.rs`, is verified. Citations in the other fields are verified where the record says `re-verified`; the rest are the
   source catalogs' coordinates and are unverified against this tree, which METHOD rule 1 requires to be labelled
   rather than restated as fact. An automated range check marks every such citation that lies beyond the current
   file's length as `(source-catalog line, not present at HEAD)`; a citation without that mark is still not a
@@ -348,8 +351,13 @@ Fault/timing angle: `close_generation` is the only remover and runs after
 before that line leaks the entry; the leaked `Arc<GenerationCore>` then keeps the
 writer sender and pending map alive for host lifetime, and the shutdown sequence
 iterates a generation whose task is gone.
-Required faults and enabling state: a panic in the read loop, control handling,
-grant, or close-route decision; or an abort while between insert and removal.
+Required faults and enabling state: a panic on the connection task's own inline
+stack between the insert and the removal (the read loop or the inline part of
+control handling), or an explicit abort of that task in the same window. A panic
+in the route-open or close-route callbacks does not qualify: `RouteOpen` launches
+`open_route` in a separate lifecycle task (`connection.rs:662-665`) whose failure
+leaves `serve_generation` alive to perform its ordinary removal, and the
+mandatory-ring implementation has no grant branch.
 Confidence: high - [evidence](evidence/generation-registry-entry-released-on-every-connection-exit.md). the single-remover structure is directly readable and nothing
 guards the interval.
 Existing check: none.
@@ -681,9 +689,13 @@ generation that will ever wait on the shutdown rendezvous.
 Check: `always` - every inserted generation either appears in the snapshot or
 completed its close before the snapshot was taken.
 Fault/timing angle: the argument rests on two orderings. The draining flag is
-stored with sequential consistency strictly before the snapshot, with an await
-between, so any insert winning the connections lock afterwards reads true and
-bails. And the check and insert share the snapshot's lock scope. Both hold as
+stored with sequential consistency strictly before the snapshot, so any insert
+winning the connections lock afterwards reads true and bails; and the check and
+insert share the snapshot's lock scope. No await is load-bearing between the store
+and the snapshot: with zero live routes the route-settle loop between them awaits
+nothing and the two run as synchronous code, so a test must not rely on a
+scheduling point there. The `SeqCst` store and the shared mutex are the
+mechanisms. Both hold as
 written; neither is asserted. That the second draining writer is a *writer task*
 rather than the shutdown path is what makes this non-obvious.
 Required faults and enabling state: a socket accepted and authenticated between
@@ -1103,8 +1115,10 @@ observable outside the process.
 Check: `always` - for every one of the thirteen reasons `classify` (`crates/host-runtime/src/lifecycle.rs:917`) distinguishes, the operator-visible output produced from that reason differs from the output produced from every other reason. This is a value-mapping assertion over the whole reason set, not location coverage: reaching the renderer once proves nothing when twelve reasons collapse to the same `wedged` output, which is the predicted violation at HEAD.
 Fault/timing angle: none. The classifier computes thirteen distinct reasons; the
 sole production consumer forwards one and collapses the rest to a bare "wedged".
-A probe *error* also becomes "wedged", erasing the distinction between fence
-incoherence and an I/O failure. Verified: the crate has no tracing or log
+Two probe *errors*, `InstanceError::Insecure` and `InstanceError::NamespaceDrift`,
+also render as "wedged", erasing the distinction between fence incoherence and
+those failures; `InstanceError::Io` is distinguishable, rendering as
+`internal_error` (evidence, `:338-340`). Verified: the crate has no tracing or log
 dependency, so there is no second channel.
 Required faults and enabling state: any wedge other than the forwarded one; two
 are already fixtured in the existing tests.
@@ -2697,7 +2711,10 @@ it announced two non-default sub-surfaces but then resolved the second,
 `RingClientEndpoint::try_recv_with` (`:723`), as `default-production`, because
 `client.rs:1878` reaches it in production. That resolution is correct, so the
 test-only surface is the publish hook and its two entry points, not two
-independent surfaces. **No record in this catalog carries a `test-only` label.**
+independent surfaces. **One record in this section carries a `test-only` label,
+[ring-a-host-doctor-emits-one-of-five-declared-terminal-classes](#ring-a-host-doctor-emits-one-of-five-declared-terminal-classes),
+because its classifier lives in a package outside this tree; the other seventeen
+are `default-production`.**
 The one record that touches the hook,
 [ring-a-endpoint-thread-panic-is-reported-as-orderly-completion](#ring-a-endpoint-thread-panic-is-reported-as-orderly-completion),
 is `default-production` because the production `written` completion hook shares
@@ -2907,10 +2924,16 @@ Guarantee: No host or client producer path retains the `ReleaseIdentity`
 returned by `ProducerReservation::commit`, so `Ring::release` is never called
 with a producer-derived identity, and the producer-side half of Part 1's
 release contract stays unreachable.
-Check: `always` - `always(!X)` where X is "`Ring::release` (`ring.rs:1469`) is
+Check: `always` - `always(!X)` where X is "`Ring::release`
+(`crates/shm-transport/src/backend/ring.rs:1469`, `pub(crate)`, re-verified) is
 entered with an identity that originated from `ProducerReservation::commit`
-(`ring.rs:2561`)". Discharged today by enumerating every `.commit(` site and
-showing each discards its `Ok` value; optionally backed by a
+(`:2561`)". The property is scoped to code inside `shm-transport`, the only crate
+that can call `release`: the `host-runtime` producer sites enumerated here cannot
+reach it even if they retained the `ReleaseIdentity`, so their retention is
+harmless and is not what the check forbids; what it forbids is a `release` call
+inside the transport whose identity came from a commit. Discharged today by
+enumerating every `.commit(` site in both crates and showing each discards its
+`Ok` value, and every `release` caller in `shm-transport` is lease-derived; optionally backed by a
 `#[cfg(debug_assertions)]` counter on the producer-identity path that must stay
 at zero. **This record previously claimed `unreachable`, which was wrong and is
 corrected here.** `unreachable` is reserved for a code location that must never
@@ -3045,7 +3068,7 @@ testable at all.
 Status: active
 Exercised: not yet - no existing test constructs the state; it is constructible
 from a test peer, which can call the public `Ring::enter_quarantine`
-(`ring.rs:1373-1378`) on `RingClientEndpoint.to_host` (`ring_transport.rs:651-656`)
+(`crates/shm-transport/src/backend/ring.rs:1889-1897` (re-verified; the source catalog cited `:1373-1378`, which now leases a second frame span)) on `RingClientEndpoint.to_host` (`ring_transport.rs:651-656`)
 while the host holds a lease, as the required-faults field below lays out.
 Guarantee: Every admission charge an endpoint takes is accounted exactly once at its exit: released, or quarantined when the exit is a ring-corruption exit that the transport contract (`docs/shm-transport.md:21`, `:65`, `:79`) says should quarantine; never both and never neither. The slug names the discovery-time finding that no `host-runtime` path calls `Admission::quarantine`, so today the quarantined side of that accounting is structurally zero and every corrupt exit releases as if the storage were cleanly recycled, which is a contract-versus-code disagreement, not a forbidden location.
 Check: `always` - across every endpoint exit in a campaign, including corrupt-ring and swallowed-panic exits, `released + quarantined` charges equal the charges taken (no leak, no double count), and for every exit the transport contract classifies as corrupt, `snapshot().quarantined` has grown by that endpoint's charge. The second clause is a predicted violation at HEAD, because `Admission::quarantine` (`profile.rs:561`) has no `host-runtime` caller; the check asserts the documented contract rather than freezing the gap. `always` because accounting must balance at every exit.
@@ -3061,7 +3084,7 @@ Required faults and enabling state: a quarantined peer-to-host ring plus an
 inspection of `accounting().quarantined` afterwards. Two producers reach it, and
 the second is cheaper than this record originally recorded: a
 descriptor-validation failure inside `try_receive` (`ring.rs:1098`), or a peer
-that calls the public `Ring::enter_quarantine` (`ring.rs:1373-1378`) directly on
+that calls the public `Ring::enter_quarantine` (`crates/shm-transport/src/backend/ring.rs:1889-1897` (re-verified; the source catalog cited `:1373-1378`, which now leases a second frame span)) directly on
 the endpoint it already holds (`RingClientEndpoint.to_host` is a `pub` field,
 `ring_transport.rs:651-656`). See
 [ring-a-lease-release-failure-is-observable-only-on-the-success-path](#ring-a-lease-release-failure-is-observable-only-on-the-success-path).
@@ -3503,7 +3526,7 @@ release (`lease.rs:186`). **Quarantine is reachable directly from the peer, and
 this record previously said it was not.** The original text required "a peer that
 publishes a malformed descriptor" so `try_receive` would quarantine from inside
 the transport, and recorded that as unavailable. It is not the only route.
-`Ring::enter_quarantine` is a **public** method (`ring.rs:1373-1378`, in
+`Ring::enter_quarantine` is a **public** method (`crates/shm-transport/src/backend/ring.rs:1889-1897` (re-verified; the source catalog cited `:1373-1378`, which now leases a second frame span), in
 `crates/shm-transport/src/backend/ring.rs`) that stores the flag on the shared
 lifecycle page, and a peer already holds the ring it needs: `RingClientEndpoint`
 exposes `to_host` and `from_host` as `pub` fields (`ring_transport.rs:651-656`),
@@ -4137,8 +4160,9 @@ cannot escape a rejected path. No allocation occurs: the function returns a
 `Copy` struct.
 Existing check: `wire.rs:722` `reject_truncated_headers_and_unsupported_versions`
 and `wire.rs:745` `reject_unknown_frame_type_and_reserved_flag_encodings`, both
-table-driven over single hand-picked inputs. Neither runs in CI, under this
-sub-part's `R0`. Status unaudited. **One citation repaired at carry time:** the
+table-driven over single hand-picked inputs. Both run in CI in this tree through
+`cargo test --workspace --all-targets` (`ci.yml:118`, `:126`); the source catalog's
+`R0` finding is provenance. Status unaudited. **One citation repaired at carry time:** the
 second test's span is `:745-774`, not `:745-773`; the closing brace is at 774
 and the lens range truncated it by one line.
 Impact: today, none observable, and the reason was refreshed at carry time. All
@@ -4205,7 +4229,7 @@ forbids a future fixture from losing that property, and the test asserts on
 Existing check: `wire.rs:703` `little_endian_and_frozen_prefix_layout` (encode
 direction, distinctive values, plus `buf.len() == HEADER_LEN` at `:718`);
 `wire.rs:680` `round_trip_request`; `wire.rs:693` `round_trip_all_frame_types`.
-None runs in CI, under this sub-part's `R0`. Status unaudited.
+All run in CI in this tree through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`); the source catalog's `R0` finding (no lib target built) is provenance. Status unaudited.
 Impact: this bijection is what makes the frozen-prefix promise in the module
 header [wire.rs:16-18] mean anything, and it is the only reason a peer's
 independently written codec can interoperate. A drifted offset that still
@@ -4259,8 +4283,8 @@ Existing check: `wire.rs:745` `reject_unknown_frame_type_and_reserved_flag_encod
 `epoch_boundaries_round_trip_and_control_channel_epoch_is_reserved`, plus the
 end-to-end `tests/protocol_vectors.rs:351`
 `structural_corruption_is_rejected_before_dispatch` and `:504`
-`pure_header_frames_accept_any_valid_priority`. None runs in CI. Status
-unaudited. **Three citations repaired at carry time**, and this is the record the
+`pure_header_frames_accept_any_valid_priority`. All run in CI in this tree through
+`cargo test --workspace --all-targets` (`ci.yml:118`, `:126`). Status unaudited. **Three citations repaired at carry time**, and this is the record the
 earlier triage predicted would need a refresh because
 `tests/protocol_vectors.rs` changed (976 lines at `1c193ae0`, 762 at `HEAD`,
 under `63c4d277`). First, the in-file span is `:745-774`, not `:745-773`.
@@ -4303,15 +4327,15 @@ bytes decode successfully and pass inbound validation on a conforming peer.
 Check: `always` - for arbitrary `(ty, flags, id, body)`, and for each production encoder, `encode_owned_frame` (`wire.rs:543`, re-verified) and `encode_split_frame` (`:578`) with bodies below, at, and above the split threshold, either the encoder returns `Err`, or `decode_header` on its output returns `Ok` and the result satisfies the pure-header, Sheddable, channel-and-epoch, and reserved-bit rules. `always` because it must hold on every emission, and the forbidden state - a frame the local decoder would reject - has no detection point on the emitting side.
 Fault/timing angle: none; this is a static contract gap. Four concrete holes,
 all re-verified at carry time and all reachable from the crate's public surface
-(O7): `Flags(0b1100_0000)` sets reserved bits, which [wire.rs:323] rejects;
-`Flags(0b0000_0110)` sets reserved priority, which [wire.rs:326] rejects;
-`encode_owned_frame(FrameType::Ping, .., body)` with a nonempty body emits
-`len != 0` on a pure-header type, since `Ping` is in `is_pure_header`'s set
-[wire.rs:86-88] and `encode_owned_frame` [wire.rs:571-602] tests only
-`body.len() > MAX_BODY_LEN` at [:577], which [wire.rs:340] rejects; and
-`FrameId::routed` [wire.rs:525-531] copies `RouteHandle`'s channel and epoch
-without checking that a nonzero channel carries a nonzero epoch, which
-[wire.rs:352] rejects.
+(O7; anchors re-verified against this tree): `Flags(0b1100_0000)` sets reserved
+bits, which [wire.rs:328-330] rejects; `Flags(0b0000_0110)` sets reserved
+priority, which [wire.rs:331-333] rejects; `encode_owned_frame(FrameType::Ping,
+.., body)` with a nonempty body emits `len != 0` on a pure-header type, since
+`Ping` is in `is_pure_header`'s set [wire.rs:80-82] and `encode_owned_frame`
+[wire.rs:543-571] tests only `body.len() > MAX_BODY_LEN` at [:549], which
+[wire.rs:345] rejects; and `FrameId::routed` [wire.rs:498] copies
+`RouteHandle`'s channel and epoch without checking that a nonzero channel
+carries a nonzero epoch, which [wire.rs:350-352] rejects.
 Required faults and enabling state: none beyond a caller passing an
 out-of-contract value. For the `FrameId::routed` hole specifically, a
 `RouteHandle` with a nonzero channel and epoch 0. **The lens left whether the
@@ -4330,9 +4354,10 @@ though not with epoch 0: `routing.rs:715-718` builds a stale-epoch handle and
 paths.
 Confidence: high - [evidence](evidence/encoder-never-emits-a-frame-its-own-decoder-rejects.md). The gap is high confidence and unchanged: all encoders were read end to end and
 the only rejection in either production encoder is the body-length cap, at
-[wire.rs:577] and [:618]. `Flags::new` [wire.rs:146-156] cannot produce the
-illegal flag values, and the two host flag helpers `response_flags`
-[wire.rs:636-638] and `pure_header_flags` [wire.rs:642-644] both go through it,
+[wire.rs:549] in `encode_owned_frame` and [:588] in `encode_split_frame`
+(re-verified). `Flags::new` [wire.rs:139] cannot produce the illegal flag
+values, and the two host flag helpers `response_flags` [wire.rs:605] and
+`pure_header_flags` [wire.rs:609] both go through it,
 so the in-tree host emission paths are safe today by construction rather than by
 enforcement. **Two things the lens recorded are corrected here.** First, the
 lens counted three production encoders and cited a third cap at [wire.rs:548];
@@ -4583,18 +4608,16 @@ is resolved in the comment's favour.
 There are **51 in-crate tests** across the five scope files: 22 in `instance.rs`,
 12 in `setup_socket.rs`, 11 in `auth.rs`, 4 in `connection_file.rs`, and 2 in
 `packages/shm-native/src/setup.rs`. Counts re-derived at `HEAD` by matching
-`#[test]` and `#[tokio::test]` per file. **49 of them never run.**
-
-The exclusion is structural, and so is the inclusion. Every `-p host-runtime` test
-invocation in `ci.yml` carries a `--test <name>` filter, which selects one
-integration binary and does not build the lib target, so the 386-line test module
-in `setup_socket.rs:441-826` and the other three `host-runtime` modules are never
-compiled in CI. The peer half is in a different crate, and `ci.yml:167` runs
-`cargo nextest run -p shm-native -p shm-transport` **unfiltered** on Linux;
-the unfiltered macOS `shm-native` run this preamble previously cited was
-removed with every other macOS job by PR #131 (merge `5d638e3e8`).
-So the 2 tests in the peer's `setup.rs` do run while the 11 in `auth.rs` that pin
-the same proof construction on the host side do not.
+`#[test]` and `#[tokio::test]` per file. **All 51 run in CI in this tree:**
+`ci.yml:118` and `:126` run `cargo test --workspace --all-targets`, which builds
+and runs every package's library test target, so the test module in
+`setup_socket.rs`, the other three `host-runtime` modules, and the peer's
+`setup.rs` all execute. The source catalog's finding that 49 never ran came from
+a workflow whose `-p host-runtime` invocations each carried a `--test <name>`
+filter; that is provenance for the per-part fault maps' CI capability rows, not
+the state of this tree. The former macOS `shm-native` run was removed with every
+other macOS job by PR #131 (merge `5d638e3e8`), so platform coverage, not
+execution, is the remaining gap.
 
 **There is no other source-resident check.** `ci.yml:175` runs
 `cargo test -p host-runtime --doc`, but this sub-part has zero doctests: a grep for
@@ -4643,10 +4666,11 @@ differ deliberately; every record appears exactly once in each.
 Distribution after the portfolio disposition in
 [portfolio-evaluation.md](setup-identity/portfolio-evaluation.md): **13 `safety`, 2 `liveness`, 1
 `reachability`**; **15 `always` and 1 `sometimes`**; 16 high confidence and 0
-medium. Reachability classes are 15 `default-production` plus one record whose
-subject is a published export **compiled with no shipped-plugin caller**
-(`setup-a-only-an-authenticated-grant-enters-the-native-channel-registry`); each
-label carries its own evidence on the record, per METHOD.md rule 4.
+medium. Reachability classes in this tree are 14 `default-production` and 2 `test-only`
+(`setup-a-only-an-authenticated-grant-enters-the-native-channel-registry` and
+`setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection`, both because
+their callers are the absent plugin or tests only); each label carries its own
+evidence on the record, per METHOD.md rule 4.
 
 Before the disposition this read 13 `safety` and 1 `reachability`, 13 `always` and
 1 `sometimes`, all 14 `default-production`, with 1 medium confidence, **and no
@@ -4693,9 +4717,15 @@ Exercised: partial - three integration tests prove an unauthenticated socket
 receives no bytes; none instruments the descriptor-send site itself.
 Guarantee: A `SCM_RIGHTS` message carrying ring descriptors is never written to a
 setup socket on which `authenticate_server` has not returned `Ok`.
-Check: `always` - instrument `send_grant` (`setup_socket.rs:153-159`); every
-invocation is preceded on that same stream by an `Ok(Authenticated)` from
-`auth.rs:251`. `always` because it is a per-send ordering invariant with no
+Check: `always` - instrument the production call path, `activate_server`'s
+`send_grant` call at `setup_socket.rs:247` as reached from `connection.rs:155-164`,
+and assert every invocation is preceded on that same stream by the
+`Ok(Authenticated)` that `authenticate_server` returned at `connection.rs:91-103`.
+The helper itself (`send_grant`, `setup_socket.rs:133`) is also called directly by
+its unit tests at `:448` and `:774` on `UnixStream::pair` sockets with no
+authentication, so a marker on every `send_grant` invocation would false-fail
+under the workspace-wide test run; scope the marker to the production path or add
+a provenance predicate. `always` because it is a per-send ordering invariant with no
 optional path and no eventual convergence; a single violation is a full loss of
 the boundary.
 Fault/timing angle: none in the ordering itself, it is straight-line. The window
@@ -5259,13 +5289,8 @@ assertion on *when* the host gave up, not a new fixture. A shortened
 observe, and unlike the `prepare`-timeout exit this needs no race: the peer's
 silence, not a scheduling outcome, is what makes the deadline fire.
 Confidence: high - [evidence](evidence/setup-a-a-stalled-setup-is-torn-down-within-the-transport-setup-deadline.md).
-**Evidence file written**: this record was added by the portfolio
-disposition, which was scoped to `catalog.md`, `fault-map.md`, and
-`portfolio-evaluation.md` and forbidden from writing under `evidence/`. The link is
-written to the schema's target so it resolves once the file lands, and the gap is
-recorded in the process caveat of
-[portfolio-evaluation.md](setup-identity/portfolio-evaluation.md). Everything the file would hold
-is verified and stated here. Verified: the single `deadline` computation at `setup_socket.rs:246-248` and its
+The evidence file exists in this tree (the portfolio disposition that added the
+record could not write under `evidence/`, and the merge supplied it). Verified: the single `deadline` computation at `setup_socket.rs:246-248` and its
 reuse at `:249-260`, `:261`, `:273`, `:281`, and `:282`; `read_message`
 (`:369-386`) wrapping both reads in `timeout_at(deadline, ..)` and mapping expiry
 to `SetupError::Timeout`; `activate_server` being called with
@@ -5528,10 +5553,10 @@ Guarantee: **In the shipped plugin path**, every channel inserted into the nativ
 registry originates from `connect_setup`, which authenticated over the setup
 socket, and never from `attach`, which takes caller-supplied descriptors and
 authenticates nothing.
-Check: `always` - instrument the three `insert_channel` call sites, `lib.rs:619`
+Check: `always` - instrument the four `insert_channel` call sites, `lib.rs:619`
 (from `attach`), `:745` (from the `finish_setup` task that completes
-`connect_setup`), and `:823` (from `create_test_pair`, a test-only export), and
-assert that a full shipped-plugin run inserts only through the `connect_setup`
+`connect_setup`), and `:823` and `:840` (both inside `create_test_pair`, a
+test-only export), and assert that a full shipped-plugin run inserts only through the `connect_setup`
 path. `always` rather than
 `unreachable` because `attach` is a published export that tests and embedders may
 legitimately call; the forbidden thing is a *state*, a registry entry with no
@@ -5559,7 +5584,9 @@ Confidence: high - [evidence](evidence/setup-a-only-an-authenticated-grant-enter
 caller-supplied integers (`:510-513`) and never touches a socket;
 `connect_setup` at `:774` starts the `BeginSetupTask` whose completion calls `setup::connect` which performs the three-message
 handshake (`setup.rs:107-113`). Both end in `insert_channel` on the same
-`REGISTRY`, at `:551` and `:612`. `index.ts:537-540` and `:542-545` expose both;
+`REGISTRY`: `:619` from `attach`, `:745` from the `finish_setup` task that completes
+`connect_setup`; the other two call sites, `:823` and `:840`, are inside
+`create_test_pair`, a test-only export (all four re-verified). `index.ts:537-540` and `:542-545` expose both;
 `shm-frame-channel.ts:77` uses only `connectSetup`, and grepping
 the source repository's `packages/plugin/src` for any other `.attach(` call site
 returns nothing outside tests; that package is absent from this tree.
@@ -5918,17 +5945,18 @@ a grep of `mod tests` for `start_ring_bridge`, `RingClientEndpoint`,
 `tests/client.rs` integration tests observes the thread or the socket. But two
 CI-executed integration tests do observe its **exit**, indirectly and genuinely.
 `tests/shm_soak.rs` runs a real `Client::connect`/`open_route`/`request`/`close`
-cycle (`:54-92`) and then polls `wait_for_envelope` (`:35-52`) until the process
-thread count equals a post-close baseline; `tests/shm_failure_modes.rs` does the
-same through `assert_resources_return_to` (`:193-210`) in
-`clean_close_returns_exact_single_connection_capacity` (`:218-230`). A bridge
-thread that never left its loop would hold the count above baseline and fail both
-assertions inside their budgets. Both run in CI at `ci.yml:130-135`
-("Mandatory ring client suite"). What remains genuinely unobserved is everything
+cycle (`:54-92`) and then polls `await_envelope` until the process thread count
+equals a post-close baseline, so a bridge thread that never left its loop would
+hold the count above baseline and fail inside its budget. `tests/shm_failure_modes.rs`
+`clean_close_returns_exact_single_connection_capacity` (`:201-210`) closes a client
+and connects a replacement; it proves capacity recovery only, never reads a
+thread count, and is not evidence of bridge exit (the `assert_resources_return_to`
+helper the source catalog credited does not exist in this tree). Both run in CI
+through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`). What remains genuinely unobserved is everything
 except termination: which `break` fired, whether `:1891` wrote anything, and the
 50-microsecond spin, none of which any check reaches.
 
-**Coverage: 40 in-crate tests, none in CI, all driving a synthetic inner.** The
+**Coverage: 40 in-crate tests, all in CI in this tree, all driving a synthetic inner.** The
 count was re-derived here by grepping `#[test]` and `tokio::test` from `:2266`
 onward, and it matches lens B exactly at 40; an initial pass of this synthesis
 under-counted at 38 by missing `#[tokio::test(flavor = ..., worker_threads = 2)]`
@@ -5936,12 +5964,11 @@ forms, which is recorded so a later pass does not repeat it. All 40 live in one
 `mod tests` at `:2266-3998` and all 40 build their subject through `test_inner`
 (`:2270`), which constructs `Arc::new(Inner { .. })` directly with a
 pre-populated route set. So there are **zero hits for the real `connect`
-(`:306`), `connect_info` (`:347`), or bridge entry points**. None of the 40 runs
-in CI, and the reason is structural: every `-p host-runtime` invocation in `ci.yml`
-carries a `--test <name>` filter, which selects one integration binary and never
-builds the lib target. Re-verified at `HEAD`: the 13 `host-runtime` hits are `:87`,
-`:132`, `:133`, `:134`, `:168`, `:169`, `:178`, `:187`, `:190`, `:211`, `:361`,
-`:442`, and `:461`, and `:168-169` are `cargo build`.
+(`:306`), `connect_info` (`:347`), or bridge entry points**. All 40 run in CI in
+this tree through the workspace-wide test steps described next; in the source
+repository none did, because every `-p host-runtime` invocation there carried a
+`--test <name>` filter that never built the lib target, which is the finding the
+per-part `existing-checks.md` records as provenance.
 
 **CI in this tree.** `.github/workflows/ci.yml:118` and `:126` run
 `cargo test --workspace --all-targets --all-features --locked` on the 1.98 and stable
@@ -6309,10 +6336,13 @@ The host's watcher is additionally a biased select on `peer_read_cancel`
 (`connection.rs:196-198`), which the ring goodbye has already tripped.
 Existing check: none constructs the ordering. Partial credit at the integration
 layer for the thread's exit, in CI: `tests/shm_soak.rs:54-110` (`cycle` plus
-`wait_for_envelope`) and `tests/shm_failure_modes.rs:193-228`
-(`assert_resources_return_to` plus `clean_close_returns_exact_single_connection_capacity`
-at `:218`), both run by `ci.yml:130-135`. They prove the thread terminates after
-a real close; they observe neither the goodbye write nor the ordering. Status
+`await_envelope`, whose predicate compares the process thread count to the
+baseline) proves the thread terminates after a real close but observes neither the
+goodbye write nor the ordering. `tests/shm_failure_modes.rs:193-228`
+(`clean_close_returns_exact_single_connection_capacity`, `:201-209`) closes a
+client and connects a replacement, which proves capacity recovery only; it never
+reads a thread count and is not evidence of bridge exit. Both run in CI through
+`cargo test --workspace --all-targets` (`ci.yml:118`, `:126`). Status
 `unaudited`.
 Impact: Narrower than originally recorded and still real. The client's own
 teardown contract is unjoined: `close` returns while an OS thread it spawned
@@ -7313,9 +7343,10 @@ are carried in [existing-checks.md](request-path/existing-checks.md).
 
 ## Reachability: admission and dispatch
 
-**Fifteen of the sixteen records are `default-production`; one,
-[req-a-both-admission-classes-and-the-rejection-bound-saturate](#req-a-both-admission-classes-and-the-rejection-bound-saturate),
-is `test-only` in this tree.** The labels rest on three facts, re-verified here,
+**Thirteen of the sixteen records are `default-production`; three are
+`test-only` in this tree:
+[req-a-both-admission-classes-and-the-rejection-bound-saturate](#req-a-both-admission-classes-and-the-rejection-bound-saturate)
+and the two composite records, whose composition no in-tree binary performs.** The labels rest on three facts, re-verified here,
 per METHOD rule 4.
 
 1. **The routed request path is `run`'s default path.** `host_runtime::run`
@@ -7391,14 +7422,15 @@ sub-part derived itself.
 
 Semantics distribution: twelve `always`, two `sometimes`. No
 `always-or-unreached`, no `reachable`, no `unreachable`. Type distribution:
-twelve safety, two reachability, no liveness. Reachability distribution:
-fourteen `default-production`. Confidence: thirteen high, one medium.
+twelve safety, two reachability, no liveness. Reachability distribution in this
+tree: eleven `default-production`, three `test-only`. Confidence: thirteen high,
+one medium.
 
 The two carried records add **2 safety** and semantics **2 `always`**, both
 `default-production` and both high confidence, so the sixteen-record totals are
 **fourteen safety, two reachability, no liveness**; semantics **fourteen
-`always`, two `sometimes`**; reachability **sixteen `default-production`**; and
-confidence **fifteen high, one medium**.
+`always`, two `sometimes`**; reachability **thirteen `default-production`, three
+`test-only`**; and confidence **fifteen high, one medium**.
 
 **The five group headings below are this synthesis's own**, chosen by shared
 mechanism rather than by the order records were proposed. Grouping reorders the
@@ -9058,8 +9090,10 @@ shutdown-is-unconditional row was refuted. Carried in full in
 
 ## Reachability: runtime and configuration
 
-**Thirteen records are `default-production` under the convention below, and one is `explicit-config-only`.**
-No record here is `test-only`. The labels rest on the construction conditionality
+**Twelve records are `default-production` under the convention below, one is
+`explicit-config-only`, and one,
+[rt-a-a-closure-store-open-failure-is-classified-not-swallowed](#rt-a-a-closure-store-open-failure-is-classified-not-swallowed),
+is `test-only` because the store is opened only from tests in this tree.** The labels rest on the construction conditionality
 map above plus three facts, per METHOD rule 4. **The map was rebuilt after an
 independent evaluation refuted two of its rows and one of its conclusions, and
 every one of these fourteen labels was re-derived against the corrected map
@@ -9131,9 +9165,9 @@ design; it built the 20-claim register and the check inventory.
 
 Semantics distribution: eleven `always`, one `always-or-unreached`, two
 `sometimes`. No `reachable`, no `unreachable`. Type distribution: twelve safety,
-two reachability, no liveness. Reachability distribution: thirteen
-`default-production`, one `explicit-config-only`. Confidence: thirteen high, one
-medium.
+two reachability, no liveness. Reachability distribution: twelve
+`default-production`, one `explicit-config-only`, one `test-only`. Confidence:
+thirteen high, one medium.
 
 **The five group headings below are this synthesis's own**, chosen by shared
 mechanism rather than by the order records were proposed. Grouping reorders the
@@ -9611,7 +9645,7 @@ Exercised: not yet - nothing enumerates the fields against their consumers
 Guarantee: Every field an embedder can set on `HostConfig`, `HostLimits`,
 `HostTiming`, `LivenessPolicy`, or `HostInit` reaches at least one consumer, so
 setting it changes some observable host behaviour.
-Check: `always` - for each public configuration field, two host executions that differ only in that field produce the documented observable difference for its family: a limit field moves the admission boundary at which a request or connection is rejected, a timing field moves the instant at which the corresponding deadline fires under paused time, a liveness field changes the probe cadence or the retirement decision, and an init field arrives unchanged in the `HostInit` passed to `HostHandler::initialize` (`handler.rs:532`), asserted at the handler rather than through client-visible behaviour, because the host does not publish `host_capabilities` or `storage` and a conforming handler may ignore them. A read site outside `config.rs` and outside a `Debug` implementation is a necessary screen, not the check: a field that is read and ignored fails. `always` because it is a property of the surface, evaluated once per field.
+Check: `always` - for each public configuration field, two host executions that differ only in that field produce the documented observable difference for its family: a limit field moves the admission boundary at which a request or connection is rejected, a timing field moves the instant at which the corresponding deadline fires under paused time, a liveness field changes the probe cadence or the retirement decision, an init field arrives unchanged in the `HostInit` passed to `HostHandler::initialize` (`handler.rs:532`), asserted at the handler rather than through client-visible behaviour, because the host does not publish `host_capabilities` or `storage` and a conforming handler may ignore them; and each direct `HostConfig` field has its own oracle: `data_dir` moves the managed directory the host resolves and publishes into (`instance::data_dir_path`, `instance.rs:130`, called from `runtime.rs:566`), `daemon_ver` changes the value published with the setup socket (`runtime.rs:710`) and echoed in the `ServerProof`, and `payload_manifest_digest` changes the digest the instance record carries (`runtime.rs:567`, validated as 64 lowercase hex characters) so a client reading the publication observes the difference. A read site outside `config.rs` and outside a `Debug` implementation is a necessary screen, not the check: a field that is read and ignored fails. `always` because it is a property of the surface, evaluated once per field.
 Fault/timing angle: none. This is a static property of the wiring.
 Required faults and enabling state: none. The check is an enumeration, best
 expressed as a test that names each field and its consumer, or as a review gate.
@@ -9761,13 +9795,20 @@ Status: active
 Exercised: not yet - `tests/harness_closure.rs` covers `open` succeeding and
 `validate`/`materialize` failing; no test exercises `open` failing on the
 production path
-Guarantee: A failure to open the harness closure store is reported with its
-distinct cause, not collapsed into an absent store that silently selects a
-different execution backend.
-Check: `always` - whenever `HarnessClosureStore::open` returns `Err`, assert that
-the resulting host startup carries a classified unavailability reason naming that
-cause. `always` because every open failure must be classified; the store's
-absence is a legitimate state, but an indistinguishable one is not.
+Guarantee: A failure to open the harness closure store is reported as an `Err`
+whose `HarnessClosureError::detail` names its distinct cause, never as an `Ok`
+that looks like an absent store; when the daemon that opens the store in
+production lands, its startup classification must carry that cause forward
+rather than silently selecting a different execution backend.
+Check: `always` - for every failure `open` (`harness_closure.rs:531`) can take,
+an unnormalized path, an anchor that cannot be opened, a directory that cannot be
+created or opened, and a traversal failure (`open_or_create_store_path`,
+`:1043-1101`), assert the call returns `Err` and that `detail()` is the distinct
+string for that cause, so no two causes share a detail and none returns `Ok`.
+The host-startup half of the guarantee has no in-tree caller to assert against
+(`open` is called only from tests; `crates/daemon` is U4) and is deferred to the
+wave that lands it. `always` because every open failure must be classified; the
+store's absence is a legitimate state, but an indistinguishable one is not.
 Fault/timing angle: none timing-related. The window is startup. `open` fails on a
 symlinked or non-owner-only ancestor, a wrong mode, a non-directory, or a
 creation failure, each with a distinct `&'static str`
@@ -9798,8 +9839,8 @@ Open questions:
 Type: reachability
 Reachability: default-production - the window is inside `run` between `HostHandler::initialize` (`runtime.rs:640-644`) and transport publication, on every start; an initialization that fails or a shutdown that lands in that window takes the unpublished drain path with no configuration gate.
 Status: active
-Exercised: not yet - the bind and publish failure paths at `runtime.rs:836` and
-`:842` have no fixture
+Exercised: not yet - the bind and publish failure paths at `runtime.rs:704` and
+`:710` (re-verified) have no fixture
 Guarantee: The state in which a handler completed initialization and then drained
 without the host ever publishing a transport occurs at least once per campaign,
 so `PrePublicationCleanup::finish` runs against a fully initialized handler.
@@ -9810,17 +9851,20 @@ initialization-failure arms at `:666` and `:677`, so a campaign can cover the
 function's lines while never producing the operational state that matters: a
 *successfully* initialized handler being drained with nothing published. That
 distinction is exactly what `:695-696` says the grouping exists to protect.
-Fault/timing angle: three entries. `bind_owner_only` failing at `:836`; `publish`
-failing at `:843`; and the shutdown token already cancelled at `:831`, which
+Fault/timing angle: three entries. `bind_owner_only` failing at `:704`; `publish`
+failing at `:710`; and the shutdown token already cancelled at `:699`, which
 returns `Ok(None)` and drains through `:856`. The third is the cheapest to
 construct.
 Required faults and enabling state: for the cheapest form, cancel the shutdown
-token between the return of `initialize` and the `is_cancelled` check at `:831`.
+token between the return of `initialize` and the `is_cancelled` check at `:699`.
+All three funnel into `cleanup.finish()` at `:722` (`Ok(None)`) or `:726`
+(`Err`), re-verified.
 For the bind form, occupy or make unwritable the `setup.sock` path inside the
 guard's directory. For the publish form, a connection-file write failure.
 Confidence: high - [evidence](evidence/rt-a-an-initialized-handler-drains-without-publishing.md).
-Verified all three entries, the shared `finish` path, and that `finish` demotes
-the phase at `:355-357` before the drain.
+Re-verified all three entries (`:699`, `:704`, `:710`), the shared `finish` path
+(`:308`, reached from `:722` and `:726`), and that `finish` demotes the phase with
+`begin_stopping` at `:310` before awaiting the handler shutdown at `:316`.
 Existing check: none. Status `unaudited`.
 Impact: this path runs the handler shutdown callback for a handler that never
 served a request, while the instance lock is still held. If the callback assumes

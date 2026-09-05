@@ -99,8 +99,10 @@ shipped addon by construction.
 
 ## What a test must construct
 
-1. Instrument both `insert_channel` call sites, `lib.rs:550-556` and `:589-596`,
-   with distinct constant markers. The marker names must be constant and globally
+1. Instrument all four `insert_channel` call sites in `packages/shm-native/src/lib.rs`
+   with distinct constant markers: `:619` (`attach`), `:745` (the `finish_setup`
+   task completing `connect_setup`), and `:823` and `:840` (both inside
+   `create_test_pair`, a test-only export). The marker names must be constant and globally
    unique, never constructed from the entry point's name at run time.
 2. Run the shipped TypeScript client through a full connect, request and close
    cycle.

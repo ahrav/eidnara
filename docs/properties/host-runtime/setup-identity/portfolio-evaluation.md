@@ -68,9 +68,10 @@ than the count: `setup-a-an-abandoned-setup-strands-no-ring-charge` was partial 
 a blocked oracle and is now partial for a non-deterministic construction.
 
 Test counts are unchanged and the evaluator disputed none of them: 51 in-crate
-tests across the five scope files, 49 of which never run; 2 peer-half tests that do
-(`ci.yml:177`, `:184`); zero doctests; and six integration binaries reaching the
-boundary of which three are named in no workflow.
+tests across the five scope files, zero doctests, and six integration binaries
+reaching the boundary. In the source repository 49 of the 51 never ran and three
+binaries were unnamed; in this tree all of them run through
+`cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 
 ## Refinements applied
 
@@ -386,16 +387,18 @@ Not ready, for three reasons no further work of this kind resolves. G1 is a miss
 category: the packaged-addon loading gate that a refactor commit was written to add
 has no property at all, and it is structurally unreachable in CI as configured. 2b's
 bias 1 governs whether one record here survives in its current form. And above all
-of it sits the fact none of these corrections touches: **49 of the 51 in-crate tests
-in this scope execute in no job, and three of the six integration binaries that
-reach this boundary are named in no workflow** - so S0 at the top of the leverage
-ranking still unblocks zero records while protecting 72 test functions, and every
-`Exercised:` line here is written against a suite that mostly does not run.
+of it sits the fact none of these corrections touches: **in the source repository 49 of the 51
+in-crate tests in this scope executed in no job, and three of the six integration
+binaries that reach this boundary were named in no workflow**; in this tree
+`ci.yml:118` and `:126` run the whole workspace, so S0 is already satisfied and the
+`Exercised:` lines in the merged catalog are written against a suite that runs.
 
 One process caveat, stated rather than hidden. METHOD.md step 7 requires records to
 equal index rows to equal evidence files. Records and index rows both equal 16 and
-their order matches. **Evidence files remain at 14**, and three are now stale or
-shared:
+their order matches. **Evidence files were at 14 when this evaluation was written; the merged catalog
+now has 16 records and 16 distinct evidence files for this section**, the two
+added being the split sentinel record and the stalled-setup record. At the time,
+three were stale or shared:
 `setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap-and-stays-cancellable.md`
 is linked deliberately by **both** halves of the C1 split so no link breaks, and
 needs to become two files;

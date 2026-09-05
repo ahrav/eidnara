@@ -16,13 +16,12 @@ cancellation record, both in Group S4 below.
 
 Three framing points specific to this part.
 
-**First, the dominant obstacle is not a missing fault.** It is that 49 of the 51
-in-crate tests in this scope execute in no job, and three of the six integration
-binaries that reach the boundary are named in no workflow. The availability column
-below therefore describes what a developer can construct locally. Two things in
-this scope are protected by automation: the peer half's 2 tests
-(`ci.yml:177`, `:184`) and the three named integration binaries (`:132`, `:133`,
-`:179`, `:187`).
+**First, the dominant obstacle in the source repository was CI wiring, and in this
+tree it is not.** The source workflow ran 2 of the 51 in-crate tests and named three
+of the six integration binaries; this tree's `ci.yml:118` and `:126` run
+`cargo test --workspace --all-targets`, so every in-crate test and every integration
+binary in this scope executes in CI. The availability column below still describes
+what a developer can construct, and any "CI wiring" row in it is satisfied here.
 
 **Second, the hardest fault in this part already exists as a checked-in fixture.**
 `tests/shm_failure_modes.rs:44-58` builds a peer that authenticates against the

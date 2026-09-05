@@ -48,8 +48,13 @@ it. The sealed-image record's real-library clause and the degrade record's
 wrong-ORT-identity clause are constructible only on a developer machine with
 the library present. Nothing in this tree ships one.
 
-**Fourth, reachability rests on a caller outside this tree.** All sixteen
-records are labelled `default-production`. At this `HEAD` the only non-test
+**Fourth, reachability rests on a caller outside this tree.** When this map was
+written all sixteen records were labelled `default-production`; the applied
+disposition relabelled twelve of them `test-only` (every Broca and Synapse
+record, the closure-store digest, and the credential fingerprint), and four
+remain `default-production` (the proof vectors, data root, coordination locks,
+and route-open body). The paragraph that follows is the reasoning that led
+there. At this `HEAD` the only non-test
 callers of `host_runtime::run` are `examples/synapse_host.rs:137`,
 `examples/perf_host.rs:100`, `examples/synapse_perf.rs:385`, and
 `benches/ipc_budget.rs:111`; no `daemon` crate is a workspace member
@@ -316,19 +321,19 @@ records unblocked per capability.
    is made, `u3_ort_test_skipped_without_library` is the honest oracle: a
    marker that counts the skips.
 
-8. **A production caller in the tree.** All sixteen `default-production`
-   labels rest on a `daemon` that is not a workspace member at this `HEAD`.
-   Nothing in this list changes that; it is the reason the open question
-   below exists.
+8. **A production caller in the tree.** The twelve `test-only` labels rest on
+   a `daemon` that is not a workspace member at this `HEAD`; when it lands,
+   those twelve are the records to re-verify for `default-production`, and
+   items 1 to 7 above then become production coverage rather than test
+   coverage.
 
 ## Open questions
 
-- Every record in this set is labelled `default-production`, and at this
-  `HEAD` the only non-test callers of `host_runtime::run` are examples and a
-  bench. Should the labels stand on the strength of the catalog's intended
-  caller, or be re-verified when the daemon crate enters the workspace?
+- Resolved by the applied disposition: the twelve records whose subject needs
+  a composed component or a store opener are `test-only` until the daemon
+  crate enters the workspace, and are re-verified in that wave.
   `migration/waves/U3/property-impact.json`, which the catalog preamble
-  cites, is absent at this `HEAD`. (needs human input)
+  cites, is absent at this `HEAD`. (resolved)
 - Is `SynapseComponent::new(None)` a production configuration? If a deployed
   host can run without a bundle, the sealed-image and validation records are
   reached only when a bundle is configured, which is the definition of

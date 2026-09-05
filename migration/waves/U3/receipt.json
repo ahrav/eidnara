@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "dc0a80acd8018e89a4e46688d5c2ab945a819ffed21c681880baafa434a7b071",
+      "destination_sha256": "c8cafea78c0dbc787a9ff1eeb3073afb11638143bcd0677a86be315334c47488",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "48fd7188ccc7bbb120e0b7120f261d8b529639ac64c6f537685a7ed3e1e8ddce",
+      "destination_sha256": "5af23f82fe36248f6d7031fdbe469f6f6684d634c34be5f5c8115b6cc351a848",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3354,7 +3354,7 @@
         "blob_sha": "e7bb53e28f2d285415d5708342cb2dd2d4d81a0f"
       },
       "destination": "docs/properties/host-runtime/evidence/close-disposition-is-a-total-function-of-the-read-exit-cause.md",
-      "destination_sha256": "0ccf8c6d1ba1549e5ad65cfc607024cca8a42e4f244592995c4e91af84376202",
+      "destination_sha256": "e82d35b41619eaf13c714aa94a9410e4f23bacd431964df2bb7e63c49c562bd8",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4017,7 +4017,7 @@
         "blob_sha": "e1508d4cc55d3569e2165ad21edaa39933a8100c"
       },
       "destination": "docs/properties/host-runtime/evidence/ring-a-lease-release-failure-is-observable-only-on-the-success-path.md",
-      "destination_sha256": "a1d70846ad7e4882830d26bc44e9774b24fca63d165921607b2aad15b6971ec8",
+      "destination_sha256": "c068660c327a83ab1238f298330c86d3561c742e3db37f50481e88826b314b9d",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4030,7 +4030,7 @@
         "blob_sha": "0b5f4bc3c510c388493f7080b55b59668d88a613"
       },
       "destination": "docs/properties/host-runtime/evidence/ring-a-no-producer-retains-a-committed-release-identity.md",
-      "destination_sha256": "1fb71f1d10996e2bed41b5606f45dc6b51b3a2d87a80aab2731f0283947e7389",
+      "destination_sha256": "a643394d6acdd5c7e1b93bdfbe0530d827e6e682e3015877c5b963eb570e1360",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4238,7 +4238,7 @@
         "blob_sha": "6d8e8594c46348cf8122d6d2e994a46131f3c392"
       },
       "destination": "docs/properties/host-runtime/evidence/setup-a-only-an-authenticated-grant-enters-the-native-channel-registry.md",
-      "destination_sha256": "072fdbe262b83c7f8116d3e982a0397d946bc4d99b03350a5d402454358dc7af",
+      "destination_sha256": "662b4066b2d809ffe5e793cbec03a1d6538c1167293e4ce4e41189558232d243",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -4939,7 +4939,7 @@
         "blob_sha": "4d3ea39654b7fba037e46a9604abaabfe88e1d30"
       },
       "destination": "docs/properties/host-runtime/lifecycle/fault-map.md",
-      "destination_sha256": "9dcb7d15475a9b7715d64db38e98061fc6df10e3928d57930f4e3ac454ce677a",
+      "destination_sha256": "2eef8f3859d149c13826e5824115d50751c23582f42db175e734b75f4c77fd12",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5004,7 +5004,7 @@
         "blob_sha": "f8515045a38eacfda1f8afd4cff46d885cbe41e3"
       },
       "destination": "docs/properties/host-runtime/ring-datapath/existing-checks.md",
-      "destination_sha256": "a55633c05c573d89b57bb65c0f8b033bf77401e80b7c66c9fbb99d3e9c6d231c",
+      "destination_sha256": "0cbbe85662aed18b598cbdd9c63bc136b998be90b468827159a1db71bd44ea5b",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5069,7 +5069,7 @@
         "blob_sha": "a6dd97ef9c8228b33da38c72ffd2bf8414ca1d75"
       },
       "destination": "docs/properties/host-runtime/setup-identity/existing-checks.md",
-      "destination_sha256": "4a05481140172671e146823e97c0710dde31943a3e7a552dc6e3180dbed809db",
+      "destination_sha256": "f090f1f9d92bdcdd1e561ad45d890b1962ff9374efe8575afe6ad03d1a33668a",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5082,7 +5082,7 @@
         "blob_sha": "b172662052324f77edfabfc0e72d5f505014b8e8"
       },
       "destination": "docs/properties/host-runtime/setup-identity/fault-map.md",
-      "destination_sha256": "a0c010f23bb52cccff2c78f9b0e4d24ae06576fc3a4f86622f493b7968103fda",
+      "destination_sha256": "40a32a1eee6cdfa6b0cafb82b770b410b82ef6bdfdee5cdc84bdc6847c0ab5f2",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5095,7 +5095,7 @@
         "blob_sha": "6be1c3bac1cb91cb0422c010e02c1b365cefbba4"
       },
       "destination": "docs/properties/host-runtime/setup-identity/portfolio-evaluation.md",
-      "destination_sha256": "13062d28ac573d7dbeae154fcd4c16fdc01c3737487e985a59350e8e81c21636",
+      "destination_sha256": "33084eff502d04a6e6a56bdd7f03239d1f01c8487397bac1b47a6ddb42e635e4",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5160,7 +5160,7 @@
         "blob_sha": "aaae2a80ff94f9e9ee097ef4e9b5f4b096f44780"
       },
       "destination": "docs/properties/host-runtime/client-peer/existing-checks.md",
-      "destination_sha256": "1329a23a10aaaf206042fe0a468ebbf21f060cfdfe3407dc05c9f419876a7dc9",
+      "destination_sha256": "f64a809715402d29dbb2ed219a9ebfbf75646032d93c23104d4ed1a9392bea14",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5199,7 +5199,7 @@
         "blob_sha": "c5ce17ce8527c656a1ffa10d2116b87bc678378d"
       },
       "destination": "docs/properties/host-runtime/request-path/existing-checks.md",
-      "destination_sha256": "5729deaa0680e61c987586a5f0256722468545aaac9b58b2adb4a358d2cf45a2",
+      "destination_sha256": "ccdf46e63a662d31f84720cf81ec5671b306b824c28b7e0ac40b854793f51271",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5290,7 +5290,7 @@
         "blob_sha": "1144b315ef48ae1769a35a4e455a3df593c903be"
       },
       "destination": "docs/properties/host-runtime/runtime-config/existing-checks.md",
-      "destination_sha256": "79505273defe1cafaedb4cb62591ac56fb83135ba220eb004ee7211b95c800e0",
+      "destination_sha256": "41cb0aea3443bbd554e54511e2c2f6b51b85e66a5bd9b51cd09ca7fd87653ab6",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5480,7 +5480,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/discovered-at-u3/fault-map.md",
-      "destination_sha256": "0b7ba54feaffb1416276fbec33882b7774987703cfcd24b853e693bd62089126",
+      "destination_sha256": "c28a4167b19d493ef909ddb0895e1ba6c4bc6df6147f5c77b7bf50efdeb36c33",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5491,7 +5491,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/discovered-at-u3/portfolio-evaluation.md",
-      "destination_sha256": "3682327e58355f431e976804adcc05bcb361f4dfb9b98af2c513150cb5ee9001",
+      "destination_sha256": "e1b9a9aa13f995ea56f6a6fa2d4c0cd46cc2f16b85ab2c006f5ef9d66936d77e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

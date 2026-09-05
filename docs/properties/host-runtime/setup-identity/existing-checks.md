@@ -19,9 +19,12 @@ proves what its name says.
 
 ## The coverage fact that frames this inventory
 
-**51 in-crate tests reach this sub-part. 49 of them never run in CI, and the 2
-that do are the peer's.** Counts re-derived per file at `HEAD` by matching
-`#[test]` and `#[tokio::test]`:
+**51 in-crate tests reach this sub-part, and in this tree all 51 run in CI**
+through `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`,
+`:126`). The source repository's workflow ran only 2 of them, the peer's, because
+its `-p host-runtime` invocations were `--test`-filtered; the "Runs in CI" column
+below records that source-workflow state as provenance and is superseded here.
+Counts re-derived per file at `HEAD` by matching `#[test]` and `#[tokio::test]`:
 
 | Unit | Test module | Module lines | Tests | Runs in CI |
 | --- | --- | --- | --- | --- |
