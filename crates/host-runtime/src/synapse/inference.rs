@@ -433,14 +433,18 @@ impl Backend {
             })
             .unwrap_or_else(|| vec![&corpus.items[0]]);
         for item in &corpus.items {
-            if distinct.len() == batch_rows.max(1) {
+            if distinct.len() >= batch_rows.max(1) {
                 break;
             }
             if distinct.iter().all(|kept| differ(kept, item)) {
                 distinct.push(item);
             }
         }
-        self.certify_batch(&distinct, &matches)?;
+        // A lane that admits one item per batch is never asked for two rows, so its certification stays within that contract.
+        distinct.truncate(batch_rows.max(1));
+        if distinct.len() >= 2 {
+            self.certify_batch(&distinct, &matches)?;
+        }
         // Full-size batches certify every admitted position with only two distinct items: batch `k` labels each position by bit `k` of its index and its complement swaps the labels, so any two positions differ in some batch and every position sees both items. A graph that mixes rows at any pair of positions, or mishandles one input at one position, produces a mismatch. The same batches are the capacity check, so a graph that fails only at the admitted size is caught too.
         let rows = batch_rows.max(1);
         if rows > 1 {
@@ -464,7 +468,7 @@ impl Backend {
     }
 
     /// Corpus texts are short, so a graph with a fixed short sequence axis passes every semantic probe and then fails an ordinary long request. This probe embeds a text at the advertised byte limit that reaches the truncation window; the result must be a valid vector, with no expectation to compare.
-    /// Corpus phrases can tokenize sparsely, so the probe's encoding is measured; if it falls short of `max_tokens`, a dense text of isolated single-byte characters (about one token per two bytes) is used instead, which is the densest legal input a request can send.
+    /// Corpus phrases can tokenize sparsely, so every candidate's encoding is measured and the densest one is embedded; when none reaches `max_tokens`, the byte cap bounds the sequence below the advertised limit for every text this search can produce.
     fn long_input_probe(
         &self,
         corpus: &Corpus,
@@ -481,10 +485,22 @@ impl Backend {
             text.push_str(&item.text);
         }
         truncate_to_char_boundary(&mut text, max_text_bytes);
-        if self.token_count(&text)? < self.max_tokens {
-            text = "x ".repeat(max_text_bytes.div_ceil(2));
-            truncate_to_char_boundary(&mut text, max_text_bytes);
+        // Candidates that tokenize densely for common vocabularies: isolated ASCII letters, isolated digits, and CJK punctuation; the probe is the candidate with the most tokens, so it reaches the longest sequence a request can send.
+        let mut best = (self.token_count(&text)?, text);
+        if best.0 < self.max_tokens {
+            for pattern in ["x ", "7 ", "\u{3002}"] {
+                let mut candidate = pattern.repeat(max_text_bytes / pattern.len() + 1);
+                truncate_to_char_boundary(&mut candidate, max_text_bytes);
+                let tokens = self.token_count(&candidate)?;
+                if tokens > best.0 {
+                    best = (tokens, candidate);
+                }
+                if best.0 >= self.max_tokens {
+                    break;
+                }
+            }
         }
+        let text = best.1;
         let vectors = self.embed(&[text.as_str()])?;
         if vectors.len() != 1 {
             return Err(InferenceError::Artifact(

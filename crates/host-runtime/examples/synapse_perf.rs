@@ -1150,7 +1150,10 @@ async fn execute_batch(
                     polls,
                 ));
             }
-            let base = json["retry_after_ms"].as_u64().unwrap_or(100);
+            // Batch admission rejections carry the configured hint; a missing one is a host regression that invalidates the repetition rather than a default to fill in.
+            let base = json["retry_after_ms"].as_u64().ok_or_else(|| {
+                format!("queue_full batch rejection omitted retry_after_ms: {json}")
+            })?;
             let delay = Duration::from_secs_f64(rng.retry_delay_ms(base) / 1_000.0);
             if Instant::now() + delay >= deadline {
                 return Ok(terminal_record(
@@ -1220,7 +1223,16 @@ async fn execute_batch(
                         if !retryable || poll_attempt >= attempt_cap {
                             break (reply, json);
                         }
-                        let base = json["retry_after_ms"].as_u64().unwrap_or(100);
+                        // A `queue_full` poll rejection carries the configured hint; the host's `timeout` error carries none, so that retry uses the harness cadence.
+                        let base = match (code, json["retry_after_ms"].as_u64()) {
+                            (Some("queue_full"), Some(hint)) => hint,
+                            (Some("queue_full"), None) => {
+                                return Err(format!(
+                                    "queue_full result rejection omitted retry_after_ms: {json}"
+                                ));
+                            }
+                            _ => 100,
+                        };
                         let delay = Duration::from_secs_f64(rng.retry_delay_ms(base) / 1_000.0);
                         if Instant::now() + delay >= deadline {
                             break (reply, json);
@@ -1853,7 +1865,7 @@ impl Observation {
 ///
 /// A censored request is known only to have taken at least its observed duration: a timed-out request at least its deadline, a request open at the window end at least the time it had. Placing every censored request above every completed one would misstate a request censored after microseconds, so each censored observation leaves the risk set at its own duration instead.
 /// The quantile `q` is the first completed duration at which the estimated cumulative probability reaches `q`; when the censored mass keeps the estimate below `q`, the value is not identifiable and is suppressed.
-/// A tail quantile below its sample floor rests on too few completed observations above it and is suppressed as well.
+/// A tail quantile with fewer than 30 completed observations beyond it rests on too little support and is suppressed as well, whether the shortfall comes from a small sample or from censoring that consumed the tail.
 #[derive(Debug, PartialEq, serde::Serialize)]
 struct GatedLatency {
     count: u64,
@@ -1878,32 +1890,37 @@ impl GatedLatency {
             .filter(|o| o.completed)
             .map(|o| o.duration_ns)
             .max()?;
-        let quantile = |quantile_per_mille: u64| -> Option<u64> {
+        // Returns the estimate and how many completed observations lie beyond the event that produced it.
+        let quantile = |quantile_per_mille: u64| -> Option<(u64, u64)> {
             let target = quantile_per_mille as f64 / 1_000.0;
             let mut survival = 1.0f64;
+            let mut events = 0u64;
             for (index, observation) in observations.iter().enumerate() {
                 if !observation.completed {
                     continue;
                 }
+                events += 1;
                 let at_risk = (observations.len() - index) as f64;
                 survival *= 1.0 - 1.0 / at_risk;
                 // Floating-point slack resolves toward publication, matching exact arithmetic at `F == q`.
                 if 1.0 - survival + 1e-9 >= target {
-                    return Some(observation.duration_ns);
+                    return Some((observation.duration_ns, count - events));
                 }
             }
             None
         };
+        // A tail estimate needs `TAIL_SAMPLE_FLOOR / 1000` completed observations beyond it; that is the support the sample floor provides without censoring, and it holds when censoring has consumed the tail as well.
+        let tail_support = perf_measurement::TAIL_SAMPLE_FLOOR / 1_000;
         let tail = |quantile_per_mille: u64| {
-            perf_measurement::quantile_publishable(count, quantile_per_mille)
-                .then(|| quantile(quantile_per_mille))
-                .flatten()
+            quantile(quantile_per_mille)
+                .filter(|(_, beyond)| *beyond >= tail_support)
+                .map(|(duration, _)| duration)
         };
         Some(Self {
             count,
-            p50_ns: quantile(500)?,
-            p90_ns: quantile(900)?,
-            p95_ns: quantile(950)?,
+            p50_ns: quantile(500)?.0,
+            p90_ns: quantile(900)?.0,
+            p95_ns: quantile(950)?.0,
             p99_ns: tail(990),
             p999_ns: tail(999),
             max_ns,
@@ -1916,11 +1933,17 @@ impl GatedLatency {
     }
 }
 
-/// Each method's censoring comes from its own attempts: a timed-out attempt is censored at its deadline, every other terminal attempt is a completed observation, so a method whose attempts all settled carries no censoring from another phase.
+/// Each method's censoring comes from its own attempts: an attempt that timed out (by disposition or by code) is censored at its deadline, every other terminal attempt is a completed observation, so a method whose attempts all settled carries no censoring from another phase.
 fn attempt_latency_by_method(attempts: &[AttemptRecord]) -> BTreeMap<&'static str, GatedLatency> {
     let mut observations: BTreeMap<&'static str, Vec<Observation>> = BTreeMap::new();
     for attempt in attempts {
-        let observation = if attempt.disposition == AttemptDisposition::Timeout {
+        // Result polls keep the `Poll` disposition whatever their outcome, so a poll that hit the caller's or the host's deadline is recognized by its code.
+        let timed_out = attempt.disposition == AttemptDisposition::Timeout
+            || matches!(
+                attempt.code.as_deref(),
+                Some("timeout" | perf_measurement::ATTEMPT_TIMEOUT_CODE)
+            );
+        let observation = if timed_out {
             Observation::censored(attempt.latency_ns)
         } else {
             Observation::completed(attempt.latency_ns)
@@ -2490,7 +2513,9 @@ mod tests {
         assert!(full.p999_ns.is_some());
 
         // Requests censored beyond every completed duration cap the estimate at the completed fraction: more than
-        // 1 per mille hides p99.9, more than 10 per mille hides p99 as well, and exactly 10 per mille still publishes p99.
+        // 1 per mille hides p99.9 and more than 10 per mille hides p99. At exactly 10 per mille the p99 estimate exists but
+        // sits on the largest completion with nothing beyond it, so it lacks tail support and stays unpublished; 8 per mille
+        // leaves enough completed observations beyond the estimate to publish.
         let with_late_censoring = |per_mille_tenths: u64| {
             let completed = p999_floor;
             let censored = completed * per_mille_tenths / (10_000 - per_mille_tenths);
@@ -2506,7 +2531,9 @@ mod tests {
         assert_eq!(p99_censored.p99_ns, None);
         assert_eq!(p99_censored.p999_ns, None);
         let at_boundary = with_late_censoring(100);
-        assert!(at_boundary.p99_ns.is_some());
+        assert_eq!(at_boundary.p99_ns, None);
+        let supported = with_late_censoring(80);
+        assert!(supported.p99_ns.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

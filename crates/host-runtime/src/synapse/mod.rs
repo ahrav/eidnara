@@ -409,6 +409,14 @@ fn mark_failing(inner: &SynapseInner, mut reason: String) {
     }
 }
 
+fn mark_disabled(inner: &SynapseInner, mut reason: String) {
+    protocol::bound_diagnostic(&mut reason);
+    let mut state = inner.lock_state();
+    if matches!(&*state, LaneState::Ready(_)) {
+        *state = LaneState::Disabled { reason };
+    }
+}
+
 /// Captured `Arc<ReadyLane>` values can outlive a failing state transition, so callers must not run a captured backend after the transition.
 fn lane_failure_reason(inner: &SynapseInner) -> Option<String> {
     match &*inner.lock_state() {
@@ -469,6 +477,11 @@ fn settle_inference(
         Ok(Err(InferenceError::Invariant(reason))) => {
             mark_failing(inner, reason.clone());
             Err(InferenceError::Invariant(reason))
+        }
+        // A runtime artifact fault means the backend declared its artifact unusable, so the lane is disabled rather than left serving it.
+        Ok(Err(InferenceError::Artifact(reason))) => {
+            mark_disabled(inner, reason.clone());
+            Err(InferenceError::Artifact(reason))
         }
         Ok(Err(other)) => Err(other),
         Err(_panicked) => {
