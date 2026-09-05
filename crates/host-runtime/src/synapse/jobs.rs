@@ -806,11 +806,11 @@ impl JobTable {
             if live.saturating_add(floor) <= cap {
                 return true;
             }
-            // Only a ready job whose lease no served page shares frees bytes when evicted; a page-leased job would be lost for nothing.
+            // Only a ready job whose lease no served page shares frees bytes when evicted; a page-leased job or a zero-byte failure record would be lost for nothing.
             let releasable = jobs
                 .by_seq
                 .values()
-                .filter(|job| job.is_completed() && Self::lease_is_sole(job))
+                .filter(|job| Self::eviction_frees_bytes(job))
                 .fold(0u64, |total, job| total.saturating_add(job.result_bytes));
             if live.saturating_sub(releasable).saturating_add(floor) > cap {
                 return false;
@@ -818,7 +818,7 @@ impl JobTable {
             let victim = jobs
                 .by_seq
                 .values()
-                .filter(|job| job.is_completed() && Self::lease_is_sole(job))
+                .filter(|job| Self::eviction_frees_bytes(job))
                 .min_by_key(|job| job.retention_rank())
                 .map(|job| job.seq);
             let Some(seq) = victim else {
@@ -830,11 +830,11 @@ impl JobTable {
         }
     }
 
-    /// A ready job whose lease has no other holder releases its bytes on eviction; a page mid-response holds a clone and keeps them live.
-    fn lease_is_sole(job: &Job) -> bool {
+    /// A ready job with result bytes whose lease has no other holder releases those bytes on eviction; a page mid-response holds a clone and keeps them live, and a failed job holds none.
+    fn eviction_frees_bytes(job: &Job) -> bool {
         match &job.state {
-            JobState::Ready { lease, .. } => Arc::strong_count(lease) == 1,
-            _ => true,
+            JobState::Ready { lease, .. } => job.result_bytes > 0 && Arc::strong_count(lease) == 1,
+            _ => false,
         }
     }
 
