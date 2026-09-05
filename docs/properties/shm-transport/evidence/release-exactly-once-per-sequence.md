@@ -73,8 +73,14 @@ recycled slot's descriptor bytes on a later lap.
 
 The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
-The sequential cases are covered. The uncovered one is the read-then-CAS window,
-which needs a second party progressing between `:1565` and `:1575`:
+The sequential cases are covered. In the source tree this record was written
+against, the uncovered one was the read-then-CAS window, which needs a second party
+holding a copied identity and progressing between `:1565` and `:1575`. At HEAD
+`Ring::release` is `pub(crate)` (`ring.rs:1528`) and reached only through
+`ReceiveLease`, whose `release_once` sets `released` before calling the sink
+(`lease.rs:350-357`), so no caller outside the crate can present a copied or
+retained identity; the interleaving below is constructible only by in-crate code
+and reads as the regression a widened `release` visibility would reopen:
 
 1. Party A holds a stale identity for sequence `N` — for example a copy kept after
    its lease was already completed, or a lap-old identity.
@@ -116,7 +122,12 @@ At HEAD: Both the increment and the decrement of active_leases go through Ring::
 ## What a test must construct
 
 At least two release attempts for one sequence, and for the uncovered case they must
-interleave. Concretely: a deterministic scheduling point immediately after the
+interleave. In the source tree this record was written against, a second party could
+call `Ring::release` with a copied identity; at HEAD that call is `pub(crate)`, so
+the interleaving below can be driven only from a unit test inside
+`crates/shm-transport`, where `Ring::release` is still callable directly, and the
+lease-mediated surface cannot construct it at all. Concretely: a deterministic
+scheduling point immediately after the
 descriptor read at `ring.rs:1565` (fault class F3, absent today), holding party A
 there while a second party performs a legitimate release, a `reclaim_completed`, a
 reserve, a commit that reuses the slot, and a fresh `try_receive`; then release A and

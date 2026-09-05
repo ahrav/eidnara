@@ -1,17 +1,17 @@
 # test-only-surface-absent-from-the-shipped-addon
 
 > Refresh note, 2026-08-31: PR #131 (merge `5d638e3e8`) changed two facts this
-> record relies on. First, the export inventory grew: `lib.rs` now carries 26
-> `#[napi]` attributes, adding `build_profile` (`:501`), `build_target`
-> (`:510`), `connect_setup` (`:860`), `finish_setup` (`:871`), `watch` (`:1274`,
-> the eventfd reactor registration), `readiness_handled` (`:1304`), and
-> `peer_closed` (`:1477`); the inventory below covers only the pre-#131 set and
-> needs re-derivation. Second, the debug-build finding is obsolete: the package
+> record relies on. First, the export inventory grew: at that merge `lib.rs`
+> carried 26 `#[napi]` attributes, adding `build_profile`, `build_target`,
+> `connect_setup`, `finish_setup`, `watch` (the reactor registration),
+> `readiness_handled`, and `peer_closed`; the inventory below has since been
+> regenerated from HEAD, which added more. Second, the debug-build finding is obsolete: the package
 > now builds with `cargo build --release` and copies from `target/release/`
 > (`package.json:16`), and exposes a `build_profile` probe (`lib.rs:501-507`).
 > The core claim — the six named test-only exports ship unconditionally and are
 > re-exported through `index.ts` — was re-verified at HEAD. Table line numbers
-> below were re-anchored to HEAD.
+> below and every `lib.rs`, `napi_buffers.rs`, and `index.ts` anchor in this
+> record are taken from the same HEAD snapshot.
 At HEAD: `lib.rs` carries 32 `#[napi]` attributes: 30 exported functions plus two `#[napi(object)]` types.
 
 ## Discovery trigger
@@ -25,44 +25,62 @@ checked for build-time gating.
 
 ### Exported N-API surface
 
-`packages/shm-native/src/lib.rs` carries 19 `#[napi]` functions and one
-`#[napi(object)]` type. In source order:
+`packages/shm-native/src/lib.rs` carries 32 `#[napi]` attributes at HEAD: 30
+exported functions and two `#[napi(object)]` types, regenerated from
+`rg -n '#\[napi' packages/shm-native/src/lib.rs`. In source order (the line is
+the attribute's; the item follows on the next line):
 
 | Line | Export | Character |
 | --- | --- | --- |
-| 34 | `NativeTestPair` (object) | test-pair result type |
-| 447 | `napi_version` | probe support |
-| 473 | `create_external_probe` | **test-only**: allocates an owned probe buffer |
-| 478 | `detach_array_buffer` | **test-only**: detaches an arbitrary `ArrayBuffer` |
-| 483 | `register_cleanup_probe` | **test-only**: arbitrary-path cleanup marker |
-| 488 | `native_leak_diagnostics` | diagnostic counter |
-| 493 | `active_external_ref_count` | diagnostic counter |
-| 498 | `set_external_view_failpoint` | **test-only**: fault injector |
-| 503 | `worker_limit` | constant read |
-| 508 | `active_channel_count` | diagnostic counter |
-| 522 | `attach` | transport |
-| 794 | `create_test_pair` | **test-only**: constructs a duplex pair |
-| 859 | `produce` | transport |
-| 937 | `reserve` | transport |
-| 1017 | `commit_reservation` | transport |
-| 1051 | `abort_reservation` | transport |
-| 1160 | `poll` | transport |
-| 1269 | `release` | transport |
-| 1308 | `close` | transport |
-| 1335 | `force_close` | **test-only**: forced quarantine close |
+| 33 | `NativeTestPair` (object) | test-pair result type |
+| 41 | `NativeSetupOptions` (object) | setup argument type |
+| 488 | `napi_version` | probe support |
+| 500 | `build_profile` | probe support: compiled profile |
+| 509 | `build_target` | probe support: compiled target triple |
+| 514 | `descriptor_schema_version` | constant read |
+| 519 | `qualified_test_profile` | constant read: the `PROFILE` name |
+| 524 | `create_external_probe` | **test-only**: allocates an owned probe buffer |
+| 529 | `detach_array_buffer` | **test-only**: detaches an arbitrary `ArrayBuffer` |
+| 534 | `register_cleanup_probe` | **test-only**: arbitrary-path cleanup marker |
+| 539 | `probe_cleanup_hooks` | probe support: capability gate for cleanup hooks |
+| 545 | `is_watching` | registry query |
+| 561 | `producer_registered` | registry query |
+| 575 | `lease_registered` | registry query |
+| 589 | `channel_registered` | registry query |
+| 599 | `native_leak_diagnostics` | diagnostic counter |
+| 604 | `active_external_ref_count` | diagnostic counter |
+| 609 | `set_external_view_failpoint` | **test-only**: fault injector |
+| 614 | `worker_limit` | constant read |
+| 619 | `active_channel_count` | diagnostic counter |
+| 633 | `attach` | transport |
+| 901 | `connect_setup` | transport: setup handshake, first half |
+| 912 | `finish_setup` | transport: setup handshake, second half |
+| 930 | `create_test_pair` | **test-only**: constructs a duplex pair |
+| 997 | `produce` | transport |
+| 1081 | `reserve` | transport |
+| 1158 | `commit_reservation` | transport |
+| 1222 | `abort_reservation` | transport |
+| 1321 | `watch` | transport: reactor registration |
+| 1351 | `readiness_handled` | transport: readiness acknowledgement |
+| 1393 | `poll` | transport |
+| 1502 | `release` | transport |
+| 1524 | `peer_closed` | transport: dead-peer query |
+| 1545 | `close` | transport |
+| 1578 | `force_close` | **test-only**: forced quarantine close |
 
-All six surfaces the catalog names are present and confirmed at those lines
-(re-anchored to post-#131 HEAD, 2026-08-31).
+All six surfaces the catalog names are present and confirmed at those lines.
 
-Three diagnostic counters the catalog does not name — `native_leak_diagnostics`,
-`active_external_ref_count`, `active_channel_count` — are also unconditionally
-exported. They leak internal accounting rather than granting a capability, so
-they are a lesser concern, but they belong in an export inventory.
+Three diagnostic counters the catalog does not name, `native_leak_diagnostics`,
+`active_external_ref_count`, and `active_channel_count`, are also unconditionally
+exported, as are the four registry queries (`is_watching`, `producer_registered`,
+`lease_registered`, `channel_registered`) the wrapper uses after a partial close.
+They leak internal accounting rather than granting a capability, so they are a
+lesser concern, but they belong in an export inventory.
 
 ### Absence of build-time gating
 
 Every `cfg` attribute in the file is a platform predicate except two additions
-from #131: the in-file unit-test module behind `#[cfg(test)]` at `:1193` and
+from #131: the in-file unit-test module behind `#[cfg(test)]` at `:1241` and
 the runtime `cfg!(debug_assertions)` inside `build_profile` at `:502`, neither
 of which gates an export. There is still **no** `cfg(test)`,
 `cfg(feature = ...)`, or `cfg(debug_assertions)` attribute on any export.
@@ -77,31 +95,31 @@ entry points, exported from the library with no gate.
 `packages/shm-native/package.json` sets `"main": "index.ts"`,
 `"types": "index.ts"`, and `"exports": { ".": "./index.ts" }`. `index.ts`
 re-exports the test-only surface as public TypeScript: `registerCleanupProbe`
-(line 497), `nativeLeakDiagnostics` (504), `activeExternalRefs` (508),
-`setExternalViewCreationFailpoint` (512), `activeNativeChannels` (516),
-`NativeChannel.createTestPair` (402), and `NativeChannel.forceClose` (486). These
+(line 912), `nativeLeakDiagnostics` (919), `activeExternalRefs` (923),
+`setExternalViewCreationFailpoint` (927), `activeNativeChannels` (931),
+`NativeChannel.createTestPair` (755), and `NativeChannel.forceClose` (873). These
 are not merely raw addon symbols reachable by `require`; they are the package's
 declared interface.
 
 ### What each capability actually permits
 
-- `force_close` (958) calls `quarantine_channel` (348), which calls
-  `enter_quarantine()` on `to_host` at line 350 and `from_host` at line 351
+- `force_close` (1579) calls `quarantine_channel` (415), which calls
+  `enter_quarantine()` on `to_host` at line 421 and `from_host` at line 422
   before any detach. One call from JavaScript unconditionally drives **both**
   directions terminal.
-- `set_external_view_failpoint` (447) sets a thread-local counter
+- `set_external_view_failpoint` (610) sets a thread-local counter
   (`napi_buffers.rs:220-222`) that makes the *n*th subsequent
   `create_external_view` fail (`napi_buffers.rs:65-81`). That reaches
-  `cleanup_created_refs` from `produce` (lib.rs:907, 914), `reserve` (983), and
-  `poll` (875). `cleanup_created_refs` (248-269) quarantines only if the
-  follow-on `detach_all` (259) or `delete_all` (266) also fails, so the failpoint
+  `cleanup_created_refs` from `produce` (lib.rs:1046, 1053), `reserve` (1128), and
+  `poll` (1442). `cleanup_created_refs` (290-312) quarantines only if the
+  follow-on `detach_all` (296) or `delete_all` (307) also fails, so the failpoint
   alone does not quarantine.
-- `detach_array_buffer` (427) calls `napi_buffers::detach_value`
+- `detach_array_buffer` (530) calls `napi_buffers::detach_value`
   (`napi_buffers.rs:268-283`), which performs no ownership check: the raw value
   goes straight to `napi_detach_arraybuffer`, and the runtime validates only that
   it is an `ArrayBuffer`. Any detachable buffer in the process can be detached,
   including buffers the addon never created.
-- `register_cleanup_probe` (432) forwards a caller-supplied `String` as a
+- `register_cleanup_probe` (535) forwards a caller-supplied `String` as a
   `PathBuf` to `lifecycle::register_cleanup_marker`. The path is written at
   environment teardown; `tests/mechanism.ts:82` reads the marker back and asserts
   its contents are `"clean"`.

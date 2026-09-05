@@ -350,17 +350,25 @@ record asserts that wakes are *delivered*; none asserts that delivery
 *terminates or is bounded*. Three gaps and one bias.
 
 1. **Redispatch and dispatch have no termination bound** (gap). Two
-   concrete unbounded shapes exist at HEAD. First, `readiness_handled`
-   converts any per-channel `arm_data_wait` error into `redispatch = true`
-   (`lib.rs:1197-1200`), and the wrapper re-queues itself with
-   `queueMicrotask` (`index.ts:555-557`); a channel whose arm persistently
-   errors (a quarantined ring, a dead wake page) therefore produces an
-   unbounded microtask recursion that never yields to the macrotask queue.
-   Second, the setup socket is registered level-triggered with
-   `IN|HUP|ERR|RDHUP` (`scheduling.rs:31-48`, `:232-239`); after peer death
+   concrete unbounded shapes existed in the source tree this pass evaluated.
+   First, in that tree `readiness_handled` converted any per-channel
+   `arm_data_wait` error into `redispatch = true`, and the wrapper re-queued
+   itself with `queueMicrotask`; a channel whose arm persistently errored
+   therefore produced an unbounded microtask recursion. That shape is
+   superseded at HEAD: `readiness_handled` (`lib.rs:1352-1391`) unregisters
+   the channel on `Err` (`:1385`) and returns `redispatch = true` only for an
+   advanced `Ok(false)` (`:1378-1381`), and the wrapper's `scheduleRedispatch`
+   (`index.ts:684-697`) yields to `setImmediate` after
+   `REDISPATCH_MICROTASK_BUDGET` consecutive microtasks; the record
+   `readiness-redispatch-is-bounded-under-persistent-arm-failure` owns it.
+   Second, the setup socket is registered with
+   `IN|HUP|ERR|RDHUP` (`scheduling.rs:70-80`, `:228-239`); in that tree the
+   registration was level-triggered, so after peer death
    the HUP can never be drained, so every `epoll::wait` returns immediately
-   and the reactor dispatches callbacks at acknowledgement speed until JS
-   closes the channel. No record states any bound on either loop.
+   and the reactor dispatched callbacks at acknowledgement speed until JS
+   closed the channel. At HEAD that registration carries `ONESHOT` (`:79`), so
+   the hangup is reported once and the registration disables itself. At the
+   time of this pass no record stated any bound on either loop.
    *Disposition:* gap — queue a discovery pass over the reactor's
    termination behavior: redispatch termination on persistent error,
    dispatch rate on a permanently-ready descriptor, and what obligation the
@@ -405,22 +413,24 @@ record asserts that wakes are *delivered*; none asserts that delivery
 
 Three of the six new coverage markers are genuinely reachable on a correct
 system, two of them already constructed:
-`shm_publish_during_readiness_callback` (`mechanism.ts:213-280`),
-`shm_queued_writes_exceed_one_per_wake` (the `try_send` bypass at
-`client.rs:4041`), and `shm_partial_page_shared_with_live_lease`
-(`ring.rs:2337-2353`). Three findings on the other three.
+`shm_publish_during_readiness_callback` (`mechanism.ts:527-650`, the
+"readiness acknowledgement preserves a frame published during callback" test),
+`shm_queued_writes_exceed_one_per_wake` (the `RingWriteSender::try_send` bypass
+at `client.rs:2400-2404`), and `shm_partial_page_shared_with_live_lease`
+(`punch_dead_pages`, `ring.rs:2169-2240`). Three findings on the other three.
 
 1. **`shm_kick_during_pending_callback` needs a race, not a call order**
    (refinement). The marker was recorded as constructible by calling `poll`
    from inside an unacknowledged callback with data visible. That construction
    cannot reach the kick: `poll` takes `try_receive()` first
-   (`lib.rs:1224-1230`), and with data visible that returns `Some(lease)`, so
-   the frame is delivered at `:1289` and the `else` arm holding
-   `arm_data_wait()` and `reactor.kick()` (`:1275-1283`) is skipped entirely.
+   (`lib.rs:1418-1423`), and with data visible that returns `Some(lease)`, so
+   the frame is delivered at `:1479` and the `else` arm holding
+   `arm_data_wait()` and `reactor.kick()` (`:1455-1472`) is skipped entirely.
    The kick is reachable only on the empty-receive arm, and only when
    `arm_data_wait()` returns `Ok(false)` — that is, when data or a generation
    change appears after the empty `try_receive` but before the arm's recheck
-   (`ring.rs:840-852`). Witnessing it therefore requires a concurrent
+   (`arm_data_wait_guarded`, `ring.rs:1201-1215`, and `armed_wait_holds`,
+   `:1227-1233`). Witnessing it therefore requires a concurrent
    publication or a scheduling seam inside that window, not a call order.
    *Disposition:* refinement — restate the marker's construction in the
    fault-map row and the Required-faults line as a race between an empty
@@ -670,8 +680,12 @@ evaluated the seven records added after the whole-portfolio pass
 `readiness-redispatch-is-bounded-under-persistent-arm-failure`,
 `each-channel-wake-survives-a-shared-acknowledgement`) against HEAD and the
 other 71 records. Of about 68 citations, two resolved wrongly (`index.ts:555`
-for the self-requeue, `tests/capability.ts` as two watched channels); both are
-corrected. Eighteen refinements were returned and all are applied:
+for the self-requeue, `tests/capability.ts` as two watched channels); both were
+corrected against the source tree this pass evaluated. That tree's line numbers
+are not HEAD's: the self-requeue is `scheduleRedispatch` at `index.ts:684-697`
+at HEAD, and the `lib.rs` and `ring.rs` anchors this section cites elsewhere
+were re-anchored in the same HEAD pass as Lens 3 above. Eighteen refinements
+were returned and all are applied:
 
 - `trim`: the dead range is `[punched, arena_reclaimed)` with partial pages
   removable under `everything`, the protective bound is the producer-local
@@ -860,6 +874,9 @@ A fresh-context evaluator that had not read this file or the evidence directory
 evaluated `attach-makes-every-received-descriptor-close-on-exec`,
 `foreign-slot-state-on-reserve-is-a-fault-not-backpressure`, and
 `failed-publication-wake-leaves-the-slot-published` against the merged HEAD.
+The portfolio at that pass held 85 records: the 82 that existed after the four
+addon additions above, plus these three. (The "other 78 records" in the
+four-addon section is that earlier pass's own baseline, 82 less its four.)
 Of 29 citations, 23 resolved exactly, four were imprecise, and two were wrong
 (`:4277-4295` for a test that ends at `:4288`; `:1294-1297` for a check at
 `:1293-1295`); all are corrected. All four cited tests run and pass. Index rows

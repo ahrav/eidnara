@@ -33,10 +33,11 @@ state.
 - The drain half reaches the ring through `crates/shm-transport/src/lease.rs:350-357`
   `release_once`, from either the explicit `release()` (`:324-325`) or `Drop`
   (`:368-369`). Either path decrements once, guarded by the local `released` flag.
-  New with the eventfd mechanism: the same `release` then signals both the
-  `capacity_ready` and `data_ready` doorbells (`ring.rs:1598`), so a consumer
-  parked in `wait_for_data` during saturation is woken into the drained state
-  rather than observing it on a later poll.
+  The same `release` then signals only the `capacity_ready` doorbell
+  (`ring.rs:1598-1599`, `signal_wake(self.capacity_wake(), &self.capacity_ready)`);
+  the data doorbell is deliberately left alone, so a consumer that parked on the
+  lease limit is not woken by its own release and observes the drained state on a
+  later poll.
 - Observability. Both halves are visible in one `conservation()` snapshot
   (`ring.rs:1607-1624`): `descriptors.receiver_leased` for the held set
   (`:1716-1725`) and `descriptors.published` for the queued backlog (`:1696-1705`).
@@ -77,8 +78,8 @@ precisely because of this, and an unreached verdict is only honest if something
 reports the unreachedness. Without the marker the campaign reports a pass, and the
 pass means the gate returned `Ok(None)` for the *other* reason — an empty ring —
 which is the exact ambiguity that made the existing test's `is_none()` assertion
-weak in the first place. Under the eventfd mechanism the unreached state also hides
-a wake path: a saturated ring is exactly the state in which `data_available`
+weak in the first place. In the source tree this record was written against, the
+unreached state also hid a wake path: a saturated ring is exactly the state in which `data_available`
 (`ring.rs:1501-1512`) parks a `wait_for_data` consumer, so a campaign that never
 saturates also never exercises the release-signals-parked-waiter edge
 (`:1598`) under lease pressure.
@@ -166,12 +167,13 @@ rather than emitted alongside it.
   the shipped-host unreachability finding all survive PR #131; only line numbers
   moved. The former `DESCRIPTOR_DEPTH` constant in `ring_transport.rs` is gone;
   the depth-and-lease bound now comes from `HOST_TEST_RING_DEPTH` in
-  `profile.rs:679`. The drain half gained a mechanism note: the pre-eventfd
-  argument was that the caller polls again after the release; at HEAD the release
-  signals both doorbells, so a parked `wait_for_data` waiter is woken sparsely,
-  and a saturated ring is precisely the state that parks such a waiter. That
-  does not change this record's marker, which is state-based, but it is the
-  reason the paired recovery record now carries a separate wake arm.
+  `profile.rs:679`. The drain half gained a mechanism note. In the source tree
+  this record was written against, the release signalled both doorbells, so a
+  parked `wait_for_data` waiter was woken sparsely, and a saturated ring was
+  precisely the state that parked such a waiter; at HEAD release signals only
+  `capacity_ready` (`ring.rs:1598-1599`), so the source-tree argument that the
+  caller polls again after the release is the current one. Neither version
+  changes this record's marker, which is state-based.
 - Missing evidence: unchanged — the addon lease-retention path remains untraced.
 - Conclusion: resolved with answer — the record survives with citations
   re-anchored; no semantic change to the marker.

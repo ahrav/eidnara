@@ -110,7 +110,10 @@ The scenario below was derived against the source tree this record was written f
 ## Timing windows and dependencies
 
 There is no race window on the counter: it is incremented and decremented by the
-same thread-confined receiver, both `Relaxed`, and read `Relaxed` at `ring.rs:1413-1416`. The
+same thread-confined receiver, both through `Self::advance_cursor`, an `AcqRel`
+compare-exchange from this handle's own record (`ring.rs:1951-1956`), and read with
+`Acquire` and checked against that record by `verified_consumer_cursors`
+(`:1990-2000`), which `try_receive_inner` calls at `:1413-1416`. The
 state half of the property is about state, not ordering, and its bounded fault-free
 window is short and exactly statable: once a release has returned `Ok`, the **next
 single** `try_receive` must deliver, because both gates are pure reads of state the

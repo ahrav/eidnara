@@ -95,15 +95,19 @@ store at `:1325-1326`, containing only two atomic loads at `:703` (source tree; 
 the `SpanPlan::reserve` call at `:1312`. It is short but not bounded by anything,
 and on a failed plan the state is rolled back before the observer could
 misattribute it, so the only observable case is the success path. There is a
-second, wider dependency that changes this property's priority sharply: at this
-commit `conservation()` has no production caller. Its only non-test caller is
-`Ring::probe()` at `ring.rs:1887`, and the only production `probe` implementation,
-`ShmRecoveryBackend::probe` (`crates/host-runtime/src/shm_provider.rs:143-147` at
-`9c1eb4d1`), returned `true` unconditionally with the comment "No shared state
-outlives the endpoint thread, so isolation alone proves the provider side is
-clean" and never touched a `Ring`. `ed487e11` deleted that implementation with
-`shm_provider.rs` and `provider_recovery.rs`, and nothing in the tree replaces it,
-so the observer this property protects still does not exist.
+second, wider dependency that sets this property's priority: the protected
+observer is `Ring::attach`, which runs `conservation_inner(true)` at `ring.rs:1148`
+on every attach, so a peer whose producer is inside the reservation window when
+the attach walks the slots is the production shape of this race; the exact walk
+tolerates one in-flight transition by re-walking until the cursors settle
+(`:1633-1657`), and refuses only a mismatch that never converges. The
+counts-returning `conservation()` itself still has no production caller: its only
+non-test caller is `Ring::probe()` at `ring.rs:1887`, and the former production
+`probe` implementation, `ShmRecoveryBackend::probe`
+(`crates/host-runtime/src/shm_provider.rs:143-147` at `9c1eb4d1`), returned
+`true` unconditionally and never touched a `Ring` before `ed487e11` deleted it
+with `shm_provider.rs` and `provider_recovery.rs`. So the observer this property
+protects exists at attach time and nowhere else.
 At HEAD: The same walk now has a production caller through a different entry point: `Ring::attach` calls `conservation_inner(true)` at `:1148`, so a peer-broken mapping is refused at attach time even though `conservation()` itself stays probe-only.
 At HEAD: The window no longer contains any atomic load: `verified_producer_cursors` (`:1287-1289`) reads `arena_write` and `arena_reclaimed` before the exchange, so only the `SpanPlan::reserve` call sits between the exchange and the store.
 
@@ -162,10 +166,16 @@ producer's own plan for reserved ones.
   deleted by `ed487e11`, argued it was unnecessary for the provider side, which
   was an argument about the single-thread ownership model rather than a permanent
   decision.
-- Conclusion: resolved at this commit. Both are effectively test-only, so the
-  property stays latent and its priority is lower than the raw contradiction
-  suggests. It becomes live if any cross-process readiness or observability path
-  starts calling `conservation()`.
+- Conclusion: resolved at this commit. In the source tree this record was written
+  against, both callers were effectively test-only, so the property stayed latent
+  and its priority was lower than the raw contradiction suggested. At HEAD the
+  walk has a production caller: `Ring::attach` runs `conservation_inner(true)`
+  (`:1148`), whose exact mode re-walks while cursors move and refuses a mismatch
+  that never converges (`:1633-1657`), so the charge-visible-with-non-free-state
+  window is now observed by a production caller and the accuracy of that walk
+  decides whether an honest peer's attach succeeds. The property is live on the
+  attach path and its priority should be reassessed upward; `conservation()`'s
+  counts remain probe-only.
   At HEAD: the grep returns `Ring::probe` (`:1891`) plus `Ring::attach` (`:1148`, through `conservation_inner`), and six `conservation()` calls in `crates/shm-transport/tests/ring.rs` rather than nine.
 
 ### Q: What did the post-merge re-anchor find at HEAD?

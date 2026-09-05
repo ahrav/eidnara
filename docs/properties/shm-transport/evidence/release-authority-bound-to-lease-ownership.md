@@ -155,11 +155,16 @@ Three independent facts establish this:
    At HEAD: The addon holds a `ReceiveLease<'static>` inside `ActiveLease` and never calls `Ring::release`, which is `pub(crate)` at HEAD, so the only `Ring::release` caller in the tree is the `ReleaseSink` impl the lease uses.
 
 Severity therefore: a latent API-shape hazard, not a live defect in the shipped
-topology. What keeps it worth a record is that the composition is available rather
-than prevented — `Ring` and `Ring::release` are public, `commit` hands the identity
-out, and the type system does not distinguish a produce-direction `Ring` from a
-receive-direction one. The property protects a boundary that is currently held by
-call-site convention in two separate codebases.
+topology. In the source tree this record was written against, what kept it worth a
+record was that the composition was available rather than prevented: `Ring` and
+`Ring::release` were public, `commit` handed the identity out, and the type system
+did not distinguish a produce-direction `Ring` from a receive-direction one, so the
+boundary was held by call-site convention in two separate codebases. At HEAD
+`Ring::release` is `pub(crate)` (`ring.rs:1528`) and its only caller is the
+`ReleaseSink` impl that `ReceiveLease::release` and `Drop` go through
+(`lease.rs:324`), so no caller outside the crate can present a producer-held
+identity; the remaining reachable composition is in-crate code and the crate's
+own unit tests, and the property guards against that visibility being widened.
 
 ## What a test must construct
 

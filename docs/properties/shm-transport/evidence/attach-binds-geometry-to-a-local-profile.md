@@ -110,11 +110,17 @@ geometries and nothing detects it. Also enables the geometry half of
 A grant whose geometry differs from the admitted profile's, driven through the
 attaching path. Two arms are worth separating. First, agreement: attach with a
 correct grant and assert that the mapped depth, arena bytes, and lease cap equal
-the local profile's values — this requires the attach API to be told the profile,
-so today the test cannot be written without a signature change. Second, a
-ceiling: assert `Ring::attach` refuses a self-consistent grant whose depth or
-total bytes exceeds a Rust-side bound, which today it does not, so the assertion
-fails and pins the gap.
+the local profile's values. `Ring::attach` is still not told the profile, so at
+the Rust boundary this test needs a signature change; at the addon boundary the
+comparison is unit-tested (`grant_matches_profile`,
+`packages/shm-native/src/lib.rs:1268` and `:1278`), and what is missing is a test
+that drives a mismatched grant through `attach` itself and asserts the
+`descriptor_error()` refusal (`:710-711`). Second, a ceiling: assert
+`Ring::attach` refuses a self-consistent grant whose depth exceeds
+`MAX_DESCRIPTOR_DEPTH` (`crates/shm-transport/src/backend/ring.rs:52`, enforced
+by `Layout::new` at `:286-287`); the `ring.rs` unit tests at `:3803` and `:3811`
+construct exactly that grant, so this arm pins a bound HEAD enforces rather than
+a gap.
 
 ## Investigation log
 

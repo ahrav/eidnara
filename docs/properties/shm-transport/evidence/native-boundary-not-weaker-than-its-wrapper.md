@@ -117,14 +117,19 @@ accepted at all.
 
 ## What a test must construct
 
-One direct native call per wrapper error code, using the `createRequire` shape the
-addon's own test already has. For each of `unexpected_field`, `stale_candidate`,
-`lane_mismatch`, `aliased_lanes` by incarnation, `geometry_mismatch`, and
-`out_of_range`, build the descriptor that triggers it and assert the native
-`attach` rejects, with `activeChannelCount()`, `activeExternalRefCount()`, and
-`nativeLeakDiagnostics()` unchanged across the throw — the pattern
-`expectRejectedWithoutEffects` (`mechanism.ts:790-802`) already uses. Six of these
-are expected to fail today; that is the point. The replay case needs a full
+One direct native call per wrapper error code that native still lacks, using the
+`createRequire` shape the addon's own test already has. For each of
+`unexpected_field`, `stale_candidate`, `lane_mismatch`, and `aliased_lanes` by
+incarnation, build the descriptor that triggers it and assert the native `attach`
+rejects, with `activeChannelCount()`, `activeExternalRefCount()`, and
+`nativeLeakDiagnostics()` unchanged across the throw, the pattern
+`expectRejectedWithoutEffects` (`mechanism.ts:790-802`) already uses. Four of
+these are expected to fail today; that is the point. `geometry_mismatch` and
+`out_of_range` are no longer gaps: at HEAD `grant_matches_profile`
+(`packages/shm-native/src/lib.rs:257-266`, called at `:710-711`) rejects a depth,
+arena-size, or lease-bound mismatch, and with those pinned `checked_layout`
+(`ring.rs:942-944`) determines the total, so those two cases belong in the
+present-behavior arm rather than the gap count. The replay case needs a full
 attach, close, and re-attach with the same grant, so it needs a real host-created
 object rather than the synthetic fixture.
 
@@ -159,9 +164,10 @@ object rather than the synthetic fixture.
 - Conclusion: unresolved, needs the transposition matrix. Concretely: enumerate
   the four combinations of swapped and unswapped `(fd, grant)` pairs and record
   which attach successfully. Until then the record stands as "native admits
-  descriptors the wrapper rejects", which is established on six independent counts
-  above, with the role-confusion consequence rated latent-in-production and
-  reachable-by-bug.
+  descriptors the wrapper rejects", which was established on seven counts above
+  in the source tree and stands on the five that remain at HEAD (items 1 through
+  5; items 6 and 7 are closed by `grant_matches_profile`), with the role-confusion
+  consequence rated latent-in-production and reachable-by-bug.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

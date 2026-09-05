@@ -10,17 +10,18 @@ siblings are `Release`, and one load has no gate.
 ## Evidence trail
 
 - A grep for `.state.load`, `.state.store`, and `.state.compare_exchange` in
-  `crates/shm-transport/src/backend/ring.rs` gives the complete access set,
-  which makes this analysis exhaustive rather than sampled:
+  `crates/shm-transport/src/backend/ring.rs` (non-test code) gives the complete
+  access set at HEAD, which makes this analysis exhaustive rather than sampled:
   - stores: `:1315` and `:1319` (`try_reserve` rollback, `Release`), `:1452`
     (`try_receive` to `SLOT_RECEIVER_LEASED`, `Release`), `:2140`
     (`reclaim_completed` to `SLOT_FREE`, `Release`), `:2280`
     (`abort_reservation` to `SLOT_FREE`, `Release`), and `:2365`
-    (`commit_reservation` to `SLOT_PUBLISHED`, **`Relaxed`**);
-  - compare-exchanges: `:1303` (`try_reserve`), `:1432` (`try_receive`), `:1575`
-    (`release`), all `AcqRel` on success and `Acquire` on failure;
-  - plain loads: `:1681` (`conservation`) and `:2093` (`reclaim_completed`), both
-    `Acquire`.
+    (`publish_commit` to `SLOT_PUBLISHED`, **`Relaxed`**);
+  - compare-exchanges: `:1303` (`try_reserve`), `:1432` (`try_receive_inner`, to
+    the intermediate `SLOT_RECEIVER_HELD`), `:1575` (`release`), all `AcqRel` on
+    success and `Acquire` on failure;
+  - plain loads: `:1681` (`conservation`), `:1836` and `:1869`
+    (`validate_idle_window`), and `:2093` (`reclaim_completed`), all `Acquire`.
 - `ring.rs:2364-2369` is the publication sequence, in program order:
   `write_volatile` of the descriptor at `:2364`, `state.store(SLOT_PUBLISHED,
   Relaxed)` at `:2365`, `arena_write.store(..., Relaxed)` at `:2366`, and

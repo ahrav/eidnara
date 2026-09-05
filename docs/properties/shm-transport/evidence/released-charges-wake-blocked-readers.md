@@ -46,13 +46,18 @@ a slow peer.
 ## Timing windows and dependencies
 
 Signal-before-park: `ByteCharge::drop` can run between the failed
-`read_budget.charge` and the bridge's `poll`. The eventfd absorbs that race —
-the write leaves the counter nonzero, so the later `poll` returns
-immediately; there is no armed-epoch protocol here and none is needed because
-the eventfd itself is level-observable state. Bounded window: one poll wakeup
-plus one loop iteration per released charge. Dependency: the drop-side signal
-fires only when `set_wake` ran first; the ordering is enforced by
-construction (`:2482` precedes thread spawn at `:2486`).
+`read_budget.charge` and the bridge's `poll`, and a drop before `parked` is set
+does not signal at all (`:2321`). The armed-marker protocol closes that race:
+the waiter stores `parked = true` (`:2631`) and only then re-runs
+`read_budget.charge` inside the loop (`:2633`), while the drop decrements `used`
+under the lock and reads `parked` only after releasing it (`:2316-2321`). So a
+release that lands before the marker is set is observed by the waiter's re-check
+of capacity, and a release that lands after it writes the eventfd, which is
+level-observable state, so the later `poll` returns immediately. The marker is
+cleared at `:2659` after the loop. Bounded window: one poll wakeup plus one
+loop iteration per released charge. Dependency: the drop-side signal fires only
+when `set_wake` ran first; the ordering is enforced by construction (`:2482`
+precedes thread spawn at `:2486`).
 
 ## What a test must construct
 

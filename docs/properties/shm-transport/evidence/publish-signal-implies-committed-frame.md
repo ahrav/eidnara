@@ -32,7 +32,10 @@ input where the orderings differ: a commit that fails after the hook has already
       .commit(written)
       .map_err(|_| error("producer underfill or invalid commit"))?;
   ```
-  (`:1073-1077`). The hook runs unconditionally before commit is attempted.
+  (`:1073-1077`). The hook still runs before commit is attempted, but at HEAD it is no longer unconditional:
+  `check_wire_header(&header, written_len)` at `:1071-1072` refuses a header that disagrees with the committed
+  body before the hook fires, so the only commit failures that can follow the hook are quarantine, `Underfill`,
+  `CommitOutsideReservation`, and a `prepare_commit` rejection of a descriptor page a peer rewrote in between.
 - `packages/shm-native/src/lib.rs:1202-1207` — the same ordering on the two-phase `commit_reservation` entry
   point: `before_publish.call(())?` then `reservation.commit(written as usize)`.
 - `packages/plugin/src/shared/host-client/shm-frame-channel.ts:289-321` (source tree; not at HEAD) `publishFrame` —
@@ -48,8 +51,11 @@ input where the orderings differ: a commit that fails after the hook has already
   and any error from `commit_reservation` (`:2562-2566`).
 - `ring.rs:2316-2317` — inside `commit_reservation`,
   `if declared_len as usize != exact_len || wire_header[4] != 2` returns `ProducerError::WireHeaderMismatch`.
-  Because the addon fixes the header at *reserve* time (`lib.rs:1026`) but commits the length the fill callback
-  reported (`lib.rs:1065`, `:1075`), a fill that under-advances produces this failure with no injected fault.
+  In the source tree this record was written against, the addon fixed the header at *reserve* time but committed
+  the length the fill callback reported, so a fill that under-advanced produced this failure with no injected
+  fault. At HEAD both addon paths run `check_wire_header` against the committed count before the hook
+  (`lib.rs:1071-1072`, `:1192-1193`; pinned by `tests/mechanism.ts:703`), so an under-advancing fill is refused
+  before `before_publish` and this branch is no longer reachable after the hook from the addon.
 - `ring.rs:2271-2282` `abort_reservation` — the failure path stores `SLOT_FREE` and never touches `published`,
   so the peer genuinely sees no frame.
 - Existing check, **corrected and re-anchored at post-#131 HEAD**: the catalog cites

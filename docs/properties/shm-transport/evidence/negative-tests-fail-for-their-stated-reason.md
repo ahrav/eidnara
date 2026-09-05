@@ -30,18 +30,21 @@ constant against the layout it mirrors.
 
 `packages/shm-native/tests/mechanism.ts:289` opens
 `describe("raw N-API descriptor boundary")` with
-`DESCRIPTOR_ERROR = /invalid shared-memory descriptor/` at line 139 and a helper
-`expectRejectedWithoutEffects` (lines 141-153) that defaults to that pattern.
-Six cases follow:
+`DESCRIPTOR_ERROR = /invalid shared-memory descriptor/` at line 290. At HEAD the
+block holds more than the descriptor-rejection cases: eight reactor, lease, and
+commit mechanism tests come first (`:292-802`), and the helper
+`expectRejectedWithoutEffects` (`:790-802`), which defaults to that pattern, is
+defined mid-block. The six descriptor-rejection cases this record is about follow
+it, at these HEAD lines:
 
 | Line | Case | Asserted reason |
 | --- | --- | --- |
-| 155 | rejects non-object and structurally hostile arguments | generic `DESCRIPTOR_ERROR` |
-| 178 | rejects every unsafe numeric representation before narrowing | generic `DESCRIPTOR_ERROR` |
-| 214 | rejects malformed, non-ASCII, and aliased grant text | generic `DESCRIPTOR_ERROR` |
-| 245 | accessor objects and proxies get one bounded redacted error | exact string equality with the generic message (line 262) |
-| 278 | a wrong profile is refused before any attachment effect | `/shared-memory profile is unavailable/` |
-| 288 | a well-formed but unresolvable descriptor fails without registry effects | `/shared-memory attachment failed/` |
+| 804 | rejects non-object and structurally hostile arguments | generic `DESCRIPTOR_ERROR` |
+| 827 | rejects every unsafe numeric representation before narrowing | generic `DESCRIPTOR_ERROR` |
+| 849 | rejects malformed, non-ASCII, and aliased grant text | generic `DESCRIPTOR_ERROR` |
+| 879 | accessor objects and proxies get one bounded redacted error | exact string equality with the generic message (line 896) |
+| 912 | a wrong profile is refused before any attachment effect | `/shared-memory profile is unavailable/` |
+| 922 | a well-formed but unresolvable descriptor fails without registry effects | `/shared-memory attachment failed/` |
 
 The four generic cases cannot distinguish the rejection they name from a
 grant-layout rejection, because `RingGrant::decode` failure maps to
@@ -49,10 +52,10 @@ grant-layout rejection, because `RingGrant::decode` failure maps to
 
 Ordering matters here and refines the catalog's count. In `attach`, the profile
 comparison is at `src/lib.rs:645`, before the two `RingGrant::decode` calls at
-`:682` and `:692`. The wrong-profile case at line 278 therefore returns before
+`:682` and `:692`. The wrong-profile case at line 912 therefore returns before
 grant decode is ever reached and could not have been masked by a stale grant.
-Of the six cases, four are maskable, one short-circuits earlier, and one — line
-288, the only case that needs the grant to be *valid* — is the case that
+Of the six cases, four are maskable, one short-circuits earlier, and one, line
+922, the only case that needs the grant to be *valid*, is the case that
 detected the defect.
 
 ### Current state of the corpus replay

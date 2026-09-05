@@ -133,7 +133,7 @@ non-vacuous, so the property and its check share a single enabling condition.
 
 ### Q: Is the cleanup hook gated or only reported at HEAD? (added 2026-09-05)
 
-- Checked: `probeCapabilities` (`packages/shm-native/index.ts:319`) returns `available: false` with `reason: "cleanup_hooks_unavailable"` when `typeof native.registerCleanupProbe !== "function"` (`:415-426`) and `available: true, cleanupHooks: true` only otherwise (`:427-435`). `capableAddon` (`:276-281`) calls the probe on every channel construction and throws `capability_unavailable` when it fails, so the probe is on the shipped path.
+- Checked: `probeCapabilities` (`packages/shm-native/index.ts:319`) calls `native.probeCleanupHooks()` inside a `try` (`:408-414`) and treats a throw as unavailable; it returns `available: false` with `reason: "cleanup_hooks_unavailable"` in that case (`:415-426`) and `available: true, cleanupHooks: true` only otherwise (`:427-435`). It does not test `typeof native.registerCleanupProbe`. `capableAddon` (`:276-281`) calls the probe on every channel construction and throws `capability_unavailable` when it fails, so the probe is on the shipped path.
 - Conclusion: gated. The record is refreshed; Reachability moves to default-production.
 
 ### Q: What did the post-merge re-anchor find at HEAD?

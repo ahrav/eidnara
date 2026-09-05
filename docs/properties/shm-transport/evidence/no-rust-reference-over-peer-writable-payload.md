@@ -87,9 +87,16 @@ At HEAD: Both mappings go through `sys::mmap_shared` (`crates/shm-transport/src/
 ## What a test must construct
 
 The audit form needs no fault: enumerate every method on `LeaseSpan` and
-`ReceiveLease` that touches arena bytes and assert each uses `read_volatile` or
-`copy_nonoverlapping`. That is a source-level or review-level check, and it fails
-today at `lease.rs:71` (source tree; not at HEAD).
+`ReceiveLease` that touches arena bytes (`read_byte` at `lease.rs:63`, `copy_to`
+at `:85`, `checksum` at `:96`, `to_vec` at `:330`, and the shared `copy_out` at
+`:186`) and assert two things of each: it forms no Rust reference, `&[u8]` or
+`&mut [u8]`, over arena memory (`rg from_raw_parts crates/shm-transport/src/lease.rs`
+must stay empty), and every load goes through the `AtomicU8` or `AtomicU64`
+width that `AccessShape::of(base, len)` (`:140-175`) assigns to that byte, so two
+parties over the same range use the same access partition. That is a
+source-level or review-level check; in the source tree this record was written
+against it failed at `lease.rs:71` (source tree; not at HEAD), where `checksum`
+built a slice, and at HEAD every reader passes it.
 
 The impact demonstration needs a peer that writes leased bytes concurrently,
 which is fault class F2 and does not exist. Under Miri or ThreadSanitizer the

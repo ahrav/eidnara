@@ -115,9 +115,14 @@ exercised by `shm_failure_modes.rs:358`
 the negotiation layer, not at attach (that test was removed with the pre-#131
 harness; `907746f7b`). The shipped-topology manifestation is the
 surviving side keeping a ring whose peer-side cursors are frozen. Both framings share
-one root, no reconciliation and no liveness field, and the property is worth keeping
-in its attach form because `validate_lifecycle` is where a reconciliation or refusal
-would have to live.
+one root: `validate_lifecycle` compares only geometry and identity, and the
+`LifecyclePage` has no liveness field. At HEAD attach also refuses a quarantined
+mapping (`ring.rs:1141-1142`) and runs `conservation_inner(true)` (`:1148`), so
+inconsistent cursors, phantom leases, and orphaned receiver slots are refused, and
+the residual this record describes is stale-but-consistent state: K leases whose
+`consumed` and `active_leases` advanced together still pass conservation and are
+inherited. The property is worth keeping in its attach form because `Ring::attach`
+is where a reconciliation or a refusal of that residual would have to live.
 
 ## What a test must construct
 

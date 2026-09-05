@@ -49,7 +49,13 @@ on whether the sandbox permits `kcmp(2)`.
 A real setup socket carrying an aliased bundle into `begin_connect`, and an
 aliased bundle handed to the raw `attach` entry point, each asserting refusal
 with no channel, external reference, or pending entry created. Present: the three
-direct-call tests.
+direct-call tests (`setup.rs:671-691`, `:694`, `:723`), which call
+`reject_aliased_descriptors`, `reject_aliased_files`, and `reject_aliased_inodes`
+directly and not through the setup or attach paths that invoke them. Missing: the
+setup-socket test through `begin_connect` and the raw-attach
+test through `attach`; neither is written, so whether the production call at
+`setup.rs:357` and the entry-point call at `lib.rs:725-731` refuse an aliased
+bundle without leaving state behind is asserted by no test.
 
 ## Investigation log
 

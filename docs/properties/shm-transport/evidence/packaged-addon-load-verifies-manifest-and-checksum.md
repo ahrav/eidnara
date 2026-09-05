@@ -40,7 +40,7 @@ path.
 - `packages/shm-native/tests/` contains no reference to `packageAddonPath`,
   `payload-manifest`, `missing_manifest`, `wrong_platform_payload`, or
   `checksum_mismatch`.
-  At HEAD: The union carries a tenth reason at HEAD, `addon_load_failed` (`index.ts:44`), which the refusal list above does not name.
+  At HEAD: The union carries a tenth reason at HEAD, `addon_load_failed` (`index.ts:44`), the loader-failure mapping the `requireAddon` bullet above now documents (`:258-260`).
 
 ## Failure scenario
 

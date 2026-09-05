@@ -22,9 +22,10 @@ one reclaimed sequence out of two satisfies.
   `reservation_len` and `completion_sequence`, frees the slot, and stores `completed`
   (`:2138-2144`). The loop continues, so **one call drains the entire contiguous
   completed prefix**, not one sequence.
-- `ring.rs:1281` — the only call site of `reclaim_completed` in the repository, confirmed
-  by search: the first statement of `try_reserve`. Reclamation is producer-driven and
-  lazy. A receiver that releases everything while the producer never reserves again
+- `ring.rs:1281`: in the source tree this record was written against, the only call
+  site of `reclaim_completed` in the repository, confirmed by search: the first
+  statement of `try_reserve`. Reclamation is producer-driven and
+  lazy. A receiver that releases everything while the producer never reserves or trims
   leaves every byte and every slot charged indefinitely, and that is by design rather
   than a defect. It fixes the shape of the bound: the window is counted in producer
   reserve attempts, not in wall-clock time.
@@ -94,11 +95,14 @@ No race window; both cursors are producer-owned and written only in
 `reclaim_completed`. The bound has two parts. Visibility: the receiver's `Release` store
 at `:1591` must be visible to the `Acquire` load at `:2090`, immediate in-process and
 bounded by store propagation across processes. Progress: after visibility, **one**
-`try_reserve` must reclaim the entire contiguous prefix, because the loop is written to
-do exactly that. So the fault-free window is one producer reserve attempt, and any need
-for a second is the defect. The producer-driven dependency is strict and is the reason
-the bound cannot be phrased in wall-clock terms: with no producer activity, elapsed time
-buys nothing. The head-of-line precondition is the situation
+`try_reserve`, or one explicit `Ring::trim` (`:2247`, whose first step is the same
+`reclaim_completed` pass at `:2256`), must reclaim the entire contiguous prefix,
+because the loop is written to do exactly that. So the fault-free window is one
+producer reserve attempt or one producer-side trim, and any need for a second is the
+defect. The producer-driven dependency is strict and is the reason the bound cannot be
+phrased in wall-clock terms: with no producer reserve or trim, elapsed time buys
+nothing; `trim` exists so an idle producer can still return capacity, but something
+on the producer side must call it. The head-of-line precondition is the situation
 `shm_arena_wrap_with_live_lease`, already declared in `fault-map.md`, and it is what
 makes the non-contiguous prefix exist in the first place.
 
@@ -110,7 +114,9 @@ profile: publish and acquire sequence 1 and hold it; publish, acquire, and relea
 sequences 2 and 3; assert `descriptors.release_pending == 2` and
 `descriptors.receiver_leased == 1` so the non-contiguous shape is witnessed rather than
 assumed; release sequence 1; then perform exactly **one** `try_reserve` and assert
-`descriptors.free == descriptor_depth` and `bytes.free == arena_bytes` after it. The
+`descriptors.free == descriptor_depth` and `bytes.free == arena_bytes` after it. A
+second arm should repeat the shape with a single `Ring::trim` in place of the
+`try_reserve`, since that is the idle-ring reclamation path. The
 size of the request matters: ask for a frame that only fits if every sequence was
 reclaimed, so the assertion has an independent witness beyond the derived `bytes.free`.
 That single change closes the gap in the existing test, which asks for one byte. Add the
@@ -142,8 +148,9 @@ its retry loop performs additional reclaim passes and destroys the one-pass boun
 - Conclusion: resolved with answer — the healthy-case liveness statement is "one
   producer reserve attempt restores the entire contiguous prefix", the distinguishing
   assertion against head-of-line blocking is a full-size request rather than a one-byte
-  request, and the bound must be counted in producer attempts because `try_reserve` is
-  the sole driver of reclamation.
+  request, and the bound must be counted in producer attempts because `try_reserve` and
+  the explicit `Ring::trim` are the only drivers of reclamation (in the source tree this
+  record was written against, `try_reserve` was the sole one).
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

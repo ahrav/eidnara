@@ -104,24 +104,27 @@ The reclaim window is bounded by the sentinel, not the ring: it opens at the
 kernel's socket-closure edge on peer exit and closes when `admission.release()`
 runs after the endpoint thread joins.
 
-**The join is bounded only while the inbound receiver is being drained.** Every
+**The join is bounded without a draining inbound receiver.** Every
 `select!` arm the endpoint parks in is cancellation-aware
 (`ring_transport.rs:582-617`) and the one synchronous wait, `reserve_until`, is
-deadline-bounded by `frame_deadline` (`ring.rs:1379-1382`, `:1383-1384`) — but
-`receive_one` also awaits a bounded-channel send that is neither:
-`inbound.send(...).await` at `ring_transport.rs:688-694` (the oversized-control rejection) and
-`ring_transport.rs:737-745` (the ordinary frame hand-off). Both carry no deadline and no
-cancellation arm. Their `map_err(|_| ReadClose::Cancelled)` fires only when the
-channel is *closed*; on a full channel with a live receiver the send parks
-indefinitely, and cancelling `root` or `read_cancel` cannot wake it. So if the
-connection task retains the receiver without draining it, the endpoint never
-joins and `admission.release()` may never run at all.
+deadline-bounded by `frame_deadline` (`ring.rs:1379-1382`, `:1383-1384`).
+`receive_one`'s two bounded-channel hand-offs, the oversized-control rejection
+(`ring_transport.rs:688-694`) and the ordinary frame hand-off (`:737-745`), both
+go through `deliver` (`:649-661`), whose `select!` races `inbound.send(event)`
+against `queue.discard.cancelled()` and `root.cancelled()` and maps either
+cancellation to `ReadClose::Cancelled`. In the source tree this record was written
+against those two sends were direct `inbound.send(...).await` calls with no
+cancellation arm, so a connection task that retained the receiver without draining
+it could park the endpoint indefinitely and `admission.release()` might never run;
+at HEAD a full channel yields to `discard` or `root` cancellation instead.
 At HEAD: both hand-offs go through `deliver` (`:649-661`), whose `select!` carries `queue.discard` and `root` cancellation arms, so the send is no longer uncancellable.
 
 The fault-free bound is therefore one socket-closure delivery plus at most one
-`frame_deadline` **given a draining inbound receiver**. Without that
-precondition there is no bound, and the failure mode is a permanently retained
-admission charge rather than a late one. Nothing polls for peer liveness on the
+`frame_deadline` plus the cancellation of `root` or `queue.discard`: `fail`
+cancels `root` (`ring_transport.rs:635-646`) and `FrameSender::discard` cancels
+`discard` (`crates/host-runtime/src/frame_channel.rs:233-237`). A non-draining receiver delays the
+join only until that cancellation lands; it no longer retains the admission
+charge permanently. Nothing polls for peer liveness on the
 ring, and the ring carries no holder count, attach epoch, heartbeat, or peer pid
 a reaper could read. Depends on `custody-terminal-transition-exactly-once` for
 release being correct at all, and shares its root cause with
