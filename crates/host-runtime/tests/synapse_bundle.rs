@@ -791,8 +791,11 @@ fn a_dropped_activate_keeps_shutdown_waiting_for_the_blocking_load() {
             .expect("shutdown completes once the blocking load stopped")
             .expect("synapse shutdown returns cleanly");
 
-        // The dropped `activate` never installs a lane because the tracked wrapper discards the load result.
-        assert!(matches!(component.status(), SynapseStatus::Starting));
+        // The dropped `activate` never installs a lane because the tracked wrapper discards the load result; shutdown then leaves the lane disabled rather than starting.
+        assert!(matches!(
+            component.status(),
+            SynapseStatus::Disabled { reason } if reason.contains("shut down")
+        ));
     });
 }
 

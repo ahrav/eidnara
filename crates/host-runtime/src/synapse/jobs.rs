@@ -72,6 +72,9 @@ enum JobState {
     Ready {
         vectors: Vec<Arc<[f32]>>,
         boundaries: Vec<usize>,
+        /// Highest page boundary this job has returned as a `next_cursor`.
+        /// Cursors are issued in page order, so every issued boundary is at most this value; a boundary above it is never-issued and must be rejected even though it is a legal page start.
+        issued_through: usize,
     },
     Failed {
         code: String,
@@ -491,6 +494,7 @@ impl JobTable {
         job.state = JobState::Ready {
             vectors,
             boundaries,
+            issued_through: 0,
         };
         job.result_bytes = result_bytes;
         job.completed_at = Some(Instant::now());
@@ -551,7 +555,7 @@ impl JobTable {
         if job.key != key {
             return PollOutcome::KeyMismatch;
         }
-        match &job.state {
+        match &mut job.state {
             JobState::Queued { .. } | JobState::Running => PollOutcome::Pending {
                 status: job.status(),
             },
@@ -562,13 +566,16 @@ impl JobTable {
             JobState::Ready {
                 vectors,
                 boundaries,
+                issued_through,
             } => {
                 let offset = match cursor {
                     None => 0,
-                    Some(cursor) => match self.parse_cursor(cursor, seq, boundaries) {
-                        Some(offset) => offset,
-                        None => return PollOutcome::BadCursor,
-                    },
+                    Some(cursor) => {
+                        match self.parse_cursor(cursor, seq, boundaries, *issued_through) {
+                            Some(offset) => offset,
+                            None => return PollOutcome::BadCursor,
+                        }
+                    }
                 };
                 let next_boundary = boundaries
                     .iter()
@@ -582,7 +589,11 @@ impl JobTable {
                     })
                     .collect();
                 let done = next_boundary >= vectors.len();
-                let next_cursor = (!done).then(|| format!("{}:{next_boundary}", self.job_id(seq)));
+                let next_cursor = (!done).then(|| {
+                    // The cursor is issued once the page carrying it is served, so a replayed page re-issues the same boundary.
+                    *issued_through = (*issued_through).max(next_boundary);
+                    format!("{}:{next_boundary}", self.job_id(seq))
+                });
                 // A served page marks the job as in use so retention prefers evicting jobs nobody is reading.
                 job.last_polled_at = Some(Instant::now());
                 PollOutcome::Page(ResultPage {
@@ -594,15 +605,22 @@ impl JobTable {
         }
     }
 
-    /// Accept a cursor only when it names this job and its offset is a page boundary; allow previously served pages to be retried after a lost response.
+    /// Accept a cursor only when it names this job and its offset is a page boundary already issued as a `next_cursor`; allow previously served pages to be retried after a lost response.
+    /// A boundary above `issued_through` is a legal page start the caller has never been handed, so accepting it would let a client skip pages the protocol defines as opaque and never-issued.
     /// The offset uses the same canonical-decimal rule as the job sequence so a never-issued spelling such as `+16` or `0016` is rejected.
-    fn parse_cursor(&self, cursor: &str, seq: u64, boundaries: &[usize]) -> Option<usize> {
+    fn parse_cursor(
+        &self,
+        cursor: &str,
+        seq: u64,
+        boundaries: &[usize],
+        issued_through: usize,
+    ) -> Option<usize> {
         let (job_id, offset) = cursor.rsplit_once(':')?;
         if self.parse_job_id(job_id) != Some(seq) {
             return None;
         }
         let offset = usize::try_from(parse_canonical_decimal(offset)?).ok()?;
-        boundaries.contains(&offset).then_some(offset)
+        (offset <= issued_through && boundaries.contains(&offset)).then_some(offset)
     }
 
     /// `MAX_F32_JSON_BYTES` is the longest `serde_json` encoding of a finite `f32`, e.g. `-0.0000010000001`.
@@ -1161,5 +1179,65 @@ mod tests {
             AdmitOutcome::ResultTooLarge
         ));
         assert!(!jobs.key_is_retained("oversize"));
+    }
+
+    #[test]
+    fn a_page_boundary_is_a_valid_cursor_only_after_it_was_issued() {
+        let limits = SynapseLimits {
+            max_page_vectors: 1,
+            ..SynapseLimits::default()
+        };
+        let jobs = JobTable::new(limits);
+        let items = vec![
+            charged_item("a", "alpha"),
+            charged_item("b", "beta"),
+            charged_item("c", "gamma"),
+        ];
+        let AdmitOutcome::Admitted { job_id, seq } =
+            jobs.admit_uncharged_for_tests("paged".to_owned(), items, 1)
+        else {
+            panic!("paged job is admitted");
+        };
+        jobs.start(seq).expect("paged job starts");
+        jobs.publish_ready(seq, vec![vec![1.0], vec![1.0], vec![1.0]]);
+
+        // Boundaries 1 and 2 are legal page starts, but neither has been issued yet.
+        for unissued in [1, 2] {
+            assert!(
+                matches!(
+                    jobs.poll(&job_id, "paged", Some(&format!("{job_id}:{unissued}"))),
+                    PollOutcome::BadCursor
+                ),
+                "boundary {unissued} was never issued"
+            );
+        }
+
+        let PollOutcome::Page(first) = jobs.poll(&job_id, "paged", None) else {
+            panic!("the first page is served from a null cursor");
+        };
+        let second_cursor = first.next_cursor.expect("the first page issues a cursor");
+        assert_eq!(second_cursor, format!("{job_id}:1"));
+
+        // The issued boundary resolves; the one after it is still unissued.
+        assert!(matches!(
+            jobs.poll(&job_id, "paged", Some(&format!("{job_id}:2"))),
+            PollOutcome::BadCursor
+        ));
+        let PollOutcome::Page(second) = jobs.poll(&job_id, "paged", Some(&second_cursor)) else {
+            panic!("an issued cursor serves its page");
+        };
+        assert_eq!(second.vectors[0].0, "b");
+        let third_cursor = second.next_cursor.expect("the second page issues a cursor");
+
+        // Replaying an earlier issued cursor stays valid after later pages were served.
+        assert!(matches!(
+            jobs.poll(&job_id, "paged", Some(&second_cursor)),
+            PollOutcome::Page(_)
+        ));
+        let PollOutcome::Page(third) = jobs.poll(&job_id, "paged", Some(&third_cursor)) else {
+            panic!("the final issued cursor serves the last page");
+        };
+        assert!(third.done);
+        assert_eq!(third.vectors[0].0, "c");
     }
 }

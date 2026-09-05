@@ -15,7 +15,7 @@ use super::bundle::{Corpus, SelectedOutput, VerifiedBundle};
 use super::bundle::{OpenRegularFileError, open_regular_file, validate_sha256_hex};
 
 /// `NORM_TOLERANCE` permits a returned vector's L2 norm to differ from 1.0 by at most 1e-3; larger deviations are invariant failures.
-const NORM_TOLERANCE: f32 = 1e-3;
+const NORM_TOLERANCE: f64 = 1e-3;
 /// CPU ONNX Runtime contains executable code and static runtime tables, not model weights.
 /// The 512 MiB limit bounds the verification source buffer and sealed memfd copy to 1 GiB.
 const MAX_ORT_LIBRARY_BYTES: u64 = 512 * 1024 * 1024;
@@ -356,7 +356,12 @@ impl Backend {
                 "vector contains a non-finite component".to_owned(),
             ));
         }
-        let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        // Accumulating in f64 keeps summation roundoff below the tolerance at `MAX_DIMS`; an f32 sum can drift past it and fail a correctly normalized vector.
+        let norm = vector
+            .iter()
+            .map(|v| f64::from(*v).powi(2))
+            .sum::<f64>()
+            .sqrt();
         if (norm - 1.0).abs() > NORM_TOLERANCE {
             return Err(InferenceError::Invariant(
                 "vector is not L2-normalized".to_owned(),

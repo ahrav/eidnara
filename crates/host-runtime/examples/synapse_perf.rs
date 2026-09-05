@@ -442,7 +442,8 @@ struct RoutedWire {
     /// An unknown correlation poisons the wire for every unrelated request.
     /// Only calls without a terminal leave a correlation stored.
     ///
-    /// The giving-up caller inserts the correlation into `tombstones` before removing it from `pending`; the reader checks `pending` before `tombstones`, so a live correlation remains in at least one map.
+    /// A correlation lives in exactly one map. The giving-up caller moves it from `pending` to `tombstones` while holding the `pending` lock, and only if the reader has not already claimed it; the reader checks `pending` before `tombstones`.
+    /// A terminal the reader claimed while the caller was timing out therefore leaves no tombstone behind.
     tombstones: Mutex<std::collections::BTreeSet<u64>>,
     next_corr: AtomicU64,
     channel: u16,
@@ -601,11 +602,14 @@ impl RoutedWire {
                     .unwrap_or_else(|| "connection closed while awaiting reply".to_owned()),
             )),
             Err(_) => {
-                // Installing the tombstone before removing `pending` keeps `corr` in `pending ∪ tombstones` throughout the transition.
-                self.tombstones.lock().await.insert(corr);
-                // Unclaimed tombstones are bounded by calls that never receive a terminal.
+                // Holding `pending` across the move keeps `corr` in exactly one map, and the removal result tells whether the reader already claimed the terminal; a claimed correlation must not become a tombstone or it would never be removed.
                 // Tombstones are never evicted because any tombstone can still receive a late terminal.
-                self.pending.lock().await.remove(&corr);
+                {
+                    let mut pending = self.pending.lock().await;
+                    if pending.remove(&corr).is_some() {
+                        self.tombstones.lock().await.insert(corr);
+                    }
+                }
                 // The timeout path re-checks `reader_error` because the reader can fail after the earlier check.
                 if let Some(error) = self.reader_error.lock().await.clone() {
                     return Err(WireCallError::Transport(error));

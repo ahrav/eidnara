@@ -1013,30 +1013,56 @@ impl serde::Serialize for VectorItemsBody<'_> {
 
 const VECTOR_BODY_ENVELOPE: usize = 256;
 
+/// The bytes of a vector body outside its items: the escaped model name, the fingerprint, the escaped cursor, and the fixed envelope.
+/// `next_cursor` is charged at its escaped length because this function is reachable from any string, even though host-issued cursors contain no escapable byte.
+fn vector_body_fixed_bytes(model: &str, fingerprint: &str, next_cursor: Option<&str>) -> usize {
+    super::jobs::escaped_string_bytes(model)
+        .saturating_add(fingerprint.len())
+        .saturating_add(next_cursor.map_or(0, super::jobs::escaped_string_bytes))
+        .saturating_add(VECTOR_BODY_ENVELOPE)
+}
+
 /// `vector_body_reservation` upper-bounds serialized vector-body length using the job table's per-item accounting.
 /// A page that satisfies the job table's page cap fits the reservation.
-/// The reservation charges `lane.model` at its escaped length; the manifest permits 128 unconstrained bytes, which can occupy 768 escaped bytes.
-/// Host-generated cursors are `<hex incarnation>-<seq>:<offset>`; hex digits, decimal digits, `-`, and `:` need no JSON escaping, so the reservation charges `next_cursor` at its raw length.
+/// Saturation keeps an overflowing sum from wrapping into an under-reservation; the wire layer rejects a saturated value as oversized.
 pub fn vector_body_reservation(
     lane: &LaneInfo,
     items: &[VectorItemView<'_>],
     next_cursor: Option<&str>,
 ) -> usize {
-    let items: usize = items
+    items
         .iter()
-        .map(|item| {
-            super::jobs::JobTable::encoded_item_cost(
+        .fold(0usize, |total, item| {
+            total.saturating_add(super::jobs::JobTable::encoded_item_cost(
                 item.vector.len(),
                 item.id,
                 item.content_sha256,
-            )
+            ))
         })
-        .sum();
-    items
-        + super::jobs::escaped_string_bytes(&lane.model)
-        + lane.fingerprint.len()
-        + next_cursor.map_or(0, str::len)
-        + VECTOR_BODY_ENVELOPE
+        .saturating_add(vector_body_fixed_bytes(
+            &lane.model,
+            &lane.fingerprint,
+            next_cursor,
+        ))
+}
+
+/// Upper bound on any result-page body the pager can emit under `limits` for a lane of `dims` dimensions.
+/// The pager closes a page at `max_page_encoded_bytes` but always places its first item, so one worst-case item is the floor.
+/// Lane fields take their manifest maxima: a fully escaped model name, a 64-byte fingerprint, and a fully escaped cursor of the longest accepted length.
+pub(crate) fn max_vector_body_bytes(dims: usize, limits: &SynapseLimits) -> usize {
+    let worst_id = "\u{1}".repeat(MAX_ITEM_ID_BYTES);
+    let worst_hash = "0".repeat(super::jobs::CONTENT_SHA256_BYTES);
+    let worst_item = super::jobs::JobTable::encoded_item_cost(dims, &worst_id, &worst_hash);
+    let worst_model = "\u{1}".repeat(super::bundle::MAX_MODEL_NAME_BYTES);
+    let worst_cursor = "\u{1}".repeat(MAX_CURSOR_BYTES);
+    limits
+        .max_page_encoded_bytes
+        .max(worst_item)
+        .saturating_add(vector_body_fixed_bytes(
+            &worst_model,
+            &worst_hash,
+            Some(&worst_cursor),
+        ))
 }
 
 pub fn write_vector_body<W: std::io::Write>(

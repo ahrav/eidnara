@@ -104,6 +104,16 @@ impl SecondaryComponent for PlaceholderBroca {
     }
 }
 
+/// `(device, inode, mtime)` of the connection file, or `None` while it is absent.
+/// The mtime guards against an unlinked inode number being reused by the new publication.
+fn publication_identity(
+    path: &std::path::Path,
+) -> Option<(u64, u64, Option<std::time::SystemTime>)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino(), metadata.modified().ok()))
+}
+
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
@@ -133,14 +143,21 @@ async fn main() {
         .join("eidnara")
         .join("run")
         .join(host_runtime::CONNECTION_FILE_NAME);
+    // A predecessor's connection file can still be present in a reused data directory. The host publishes by rename, so a new publication is a new inode; readiness waits for a file whose identity differs from the stale one rather than for any file to exist.
+    let stale_publication = publication_identity(&publication);
     let shutdown = CancellationToken::new();
     let host = tokio::spawn(host_runtime::run(composite, config, shutdown.clone()));
 
-    while !publication.exists() {
+    loop {
         if host.is_finished() {
             let result = host.await;
             eprintln!("host exited before publishing: {result:?}");
             std::process::exit(1);
+        }
+        if let Some(current) = publication_identity(&publication)
+            && Some(current) != stale_publication
+        {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

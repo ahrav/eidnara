@@ -15,6 +15,7 @@ const MAX_SIDE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXTERNAL_INITIALIZERS: usize = 16;
 const MAX_ARTIFACT_NAME_BYTES: usize = 255;
 const MAX_PROVENANCE_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_MODEL_NAME_BYTES: usize = 128;
 pub(crate) const MAX_DIMS: u64 = 16_384;
 const MAX_MAX_TOKENS: u64 = 1_048_576;
 /// `MAX_TABLE_EPOCH` prevents TypeScript JSON-number rounding from changing `table_epoch`.
@@ -175,8 +176,15 @@ pub fn load_bundle(
     limits: &SynapseLimits,
     expected_manifest_sha256: Option<&str>,
 ) -> Result<VerifiedBundle, BundleError> {
-    let metadata =
-        std::fs::symlink_metadata(dir).map_err(|_| err("bundle directory is missing"))?;
+    // The bundle root is inspected without following symlinks, like every artifact under it, so a redirected root cannot swap the tree between the manifest read and the artifact opens.
+    // Only `NotFound` reports absence; a permission or I/O failure keeps its error so it is not misread as a missing bundle.
+    let metadata = std::fs::symlink_metadata(dir).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            err("bundle directory is missing")
+        } else {
+            err(format!("bundle directory is unreadable: {error}"))
+        }
+    })?;
     if !metadata.is_dir() {
         return Err(err("bundle path is not a directory"));
     }
@@ -289,7 +297,7 @@ fn validate_manifest(manifest: &BundleManifest) -> Result<(), BundleError> {
     if manifest.schema_version != 1 {
         return Err(err("unsupported manifest schema version"));
     }
-    if manifest.model.is_empty() || manifest.model.len() > 128 {
+    if manifest.model.is_empty() || manifest.model.len() > MAX_MODEL_NAME_BYTES {
         return Err(err("model name out of bounds"));
     }
     validate_sha256_hex(&manifest.fingerprint).map_err(err)?;
@@ -407,6 +415,16 @@ pub(crate) fn validate_serving_limits(
             "maximum batch result ({max_result_bytes} bytes) exceeds the host's retained-result \
              limit ({} bytes)",
             limits.max_retained_result_bytes
+        )));
+    }
+
+    // `reserve_output` refuses any body above the frame limit, so a page the pager can build but the wire cannot carry would fail every `embed.result` poll with no cursor able to make progress.
+    let wire_body_limit = crate::wire::MAX_BODY_LEN as usize;
+    let worst_page_body = super::protocol::max_vector_body_bytes(dims, limits);
+    if worst_page_body > wire_body_limit {
+        return Err(err(format!(
+            "worst-case result page ({worst_page_body} bytes) exceeds the wire body limit \
+             ({wire_body_limit} bytes); lower max_page_encoded_bytes"
         )));
     }
     Ok(())
@@ -652,7 +670,13 @@ pub(crate) enum OpenRegularFileError {
 
 impl OpenRegularFile {
     pub(crate) fn read(self) -> std::io::Result<Vec<u8>> {
-        let mut bytes = Vec::with_capacity(self.len as usize);
+        let capacity = usize::try_from(self.len).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "file length exceeds the address space",
+            )
+        })?;
+        let mut bytes = Vec::with_capacity(capacity);
         self.file.take(self.len).read_to_end(&mut bytes)?;
         Ok(bytes)
     }
@@ -1009,6 +1033,41 @@ mod tests {
             ..SynapseLimits::default()
         };
         assert!(validate_test_serving(&manifest, &limits).is_ok());
+    }
+
+    #[test]
+    fn a_result_page_above_the_wire_body_limit_is_rejected_at_startup() {
+        use super::super::protocol::max_vector_body_bytes;
+        let mut manifest = manifest();
+        manifest.dims = MAX_DIMS;
+        let dims = MAX_DIMS as usize;
+        let wire_limit = crate::wire::MAX_BODY_LEN as usize;
+
+        let limits = SynapseLimits::default();
+        assert!(max_vector_body_bytes(dims, &limits) < wire_limit);
+        assert!(validate_test_serving(&manifest, &limits).is_ok());
+
+        // A page cap equal to the frame leaves no room for the body envelope.
+        let limits = SynapseLimits {
+            max_page_encoded_bytes: wire_limit,
+            ..SynapseLimits::default()
+        };
+        let error = validate_test_serving(&manifest, &limits)
+            .expect_err("a page the wire cannot carry is a permanent outage");
+        assert!(error.0.contains("wire body limit"), "{}", error.0);
+
+        // The largest cap that still fits validates; one more byte fails.
+        let fixed = max_vector_body_bytes(dims, &limits) - wire_limit;
+        let limits = SynapseLimits {
+            max_page_encoded_bytes: wire_limit - fixed,
+            ..SynapseLimits::default()
+        };
+        assert!(validate_test_serving(&manifest, &limits).is_ok());
+        let limits = SynapseLimits {
+            max_page_encoded_bytes: wire_limit - fixed + 1,
+            ..SynapseLimits::default()
+        };
+        assert!(validate_test_serving(&manifest, &limits).is_err());
     }
 
     #[test]

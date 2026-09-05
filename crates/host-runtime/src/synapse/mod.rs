@@ -170,6 +170,19 @@ impl EmbeddingEngine for Backend {
 struct ReadyLane {
     backend: Arc<dyn EmbeddingEngine>,
     lane: LaneInfo,
+    /// Caching one `models.list` body per lane keeps its serialization off the request path, where no reservation covers it.
+    models_list: Vec<u8>,
+}
+
+impl ReadyLane {
+    fn new(backend: Arc<dyn EmbeddingEngine>, lane: LaneInfo) -> Self {
+        let models_list = protocol::models_list_body(&lane);
+        Self {
+            backend,
+            lane,
+            models_list,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -291,10 +304,7 @@ impl SynapseComponent {
                 unsupported_reason: None,
                 jobs: JobTable::new(limits.clone()),
                 limits,
-                state: Mutex::new(LaneState::Ready(Arc::new(ReadyLane {
-                    backend: engine,
-                    lane,
-                }))),
+                state: Mutex::new(LaneState::Ready(Arc::new(ReadyLane::new(engine, lane)))),
                 cpu: Arc::new(tokio::sync::Semaphore::new(1)),
                 query_admission: Arc::new(tokio::sync::Semaphore::new(query_admission_permits)),
                 tracker: TaskTracker::new(),
@@ -370,6 +380,8 @@ const STARTING_REASON: &str = "the synapse lane is still starting";
 
 /// `BUSY_REASON` reports a `cpu` permit that a synchronous caller could not take without waiting.
 const BUSY_REASON: &str = "the synapse lane is busy";
+
+const SHUT_DOWN_REASON: &str = "the synapse lane is shut down";
 
 fn embed_via(
     inner: &SynapseInner,
@@ -485,11 +497,11 @@ fn expired_query() -> RequestOutcome {
     app_error("timeout", "the query deadline expired")
 }
 
-async fn respond(ctx: &RequestCtx, body: Vec<u8>) -> RequestOutcome {
+async fn respond(ctx: &RequestCtx, body: &[u8]) -> RequestOutcome {
     let Ok(mut output) = ctx.reserve_output(body.len()).await else {
         return app_error("internal_error", "output reservation failed");
     };
-    if output.extend_from_slice(&body).is_err() {
+    if output.extend_from_slice(body).is_err() {
         return app_error("internal_error", "output reservation too small");
     }
     RequestOutcome::Response {
@@ -662,7 +674,7 @@ impl SynapseComponent {
             AdmitOutcome::Existing(descriptor) => {
                 respond(
                     ctx,
-                    protocol::job_descriptor_body(
+                    &protocol::job_descriptor_body(
                         &descriptor.job_id,
                         &request_key,
                         descriptor.status,
@@ -689,7 +701,7 @@ impl SynapseComponent {
                 self.spawn_batch_worker(Arc::clone(&lane), seq);
                 respond(
                     ctx,
-                    protocol::job_descriptor_body(&job_id, &request_key, "queued", retry_after_ms),
+                    &protocol::job_descriptor_body(&job_id, &request_key, "queued", retry_after_ms),
                 )
                 .await
             }
@@ -789,7 +801,7 @@ impl SynapseComponent {
             PollOutcome::Pending { status } => {
                 respond(
                     ctx,
-                    protocol::pending_body(&job_id, status, self.inner.limits.retry_after_ms),
+                    &protocol::pending_body(&job_id, status, self.inner.limits.retry_after_ms),
                 )
                 .await
             }
@@ -871,7 +883,11 @@ impl CompositeComponent for SynapseComponent {
         let Some(reservation_bytes) =
             protocol::parse_reservation_bytes(ctx.body.len(), &self.inner.limits)
         else {
-            return app_error("queue_full", "the parse reservation bound is unsatisfiable");
+            // An overflowing reservation can never be admitted, so it is a size rejection rather than transient backpressure.
+            return app_error(
+                "schema_violation",
+                "request body is too large for this host",
+            );
         };
         // A reservation above `capacity` remains unadmittable after draining, so it gets a size rejection instead of `queue_full`.
         let capacity = ctx.resident_capacity();
@@ -912,7 +928,7 @@ impl CompositeComponent for SynapseComponent {
         match request {
             Request::ModelsList => {
                 drop(charge);
-                respond(&ctx, protocol::models_list_body(&lane.lane)).await
+                respond(&ctx, &lane.models_list).await
             }
             Request::EmbedQuery { text, deadline_ms } => {
                 let text_charge = charge.split_or_take(text.capacity());
@@ -975,6 +991,7 @@ impl CompositeComponent for SynapseComponent {
 
     /// Shutdown closes admission and cancels queued wrappers before joining every started native call through its incarnation.
     /// Shutdown never aborts a started native call.
+    /// The lane ends `Disabled` so a late `bind`, `health`, or `embed_blocking` observes the shutdown instead of a ready lane whose admission is closed.
     async fn shutdown(&self) -> Result<(), crate::composite::ShutdownError> {
         self.inner.closing.cancel();
         self.inner.jobs.close_admission();
@@ -983,6 +1000,9 @@ impl CompositeComponent for SynapseComponent {
         self.inner.tracker.close();
         self.inner.tracker.wait().await;
         self.inner.jobs.clear();
+        *self.inner.lock_state() = LaneState::Disabled {
+            reason: SHUT_DOWN_REASON.to_owned(),
+        };
         Ok(())
     }
 }
@@ -1035,10 +1055,7 @@ impl SecondaryComponent for SynapseComponent {
             };
             let lane = LaneInfo::from_bundle(&bundle);
             let backend = Backend::load(bundle, &ort)?;
-            Ok::<_, InferenceError>(ReadyLane {
-                lane,
-                backend: Arc::new(backend),
-            })
+            Ok::<_, InferenceError>(ReadyLane::new(Arc::new(backend), lane))
         });
         let loaded = match self.inner.tracker.spawn(blocking).await {
             Ok(joined) => joined,
@@ -1160,6 +1177,50 @@ mod tests {
         assert_eq!(component.inner.cpu.available_permits(), 1);
     }
 
+    #[tokio::test]
+    async fn shutdown_disables_the_lane_for_late_callers() {
+        let component = SynapseComponent::ready_with_engine(
+            lane(),
+            Arc::new(NoopEngine),
+            SynapseLimits {
+                max_queued_request_bytes: 8 * 1024 * 1024,
+                ..SynapseLimits::default()
+            },
+        )
+        .expect("limits validate");
+        assert!(matches!(component.status(), SynapseStatus::Ready(_)));
+
+        component.shutdown().await.expect("shutdown drains cleanly");
+
+        match component.status() {
+            SynapseStatus::Disabled { reason } => assert_eq!(reason, SHUT_DOWN_REASON),
+            other => panic!("a drained lane must be disabled, got {other:?}"),
+        }
+        let route = RouteHandle {
+            channel: 1,
+            epoch: 1,
+        };
+        let identity = RouteIdentity {
+            project_root: PathBuf::from("/"),
+            harness: "test".to_owned(),
+            session: "test".to_owned(),
+            consumer_module_id: None,
+            consumer_launch_nonce: None,
+            consumer_capabilities: Vec::new(),
+            admission_facts: None,
+            credential_fingerprints: Default::default(),
+        };
+        assert!(matches!(
+            component.bind(route, identity).await,
+            BindOutcome::Reject { code, .. } if code == "artifact_invalid"
+        ));
+        assert_eq!(component.health().await.status, HealthStatus::Degraded);
+        match component.embed_blocking(&["x"]) {
+            Err(InferenceError::Artifact(reason)) => assert_eq!(reason, SHUT_DOWN_REASON),
+            other => panic!("a drained lane must refuse to embed, got {other:?}"),
+        }
+    }
+
     #[test]
     fn load_failures_route_invariants_to_failing_and_artifacts_to_disabled() {
         match lane_state_after_load(Err(InferenceError::Invariant("bad norm".to_owned()))) {
@@ -1171,10 +1232,7 @@ mod tests {
             _ => panic!("an artifact failure must disable the lane"),
         }
         assert!(matches!(
-            lane_state_after_load(Ok(ReadyLane {
-                backend: Arc::new(NoopEngine),
-                lane: lane(),
-            })),
+            lane_state_after_load(Ok(ReadyLane::new(Arc::new(NoopEngine), lane()))),
             LaneState::Ready(_)
         ));
     }
