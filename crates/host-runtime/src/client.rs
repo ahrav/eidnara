@@ -1095,6 +1095,10 @@ enum BindOwner {
 struct BindTracking {
     publishing: HashSet<RouteHandle>,
     torn_down: HashSet<RouteHandle>,
+    /// Highest epoch ever delivered for each channel on this generation. A later bind on the
+    /// same channel must carry a strictly greater epoch, or a delayed `Goodbye` from the old
+    /// incarnation would exactly match and tear down the new route.
+    epoch_watermark: HashMap<u16, u32>,
     /// The correlation whose response delivered each live or in-flight handle. An unmatched
     /// response for the same handle is a duplicate terminal only if it carries this
     /// correlation; any other correlation is a distinct bind that reused the handle.
@@ -1684,10 +1688,15 @@ impl Inner {
                                             |route: &RouteHandle| route.channel == handle.channel;
                                         // A handle whose earlier bind was torn down before its
                                         // opener resumed still has one marker outstanding; a reuse
-                                        // would let two openers share it.
+                                        // would let two openers share it. A reused channel must
+                                        // advance its epoch past every earlier route on it.
                                         routes.iter().any(same_channel)
                                             || binds.publishing.iter().any(same_channel)
                                             || binds.torn_down.contains(&handle)
+                                            || binds
+                                                .epoch_watermark
+                                                .get(&handle.channel)
+                                                .is_some_and(|highest| handle.epoch <= *highest)
                                     }
                                 {
                                     drop(charge);
@@ -1706,6 +1715,9 @@ impl Inner {
                                             let mut binds = lock_unpoisoned(&self.binds);
                                             binds.publishing.insert(handle);
                                             binds.delivered_by.insert(handle, header.corr);
+                                            binds
+                                                .epoch_watermark
+                                                .insert(handle.channel, handle.epoch);
                                         }
                                         Ok(RetainedResponse {
                                             response: Response {
@@ -1927,7 +1939,21 @@ impl Inner {
                     self.retire("invalid_route_response");
                     return;
                 }
-                BindOwner::None { .. } => {}
+                BindOwner::None { .. }
+                    if binds
+                        .epoch_watermark
+                        .get(&route.channel)
+                        .is_some_and(|highest| route.epoch <= *highest) =>
+                {
+                    drop(binds);
+                    drop(routes);
+                    self.retire("invalid_route_response");
+                    return;
+                }
+                BindOwner::None { .. } => {
+                    // The host installed this route; a later bind on the channel must outrank it.
+                    binds.epoch_watermark.insert(route.channel, route.epoch);
+                }
                 // The response's own caller is gone, so its tracking ends here.
                 BindOwner::Abandoned => {
                     if routes.contains(&route) {
@@ -4844,6 +4870,82 @@ mod tests {
             control_op(br#"{"op":"host.shutdown","x":1,"x":2}"#).as_deref(),
             Some("host.shutdown")
         );
+    }
+
+    #[tokio::test]
+    async fn a_reused_channel_must_advance_its_epoch() {
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let deliver = |key: PendingKey, handle: RouteHandle| {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "op": "route.open",
+                "route_channel": handle.channel,
+                "route_epoch": handle.epoch,
+            }))
+            .expect("body encodes");
+            inner.dispatch(
+                EnvelopeHeader {
+                    len: u32::try_from(body.len()).expect("fits"),
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType::Response,
+                    flags: response_flags(false, false),
+                    channel: 0,
+                    epoch: 0,
+                    corr: key.corr,
+                },
+                body,
+                ByteCharge::none(),
+            );
+        };
+        let control = RouteHandle {
+            channel: 0,
+            epoch: 0,
+        };
+        let open = |inner: &Arc<Inner>, data_rx: &mut mpsc::Receiver<QueuedFrame>| {
+            let (tx, rx) = oneshot::channel();
+            let (key, publish) = inner
+                .admit(control, Vec::new(), false, PendingKind::Unary(tx), deadline)
+                .expect("control request admitted");
+            assert!(bridge_claims(&publish));
+            let _ = data_rx.try_recv();
+            (key, rx)
+        };
+        let first = RouteHandle {
+            channel: 40,
+            epoch: 77,
+        };
+        let (key, rx) = open(&inner, &mut data_rx);
+        deliver(key, first);
+        assert!(
+            !inner.retired.load(Ordering::Acquire),
+            "first bind is legal"
+        );
+        drop(rx);
+        // The opener never inserted it, so the route is fully cleaned up on the client.
+        {
+            let mut binds = lock_unpoisoned(&inner.binds);
+            binds.publishing.remove(&first);
+            binds.delivered_by.remove(&first);
+        }
+        // The same channel at a strictly greater epoch is a legal reuse.
+        let (key, _rx) = open(&inner, &mut data_rx);
+        deliver(
+            key,
+            RouteHandle {
+                channel: 40,
+                epoch: 78,
+            },
+        );
+        assert!(!inner.retired.load(Ordering::Acquire));
+        {
+            let mut binds = lock_unpoisoned(&inner.binds);
+            binds.publishing.clear();
+            binds.delivered_by.clear();
+        }
+        // The old epoch again is not.
+        let (key, _rx) = open(&inner, &mut data_rx);
+        deliver(key, first);
+        assert!(inner.retired.load(Ordering::Acquire));
     }
 
     #[tokio::test]

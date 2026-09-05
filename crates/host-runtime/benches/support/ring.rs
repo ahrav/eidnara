@@ -323,6 +323,10 @@ async fn run_open_loop_inner(
                 outcomes.missed_slot += measured_overdue;
                 slot = next_pending;
             }
+            // Saturation only clears when a request task runs; on a current-thread runtime
+            // that needs this loop to yield, or the schedule would spin over expired slots
+            // for the whole window without polling anything.
+            tokio::task::yield_now().await;
             continue;
         }
         if measured {
