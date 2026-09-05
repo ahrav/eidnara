@@ -50,7 +50,9 @@ Clean `Goodbye` and unexpected setup-socket closure are distinct. Unexpected clo
 
 ## Doctor and diagnostics
 
-`eidnara daemon doctor` reports either a healthy fixed ring or one terminal class:
+`RingTransport::diagnostics` (`crates/host-runtime/src/ring_transport.rs`) produces the report described here. The `eidnara daemon doctor` command that renders it belongs to the product daemon crate and is not delivered in this tree; see the scope boundaries in `docs/host-wire-protocol.md`. Until that command lands, the report is reachable only through the host runtime API and its tests.
+
+The report is either a healthy fixed ring or one terminal class:
 
 - `missing_addon`
 - `identity_mismatch`
@@ -74,7 +76,9 @@ Reports never include setup-socket paths, native handles, mapping descriptors, g
 
 ## Resource bounds
 
-The fixed profile charges both directions. One connection charges 16 ring descriptors, 128 MiB of sparse virtual arena capacity, 16 receive leases, two mappings, six transferred file descriptors, one fused endpoint worker, one client instance, and zero pinned workers. Native JS integration adds one environment watcher, not one watcher per connection. Process bounds multiply this profile by the configured maximum connection count with checked arithmetic. Resident memory grows on first touch and returns through FIFO page removal; the virtual arena charge stays fixed.
+The fixed profile charges both directions. One connection charges 16 ring descriptors, 128 MiB of sparse virtual arena capacity, 16 receive leases, two mappings, six transferred file descriptors, one fused endpoint worker, one client instance, and zero pinned workers. Native JS integration adds one environment watcher, not one watcher per connection. Resident memory grows on first touch and returns through FIFO page removal; the virtual arena charge stays fixed.
+
+Process bounds multiply this profile by the effective ring count with checked arithmetic. The effective ring count is the configured `max_connections` clamped to the aggregate virtual arena ceiling, `MAX_RING_RESIDENT_BYTES` (1 GiB) divided by the per-connection arena charge (`process_limits` in `crates/host-runtime/src/ring_transport.rs`). With the fixed profile that ceiling admits eight rings, so the default `max_connections = 64` yields ring bounds sized for eight connections, not 64. Connection permits still follow `max_connections` and are taken before ring admission; a connection that holds a permit but is refused by ring admission fails setup and increments the `exhaustion` counter in the diagnostics report. Operators sizing for more than eight concurrent ring connections must raise the ceiling, not only `max_connections`.
 
 Exact-capacity admission succeeds. Capacity plus one fails without creating another mapping or worker. Repeated peer crashes must not increase active charges after reclamation, and quarantined charges remain within the configured process bound.
 

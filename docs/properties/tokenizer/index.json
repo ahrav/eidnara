@@ -2,13 +2,13 @@
   "schema_version": 1,
   "part": "tokenizer",
   "source": "catalog.md",
-  "source_sha256": "e766a860fcbe684789c4434058c8095381de44590ab0be6fb0a8d2f9d86744fc",
+  "source_sha256": "ded079da4440691dd3c905f49eeb3e04d23a5c4743dbbdf2451679fa4249108e",
   "records": [
     {
       "slug": "tokenizer-encoding-matches-the-independent-oracle",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every budget estimate encodes through this table.",
+      "reachability": "test-only",
+      "reachability_note": "no workspace crate depends on `tokenizer`; only `crates/tokenizer/tests/token_golden.rs` and the crate's unit tests call `encode_ordinary` and `estimate_tokens`.",
       "status": "active",
       "exercised": {
         "state": "yes",
@@ -33,8 +33,8 @@
     {
       "slug": "tokenizer-vocabulary-is-embedded-and-complete",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "the vocabulary is read at build time.",
+      "reachability": "test-only",
+      "reachability_note": "the asset is embedded with `include_str!` and read on first use, but no workspace crate depends on `tokenizer`, so only the crate's tests reach it.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -53,6 +53,32 @@
       },
       "existing_check": "The generator's checks; no Rust check; unaudited.",
       "impact": "Encoding panics or silently drops bytes.",
+      "open_questions": [],
+      "extra": {}
+    },
+    {
+      "slug": "tokenizer-over-long-pieces-are-chunked-and-bounded",
+      "type": "safety",
+      "reachability": "test-only",
+      "reachability_note": "every call to `encode_ordinary` and `estimate_tokens` goes through `encode_bounded`, but no workspace crate depends on `tokenizer`, so only the crate's tests reach it.",
+      "status": "active",
+      "exercised": {
+        "state": "yes",
+        "note": "three tests build inputs above and around `MAX_PIECE_BYTES`: a letter run three caps long, a CJK run that would split mid-codepoint if chunking were byte-based, and a long text with no over-long piece."
+      },
+      "guarantee": "A pre-token piece longer than `MAX_PIECE_BYTES` (4096) is split at character boundaries into chunks of at most that size before BPE merging, so merge work is `O(len * MAX_PIECE_BYTES)` rather than quadratic in the piece; spans with no over-long piece encode exactly as the oracle does, and the ids of a chunked piece equal the concatenation of its chunks' ids, which may differ from the oracle only at chunk seams.",
+      "check": {
+        "semantics": "always",
+        "condition": "for an over-long piece, `encode_ordinary(text)` equals the concatenation of `encode_ordinary` over the prefix, each chunk of at most `MAX_PIECE_BYTES` bytes, and the suffix; every chunk boundary is a `char` boundary; for text with no over-long piece, `encode_ordinary(text)` equals the piece-by-piece encoding; and `estimate_tokens(text) == encode_ordinary(text).len()` in every case."
+      },
+      "fault_timing": "A change that removes or raises the cap restores tiktoken's quadratic merge loop, so one long unpunctuated run (37k CJK characters) takes seconds; a change that chunks by byte splits a multi-byte character and panics or corrupts ids.",
+      "required_faults": "An input whose pre-token piece exceeds `MAX_PIECE_BYTES`; the ` ?\\p{L}+` pattern makes any long letter run such a piece.",
+      "confidence": {
+        "level": "high",
+        "evidence": "[evidence](evidence/tokenizer-over-long-pieces-are-chunked-and-bounded.md). `encode_bounded` and `char_chunks` (`crates/tokenizer/src/lib.rs`) were read directly, and the three tests construct the over-long, multi-byte, and unaffected cases."
+      },
+      "existing_check": "`over_long_piece_is_chunked_and_bounded`, `over_long_cjk_piece_keeps_char_boundaries`, `long_text_without_over_long_piece_is_unaffected_by_bound` (`crates/tokenizer/tests/token_golden.rs`); audited at U3.",
+      "impact": "Worst-case encoding latency regresses from linear to seconds, or a campaign demands oracle equality for a long unpunctuated input that the crate deliberately does not promise.",
       "open_questions": [],
       "extra": {}
     }

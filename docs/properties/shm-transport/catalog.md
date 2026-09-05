@@ -3373,7 +3373,7 @@ Exercised: yes — `doorbell_attachment_requires_nonblocking_eventfd`
 (`crates/shm-transport/src/backend/ring.rs:2248-2270`) constructs both
 rejection arms, a blocking eventfd and a nonblocking non-eventfd; the positive
 arm is every cross-process attach (`ring_child_exchange`,
-`tests/ring.rs:597-626`). No test substitutes a bad doorbell into a full
+`tests/ring.rs:537-566`). No test substitutes a bad doorbell into a full
 `Ring::attach` call.
 Guarantee: `Ring::attach` accepts a doorbell descriptor only when it is a live
 nonblocking eventfd, and rejects anything else as `DoorbellFailed` before the
@@ -3905,10 +3905,10 @@ Reachability: default-production - every channel close in the addon runs this dr
 Status: active
 Exercised: partial - one unit test drives the drop order for borrowing reservations; the N-API detachment half is covered by `packages/shm-native/tests/runtime.ts` under Bun only.
 Guarantee: Closing a channel drops every reservation that borrows ring memory before the ring itself is dropped, so no JavaScript alias outlives the mapping it points into.
-Check: `always` - at channel close, `reservations.is_empty()` before `ring` is dropped; externally, no `Uint8Array` handed to JavaScript remains attached after `close` returns.
+Check: `always` - at channel close, `reservations.is_empty()` before `ring` is dropped; externally, when `close` returns `Ok`, no `Uint8Array` handed to JavaScript remains attached. When a detachment fails, `close` returns an error and by design keeps the channel entry and its mapping registered until a later `close` retries the detachment (`packages/shm-native/src/lib.rs`, `close`), so that error path is the quarantine the guarantee relies on, not a violation of it.
 Fault/timing angle: A reservation dropped after the ring would touch unmapped memory from the finalizer.
 Required faults and enabling state: A channel with live borrowing reservations at close.
-Confidence: medium - `channel_drops_borrowing_reservations_before_the_ring` (`packages/shm-native/src/lib.rs`) and the detachment cases in `packages/shm-native/tests/runtime.ts`; the Node runtime reports detachment unavailable, so the Node half is a capability refusal, not a proof.
+Confidence: medium - [evidence](evidence/addon-reservations-drop-before-the-ring.md). `channel_drops_borrowing_reservations_before_the_ring` (`packages/shm-native/src/lib.rs`) and the detachment cases in `packages/shm-native/tests/runtime.ts`; the Node runtime reports detachment unavailable, so the Node half is a capability refusal, not a proof.
 Existing check: `channel_drops_borrowing_reservations_before_the_ring`; `packages/shm-native/tests/runtime.ts` detachment cases (Bun); unaudited.
 Impact: Use-after-unmap in the JavaScript peer.
 Open questions: None.
@@ -3918,14 +3918,29 @@ Open questions: None.
 Type: liveness
 Reachability: default-production - `watch` callbacks and readiness acknowledgement go through the scheduler; `poll` reads the ring directly and consults the reactor only for readiness.
 Status: active
-Exercised: partial - three unit tests cover acknowledgement waiting, setup-socket EOF as readiness, and interrupted waits, and `packages/shm-native/tests/mechanism.ts` covers a frame published during a callback; no test covers a lost eventfd wake with no frame behind it.
-Guarantee: A pending callback runs only after the readiness it waited on is acknowledged; setup-socket EOF is delivered as readiness so a closed peer is observed; an interrupted wait retries until success or close rather than reporting a spurious wake.
-Check: `always` - a callback never runs before its acknowledgement; `sometimes` - EOF and EINTR paths are reached.
+Exercised: partial - one unit test covers acknowledgement waiting, and `packages/shm-native/tests/mechanism.ts` covers a frame published during a callback; no test covers a lost eventfd wake with no frame behind it.
+Guarantee: A pending callback runs only after the readiness it waited on is acknowledged, and an interrupted wait retries until success or close rather than reporting a spurious wake.
+Check: `always` - a callback never runs before its acknowledgement, and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. `always` because the ordering must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`.
 Fault/timing angle: A missed or duplicated wake leaves the JavaScript side spinning or stalled.
-Required faults and enabling state: Peer close during a wait; a signal interrupting the wait; a readiness event with no pending callback.
-Confidence: medium - `pending_callback_waits_for_acknowledgement`, `setup_socket_eof_is_reactor_readiness`, `interrupted_wait_retries_until_success_or_close` (`packages/shm-native/src/scheduling.rs`).
-Existing check: The three unit tests named above; unaudited.
+Required faults and enabling state: A readiness event with no pending callback; a signal interrupting the wait.
+Confidence: medium - [evidence](evidence/addon-scheduling-wakes-only-on-acknowledged-readiness.md). `pending_callback_waits_for_acknowledgement` and `interrupted_wait_retries_until_success_or_close` (`packages/shm-native/src/scheduling.rs`).
+Existing check: The two unit tests named above; unaudited.
 Impact: A stalled harness client that never sees the daemon's frames.
+Open questions: None.
+
+### addon-scheduling-reaches-peer-eof-and-interrupted-wait
+
+Type: reachability
+Reachability: default-production - the reactor registers every channel's setup socket, and every blocking wait goes through `retry_interrupted`.
+Status: active
+Exercised: partial - one unit test drops the peer end of a registered setup socket and observes the reactor event; one unit test injects a single `EINTR` and a close during the retry loop; no test reaches either situation through the public `watch` or `poll` surface.
+Guarantee: Setup-socket EOF is delivered to the scheduler as reactor readiness, so a peer that exits without a Goodbye is observed; a wait interrupted by a signal is retried rather than dropped.
+Check: `sometimes` - across a campaign, at least one wait observes setup-socket EOF as readiness and at least one wait returns through the `EINTR` retry. `sometimes` because these are situations a campaign must reach, not conditions that hold on every wake; the ordering condition on every wake is `addon-scheduling-wakes-only-on-acknowledged-readiness`.
+Fault/timing angle: A peer that dies mid-wait, or a signal that lands inside the blocking wait, leaves a scheduler that never reaches these paths looking healthy while the JavaScript side waits forever.
+Required faults and enabling state: Peer close while a wait is pending; a signal delivered to the waiting thread.
+Confidence: medium - [evidence](evidence/addon-scheduling-reaches-peer-eof-and-interrupted-wait.md). `setup_socket_eof_is_reactor_readiness` and `interrupted_wait_retries_until_success_or_close` (`packages/shm-native/src/scheduling.rs`) construct each situation directly against the scheduler internals.
+Existing check: The two unit tests named above; unaudited.
+Impact: A closed daemon is never noticed, or a signal turns one wait into a permanent stall.
 Open questions: None.
 
 ### addon-grant-decoding-is-the-shared-setup-envelope
@@ -3933,12 +3948,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - the addon decodes every grant through its setup envelope.
 Status: active
-Exercised: partial - the tagged-envelope acceptance and the live-then-dropped sentinel are tested; malformed grants are covered by the transport fuzz corpus, not by the addon.
-Guarantee: The addon accepts a grant only as the tagged setup envelope whose shape mirrors the host's `GrantMessage` (`crates/host-runtime/src/setup_socket.rs`); the two definitions are separate and kept in step by the committed fixture. A closed peer is reported as live-then-dropped rather than as a fresh grant.
+Exercised: partial - the addon's tagged-envelope acceptance and the live-then-dropped sentinel are tested against addon-local JSON; the host's `GrantMessage` tests construct their own value. No committed fixture is shared by the two sides and no test drives a host-issued grant into the addon decoder, so cross-side agreement is untested. The transport fuzz corpus covers the binary `RingGrant` decoder, not this JSON envelope.
+Guarantee: The addon accepts a grant only as the tagged setup envelope whose shape mirrors the host's `GrantMessage` (`crates/host-runtime/src/setup_socket.rs`); the two definitions are separate and agree only by construction. A closed peer is reported as live-then-dropped rather than as a fresh grant.
 Check: `always` - `grant_message` decodes exactly the tagged envelope; a closed peer yields the dropped sentinel.
-Fault/timing angle: The addon's decoder drifting from the host's encoder would accept a grant the host never issued, or refuse every real one.
+Fault/timing angle: The addon's decoder drifting from the host's encoder would accept a grant the host never issued, or refuse every real one, while both sides' unit tests and the fuzz corpus stay green.
 Required faults and enabling state: A grant message from the host; a peer that closes after the grant.
-Confidence: medium - `grant_message_accepts_tagged_setup_envelope`, `peer_closed_reports_live_then_dropped_sentinel` (`packages/shm-native/src/setup.rs`).
+Confidence: low - [evidence](evidence/addon-grant-decoding-is-the-shared-setup-envelope.md). `grant_message_accepts_tagged_setup_envelope` and `peer_closed_reports_live_then_dropped_sentinel` (`packages/shm-native/src/setup.rs`) prove the addon side alone; nothing pins the two definitions to one another.
 Existing check: The two unit tests named above; unaudited.
-Impact: A grant the host never issued attaches a ring.
-Open questions: None.
+Impact: A grant the host never issued attaches a ring, or every real grant is refused.
+Open questions:
+- Add a committed grant-envelope fixture that the host serializes against and the addon deserializes, or a live host-to-addon setup test, so a field or tag change on one side fails a test (needs human input).

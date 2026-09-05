@@ -253,8 +253,8 @@ is inventoried above.)
 
 | Test | Claim asserted | Status |
 | --- | --- | --- |
-| `two_process_zero_copy_exchange_uses_authenticated_grant` (`:551-592`) | Now transfers three descriptors (`[OwnedFd; 3]`, mapping plus both doorbells), blocks a `reserve_until` behind the child's held lease with a 5 s deadline, and requires 25 ms minimum elapsed | unaudited — still lockstep; the release always lands mid-block, never in the arm window |
-| `ring_child_exchange` (`:597-626`) | Child attaches by descriptor, blocks in `wait_for_data` on the data doorbell, verifies payload, releases | unaudited |
+| `two_process_zero_copy_exchange_uses_authenticated_grant` (`:483-533`) | Now transfers three descriptors (`[OwnedFd; 3]`, mapping plus both doorbells), blocks a `reserve_until` behind the child's held lease with a 5 s deadline, and requires 25 ms minimum elapsed | unaudited — still lockstep; the release always lands mid-block, never in the arm window |
+| `ring_child_exchange` (`:537-566`) | Child attaches by descriptor, blocks in `wait_for_data` on the data doorbell, verifies payload, releases | unaudited |
 
 ### `packages/shm-native/src/scheduling.rs` unit tests — 3 new
 

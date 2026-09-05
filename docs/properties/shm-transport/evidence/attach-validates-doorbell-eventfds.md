@@ -87,7 +87,7 @@ of the gate Linux-shaped; a platform without that readlink would fail closed
   ordering claim (mapping validated before doorbells, no partial state
   leaked) is untested.
 - Positive arm: a cross-process attach with genuine doorbells
-  (`ring_child_exchange`, `tests/ring.rs:597-626`, does this).
+  (`ring_child_exchange`, `tests/ring.rs:537-566`, does this).
 - The post-attach window: attach with valid doorbells, then clear
   `O_NONBLOCK` from the descriptor the *other* side retained, then drive an
   empty `drain` through `arm_data_wait` and assert against an explicit
