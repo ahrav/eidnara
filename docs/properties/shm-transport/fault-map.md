@@ -65,7 +65,7 @@ nothing. That is the failure mode this file exists to prevent.
 | native-boundary-not-weaker-than-its-wrapper (invalidated 2026-09-05: the wrapper decoder does not exist in this tree; superseded by `raw-native-attach-rejects-hostile-descriptors-without-effects`) | A direct native call carrying a descriptor the wrapper would reject | No |
 | operation-counters-are-observed-not-declared | None to observe the gap; negative controls that remove a real operation | No |
 | measured-transfer-is-witnessed-by-the-data | None to observe the gap; a byte corruption to demonstrate impact | No |
-| traceability-pointers-resolve | None; F8 | **Yes** — checked mechanically for this catalog |
+| traceability-pointers-resolve | None; F8 | n/a — invalidated: the property is about `docs/evidence/shm-traceability-v1.json`, which was not migrated, so its check is not repeatable here; the mechanical index and catalog checks this tree runs belong to the repository gates, not to this record |
 | negative-tests-fail-for-their-stated-reason | None | No |
 | documented-close-order-has-a-production-driver | None | No |
 | capability-probe-gates-every-advertised-mechanism | F6: a runtime lacking the cleanup hook | No |

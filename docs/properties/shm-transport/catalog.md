@@ -4956,11 +4956,16 @@ Open questions: None. Both halves of the earlier question (distinguish
 ### each-channel-wake-survives-a-shared-acknowledgement
 
 Type: liveness
-Reachability: default-production - one reactor serves every watched channel in
-the process (`packages/shm-native/src/lib.rs:1364-1387` re-arms every channel
-the reactor reported ready in one walk), and a client with more than one channel is the shipped
-topology whenever it opens a second connection (`tests/mechanism.ts:226-239`
-watches two).
+Reachability: default-production - one reactor serves every channel watched
+from the same thread: `REGISTRY` is a `thread_local!`
+(`packages/shm-native/src/lib.rs:142-144`), `watch` creates or reuses that
+thread's `registry.reactor` (`:1334-1347`), and `readiness_handled`
+(`:1352-1391`) re-arms every channel that thread's reactor reported ready in one
+walk. Channels watched from different worker threads use independent reactors
+and never share an acknowledgement window, so this record is scoped to channels
+registered in one thread-local registry. A client with more than one channel on
+one thread is the shipped topology whenever it opens a second connection there
+(`tests/mechanism.ts:226-239` watches two on one thread).
 Status: active
 Exercised: partial - `one channel handler failure does not starve later channels`
 (`tests/mechanism.ts:224-261`) registers two channels through `startReadiness`
@@ -4971,8 +4976,9 @@ published during callback` (`:527-650`) proves the single-channel window and
 then opens a later pair on the same reactor and proves its publish still reaches
 the retained callback (`:627-642`), but only after the first pair is closed. No
 test lands the second channel's edge inside the first channel's pending window.
-Guarantee: With two or more registered channels, an edge on channel B that
-arrives while the batch raised by channel A is pending, before
+Guarantee: With two or more channels registered in the same thread-local
+registry, an edge on channel B that arrives while the batch raised by channel A
+is pending, before
 `readinessHandled()`, results in B's handler observing B's frame within the
 next batch; the shared acknowledgement and the joint re-arm walk never drop one
 channel's progress in favour of another's.
