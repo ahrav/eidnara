@@ -332,7 +332,7 @@ pub async fn run(
         // Ordinary paths reap explicitly; `Drop` is only a backstop.
         .kill_on_drop(true);
     // On Linux, `pdeathsig` (`PR_SET_PDEATHSIG`) asks the kernel to SIGKILL the leader when the
-    // *thread* that forked it exits, not merely the parent process. `spawn_from_dedicated_thread`
+    // *thread* that forked it exits, not merely the parent process. `queue_spawn`
     // forks from a thread that remains alive for the leader's lifetime; a retired
     // `spawn_blocking` thread would SIGKILL the leader, and forking on a runtime worker would
     // block that worker for the whole exec-barrier handshake.
@@ -386,11 +386,12 @@ pub async fn run(
                     pid.len() - sent,
                 );
                 if written < 0 {
-                    let errno = *libc::__errno_location();
-                    if errno == libc::EINTR {
+                    // `last_os_error` reads `errno` portably (glibc-only `__errno_location` breaks non-Linux builds) and stores the raw code inline without allocating. commentlint: allow(JUDGE)
+                    let err = io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::EINTR) {
                         continue;
                     }
-                    return Err(io::Error::from_raw_os_error(errno));
+                    return Err(err);
                 }
                 sent += written as usize;
             }
@@ -406,9 +407,9 @@ pub async fn run(
                     // Executing without a published record could orphan helper processes outside the registry.
                     return Err(io::Error::from_raw_os_error(libc::ECANCELED));
                 }
-                let errno = *libc::__errno_location();
-                if errno != libc::EINTR {
-                    return Err(io::Error::from_raw_os_error(errno));
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EINTR) {
+                    return Err(err);
                 }
             }
             Ok(())
@@ -418,7 +419,12 @@ pub async fn run(
         command.env(name, value);
     }
 
-    // The registrar starts before `spawn` because `spawn` blocks this thread until the child execs.
+    // The registrar starts before the spawn job because `spawn` blocks the spawner thread until the child execs.
+    // `abort_registration` keeps a stalled record publication from wedging this task: once set, the registrar withholds the exec barrier, so the child aborts before executing harness code. commentlint: allow(JUDGE)
+    // The pid is reported the moment the child writes it, so an aborting caller can tear down the group without waiting for the registry filesystem. commentlint: allow(JUDGE)
+    let abort_registration = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let registrar_abort = Arc::clone(&abort_registration);
+    let (pid_reported_send, mut pid_reported) = tokio::sync::oneshot::channel::<i32>();
     let registrar = tokio::task::spawn_blocking(move || {
         let mut pid_bytes = [0u8; size_of::<libc::pid_t>()];
         let mut filled = 0;
@@ -432,18 +438,68 @@ pub async fn run(
             }
         }
         let leader = libc::pid_t::from_ne_bytes(pid_bytes);
+        let _ = pid_reported_send.send(leader);
+        if registrar_abort.load(std::sync::atomic::Ordering::SeqCst) {
+            // Withholding the barrier aborts the child before exec, so no record is needed.
+            return None;
+        }
         let record = group_registry::GroupRecord::record(&state_root, leader)?;
+        if registrar_abort.load(std::sync::atomic::Ordering::SeqCst) {
+            // The run gave up during publication; the barrier stays withheld so the child aborts, and the published record is returned for the abort path's cleanup task. commentlint: allow(JUDGE)
+            return Some(record);
+        }
         // The already-published record is returned even when this write fails; the caller owns its removal. commentlint: allow(JUDGE)
         let _ = rustix::io::write(&exec_barrier_write, &[1u8]);
         Some(record)
     });
 
-    let spawned = spawn_from_dedicated_thread(command).await;
+    let mut spawn_reply = queue_spawn(command, pid_report_write, exec_barrier_read)?;
     // Dropping `env` releases its environment-sized allocation before concurrent runs continue. commentlint: allow(JUDGE)
     drop(env);
-    // Dropping the parent's pipe ends lets the registrar observe EOF when no child reported a pid.
-    drop(pid_report_write);
-    drop(exec_barrier_read);
+    // A stalled record publication blocks the spawner thread, not this task: cancellation and the run deadline stop waiting, and the abort flag makes the registrar withhold the exec barrier. commentlint: allow(JUDGE)
+    let (spawned, aborted_end) = tokio::select! {
+        biased;
+        spawned = &mut spawn_reply => (Some(spawned), None),
+        () = cancel.cancelled() => (None, Some(SubprocessEnd::Cancelled)),
+        () = tokio::time::sleep_until(run_deadline) => (None, Some(SubprocessEnd::TimedOut)),
+    };
+    if let Some(end) = aborted_end {
+        abort_registration.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The child reports its pid immediately after `fork`, so this wait is bounded by process startup rather than the registry filesystem. commentlint: allow(JUDGE)
+        // The timeout bounds pid reporting; the abort flag makes a still-queued job's registrar withhold the exec barrier when it runs. commentlint: allow(JUDGE)
+        let reported = tokio::time::timeout(limits.termination_grace, &mut pid_reported)
+            .await
+            .ok()
+            .and_then(Result::ok);
+        let group = reported.and_then(rustix::process::Pid::from_raw);
+        let signalled = kill_group(group, rustix::process::Signal::KILL).is_ok();
+        let members_gone = wait_other_members_gone(group, limits.termination_grace).await;
+        let group_gone = signalled && members_gone;
+        // Cleanup detaches because the registrar can remain stalled after the run deadline.
+        // An unproven teardown keeps the record on disk for a successor sweep. commentlint: allow(JUDGE)
+        tokio::spawn(async move {
+            let record = registrar.await.ok().flatten();
+            if group_gone && let Some(record) = record {
+                let _ = off_runtime(move || record.remove()).await;
+            }
+            // Receiving the spawner's reply drops the dead child, letting `kill_on_drop` reap it. commentlint: allow(JUDGE)
+            drop(spawn_reply.await);
+        });
+        return Ok(SubprocessResult {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            end: if group_gone {
+                end
+            } else {
+                SubprocessEnd::TeardownUnconfirmed
+            },
+            prompt_delivered: false,
+            record_retained: false,
+        });
+    }
+    let spawned = spawned
+        .expect("the biased select returned either a spawn result or an abort")
+        .map_err(|_| io::Error::other("the broca-spawner thread dropped a spawn reply"))?;
     let group_record = registrar.await.ok().flatten();
     let mut child = match spawned {
         Ok(child) => child,
@@ -453,6 +509,10 @@ pub async fn run(
                 && record.remove().is_err()
             {
                 return Err(io::Error::other(SpawnRecordRetained { kind: err.kind() }));
+            }
+            // `ECANCELED` comes only from the withheld exec barrier: registration failed, the child aborted before exec, and a later attempt can succeed. commentlint: allow(JUDGE)
+            if err.raw_os_error() == Some(libc::ECANCELED) {
+                return Err(io::Error::other(RegistrationFailed));
             }
             return Err(err);
         }
@@ -478,9 +538,7 @@ pub async fn run(
             // The host cannot report the group as terminated until teardown is proven.
             return Err(io::Error::other(RegistrationTeardownUnproven));
         }
-        return Err(io::Error::other(
-            "crash-ownership registration failed before prompt delivery",
-        ));
+        return Err(io::Error::other(RegistrationFailed));
     }
     // `group_record` remains `Some` until teardown is proven, retaining the registry record.
     // The successor sweeps the group's descendants after this host exits.
@@ -788,15 +846,20 @@ pub(crate) async fn off_runtime<T: Send + 'static>(
         .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
 }
 
-/// Forks harness children from one immortal OS thread.
+/// Queues a fork on one immortal OS thread and returns the reply channel without waiting. commentlint: allow(JUDGE)
 ///
 /// `pdeathsig` SIGKILLs a leader when its forking thread exits, so a retiring `spawn_blocking` thread may not fork. commentlint: allow(JUDGE)
 /// The spawn blocks its thread for the whole exec-barrier handshake, so forking on runtime workers would let concurrent runs occupy every worker and stall request handling, cancellation, and shutdown. commentlint: allow(JUDGE)
-async fn spawn_from_dedicated_thread(
+/// The job owns the parent-side handshake pipe ends: the raw fd numbers captured by `pre_exec` must stay valid until the fork happens, even when the requesting task gives up first. commentlint: allow(JUDGE)
+fn queue_spawn(
     command: tokio::process::Command,
-) -> io::Result<tokio::process::Child> {
+    pid_report_write: std::os::fd::OwnedFd,
+    exec_barrier_read: std::os::fd::OwnedFd,
+) -> io::Result<tokio::sync::oneshot::Receiver<io::Result<tokio::process::Child>>> {
     struct SpawnJob {
         command: tokio::process::Command,
+        // Held through the fork; dropped once `spawn` returns so the registrar sees EOF when no child reported a pid. commentlint: allow(JUDGE)
+        handshake_fds: (std::os::fd::OwnedFd, std::os::fd::OwnedFd),
         reply: tokio::sync::oneshot::Sender<io::Result<tokio::process::Child>>,
         handle: tokio::runtime::Handle,
     }
@@ -810,7 +873,9 @@ async fn spawn_from_dedicated_thread(
                 while let Ok(mut job) = jobs.recv() {
                     // `tokio::process::Command::spawn` registers `SIGCHLD` interest and needs the caller's runtime entered on this thread. commentlint: allow(JUDGE)
                     let _guard = job.handle.enter();
-                    let _ = job.reply.send(job.command.spawn());
+                    let spawned = job.command.spawn();
+                    drop(job.handshake_fds);
+                    let _ = job.reply.send(spawned);
                 }
             })
             .expect("spawn the broca-spawner thread");
@@ -820,14 +885,12 @@ async fn spawn_from_dedicated_thread(
     sender
         .send(SpawnJob {
             command,
+            handshake_fds: (pid_report_write, exec_barrier_read),
             reply,
             handle: tokio::runtime::Handle::current(),
         })
         .map_err(|_| io::Error::other("the broca-spawner thread is gone"))?;
-    // `kill_on_drop` reaps the child if this task is dropped before the reply arrives. commentlint: allow(JUDGE)
-    spawned
-        .await
-        .map_err(|_| io::Error::other("the broca-spawner thread dropped a spawn reply"))?
+    Ok(spawned)
 }
 
 /// Each poll walks all of `/proc`; the backoff bounds how many walks a lingering member costs.
@@ -1102,6 +1165,21 @@ impl std::fmt::Display for RegistrationTeardownUnproven {
 
 impl std::error::Error for RegistrationTeardownUnproven {}
 
+/// Crash-ownership registration failed and the child aborted before exec, so no prompt bytes or provider work exist and a later attempt can succeed; `spawn_failure` classifies this transient. commentlint: allow(JUDGE)
+#[derive(Debug)]
+struct RegistrationFailed;
+
+impl std::fmt::Display for RegistrationFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "crash-ownership registration failed before the child could start"
+        )
+    }
+}
+
+impl std::error::Error for RegistrationFailed {}
+
 /// Spawn failed after publishing a crash-ownership record whose removal also failed.
 /// Its `Display` carries [`RECORD_RETAINED_MARKER`] so settlement latches the retained record.
 #[derive(Debug)]
@@ -1145,6 +1223,21 @@ pub(crate) fn spawn_failure(harness: Harness, err: &io::Error) -> BackendTermina
             message: format!(
                 "{} backend crash-ownership registration failed; the \
                  process group could not be confirmed stopped",
+                harness.as_str()
+            ),
+            retry_after_secs: None,
+            provider_code: None,
+        });
+    }
+    if err
+        .get_ref()
+        .is_some_and(|inner| inner.is::<RegistrationFailed>())
+    {
+        return BackendTerminal::Failed(BackendError {
+            class: ErrorClass::Transient,
+            message: format!(
+                "{} backend crash-ownership registration failed before \
+                 the child could start; the run may be retried",
                 harness.as_str()
             ),
             retry_after_secs: None,
