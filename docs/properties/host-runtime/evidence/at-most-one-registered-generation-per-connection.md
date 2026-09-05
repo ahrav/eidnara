@@ -92,16 +92,18 @@ single-remover structure this record depends on.
 
 ## What a test must construct
 
-A committed non-TCP grant plus a drain landing inside the transfer window (fault
-class H1, multi-thread scheduling, unavailable today). Concretely: the
-`FakeProvider` harness already used by `tests/lifecycle.rs:1722`, driven to a
-*completed* commit rather than an interrupted setup; a scheduling point placed
-after `close_generation` returns at `connection.rs:345` and before the second
-`serve_generation` reaches `:285`; `host.shutdown` committed while the connection
-task is held there; then release. Two oracles, asserted separately. For the
-exclusion: instrument `connections.insert` at `:288` and assert it never returns
-`Some(_)`, and sample the registry under the lock asserting at most one of the
-socket's two ids is present. For the window: assert the peer socket observes
+The promotion window this evidence once described no longer exists: the
+mandatory-ring refactor removed candidate promotion, `FakeProvider`, and
+`transport_negotiation.rs`, and `run_connection` now creates one generation at
+`connection.rs:175` and serves it directly at `:192`. The live window is the
+post-setup, pre-registration drain check at `connection.rs:256-260`. Concretely: a
+scheduling point placed after `new_generation` returns (`:175`) and before
+`serve_generation` takes the `connections` lock at `:254`; `host.shutdown`
+committed while the connection task is held there; then release. Two oracles,
+asserted separately. For the exclusion: instrument `connections.insert` at `:260`
+and assert it never returns `Some(_)`, and sample the registry under the lock
+asserting the socket's id is present at most once and absent entirely when the
+draining check at `:256` refused it. For the window: assert the peer socket observes
 either exactly one connection Goodbye or a close with no Goodbye, and record which
 - the current behaviour is the second, and the catalog's open question is whether
 that is intended. Coverage checks to emit:

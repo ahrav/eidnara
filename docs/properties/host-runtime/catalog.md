@@ -185,8 +185,9 @@ order, so no row was added, and none of the 38 surviving records was touched.
 
 Type: safety
 Reachability: default-production - the generation counter is seeded once per
-incarnation (`crates/host-runtime/src/runtime.rs:922`) and every accepted connection
-mints from it (`crates/host-runtime/src/connection.rs:235`).
+incarnation (`gen_counter: AtomicU64::new(1)` at `crates/host-runtime/src/runtime.rs:788`, re-verified) and every accepted
+connection mints from it (`shared.gen_counter.fetch_add(1, ..)` in `new_generation`,
+`crates/host-runtime/src/connection.rs:219`, re-verified).
 Status: active
 Exercised: not yet - every test hand-builds `id: 1`.
 Guarantee: Within one host incarnation every minted connection generation has a
@@ -9635,7 +9636,11 @@ them.
 Check: `always-or-unreached` - assert that an acquisition against
 `reserved_pending_permits` or `reserved_task_permits` occurs only for a route
 whose class is `Reserved`, and that no such route exists when
-`reservations.pending == 0`. `always-or-unreached` rather than `unreachable`,
+`reservations.pending == 0`; and, after `HostShared` construction, that
+`reserved_pending_permits.available_permits() == reservations.pending` and
+`reserved_task_permits.available_permits() == reservations.tasks` (constructed at
+`runtime.rs:777-778`), so the undeclared case requires both pools to hold zero
+permits rather than only that no route acquires from them. `always-or-unreached` rather than `unreachable`,
 because the pools are legitimately entered on a host that does declare a
 reservation; the obligation is that entry is safe and correctly gated, not that
 the code is dead.

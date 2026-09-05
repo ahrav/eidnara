@@ -111,10 +111,15 @@ regenerated.
 
 The record states that the pre-image covering every artifact is established
 by reading the function against its Python mirror, not by a test. A
-structural test would enumerate the `ArtifactRef` fields of `BundleManifest`
-(`:99-115`), including each entry of `external_initializers` and
-`TokenizerRefs::all`, and assert that changing each `sha256` alone changes
-`canonical_fingerprint`. The existing per-artifact test works at the file
+structural test would enumerate every manifest field the pre-image covers and
+assert that perturbing each one alone changes `canonical_fingerprint`: the model
+`sha256`; each external initializer's `sha256` and its `name` (the pre-image binds
+`name.len():name:sha256`, `bundle.rs:585-594`), plus a swap of two initializer
+names with every hash held fixed; each of the four `TokenizerRefs::all` hashes;
+pooling; quantization; output selection; max tokens; dims; table epoch; corpus
+digest; and the remaining embedding-space scalars. Mutating only the `ArtifactRef`
+hashes leaves a regression that drops any non-artifact field from the pre-image
+undetected. The existing per-artifact test works at the file
 level and is intercepted by the artifact hash check before the fingerprint
 comparison, so it does not prove fingerprint coverage. A second test could
 pin the hex literal `2bba4ff1...2b5f` so a regenerated fixture that silently
