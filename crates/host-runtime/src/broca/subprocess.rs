@@ -11,7 +11,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -246,7 +246,7 @@ pub struct SubprocessSpec {
     pub stdin: Vec<u8>,
     /// `inherit_fds` retains descriptors referenced by child path arguments.
     pub inherit_fds: Vec<RawFd>,
-    /// The crash-ownership record for the child's process group is written here before prompt delivery.
+    /// The crash-ownership record for the child's process group is written here before the child execs. commentlint: allow(JUDGE)
     pub state_root: group_registry::StateRoot,
 }
 
@@ -342,6 +342,16 @@ pub async fn run(
     // The parent check aborts when the child no longer has `host_pid` as its parent.
     let host_pid = std::process::id();
     let child_inherit_fds = inherit_fds.clone();
+    // Register crash ownership before `exec` so successor sweeps can find helpers after a host crash: `pdeathsig` kills only the leader, and a helper forked before record publication would otherwise be unrecorded. commentlint: allow(JUDGE)
+    // `spawn` waits for `exec`, so the blocking-pool registrar reads `pid_report`, publishes the record, then releases `exec_barrier`.
+    let (pid_report_read, pid_report_write) =
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+    let (exec_barrier_read, exec_barrier_write) =
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+    let child_pid_report_write = pid_report_write.as_raw_fd();
+    let child_exec_barrier_read = exec_barrier_read.as_raw_fd();
+    let child_pid_report_read = pid_report_read.as_raw_fd();
+    let child_exec_barrier_write = exec_barrier_write.as_raw_fd();
     // SAFETY: `pre_exec` runs after `fork` and before `exec`, so its closure must avoid allocation and locking.
     // Every error is built from a raw errno; `io::Error::other` would allocate.
     #[allow(unsafe_code)]
@@ -359,6 +369,43 @@ pub async fn run(
                     return Err(io::Error::last_os_error());
                 }
             }
+            // The child closes registrar-side pipe ends so dropping `exec_barrier_write` delivers EOF to `child_exec_barrier_read`.
+            libc::close(child_pid_report_read);
+            libc::close(child_exec_barrier_write);
+            let pid = libc::getpid().to_ne_bytes();
+            let mut sent = 0;
+            while sent < pid.len() {
+                let written = libc::write(
+                    child_pid_report_write,
+                    pid.as_ptr().add(sent).cast(),
+                    pid.len() - sent,
+                );
+                if written < 0 {
+                    let errno = *libc::__errno_location();
+                    if errno == libc::EINTR {
+                        continue;
+                    }
+                    return Err(io::Error::from_raw_os_error(errno));
+                }
+                sent += written as usize;
+            }
+            libc::close(child_pid_report_write);
+            let mut byte = 0u8;
+            loop {
+                let received = libc::read(child_exec_barrier_read, (&raw mut byte).cast(), 1);
+                if received == 1 {
+                    break;
+                }
+                if received == 0 {
+                    // EOF means the registrar dropped the barrier without publishing a record.
+                    // Executing without a published record could orphan helper processes outside the registry.
+                    return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+                }
+                let errno = *libc::__errno_location();
+                if errno != libc::EINTR {
+                    return Err(io::Error::from_raw_os_error(errno));
+                }
+            }
             Ok(())
         });
     }
@@ -366,27 +413,52 @@ pub async fn run(
         command.env(name, value);
     }
 
-    let mut child = command.spawn()?;
+    // The registrar starts before `spawn` because `spawn` blocks this thread until the child execs.
+    let registrar = tokio::task::spawn_blocking(move || {
+        let mut pid_bytes = [0u8; size_of::<libc::pid_t>()];
+        let mut filled = 0;
+        while filled < pid_bytes.len() {
+            match rustix::io::read(&pid_report_read, &mut pid_bytes[filled..]) {
+                // EOF: the child died before reporting its pid.
+                Ok(0) => return None,
+                Ok(read) => filled += read,
+                Err(rustix::io::Errno::INTR) => {}
+                Err(_) => return None,
+            }
+        }
+        let leader = libc::pid_t::from_ne_bytes(pid_bytes);
+        let record = group_registry::GroupRecord::record(&state_root, leader)?;
+        // The already-published record is returned even when this write fails; the caller owns its removal. commentlint: allow(JUDGE)
+        let _ = rustix::io::write(&exec_barrier_write, &[1u8]);
+        Some(record)
+    });
+
+    let spawned = command.spawn();
     // Dropping `command` and `env` releases their environment-sized allocations before concurrent runs continue.
     drop(command);
     drop(env);
+    // Dropping the parent's pipe ends lets the registrar observe EOF when no child reported a pid.
+    drop(pid_report_write);
+    drop(exec_barrier_read);
+    let group_record = registrar.await.ok().flatten();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(err) => {
+            // A record published before an `exec` failure covers an empty group (the child exited without executing harness code), so only the record needs removing. commentlint: allow(JUDGE)
+            if let Some(record) = group_record
+                && record.remove().is_err()
+            {
+                return Err(io::Error::other(SpawnRecordRetained { kind: err.kind() }));
+            }
+            return Err(err);
+        }
+    };
     // With process_group(0) the leader's pid IS the group id.
     let group = child
         .id()
         .and_then(|pid| i32::try_from(pid).ok())
         .and_then(rustix::process::Pid::from_raw);
-    // Crash-ownership registration is a barrier before prompt delivery.
-    // Registration failure sends `KILL` before stdin delivery.
-    let group_record = match group {
-        Some(g) => {
-            let leader = g.as_raw_nonzero().get();
-            off_runtime(move || group_registry::GroupRecord::record(&state_root, leader))
-                .await
-                .ok()
-                .flatten()
-        }
-        None => None,
-    };
+    // A successful `spawn` implies the registrar published a record before releasing the barrier; a missing record after a registrar join failure leaves the group unobservable, so it is torn down. commentlint: allow(JUDGE)
     if group_record.is_none() {
         let signalled = kill_group(group, rustix::process::Signal::KILL).is_ok();
         // `child.start_kill()` covers a missing or unaddressable process group.
@@ -438,13 +510,22 @@ pub async fn run(
 
     // Concurrent prompt delivery and output draining prevent a child that fills stdout before reading stdin from deadlocking the host.
     // Prompt delivery drops stdin after writing so print-mode reads receive EOF.
+    // Cancellation wins races with prompt delivery, preventing writes after cancellation; a prompt delivered to an already-cancelled run could otherwise start a provider request. commentlint: allow(JUDGE)
+    // The abandoned write reports non-delivery.
+    let writer_cancel = cancel.clone();
     let mut stdin_pipe = child.stdin.take();
     let mut stdin_task = tokio::spawn(async move {
         let Some(mut stdin) = stdin_pipe.take() else {
             return true;
         };
-        let written = stdin.write_all(&prompt).await.is_ok();
-        stdin.shutdown().await.is_ok() && written
+        tokio::select! {
+            biased;
+            () = writer_cancel.cancelled() => false,
+            delivered = async {
+                let written = stdin.write_all(&prompt).await.is_ok();
+                stdin.shutdown().await.is_ok() && written
+            } => delivered,
+        }
     });
 
     let mut stdout_pipe = child.stdout.take().expect("stdout is piped");
@@ -974,6 +1055,25 @@ impl std::fmt::Display for RegistrationTeardownUnproven {
 
 impl std::error::Error for RegistrationTeardownUnproven {}
 
+/// Spawn failed after publishing a crash-ownership record whose removal also failed.
+/// Its `Display` carries [`RECORD_RETAINED_MARKER`] so settlement latches the retained record.
+#[derive(Debug)]
+struct SpawnRecordRetained {
+    kind: io::ErrorKind,
+}
+
+impl std::fmt::Display for SpawnRecordRetained {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "run could not start ({}); additionally the backend {RECORD_RETAINED_MARKER}",
+            self.kind
+        )
+    }
+}
+
+impl std::error::Error for SpawnRecordRetained {}
+
 /// A shared wall-clock budget can elapse during setup, before a child exists to time out.
 /// A later attempt can still fit the budget, so the class is transient.
 pub(crate) fn budget_exhausted_failure(harness: Harness) -> BackendTerminal {
@@ -1004,12 +1104,24 @@ pub(crate) fn spawn_failure(harness: Harness, err: &io::Error) -> BackendTermina
             provider_code: None,
         });
     }
-    let class = match err.kind() {
-        io::ErrorKind::WouldBlock | io::ErrorKind::OutOfMemory => ErrorClass::Transient,
-        _ => ErrorClass::Permanent,
-    };
+    if let Some(retained) = err
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<SpawnRecordRetained>())
+    {
+        return BackendTerminal::Failed(BackendError {
+            class: spawn_error_class(retained.kind),
+            message: format!(
+                "{} backend run could not start ({}); additionally the {} backend {RECORD_RETAINED_MARKER}",
+                harness.as_str(),
+                retained.kind,
+                harness.as_str(),
+            ),
+            retry_after_secs: None,
+            provider_code: None,
+        });
+    }
     BackendTerminal::Failed(BackendError {
-        class,
+        class: spawn_error_class(err.kind()),
         message: format!(
             "{} backend run could not start ({})",
             harness.as_str(),
@@ -1018,6 +1130,13 @@ pub(crate) fn spawn_failure(harness: Harness, err: &io::Error) -> BackendTermina
         retry_after_secs: None,
         provider_code: None,
     })
+}
+
+fn spawn_error_class(kind: io::ErrorKind) -> ErrorClass {
+    match kind {
+        io::ErrorKind::WouldBlock | io::ErrorKind::OutOfMemory => ErrorClass::Transient,
+        _ => ErrorClass::Permanent,
+    }
 }
 
 pub(crate) fn credential_failure(harness: Harness, error: CredentialRowError) -> BackendTerminal {
@@ -1612,7 +1731,7 @@ pub mod group_registry {
 
     impl GroupRecord {
         /// `record` returns `None` if it cannot write the record or establish either process identity.
-        /// The spawner kills the group before delivering the prompt when `record` returns `None`.
+        /// The registrar then withholds the exec barrier, so the child aborts before executing harness code.
         pub fn record(root: &StateRoot, leader_pid: i32) -> Option<Self> {
             let leader_start = proc_start_time(leader_pid).ok().flatten()?;
             let owner_pid = std::process::id() as i32;
@@ -1676,13 +1795,24 @@ pub mod group_registry {
             if !path.is_file() {
                 continue;
             }
-            // A dot-prefixed file is an unpublished temp from a crashed `GroupRecord::record`; its group never received a prompt.
+            // Hosts sharing one state root sweep concurrently with each other's record writes. commentlint: allow(JUDGE)
+            // Deleting a dot-prefixed temp younger than `UNPUBLISHED_TEMP_GRACE` could unlink an in-flight write, causing its publishing rename to fail with `ENOENT`.
             if path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with('.'))
             {
-                remove_swept_record(&path)?;
+                let stale = fs::symlink_metadata(&path)
+                    .and_then(|meta| meta.modified())
+                    .map(|modified| {
+                        std::time::SystemTime::now()
+                            .duration_since(modified)
+                            .is_ok_and(|age| age >= UNPUBLISHED_TEMP_GRACE)
+                    })
+                    .unwrap_or(false);
+                if stale {
+                    remove_swept_record(&path)?;
+                }
                 continue;
             }
             // A record names a kill target, so the sweep parses only a pinned regular file owned by this user.
@@ -1758,6 +1888,11 @@ pub mod group_registry {
     /// SIGKILL cannot be caught; members in uninterruptible kernel state can delay group removal.
     /// `SWEEP_MEMBER_GRACE` bounds the wait for uninterruptible members before startup fails closed.
     const SWEEP_MEMBER_GRACE: Duration = Duration::from_secs(5);
+
+    /// The sweep deletes dot-prefixed record temps only after `UNPUBLISHED_TEMP_GRACE`; newer
+    /// files may belong to a concurrent host's active write. A skipped young temp is
+    /// reconsidered by the next startup sweep.
+    const UNPUBLISHED_TEMP_GRACE: Duration = Duration::from_secs(600);
 
     /// The startup sweep runs before request work, so `wait_group_empty_blocking` may block until `budget` elapses.
     /// The startup sweep runs before request work, so blocking cannot starve requests.

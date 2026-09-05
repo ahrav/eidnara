@@ -209,7 +209,7 @@ impl CompositeComponent for BrocaComponent {
             return app_error("internal_error", "route is not bound to a broca session");
         };
         // The handler reserves `ctx.body.len() + 512` bytes before parsing so parser allocations count against resident capacity.
-        let Some(_scratch) = ctx.try_reserve_resident(ctx.body.len() + 512) else {
+        let Some(scratch) = ctx.try_reserve_resident(ctx.body.len() + 512) else {
             return app_error(
                 "queue_full",
                 "resident capacity for request handling is exhausted",
@@ -256,6 +256,10 @@ impl CompositeComponent for BrocaComponent {
                 Err(error) => request_error(error),
             },
             Request::Subscribe => {
+                // `Subscribe` carries no parsed payload, and its streaming loop can hold this
+                // request open for minutes; releasing the parse reservation here keeps resident
+                // capacity scaled to in-flight parses rather than live subscriptions.
+                drop(scratch);
                 let mut subscription = match self.supervisor.subscribe(&key) {
                     Ok(subscription) => subscription,
                     Err(error) => return request_error(error),
@@ -321,6 +325,8 @@ impl CompositeComponent for BrocaComponent {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
+        // One run can leave several residue classes at once; suppressing any of them would hide
+        // caller-private material or registry state, so all are aggregated into one error.
         let unresolved = self.supervisor.shutdown().await;
         self.routes
             .lock()
@@ -330,32 +336,35 @@ impl CompositeComponent for BrocaComponent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
-        // Shutdown fails when process-group teardown is unproven because a provider descendant may remain alive.
-        // Shutdown fails when process-group teardown is unproven.
-        // stopped.
+        let mut failures = Vec::new();
+        // Teardown failures lead because a provider descendant may still be running.
         if unresolved > 0 {
-            return Err(ShutdownError(format!(
+            failures.push(format!(
                 "{unresolved} run(s) ended without confirming harness \
                  process-group teardown; provider work may still be running"
-            )));
+            ));
         }
         // Cleanup residue outranks a clean report: caller-private prompt material may remain on disk.
         let residue = self.supervisor.cleanup_unresolved_runs();
         if residue > 0 {
-            return Err(ShutdownError(format!(
+            failures.push(format!(
                 "{residue} run(s) could not remove their private run files; \
                  caller-private prompt material may remain on disk"
-            )));
+            ));
         }
         // A retained crash-ownership record remains in the registry for a successor to sweep.
         let records = self.supervisor.record_unresolved_runs();
         if records > 0 {
-            return Err(ShutdownError(format!(
+            failures.push(format!(
                 "{records} run(s) could not remove their crash-ownership records; \
                  the registry retains them for a later sweep"
-            )));
+            ));
         }
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ShutdownError(failures.join("; ")))
+        }
     }
 }
 

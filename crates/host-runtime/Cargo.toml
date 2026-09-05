@@ -21,7 +21,7 @@ fastembed = { version = "=6.0.0", default-features = false, features = ["ort-loa
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "ndarray", "std"] }
 tokio = { workspace = true, features = ["process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-rustix = { workspace = true, features = ["event", "fs", "net", "process", "thread"] }
+rustix = { workspace = true, features = ["event", "fs", "net", "pipe", "process", "thread"] }
 getrandom = { workspace = true }
 libc = { workspace = true }
 shm-transport = { workspace = true }

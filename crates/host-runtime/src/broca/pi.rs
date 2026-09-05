@@ -176,7 +176,7 @@ struct PiRun {
 /// Direct `openai` and `google` API-key users lack credentials under subscription-extension aliases.
 /// Pi tries each provider at most once.
 /// Both attempts share one wall-clock budget; the retry receives only the remainder.
-/// A first-attempt cleanup failure blocks the retry so retry success cannot mask disk residue.
+/// A first-attempt cleanup failure or retained crash-ownership record blocks the retry so retry success cannot mask disk or registry residue.
 async fn run_pi_with_provider_fallback(
     run: PiRun,
     request: BackendRequest,
@@ -200,11 +200,13 @@ async fn run_pi_with_provider_fallback(
     )
     .await;
     // An attempt that left private prompt material on disk must surface its cleanup failure.
-    // A first-attempt cleanup failure blocks the retry.
+    // A retained crash-ownership record blocks retry: success would replace the terminal before
+    // the supervisor latches the record.
     let credential_failure = matches!(
         &first,
         BackendTerminal::Failed(error) if error.class == ErrorClass::AuthRequired
             && !error.message.contains(subprocess::CLEANUP_FAILURE_MARKER)
+            && !error.message.contains(subprocess::RECORD_RETAINED_MARKER)
     );
     if !credential_failure || cancel.is_cancelled() {
         return first;

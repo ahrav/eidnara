@@ -482,7 +482,6 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
     let saw_component = !names.is_empty();
 
     let last = names.len().saturating_sub(1);
-    let mut final_created = false;
     for (index, name) in names.into_iter().enumerate() {
         walked.push(name);
         let next = match openat(&current, name, flags, Mode::empty()) {
@@ -510,9 +509,6 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
                 if created {
                     rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))
                         .map_err(|e| io_err("fchmod_component", &walked, e))?;
-                }
-                if index == last {
-                    final_created = created;
                 }
                 fd
             }
@@ -549,9 +545,10 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
             path: dir_path.to_path_buf(),
         });
     }
-    // A pre-existing directory that another principal could write may already hold planted files, so tightening its mode now cannot repair it.
-    // Only umask damage from this call's own `mkdirat` is repairable; `final_created` distinguishes the two.
-    if !final_created && (mode & 0o022) != 0 {
+    // A directory writable by another principal may contain planted files; changing its mode
+    // cannot make it safe. Freshly created components were already forced to `0700` above (with
+    // failures propagated), so a legitimate creation never trips this rejection.
+    if (mode & 0o022) != 0 {
         return Err(InstanceError::Insecure {
             what: "runtime directory was writable by other principals",
             path: dir_path.to_path_buf(),

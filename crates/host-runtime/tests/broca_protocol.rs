@@ -257,6 +257,12 @@ fn every_malformed_shape_is_rejected_with_schema_violation() {
             false,
         ),
         (
+            // `-0.0` passes the inclusive `0.0..=2.0` check under IEEE 754 but serializes as `"-0"`, which providers reject as a negative temperature.
+            "temperature negative zero",
+            mutate(&ok_text, "\"temperature\":0.1", "\"temperature\":-0.0"),
+            false,
+        ),
+        (
             "temperature as string",
             mutate(&ok_text, "\"temperature\":0.1", "\"temperature\":\"0.1\""),
             false,

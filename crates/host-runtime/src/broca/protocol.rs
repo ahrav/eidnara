@@ -229,7 +229,12 @@ fn parse_send(params: SendParams) -> Result<Request, RequestError> {
     if generation.max_output_tokens == 0 || generation.max_output_tokens > MAX_OUTPUT_TOKENS_BOUND {
         return Err(schema("max_output_tokens out of bounds"));
     }
-    if !generation.temperature.is_finite() || !TEMPERATURE_RANGE.contains(&generation.temperature) {
+    // `-0.0` satisfies `contains` under IEEE 754 (`-0.0 >= 0.0`) but serializes as `"-0"`,
+    // which downstream provider schemas reject as a negative temperature.
+    if !generation.temperature.is_finite()
+        || !TEMPERATURE_RANGE.contains(&generation.temperature)
+        || generation.temperature.is_sign_negative()
+    {
         return Err(schema("temperature out of bounds"));
     }
     Ok(Request::Send(SendRequest {

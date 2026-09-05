@@ -258,6 +258,10 @@ fn main() {
             group_record_mode_forced_under_umask,
         ),
         (
+            "sweep_spares_young_record_temps",
+            sweep_spares_young_record_temps,
+        ),
+        (
             "incomplete_closure_reports_unavailable_without_run_state",
             incomplete_closure_reports_unavailable_without_run_state,
         ),
@@ -3503,4 +3507,35 @@ fn group_record_mode_forced_under_umask() {
         assert!(body.starts_with("v1\n"), "record is complete when visible");
         record.remove().expect("remove record");
     }
+}
+
+/// Hosts sharing one state root sweep concurrently with each other's record writes, so the sweep
+/// must spare a dot-prefixed temp another host may still be publishing and remove only aged ones.
+fn sweep_spares_young_record_temps() {
+    use host_runtime::broca::subprocess::group_registry::sweep_orphaned_groups;
+
+    let registry = state_root();
+    let fresh = registry.path().join(".fresh-record.tmp");
+    let stale = registry.path().join(".stale-record.tmp");
+    fs::write(&fresh, b"partial").expect("write fresh temp");
+    fs::write(&stale, b"partial").expect("write stale temp");
+    let aged = std::time::SystemTime::now() - Duration::from_secs(20 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&stale)
+        .expect("open stale temp")
+        .set_modified(aged)
+        .expect("age stale temp");
+
+    sweep_orphaned_groups(&registry).expect("sweep completes");
+
+    assert!(
+        fresh.exists(),
+        "a young temp may be another host's in-flight record write and must survive the sweep"
+    );
+    assert!(
+        !stale.exists(),
+        "an aged temp is a crashed write's leftover and must be removed"
+    );
+    fs::remove_file(&fresh).expect("clean up fresh temp");
 }
