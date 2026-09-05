@@ -176,14 +176,21 @@ impl CallError {
         };
         // Raw terminal messages may contain request, credential, or identity data.
         // `CallError` retains the bounded terminal code and discards the raw terminal message.
-        // `host.` identifies host-supplied codes.
+        // `host.` identifies host-supplied codes; the raw code is bounded on its own so a
+        // conforming code at the host's limit survives the prefix.
+        let code = if is_conforming_code(code, MAX_ERROR_CODE_BYTES) {
+            format!("host.{code}")
+        } else {
+            "host.remote_error".to_owned()
+        };
         Some(Self {
-            retry_after,
-            ..Self::new(
-                SendOutcome::Terminal,
-                format!("host.{}", bounded_code(code)),
+            outcome: SendOutcome::Terminal,
+            code,
+            message: bounded_text(
                 "host returned a terminal error (message redacted)",
-            )
+                MAX_ERROR_MESSAGE_BYTES,
+            ),
+            retry_after,
         })
     }
 
@@ -508,7 +515,18 @@ impl Client {
         // The clock starts before encoding: identity is caller-controlled input, and its
         // clone and serialization spend the operation's budget like any other stage.
         let deadline = Instant::now() + CLIENT_ROUTE_OPEN_TIMEOUT;
-        let body = route_open_body(&target, &identity)?;
+        let mut identity = identity;
+        let body = match route_open_body(&target, &identity) {
+            Ok(body) => body,
+            Err(error) => {
+                // A rejected value may be arbitrarily deep; `serde_json::Value`'s destructor
+                // recurses, so it is flattened before this frame drops it.
+                if let Some(facts) = identity.admission_facts.take() {
+                    drop_json_iteratively(facts);
+                }
+                return Err(error);
+            }
+        };
         let mut backoff = Duration::from_millis(25);
         loop {
             let response = self
@@ -668,15 +686,7 @@ impl Client {
                 None,
             )
             .await?;
-        let acknowledged = serde_json::from_slice::<serde_json::Value>(&response.body)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("op")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|op| op == OP_HOST_SHUTDOWN)
-            })
-            .unwrap_or(false);
+        let acknowledged = control_op(&response.body).as_deref() == Some(OP_HOST_SHUTDOWN);
         if !acknowledged {
             // A channel-0 response that is not the tagged JSON object §7.1 requires is framing corruption, not an application result.
             self.inner.retire("invalid_shutdown_response");
@@ -3177,17 +3187,35 @@ fn recognized_keys_are_unique(body: &[u8], recognized: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn names_route_open(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .is_some_and(|value| value.get("op").and_then(Value::as_str) == Some(OP_ROUTE_OPEN))
+/// The `op` tag of a channel-0 body: a JSON object with exactly one string `op` (§7.1).
+/// `None` for anything else, including a repeated `op`, which would let the last one win.
+fn control_op(body: &[u8]) -> Option<String> {
+    if !recognized_keys_are_unique(body, &["op"]) {
+        return None;
+    }
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    value.get("op")?.as_str().map(str::to_owned)
 }
 
-/// A channel-0 body is a JSON object carrying a string `op` (§7.1).
+/// Drops `value` without recursing into nested containers, so a hostile depth cannot
+/// overflow the stack the way the derived destructor would.
+fn drop_json_iteratively(value: Value) {
+    let mut pending = vec![value];
+    while let Some(node) = pending.pop() {
+        match node {
+            Value::Array(items) => pending.extend(items),
+            Value::Object(map) => pending.extend(map.into_iter().map(|(_, child)| child)),
+            _ => {}
+        }
+    }
+}
+
+fn names_route_open(body: &[u8]) -> bool {
+    control_op(body).as_deref() == Some(OP_ROUTE_OPEN)
+}
+
 fn is_tagged_control_body(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .is_some_and(|value| value.get("op").and_then(Value::as_str).is_some())
+    control_op(body).is_some()
 }
 
 fn parse_route_open(body: &[u8]) -> Result<RouteHandle, CallError> {
@@ -3291,16 +3319,19 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// nonconforming value onto a reserved code (`unknown_module!` → `unknown_module`)
 /// and trigger that code's recovery rule, so the whole value falls back instead.
 fn bounded_code(code: &str) -> String {
-    let conforming = !code.is_empty()
-        && code.len() <= MAX_ERROR_CODE_BYTES
-        && code
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
-    if conforming {
+    if is_conforming_code(code, MAX_ERROR_CODE_BYTES) {
         code.to_owned()
     } else {
         "remote_error".to_owned()
     }
+}
+
+fn is_conforming_code(code: &str, max_bytes: usize) -> bool {
+    !code.is_empty()
+        && code.len() <= max_bytes
+        && code
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
 fn bounded_text(text: &str, max: usize) -> String {
@@ -4278,6 +4309,69 @@ mod tests {
             .expect("Pong admits from its reserve");
         assert!(!inner.retired.load(Ordering::Acquire));
         inner.retire("test_done");
+    }
+
+    #[test]
+    fn a_duplicate_op_tag_is_never_read_as_a_valid_tag() {
+        assert!(!is_tagged_control_body(
+            br#"{"op":"route.open","op":"future"}"#
+        ));
+        assert!(!names_route_open(
+            br#"{"op":"route.open","op":"future","route_channel":7,"route_epoch":77}"#
+        ));
+        assert_eq!(control_op(br#"{"op":"wrong","op":"host.shutdown"}"#), None);
+        assert_eq!(
+            control_op(br#"{"op":"host.shutdown","x":1,"x":2}"#).as_deref(),
+            Some("host.shutdown")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_untagged_duplicate_tag_bind_response_retires() {
+        // `release_stranded_route` sees a body whose `op` is repeated and treats it as untagged.
+        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let body =
+            br#"{"op":"route.open","op":"future","route_channel":7,"route_epoch":77}"#.to_vec();
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: 0,
+                epoch: 0,
+                corr: 4242,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(inner.retired.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_host_code_at_the_host_limit_survives_the_prefix() {
+        let code = "c".repeat(MAX_ERROR_CODE_BYTES);
+        let body = serde_json::to_vec(&serde_json::json!({"code": code, "message": "m"})).unwrap();
+        let error = CallError::host_terminal(&body).expect("canonical body");
+        assert_eq!(error.code(), format!("host.{code}"));
+        let over = "c".repeat(MAX_ERROR_CODE_BYTES + 1);
+        let body = serde_json::to_vec(&serde_json::json!({"code": over, "message": "m"})).unwrap();
+        assert_eq!(
+            CallError::host_terminal(&body)
+                .expect("canonical body")
+                .code(),
+            "host.remote_error"
+        );
+    }
+
+    #[test]
+    fn rejected_deep_facts_are_dropped_without_recursion() {
+        // Deeper than any stack the derived destructor could unwind; only the iterative drop survives.
+        let mut deep = Value::Null;
+        for _ in 0..1_000_000 {
+            deep = Value::Array(vec![deep]);
+        }
+        drop_json_iteratively(deep);
     }
 
     #[test]
