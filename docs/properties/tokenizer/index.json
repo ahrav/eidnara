@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "tokenizer",
   "source": "catalog.md",
-  "source_sha256": "5e66672d812a87a881489fecf40ea7357fd7ba0726dfcaed42fa57ffdf2b571f",
+  "source_sha256": "cc60889e7242eb39d547d0aebca61034d1a4257d55b4a64672b2629440e9943e",
   "records": [
     {
       "slug": "tokenizer-encoding-matches-the-independent-oracle",
@@ -11,8 +11,8 @@
       "reachability_note": "no workspace crate depends on `tokenizer`; only `crates/tokenizer/tests/token_golden.rs` and the crate's unit tests call `encode_ordinary` and `estimate_tokens`.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "36 golden cases regenerated from the `ai-tokenizer` oracle pass, and a token-count estimate is checked against them."
+        "state": "partial",
+        "note": "46 golden cases regenerated from the `ai-tokenizer` oracle pass, and a token-count estimate is checked against them; together they exercise 606 distinct token ids of the 64,995 in the vocabulary, so drift in a rank or pattern branch the corpus never reaches is not detected."
       },
       "guarantee": "`encode_ordinary` produces the same token ids as `ai-tokenizer`'s claude encoding for every golden case, and `estimate_tokens` returns their count. The oracle is the null-prototype-patched encoder described in Provenance and scope, so the two documented oracle defects are excluded from parity by construction.",
       "check": {

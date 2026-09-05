@@ -19,6 +19,18 @@ from this file; the record contract is [`../METHOD.md`](../METHOD.md).
   `estimate_tokens`; the workspace is `publish = false`. Every record is therefore `test-only` at HEAD. Reclassify to
   `default-production` in the wave that adds the first production caller.
 
+## Index
+
+The `Reaches production` column is derived from each record's `Reachability` and
+`Status`: `yes` for `default-production`, `no` for `test-only`, and
+`n/a - invalidated` for an invalidated record.
+
+| Slug | Type | Confidence | Reaches production |
+| --- | --- | --- | --- |
+| [tokenizer-encoding-matches-the-independent-oracle](#tokenizer-encoding-matches-the-independent-oracle) | safety | high | no |
+| [tokenizer-vocabulary-is-embedded-and-complete](#tokenizer-vocabulary-is-embedded-and-complete) | safety | medium | no |
+| [tokenizer-over-long-pieces-are-chunked-and-bounded](#tokenizer-over-long-pieces-are-chunked-and-bounded) | safety | high | no |
+
 ## Records
 
 ### tokenizer-encoding-matches-the-independent-oracle
@@ -26,7 +38,7 @@ from this file; the record contract is [`../METHOD.md`](../METHOD.md).
 Type: safety
 Reachability: test-only - no workspace crate depends on `tokenizer`; only `crates/tokenizer/tests/token_golden.rs` and the crate's unit tests call `encode_ordinary` and `estimate_tokens`.
 Status: active
-Exercised: yes - 36 golden cases regenerated from the `ai-tokenizer` oracle pass, and a token-count estimate is checked against them.
+Exercised: partial - 46 golden cases regenerated from the `ai-tokenizer` oracle pass, and a token-count estimate is checked against them; together they exercise 606 distinct token ids of the 64,995 in the vocabulary, so drift in a rank or pattern branch the corpus never reaches is not detected.
 Guarantee: `encode_ordinary` produces the same token ids as `ai-tokenizer`'s claude encoding for every golden case, and `estimate_tokens` returns their count. The oracle is the null-prototype-patched encoder described in Provenance and scope, so the two documented oracle defects are excluded from parity by construction.
 Check: `always` - `encode_ordinary(text) == golden.ids` for every case; `estimate_tokens(text) == golden.ids.len()`. Parity is asserted against the committed golden, never against a live stock `ai-tokenizer`, so the prototype-name and BOM corrections cannot register as failures.
 Fault/timing angle: A vocabulary or pre-tokenizer divergence that keeps counts equal but changes ids.
@@ -65,3 +77,29 @@ Confidence: high - [evidence](evidence/tokenizer-over-long-pieces-are-chunked-an
 Existing check: `over_long_piece_is_chunked_and_bounded`, `over_long_cjk_piece_keeps_char_boundaries`, `long_text_without_over_long_piece_is_unaffected_by_bound` (`crates/tokenizer/tests/token_golden.rs`); audited at U3.
 Impact: Worst-case encoding latency regresses from linear to seconds, or a campaign demands oracle equality for a long unpunctuated input that the crate deliberately does not promise.
 Open questions: None.
+
+## Relationship map
+
+Grouped by shared mechanism, with suspected dominance noted where one property
+holding would make another likely to hold. Dominance is a hypothesis, not proof.
+
+- **One embedded table behind every id.**
+  `tokenizer-vocabulary-is-embedded-and-complete` is upstream of
+  `tokenizer-encoding-matches-the-independent-oracle`: every id the oracle test
+  compares is looked up in the embedded asset, so a corrupted or duplicated
+  entry that the golden corpus reaches fails parity, and one it does not reach
+  passes both records. Parity therefore dominates completeness only over the
+  606 ids the corpus exercises; for the rest, completeness is the only record
+  that speaks, and it has no Rust check.
+- **Parity below the cap, bounded work above it.**
+  `tokenizer-encoding-matches-the-independent-oracle` and
+  `tokenizer-over-long-pieces-are-chunked-and-bounded` partition the input space
+  by pre-token piece length. Below `MAX_PIECE_BYTES` the first record owns the
+  ids; above it the second owns the cost bound and permits seam divergence. A
+  test that asserted oracle equality for an over-long piece would contradict the
+  second record; a test that relaxed parity below the cap would contradict the
+  first. Neither dominates the other.
+- **Reachability moves together.** All three records are `test-only` for one
+  reason, the absence of a production caller, so the wave that adds the first
+  caller reclassifies all three at once and must re-evaluate which golden cases
+  are load-bearing for that caller's inputs.

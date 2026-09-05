@@ -7,7 +7,7 @@ The crate is a port of the `ai-tokenizer` claude encoding. Its value is bit-fait
 ## Evidence trail
 
 - `crates/tokenizer/testdata/token-golden.json` is produced by `crates/tokenizer/gen/gen-token-golden.ts`, which encodes the corpus with `ai-tokenizer@1.0.6` (a root dev dependency) using a null-prototype copy of the encoder, and writes the ids.
-- `encode_ordinary_matches_ai_tokenizer_ids` (`crates/tokenizer/tests/token_golden.rs:24`) asserts `encode_ordinary(text) == golden.ids` for all 36 cases; `estimate_tokens_matches_golden_counts` (`:47`) asserts the counts.
+- `encode_ordinary_matches_ai_tokenizer_ids` (`crates/tokenizer/tests/token_golden.rs:24`) asserts `encode_ordinary(text) == golden.ids` for all 46 cases; `estimate_tokens_matches_golden_counts` (`:47`) asserts the counts.
 - The corpus covers whitespace runs, digits, punctuation, code, JSON, paths, special-token substrings, several scripts, emoji with ZWJ, combining marks, zero-width characters, control characters, surrogate pairs, long runs, prototype-member names, and a 40-line mixed blob.
 - `bom_before_newline_is_preserved` (`:101`) pins the one documented divergence the golden cannot carry, against the crate's single-character encodings.
 - All pass under `cargo test --workspace` on Rust 1.98 (CI) and stable.
@@ -22,8 +22,8 @@ None.
 
 ## What a test must construct
 
-- Present: an oracle-produced golden and an exact-id comparison.
-- Missing: nothing for the corpus as it stands. The corpus is fixed; inputs outside it are covered only by construction.
+- Present: an oracle-produced golden and an exact-id comparison over 46 cases.
+- Missing: coverage of the 64,389 vocabulary entries and the pattern branches the corpus never reaches; a generated corpus over the whole vocabulary, or a property test against a live oracle, would close it.
 
 ## Investigation log
 
@@ -31,5 +31,5 @@ None.
 
 - Sources examined: `gen-token-golden.ts`, `token_golden.rs`, `package.json` dev dependencies.
 - Findings: The golden is written by the JavaScript oracle; the Rust crate never writes it. The oracle is patched only to avoid the prototype-name defect, which the scope note documents.
-- Missing evidence: None.
-- Conclusion: resolved with answer: independent.
+- Missing evidence: The 46 cases exercise 606 distinct token ids of 64,995, so parity outside the corpus is by construction, not by test.
+- Conclusion: resolved with answer: independent, and partial in coverage.

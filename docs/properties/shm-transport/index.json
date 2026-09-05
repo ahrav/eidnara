@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shm-transport",
   "source": "catalog.md",
-  "source_sha256": "11845999ae29d94d7683b9387ae701ceae1725f525621d87761266e84ec272e8",
+  "source_sha256": "6f46fd07627a7119cf2beace9b1ab3e8f869a5c5dc5cde4b311399d8cf7344b9",
   "records": [
     {
       "slug": "quarantine-authority-survives-peer-writes",
@@ -23,14 +23,12 @@
       "required_faults": "a quarantine trigger (corrupt descriptor, or a failed alias detach) **and** a peer that writes the shared lifecycle page after it. Without the second, the check passes without testing anything.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/quarantine-authority-survives-peer-writes.md)."
+        "evidence": "[evidence](evidence/quarantine-authority-survives-peer-writes.md). Verified by direct read at HEAD - `Ring.quarantined: Cell<bool>` (`ring.rs:883`); `enter_quarantine` sets the local cell first and then stores the shared flag (`:1889-1897`); `is_quarantined` returns the local cell when set, otherwise loads the shared flag, treats an unreadable lifecycle page as quarantined, and latches any observed set flag into the cell (`:1902-1917`). The shared mapping is still `PROT_READ|PROT_WRITE` with `F_SEAL_GROW|SHRINK|SEAL` only, so the peer can still write the byte; it just cannot revive the handle. The source tree's `Ring` had no local mirror and re-read the shared flag at every gate, which is the defect this record was written against."
       },
       "existing_check": "`quarantine_survives_peer_clearing_shared_flag` (`ring.rs:4257`), `shared_quarantine_flag_latches_locally_when_observed` (`:3976`), and `quarantine_rejects_all_operations_and_reports_conservation` (`crates/shm-transport/tests/ring.rs`) for the self-quarantine half. Status unaudited.",
       "impact": "if the local latch were removed, a one-byte write by the peer would un-terminate a channel the local side condemned, and the rewritten document's statements that active and quarantined charges are reported separately (`docs/shm-transport.md:21`) and stay within the process bound (`:92`) would rest on a byte the peer controls. At HEAD the latch makes the peer's write inert.",
       "open_questions": [],
-      "extra": {
-        "Verified by direct read at HEAD": "`Ring.quarantined: Cell<bool>` (`ring.rs:883`); `enter_quarantine` sets the local cell first and then stores the shared flag (`:1889-1897`); `is_quarantined` returns the local cell when set, otherwise loads the shared flag, treats an unreadable lifecycle page as quarantined, and latches any observed set flag into the cell (`:1902-1917`). The shared mapping is still `PROT_READ|PROT_WRITE` with `F_SEAL_GROW|SHRINK|SEAL` only, so the peer can still write the byte; it just cannot revive the handle. The source tree's `Ring` had no local mirror and re-read the shared flag at every gate, which is the defect this record was written against."
-      }
+      "extra": {}
     },
     {
       "slug": "quarantine-gates-cover-every-storage-mutation",
@@ -51,14 +49,12 @@
       "required_faults": "an outstanding `ProducerReservation` **and** a quarantine trigger from the other side during its lifetime.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/quarantine-gates-cover-every-storage-mutation.md)."
+        "evidence": "[evidence](evidence/quarantine-gates-cover-every-storage-mutation.md). Verified by direct read at HEAD - `ProducerReservation::commit` (`ring.rs:2566-2572`) checks `ring.is_quarantined()` first, aborts the reservation, and returns `ProducerError::Quarantined`, so the commit path is gated. `try_reserve`, `try_receive`, `release`, and `probe` gate on `is_quarantined()` as before. The source tree's `commit_reservation` had no gate, which is the defect this record was written against."
       },
       "existing_check": "`commit_after_quarantine_is_refused_and_aborts` (`ring.rs:3134`). Status unaudited.",
       "impact": "if the commit gate were removed, a reservation admitted before quarantine could publish into a ring whose storage is already considered unrecyclable, and an abort would hand quarantined storage back to the free pool. The abort path matters most where quarantine was raised *because* a JavaScript alias may still be attached to the aborted range (`packages/shm-native/src/lib.rs:283-287`).",
       "open_questions": [],
-      "extra": {
-        "Verified by direct read at HEAD": "`ProducerReservation::commit` (`ring.rs:2566-2572`) checks `ring.is_quarantined()` first, aborts the reservation, and returns `ProducerError::Quarantined`, so the commit path is gated. `try_reserve`, `try_receive`, `release`, and `probe` gate on `is_quarantined()` as before. The source tree's `commit_reservation` had no gate, which is the defect this record was written against."
-      }
+      "extra": {}
     },
     {
       "slug": "attach-refuses-a-quarantined-object",
@@ -79,14 +75,12 @@
       "required_faults": "a quarantine trigger, then a fresh attach using the same grant.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/attach-refuses-a-quarantined-object.md)."
+        "evidence": "[evidence](evidence/attach-refuses-a-quarantined-object.md). Raised from medium after direct verification - `validate_lifecycle` (`ring.rs:2067-2098`) reads exactly eight fields at `:2074-2085` — magic, layout version, depth, arena, leases, total, incarnation, and lane — and compares them at `:2086-2096`. It never reads `quarantined`. The per-operation gates are the only readers of that flag."
       },
       "existing_check": "per-operation `is_quarantined()` guards only.",
       "impact": "a caller receives a channel id and a usable-looking channel that fails at first reserve or receive. The grant claim is held until the registry entry is removed; `close` and `force_close` do remove it once producers, active leases, and stranded aliases are all empty (`packages/shm-native/src/lib.rs:1326-1329`, `:1350-1352`), so the claim is pinned indefinitely only when a detach has already stranded an alias. An earlier draft of this record overstated that as \"for the process lifetime\".",
       "open_questions": [],
-      "extra": {
-        "Raised from medium after direct verification": "`validate_lifecycle` (`ring.rs:2067-2098`) reads exactly eight fields at `:2074-2085` — magic, layout version, depth, arena, leases, total, incarnation, and lane — and compares them at `:2086-2096`. It never reads `quarantined`. The per-operation gates are the only readers of that flag."
-      }
+      "extra": {}
     },
     {
       "slug": "quarantine-charge-transition-is-atomic",
@@ -133,14 +127,12 @@
       "required_faults": "lock poisoning, or an arithmetic inconsistency in `active`.",
       "confidence": {
         "level": "medium",
-        "evidence": "[evidence](evidence/charge-release-never-silently-strands.md)."
+        "evidence": "[evidence](evidence/charge-release-never-silently-strands.md). Reported basis - `profile.rs:511-521` returns early on a poisoned lock and performs the subtraction inside `if let Some(active) = ...checked_sub(charges)`, so both failures are silent, while `Drop` still marks the state `Released` (`profile.rs:581-588`). I verified the analogous pattern in `quarantine()` by direct read, but not the `release()` body itself."
       },
       "existing_check": "none.",
       "impact": "`active` diverges permanently from the live set, so admission refuses candidates the host can afford, or accepts ones it cannot.",
       "open_questions": [],
-      "extra": {
-        "Reported basis": "`profile.rs:511-521` returns early on a poisoned lock and performs the subtraction inside `if let Some(active) = ...checked_sub(charges)`, so both failures are silent, while `Drop` still marks the state `Released` (`profile.rs:581-588`). I verified the analogous pattern in `quarantine()` by direct read, but not the `release()` body itself."
-      }
+      "extra": {}
     },
     {
       "slug": "custody-terminal-transition-exactly-once",
@@ -292,15 +284,12 @@
       "required_faults": "a live lease **and** a release from the producer side using the identity returned by `commit`.",
       "confidence": {
         "level": "high",
-        "evidence": "on the API shape, and the reachability question is now settled as latent — [evidence](evidence/release-authority-bound-to-lease-ownership.md)."
+        "evidence": "on the API shape, and the reachability question is now settled as latent — [evidence](evidence/release-authority-bound-to-lease-ownership.md). Verified by direct read of both signatures - `pub fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError>` (`ring.rs:1175`) validates identity and slot state only, and `pub fn commit(mut self, body_len: usize) -> Result<ReleaseIdentity, ProducerError>` (`ring.rs:1769`) hands that identity to the producer. No role, owner, or lease-token check exists on the release path. Reachability verdict - **not reachable in the shipped two-process topology.** Re-verified against `ring_transport.rs` at `e447c927`, and again at post-#131 HEAD (2026-08-31), after the refactor rewrote every host-side producer path, because the verdict rests on caller behaviour that the refactor could have changed. It did not. Every non-test `commit` caller still discards the returned identity: all three host call sites put `commit` in statement position under `?` (`ring_transport.rs:615` in `publish_direct`, `:628` in `publish_owned`, `:696` in `RingClientEndpoint::send`), and the addon's two call sites do the same (`packages/shm-native/src/lib.rs:929-932`, `:1043-1046`). The only non-test direct `Ring::release` is a receiver completing its own lease (`lib.rs:327-331`, on the receive ring with an identity from `lease.identity()` held in the addon's table because `poll` forgets the lease). And the two directions are separate objects with independent random incarnations (`DuplexRing::create`, `ring.rs:757`), so a cross-ring release fails the incarnation check at `:1179-1184`. The violating composition is reachable only in a same-process, single-`Ring` arrangement, which today means the transport's own tests."
       },
       "existing_check": "none. The identity-validation tests (`tests/ring.rs:152-175`, `:206`) all issue releases from the legitimate holder.",
       "impact": "a latent API-shape hazard rather than a live defect. What keeps it worth a record is that the composition is available rather than prevented, and in `tests/ring.rs` the violating call sits one unmutated argument away from an existing assertion. If a future caller retains a committed identity — for instance to implement producer-side reclamation — this becomes a read-after-recycle on leased bytes with no malformed input required.",
       "open_questions": [],
-      "extra": {
-        "Verified by direct read of both signatures": "`pub fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError>` (`ring.rs:1175`) validates identity and slot state only, and `pub fn commit(mut self, body_len: usize) -> Result<ReleaseIdentity, ProducerError>` (`ring.rs:1769`) hands that identity to the producer. No role, owner, or lease-token check exists on the release path.",
-        "Reachability verdict": "**not reachable in the shipped two-process topology.** Re-verified against `ring_transport.rs` at `e447c927`, and again at post-#131 HEAD (2026-08-31), after the refactor rewrote every host-side producer path, because the verdict rests on caller behaviour that the refactor could have changed. It did not. Every non-test `commit` caller still discards the returned identity: all three host call sites put `commit` in statement position under `?` (`ring_transport.rs:615` in `publish_direct`, `:628` in `publish_owned`, `:696` in `RingClientEndpoint::send`), and the addon's two call sites do the same (`packages/shm-native/src/lib.rs:929-932`, `:1043-1046`). The only non-test direct `Ring::release` is a receiver completing its own lease (`lib.rs:327-331`, on the receive ring with an identity from `lease.identity()` held in the addon's table because `poll` forgets the lease). And the two directions are separate objects with independent random incarnations (`DuplexRing::create`, `ring.rs:757`), so a cross-ring release fails the incarnation check at `:1179-1184`. The violating composition is reachable only in a same-process, single-`Ring` arrangement, which today means the transport's own tests."
-      }
+      "extra": {}
     },
     {
       "slug": "release-exactly-once-per-sequence",
@@ -347,14 +336,12 @@
       "required_faults": "none, because the property is now that the branches are not entered. A synthetic failpoint would prove nothing about production, since it would construct a state `validate` excludes.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/receive-failure-leaves-no-wedged-slot.md)."
+        "evidence": "[evidence](evidence/receive-failure-leaves-no-wedged-slot.md). Verified by inspection - `enter_quarantine` is called exactly once inside `try_receive`, at `ring.rs:1098`, on the validation path only. Two independent analyses then agreed that an accepted descriptor guarantees the span count and bounds that both constructors check, so all three branches are dead given `validate` on a 64-bit target."
       },
       "existing_check": "none.",
       "impact": "as written, none in production — this is a correctness argument the code does not state. The value of the record is that three `Result` paths exist for conditions that cannot arise, and nothing marks them as such. A future change to `validate` silently converts them from dead code into the wedge described above, with no test covering the transition.",
       "open_questions": [],
-      "extra": {
-        "Verified by inspection": "`enter_quarantine` is called exactly once inside `try_receive`, at `ring.rs:1098`, on the validation path only. Two independent analyses then agreed that an accepted descriptor guarantees the span count and bounds that both constructors check, so all three branches are dead given `validate` on a 64-bit target."
-      }
+      "extra": {}
     },
     {
       "slug": "release-failure-is-observable",
@@ -449,7 +436,7 @@
         "semantics": "always",
         "condition": "after killing and reaping a committed peer, either the killed connection's exact charges return to free capacity once the sentinel-triggered teardown completes, or the accounting snapshot exposes them as a distinct \"unreclaimable\" class that the admission contract accounts for. `always` because the obligation applies at every peer death, not at one code point."
       },
-      "fault_timing": "a dead peer closes its doorbell end, and the socketpair doorbell reports that: `drain` reads zero bytes and returns `DoorbellFailed` (`ring.rs:638`), `signal` fails on the closed peer, and `poll` sees hang-up (`closed_peer_doorbell_fails_instead_of_blocking`, `ring.rs:3088-3094`). The rest of this angle was written against the source tree's eventfd doorbells, under which a dead peer was pure silence: it never signalled `data_ready`, so the endpoint armed the data wait (`crates/host-runtime/src/ring_transport.rs:429`) and parks in the readiness select (`:441-474`); the ring path alone never produces an error, a wake, or a suspect, and a parked endpoint is indistinguishable from an idle one.",
+      "fault_timing": "a dead peer closes its doorbell end, and the socketpair doorbell reports that: `drain` reads zero bytes and returns `DoorbellFailed` (`ring.rs:638`), `signal` fails on the closed peer, and `poll` sees hang-up (`closed_peer_doorbell_fails_instead_of_blocking`, `ring.rs:3088-3094`). The rest of this angle was written against the source tree's eventfd doorbells, under which a dead peer was pure silence: it never signalled `data_ready`, so the endpoint armed the data wait (`crates/host-runtime/src/ring_transport.rs:429`) and parks in the readiness select (`:441-474`); the ring path alone never produces an error, a wake, or a suspect, and a parked endpoint is indistinguishable from an idle one. Detection is out of band - the setup socket is held open as the peer-lifetime sentinel, and a non-`Goodbye` closure records a peer death and cancels the generation (`crates/host-runtime/src/connection.rs:180-190`), after which the endpoint thread joins and `admission.release()` runs unconditionally (`ring_transport.rs:276`). With outbound frames queued, the other path is `reserve_until` parking on the `capacity_ready` doorbell and returning `Deadline` at `frame_deadline` (`crates/shm-transport/src/backend/ring.rs:1035`, `:1043-1044`), which fails the publish and cancels (`ring_transport.rs:479-483`). Both paths converge on the same unconditional release; the pre-refactor release-versus-suspect fork is gone.",
       "required_faults": "an actual kill without `Goodbye`, plus a committed candidate.",
       "confidence": {
         "level": "high",
@@ -458,9 +445,7 @@
       "existing_check": "the SIGKILL test above. Status unaudited as an oracle for the per-identity tuple: readmission at a one-connection cap witnesses that enough capacity returned, not that the killed candidate's exact tuple did.",
       "impact": "if release fails after a peer death, then with single-candidate limits one dead peer permanently ends shared-memory eligibility for the process while readiness still reports healthy. Under the source tree's blocking eventfd waits nothing on the ring path surfaced it, because the endpoint parked silently instead of visibly polling an empty ring. With socketpair doorbells the closed peer end surfaces as `DoorbellFailed` on the next `drain` or `signal`; whether that reaches the release path is part of the open question.",
       "open_questions": [],
-      "extra": {
-        "Detection is out of band": "the setup socket is held open as the peer-lifetime sentinel, and a non-`Goodbye` closure records a peer death and cancels the generation (`crates/host-runtime/src/connection.rs:180-190`), after which the endpoint thread joins and `admission.release()` runs unconditionally (`ring_transport.rs:276`). With outbound frames queued, the other path is `reserve_until` parking on the `capacity_ready` doorbell and returning `Deadline` at `frame_deadline` (`crates/shm-transport/src/backend/ring.rs:1035`, `:1043-1044`), which fails the publish and cancels (`ring_transport.rs:479-483`). Both paths converge on the same unconditional release; the pre-refactor release-versus-suspect fork is gone."
-      }
+      "extra": {}
     },
     {
       "slug": "cancelled-frame-disposition-is-declared",
@@ -559,14 +544,12 @@
       "required_faults": "a peer write to a `RELEASE_PENDING` slot's descriptor between release and reclaim.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/reclaim-advance-bounded-by-the-producer-reservation.md)."
+        "evidence": "[evidence](evidence/reclaim-advance-bounded-by-the-producer-reservation.md). Verified by direct read at HEAD - `Ring` holds `published_allocations: Vec<Cell<Option<(u64, u64)>>>` (`ring.rs:897`, built by `allocation_shadow`, `:295-297`) as a producer-private record of each published slot's allocation; `reclaim_completed_inner` (`:2078`) re-reads the descriptor, validates it, and returns `InvalidSharedState` when `(allocation_start, allocation_len)` differs from the shadow (`:2106-2112`), then checks the FIFO start (`:2116-2117`). The source tree consumed the re-read `allocation_len` with only the start check and both candidate records lived in peer-writable memory; that is the defect this record was written against, and the producer-local table its open question proposed is what HEAD implements."
       },
       "existing_check": "`lengthened_released_descriptor_cannot_reclaim_a_live_frame` (`ring.rs:3163`). Status unaudited.",
       "impact": "if the shadow comparison were removed, the reclaim cursor could be pushed past bytes still under a live lease; later underflow would be caught, so the result would be corruption and denial of service rather than an out-of-bounds access.",
       "open_questions": [],
-      "extra": {
-        "Verified by direct read at HEAD": "`Ring` holds `published_allocations: Vec<Cell<Option<(u64, u64)>>>` (`ring.rs:897`, built by `allocation_shadow`, `:295-297`) as a producer-private record of each published slot's allocation; `reclaim_completed_inner` (`:2078`) re-reads the descriptor, validates it, and returns `InvalidSharedState` when `(allocation_start, allocation_len)` differs from the shadow (`:2106-2112`), then checks the FIFO start (`:2116-2117`). The source tree consumed the re-read `allocation_len` with only the start check and both candidate records lived in peer-writable memory; that is the defect this record was written against, and the producer-local table its open question proposed is what HEAD implements."
-      }
+      "extra": {}
     },
     {
       "slug": "attach-binds-geometry-to-a-local-profile",
@@ -979,14 +962,12 @@
       "required_faults": "none for the static half. For coverage, an `expected` identity differing from the decoded one in incarnation or sequence, which neither fuzz target supplies, so the guards at `descriptor.rs:229-231` and `:235-237` are reached by no campaign execution.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/fuzz-harness-encoding-tracks-the-production-descriptor.md)."
+        "evidence": "[evidence](evidence/fuzz-harness-encoding-tracks-the-production-descriptor.md). Measured - `FRAME_DESCRIPTOR_BYTES` is 108 (`harness.rs:16-17`) while `size_of::<SharedDescriptor>()` is 120 with 12 bytes of padding; every field from `lane` onward sits at a different offset, and the span region is interleaved in the harness but grouped in the struct. That is not a defect, because production reads typed fields via `snapshot()` and never sees bytes. The 108-byte map is exactly a bijection: ten field widths total 864 bits, and 108 bytes is 864 bits. The 120-byte figure was confirmed twice: by a layout program, and through the corpus, since the `provider_grant/valid` seed's `total_bytes` of 67,125,248 is reproduced by `Layout::new(32, 64 MiB)` only if `DescriptorSlot` is 256 bytes, which requires the 120-byte descriptor, and that seed is accepted by a passing test."
       },
       "existing_check": "partial and type-level only. `MAX_SPANS` is coupled by a two-element array literal, and `from_untrusted`'s argument list makes an added field a compile error. `tests/contract.rs:743-766` sweeps the constant and the constant plus one. Nothing asserts the read regions sum to the constant, and nothing asserts the incarnation and sequence guards are reachable from fuzzing. Status unaudited.",
       "impact": "the offsets are independent literals, so a reordering preserving the total keeps the length gate satisfied and the bit count at 864. And two of the five identity conditions in the load-bearing `validate` function are covered only by tabled unit cases, never by fuzzing.",
       "open_questions": [],
-      "extra": {
-        "Measured": "`FRAME_DESCRIPTOR_BYTES` is 108 (`harness.rs:16-17`) while `size_of::<SharedDescriptor>()` is 120 with 12 bytes of padding; every field from `lane` onward sits at a different offset, and the span region is interleaved in the harness but grouped in the struct. That is not a defect, because production reads typed fields via `snapshot()` and never sees bytes. The 108-byte map is exactly a bijection: ten field widths total 864 bits, and 108 bytes is 864 bits. The 120-byte figure was confirmed twice: by a layout program, and through the corpus, since the `provider_grant/valid` seed's `total_bytes` of 67,125,248 is reproduced by `Layout::new(32, 64 MiB)` only if `DescriptorSlot` is 256 bytes, which requires the 120-byte descriptor, and that seed is accepted by a passing test."
-      }
+      "extra": {}
     },
     {
       "slug": "macos-object-creation-outcome-is-attributed",
@@ -1245,18 +1226,15 @@
         "condition": "reserve and commit past the subscriber buffer bound with no intervening receive and assert the final `commit` returns within a deadline as some bounded error; separately, retain `max_leases` leases and assert `try_receive` returns `Ok(None)` rather than `Err`, then release one and assert the queued frame arrives. `always` in the bounded-liveness sense used by `crashed-producer-does-not-wedge-the-sequence`: the obligation holds whenever the state is entered, checked in a fault-free window after it is established."
       },
       "fault_timing": "no window; both are state conditions reached by counting operations and permanent while the state holds. The publish-side block is unbounded in wall-clock time and unbreakable on one thread, because the backend pins both ports to one thread via `_not_send: PhantomData<Rc<()>>` (`iceoryx.rs:45`), so the only party that could drain the queue is the thread blocked inside `send()`.",
-      "required_faults": "none; no fault class and no concurrency.",
+      "required_faults": "none; no fault class and no concurrency. Publish side - `descriptor_depth + 1` commits with no receive. Receive side: publish to the buffer bound, retain `max_leases` leases, publish once more. A plain test on the publish side hangs, so the harness needs a terminating timeout.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/iceoryx-saturation-is-bounded-non-blocking-backpressure.md)."
+        "evidence": "[evidence](evidence/iceoryx-saturation-is-bounded-non-blocking-backpressure.md). The compiled default was traced - the publisher builder (`iceoryx.rs:89-106`) never sets a backpressure strategy, so it inherits `RetryUntilDelivered`; with `enable_safe_overflow(false)` (`:80`) the send routes to a blocking path that spins while the submission queue is full. On the receive side the library returns an exceeds-max-borrows error when every channel with data sits at the borrow cap, and `iceoryx.rs:151-157` collapses every receive error into `IceoryxError::ReceiveFailed`, indistinguishable from a connection failure."
       },
       "existing_check": "none on iceoryx. The ring's counterpart is pinned at `tests/ring.rs:279`. Status unaudited.",
       "impact": "the ring answers a full descriptor set with `Exhausted`, which `reserve_until` converts to `Deadline`, and a full lease set with `Ok(None)` under the stated rule that a full lease set is backpressure and errors are reserved for channel-ending faults. The iceoryx path violates both halves: the publisher can hang forever with no deadline parameter, and normal receive backpressure is reported as a fault. Both caps are handed to the provider and never consulted locally, so the backend cannot report saturation in its own vocabulary.",
       "open_questions": [],
-      "extra": {
-        "Publish side": "`descriptor_depth + 1` commits with no receive. Receive side: publish to the buffer bound, retain `max_leases` leases, publish once more. A plain test on the publish side hangs, so the harness needs a terminating timeout.",
-        "The compiled default was traced": "the publisher builder (`iceoryx.rs:89-106`) never sets a backpressure strategy, so it inherits `RetryUntilDelivered`; with `enable_safe_overflow(false)` (`:80`) the send routes to a blocking path that spins while the submission queue is full. On the receive side the library returns an exceeds-max-borrows error when every channel with data sits at the borrow cap, and `iceoryx.rs:151-157` collapses every receive error into `IceoryxError::ReceiveFailed`, indistinguishable from a connection failure."
-      },
+      "extra": {},
       "unreachability_evidence": "`0f336d3c` deleted the backend. What the record established is that the removed backend inherited its backpressure strategy from an external `iceoryx2.toml` rather than pinning it, so a full publish queue blocked indefinitely on the one thread that could have drained it, and ordinary receive backpressure was reported as a channel-ending fault — the opposite of the ring's `Exhausted`-plus-`Ok(None)` split, which survives."
     },
     {
@@ -1267,7 +1245,7 @@
       "status": "active",
       "exercised": {
         "state": "partial",
-        "note": "the pre-#131 `crates/host-runtime/tests/shm_failure_modes.rs:195` published one header the transport accepts and the host rejects, but asserted only the downstream quarantine, so it could not distinguish rejection before the charge from rejection after it. That test is absent from the rewritten post-#131 file (refresh note 2026-08-31), so even this partial arm needs re-establishing."
+        "note": "the pre-#131 `crates/host-runtime/tests/shm_failure_modes.rs:195` published one header the transport accepts and the host rejects, but asserted only the downstream quarantine, so it could not distinguish rejection before the charge from rejection after it. That test is absent from the rewritten post-#131 file (refresh note 2026-08-31), so even this partial arm needs re-establishing. Missing - any assertion that no ingress permit was taken and no inbound event emitted."
       },
       "guarantee": "No consumer of a shared-memory frame acts on any header field, or on the body it describes, before both host header gates have accepted it.",
       "check": {
@@ -1283,9 +1261,7 @@
       "existing_check": "the pre-#131 `shm_failure_modes.rs:195` `corrupt_peer_frame_quarantines_exact_charges_and_returns_ready` (one role-invalid type, quarantine outcome only) was removed in the #131 test rewrite; no successor found at HEAD. Status unaudited as an ordering oracle.",
       "impact": "this is the ordering the trust boundary rests on, and it is correct at HEAD. Cataloged because nothing fails if it stops being correct. Moving the charge or the copy above `ring_transport.rs:503` lets a peer hold up to 64 MiB of ingress budget for a frame deadline on a frame already known illegal, and the transport cannot compensate, because `host-runtime` depends on `shm-transport` and so `FrameType`, `Flags`, and the protocol version are unreachable from the validating crate.",
       "open_questions": [],
-      "extra": {
-        "Missing": "any assertion that no ingress permit was taken and no inbound event emitted."
-      }
+      "extra": {}
     },
     {
       "slug": "ingress-charge-matches-the-bytes-copied-from-shared-storage",
@@ -1639,7 +1615,7 @@
       "guarantee": "when a released byte charge frees read-budget capacity **sufficient to admit the pending frame**, a bridge blocked waiting for that capacity resumes within one poll wakeup, admits the pending frame, and continues delivery. A release that frees fewer bytes than the pending frame needs wakes the bridge but does not discharge the guarantee: the charge closure re-runs `read_budget.charge(bytes)` (`client.rs:1873`), fails again, and re-parks. With 100 of 100 bytes used and an 80-byte frame pending, dropping a 20-byte charge produces exactly one more failed attempt. The liveness claim is therefore over the *cumulative* release that first satisfies the pending charge, not over any single drop.",
       "check": {
         "semantics": "always",
-        "condition": "every `ByteCharge::drop` that decrements a counter with a registered wake signals that wake's eventfd (`client.rs:1711-1725`), and a bridge parked in the charge loop observes it on its next poll (`:1879-1901`). `always` because the drop-side signal is unconditional given a registered wake; the bounded window is one poll wakeup plus one loop iteration **after a release that satisfies the pending charge** — an insufficient release costs one extra failed `charge` attempt and re-park, and does not start the window."
+        "condition": "every `ByteCharge::drop` that decrements a counter with a registered wake signals that wake's eventfd (`client.rs:1711-1725`), and a bridge parked in the charge loop observes it on its next poll (`:1879-1901`). `always` because the drop-side signal is unconditional given a registered wake; the bounded window is one poll wakeup plus one loop iteration **after a release that satisfies the pending charge** — an insufficient release costs one extra failed `charge` attempt and re-park, and does not start the window. Harness proxy - **receipt of the pending inbound frame** on the bridge's read channel within an explicit wall-clock deadline of the release that first frees enough bytes for that frame, since loop passes are not externally observable. The test must therefore size the released charge against the pending frame, not merely drop some charge. Per-write completion is **not** a valid proxy: the loop services `write_rx` at `:1847-1859` *before* it reaches `try_recv_with(charge)` at `:1903`, so a write submitted before the park completes and reports success while the bridge then parks indefinitely and the inbound frame is never admitted — a false pass on exactly the wedge this record exists to catch. The test must also account for the other writers of the same descriptor: `worker_wake` is signalled by `ByteCharge::drop` (`:1722`), `RingWriteSender::try_send` (`:1766`), and `RingWriteSender::drop` (`:1773`), so outbound traffic has to be quiesced for the observed resumption to be attributable to the charge release rather than merely counted."
       },
       "fault_timing": "signal-before-park — the drop can land between the failed `charge` attempt and the bridge's `poll`. The eventfd absorbs it: the write leaves the counter readable, so the later poll returns immediately. No parked-epoch protocol exists on this path and none is needed; the eventfd is the level-observable state.",
       "required_faults": "read-budget exhaustion with the bridge parked in the charge poll, then a concurrent charge drop. Needs a shrunken budget or frames wider than the default. Enabling situation `shm_read_budget_exhausted_with_parked_bridge`, witnessed as `read_budget.used == capacity` at the moment a further frame is published, followed by bounded resumption after one `ByteCharge` drop. The test is necessarily in-module — `start_ring_bridge` is private and the `used()` accessor exists under `#[cfg(test)]` (`client.rs:1688-1690`).",
@@ -1650,9 +1626,7 @@
       "existing_check": "none.",
       "impact": "a read-heavy channel with no outbound writes wedges permanently at the first budget exhaustion — frames accumulate unread, the producer exhausts and reports deadlines, and the defect is attributed to the peer.",
       "open_questions": [],
-      "extra": {
-        "Harness proxy": "**receipt of the pending inbound frame** on the bridge's read channel within an explicit wall-clock deadline of the release that first frees enough bytes for that frame, since loop passes are not externally observable. The test must therefore size the released charge against the pending frame, not merely drop some charge. Per-write completion is **not** a valid proxy: the loop services `write_rx` at `:1847-1859` *before* it reaches `try_recv_with(charge)` at `:1903`, so a write submitted before the park completes and reports success while the bridge then parks indefinitely and the inbound frame is never admitted — a false pass on exactly the wedge this record exists to catch. The test must also account for the other writers of the same descriptor: `worker_wake` is signalled by `ByteCharge::drop` (`:1722`), `RingWriteSender::try_send` (`:1766`), and `RingWriteSender::drop` (`:1773`), so outbound traffic has to be quiesced for the observed resumption to be attributable to the charge release rather than merely counted."
-      }
+      "extra": {}
     },
     {
       "slug": "capacity-recheck-after-a-wake-race",

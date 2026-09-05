@@ -329,7 +329,7 @@ Required faults and enabling state: a quarantine trigger (corrupt descriptor, or
 a failed alias detach) **and** a peer that writes the shared lifecycle page
 after it. Without the second, the check passes without testing anything.
 Confidence: high — [evidence](evidence/quarantine-authority-survives-peer-writes.md).
-Verified by direct read at HEAD: `Ring.quarantined: Cell<bool>` (`ring.rs:883`);
+Verified by direct read at HEAD - `Ring.quarantined: Cell<bool>` (`ring.rs:883`);
 `enter_quarantine` sets the local cell first and then stores the shared flag
 (`:1889-1897`); `is_quarantined` returns the local cell when set, otherwise
 loads the shared flag, treats an unreadable lifecycle page as quarantined, and
@@ -386,7 +386,7 @@ publishes a corrupt frame → the receiver's `try_receive` quarantines
 Required faults and enabling state: an outstanding `ProducerReservation`
 **and** a quarantine trigger from the other side during its lifetime.
 Confidence: high — [evidence](evidence/quarantine-gates-cover-every-storage-mutation.md).
-Verified by direct read at HEAD: `ProducerReservation::commit`
+Verified by direct read at HEAD - `ProducerReservation::commit`
 (`ring.rs:2566-2572`) checks `ring.is_quarantined()` first, aborts the
 reservation, and returns `ProducerError::Quarantined`, so the commit path is
 gated. `try_reserve`, `try_receive`, `release`, and `probe` gate on
@@ -428,7 +428,7 @@ first reserve or receive.
 Required faults and enabling state: a quarantine trigger, then a fresh attach
 using the same grant.
 Confidence: high — [evidence](evidence/attach-refuses-a-quarantined-object.md).
-Raised from medium after direct verification: `validate_lifecycle`
+Raised from medium after direct verification - `validate_lifecycle`
 (`ring.rs:2067-2098`) reads exactly eight fields at `:2074-2085` — magic, layout
 version, depth, arena, leases, total, incarnation, and lane — and compares them
 at `:2086-2096`. It never reads `quarantined`. The per-operation gates are the
@@ -526,7 +526,7 @@ mismatched or double release makes `checked_sub` fail.
 Required faults and enabling state: lock poisoning, or an arithmetic
 inconsistency in `active`.
 Confidence: medium — [evidence](evidence/charge-release-never-silently-strands.md).
-Reported basis: `profile.rs:511-521` returns early on a poisoned lock and
+Reported basis - `profile.rs:511-521` returns early on a poisoned lock and
 performs the subtraction inside `if let Some(active) = ...checked_sub(charges)`,
 so both failures are silent, while `Drop` still marks the state `Released`
 (`profile.rs:581-588`). I verified the analogous pattern in `quarantine()` by
@@ -803,13 +803,13 @@ Required faults and enabling state: a live lease **and** a release from the
 producer side using the identity returned by `commit`.
 Confidence: high on the API shape, and the reachability question is now settled
 as latent — [evidence](evidence/release-authority-bound-to-lease-ownership.md).
-Verified by direct read of both signatures:
+Verified by direct read of both signatures -
 `pub fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError>`
 (`ring.rs:1175`) validates identity and slot state only, and
 `pub fn commit(mut self, body_len: usize) -> Result<ReleaseIdentity, ProducerError>`
 (`ring.rs:1769`) hands that identity to the producer. No role, owner, or
 lease-token check exists on the release path.
-Reachability verdict: **not reachable in the shipped two-process topology.**
+Reachability verdict - **not reachable in the shipped two-process topology.**
 Re-verified against `ring_transport.rs` at `e447c927`, and again at post-#131
 HEAD (2026-08-31), after the refactor rewrote
 every host-side producer path, because the verdict rests on caller behaviour that
@@ -917,7 +917,7 @@ Required faults and enabling state: none, because the property is now that the
 branches are not entered. A synthetic failpoint would prove nothing about
 production, since it would construct a state `validate` excludes.
 Confidence: high — [evidence](evidence/receive-failure-leaves-no-wedged-slot.md).
-Verified by inspection: `enter_quarantine` is called exactly once inside
+Verified by inspection - `enter_quarantine` is called exactly once inside
 `try_receive`, at `ring.rs:1098`, on the validation path only. Two independent
 analyses then agreed that an accepted descriptor guarantees the span count and
 bounds that both constructors check, so all three branches are dead given
@@ -1113,7 +1113,7 @@ the endpoint armed the data wait
 (`crates/host-runtime/src/ring_transport.rs:429`) and parks in the readiness select
 (`:441-474`); the ring path alone never produces an error, a wake, or a
 suspect, and a parked endpoint is indistinguishable from an idle one.
-Detection is out of band: the setup socket is held open as the peer-lifetime
+Detection is out of band - the setup socket is held open as the peer-lifetime
 sentinel, and a non-`Goodbye` closure records a peer death and cancels the
 generation (`crates/host-runtime/src/connection.rs:180-190`), after which the
 endpoint thread joins and `admission.release()` runs unconditionally
@@ -1319,7 +1319,7 @@ pinned where the advance started but not how far it went.
 Required faults and enabling state: a peer write to a `RELEASE_PENDING` slot's
 descriptor between release and reclaim.
 Confidence: high - [evidence](evidence/reclaim-advance-bounded-by-the-producer-reservation.md).
-Verified by direct read at HEAD: `Ring` holds `published_allocations:
+Verified by direct read at HEAD - `Ring` holds `published_allocations:
 Vec<Cell<Option<(u64, u64)>>>` (`ring.rs:897`, built by `allocation_shadow`,
 `:295-297`) as a producer-private record of each published slot's allocation;
 `reclaim_completed_inner` (`:2078`) re-reads the descriptor, validates it, and
@@ -2092,7 +2092,7 @@ Required faults and enabling state: none for the static half. For coverage, an
 which neither fuzz target supplies, so the guards at `descriptor.rs:229-231` and
 `:235-237` are reached by no campaign execution.
 Confidence: high — [evidence](evidence/fuzz-harness-encoding-tracks-the-production-descriptor.md).
-Measured: `FRAME_DESCRIPTOR_BYTES` is 108 (`harness.rs:16-17`) while
+Measured - `FRAME_DESCRIPTOR_BYTES` is 108 (`harness.rs:16-17`) while
 `size_of::<SharedDescriptor>()` is 120 with 12 bytes of padding; every field from
 `lane` onward sits at a different offset, and the span region is interleaved in
 the harness but grouped in the struct. That is not a defect, because production
@@ -2770,11 +2770,11 @@ pins both ports to one thread via `_not_send: PhantomData<Rc<()>>`
 (`iceoryx.rs:45`), so the only party that could drain the queue is the thread
 blocked inside `send()`.
 Required faults and enabling state: none; no fault class and no concurrency.
-Publish side: `descriptor_depth + 1` commits with no receive. Receive side:
+Publish side - `descriptor_depth + 1` commits with no receive. Receive side:
 publish to the buffer bound, retain `max_leases` leases, publish once more. A
 plain test on the publish side hangs, so the harness needs a terminating timeout.
 Confidence: high — [evidence](evidence/iceoryx-saturation-is-bounded-non-blocking-backpressure.md).
-The compiled default was traced: the publisher builder (`iceoryx.rs:89-106`)
+The compiled default was traced - the publisher builder (`iceoryx.rs:89-106`)
 never sets a backpressure strategy, so it inherits `RetryUntilDelivered`; with
 `enable_safe_overflow(false)` (`:80`) the send routes to a blocking path that
 spins while the submission queue is full. On the receive side the library returns
@@ -2841,7 +2841,7 @@ header the transport accepts and the host rejects, but asserted only the
 downstream quarantine, so it could not distinguish rejection before the charge from
 rejection after it. That test is absent from the rewritten post-#131 file
 (refresh note 2026-08-31), so even this partial arm needs re-establishing.
-Missing: any assertion that no ingress permit was taken and no
+Missing - any assertion that no ingress permit was taken and no
 inbound event emitted.
 Guarantee: No consumer of a shared-memory frame acts on any header field, or on
 the body it describes, before both host header gates have accepted it.
@@ -3736,7 +3736,7 @@ bridge parked in the charge loop observes it on its next poll (`:1879-1901`).
 wake; the bounded window is one poll wakeup plus one loop iteration **after a
 release that satisfies the pending charge** — an insufficient release costs one
 extra failed `charge` attempt and re-park, and does not start the window.
-Harness proxy: **receipt of the pending inbound frame** on the bridge's read
+Harness proxy - **receipt of the pending inbound frame** on the bridge's read
 channel within an explicit wall-clock deadline of the release that first frees
 enough bytes for that frame, since loop passes are not externally observable.
 The test must therefore size the released charge against the pending frame, not
@@ -4054,14 +4054,19 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   parked-epoch protocol does not apply there, level-observable eventfd state
   does. Neither dominates the other — one guards the write queue, one the read
   budget — but a fix that serialized bridge passes wrongly would break both.
-- **Two definitions of one wire contract.**
+- **The setup handshake's two kinds of contract.**
   `setup-proof-vectors-pin-the-shared-hmac-transcript` and
-  `addon-grant-decoding-is-the-shared-setup-envelope` are both agreement
-  properties between the host's and the addon's separate implementations of the
-  setup handshake. The proof vectors have a committed cross-side fixture and an
-  external oracle; the grant envelope has neither, which is why the first is
-  `high` and the second is `low`. A shared fixture for the envelope would put
-  the two on the same footing.
+  `addon-grant-decoding-is-the-shared-setup-envelope` both guard the setup
+  handshake, but against different drift. The HMAC has one implementation,
+  `shm_transport::setup_auth::compute_proof`, which the host wrapper
+  (`crates/host-runtime/src/auth.rs:119-127`) and the addon helper
+  (`packages/shm-native/src/setup.rs:248-256`) both call; the vectors therefore
+  test that one implementation against an external contract, and a symmetric
+  change would pass every in-tree round trip. The JSON grant envelope has two
+  independent definitions (host struct, addon enum) with no shared fixture, so
+  what it needs is cross-side agreement, which nothing asserts. That difference
+  is why the first record is `high` and the second is `low`; a shared fixture
+  for the envelope would give it the footing the vectors already have.
 - **Alias lifetime at channel close.** `addon-reservations-drop-before-the-ring`
   is the addon-side half of `documented-close-order-has-a-production-driver`:
   the host's close order returns the charge when the mapping is unmapped, and

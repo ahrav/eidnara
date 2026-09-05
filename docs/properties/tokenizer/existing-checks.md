@@ -11,7 +11,7 @@ already did so.
 
 | Test | Claim asserted | Status |
 | --- | --- | --- |
-| `encode_ordinary_matches_ai_tokenizer_ids` (`:24`) | For all 36 golden cases, `encode_ordinary(text) == golden.ids` | audited at U3 (`tokenizer-encoding-matches-the-independent-oracle`) |
+| `encode_ordinary_matches_ai_tokenizer_ids` (`:24`) | For all 46 golden cases, `encode_ordinary(text) == golden.ids` | audited at U3 (`tokenizer-encoding-matches-the-independent-oracle`) |
 | `estimate_tokens_matches_golden_counts` (`:47`) | For all golden cases, `estimate_tokens(text) == golden.ids.len()` | audited at U3 (same record) |
 | `empty_text_is_zero` (`:59`) | `estimate_tokens("") == 0` | unaudited |
 | `deterministic_across_calls` (`:64`) | Repeated calls on one input return identical ids | unaudited |
