@@ -1554,8 +1554,16 @@ impl Inner {
                                         // that lands before the insert must be remembered.
                                         if header.channel == 0
                                             && let Ok(handle) = parse_route_open(&body)
+                                            && !lock_unpoisoned(&self.binds)
+                                                .publishing
+                                                .insert(handle)
                                         {
-                                            lock_unpoisoned(&self.binds).publishing.insert(handle);
+                                            // Two matched binds for one handle collapse into one
+                                            // publication owner, so a `Goodbye` in this window could
+                                            // reach only one of them; live routes must be distinct.
+                                            drop(charge);
+                                            self.retire("invalid_route_response");
+                                            return;
                                         }
                                         Ok(RetainedResponse {
                                             response: Response {
@@ -2903,54 +2911,53 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
             return Err(invalid(String::new()));
         }
     }
-    // The byte cap runs first: its counting writer stops the serializer at the cap, so
-    // every later check runs over a value already known to encode within it.
     if identity.admission_facts.as_ref().is_some_and(|facts| {
-        !compact_json_fits(facts, MAX_ADMISSION_FACTS_BYTES)
-            || exceeds_depth(facts, MAX_ADMISSION_FACTS_DEPTH)
+        !json_within_bounds(facts, MAX_ADMISSION_FACTS_BYTES, MAX_ADMISSION_FACTS_DEPTH)
     }) {
         return Err(invalid(String::new()));
     }
     Ok(())
 }
 
-/// Whether `value` nests deeper than `limit`. The walk is iterative, so it cannot exhaust
-/// the stack; each nesting level costs at least one byte to encode, so on a value that
-/// fits the byte cap the frontier is bounded by that cap.
-fn exceeds_depth(value: &Value, limit: usize) -> bool {
+/// Whether `value` nests no deeper than `max_depth` and its compact encoding is at most
+/// `max_bytes`. The walk is iterative and charges each node a lower bound of its encoded
+/// size from `len()` alone, without scanning string contents, so it stops after work
+/// proportional to `max_bytes` on any caller-built value; the host applies the exact
+/// bound to what is sent.
+fn json_within_bounds(value: &Value, max_bytes: usize, max_depth: usize) -> bool {
+    let mut budget = max_bytes;
+    let mut charge = |bytes: usize| -> bool {
+        budget = budget.saturating_sub(bytes);
+        budget > 0 || bytes == 0
+    };
     let mut frontier: Vec<(&Value, usize)> = vec![(value, 0)];
     while let Some((node, depth)) = frontier.pop() {
+        let lower_bound = match node {
+            Value::Null => 4,
+            Value::Bool(_) => 4,
+            Value::Number(_) => 1,
+            // Quotes plus the raw bytes; escapes only lengthen the encoding.
+            Value::String(text) => text.len() + 2,
+            // Brackets plus one separator per child; keys add quotes, a colon, and their bytes.
+            Value::Array(items) => 2 + items.len().saturating_sub(1),
+            Value::Object(map) => {
+                2 + map.len().saturating_sub(1) + map.keys().map(|key| key.len() + 3).sum::<usize>()
+            }
+        };
+        if !charge(lower_bound) {
+            return false;
+        }
         let children: Box<dyn Iterator<Item = &Value>> = match node {
             Value::Array(items) => Box::new(items.iter()),
             Value::Object(map) => Box::new(map.values()),
             _ => continue,
         };
-        if depth + 1 > limit {
-            return true;
+        if depth + 1 > max_depth {
+            return false;
         }
         frontier.extend(children.map(|child| (child, depth + 1)));
     }
-    false
-}
-
-/// Whether `value`'s compact encoding is at most `cap` bytes, measured by a counting
-/// writer that stops the serializer as soon as the cap is exceeded, so the cost is
-/// bounded by `cap` rather than by the caller-supplied value.
-fn compact_json_fits(value: &Value, cap: usize) -> bool {
-    struct Remaining(usize);
-    impl std::io::Write for Remaining {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if buf.len() > self.0 {
-                return Err(std::io::Error::other("cap exceeded"));
-            }
-            self.0 -= buf.len();
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    serde_json::to_writer(Remaining(cap), value).is_ok()
+    true
 }
 
 fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec<u8>, CallError> {
@@ -4457,7 +4464,7 @@ mod tests {
         identity.admission_facts = Some(serde_json::json!({"blob": "x".repeat(64)}));
         route_open_body(&target, &identity).expect("small facts encode");
 
-        // The depth walk stops at the limit: it visits no deeper than `limit + 1` containers.
+        // The bounds walk is exact on depth and never scans string contents.
         // (Building or dropping a `Value` far deeper than this recurses inside serde_json itself,
         // so the walk is exercised on a value the test thread can hold safely.)
         let mut identity = identity_fixture();
@@ -4465,12 +4472,17 @@ mod tests {
         for _ in 0..200 {
             deep = serde_json::json!([deep]);
         }
-        assert!(exceeds_depth(
+        assert!(!json_within_bounds(
             &deep,
+            usize::MAX,
             crate::control::MAX_ADMISSION_FACTS_DEPTH
         ));
-        assert!(!exceeds_depth(&deep, 200));
-        assert!(exceeds_depth(&deep, 199));
+        assert!(json_within_bounds(&deep, usize::MAX, 200));
+        assert!(!json_within_bounds(&deep, usize::MAX, 199));
+        // A wide array is charged one byte per separator; the byte bound stops it.
+        let wide = Value::Array(vec![Value::Null; 4096]);
+        assert!(!json_within_bounds(&wide, 4096, 1));
+        assert!(json_within_bounds(&wide, 6 * 4096, 1));
         identity.admission_facts = Some(deep);
         assert_eq!(
             route_open_body(&target, &identity)
