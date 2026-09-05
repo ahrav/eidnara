@@ -158,6 +158,18 @@ budget_block() {
   done
 }
 
+# Fails when any same-L3 attempt under the given evidence directory finalized as
+# skipped; cross-NUMA skips are the documented optional outcome and are ignored.
+budget_require_same_l3() {
+  local out="${1:?outdir}" skipped
+  skipped=$(grep -l '"state": *"skipped"' "$out"/*same-l3*/manifest.json 2>/dev/null || true)
+  if [[ -n "$skipped" ]]; then
+    echo "$skipped" >&2
+    echo "a required same-L3 arm was skipped; the run has no primary measurement" >&2
+    return 1
+  fi
+}
+
 budget_run() {
   local blocks="$1"
   shift
@@ -178,6 +190,10 @@ budget_run() {
   for block in $(seq 1 "$blocks"); do
     budget_block "$block" "$@"
   done
+  # Same-L3 arms are the primary measurements. The bench finalizes a
+  # structured skip with exit 0 when no valid pair exists, so their manifests
+  # are inspected before aggregation can summarize a run with no primary data.
+  budget_require_same_l3 "$BUDGET_OUT"
   EIDNARA_IPC_BUDGET_MODE=aggregate EIDNARA_IPC_BUDGET_OUT="$BUDGET_OUT" "$BUDGET_BENCH" \
     >"$BUDGET_OUT/summary.stdout.json"
   echo "evidence: $BUDGET_OUT"
@@ -206,10 +222,8 @@ budget-preflight)
   # finalized manifests are inspected rather than trusting the exit status.
   # The manifests are written by the bench itself before it exits, unlike the
   # tee'd collection log, which a separate process may still be flushing.
-  skipped=$(grep -l '"state": *"skipped"' "$BUDGET_OUT"/*/manifest.json 2>/dev/null || true)
-  if [[ -n "$skipped" ]]; then
-    echo "$skipped" >&2
-    echo "preflight failed: a required same-L3 arm was skipped" >&2
+  if ! budget_require_same_l3 "$BUDGET_OUT"; then
+    echo "preflight failed" >&2
     rm -rf "$BUDGET_OUT"
     exit 1
   fi

@@ -1598,9 +1598,17 @@ impl Inner {
                                             && let Ok(handle) = parse_route_open(&body)
                                             && {
                                                 // `routes` before `binds`, matching `open_route`.
+                                                // §6.2 permits a channel to be reused only after its
+                                                // prior route is cleaned up, so any live or in-flight
+                                                // route on the same channel, at any epoch, is a
+                                                // protocol violation.
                                                 let routes = lock_unpoisoned(&self.routes);
                                                 let mut binds = lock_unpoisoned(&self.binds);
-                                                routes.contains(&handle)
+                                                let same_channel = |route: &RouteHandle| {
+                                                    route.channel == handle.channel
+                                                };
+                                                routes.iter().any(same_channel)
+                                                    || binds.publishing.iter().any(same_channel)
                                                     || !binds.publishing.insert(handle)
                                             }
                                         {
@@ -4389,6 +4397,47 @@ mod tests {
             .is_ok(),
             "repeated unknown members are ignored"
         );
+    }
+
+    #[tokio::test]
+    async fn a_matched_bind_for_a_live_channel_at_another_epoch_retires() {
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let live = route(1);
+        let (tx, _rx) = oneshot::channel();
+        let (key, publish) = inner
+            .admit(
+                RouteHandle {
+                    channel: 0,
+                    epoch: 0,
+                },
+                Vec::new(),
+                false,
+                PendingKind::Unary(tx),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .expect("control request admitted");
+        assert!(bridge_claims(&publish));
+        drop(data_rx.recv().await);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "op": "route.open",
+            "route_channel": live.channel,
+            "route_epoch": live.epoch + 40,
+        }))
+        .expect("body encodes");
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: 0,
+                epoch: 0,
+                corr: key.corr,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(inner.retired.load(Ordering::Acquire));
     }
 
     #[tokio::test]

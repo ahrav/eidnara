@@ -15,7 +15,8 @@ use tokio::task::JoinSet;
 
 use super::evidence::HistogramConfig;
 use super::perf_measurement::{
-    FIXTURE_BODY, Outcome, OutcomeCounts, open_loop_offset_ns, validate_open_loop_rate,
+    FIXTURE_BODY, Outcome, OutcomeCounts, first_slot_at_or_after, open_loop_offset_ns,
+    validate_open_loop_rate,
 };
 
 const MODULE_ID: &str = "perf-echo";
@@ -309,6 +310,18 @@ async fn run_open_loop_inner(
         if requests.len() >= cfg.inflight_cap {
             if measured {
                 outcomes.record(Outcome::MissedSlot);
+            }
+            // Every slot already due while the window is saturated is missed for the same
+            // reason; they are counted in one step rather than iterated one per slot, so a
+            // high offered rate cannot turn the loop into a hot spin past the window.
+            let now_ns = start.elapsed().as_nanos() as u64;
+            let next_pending = first_slot_at_or_after(now_ns.min(deadline_ns), cfg.rate_per_sec);
+            if next_pending > slot {
+                let first_measured = first_slot_at_or_after(warmup_ns, cfg.rate_per_sec);
+                let measured_overdue = next_pending.saturating_sub(first_measured.max(slot));
+                scheduled_slots += measured_overdue;
+                outcomes.missed_slot += measured_overdue;
+                slot = next_pending;
             }
             continue;
         }
