@@ -307,6 +307,28 @@ impl Default for RequestOptions {
     }
 }
 
+/// A route opened on one `Client`, fenced to that client's connection generation.
+///
+/// The wire identifies a route by `(channel, epoch)` only; a later daemon incarnation can
+/// hand out the same tuple for an unrelated route. Carrying the client generation makes a
+/// handle retained across a reconnect fail with `route_not_live` instead of addressing
+/// whatever route the new generation allocated at that tuple (§14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClientRoute {
+    handle: RouteHandle,
+    generation: u64,
+}
+
+impl ClientRoute {
+    /// The wire `(channel, epoch)` this route uses on its own generation.
+    pub const fn handle(&self) -> RouteHandle {
+        self.handle
+    }
+}
+
+/// Process-wide counter that gives each connected `Client` a distinct generation id.
+static CLIENT_GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// The client manages one authenticated daemon generation through this connection.
 pub struct Client {
     inner: Arc<Inner>,
@@ -432,6 +454,7 @@ impl Client {
         let (control_tx, control_rx) = mpsc::channel(CLIENT_CONTROL_QUEUE_FRAMES);
         let bridge_wake = Arc::downgrade(&ring_tx.wake);
         let inner = Arc::new(Inner {
+            generation: CLIENT_GENERATIONS.fetch_add(1, Ordering::Relaxed),
             daemon_id: info.daemon_id,
             daemon_ver: authenticated.daemon_ver,
             closed: AtomicBool::new(false),
@@ -497,7 +520,7 @@ impl Client {
         &self,
         target: RouteTarget,
         identity: RouteIdentity,
-    ) -> Result<RouteHandle, CallError> {
+    ) -> Result<ClientRoute, CallError> {
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(CallError::local(
                 SendOutcome::NotSent,
@@ -589,7 +612,10 @@ impl Client {
                             ));
                         }
                     }
-                    return Ok(handle);
+                    return Ok(ClientRoute {
+                        handle,
+                        generation: self.inner.generation,
+                    });
                 }
                 Err(error)
                     if error.outcome == SendOutcome::Terminal
@@ -614,11 +640,11 @@ impl Client {
     /// The request body is never replayed.
     pub async fn request(
         &self,
-        route: RouteHandle,
+        route: ClientRoute,
         body: Vec<u8>,
         options: RequestOptions,
     ) -> Result<Response, CallError> {
-        self.require_route(route)?;
+        let route = self.require_route(route)?;
         let deadline = request_deadline(options.timeout)?;
         self.inner
             .unary(route, body, options.binary, deadline, options.cancellation)
@@ -627,11 +653,11 @@ impl Client {
 
     pub async fn request_stream(
         &self,
-        route: RouteHandle,
+        route: ClientRoute,
         body: Vec<u8>,
         options: RequestOptions,
     ) -> Result<ResponseStream, CallError> {
-        self.require_route(route)?;
+        let route = self.require_route(route)?;
         self.inner.start_stream(route, body, options)
     }
 
@@ -639,7 +665,12 @@ impl Client {
     ///
     /// `settle_route` removes `route` before `send_control_wait`; later calls return `Ok(())` without sending `Goodbye`.
     /// Retiring the generation on a failed wait makes setup-socket teardown release the host-side route.
-    pub async fn close_route(&self, route: RouteHandle) -> Result<(), ClientError> {
+    pub async fn close_route(&self, route: ClientRoute) -> Result<(), ClientError> {
+        // A handle from another generation names nothing here; it is idempotently closed.
+        if route.generation != self.inner.generation {
+            return Ok(());
+        }
+        let route = route.handle;
         if !self.inner.settle_route(route) {
             return Ok(());
         }
@@ -745,9 +776,18 @@ impl Client {
                 "host.status response is malformed",
             )
         };
-        // §7.1: unknown members count toward the control nesting bound.
+        // §7.1: recognized members appear once, and unknown members count toward the nesting bound.
+        if !recognized_keys_are_unique(
+            &response.body,
+            &["op", "health", "metrics", "shared_memory"],
+        ) {
+            return Err(malformed());
+        }
         let value = serde_json::from_slice::<Value>(&response.body).map_err(|_| malformed())?;
         if exceeds_control_depth(&value) {
+            return Err(malformed());
+        }
+        if !nested_recognized_keys_are_unique(&response.body, "metrics", &["components"]) {
             return Err(malformed());
         }
         let decoded: WireStatus = serde_json::from_value(value).map_err(|_| malformed())?;
@@ -821,7 +861,8 @@ impl Client {
         result
     }
 
-    fn require_route(&self, route: RouteHandle) -> Result<(), CallError> {
+    /// Resolves a caller's route to its wire handle, refusing handles from other generations.
+    fn require_route(&self, route: ClientRoute) -> Result<RouteHandle, CallError> {
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(CallError::local(
                 SendOutcome::NotSent,
@@ -829,14 +870,16 @@ impl Client {
                 "client is closed",
             ));
         }
-        if !lock_unpoisoned(&self.inner.routes).contains(&route) {
+        if route.generation != self.inner.generation
+            || !lock_unpoisoned(&self.inner.routes).contains(&route.handle)
+        {
             return Err(CallError::local(
                 SendOutcome::NotSent,
                 "route_not_live",
                 "route is not live on this generation",
             ));
         }
-        Ok(())
+        Ok(route.handle)
     }
 }
 
@@ -1072,6 +1115,8 @@ enum PendingKind {
 }
 
 struct Inner {
+    /// Distinguishes this connection's routes from a reconnected client's; see `ClientRoute`.
+    generation: u64,
     daemon_id: [u8; DAEMON_ID_LEN],
     daemon_ver: String,
     closed: AtomicBool,
@@ -1793,9 +1838,12 @@ impl Inner {
     /// The handler does not treat a duplicate terminal for a cached bind as stranded.
     /// Sending `Goodbye` would close a route still in use.
     fn release_stranded_route(&self, body: &[u8], owner: BindOwner) {
-        // §7.1: every channel-0 body is a tagged JSON object; an untagged one is a
-        // protocol violation whether or not a caller was waiting for it.
-        if !is_tagged_control_body(body) {
+        // §7.1: every channel-0 body is a tagged JSON object within the control nesting
+        // bound; a violation is structural whether or not a caller was waiting for it.
+        if !is_tagged_control_body(body)
+            || serde_json::from_slice::<Value>(body)
+                .is_ok_and(|value| exceeds_control_depth(&value))
+        {
             self.retire("protocol_violation");
             return;
         }
@@ -3199,7 +3247,7 @@ struct ErrorBodyFields {
 
 impl ErrorBodyFields {
     fn scan(body: &[u8]) -> Option<Self> {
-        use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
+        use serde::de::{DeserializeSeed, Deserializer, MapAccess, Visitor};
         struct Fields;
         impl<'de> Visitor<'de> for Fields {
             type Value = Option<ErrorBodyFields>;
@@ -3210,9 +3258,9 @@ impl ErrorBodyFields {
                 let mut code: Option<String> = None;
                 let mut message_seen = false;
                 let mut retry: Option<Option<u64>> = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "code" => {
+                while let Some(key) = map.next_key::<BoundedKey>()? {
+                    match key.0.as_deref() {
+                        Some("code") => {
                             if code.is_some() {
                                 return Ok(None);
                             }
@@ -3221,7 +3269,7 @@ impl ErrorBodyFields {
                             };
                             code = Some(value);
                         }
-                        "message" => {
+                        Some("message") => {
                             if message_seen {
                                 return Ok(None);
                             }
@@ -3231,7 +3279,7 @@ impl ErrorBodyFields {
                             };
                             message_seen = true;
                         }
-                        "retry_after_ms" => {
+                        Some("retry_after_ms") => {
                             if retry.is_some() {
                                 return Ok(None);
                             }
@@ -3241,7 +3289,13 @@ impl ErrorBodyFields {
                             retry = Some(Some(value));
                         }
                         _ => {
-                            map.next_value::<IgnoredAny>()?;
+                            // Unknown values are skipped without materializing them, but they
+                            // still count toward the §7.1 nesting bound (this object is depth 1).
+                            let Ok(BoundedDepth) = map
+                                .next_value_seed(DepthBound(crate::control::MAX_CONTROL_DEPTH - 1))
+                            else {
+                                return Ok(None);
+                            };
                         }
                     }
                 }
@@ -3271,6 +3325,88 @@ impl ErrorBodyFields {
     }
 }
 
+/// A top-level key, retained only when it could name a recognized member; a longer key is an
+/// unknown member and is discarded during decoding rather than copied.
+struct BoundedKey(Option<String>);
+
+const MAX_RECOGNIZED_KEY_BYTES: usize = 32;
+
+impl<'de> serde::Deserialize<'de> for BoundedKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = BoundedKey;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an object key")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<BoundedKey, E> {
+                Ok(BoundedKey(
+                    (v.len() <= MAX_RECOGNIZED_KEY_BYTES).then(|| v.to_owned()),
+                ))
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+/// Skips one JSON value while refusing any nesting deeper than the seed's remaining depth.
+struct DepthBound(usize);
+struct BoundedDepth;
+
+impl<'de> serde::de::DeserializeSeed<'de> for DepthBound {
+    type Value = BoundedDepth;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<BoundedDepth, D::Error> {
+        use serde::de::{Error, MapAccess, SeqAccess, Visitor};
+        struct V(usize);
+        impl<'de> Visitor<'de> for V {
+            type Value = BoundedDepth;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON value within the nesting bound")
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<BoundedDepth, E> {
+                Ok(BoundedDepth)
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<BoundedDepth, E> {
+                Ok(BoundedDepth)
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<BoundedDepth, E> {
+                Ok(BoundedDepth)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<BoundedDepth, E> {
+                Ok(BoundedDepth)
+            }
+            fn visit_str<E>(self, _: &str) -> Result<BoundedDepth, E> {
+                Ok(BoundedDepth)
+            }
+            fn visit_unit<E>(self) -> Result<BoundedDepth, E> {
+                Ok(BoundedDepth)
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<BoundedDepth, A::Error> {
+                let remaining = self
+                    .0
+                    .checked_sub(1)
+                    .ok_or_else(|| A::Error::custom("too deep"))?;
+                while seq.next_element_seed(DepthBound(remaining))?.is_some() {}
+                Ok(BoundedDepth)
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<BoundedDepth, A::Error> {
+                let remaining = self
+                    .0
+                    .checked_sub(1)
+                    .ok_or_else(|| A::Error::custom("too deep"))?;
+                while map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+                    map.next_value_seed(DepthBound(remaining))?;
+                }
+                Ok(BoundedDepth)
+            }
+        }
+        deserializer.deserialize_any(V(self.0))
+    }
+}
+
 /// Accepts a JSON string without retaining it.
 struct IgnoredString;
 
@@ -3290,6 +3426,98 @@ impl<'de> serde::Deserialize<'de> for IgnoredString {
     }
 }
 
+/// Whether, inside the top-level object member `parent` of `body`, each key in `recognized`
+/// appears at most once. A `parent` that is absent or not an object passes; the caller's
+/// typed decode reports those shapes.
+fn nested_recognized_keys_are_unique(body: &[u8], parent: &str, recognized: &[&str]) -> bool {
+    use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
+    struct Inner<'r>(&'r [&'r str]);
+    impl<'de> DeserializeSeed<'de> for Inner<'_> {
+        type Value = bool;
+        fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
+            struct V<'r>(&'r [&'r str]);
+            impl<'de> Visitor<'de> for V<'_> {
+                type Value = bool;
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("a JSON value")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+                    let mut seen = vec![false; self.0.len()];
+                    while let Some(key) = map.next_key::<BoundedKey>()? {
+                        map.next_value::<IgnoredAny>()?;
+                        if let Some(index) = key
+                            .0
+                            .as_deref()
+                            .and_then(|key| self.0.iter().position(|name| *name == key))
+                        {
+                            if seen[index] {
+                                return Ok(false);
+                            }
+                            seen[index] = true;
+                        }
+                    }
+                    Ok(true)
+                }
+                fn visit_bool<E>(self, _: bool) -> Result<bool, E> {
+                    Ok(true)
+                }
+                fn visit_i64<E>(self, _: i64) -> Result<bool, E> {
+                    Ok(true)
+                }
+                fn visit_u64<E>(self, _: u64) -> Result<bool, E> {
+                    Ok(true)
+                }
+                fn visit_f64<E>(self, _: f64) -> Result<bool, E> {
+                    Ok(true)
+                }
+                fn visit_str<E>(self, _: &str) -> Result<bool, E> {
+                    Ok(true)
+                }
+                fn visit_unit<E>(self) -> Result<bool, E> {
+                    Ok(true)
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<bool, A::Error> {
+                    while seq.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(true)
+                }
+            }
+            deserializer.deserialize_any(V(self.0))
+        }
+    }
+    struct Outer<'r>(&'r str, &'r [&'r str]);
+    impl<'de> DeserializeSeed<'de> for Outer<'_> {
+        type Value = bool;
+        fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
+            struct V<'r>(&'r str, &'r [&'r str]);
+            impl<'de> Visitor<'de> for V<'_> {
+                type Value = bool;
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("a JSON object")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+                    let mut unique = true;
+                    while let Some(key) = map.next_key::<BoundedKey>()? {
+                        if key.0.as_deref() == Some(self.0) {
+                            unique &= map.next_value_seed(Inner(self.1))?;
+                        } else {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                    Ok(unique)
+                }
+            }
+            deserializer.deserialize_map(V(self.0, self.1))
+        }
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    Outer(parent, recognized)
+        .deserialize(&mut deserializer)
+        .unwrap_or(false)
+}
+
 /// Whether each key in `recognized` appears at most once at the top level of `body`.
 /// A repeated recognized member would let the last occurrence win silently; repeated
 /// unknown members are ignored like any other unknown member. Nested objects are skipped;
@@ -3304,9 +3532,13 @@ fn recognized_keys_are_unique(body: &[u8], recognized: &[&str]) -> bool {
         }
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
             let mut seen = vec![false; self.0.len()];
-            while let Some(key) = map.next_key::<String>()? {
+            while let Some(key) = map.next_key::<BoundedKey>()? {
                 map.next_value::<IgnoredAny>()?;
-                if let Some(index) = self.0.iter().position(|name| *name == key) {
+                if let Some(index) = key
+                    .0
+                    .as_deref()
+                    .and_then(|key| self.0.iter().position(|name| *name == key))
+                {
                     if seen[index] {
                         return Ok(false);
                     }
@@ -3525,6 +3757,7 @@ mod tests {
         let (control_tx, control_rx) = mpsc::channel(CLIENT_CONTROL_QUEUE_FRAMES);
         (
             Arc::new(Inner {
+                generation: CLIENT_GENERATIONS.fetch_add(1, Ordering::Relaxed),
                 daemon_id: [0; DAEMON_ID_LEN],
                 daemon_ver: "eidnara-host/0.0.0-test".to_owned(),
                 closed: AtomicBool::new(false),
@@ -4038,6 +4271,29 @@ mod tests {
         assert!(lock_unpoisoned(&inner.binds).publishing.contains(&bound));
         assert!(!inner.retired.load(Ordering::Acquire));
         inner.retire("test_done");
+    }
+
+    #[test]
+    fn a_route_from_another_client_generation_is_not_live() {
+        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let client = Client {
+            inner: Arc::clone(&inner),
+        };
+        let own = ClientRoute {
+            handle: route(1),
+            generation: inner.generation,
+        };
+        assert_eq!(client.require_route(own).expect("own route"), route(1));
+        let stale = ClientRoute {
+            handle: route(1),
+            generation: inner.generation + 1,
+        };
+        let error = client
+            .require_route(stale)
+            .expect_err("a handle from another generation names nothing here");
+        assert_eq!(error.code(), "route_not_live");
+        assert_eq!(error.outcome(), SendOutcome::NotSent);
+        drop(client);
     }
 
     #[tokio::test]
@@ -5391,6 +5647,46 @@ mod tests {
                 .code(),
             "invalid_identity"
         );
+    }
+
+    #[test]
+    fn error_bodies_are_bounded_by_the_control_depth_and_never_copy_unknown_keys() {
+        let deep_unknown = format!(
+            r#"{{"code":"c","message":"m","x":{}1{}}}"#,
+            "[".repeat(crate::control::MAX_CONTROL_DEPTH),
+            "]".repeat(crate::control::MAX_CONTROL_DEPTH)
+        );
+        assert!(CallError::host_terminal(deep_unknown.as_bytes()).is_none());
+        let shallow_unknown = r#"{"code":"c","message":"m","x":[[1]]}"#;
+        assert!(CallError::host_terminal(shallow_unknown.as_bytes()).is_some());
+        // A huge unknown key is skipped; `BoundedKey` retains nothing past the recognized length.
+        let long_key = format!(
+            r#"{{"code":"c","message":"m","{}":1}}"#,
+            "k".repeat(1 << 16)
+        );
+        assert!(CallError::host_terminal(long_key.as_bytes()).is_some());
+    }
+
+    #[test]
+    fn nested_recognized_keys_are_checked_inside_metrics() {
+        let body = br#"{"op":"host.status","metrics":{"components":{},"components":{}}}"#;
+        assert!(!nested_recognized_keys_are_unique(
+            body,
+            "metrics",
+            &["components"]
+        ));
+        let body = br#"{"op":"host.status","metrics":{"components":{},"x":1,"x":2}}"#;
+        assert!(nested_recognized_keys_are_unique(
+            body,
+            "metrics",
+            &["components"]
+        ));
+        let body = br#"{"op":"host.status"}"#;
+        assert!(nested_recognized_keys_are_unique(
+            body,
+            "metrics",
+            &["components"]
+        ));
     }
 
     #[test]

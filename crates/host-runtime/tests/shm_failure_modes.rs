@@ -277,7 +277,7 @@ async fn exact_capacity_succeeds_and_plus_one_creates_no_ring_resources() {
     host.shutdown_gracefully().await;
 }
 
-async fn echo_route(client: &Client, session: &str) -> host_runtime::RouteHandle {
+async fn echo_route(client: &Client, session: &str) -> host_runtime::ClientRoute {
     client
         .open_route(
             RouteTarget {

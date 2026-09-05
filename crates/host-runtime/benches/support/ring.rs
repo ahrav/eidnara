@@ -52,7 +52,7 @@ fn identity(session: &str) -> host_runtime::RouteIdentity {
 async fn open_route(
     publication: &Path,
     session: &str,
-) -> Result<(Arc<host_runtime::Client>, host_runtime::RouteHandle), String> {
+) -> Result<(Arc<host_runtime::Client>, host_runtime::ClientRoute), String> {
     tokio::time::timeout(SETUP_BUDGET, async {
         let client = host_runtime::Client::connect(publication)
             .await
@@ -69,7 +69,7 @@ async fn open_route(
 
 async fn request(
     client: Arc<host_runtime::Client>,
-    route: host_runtime::RouteHandle,
+    route: host_runtime::ClientRoute,
 ) -> CallResult {
     client
         .request(
@@ -410,7 +410,7 @@ pub struct ThroughputResult {
 fn spawn_request(
     requests: &mut JoinSet<CallResult>,
     client: &Arc<host_runtime::Client>,
-    route: host_runtime::RouteHandle,
+    route: host_runtime::ClientRoute,
 ) {
     let client = Arc::clone(client);
     requests.spawn(async move { request(client, route).await });
@@ -552,7 +552,7 @@ async fn run_throughput_inner(
 /// that hosted its tasks shuts down.
 pub struct SerialProbe {
     client: Arc<host_runtime::Client>,
-    route: host_runtime::RouteHandle,
+    route: host_runtime::ClientRoute,
     runtime: tokio::runtime::Runtime,
 }
 

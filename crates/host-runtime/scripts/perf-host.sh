@@ -158,14 +158,15 @@ budget_block() {
   done
 }
 
-# Fails when any same-L3 attempt under the given evidence directory finalized as
-# skipped; cross-NUMA skips are the documented optional outcome and are ignored.
+# Fails when any same-L3 attempt under the given evidence directory finalized in
+# a state other than complete; cross-NUMA skips are the documented optional
+# outcome and are ignored.
 budget_require_same_l3() {
-  local out="${1:?outdir}" skipped
-  skipped=$(grep -l '"state": *"skipped"' "$out"/*same-l3*/manifest.json 2>/dev/null || true)
-  if [[ -n "$skipped" ]]; then
-    echo "$skipped" >&2
-    echo "a required same-L3 arm was skipped; the run has no primary measurement" >&2
+  local out="${1:?outdir}" incomplete
+  incomplete=$(grep -L '"state": *"complete"' "$out"/*same-l3*/manifest.json 2>/dev/null || true)
+  if [[ -n "$incomplete" ]]; then
+    echo "$incomplete" >&2
+    echo "a required same-L3 arm did not complete; the run has no primary measurement" >&2
     return 1
   fi
 }
