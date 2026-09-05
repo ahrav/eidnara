@@ -10,6 +10,7 @@ The crate is a port of the `ai-tokenizer` claude encoding. Its value is bit-fait
 - `encode_ordinary_matches_ai_tokenizer_ids` (`crates/tokenizer/tests/token_golden.rs:24`) asserts `encode_ordinary(text) == golden.ids` for all 46 cases; `estimate_tokens_matches_golden_counts` (`:47`) asserts the counts.
 - The corpus covers whitespace runs, digits, punctuation, code, JSON, paths, special-token substrings, several scripts, emoji with ZWJ, combining marks, zero-width characters, control characters, surrogate pairs, long runs, prototype-member names, and a 40-line mixed blob.
 - `bom_before_newline_is_preserved` (`:101`) pins the one documented divergence the golden cannot carry, against the crate's single-character encodings.
+- `ids_match_reference_impl` and `count_equals_encode_len` (`src/parity_tests.rs:63`, `:68`) compare the live crate against `src/reference_impl.rs` on 2,000 generated strings per property. The reference is `tiktoken-rs` `CoreBPE` built from the same asset with the same pattern (`reference_impl.rs:37-51`), so it is a second implementation of the same specification, not the oracle; it widens rank and pattern-branch coverage and cannot see an asset or pattern edit shared with the live crate.
 - All pass under `cargo test --workspace` on Rust 1.98 (CI) and stable.
 
 ## Failure scenario
@@ -23,7 +24,8 @@ None.
 ## What a test must construct
 
 - Present: an oracle-produced golden and an exact-id comparison over 46 cases.
-- Missing: coverage of the 64,389 vocabulary entries and the pattern branches the corpus never reaches; a generated corpus over the whole vocabulary, or a property test against a live oracle, would close it.
+- Present at HEAD: reference parity on generated input, which covers implementation drift over ranks and branches the corpus never reaches.
+- Missing: oracle coverage of the 64,389 vocabulary entries the corpus never reaches; a generated corpus over the whole vocabulary, or a property test against a live oracle, would close it.
 
 ## Investigation log
 
@@ -33,3 +35,14 @@ None.
 - Findings: The golden is written by the JavaScript oracle; the Rust crate never writes it. The oracle is patched only to avoid the prototype-name defect, which the scope note documents.
 - Missing evidence: The 46 cases exercise 606 distinct token ids of 64,995, so parity outside the corpus is by construction, not by test.
 - Conclusion: resolved with answer: independent, and partial in coverage.
+
+### Q: Does the reference parity test add an oracle?
+
+- Sources examined: `src/reference_impl.rs`, `src/parity_tests.rs`.
+- Findings: the reference decodes `assets/claude.tiktoken` and compiles the same
+  pattern the live crate is tested against; its file header forbids editing it
+  to make a comparison pass. It is independent of the scanner and the in-crate
+  BPE, not of the asset or the pattern.
+- Missing evidence: none for the record's stated scope.
+- Conclusion: the golden remains the only oracle; the parity properties are
+  recorded as a second line of evidence in Exercised and Existing check.

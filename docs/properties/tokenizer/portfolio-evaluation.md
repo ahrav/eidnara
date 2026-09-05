@@ -189,3 +189,41 @@ Ten refinements were returned and all are applied:
    a caller lands; the relationship map now says they need not.
 4. Totality was read as "no panic" only; non-termination and unbounded
    accumulation in `encode_bounded` were not considered.
+
+## Re-derivation against the post-merge HEAD
+
+The base branch replaced the crate's runtime after the evaluations above were
+written: the pre-tokenizer is now the hand-written scanner in `src/scan.rs`, the
+merge loop is the in-crate `src/bpe.rs`, the vocabulary is decoded by `build.rs`
+and embedded as a blob, and the regex-and-`tiktoken-rs` implementation survives
+only as the test-side `src/reference_impl.rs`. Every record was re-read against
+that tree; the catalog, existing-check inventory, fault map, and evidence files
+carry the results. What changed for the items above:
+
+- Original gap 2 (Unicode-table skew) is now partly pinned:
+  `unicode_tables_match_regex_syntax` ties `src/unicode_tables.rs` to
+  `regex-syntax`, so the crate's tables cannot drift from that crate silently.
+  The skew between `regex-syntax` and the JS engine is untouched and the human
+  decision on the authoritative Unicode version still stands.
+- Original gap 3 (totality) lost its premise: the `fancy_regex` `expect` is
+  gone. The record was rewritten over the scanner and merge engines instead of
+  invalidated; the proptest arms give it a partial exercise, and its open
+  question moves to a fuzz target and to promoting the debug-only guards in
+  `encode_piece`.
+- `fault-map.md` item 1 (a Rust asset check) is done at HEAD as
+  `vocab_blob_matches_claude_tiktoken`, which moves
+  `tokenizer-vocabulary-is-embedded-and-complete` to `Exercised: yes` and
+  confidence high.
+- Fresh-context gap 2 (`char_chunks` looping when `max_bytes` is below a
+  character's width) still applies to `lib.rs:101-115`: the loop at `:108-110`
+  steps `end` back to a `char` boundary, and when that boundary is 0 the
+  iterator yields an empty chunk without advancing `rest`, so it never ends.
+  Unreachable at `MAX_PIECE_BYTES == 4096`; unchanged.
+- Fresh-context gap 1 (decode round-trip) and gap 5 (whitespace alternative
+  boundary) remain open. The parity properties compare against a reference
+  that shares the asset and the pattern, so neither counts as the round-trip or
+  the boundary oracle.
+- Bias 1 (self-referential oracles) sharpens: every record except the golden
+  parity now leans on `reference_impl`, which is a second implementation of the
+  same specification rather than an oracle. The relationship map records this
+  as a shared blind spot.

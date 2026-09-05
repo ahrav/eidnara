@@ -14,12 +14,20 @@ on a single call does not imply that later or concurrent calls agree.
   threads, each encoding every golden case with `encode_ordinary` and
   `estimate_tokens`; thread 0 is compared to the golden ids and to
   `ids.len()`, and every other thread is compared to thread 0.
-- `crates/tokenizer/src/lib.rs:82-84`: `fn tokenizer() -> &'static CoreBPE`
-  over `static TOKENIZER: OnceLock<CoreBPE>`; `:108-109`: `fn piece_regex()`
-  over `static REGEX: OnceLock<Regex>`. `OnceLock` runs its initialiser once
-  and blocks concurrent callers until it completes.
-- No other mutable state exists in the crate's encode path (`encode_bounded`,
-  `:132-150`, is a pure function of its arguments).
+- `src/parity_tests.rs:95-118`: `encode_is_pure_across_threads` encodes 2,000
+  texts on the calling thread, then has eight scoped threads re-encode them and
+  assert equal ids and counts.
+- `crates/tokenizer/src/lib.rs:95-98`: `fn vocab() -> &'static bpe::Vocab` over
+  `static VOCAB: OnceLock<bpe::Vocab>`, the only `OnceLock` in the runtime;
+  `from_blob` (`src/bpe.rs:116-150`) builds the whole table before returning.
+  The scanner's tables are compile-time constants (`src/scan.rs:29`, `:82`).
+- No other mutable state exists in the crate's encode path: `encode_bounded`
+  (`lib.rs:123-142`) allocates a fresh `Scratch` per call (`:128`), and the
+  engine choice in `encode_piece` (`src/bpe.rs:219-229`) depends only on the
+  piece's bytes; `heap_and_scan_engines_agree` (`bpe.rs:381`) asserts the two
+  engines agree.
+- In the source tree there were two `OnceLock`s, the `CoreBPE` and the pattern
+  regex, and an early return skipped the pattern for inputs at or below the cap.
 
 ## Failure scenario
 
@@ -33,8 +41,8 @@ Concurrent first callers racing the lazy initialisation on a cold process.
 
 ## What a test must construct
 
-Repeated calls on one input; concurrent first calls from several threads
-compared to each other and to a later sequential call.
+Repeated calls on one input; concurrent first calls from several threads in an
+isolated cold process compared to each other and to a later sequential call.
 
 ## Investigation log
 
@@ -60,3 +68,15 @@ compared to each other and to a later sequential call.
 - Missing evidence: an isolated cold process with concurrent first callers whose
   inputs include an over-cap string.
 - Conclusion: Exercised is partial; the Check names the isolated cold process.
+
+### Q: What changed in the shared state at HEAD?
+
+- Sources examined: `src/lib.rs:95-156`, `src/scan.rs`, `src/bpe.rs:198-230`,
+  `src/parity_tests.rs:95-118`.
+- Findings: one `OnceLock` remains and it publishes a fully built `Vocab`; the
+  pattern `OnceLock` and the over-cap early return are gone, so the Check no
+  longer needs an over-cap input to race a second initialiser. Per-call
+  `Scratch` and a byte-determined engine choice leave no cross-call state.
+- Missing evidence: an isolated cold process; sibling tests initialise `VOCAB`
+  first in every binary.
+- Conclusion: Exercised stays partial; the Check drops the over-cap conjunct.

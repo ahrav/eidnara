@@ -19,7 +19,9 @@ expected ids from the function under test.
   `EF BB BF`). These give the independent expected encoding `[92, 57538, 203]`.
 - `crates/tokenizer/src/lib.rs:15-17` (crate docs) records that the oracle has
   two bugs producing ids that decode to different bytes than the input and that
-  the crate does not reproduce them.
+  the crate does not reproduce them; `:25-28` describes the BOM case.
+- `src/bpe.rs:175-193`: `Vocab::rank_of` keys every tier on raw bytes and never
+  decodes, so a BOM-stripping lookup cannot arise without a lookup rewrite.
 - The tokenizer portfolio evaluation (gap 4) called the existing oracle
   circular; this record adopts the asset ranks as the fix.
 
@@ -62,3 +64,13 @@ from `encode_ordinary`.
   `"x\u{feff}\n"`.
 - Conclusion: the record's residue is the BOM-plus-adjacent-whitespace piece
   shape; the Impact and Existing check are narrowed accordingly.
+
+### Q: Can the oracle's BOM-stripping defect recur at HEAD?
+
+- Sources examined: `src/bpe.rs:70-108`, `:175-193`.
+- Findings: the short and mid keys are built from raw bytes (`short_key`,
+  `mid_key`) and the long tier indexes a byte-slice map; no text decoding sits
+  on the lookup path.
+- Missing evidence: none.
+- Conclusion: the record's hazard is a lookup rewrite or a vocabulary edit; the
+  self-referential test shape is unchanged.
