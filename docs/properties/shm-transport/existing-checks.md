@@ -136,7 +136,7 @@ assertion. Rows that a catalog record already cites are marked with the record.
 | `attach_refuses_a_quarantined_ring` (`:3697`) | Attach refuses a quarantined ring | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
 | `receive_that_raced_a_quarantine_is_not_reported_as_delivered` (`:3705`) | Receive that raced a quarantine is not reported as delivered | unaudited |
 | `two_producer_reserved_slots_are_impossible` (`:3719`) | Two producer reserved slots are impossible | unaudited |
-| `release_leaves_the_consumers_data_wait_armed_for_the_next_publish` (`:3737`) | Release leaves the consumers data wait armed for the next publish | unaudited |
+| `release_leaves_the_consumers_data_wait_armed_for_the_next_publish` (`:3737`) | Release leaves the consumers data wait armed for the next publish | unaudited; cited by `release-leaves-the-consumer-parked-marker-intact` |
 | `attach_refuses_a_write_cursor_beyond_the_committed_frames` (`:3766`) | Attach refuses a write cursor beyond the committed frames | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
 | `attach_refuses_a_live_slot_whose_descriptor_does_not_validate` (`:3780`) | Attach refuses a live slot whose descriptor does not validate | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
 | `descriptor_depth_above_the_cap_is_rejected_before_any_allocation` (`:3801`) | Descriptor depth above the cap is rejected before any allocation | unaudited |

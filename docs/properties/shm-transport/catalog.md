@@ -353,6 +353,7 @@ and `n/a - invalidated` for an invalidated record.
 | [attach-makes-every-received-descriptor-close-on-exec](#attach-makes-every-received-descriptor-close-on-exec) | safety | high | yes |
 | [foreign-slot-state-on-reserve-is-a-fault-not-backpressure](#foreign-slot-state-on-reserve-is-a-fault-not-backpressure) | safety | high | yes |
 | [failed-publication-wake-leaves-the-slot-published](#failed-publication-wake-leaves-the-slot-published) | safety | high | yes |
+| [release-leaves-the-consumer-parked-marker-intact](#release-leaves-the-consumer-parked-marker-intact) | liveness | high | yes |
 
 ---
 
@@ -953,8 +954,14 @@ duplex ring (`crates/host-runtime/src/connection.rs:138`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: not yet — needs concurrent release attempts rather than sequential
-ones.
+Exercised: partial — the sequential cases are covered:
+`mismatched_release_identity_names_the_field_and_quarantines`
+(`ring.rs:3871-3907`) drives the duplicate release, and
+`stale_lap_release_cannot_complete_recycled_slot` (`:3910`) performs one
+successful release and a second release of the same identity a full lap later
+and asserts the recycled live slot is not completed. The concurrent read-to-CAS
+interleaving, two releases racing for the same slot, has no test; that is the
+uncovered residue, not the whole property.
 Guarantee: Given a live lease, a correct identity, and a ring that is not
 quarantined, exactly one release per `(incarnation, lane, sequence)` succeeds and
 every later one fails.
@@ -1922,9 +1929,14 @@ Type: reachability
 Reachability: test-only — when live, the clean-reclamation branch and the
 incarnation mint were reached only through the fake recovery backend, as this
 record's own evidence states. Invalidated rather than live:
-`provider_recovery.rs` and `ShmRecoveryBackend` are deleted, and
-`crates/host-runtime/src/ring_transport.rs:360` releases charges unconditionally
-with no reclamation outcome.
+`provider_recovery.rs` and `ShmRecoveryBackend` are deleted, and with them the
+recovery episode, the incarnation mint, and the reclaim-versus-isolate outcome
+this record asked about. The endpoint that replaced them has a two-way terminal
+disposition of its own (`crates/host-runtime/src/ring_transport.rs:351-361`:
+`admission.quarantine()` when a ring is quarantined and the peer still retains
+it, `admission.release()` otherwise), which `custody-terminal-transition-exactly-once`
+and `dead-peer-charges-are-reclaimed-or-declared` describe; it is a different
+mechanism from the one invalidated here, not evidence for it.
 Status: invalidated
 Exercised: not yet — reachable only through a fake backend today.
 Guarantee: For the shipped provider, the clean-reclamation outcome — charges
@@ -1953,19 +1965,23 @@ Existing check: none. The fake-backend test was deleted with
 Impact: `ed487e11` deleted `provider_recovery.rs` and `0f336d3c` removed
 `ShmRecoveryBackend`, so `CleanupOutcome`, `ProviderReadiness`, recovery
 episodes, and provider incarnations no longer exist anywhere in the tree and
-nothing now owns the reclaim-versus-isolate obligation. The question the record
-asked — whether the shipped backend can ever reach clean reclamation — is
-answered by deletion rather than by evidence: `crates/host-runtime/src/ring_transport.rs:360`
-returns charges unconditionally, with neither a quarantine outcome nor a
-reclamation proof. The rewritten `docs/shm-transport.md:49` and `:92` still name
-reclamation and quarantine as two outcomes (former `:87-90` also prescribed
-distinct experiments for them),
-and now describes no code at all.
+nothing now owns the reclaim-versus-isolate obligation in the form this record
+stated it (a cleanup that proves stale resources are gone and mints a new
+incarnation). The question the record asked, whether the shipped backend can
+ever reach clean reclamation, is answered by deletion rather than by evidence.
+What exists at HEAD is a narrower release-versus-quarantine choice on the
+endpoint thread (`crates/host-runtime/src/ring_transport.rs:351-361`), exercised
+by `peer_close_refunds_admission_although_the_backend_quarantines_the_ring`
+(`:1751`) and `quarantined_ring_moves_its_charges_to_the_quarantined_bucket`
+(`:1921`) and owned by `custody-terminal-transition-exactly-once`; the
+rewritten `docs/shm-transport.md:49` and `:92` name reclamation and quarantine
+as two outcomes, and at HEAD they describe that choice rather than the deleted
+recovery model.
 Open questions:
-- The documentation at `docs/shm-transport.md:49` and `:92` (former `:87-90`)
-  still describes a two-outcome recovery model that no longer exists. Should it be rewritten to the
-  unconditional-release behaviour, or is the recovery model intended to return?
-  (needs human input)
+- Should a record own the release-versus-quarantine disposition as a
+  reachability property in its own right (each branch reached at least once on
+  the shipped path), separately from the exactly-once contract that
+  `custody-terminal-transition-exactly-once` carries? (needs human input)
 
 ### test-only-surface-absent-from-the-shipped-addon
 
@@ -4824,6 +4840,10 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   failure before publication must leave no frame, and this record says a
   failure after publication must leave the frame; together they fix the point
   in `publish_commit` where the frame becomes the peer's.
+  `release-leaves-the-consumer-parked-marker-intact` is the consumer-side
+  complement of `quarantine-wakes-a-parked-waiter` and
+  `capacity-recheck-after-a-wake-race`: those say who must signal a parked
+  waiter; this says which operation must not un-park it.
 
 ## Discovered at U3
 
@@ -5476,4 +5496,44 @@ Existing check: `failed_publication_wake_leaves_the_slot_published`
 Impact: a wake-error cleanup change that resets the slot loses or reuses an
 already published frame; the consumer either never sees it or reads bytes the
 producer has handed to the next reservation.
+Open questions: None.
+
+### release-leaves-the-consumer-parked-marker-intact
+
+Type: liveness
+Reachability: default-production - every lease release on the consumer side
+runs `Ring::release` (`crates/shm-transport/src/backend/ring.rs:1528`), which
+signals only the capacity doorbell (`:1598-1599`) and never touches the data
+wake's `parked` marker; every publication decides whether to signal the data
+doorbell by swapping that marker (`signal_wake`, `:2032-2035`).
+Status: active
+Exercised: yes - `release_leaves_the_consumers_data_wait_armed_for_the_next_publish`
+(`ring.rs:3737-3762`) publishes one frame, has the consumer receive it and arm
+its data wait, releases the previous lease, asserts the consumer's `parked`
+marker is still set (`:3748-3752`), publishes a second frame, and asserts the
+parked consumer is woken (`:3754-3760`). In-process, one thread.
+Guarantee: Releasing a lease does not clear the releasing consumer's own data-wait
+`parked` marker, so a publication that follows the release still finds the
+marker set, signals the data doorbell, and wakes the consumer; a consumer that
+armed its wait and then released cannot be stranded by its own release.
+Check: `always` - after `arm_data_wait` returns true and a lease is released,
+the data wake's `parked` is non-zero; the next `commit` signals the data
+doorbell and `wait_for_data` (or the reactor's readiness) returns.
+Fault/timing angle: `signal_wake` sends a doorbell byte only when it swaps a
+non-zero `parked` (`:2033`), so any path that clears the consumer's marker
+between arm and publish makes the publisher skip the signal and leaves the
+consumer blocked until an unrelated wake. Release is the operation most likely
+to run in that window, because a consumer typically releases the frame it just
+processed before parking for the next one; it must touch only the capacity
+side. The hazard is a release path that resets both wake epochs, or a shared
+helper that clears `parked` on any doorbell traffic.
+Required faults and enabling state: none; an armed consumer, a release, and a
+publication in that order.
+Confidence: high - [evidence](evidence/release-leaves-the-consumer-parked-marker-intact.md).
+`Ring::release`'s doorbell signalling, `signal_wake`'s marker swap, and the
+test were read directly.
+Existing check: the test named above, unaudited.
+Impact: a lost wake at the most common consumer transition: the consumer parks
+after releasing, the publisher skips the doorbell, and the frame sits until an
+unrelated event; on an idle channel, forever.
 Open questions: None.
