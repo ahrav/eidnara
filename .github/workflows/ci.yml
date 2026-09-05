@@ -14,9 +14,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Impact records pin a destination commit that must be an ancestor of HEAD.
-          fetch-depth: 0
+
+      - name: Predecessor tokens
+        # Names from the source repositories must not survive in tracked files.
+        # `docs/plans/` is history and is exempt. A bracketed character in each
+        # pattern keeps this file from matching itself.
+        run: |
+          if git grep -n -I -i -E 'c[o]rtexkit|magic[-_]context|ck[-]mc|mc[-](host|shm|tokenizer|store|kernel|module|core|secret-scanner)|\bmc[_]|\bck[_]|primitives[@]|host[@]|"repo": "(primitives|host)"' -- ':!docs/plans/'; then
+            echo "predecessor tokens found"
+            exit 1
+          fi
+
+      - name: Migration machinery
+        # Schema-migration identifiers must not appear in non-test code.
+        run: |
+          if git grep -n -I -E 'schema[_]migrations|\bMIGRATION[S]\b|LATEST[_]MIGRATION_VERSION|BOOTSTRAP[_]MIGRATION_VERSION|OLDEST[_]ADOPTABLE_MIGRATION_VERSION|ensure[C]olumn|fn migrat[e]\b|run[_]migrations' -- ':!docs/plans/' ':!**/tests/**' ':!**/*.test.ts' ':!**/*_test.rs'; then
+            echo "migration machinery found"
+            exit 1
+          fi
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -25,68 +40,8 @@ jobs:
       - name: Install TypeScript tooling
         run: bun install --frozen-lockfile
 
-      - name: Typecheck migration tooling
+      - name: Typecheck
         run: bun run typecheck
-
-      - name: Migration tooling tests
-        run: bun run test:eidnara-migration
-
-      - name: Registry
-        run: bun run eidnara:check registry migration/registry.json
-
-      - name: Waivers
-        run: |
-          for file in migration/waves/*/waivers.json; do
-            bun run eidnara:check waivers "$file"
-          done
-
-      - name: Source checkouts for receipt verification
-        # Receipts name each source repository by an alias. The repository
-        # variable SOURCE_CHECKOUTS maps alias to clone URL, one `alias=url`
-        # pair per whitespace-separated token. A missing alias fails the job.
-        env:
-          SOURCE_CHECKOUTS: ${{ vars.SOURCE_CHECKOUTS }}
-        run: |
-          set -euo pipefail
-          repos=$(bun -e 'const fs=require("fs");const s=new Set();for(const f of fs.readdirSync("migration/waves")){const p=`migration/waves/${f}/receipt.json`;if(!fs.existsSync(p))continue;for(const r of JSON.parse(fs.readFileSync(p,"utf8")).sources??[])s.add(r.repo)}console.log([...s].join(" "))')
-          declare -A urls=()
-          for pair in ${SOURCE_CHECKOUTS:-}; do
-            urls["${pair%%=*}"]="${pair#*=}"
-          done
-          for repo in $repos; do
-            url="${urls[$repo]:-}"
-            if [ -z "$url" ]; then
-              echo "SOURCE_CHECKOUTS has no clone URL for source alias '${repo}'" >&2
-              exit 1
-            fi
-            git clone --quiet --no-checkout "$url" "../${repo}"
-          done
-
-      - name: Receipts
-        run: |
-          set -euo pipefail
-          args=()
-          for dir in ../*/; do
-            name=$(basename "$dir")
-            [ -d "$dir/.git" ] && [ "$name" != "$(basename "$PWD")" ] && args+=(--checkout "${name}=${dir%/}")
-          done
-          for file in migration/waves/*/receipt.json; do
-            bun run eidnara:check receipt "$file" "${args[@]}"
-          done
-
-      - name: Property catalog indexes
-        run: |
-          shopt -s nullglob
-          parts=(docs/properties/*/catalog.md)
-          if [ "${#parts[@]}" -eq 0 ]; then
-            echo "no property catalogs yet"
-            exit 0
-          fi
-          for catalog in "${parts[@]}"; do
-            part=$(dirname "$catalog")
-            bun scripts/eidnara-migration/generate-property-index.ts "$part" --check
-            bun run eidnara:check property-catalog "$part/index.json"
-          done
 
       - name: Rust toolchains
         run: |
