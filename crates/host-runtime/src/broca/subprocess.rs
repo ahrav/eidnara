@@ -448,7 +448,8 @@ pub async fn run(
     let abort_registration = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let registrar_abort = Arc::clone(&abort_registration);
     let (pid_reported_send, mut pid_reported) = tokio::sync::oneshot::channel::<i32>();
-    let registrar = tokio::task::spawn_blocking(move || {
+    // The registrar takes a bounded blocking slot like every other filesystem job, so a run that gives up on a stalled publication cannot leave an unaccounted blocking task behind. commentlint: allow(JUDGE)
+    let registrar = tokio::spawn(off_runtime(move || {
         let mut pid_bytes = [0u8; size_of::<libc::pid_t>()];
         let mut filled = 0;
         while filled < pid_bytes.len() {
@@ -474,7 +475,7 @@ pub async fn run(
         // The already-published record is returned even when this write fails; the caller owns its removal. commentlint: allow(JUDGE)
         let _ = rustix::io::write(&exec_barrier_write, &[1u8]);
         Some(record)
-    });
+    }));
 
     let mut spawn_reply = queue_spawn(command, pid_report_write, exec_barrier_read)?;
     // Dropping `env` releases its environment-sized allocation before concurrent runs continue. commentlint: allow(JUDGE)
@@ -541,7 +542,7 @@ pub async fn run(
         // retained (when teardown is proven) and detaches best-effort removal. commentlint: allow(JUDGE)
         let record_retained =
             match tokio::time::timeout(limits.termination_grace, &mut registrar).await {
-                Ok(joined) => match joined.ok().flatten() {
+                Ok(joined) => match joined.ok().and_then(Result::ok).flatten() {
                     Some(record) if group_gone => {
                         remove_record_bounded(record, limits.termination_grace).await
                     }
@@ -550,7 +551,7 @@ pub async fn run(
                 },
                 Err(_) => {
                     tokio::spawn(async move {
-                        let record = registrar.await.ok().flatten();
+                        let record = registrar.await.ok().and_then(Result::ok).flatten();
                         if group_gone && let Some(record) = record {
                             let _ = off_runtime(move || record.remove()).await;
                         }
@@ -581,7 +582,7 @@ pub async fn run(
     let spawned = spawned
         .expect("the biased select returned either a spawn result or an abort")
         .map_err(|_| io::Error::other("the broca-spawner thread dropped a spawn reply"))?;
-    let group_record = registrar.await.ok().flatten();
+    let group_record = registrar.await.ok().and_then(Result::ok).flatten();
     let mut child = match spawned {
         Ok(child) => child,
         Err(err) => {

@@ -229,13 +229,25 @@ impl CompositeComponent for BrocaComponent {
                 // The probe opens, hashes, and stats closure nodes, so it runs on the blocking pool like the execution-path resolution; a stalled closure store must not occupy runtime workers. commentlint: allow(JUDGE)
                 let supervisor = Arc::clone(&self.supervisor);
                 let harness = key.harness;
-                let probe =
-                    subprocess::off_runtime(move || supervisor.harness_unavailable_reason(harness))
-                        .await;
+                // The probe also races request cancellation and a fixed budget so stalled sends cannot pin the reserved handler slots. commentlint: allow(JUDGE)
+                let probe = tokio::select! {
+                    biased;
+                    () = ctx.cancelled() => {
+                        return app_error("cancelled", "the request was cancelled");
+                    }
+                    probe = tokio::time::timeout(
+                        config::AVAILABILITY_PROBE_BUDGET,
+                        subprocess::off_runtime(move || {
+                            supervisor.harness_unavailable_reason(harness)
+                        }),
+                    ) => probe,
+                };
                 match probe {
-                    Ok(None) => {}
-                    Ok(Some(reason)) => return app_error("harness_unavailable", reason),
-                    Err(_) => return app_error("harness_unavailable", "closure_unverified"),
+                    Ok(Ok(None)) => {}
+                    Ok(Ok(Some(reason))) => return app_error("harness_unavailable", reason),
+                    Ok(Err(_)) | Err(_) => {
+                        return app_error("harness_unavailable", "closure_unverified");
+                    }
                 }
                 if let Some(verifier) = &self.credential_verifier {
                     let fingerprints = self

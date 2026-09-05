@@ -170,6 +170,10 @@ pub const RESERVED_HANDLER_TASKS: usize = 96;
 /// Providers enforce per-model ceilings separately from this bound.
 pub const MAX_OUTPUT_TOKENS_BOUND: u64 = 1_000_000;
 
+/// A pre-admission harness probe that has not answered within this budget reports the harness unavailable.
+/// Bounding the probe keeps stalled sends from holding every reserved handler slot while cancel, delete, and status requests wait behind them. commentlint: allow(JUDGE)
+pub const AVAILABILITY_PROBE_BUDGET: Duration = Duration::from_secs(5);
+
 /// `TEMPERATURE_RANGE` accepts `generation.temperature` values from 0.0 through 2.0.
 pub const TEMPERATURE_RANGE: std::ops::RangeInclusive<f64> = 0.0..=2.0;
 

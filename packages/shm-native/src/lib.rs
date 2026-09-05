@@ -18,7 +18,7 @@ use napi::{Env, Error, JsValue, Result, Status, Task, Unknown, ValueType, sys};
 use napi_derive::napi;
 use shm_transport::backend::ring::RingGrant;
 use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring};
-use shm_transport::descriptor::WIRE_V2_HEADER_BYTES;
+use shm_transport::descriptor::{WIRE_V2_HEADER_BYTES, check_wire_header};
 use shm_transport::lease::ReceiveLease;
 use shm_transport::profile::host_test_ring_profile;
 
@@ -1132,6 +1132,10 @@ pub fn commit_reservation(
         if over_capacity {
             return Err(error("producer overflow"));
         }
+        // Header semantics (version, declared length) are checked with the same predicate
+        // `commit` applies, while the token is still registered.
+        check_wire_header(&header, u64::from(written))
+            .map_err(|_| error("wire header does not describe the committed body"))?;
         let mut reservation = detach_producer(env, channel, token)?;
         reservation
             .set_wire_header(header)

@@ -292,7 +292,14 @@ fn parse_opencode_transcript(
             return Err(format!("missing event type at line {line_no}"));
         };
         match event_type {
-            "step_start" => {}
+            // A step opened after the terminal means the run continued past the answer it published; the earlier text cannot be trusted as the complete result. commentlint: allow(JUDGE)
+            "step_start" => {
+                if terminal.is_some() {
+                    return Err(format!(
+                        "step_start event after the terminal at line {line_no}"
+                    ));
+                }
+            }
             // A tool invocation violates the zero-tool contract, so the transform must not publish its text.
             "tool_use" => {
                 return Err(format!(
