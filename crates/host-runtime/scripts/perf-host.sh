@@ -273,6 +273,7 @@ budget-smoke | budget-pilot | budget-final)
 budget-summarize)
   BUDGET_OUT="${1:?outdir}"
   budget_build
+  budget_require_same_l3 "$BUDGET_OUT"
   EIDNARA_IPC_BUDGET_MODE=aggregate EIDNARA_IPC_BUDGET_OUT="$BUDGET_OUT" "$BUDGET_BENCH"
   exit 0
   ;;

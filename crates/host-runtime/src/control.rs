@@ -61,7 +61,7 @@ pub(crate) const MAX_ADMISSION_FACTS_DEPTH: usize = 32;
 /// Whole-request nesting bound: the root object plus a maximal
 /// `admission_facts` subtree. Unknown fields count toward nesting limits
 /// (protocol §7.1), so the bound applies to the complete control object
-const MAX_CONTROL_DEPTH: usize = MAX_ADMISSION_FACTS_DEPTH + 1;
+pub(crate) const MAX_CONTROL_DEPTH: usize = MAX_ADMISSION_FACTS_DEPTH + 1;
 
 /// The direct-linked profile cannot change catalog content at runtime, so the generation is always 1.
 pub const CATALOG_GENERATION: u64 = 1;

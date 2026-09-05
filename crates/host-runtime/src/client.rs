@@ -1587,37 +1587,40 @@ impl Inner {
                     PendingKind::Unary(tx) => {
                         let result = match header.ty {
                             FrameType::Response => {
+                                // A matched bind is checked against the route cache before it is
+                                // retained or released: §6.2 permits a channel to be reused only
+                                // after its prior route is cleaned up, so any live or in-flight
+                                // route on the same channel, at any epoch, is a protocol violation.
+                                let bound = if header.channel == 0 {
+                                    parse_route_open(&body).ok()
+                                } else {
+                                    None
+                                };
+                                if let Some(handle) = bound
+                                    && {
+                                        // `routes` before `binds`, matching `open_route`.
+                                        let routes = lock_unpoisoned(&self.routes);
+                                        let binds = lock_unpoisoned(&self.binds);
+                                        let same_channel =
+                                            |route: &RouteHandle| route.channel == handle.channel;
+                                        routes.iter().any(same_channel)
+                                            || binds.publishing.iter().any(same_channel)
+                                    }
+                                {
+                                    drop(charge);
+                                    self.retire("invalid_route_response");
+                                    return;
+                                }
                                 // The response is retained until the caller polls it, so its bytes
                                 // move from the read reservation to the retained budget; a caller that
                                 // never polls cannot hold more than `CLIENT_RETAINED_RESPONSE_BYTES`.
                                 match self.unary_budget.charge(body.len()) {
                                     Some(retained) => {
                                         // The bind is now in flight to its caller; a route `Goodbye`
-                                        // that lands before the insert must be remembered.
-                                        if header.channel == 0
-                                            && let Ok(handle) = parse_route_open(&body)
-                                            && {
-                                                // `routes` before `binds`, matching `open_route`.
-                                                // §6.2 permits a channel to be reused only after its
-                                                // prior route is cleaned up, so any live or in-flight
-                                                // route on the same channel, at any epoch, is a
-                                                // protocol violation.
-                                                let routes = lock_unpoisoned(&self.routes);
-                                                let mut binds = lock_unpoisoned(&self.binds);
-                                                let same_channel = |route: &RouteHandle| {
-                                                    route.channel == handle.channel
-                                                };
-                                                routes.iter().any(same_channel)
-                                                    || binds.publishing.iter().any(same_channel)
-                                                    || !binds.publishing.insert(handle)
-                                            }
-                                        {
-                                            // Two matched binds for one handle collapse into one
-                                            // publication owner, so a `Goodbye` in this window could
-                                            // reach only one of them; live routes must be distinct.
-                                            drop(charge);
-                                            self.retire("invalid_route_response");
-                                            return;
+                                        // that lands before the insert must be remembered. The
+                                        // channel scan above makes this insert's failure unreachable.
+                                        if let Some(handle) = bound {
+                                            lock_unpoisoned(&self.binds).publishing.insert(handle);
                                         }
                                         Ok(RetainedResponse {
                                             response: Response {
@@ -3122,8 +3125,16 @@ fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec
         },
         "consumer_capabilities": identity.consumer_capabilities
     });
-    // A present JSON `null` makes `bind` observe `Some(..)`, unlike an absent member.
+    // `bind` reads a present `null` as no facts, so a caller-supplied `Some(Null)` cannot be
+    // transmitted as a value; it is refused here rather than silently dropped.
     if let Some(facts) = identity.admission_facts.as_ref() {
+        if facts.is_null() {
+            return Err(CallError::local(
+                SendOutcome::NotSent,
+                "invalid_identity",
+                "admission_facts cannot be an explicit null",
+            ));
+        }
         request["admission_facts"] = facts.clone();
     }
     // `bind` decodes an absent `credential_fingerprints` member as an empty map.
@@ -3209,6 +3220,12 @@ fn recognized_keys_are_unique(body: &[u8], recognized: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a decoded channel-0 body nests deeper than the §7.1 control bound. The walk is
+/// iterative; the body is already bounded by `MAX_CONTROL_BODY_LEN`, so its work is bounded.
+fn exceeds_control_depth(value: &Value) -> bool {
+    !json_within_bounds(value, usize::MAX, crate::control::MAX_CONTROL_DEPTH)
+}
+
 /// The `op` tag of a channel-0 body: a JSON object with exactly one string `op` (§7.1).
 /// `None` for anything else, including a repeated `op`, which would let the last one win.
 fn control_op(body: &[u8]) -> Option<String> {
@@ -3271,6 +3288,10 @@ fn parse_route_open(body: &[u8]) -> Result<RouteHandle, CallError> {
         return Err(invalid());
     }
     let value = serde_json::from_slice::<Value>(body).map_err(|_| invalid())?;
+    // §7.1: unknown members count toward the control nesting bound.
+    if exceeds_control_depth(&value) {
+        return Err(invalid());
+    }
     if value.get("op").and_then(Value::as_str) != Some(OP_ROUTE_OPEN) {
         return Err(CallError::local(
             SendOutcome::Terminal,
@@ -4465,6 +4486,15 @@ mod tests {
             )
             .is_err()
         );
+        // Unknown members count toward the §7.1 control nesting bound.
+        let deep_unknown = format!(
+            r#"{{"op":"route.open","route_channel":9,"route_epoch":3,"x":{}1{}}}"#,
+            "[".repeat(crate::control::MAX_CONTROL_DEPTH),
+            "]".repeat(crate::control::MAX_CONTROL_DEPTH)
+        );
+        assert!(parse_route_open(deep_unknown.as_bytes()).is_err());
+        let shallow_unknown = r#"{"op":"route.open","route_channel":9,"route_epoch":3,"x":[[1]]}"#;
+        assert!(parse_route_open(shallow_unknown.as_bytes()).is_ok());
         assert!(
             parse_route_open(
                 br#"{"op":"route.open","route_channel":9,"route_epoch":3,"x":1,"x":2}"#
@@ -4513,6 +4543,63 @@ mod tests {
             ByteCharge::none(),
         );
         assert!(inner.retired.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn a_matched_bind_for_a_live_channel_retires_even_when_retention_is_full() {
+        let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let deliver = |key: PendingKey, body: Vec<u8>| {
+            inner.dispatch(
+                EnvelopeHeader {
+                    len: u32::try_from(body.len()).expect("fits"),
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType::Response,
+                    flags: response_flags(false, false),
+                    channel: key.channel,
+                    epoch: key.epoch,
+                    corr: key.corr,
+                },
+                body,
+                ByteCharge::none(),
+            );
+        };
+        let (kind, _filler_rx) = unary_sender();
+        let (filler, publish) = inner
+            .admit(route(1), Vec::new(), false, kind, deadline)
+            .expect("admitted");
+        assert!(bridge_claims(&publish));
+        drop(data_rx.recv().await);
+        deliver(filler, vec![0u8; CLIENT_RETAINED_RESPONSE_BYTES]);
+
+        let (tx, _rx) = oneshot::channel();
+        let (key, publish) = inner
+            .admit(
+                RouteHandle {
+                    channel: 0,
+                    epoch: 0,
+                },
+                Vec::new(),
+                false,
+                PendingKind::Unary(tx),
+                deadline,
+            )
+            .expect("control request admitted");
+        assert!(bridge_claims(&publish));
+        drop(data_rx.recv().await);
+        let live = route(1);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "op": "route.open",
+            "route_channel": live.channel,
+            "route_epoch": live.epoch + 1,
+        }))
+        .expect("body encodes");
+        deliver(key, body);
+        assert!(inner.retired.load(Ordering::Acquire));
+        assert!(
+            control_rx.try_recv().is_err(),
+            "the overlap retires rather than releasing the new handle"
+        );
     }
 
     #[tokio::test]
@@ -4994,6 +5081,15 @@ mod tests {
         assert_eq!(
             value["admission_facts"],
             serde_json::json!({"tier": "gold"})
+        );
+
+        // The host reads a present null as no facts, so it cannot be transmitted as a value.
+        identity.admission_facts = Some(Value::Null);
+        assert_eq!(
+            route_open_body(&target, &identity)
+                .expect_err("explicit null facts")
+                .code(),
+            "invalid_identity"
         );
     }
 
