@@ -2186,13 +2186,13 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "yes",
+        "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "yes",
+        "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
@@ -3243,7 +3243,7 @@
     },
     {
       "slug": "ring-a-segmented-inbound-body-has-no-production-producer",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/client.rs",
@@ -3252,21 +3252,8 @@
         "crates/host-runtime/src/frame_channel/contract_tests.rs",
         "crates/host-runtime/src/ring_transport.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "not-yet",
-        "check_status": "unaudited",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": true
-      },
-      "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "unaudited",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": true
-      },
-      "check_pointer": "crates/host-runtime/src/client.rs",
-      "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-segmented-inbound-body-has-no-production-producer.md"
+      "historical_evidence": "docs/properties/host-runtime/evidence/ring-a-segmented-inbound-body-has-no-production-producer.md",
+      "unreachability_evidence": "the single-`Vec<u8>` `InboundFrame` (`frame_channel.rs:423-475`) removed `InboundFrame::segmented` and `ReceiveBody::Segmented`; a body spanning the arena wrap point is assembled by `lease.to_vec()` into the owned frame at `ring_transport.rs:549`, so the zero-copy segmented inbound path this record asked a producer for no longer exists in any file under `crates/host-runtime/src` at the pinned commit."
     },
     {
       "slug": "decode-header-is-total-over-arbitrary-bytes",

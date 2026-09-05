@@ -788,8 +788,7 @@ Reachability: default-production - the shutdown latch is constructed for every
 host incarnation (`crates/host-runtime/src/runtime.rs:919`) and driven by the
 ordinary shutdown path; nothing gates it on configuration.
 Status: active
-Exercised: yes - four in-crate latch tests plus three integration tests, and
-the integration file runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`).
+Exercised: partial - four in-crate latch tests plus three integration tests cover the concurrent and pipelined commit paths, and the integration file runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`); the pre-acknowledgement-failure half is not forced: `a_dying_requester_cannot_strand_the_stop` (`tests/lifecycle.rs:1525-1537`) accepts either commit or reopen for the first response and ignores the successor's outcome, and the in-crate latch test performs reopen and successor ownership sequentially with no concurrent requester, so a regression confined to ownership transfer after a failed response write passes every cited test.
 Guarantee: Across any number of concurrent and repeated shutdown requests, the
 latch commits and the shutdown token is cancelled at most once per incarnation.
 Check: `always` - drive concurrent and pipelined requests, some on generations that retire mid-flight; assert the commit executes exactly once when at least one committing response's write callback is acknowledged, and zero times when every owner generation retires before its response is written (each dropped `CommitOnAck` reopens the latch); assert each requester receives exactly one correlated response or none, and none receives two.
@@ -975,7 +974,7 @@ this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outs
 `crates/host-runtime` tests in this tree. Its production consumer, the daemon CLI
 (`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
-Status: active - **reframed after portfolio evaluation**
+Status: active
 Exercised: not yet - the two existing tests assert that expiry produces wedged; nothing holds both fences through a phase longer than the evidence window and asserts the probe never reports wedged.
 Guarantee: The documented freshness window is wide enough for every phase the
 implementation can legitimately take, or the phase budget is coupled to the window
@@ -988,7 +987,7 @@ classification table states that an expired record in any phase is wedged, and i
 prose says the freshness windows "still age a hung start or stop to wedged". So
 ageing out is specified behaviour, not a violation. The real defect is a
 *coupling* gap, which is what this record now states.
-Fault/timing angle: the record is written once per phase transition and never
+Fault/timing angle: Reframed after portfolio evaluation. the record is written once per phase transition and never
 refreshed, and freshness compares it against a fixed 60 second wall-clock window
 (`lifecycle.rs:770-776`, value at `:773`). That window is **not configurable**: the
 sole production construction is the default, with no flag, field, or environment
@@ -1260,13 +1259,13 @@ them (`packages/plugin/src/shared/host-lifecycle/paths.ts`) is in this tree; the
 `packages/` directory holds only `shm-native`. The daemon is scheduled for U4
 (`docs/properties/README.md:52`); reclassify in the wave that lands it. The
 TypeScript producer and mis-mapping findings below are source-repository evidence.
-Status: active - **premise corrected after portfolio evaluation**
+Status: active
 Exercised: not yet - the TypeScript producer tests are in the source repository; nothing in this tree enumerates the declared ids against Rust producers, and the CLI and plugin surfaces are absent.
 Guarantee: Each reason id the release contract declares is emitted by the layer
 the remediation implies, and a condition that maps to one id is not reported under
 another.
 Check: `always` - for every classified failure condition in the Rust layer, the reason id it produces is the one the release contract declares for that condition, and each declared id has at least one producer in the layer the remediation implies. The first clause is a predicted violation at HEAD for the filesystem conditions named below: an atomic exchange unsupported on the volume, a filesystem without the rename flags, and a cross-device rename all map to the payload-invalid result rather than `unsupported_filesystem`. `always` because the mapping must hold for every condition, not once per vocabulary entry.
-Fault/timing angle: no timing angle. An earlier revision of this record claimed
+Fault/timing angle: Premise corrected after portfolio evaluation. no timing angle. An earlier revision of this record claimed
 `unsupported_filesystem` has **no** producer anywhere in the workspace. That is
 false and is corrected here: it is produced in TypeScript, by the managed-policy
 path preflight (`packages/plugin/src/shared/host-lifecycle/paths.ts:157`), with
@@ -3830,28 +3829,17 @@ Open questions:
 ### ring-a-segmented-inbound-body-has-no-production-producer
 
 Type: reachability
-Reachability: default-production - the host inbound path runs on every connection, but the subject is compiled with no production producer. Stated rather than
-defaulted: the host inbound path and always takes the
-`owned` constructor (`ring_transport.rs:552`). The subject,
-`InboundFrame::segmented` (`frame_channel.rs:477`), has zero call sites
-tree-wide including tests, so `ReceiveBody::Segmented` (`:448`) is
-unconstructible and `decode_contiguous`'s `None` arm (`connection.rs:586`) is
-compiled and unreachable.
-Status: active
+Reachability: default-production when live - the host inbound path runs on every
+connection and always took the `owned` constructor (`ring_transport.rs:549`,
+re-verified), so the segmented subject had no production producer even before its
+removal; at HEAD the constructor it named does not exist.
+Status: invalidated
+Invalidated: the single-`Vec<u8>` `InboundFrame` (`frame_channel.rs:423-475`) removed `InboundFrame::segmented` and `ReceiveBody::Segmented`; a body whose descriptor spans the arena wrap point is now assembled by `lease.to_vec()` into the owned frame at `ring_transport.rs:549`, so the zero-copy segmented inbound path this record asked a producer for no longer exists to be produced. The subject is gone rather than unexercised, which is what distinguishes invalidation from `not yet`.
 Exercised: not yet - unconstructible from any host path.
 Guarantee: The zero-copy segmented inbound path that the frame-channel
 abstraction and the transport doc both describe has a production producer, so
 the copy accounting and the wrap-around lease handling are exercised.
-Check: `reachable` - the live wrap-around conversion in `ring_transport.rs`, where
-a body whose descriptor spans the arena end is assembled into the single `Vec<u8>`
-that `InboundFrame::owned` carries (`:549`), is executed at least once per
-campaign; `InboundFrame::segmented` and `ReceiveBody::Segmented`, the sites the
-source catalog named, were removed with the single-`Vec<u8>` `InboundFrame`
-(`frame_channel.rs:423-475`), and only the lease-level `ReceiveLease::segmented`
-(`frame_channel.rs:300`) remains, reached from `contiguous` at `:297`.
-`reachable` fits because this is location coverage; the derived state claim,
-that every host inbound frame carries exactly one copy, is what a cheaper
-screen would assert.
+Check: `reachable` - when live, the code location `InboundFrame::segmented` is executed at least once per campaign. No live location corresponds to it: the wrap-around case takes the owned conversion (`ring_transport.rs:549`), and only the lease-level `ReceiveLease::segmented` (`frame_channel.rs:300`, reached from `contiguous` at `:297`) remains. `reachable` fit because this was location coverage.
 Fault/timing angle: none. Static producer enumeration. The interesting
 consequence is that a body wrapping the arena end is copied twice on the peer
 side of the in-process client (`client.rs:1878` charges then
@@ -10151,7 +10139,7 @@ Open questions: None.
 ### synapse-admission-boundaries-are-exact
 
 Type: safety
-Reachability: test-only - every batch and query a composed `SynapseComponent` receives is admitted through these bounds. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every batch and query a composed `SynapseComponent` receives is admitted through these bounds. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `SynapseComponent` is constructed by tests and by the two examples (`SynapseComponent::new` at `examples/synapse_host.rs:123`, composed at `:124`; `SynapseComponent::ready_with_engine` at `examples/synapse_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - count and byte boundaries, eviction order, and expiry are covered with a deterministic engine; the bounded-waiter test that opens 33 ring clients is ignored because the host admits at most 8 rings per process.
 Guarantee: Job admission is exact at the count and queued-byte boundaries, never evicts live work, evicts completed jobs oldest first under count pressure, and reports expired jobs as `module_restarted`.
@@ -10167,7 +10155,7 @@ Open questions:
 ### synapse-degrades-to-disabled-and-keeps-the-context-routable
 
 Type: liveness
-Reachability: test-only - every artifact fault in a composed `SynapseComponent` takes this path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every artifact fault in a composed `SynapseComponent` takes this path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `SynapseComponent` is constructed by tests and by the two examples (`SynapseComponent::new` at `examples/synapse_host.rs:123`, composed at `:124`; `SynapseComponent::ready_with_engine` at `examples/synapse_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - missing, corrupt, extra, wrong-identity, and wrong-pooling artifacts disable the lane while the context module stays routable; a fault during inference itself is covered only by the deterministic engine.
 Guarantee: An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.
@@ -10182,7 +10170,7 @@ Open questions: None.
 ### synapse-requests-are-validated-before-any-inference
 
 Type: safety
-Reachability: test-only - every Synapse request to a composed `SynapseComponent` is decoded and bounded before it reaches the engine. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every Synapse request to a composed `SynapseComponent` is decoded and bounded before it reaches the engine. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `SynapseComponent` is constructed by tests and by the two examples (`SynapseComponent::new` at `examples/synapse_host.rs:123`, composed at `:124`; `SynapseComponent::ready_with_engine` at `examples/synapse_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - constraint violations, unknown fields, excessive depth, oversize bodies, and replay reuse are covered with a deterministic engine that counts calls.
 Guarantee: A request that violates a constraint, carries an unknown field, exceeds the depth or size bound, names a different model, fingerprint, or epoch, or names a foreign job is rejected before the engine runs (as `schema_violation`, `substitution_rejected`, or `module_restarted` by class), and equal replays of a queued, running, ready, or permanently failed job reuse that job and one inference, while an equal replay after a retained retryable failure admits a new job.
@@ -10197,7 +10185,7 @@ Open questions: None.
 ### synapse-inference-runs-through-a-sealed-runtime-image
 
 Type: safety
-Reachability: test-only - every inference in a composed `SynapseComponent` loads ONNX Runtime through the sealed memfd path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every inference in a composed `SynapseComponent` loads ONNX Runtime through the sealed memfd path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `SynapseComponent` is constructed by tests and by the two examples (`SynapseComponent::new` at `examples/synapse_host.rs:123`, composed at `:124`; `SynapseComponent::ready_with_engine` at `examples/synapse_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - `source_replacement_cannot_change_verified_loader_bytes` asserts the seals, rejected writes, replacement resistance, and the digest on the memfd path; the full load into ONNX Runtime is exercised only where the runtime library is present.
 Guarantee: The ONNX Runtime library is loaded from a sealed memfd named `host-onnxruntime` whose bytes were certified with the bundle, so a library swapped on disk after certification cannot reach inference.
