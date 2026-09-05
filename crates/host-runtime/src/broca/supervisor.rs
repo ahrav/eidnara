@@ -500,8 +500,7 @@ impl Supervisor {
         };
         // Reserve tombstone capacity before waiting so eviction cannot consume the deletion guard's budget.
         let mut reserved_tombstone = self.inner.retained.try_charge(key.meta_bytes());
-        // `settlement` keeps the first failed verdict across replacement iterations.
-        let mut settlement = Ok(());
+        let mut settlement = SettlementFlags::default();
         // Each iteration needs a racing admission in the window between eviction and this lock reacquisition; the tombstone installed on exit closes that window.
         loop {
             run.cancel.cancel();
@@ -513,7 +512,7 @@ impl Supervisor {
                 },
             );
             wait_work_done(&run).await;
-            settlement = settlement.and(Self::settlement_error(&run));
+            settlement.absorb(&run);
 
             let mut released = Released::default();
             let mut index = lock_index(&self.inner);
@@ -592,31 +591,14 @@ impl Supervisor {
             }
         }
         // Retained bytes remain bounded whether tombstone charging succeeds or fails.
-        settlement
+        settlement.error()
     }
 
     /// `work_done` proves only that the run task returned, not that the backend process tree stopped or its private files were removed.
-    /// Unproven teardown outranks cleanup residue because live descendants can keep executing a billable request.
     fn settlement_error(run: &Arc<Run>) -> Result<(), RequestError> {
-        let (work_unresolved, cleanup_unresolved) = {
-            let state = lock_run(run);
-            (state.work_unresolved, state.cleanup_unresolved)
-        };
-        if work_unresolved {
-            return Err(app(
-                "teardown_unconfirmed",
-                "the harness process group could not be confirmed stopped; \
-                 work may still be running",
-            ));
-        }
-        if cleanup_unresolved {
-            return Err(app(
-                "cleanup_unconfirmed",
-                "the run's private files could not be removed; \
-                 caller-private prompt material may remain on disk",
-            ));
-        }
-        Ok(())
+        let mut flags = SettlementFlags::default();
+        flags.absorb(run);
+        flags.error()
     }
 
     /// Dropping `Subscription` does not cancel the run.
@@ -810,7 +792,9 @@ impl Supervisor {
                     } else {
                         "backend task was aborted"
                     };
-                    BackendTerminal::Failed(BackendError {
+                    // Unwinding drops the child, and `kill_on_drop` signals only the leader; descendants keep the process group.
+                    // The retained registry record cannot be swept while this host is live, so teardown stays unproven.
+                    BackendTerminal::FailedUnresolved(BackendError {
                         class: ErrorClass::Permanent,
                         message: message.to_owned(),
                         retry_after_secs: None,
@@ -840,6 +824,41 @@ impl Supervisor {
             finish(&inner, &run, outcome);
             // `_backend_permit` drops here: the permit is held through reap.
         });
+    }
+}
+
+/// A settlement operation can touch several runs for one session, so it accumulates their verdicts before ranking them.
+#[derive(Default)]
+struct SettlementFlags {
+    work_unresolved: bool,
+    cleanup_unresolved: bool,
+}
+
+impl SettlementFlags {
+    fn absorb(&mut self, run: &Arc<Run>) {
+        let state = lock_run(run);
+        self.work_unresolved |= state.work_unresolved;
+        self.cleanup_unresolved |= state.cleanup_unresolved;
+    }
+
+    /// Unproven teardown outranks cleanup residue because live descendants can keep executing a billable request.
+    /// Ranking runs after every verdict is absorbed, so one run's cleanup residue cannot hide another's unproven teardown.
+    fn error(&self) -> Result<(), RequestError> {
+        if self.work_unresolved {
+            return Err(app(
+                "teardown_unconfirmed",
+                "the harness process group could not be confirmed stopped; \
+                 work may still be running",
+            ));
+        }
+        if self.cleanup_unresolved {
+            return Err(app(
+                "cleanup_unconfirmed",
+                "the run's private files could not be removed; \
+                 caller-private prompt material may remain on disk",
+            ));
+        }
+        Ok(())
     }
 }
 

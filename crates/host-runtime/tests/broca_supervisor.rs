@@ -832,6 +832,77 @@ async fn cancellation_winning_the_terminal_still_reports_cleanup_residue() {
     assert_eq!(supervisor.cleanup_unresolved_runs(), 1);
 }
 
+/// Unproven teardown outranks cleanup residue: live descendants can still bill a request, so that verdict must not be hidden.
+#[tokio::test]
+async fn unproven_teardown_outranks_cleanup_residue() {
+    let backend = ScriptedBackend::with_behavior(|_request, _events, _cancel| {
+        Box::pin(async {
+            // One terminal reports both failures, as `merge_cleanup` produces for an unresolved teardown whose cleanup also failed.
+            BackendTerminal::FailedUnresolved(BackendError {
+                class: ErrorClass::Transient,
+                message: "process group teardown was not confirmed; additionally sensitive \
+                          temp cleanup failed (PermissionDenied)"
+                    .to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        })
+    });
+    let supervisor = Supervisor::new(backend as Arc<_>);
+
+    let run_id = send(&supervisor, "s-both", "p1");
+    until(
+        || supervisor.status(&key("s-both"), &run_id) == Ok("failed"),
+        "the run commits its failed terminal",
+    )
+    .await;
+
+    let cancelled = supervisor
+        .cancel(&key("s-both"), &run_id)
+        .await
+        .expect_err("cancel reports the ranking verdict");
+    assert_eq!(cancelled.code, "teardown_unconfirmed");
+    let deleted = supervisor
+        .delete(&key("s-both"))
+        .await
+        .expect_err("delete reports the ranking verdict");
+    assert_eq!(deleted.code, "teardown_unconfirmed");
+    // Both latches are set; only the ranking changes which one is reported.
+    assert_eq!(supervisor.cleanup_unresolved_runs(), 1);
+}
+
+/// A panicking backend leaves its process group unproven: unwinding kills only the leader, so settlement must not report success.
+#[tokio::test]
+async fn backend_panic_reports_unconfirmed_teardown() {
+    let backend = ScriptedBackend::with_behavior(|_request, _events, _cancel| {
+        Box::pin(async { panic!("backend bug") })
+    });
+    let supervisor = Supervisor::new(backend as Arc<_>);
+
+    let run_id = send(&supervisor, "s-panic-teardown", "p1");
+    until(
+        || supervisor.status(&key("s-panic-teardown"), &run_id) == Ok("failed"),
+        "the panicked run commits its failed terminal",
+    )
+    .await;
+
+    let cancelled = supervisor
+        .cancel(&key("s-panic-teardown"), &run_id)
+        .await
+        .expect_err("cancel cannot claim a teardown the panic left unproven");
+    assert_eq!(cancelled.code, "teardown_unconfirmed");
+    let deleted = supervisor
+        .delete(&key("s-panic-teardown"))
+        .await
+        .expect_err("delete reports the same unproven teardown");
+    assert_eq!(deleted.code, "teardown_unconfirmed");
+    assert_eq!(
+        supervisor.shutdown().await,
+        1,
+        "shutdown must surface the panicked run's unproven teardown"
+    );
+}
+
 /// `shutdown` reports runs with unproven teardown.
 #[tokio::test]
 async fn shutdown_counts_runs_with_unproven_teardown() {
