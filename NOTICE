@@ -12,5 +12,5 @@ the component's own `NOTICE` file next to the code it covers.
 | ONNX Runtime and bundled model | `packages/host-linux-x64-gnu/NOTICE` | U7 |
 
 No third-party component is present yet. The table is the contract for where
-each notice must land. The owning wave's receipt lists the notice file as a
-`verbatim` copy from the source repository.
+each notice must land. The owning wave's note records the notice file as a
+verbatim copy from the source repository.

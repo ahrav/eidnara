@@ -2,8 +2,8 @@
 
 Provenance: `primitives@89abb40`. This is the source portfolio evaluation for
 the lease and fence records, carried forward verbatim in substance. The fresh
-evaluation over this wave's `core` subset is in
-`migration/waves/U2/property-impact.json` and the per-record evidence files.
+evaluation over this wave's `core` subset is in the per-record evidence
+files.
 PostgreSQL statements describe the PostgreSQL backend in the source
 (`primitives@89abb40`), which is not carried.
 

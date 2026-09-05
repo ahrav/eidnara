@@ -7,15 +7,15 @@ becomes `crates/memory-store`, `crates/daemon`, and the kernel crates in U4 and
 U5, and its unfenced `with_conn` mutations are an open issue in the `host`
 source. The credentials store, the sibling module store, and the two
 repositories that returned 404 are outside Eidnara; the credentials-store
-review duty is released to the single maintainer in `migration/owners.json`.
+review duty is released to the single maintainer.
 The PostgreSQL backend in the source (`primitives@89abb40`) is not carried, so
 the "PostgreSQL consumers" row is closed by removal rather than migration.
 
-Receipts are reads of consumer sources outside this tree. Docs cite only
+The reads below are of consumer sources outside this tree. Docs cite only
 in-tree code plus a source alias and commit, so the rows below carry the
 finding and the read date, not paths or line ranges into those sources.
 
-| Consumer | Receipt | Finding |
+| Consumer | Read | Finding |
 |---|---|---|
 | A credentials store outside Eidnara | Commit-pinned source read, 2026-09-01 | `fenced_write` delegates durable writes to `with_conn_fenced`. Unfenced `with_conn` remains in the file for reads and connection setup. |
 | A module store in a sibling repository outside Eidnara | Commit-pinned source read, 2026-09-01 | Open and migration use the SQLite store; the first read-modify-write shown uses `with_conn_fenced`. The file contains additional fenced writes and unfenced reads. |
@@ -29,5 +29,5 @@ committing unfenced, so upgrading that consumer requires moving those mutations
 to `with_conn_fenced` before the version bump reaches it. Defining the complete
 protected write set is a separate owner decision, because `with_conn_unfenced`
 can carry the same mutations without a fence check. The credentials store has
-no supplied receipt for its real-daemon two-process review. Both blockers stay
+no recorded read of its real-daemon two-process review. Both blockers stay
 open.

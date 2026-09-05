@@ -14,16 +14,16 @@ Counts are `unsafe { }` blocks plus `unsafe fn` declarations at the commit that 
 | `crates/shm-transport/src/lease.rs` | 11 + 3 | `LeaseSpan::new`, `copy_out`, `copy_in` (`unsafe fn`); `AtomicU8`/`AtomicU64::from_ptr` on the mapping side only, at the width `AccessShape` fixes per byte; test fixtures | same lints, Miri (`lease::`) |
 | `crates/shm-transport/tests/ring.rs` | 8 + 0 | `ftruncate`/`fchmod`/`memfd_create` probes and inherited-fd adoption in the child role | `undocumented_unsafe_blocks` at the test crate root, valgrind |
 | `crates/shm-transport/benches/hardware_envelope.rs` | 11 + 0 | `fork`, `mmap`, `getrusage`, `sched_yield`, `waitpid`, `kill` for the bench harness | `undocumented_unsafe_blocks` at the bench crate root; not shipped |
-| `crates/lease/src/lib.rs` | 8 + 0 | two `geteuid` reads, two Windows `GetFileInformationByHandle` + `assume_init` blocks (`FileIdentity::of_file`, `link_count`), test `umask`/`mkfifo` | existing safety comments; `deny(unsafe_code)` with enumerated allows lands through wave U2, whose receipt pins this file |
-| `crates/storage/src/lib.rs` | 8 + 0 | test-only `umask`/`mkfifo` | existing safety comments; `deny(unsafe_code)` with enumerated allows lands through wave U2, whose receipt pins this file |
+| `crates/lease/src/lib.rs` | 8 + 0 | two `geteuid` reads, two Windows `GetFileInformationByHandle` + `assume_init` blocks (`FileIdentity::of_file`, `link_count`), test `umask`/`mkfifo` | existing safety comments; `deny(unsafe_code)` with enumerated allows lands through wave U2 |
+| `crates/storage/src/lib.rs` | 8 + 0 | test-only `umask`/`mkfifo` | existing safety comments; `deny(unsafe_code)` with enumerated allows lands through wave U2 |
 | `crates/tokenizer` | 0 | | `forbid(unsafe_code)` |
-| `crates/storage-types`, `crates/cache-stability` | 0 | | `forbid(unsafe_code)` lands through wave U2, whose receipt pins these files |
+| `crates/storage-types`, `crates/cache-stability` | 0 | | `forbid(unsafe_code)` lands through wave U2 |
 
 Baseline before the refactor: 103 production blocks across three files, 91 of them in `ring.rs`, 14 without a safety comment, two private `unsafe fn` without a `# Safety` section, and an `unsafe fn` release callback carrying a `*const ()` context.
 
 ### `#[allow(unsafe_code)]` items for wave U2
 
-The four crates whose `lib.rs` the U2 receipt pins (`cache-stability`, `lease`, `storage-types`, `storage`) take their lint attributes through the wave process, so the receipt's property records and `modules_hash` are regenerated against the audited tree rather than refreshed in place. The attributes to land there:
+The four crates U2 carries (`cache-stability`, `lease`, `storage-types`, `storage`) take their lint attributes through the wave process, so their property records are re-derived against the audited tree rather than refreshed in place. The attributes to land there:
 
 `crates/storage-types`, `crates/cache-stability`: `#![forbid(unsafe_code)]`.
 

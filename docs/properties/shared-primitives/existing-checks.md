@@ -55,7 +55,7 @@ No production `assert!`, `debug_assert!`, `panic!`, or equivalent invariant batt
 
 These are outside the target crate but explicitly exercise or consume its contract.
 
-The PostgreSQL backend in the source (`primitives@89abb40`) is not carried. Its rows stay as source provenance: the location is the source alias and commit only, because receipts verify source blobs by hash and docs cite no paths into the source tree.
+The PostgreSQL backend in the source (`primitives@89abb40`) is not carried. Its rows stay as source provenance: the location is the source repository and commit only; docs cite no paths into the source tree.
 
 | Test | Location | Claim | Status |
 |---|---|---|---|
