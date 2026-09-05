@@ -599,17 +599,22 @@ the rest. Findings are reproduced with its citations; the disposition is ours.
 
 1. **`Ring::trim`** (`ring.rs:2259`) punches arena pages with three dedicated
    tests (`:3150`, `:3276`, `:4183`) and no record; the live-byte exclusion
-   property covers `reclaim_completed` only. Add a `trim` counterpart and a
-   producer-authority record.
+   property covers `reclaim_completed` only. Closed 2026-09-05:
+   `trim-removes-only-dead-pages-below-the-write-cursor` added and the
+   reclamation record scoped to `reclaim_completed`.
 2. **Diagnostics contract.** `RingTransport` publishes `peer_deaths` and
    `reclamations` (`ring_transport.rs:86-87`, `:188-189`), pinned by
    `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts`
-   (`:862`), and six records say "no counter fires". Add one record and use it
-   as the oracle for the dead-peer and release-failure records.
+   (`:862`), and six records say "no counter fires". Closed 2026-09-05:
+   `diagnostics-report-lifecycle-counts-in-a-fixed-shape` added; using it as
+   the oracle inside the dead-peer and release-failure records is still open.
 3. **Quarantine wake protocol.** Three tests (`ring.rs:3116`, `:3294`, `:3314`)
    assert a quarantine raised while a peer is parked is delivered; no record.
+   Closed 2026-09-05: `quarantine-wakes-a-parked-waiter` added.
 4. **Redaction.** Three tests (`contract.rs:446`, `:714`, `profile.rs:22`) and
    the `redacted_debug!` macro assert sentinels never reach logs; no record.
+   Closed 2026-09-05: `transport-debug-output-redacts-every-sentinel` added,
+   labelled `test-only` because no shipped formatter reaches the impls.
 5. **Unattached tests.** 82 of the inventoried tests are named by no record and
    the back-link column is filled for a minority; complete it and triage the
    forged-shared-state, `probe`, and redaction clusters.
@@ -649,7 +654,7 @@ claims were false rather than mis-numbered (in-transport syscall counting
 exists, the bench checksum is computed from received bytes, both readers
 quarantine on every error), and the fault map mis-stated its own top-ranked
 investment. Fifteen of the sixteen refinements are applied above; the sixteenth,
-the per-record `ring.rs` re-anchor, has a HEAD anchor table in its place. With
-the four missing property areas (`trim`, diagnostics, quarantine wake,
-redaction) and the back-link triage still queued, the set is a solid basis for a
-campaign but not a finished one.
+the per-record `ring.rs` re-anchor, has a HEAD anchor table in its place. The
+four missing property areas (`trim`, diagnostics, quarantine wake, redaction)
+now have records; with the back-link triage still queued, the set is a solid
+basis for a campaign but not a finished one.

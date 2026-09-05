@@ -29,6 +29,7 @@ not timing or process faults.
 | tokenizer-encoding-matches-the-independent-oracle | T1, with a golden the crate did not produce | Partial - 46 oracle-produced cases covering 606 distinct ids |
 | tokenizer-vocabulary-is-embedded-and-complete | T2 against the committed asset | No - only the generator checks, at generation time |
 | tokenizer-over-long-pieces-are-chunked-and-bounded | T3 and T5 | Partial - T3 yes, T5 no |
+| tokenizer-pattern-is-upstream-with-ecmascript-whitespace | T1 as pattern drift: an edit to `assets/claude.pat` or to `ecmascript_whitespace!` that moves piece boundaries | Yes - `pattern_is_upstream_with_ecmascript_whitespace` derives the constant from the asset; `whitespace_class_matches_ecmascript_not_unicode_white_space` pins U+FEFF in and U+0085 out |
 
 ## Coverage checks to add
 

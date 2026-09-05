@@ -30,11 +30,11 @@ transcribes each test's name; it is a locator, not an audit, and every row is
 | `span_accessors_return_none_past_span_count_without_panicking` (`:329`) | Span accessors return none past span count without panicking | unaudited |
 | `hardware_profile_id_deserialization_enforces_constructor_rules` (`:356`) | Hardware profile id deserialization enforces constructor rules | unaudited |
 | `lifecycle_accepts_only_diagram_edges_and_quarantine_is_terminal` (`:379`) | Lifecycle accepts only diagram edges and quarantine is terminal | unaudited |
-| `debug_and_errors_redact_every_sentinel` (`:446`) | Debug and errors redact every sentinel | unaudited |
+| `debug_and_errors_redact_every_sentinel` (`:446`) | Debug and errors redact every sentinel | unaudited; cited by `transport-debug-output-redacts-every-sentinel` |
 | `sample_prefix_rejects_every_truncation_point_and_bounds_the_body` (`:479`) | Sample prefix rejects every truncation point and bounds the body | unaudited |
 | `sample_prefix_rejects_identity_schema_length_and_wire_failures` (`:528`) | Sample prefix rejects identity schema length and wire failures | unaudited |
 | `frame_descriptor_rejects_span_count_and_allocation_extremes` (`:644`) | Frame descriptor rejects span count and allocation extremes | unaudited |
-| `sample_errors_redact_every_sentinel` (`:714`) | Sample errors redact every sentinel | unaudited |
+| `sample_errors_redact_every_sentinel` (`:714`) | Sample errors redact every sentinel | unaudited; cited by `transport-debug-output-redacts-every-sentinel` |
 
 ### `crates/shm-transport/tests/ring.rs` - 13 tests
 
@@ -59,7 +59,7 @@ transcribes each test's name; it is a locator, not an audit, and every row is
 | Test | Claim asserted (from the name) | Status |
 | --- | --- | --- |
 | `fixed_ring_identity_survives_profile_validation` (`:11`) | Fixed ring identity survives profile validation | unaudited |
-| `debug_redacts_profile_admission_and_quarantine_record` (`:22`) | Debug redacts profile admission and quarantine record | unaudited |
+| `debug_redacts_profile_admission_and_quarantine_record` (`:22`) | Debug redacts profile admission and quarantine record | unaudited; cited by `transport-debug-output-redacts-every-sentinel` |
 | `host_admission_retains_quarantined_commitments` (`:50`) | Host admission retains quarantined commitments | unaudited |
 | `exact_aggregate_capacity_admits_n_and_rejects_n_plus_one_without_charging` (`:85`) | Exact aggregate capacity admits n and rejects n plus one without charging | unaudited |
 | `worker_limit_is_the_only_limit_that_refuses_a_second_fused_admission` (`:128`) | Worker limit is the only limit that refuses a second fused admission | unaudited |
@@ -103,17 +103,17 @@ assertion. Rows that a catalog record already cites are marked with the record.
 | `doorbell_never_blocks_after_either_end_clears_nonblock` (`:3062`) | Doorbell never blocks after either end clears nonblock | unaudited; cited by `attach-validates-doorbell-sockets` |
 | `closed_peer_doorbell_fails_instead_of_blocking` (`:3088`) | Closed peer doorbell fails instead of blocking | unaudited; cited by `attach-validates-doorbell-sockets` |
 | `creator_observes_peer_exit_once_the_attachment_is_handed_over` (`:3097`) | Creator observes peer exit once the attachment is handed over | unaudited |
-| `quarantine_wakes_a_parked_peer` (`:3116`) | Quarantine wakes a parked peer | unaudited |
+| `quarantine_wakes_a_parked_peer` (`:3116`) | Quarantine wakes a parked peer | unaudited; cited by `quarantine-wakes-a-parked-waiter` |
 | `commit_after_quarantine_is_refused_and_aborts` (`:3134`) | Commit after quarantine is refused and aborts | unaudited; cited by `quarantine-gates-cover-every-storage-mutation` |
-| `only_a_producer_handle_may_trim` (`:3150`) | Only a producer handle may trim | unaudited |
+| `only_a_producer_handle_may_trim` (`:3150`) | Only a producer handle may trim | unaudited; cited by `trim-removes-only-dead-pages-below-the-write-cursor` |
 | `lengthened_released_descriptor_cannot_reclaim_a_live_frame` (`:3163`) | Lengthened released descriptor cannot reclaim a live frame | unaudited; cited by `reclaim-advance-bounded-by-the-producer-reservation` |
 | `forged_active_lease_count_quarantines_on_release` (`:3190`) | Forged active lease count quarantines on release | unaudited |
 | `rewound_arena_write_quarantines_instead_of_overlapping_a_live_frame` (`:3210`) | Rewound arena write quarantines instead of overlapping a live frame | unaudited |
 | `rewound_published_cursor_quarantines_even_with_a_freed_slot` (`:3228`) | Rewound published cursor quarantines even with a freed slot | unaudited |
 | `forged_consumer_cursors_fail_waits_instead_of_parking` (`:3247`) | Forged consumer cursors fail waits instead of parking | unaudited |
-| `trim_reclaims_pending_releases_before_punching` (`:3276`) | Trim reclaims pending releases before punching | unaudited |
-| `armed_wait_recheck_sees_a_quarantine_that_sent_no_token` (`:3294`) | Armed wait recheck sees a quarantine that sent no token | unaudited |
-| `peer_closing_its_doorbell_quarantines_the_waiting_side` (`:3314`) | Peer closing its doorbell quarantines the waiting side | unaudited |
+| `trim_reclaims_pending_releases_before_punching` (`:3276`) | Trim reclaims pending releases before punching | unaudited; cited by `trim-removes-only-dead-pages-below-the-write-cursor` |
+| `armed_wait_recheck_sees_a_quarantine_that_sent_no_token` (`:3294`) | Armed wait recheck sees a quarantine that sent no token | unaudited; cited by `quarantine-wakes-a-parked-waiter` |
+| `peer_closing_its_doorbell_quarantines_the_waiting_side` (`:3314`) | Peer closing its doorbell quarantines the waiting side | unaudited; cited by `quarantine-wakes-a-parked-waiter` |
 | `sealed_object_of_the_wrong_size_is_refused_before_mapping` (`:3344`) | Sealed object of the wrong size is refused before mapping | unaudited |
 | `probe_checks_cursors_against_slot_states` (`:3378`) | Probe checks cursors against slot states | unaudited |
 | `rewound_published_cursor_does_not_hide_a_queued_frame` (`:3425`) | Rewound published cursor does not hide a queued frame | unaudited |
@@ -150,7 +150,7 @@ assertion. Rows that a catalog record already cites are marked with the record.
 | `reclaimed_pages_leave_residency_and_reuse_as_zeroes` (`:4120`) | Reclaimed pages leave residency and reuse as zeroes | unaudited |
 | `subpage_releases_stay_resident_until_trim` (`:4138`) | Subpage releases stay resident until trim | unaudited |
 | `partial_page_reclaim_preserves_live_neighbor` (`:4165`) | Partial page reclaim preserves live neighbor | unaudited |
-| `trim_preserves_bytes_of_an_uncommitted_reservation` (`:4183`) | Trim preserves bytes of an uncommitted reservation | unaudited |
+| `trim_preserves_bytes_of_an_uncommitted_reservation` (`:4183`) | Trim preserves bytes of an uncommitted reservation | unaudited; cited by `trim-removes-only-dead-pages-below-the-write-cursor` |
 | `outstanding_reservation_is_refused_without_parking` (`:4211`) | Outstanding reservation is refused without parking | unaudited |
 | `page_removal_failure_quarantines_before_capacity_publication` (`:4236`) | Page removal failure quarantines before capacity publication | unaudited |
 | `quarantine_survives_peer_clearing_shared_flag` (`:4257`) | Quarantine survives peer clearing shared flag | unaudited; cited by `quarantine-authority-survives-peer-writes` |
@@ -241,7 +241,7 @@ the host's header validation.
 | File | Claims asserted | Status |
 | --- | --- | --- |
 | `packages/shm-native/tests/capability.ts` | Channel count is zero before and after the probe; if capable, a test pair opens two channels and closes to zero; if not, construction throws and the count stays zero | unaudited — both branches print and exit 0; CI does not parse stdout |
-| `packages/shm-native/tests/mechanism.ts` | Runtime mechanism gate or clean omission; cleanup hook runs at exit with empty stderr; five raw-descriptor boundary suites covering non-objects, unsafe numerics, malformed grant text, throwing accessors, wrong profile, and an unresolvable descriptor | unaudited — six suites self-skip when the addon is absent or the platform is not Linux |
+| `packages/shm-native/tests/mechanism.ts` | Runtime mechanism gate or clean omission; cleanup hook runs at exit with empty stderr; five raw-descriptor boundary suites covering non-objects, unsafe numerics, malformed grant text, throwing accessors, wrong profile, and an unresolvable descriptor | unaudited — six suites self-skip when the addon is absent or the platform is not Linux; the four raw-descriptor suites are cited by `raw-native-attach-rejects-hostile-descriptors-without-effects` |
 | `packages/shm-native/tests/runtime.ts` | Producer aliases detached before publish; receive segment has exact bounds; transfer refused; post-release reads are zeroed; double release throws; a throwing fill publishes nothing; descriptor and arena exhaustion recover; an external-view failpoint leaves the channel usable; leaked leases survive a forced GC | unaudited |
 
 The addon's negative tests pin channel count, external-ref count, and leak
@@ -375,7 +375,7 @@ outside the earlier inventory's scope, but catalog records depend on them.
 | `short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` (`shm_soak.rs:82`) | A short soak keeps fd, mapping, thread, and RSS envelopes bounded | unaudited |
 | `long_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded` (`shm_soak.rs:88`) | A long soak keeps the same envelopes bounded | unaudited |
 | `ring_profile_pins_per_connection_grant_geometry` (`src/ring_transport.rs:904`) | The host profile's grant geometry is pinned | unaudited; cited by `one-profile-name-denotes-one-geometry` |
-| `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts` (`src/ring_transport.rs:862`) | The diagnostics report carries identity, bounds, accounting, and lifecycle counts | unaudited |
+| `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts` (`src/ring_transport.rs:862`) | The diagnostics report carries identity, bounds, accounting, and lifecycle counts | unaudited; cited by `diagnostics-report-lifecycle-counts-in-a-fixed-shape` |
 
 ### Still quiet after the merge
 

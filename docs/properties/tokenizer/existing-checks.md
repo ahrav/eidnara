@@ -28,8 +28,8 @@ is a link, not a verdict.
 
 | Test | Claim asserted | Status |
 | --- | --- | --- |
-| `pattern_is_upstream_with_ecmascript_whitespace` (`:179`) | `CLAUDE_PAT_STR` equals `assets/claude.pat` with `\s`/`\S` rewritten to the ECMAScript whitespace class | unaudited |
-| `whitespace_class_matches_ecmascript_not_unicode_white_space` (`:192`) | The whitespace class includes U+FEFF and excludes U+0085 | unaudited |
+| `pattern_is_upstream_with_ecmascript_whitespace` (`:179`) | `CLAUDE_PAT_STR` equals `assets/claude.pat` with `\s`/`\S` rewritten to the ECMAScript whitespace class | unaudited; cited by `tokenizer-pattern-is-upstream-with-ecmascript-whitespace` |
+| `whitespace_class_matches_ecmascript_not_unicode_white_space` (`:192`) | The whitespace class includes U+FEFF and excludes U+0085 | unaudited; cited by `tokenizer-pattern-is-upstream-with-ecmascript-whitespace` |
 | `char_chunks_respect_boundaries_and_cap` (`:213`) | `char_chunks` never exceeds the cap and never splits a `char` | unaudited |
 
 ## Generator-time checks

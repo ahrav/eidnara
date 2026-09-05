@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "tokenizer",
   "source": "catalog.md",
-  "source_sha256": "3a3b72020f7f0427d09639b2c5fd1e1c4902ae216305ccb2b96a2c28a9e98eb9",
+  "source_sha256": "bf4603e3226927d52876ead2792fe26a8a0ccf670368cdb01dc38054c8e44f99",
   "records": [
     {
       "slug": "tokenizer-encoding-matches-the-independent-oracle",
@@ -80,6 +80,34 @@
       "existing_check": "`over_long_piece_is_chunked_and_bounded`, `over_long_cjk_piece_keeps_char_boundaries`, `long_text_without_over_long_piece_is_unaffected_by_bound` (`crates/tokenizer/tests/token_golden.rs`) and `char_chunks_respect_boundaries_and_cap` (`crates/tokenizer/src/lib.rs:213`); unaudited.",
       "impact": "Worst-case encoding latency regresses from bounded to seconds, or a campaign demands oracle equality for a long unpunctuated input that the crate deliberately does not promise.",
       "open_questions": [],
+      "extra": {}
+    },
+    {
+      "slug": "tokenizer-pattern-is-upstream-with-ecmascript-whitespace",
+      "type": "safety",
+      "reachability": "test-only",
+      "reachability_note": "`CLAUDE_PAT_STR` (`crates/tokenizer/src/lib.rs:65-75`) is compiled into every build and is the pre-tokenizer for every `encode_ordinary` call, but no workspace crate depends on `tokenizer`, so only the crate's tests reach it; the label moves with the other three records when a production caller lands.",
+      "status": "active",
+      "exercised": {
+        "state": "yes",
+        "note": "`pattern_is_upstream_with_ecmascript_whitespace` (`lib.rs:179`) derives the constant from `assets/claude.pat` by substituting the ECMAScript class for `\\s` and `\\S` and asserts equality plus the absence of any unexpanded `\\s` or `\\S`; `whitespace_class_matches_ecmascript_not_unicode_white_space` (`:192`) asserts the class matches the sixteen code points it enumerates, U+FEFF among them, and rejects U+0085, U+200B, U+180E, and `a`."
+      },
+      "guarantee": "The runtime pre-tokenizer pattern equals upstream `pat_str` with `\\s` and `\\S` replaced by the ECMAScript whitespace class, and that class follows the ECMAScript definition (U+FEFF included, U+0085 excluded), so piece boundaries match the JavaScript reference rather than the `regex` crate's Unicode `White_Space` definition (`lib.rs:10-13`).",
+      "check": {
+        "semantics": "always",
+        "condition": "the derived pattern equals `CLAUDE_PAT_STR`; the constant contains no `\\s` or `\\S`; the class matches each enumerated ECMAScript code point and none of U+0085, U+200B, U+180E."
+      },
+      "fault_timing": "An edit to `assets/claude.pat`, to `ecmascript_whitespace!`, or a change in the `regex` crate's class semantics moves piece boundaries and therefore ids while counts stay plausible; the difference surfaces only on inputs containing the code points where the two definitions disagree.",
+      "required_faults": "None; static checks over the constant and the class.",
+      "confidence": {
+        "level": "high",
+        "evidence": "[evidence](evidence/tokenizer-pattern-is-upstream-with-ecmascript-whitespace.md). The constant, the crate docs at `lib.rs:10-13`, and both tests were read directly."
+      },
+      "existing_check": "The two tests named above; unaudited.",
+      "impact": "A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`lib.rs:101`); U+0085 is not known to be in the corpus.",
+      "open_questions": [
+        "Does any golden case contain U+0085, so that a class drift on that code point would also fail parity? (needs human input)"
+      ],
       "extra": {}
     }
   ]

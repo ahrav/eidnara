@@ -30,6 +30,7 @@ The `Reaches production` column is derived from each record's `Reachability` and
 | [tokenizer-encoding-matches-the-independent-oracle](#tokenizer-encoding-matches-the-independent-oracle) | safety | high | no |
 | [tokenizer-vocabulary-is-embedded-and-complete](#tokenizer-vocabulary-is-embedded-and-complete) | safety | medium | no |
 | [tokenizer-over-long-pieces-are-chunked-and-bounded](#tokenizer-over-long-pieces-are-chunked-and-bounded) | safety | high | no |
+| [tokenizer-pattern-is-upstream-with-ecmascript-whitespace](#tokenizer-pattern-is-upstream-with-ecmascript-whitespace) | safety | high | no |
 
 ## Records
 
@@ -80,6 +81,21 @@ Open questions:
 
 - The three tests derive their input sizes from `MAX_PIECE_BYTES`, so raising the cap to a value that restores near-quadratic cost leaves them green. Should the cap be asserted as a literal and a time-bounded check added, or should the latency claim move to its own record with T5 as its oracle?
 
+### tokenizer-pattern-is-upstream-with-ecmascript-whitespace
+
+Type: safety
+Reachability: test-only - `CLAUDE_PAT_STR` (`crates/tokenizer/src/lib.rs:65-75`) is compiled into every build and is the pre-tokenizer for every `encode_ordinary` call, but no workspace crate depends on `tokenizer`, so only the crate's tests reach it; the label moves with the other three records when a production caller lands.
+Status: active
+Exercised: yes - `pattern_is_upstream_with_ecmascript_whitespace` (`lib.rs:179`) derives the constant from `assets/claude.pat` by substituting the ECMAScript class for `\s` and `\S` and asserts equality plus the absence of any unexpanded `\s` or `\S`; `whitespace_class_matches_ecmascript_not_unicode_white_space` (`:192`) asserts the class matches the sixteen code points it enumerates, U+FEFF among them, and rejects U+0085, U+200B, U+180E, and `a`.
+Guarantee: The runtime pre-tokenizer pattern equals upstream `pat_str` with `\s` and `\S` replaced by the ECMAScript whitespace class, and that class follows the ECMAScript definition (U+FEFF included, U+0085 excluded), so piece boundaries match the JavaScript reference rather than the `regex` crate's Unicode `White_Space` definition (`lib.rs:10-13`).
+Check: `always` - the derived pattern equals `CLAUDE_PAT_STR`; the constant contains no `\s` or `\S`; the class matches each enumerated ECMAScript code point and none of U+0085, U+200B, U+180E.
+Fault/timing angle: An edit to `assets/claude.pat`, to `ecmascript_whitespace!`, or a change in the `regex` crate's class semantics moves piece boundaries and therefore ids while counts stay plausible; the difference surfaces only on inputs containing the code points where the two definitions disagree.
+Required faults and enabling state: None; static checks over the constant and the class.
+Confidence: high - [evidence](evidence/tokenizer-pattern-is-upstream-with-ecmascript-whitespace.md). The constant, the crate docs at `lib.rs:10-13`, and both tests were read directly.
+Existing check: The two tests named above; unaudited.
+Impact: A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`lib.rs:101`); U+0085 is not known to be in the corpus.
+Open questions: Does any golden case contain U+0085, so that a class drift on that code point would also fail parity? (needs human input)
+
 ## Relationship map
 
 Grouped by shared mechanism, with suspected dominance noted where one property
@@ -101,7 +117,14 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   test that asserted oracle equality for an over-long piece would contradict the
   second record; a test that relaxed parity below the cap would contradict the
   first. Neither dominates the other.
-- **Reachability moves together.** All three records are `test-only` for one
+- **Boundaries before merges.**
+  `tokenizer-pattern-is-upstream-with-ecmascript-whitespace` is upstream of
+  `tokenizer-encoding-matches-the-independent-oracle`: every id the oracle test
+  compares is produced by merging within pieces the pattern cut, so a boundary
+  drift fails parity on any golden case containing an affected code point and
+  passes on the rest. Parity dominates the pattern record only over the code
+  points the corpus reaches.
+- **Reachability moves together.** All four records are `test-only` for one
   reason, the absence of a production caller, so the wave that adds the first
-  caller reclassifies all three at once and must re-evaluate which golden cases
+  caller reclassifies all four at once and must re-evaluate which golden cases
   are load-bearing for that caller's inputs.

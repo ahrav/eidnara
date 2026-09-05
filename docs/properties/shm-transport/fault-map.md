@@ -62,7 +62,7 @@ nothing. That is the failure mode this file exists to prevent.
 | reclaim-advance-bounded-by-the-producer-reservation | F2 writing a pending slot's descriptor between release and reclaim | No |
 | attach-binds-geometry-to-a-local-profile | A grant whose geometry differs from the admitted profile | No |
 | one-profile-name-denotes-one-geometry | None; F8 to detect it | No — and the contradiction is live |
-| native-boundary-not-weaker-than-its-wrapper | A direct native call carrying a descriptor the wrapper would reject | No |
+| native-boundary-not-weaker-than-its-wrapper (invalidated 2026-09-05: the wrapper decoder does not exist in this tree; superseded by `raw-native-attach-rejects-hostile-descriptors-without-effects`) | A direct native call carrying a descriptor the wrapper would reject | No |
 | operation-counters-are-observed-not-declared | None to observe the gap; negative controls that remove a real operation | No |
 | measured-transfer-is-witnessed-by-the-data | None to observe the gap; a byte corruption to demonstrate impact | No |
 | traceability-pointers-resolve | None; F8 | **Yes** — checked mechanically for this catalog |
@@ -270,6 +270,11 @@ while testing nothing.
 | capacity-recheck-after-a-wake-race | F16 against `reserve_until`'s arm ladder, plus a parked epoch the release provably hit; enabling situation `shm_capacity_signal_hit_parked_epoch` witnesses block-then-wake coverage only — F16's arm window has no constructible runtime marker | No — the existing cross-process wake lands mid-block, three orders of magnitude away from the window |
 | reclamation-excludes-pages-with-live-wrapped-bytes | F17: a shared partial page beside a live lease, a wrap-crossing run, and the trailing-page exception under a wrapped cursor; enabling situations `shm_partial_page_shared_with_live_lease`, `shm_arena_wrap_with_live_lease` | Partial — the first two shapes are pinned by unit tests; the exception-under-wrap shape and any non-4096 page size are not |
 | reactor-callback-is-one-in-flight | Doorbell or kick edges during a pending callback, ideally from several channels at once; enabling situation `shm_kick_during_pending_callback` | Partial — single-channel deferral is pinned (`callbacks === 2`); multi-channel coalescing and a hostile double-acknowledge are not |
+| trim-removes-only-dead-pages-below-the-write-cursor | F17 on an idle ring: a released frame with no reservation in flight, then an uncommitted reservation whose start lies in the trailing dead page; a consumer handle for the role gate | **Yes** - `trim_reclaims_pending_releases_before_punching`, `trim_preserves_bytes_of_an_uncommitted_reservation`, and `only_a_producer_handle_may_trim` build all three (no shipped caller today) |
+| quarantine-wakes-a-parked-waiter | A peer parked in `wait_until` or `wait_for_data`, then F4 quarantine on the other side, a quarantine between arm and park, or F1 closing the doorbell end | **Yes** - `quarantine_wakes_a_parked_peer`, `armed_wait_recheck_sees_a_quarantine_that_sent_no_token`, `peer_closing_its_doorbell_quarantines_the_waiting_side` build each, in-process, under a 5 s bound |
+| raw-native-attach-rejects-hostile-descriptors-without-effects | A descriptor object built without the wrapper: non-object, unsafe numeric field, malformed or aliased grant text, accessor or proxy | **Yes** - four raw-descriptor suites in `tests/mechanism.ts` (`:401`, `:424`, `:446`, `:476`) with the leak counters checked around each call |
+| diagnostics-report-lifecycle-counts-in-a-fixed-shape | One activation, one peer death (F1 or F4), one reclamation on a live connection, with a status request after each | Partial - the report shape and counter mapping are pinned by calling `record_*` directly; no test drives the events through `connection.rs` |
+| transport-debug-output-redacts-every-sentinel | None; formatting each sentinel-bearing type and error variant | **Yes** - `debug_and_errors_redact_every_sentinel`, `sample_errors_redact_every_sentinel`, `debug_redacts_profile_admission_and_quarantine_record` (no shipped formatter reaches the impls today) |
 
 ### Coverage checks to add (Group N)
 
@@ -306,9 +311,9 @@ bounded resumption after the witnessed precondition.
    `released-charges-wake-blocked-readers`, the only Group N record with no
    check at all.
 3. **F17's missing shape** — the trailing-page exception under a wrapped
-   cursor is one in-process test away, and F11 (a 16 KiB host, already
-   provisioned in CI) multiplies the value of every reclamation test that
-   exists.
+   cursor is one in-process test away, and F11 (a 16 KiB host, which no CI
+   runner provides today; see the F11 row above) would multiply the value of
+   every reclamation test that exists.
 4. **F15 through a real handshake** — low urgency: the unit gate is tight and
    the substitution surface is one function; worth folding into any future
    hostile-setup fixture rather than building alone.

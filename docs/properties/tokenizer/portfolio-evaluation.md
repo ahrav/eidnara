@@ -55,7 +55,8 @@ wildcard pass that questioned the framing itself.
 
 ## Gaps queued
 
-1. **The pre-tokenizer pattern has tests but no record.** `CLAUDE_PAT_STR`
+1. **The pre-tokenizer pattern has tests but no record.** Closed 2026-09-05:
+   `tokenizer-pattern-is-upstream-with-ecmascript-whitespace` added. `CLAUDE_PAT_STR`
    (`lib.rs:65-75`) is a hand-substituted rewrite of `assets/claude.pat`
    because ECMAScript and the `regex` crate define `\s` differently
    (`lib.rs:10-13`); `pattern_is_upstream_with_ecmascript_whitespace` and

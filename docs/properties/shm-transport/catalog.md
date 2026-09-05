@@ -286,7 +286,7 @@ and `n/a - invalidated` for an invalidated record.
 | [reclaim-advance-bounded-by-the-producer-reservation](#reclaim-advance-bounded-by-the-producer-reservation) | safety | high | yes |
 | [attach-binds-geometry-to-a-local-profile](#attach-binds-geometry-to-a-local-profile) | safety | high | yes |
 | [one-profile-name-denotes-one-geometry](#one-profile-name-denotes-one-geometry) | safety | high | yes |
-| [native-boundary-not-weaker-than-its-wrapper](#native-boundary-not-weaker-than-its-wrapper) | safety | high | yes |
+| [native-boundary-not-weaker-than-its-wrapper](#native-boundary-not-weaker-than-its-wrapper) | safety | high | n/a - invalidated |
 | [operation-counters-are-observed-not-declared](#operation-counters-are-observed-not-declared) | safety | high | no |
 | [measured-transfer-is-witnessed-by-the-data](#measured-transfer-is-witnessed-by-the-data) | safety | high | no |
 | [traceability-pointers-resolve](#traceability-pointers-resolve) | safety | high | n/a - invalidated |
@@ -334,6 +334,11 @@ and `n/a - invalidated` for an invalidated record.
 | [addon-scheduling-wakes-only-on-acknowledged-readiness](#addon-scheduling-wakes-only-on-acknowledged-readiness) | liveness | medium | yes |
 | [addon-scheduling-reaches-peer-eof-and-interrupted-wait](#addon-scheduling-reaches-peer-eof-and-interrupted-wait) | reachability | medium | yes |
 | [addon-grant-decoding-is-the-shared-setup-envelope](#addon-grant-decoding-is-the-shared-setup-envelope) | safety | low | yes |
+| [raw-native-attach-rejects-hostile-descriptors-without-effects](#raw-native-attach-rejects-hostile-descriptors-without-effects) | safety | high | yes |
+| [diagnostics-report-lifecycle-counts-in-a-fixed-shape](#diagnostics-report-lifecycle-counts-in-a-fixed-shape) | safety | high | yes |
+| [transport-debug-output-redacts-every-sentinel](#transport-debug-output-redacts-every-sentinel) | safety | high | no |
+| [trim-removes-only-dead-pages-below-the-write-cursor](#trim-removes-only-dead-pages-below-the-write-cursor) | safety | high | no |
+| [quarantine-wakes-a-parked-waiter](#quarantine-wakes-a-parked-waiter) | liveness | high | yes |
 
 ---
 
@@ -844,61 +849,49 @@ duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: not yet — needs a release issued by a party other than the lease
-holder.
+Exercised: yes, by construction - the violating call does not compile outside
+the transport crate, so no test needs to issue it; what remains to regress is a
+visibility change.
 Guarantee: Only the holder of a receive lease can complete it; possession of a
 frame's release identity does not by itself authorize completing that frame.
-Check: `always` — with a live `ReceiveLease` over sequence N, a release of
-identity N issued by any other party fails, the slot stays `RECEIVER_LEASED`,
-and the arena bytes under the lease do not become reservable.
-Fault/timing angle: the producer holds the identity of every frame it published,
-because `commit` returns it. If it releases while the receiver's lease is live,
-the slot moves to `RELEASE_PENDING`, the next `try_reserve` reclaims those bytes,
-and the producer may write them while the receiver's `LeaseSpan` still points
-there. The receiver's own `Drop` then gets `DuplicateRelease`, which is silently
-discarded.
-Required faults and enabling state: a live lease **and** a release from the
-producer side using the identity returned by `commit`.
-Confidence: high on the API shape, and the reachability question is now settled
-as latent — [evidence](evidence/release-authority-bound-to-lease-ownership.md).
-Verified by direct read of both signatures -
-`pub fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError>`
-(`ring.rs:1175`) validates identity and slot state only, and
-`pub fn commit(mut self, body_len: usize) -> Result<ReleaseIdentity, ProducerError>`
-(`ring.rs:1769`) hands that identity to the producer. No role, owner, or
-lease-token check exists on the release path.
-Reachability verdict - **not reachable in the shipped two-process topology.**
-Re-verified against `ring_transport.rs` at `e447c927`, and again at post-#131
-HEAD (2026-08-31), after the refactor rewrote
-every host-side producer path, because the verdict rests on caller behaviour that
-the refactor could have changed. It did not. Every non-test `commit` caller still
-discards the returned identity: all three host call sites put `commit` in
-statement position under `?` (`ring_transport.rs:615` in `publish_direct`, `:628`
-in `publish_owned`, `:696` in `RingClientEndpoint::send`), and the addon's two
-call sites do the same (`packages/shm-native/src/lib.rs:929-932`, `:1043-1046`).
-The only non-test direct `Ring::release` is a receiver completing its own lease
-(`lib.rs:327-331`, on the receive ring with an identity from `lease.identity()`
-held in the addon's table because `poll` forgets the lease). And the two
-directions are separate objects with independent random incarnations
-(`DuplexRing::create`, `ring.rs:757`), so a cross-ring release fails the
-incarnation check at `:1179-1184`. The violating composition is reachable only in
-a same-process, single-`Ring` arrangement, which today means the transport's own
-tests.
-Existing check: none. The identity-validation tests
-(`tests/ring.rs:152-175`, `:206`) all issue releases from the legitimate holder.
-Impact: a latent API-shape hazard rather than a live defect. What keeps it worth
-a record is that the composition is available rather than prevented, and in
-`tests/ring.rs` the violating call sits one unmutated argument away from an
-existing assertion. If a future caller retains a committed identity — for
-instance to implement producer-side reclamation — this becomes a
-read-after-recycle on leased bytes with no malformed input required.
+Check: `always` - `Ring::release` stays `pub(crate)` (`ring.rs:1469`); the only
+public completion path is `ReceiveLease::release(self)` (`lease.rs:207`), which
+consumes the lease and forwards the identity the lease was built with; a release
+of identity N by any party other than the lease holder is therefore not
+constructible from a dependent crate. A compile-fail test that a dependent crate
+cannot name `Ring::release` is the mechanical form of this record.
+Fault/timing angle: the source tree exposed `pub fn release(&self, identity)`
+on `Ring` while `commit` handed the same `ReleaseIdentity` to the producer, as
+it still does (`ring.rs:2561`), so a producer that retained the identity could
+complete a frame the receiver was still leasing, move the slot to
+`RELEASE_PENDING`, and let the next reservation overwrite leased bytes. The
+tree closes the composition by visibility, not by a runtime check: the release
+path still validates identity and slot state only (`:1469-1490`), so widening
+the visibility again reopens the hazard with no other change.
+Required faults and enabling state: a live lease and a release from a
+non-holder using the identity returned by `commit`; constructible only inside
+`crates/shm-transport` today.
+Confidence: high - [evidence](evidence/release-authority-bound-to-lease-ownership.md).
+Verified by direct read at HEAD - `pub(crate) fn release(&self, identity:
+ReleaseIdentity) -> Result<(), LeaseError>` (`ring.rs:1469`),
+`pub fn release(mut self) -> Result<(), LeaseError>` on `ReceiveLease`
+(`lease.rs:207`), and `pub fn commit(mut self, body_len: usize) ->
+Result<ReleaseIdentity, ProducerError>` (`ring.rs:2561`). The addon's
+`release` (`packages/shm-native/src/lib.rs:1278`) reaches the ring only
+through the `ReceiveLease` it stored at `poll` time (`detach_active`,
+`:317-333`), so the lease-independent completion the source tree's addon needed
+is gone.
+Existing check: none names the visibility. The identity-validation tests
+(`tests/ring.rs:152-175`, `:206`) all release from the legitimate holder.
+Impact: none live; the record is a regression contract. Widening
+`Ring::release` to `pub` again, or adding a public helper that completes by
+identity for a caller that forgot its lease, restores a read-after-recycle on
+leased bytes with no malformed input required.
 Open questions:
 
-- Should `Ring::release` remain public? There is a real constraint behind it:
-  the addon needs lease-independent completion because `poll` forgets the lease
-  and tracks the identity in its own table. So this is a design trade-off, not
-  an oversight, and the answer belongs to whoever owns that seam.
-  (needs human input)
+- Should the visibility be pinned by a compile-fail test under
+  `crates/shm-transport/tests`, or is the `pub(crate)` marker considered
+  sufficient under the crate's review practice? (needs human input)
 
 ### release-exactly-once-per-sequence
 
@@ -1507,7 +1500,7 @@ channel it opens crosses this boundary (`packages/shm-native/src/lib.rs`,
 `packages/plugin` is not in this tree; no in-tree production caller exists, so the
 label rests on the addon being the shipped client. The host side is
 unconditional (`crates/host-runtime/src/runtime.rs:738-744`).
-Status: active
+Status: invalidated
 Exercised: not yet — needs each wrapper-level rejection driven against the
 native boundary directly.
 Guarantee: Every rejection the TypeScript grant decoder performs is also
@@ -1535,11 +1528,21 @@ Impact: the permissive layer is the inner, directly-requirable one. A related
 gap: nothing binds a grant to its direction — field *position* is the only role
 assignment, so swapped fields would put two producers on one single-producer
 lane.
+Invalidated: the wrapper this record compared against does not exist in the
+U3 tree. `NativeChannel.attach` (`packages/shm-native/index.ts:537-540`)
+forwards the caller's descriptor to `native.attach` unchanged, so there is no
+TypeScript grant decoder, no wrapper error code, and nothing for the native
+boundary to be weaker than; the rejection set lives in the addon alone
+(`packages/shm-native/src/lib.rs:525`) and is pinned by the raw-descriptor
+suites in `packages/shm-native/tests/mechanism.ts` (`:401`, `:424`, `:446`,
+`:476`). The guarantee is vacuous against this tree. Its live content, that the
+directly-requirable `attach` rejects hostile descriptors with one bounded error
+and retains nothing, is carried by
+`raw-native-attach-rejects-hostile-descriptors-without-effects`; the
+direction-binding gap above is restated in that record's open questions.
 Open questions:
 
-- Can any caller reach native `attach` with attacker-ordered or
-  bug-ordered lane fields, making the role confusion reachable rather than
-  latent?
+- Carried to `raw-native-attach-rejects-hostile-descriptors-without-effects`.
 
 ---
 
@@ -1938,6 +1941,109 @@ Open questions:
 - Is a `cfg`- or feature-gated split intended before this transport becomes
   selectable, or is the surface considered acceptable because the transport is
   test-only? (needs human input)
+
+---
+
+### diagnostics-report-lifecycle-counts-in-a-fixed-shape
+
+Type: safety
+Reachability: default-production - `RingTransport::diagnostics`
+(`crates/host-runtime/src/ring_transport.rs:139`) is what
+`ControlAction::HostStatus` returns (`crates/host-runtime/src/connection.rs:640`),
+and the four counters it reports are bumped on the shipped connection path:
+`record_activation` at `connection.rs:172`, `record_peer_death` at `:185`,
+`record_reclamation` at `:193`, and the exhaustion count inside `prepare`
+(`ring_transport.rs:221`).
+Status: active
+Exercised: partial - `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts`
+(`ring_transport.rs:862`) calls the three `record_*` methods directly and then
+asserts every key of the report, so it pins the shape and the counter-to-key
+mapping; no test drives a real activation, peer death, or reclamation through
+`connection.rs` and reads the count back.
+Guarantee: The status report is a closed JSON shape: `state`, `error_class`,
+`artifact` (profile identity), `bounds` (the admitted limits), `accounting`
+(`active` and `quarantined` charges), and monotonic `activation.completed`,
+`peer_death.observed`, `reclamation.completed`, and `exhaustion.observed`
+counts, each of which increments exactly once per corresponding lifecycle
+event and never decrements.
+Check: `always` - after one activation, one observed peer death, and one
+reclamation, the report carries `1` under each of those keys and `0` under
+`exhaustion.observed`; `bounds` equals the admitted limits; no key outside the
+closed set is present; and every count is non-decreasing across successive
+reports on the same transport.
+Fault/timing angle: the counters are `AtomicU64` with `Relaxed` increments
+(`:195-221`) read with `Acquire` at report time (`:187-190`), so a report
+concurrent with an event may lag by one but can never go backwards; the hazard
+is a lifecycle path that forgets its `record_*` call, which no test detects
+because the only test increments the counters itself.
+Required faults and enabling state: a connection that activates, then loses its
+peer (F1 or F4), then reclaims; a status request after each step.
+Confidence: high - [evidence](evidence/diagnostics-report-lifecycle-counts-in-a-fixed-shape.md).
+The report builder, the four increment sites, the `HostStatus` caller, and the
+test were read directly.
+Existing check: the test named above, unaudited; `docs/shm-transport.md:71`
+documents the same surface.
+Impact: five records in this catalog say "no counter fires" for a failure they
+describe; this report is the one surface where a peer death or a reclamation
+that did happen is countable, so it is the oracle those records should use, and
+a missed `record_*` call turns a real event back into silence.
+Open questions:
+
+- Should a host-level test drive the three events through `connection.rs`
+  rather than calling `record_*` directly, so the wiring at `:172`, `:185`,
+  and `:193` is pinned? (needs human input)
+
+---
+
+### transport-debug-output-redacts-every-sentinel
+
+Type: safety
+Reachability: test-only - the `Debug` impls are compiled into every build
+(`redacted_debug!`, `crates/shm-transport/src/lib.rs:13-22`, applied to thirteen
+types across `profile.rs`, `descriptor.rs`, `arena.rs`, and `backend/sample.rs`),
+but no shipped formatter reaches them: no `{:?}` site in
+`crates/host-runtime/src` or `packages/shm-native/src` outside tests formats a
+transport descriptor, profile, admission, lease, or sample type. The label moves
+to `default-production` the day a host or addon log line formats one of them.
+Status: active
+Exercised: yes, in-crate - `debug_and_errors_redact_every_sentinel`
+(`crates/shm-transport/tests/contract.rs:446`) and
+`sample_errors_redact_every_sentinel` (`:714`) format the descriptor,
+incarnation, release-identity, frame, and sample types and their error variants
+and assert the output carries neither the sentinel bytes, the literal
+`SENTINEL`, nor a `0x` prefix; `debug_redacts_profile_admission_and_quarantine_record`
+(`tests/profile.rs:22`) does the same for `TargetProfile`, `Admission`, and
+`QuarantineRecord`.
+Guarantee: Formatting any transport type that carries a peer-echoed sentinel
+(incarnations, release identities, hardware profile ids, transport and frame
+descriptors, validated frames and samples, arena spans and plans, target
+profiles, admissions, quarantine records) with `Debug`, directly or through an
+error that embeds it, yields only the type name and `(<redacted>)`; no sentinel
+byte, hex rendering, or field value appears.
+Check: `always` - for each type in the `redacted_debug!` list, `format!("{:?}")`
+equals `TypeName(<redacted>)`, and for each error variant that embeds one of
+them the rendering contains no substring of the embedded value.
+Fault/timing angle: not a race. The hazard is additive: a new field type or a
+new error variant that derives `Debug` instead of going through the macro
+renders its payload, and nothing but the two contract tests, which enumerate
+types by hand, would notice.
+Required faults and enabling state: none; a static formatting check over the
+type list.
+Confidence: high - [evidence](evidence/transport-debug-output-redacts-every-sentinel.md).
+The macro and all thirteen invocation sites were read; the three tests were
+read and their negative assertions match the guarantee.
+Existing check: the three tests named above, unaudited. `docs/shm-transport.md:84`
+states the host-level consequence (reports never include grants, activation
+tokens, keys, or proofs), but that claim also depends on the host's own report
+builder, which is a separate surface.
+Impact: a sentinel in a log line is a replayable credential for whoever reads
+the log; the transport's defence is this macro, and its type list is
+maintained by hand.
+Open questions:
+
+- Should the type list be derived rather than enumerated, for instance by a
+  test that asserts every type carrying a sentinel field routes through the
+  macro? (needs human input)
 
 ---
 
@@ -3239,6 +3345,55 @@ Open questions:
 
 ---
 
+### raw-native-attach-rejects-hostile-descriptors-without-effects
+
+Type: safety
+Reachability: default-production - the addon is the shipped client and its
+`attach` (`packages/shm-native/src/lib.rs:525`) is the only descriptor
+validator; `NativeChannel.attach` (`packages/shm-native/index.ts:537-540`)
+forwards the caller's object unchanged, and the addon is directly requirable
+without the wrapper.
+Status: active
+Exercised: yes - four suites in `packages/shm-native/tests/mechanism.ts` drive
+the raw addon: non-object and structurally hostile arguments (`:401`), every
+unsafe numeric representation before narrowing (`:424`), malformed, non-ASCII,
+and aliased grant text (`:446`), and accessor objects and proxies (`:476`). Each
+goes through `expectRejectedWithoutEffects` (`:387`), which asserts the error
+pattern and that `activeChannelCount`, `activeExternalRefCount`, and
+`nativeLeakDiagnostics` are unchanged afterwards. All self-skip when the addon is
+absent or the platform is not Linux.
+Guarantee: A descriptor that is not a plain object, carries a field in an
+unsafe numeric representation, carries malformed or aliased grant text, or
+observes its own reads through accessors or a proxy is rejected by the raw
+native `attach` with the single fixed message `invalid shared-memory descriptor`
+(`DESCRIPTOR_ERROR`, `lib.rs:32`; `descriptor_error`, `:150`), and the
+rejection retains no channel, external reference, or native allocation.
+Check: `always` - for each hostile shape, `attach` throws the fixed message and
+the three leak counters are equal before and after the call.
+Fault/timing angle: not a race. The hazard is a validation step that reads a
+field twice, once to check and once to use, through an accessor or proxy that
+returns different values, or an early return that leaks a partially registered
+channel; the accessor and proxy suites exist because both were plausible.
+Required faults and enabling state: a caller that bypasses the wrapper or
+builds the descriptor object itself; no host cooperation needed.
+Confidence: high - [evidence](evidence/raw-native-attach-rejects-hostile-descriptors-without-effects.md).
+The `attach` entry, the fixed error constructors, the wrapper forwarding, and
+the four suites with their shared helper were read directly.
+Existing check: the four suites named above, unaudited; inventoried as one
+file-level row in `existing-checks.md`.
+Impact: this is the inner, directly-requirable boundary; an admitted hostile
+descriptor maps attacker-chosen geometry into the process. The record replaces
+`native-boundary-not-weaker-than-its-wrapper`, whose wrapper decoder does not
+exist in this tree.
+Open questions:
+
+- Nothing binds a grant to its direction: field position is the only role
+  assignment, so a descriptor with swapped lane fields would put two producers
+  on one single-producer lane. Is that reachable from any caller, or latent?
+  (carried over; needs human input)
+
+---
+
 ## Group M: normal-operation liveness
 
 Every liveness record before this group concerns a failure. A transport that never
@@ -3347,9 +3502,11 @@ does not weaken the window: the same release signals the `data_ready` doorbell
 (`:1236-1241`), and `data_available` (`:1160-1172`) returns true only when
 `published != consumed` and `active < max_leases`, so the saturation state is
 exactly the one that parks a waiter and the release's signal is what un-parks
-it. `always-or-unreached` because the saturation state is unreachable in the
-shipped host: `receive_one` holds at most one of eight leases and releases it
-on every path.
+it. `always-or-unreached` because the saturation state is unreachable through
+the Rust host receiver: `receive_one` holds at most one of eight leases and
+releases it on every path. It is reachable through the addon receiver, whose
+leases live until the caller releases them (`packages/shm-native/src/lib.rs:1220`,
+`:1278`), which is why the label stays `default-production`.
 Fault/timing angle: no race — the counter is incremented and decremented by the
 same thread-confined receiver. The hazard is representational: the declining
 return is used both for saturation (`ring.rs:1063-1068`) and for an empty ring
@@ -3379,11 +3536,13 @@ quarantine, or counter fires: the silent capacity-loss signature of
 `attach-reconciles-or-refuses-stale-shared-cursors`, reached with no crash.
 Open questions:
 
-- Does the addon receive path saturate where the Rust host cannot? It retains
-  leases deliberately, per the reachability analysis in
-  `release-authority-bound-to-lease-ownership`, so it is the one shipped consumer
-  that plausibly reaches the cap. Whether the property is latent or live depends
-  on that answer. (needs human input)
+- Resolved (2026-09-05): the addon receive path does saturate where the Rust
+  host cannot. `poll` inserts every lease into `channel.active`
+  (`packages/shm-native/src/lib.rs:1220`) and only `release` (`:1278`,
+  through `detach_active`, `:317-333`) removes it, and the wrapper hands the
+  release decision to the caller (`NativeReceiveLease.release` and
+  `[Symbol.dispose]`, `packages/shm-native/index.ts:497-505`). The property
+  is live for the client-side ring whenever a caller holds eight frames.
 - Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
   references were written against the source tree's eventfd doorbells. The
   tree's doorbells are `socketpair` ends (doorbell mechanism pass at the top of
@@ -3525,10 +3684,18 @@ Type: reachability
 Reachability: default-production — the lease-capacity gate is on the shipped
 path, since the ring is built unconditionally
 (`crates/host-runtime/src/runtime.rs:741`) and prepared per connection
-(`crates/host-runtime/src/connection.rs:117`). The saturated *state* is not
-shipped-reachable: `max_leases` is `HOST_TEST_RING_DEPTH`, 8
-(`crates/shm-transport/src/profile.rs:652`, `:655-670`) while a receive
-holds one lease at a time, which is this record's finding.
+(`crates/host-runtime/src/connection.rs:117`). The saturated *state* is
+reachable through one shipped receiver only. The Rust host's `receive_one`
+holds at most one of the `max_leases` (8, `HOST_TEST_RING_DEPTH`,
+`crates/shm-transport/src/profile.rs:652`, `:655-670`) leases per call, so
+the host-side receive ring never reaches the cap. The addon's `poll` stores
+every lease it hands out in `channel.active`
+(`packages/shm-native/src/lib.rs:1220`) until the caller invokes `release`
+(`:1278`, reached from `NativeReceiveLease.release` or `[Symbol.dispose]`,
+`packages/shm-native/index.ts:497-505`), so a caller holding eight frames puts
+the client-side receive ring at the cap with no fault. The label stays
+`default-production` for that reason; the host-side unreachability is a
+finding about one receiver, not about the transport.
 Status: active
 Exercised: not yet — reached once, in one synthetic profile, at a cap of one,
 which cannot distinguish being at the cap from holding one lease.
@@ -3559,18 +3726,19 @@ the extra publication has a slot. The existing lease-limited profile satisfies t
 second but not the first, so a new profile is required rather than a reuse.
 Confidence: high — [evidence](evidence/lease-saturation-is-reached-then-drains.md).
 Both halves are observable in one existing `conservation()` snapshot, so the
-marker needs no new instrumentation, and the shipped host cannot reach the state
-at all: `max_leases` is 8 while `receive_one` holds at most one lease per call,
+marker needs no new instrumentation. The Rust host cannot reach the state:
+`max_leases` is 8 while `receive_one` holds at most one lease per call,
 releasing it on every path (`crates/host-runtime/src/ring_transport.rs:507-509`,
-`:546-548`, and `Drop` on error returns).
+`:546-548`, and `Drop` on error returns). The addon can, because lease
+lifetime there is the caller's (`lib.rs:1220`, `:1278`).
 Existing check: none as a coverage marker. The lease-limit test constructs and
 drains the state at a cap of one, so the situation is reached but not witnessed.
 Impact: without this marker,
 `receive-resumes-when-lease-capacity-clears` reports a pass that means the gate
 declined for the other reason, an empty ring, which is exactly the ambiguity that
-made the existing assertion weak. A never-fired marker is itself the finding: it
-reports that the shipped host configuration cannot exercise lease backpressure at
-all.
+made the existing assertion weak. A never-fired marker under a Rust-host-only
+campaign is itself a finding: it reports that the host receiver cannot exercise
+lease backpressure, and that only an addon caller retaining leases can.
 Open questions:
 
 - Should a second profile with a cap above one be added purely to make this
@@ -3992,7 +4160,11 @@ assert both that removal occurred and that the neighbour survived. The
 trailing-partial-page exception has never been reached with a wrapped cursor.
 Guarantee: `MADV_REMOVE` is applied only to pages every byte of which belongs
 to released frames; a page shared with any live byte — including the wrapped
-tail of a partially released run — is never removed.
+tail of a partially released run — is never removed. This record scopes the
+reclaim-time pass (`reclaim_completed`, `ring.rs:2073`, through
+`punch_dead_pages`, `:2178`); the explicit idle-ring pass `Ring::trim`
+(`:2259`) shares `punch_dead_pages` and is covered by
+`trim-removes-only-dead-pages-below-the-write-cursor`.
 Check: `always` — every range passed to `remove_pages` is page-aligned, lies
 within the logical span `[reclaimed, new_reclaimed)` rounded inward
 (`removal_ranges`, `:221-273`: start rounds up `:243-249`, end rounds down
@@ -4094,6 +4266,113 @@ Open questions:
 - The terminal-path non-gated callback (`scheduling.rs:184-189`) can overlap
   an unacknowledged one exactly once, on a dying reactor. Acceptable by
   design? (needs human input)
+
+---
+
+### trim-removes-only-dead-pages-below-the-write-cursor
+
+Type: safety
+Reachability: test-only - `Ring::trim` (`crates/shm-transport/src/backend/ring.rs:2259`)
+has no caller outside the transport crate's own tests (`ring.rs:3004`, `:3155`,
+`:3159`, `:3282`, and the uncommitted-reservation test at `:4183`); neither
+`crates/host-runtime` nor `packages/shm-native` invokes it, so the idle-ring
+page-removal pass is not on the shipped path.
+Status: active
+Exercised: yes, in-crate - `only_a_producer_handle_may_trim` (`:3150`) pins the
+role gate, `trim_reclaims_pending_releases_before_punching` (`:3276`) pins the
+reclaim-before-punch order against `resident_arena_pages()` (`:1857`), and
+`trim_preserves_bytes_of_an_uncommitted_reservation` (`:4183`) pins the upper
+bound at `arena_write`.
+Guarantee: An explicit `trim` is refused for a consumer handle (`RoleMismatch`)
+and for a quarantined ring (`Quarantined`); when it runs it first turns pending
+releases into reclaimed capacity (`reclaim_completed`, `:2073`) and then removes
+only whole pages inside `[arena_reclaimed, arena_write)`, so no byte of a live
+lease, and no byte of a reservation taken but not yet committed, is punched.
+Check: `always` - after `trim` on a ring holding one live lease and one
+uncommitted reservation, the lease's bytes and the reservation's bytes read back
+unchanged, `resident_arena_pages()` counts only pages that intersect live or
+reserved bytes, and a consumer handle's `trim` returns `RoleMismatch` without
+changing residency.
+Fault/timing angle: `trim` shares `punch_dead_pages` (`:2178`) with the
+reclaim-time pass but runs with the trailing-page flag set (`:2276`), so the
+partial page just below `arena_write` is removable when nothing live remains in
+it; the bound that protects reserved bytes is `arena_write` itself, read through
+`verified_producer_cursors()` after the reclaim pass. A removal failure
+quarantines (`quarantine_with`, `:2277`) rather than returning an error the
+caller could retry.
+Required faults and enabling state: a released frame on an otherwise idle ring,
+so that only `trim` can reclaim it; a reservation taken but not committed whose
+start lies inside the page `trim` would otherwise treat as fully dead; a
+consumer handle on the same ring.
+Confidence: high - [evidence](evidence/trim-removes-only-dead-pages-below-the-write-cursor.md).
+The role and quarantine gates, the reclaim call, and the punch bounds were read
+directly at `:2259-2278`; the three tests were read and their assertions match
+the guarantee.
+Existing check: the three tests named above, all unaudited.
+Impact: a wrong upper bound zeroes the bytes of a frame the producer is still
+writing, which the receiver later decodes as a valid frame of zeros; a missing
+role gate lets the consumer punch pages under the producer's reservation.
+Because no shipped caller exists today, the record is a regression contract for
+the first caller rather than a live exposure.
+Open questions:
+
+- Is `trim` intended for a host idle-connection path, or is it a test-only
+  hook that should be `cfg(test)`? (needs human input)
+
+---
+
+### quarantine-wakes-a-parked-waiter
+
+Type: liveness
+Reachability: default-production - the host parks on the ring doorbell through
+`arm_data_wait` (`crates/host-runtime/src/ring_transport.rs:426`) and
+`wait_for_data` (`:713`), and quarantine can be entered on either side of the
+shipped ring by any verification failure or peer death, so a waiter parked at
+the moment its peer dies or quarantines is an ordinary production state.
+Status: active
+Exercised: yes, in-crate - `quarantine_wakes_a_parked_peer`
+(`crates/shm-transport/src/backend/ring.rs:3116`) parks the attached side in
+`wait_until` under a 5 s deadline, enters quarantine on the other side, and
+asserts the wait returns and `is_quarantined()` holds;
+`armed_wait_recheck_sees_a_quarantine_that_sent_no_token` (`:3294`) arms a wait,
+quarantines without ringing, and asserts `armed_wait_holds` reports the
+quarantine with `parked == 0`;
+`peer_closing_its_doorbell_quarantines_the_waiting_side` (`:3314`) drops the
+attached peer and asserts `wait_for_data` returns a quarantine result, the local
+side is quarantined, and `parked == 0`.
+Guarantee: A waiter parked on the data doorbell is released, within its own
+deadline, by any of three events: the ring entering quarantine
+(`enter_quarantine`, `:1889`, which rings the doorbell the peer waits on), a
+quarantine that raced the arm and delivered no token (the armed re-check,
+`armed_wait_holds`, `:1097`, observes the state), and the peer closing its
+doorbell end (which `wait_for_data`, `:1409`, surfaces as quarantine of the
+waiting side). In every case `parked` returns to `0`, so no waiter sleeps to its
+deadline on a dead ring and no stale parked flag survives to swallow a later
+wake.
+Check: `always` - with a waiter parked, each of the three events causes the wait
+to return before its deadline with a quarantine result, `is_quarantined()` true
+on the waiting side, and `parked == 0` afterwards.
+Fault/timing angle: the socketpair doorbell delivers a token only when `signal`
+(`:596`) runs; a quarantine entered between `arm_data_wait` (`:1066`) and the
+park has no token to deliver, which is the case the armed re-check covers. The
+hazard is a new quarantine entry point that sets the state without ringing and
+is reached after the re-check has already passed.
+Required faults and enabling state: a peer parked in `wait_until` or
+`wait_for_data`; then one of quarantine entry on the other side (F4 or any
+verification failure), quarantine entry between arm and park, or the peer's
+doorbell end closing (F1).
+Confidence: high - [evidence](evidence/quarantine-wakes-a-parked-waiter.md).
+The three tests were read against `signal`, `wait_until`, `arm_data_wait`,
+`armed_wait_holds`, `wait_for_data`, and `enter_quarantine` at HEAD.
+Existing check: the three tests named above, unaudited.
+Impact: a lost wake here is the difference between a dead peer being reported
+within one poll and a connection hanging for its full deadline, which the host
+then classifies as a timeout rather than a peer death.
+Open questions:
+
+- Does `enter_quarantine` ring the capacity doorbell as well as the data
+  doorbell, so a producer parked on capacity is released too? Only the
+  data-side wake is pinned. (needs human input)
 
 ---
 
@@ -4200,6 +4479,31 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   `backpressure-converges-in-a-bounded-reclaim-window` assert; the rounding
   that protects live bytes is precisely what defers page removal, so tests for
   the liveness pair must not treat retained partial pages as a defect.
+- **Two entry points into page removal.**
+  `reclamation-excludes-pages-with-live-wrapped-bytes` and
+  `trim-removes-only-dead-pages-below-the-write-cursor` both end in
+  `punch_dead_pages`; the first bounds the reclaim-time pass, the second the
+  explicit idle pass with the trailing-page flag set and `arena_write` as the
+  ceiling. A defect in the shared punch fails both; a defect in either caller's
+  bounds fails one.
+- **Quarantine is delivered, not only recorded.**
+  `quarantine-wakes-a-parked-waiter` is the liveness half of
+  `quarantine-gates-cover-every-storage-mutation` and
+  `attach-refuses-a-quarantined-object`: the gates make quarantine terminal, the
+  wake makes it observable before a deadline. A new quarantine entry point that
+  skips `signal` passes the gate records and fails only this one.
+- **One counting surface for silent failures.**
+  `diagnostics-report-lifecycle-counts-in-a-fixed-shape` is the oracle the
+  "no counter fires" records (`release-failure-is-observable`,
+  `dead-peer-charges-are-reclaimed-or-declared`) should assert against;
+  `transport-debug-output-redacts-every-sentinel` bounds what any such report
+  or log may render. Neither dominates the other.
+- **The raw boundary and the envelope.**
+  `raw-native-attach-rejects-hostile-descriptors-without-effects` covers the
+  descriptor object the addon validates; `addon-grant-decoding-is-the-shared-setup-envelope`
+  covers the grant envelope decoded before it. The invalidated
+  `native-boundary-not-weaker-than-its-wrapper` sat between them against a
+  wrapper decoder this tree does not have.
 
 ## Discovered at U3
 
