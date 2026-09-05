@@ -351,8 +351,13 @@ Fault/timing angle: `close_generation` is the only remover and runs after
 before that line leaks the entry; the leaked `Arc<GenerationCore>` then keeps the
 writer sender and pending map alive for host lifetime, and the shutdown sequence
 iterates a generation whose task is gone.
-Required faults and enabling state: a panic in the read loop, control handling,
-grant, or close-route decision; or an abort while between insert and removal.
+Required faults and enabling state: a panic on the connection task's own inline
+stack between the insert and the removal (the read loop or the inline part of
+control handling), or an explicit abort of that task in the same window. A panic
+in the route-open or close-route callbacks does not qualify: `RouteOpen` launches
+`open_route` in a separate lifecycle task (`connection.rs:662-665`) whose failure
+leaves `serve_generation` alive to perform its ordinary removal, and the
+mandatory-ring implementation has no grant branch.
 Confidence: high - [evidence](evidence/generation-registry-entry-released-on-every-connection-exit.md). the single-remover structure is directly readable and nothing
 guards the interval.
 Existing check: none.
@@ -684,9 +689,13 @@ generation that will ever wait on the shutdown rendezvous.
 Check: `always` - every inserted generation either appears in the snapshot or
 completed its close before the snapshot was taken.
 Fault/timing angle: the argument rests on two orderings. The draining flag is
-stored with sequential consistency strictly before the snapshot, with an await
-between, so any insert winning the connections lock afterwards reads true and
-bails. And the check and insert share the snapshot's lock scope. Both hold as
+stored with sequential consistency strictly before the snapshot, so any insert
+winning the connections lock afterwards reads true and bails; and the check and
+insert share the snapshot's lock scope. No await is load-bearing between the store
+and the snapshot: with zero live routes the route-settle loop between them awaits
+nothing and the two run as synchronous code, so a test must not rely on a
+scheduling point there. The `SeqCst` store and the shared mutex are the
+mechanisms. Both hold as
 written; neither is asserted. That the second draining writer is a *writer task*
 rather than the shutdown path is what makes this non-obvious.
 Required faults and enabling state: a socket accepted and authenticated between
@@ -1106,8 +1115,10 @@ observable outside the process.
 Check: `always` - for every one of the thirteen reasons `classify` (`crates/host-runtime/src/lifecycle.rs:917`) distinguishes, the operator-visible output produced from that reason differs from the output produced from every other reason. This is a value-mapping assertion over the whole reason set, not location coverage: reaching the renderer once proves nothing when twelve reasons collapse to the same `wedged` output, which is the predicted violation at HEAD.
 Fault/timing angle: none. The classifier computes thirteen distinct reasons; the
 sole production consumer forwards one and collapses the rest to a bare "wedged".
-A probe *error* also becomes "wedged", erasing the distinction between fence
-incoherence and an I/O failure. Verified: the crate has no tracing or log
+Two probe *errors*, `InstanceError::Insecure` and `InstanceError::NamespaceDrift`,
+also render as "wedged", erasing the distinction between fence incoherence and
+those failures; `InstanceError::Io` is distinguishable, rendering as
+`internal_error` (evidence, `:338-340`). Verified: the crate has no tracing or log
 dependency, so there is no second channel.
 Required faults and enabling state: any wedge other than the forwarded one; two
 are already fixtured in the existing tests.

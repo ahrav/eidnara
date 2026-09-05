@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "14d049898a87550998b6bec1af0fb4653cf51ad70562dcf24dc240709eed4817",
+  "source_sha256": "a6cb6c148f8ea4e837073c2d661f31f98289833613167a3801823656fff04389",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -154,7 +154,7 @@
         "condition": "for every path out of `serve_generation` after the insert, the registry no longer contains that id and no `Arc<GenerationCore>` for it is retained: the ordinary return, the panic path, and the abort path, where the connection task's future is dropped by the forced shutdown's `abort_all` between insert and removal and the removal must run from a drop guard rather than from a return."
       },
       "fault_timing": "`close_generation` is the only remover and runs after `read_tasks.wait()` and after the `shutdown_complete` rendezvous. Any unwind before that line leaks the entry; the leaked `Arc<GenerationCore>` then keeps the writer sender and pending map alive for host lifetime, and the shutdown sequence iterates a generation whose task is gone.",
-      "required_faults": "a panic in the read loop, control handling, grant, or close-route decision; or an abort while between insert and removal.",
+      "required_faults": "a panic on the connection task's own inline stack between the insert and the removal (the read loop or the inline part of control handling), or an explicit abort of that task in the same window. A panic in the route-open or close-route callbacks does not qualify: `RouteOpen` launches `open_route` in a separate lifecycle task (`connection.rs:662-665`) whose failure leaves `serve_generation` alive to perform its ordinary removal, and the mandatory-ring implementation has no grant branch.",
       "confidence": {
         "level": "high",
         "evidence": "[evidence](evidence/generation-registry-entry-released-on-every-connection-exit.md). the single-remover structure is directly readable and nothing guards the interval."
@@ -426,7 +426,7 @@
         "semantics": "always",
         "condition": "every inserted generation either appears in the snapshot or completed its close before the snapshot was taken."
       },
-      "fault_timing": "the argument rests on two orderings. The draining flag is stored with sequential consistency strictly before the snapshot, with an await between, so any insert winning the connections lock afterwards reads true and bails. And the check and insert share the snapshot's lock scope. Both hold as written; neither is asserted. That the second draining writer is a *writer task* rather than the shutdown path is what makes this non-obvious.",
+      "fault_timing": "the argument rests on two orderings. The draining flag is stored with sequential consistency strictly before the snapshot, so any insert winning the connections lock afterwards reads true and bails; and the check and insert share the snapshot's lock scope. No await is load-bearing between the store and the snapshot: with zero live routes the route-settle loop between them awaits nothing and the two run as synchronous code, so a test must not rely on a scheduling point there. The `SeqCst` store and the shared mutex are the mechanisms. Both hold as written; neither is asserted. That the second draining writer is a *writer task* rather than the shutdown path is what makes this non-obvious.",
       "required_faults": "a socket accepted and authenticated between the draining store and the snapshot; requires a multi-thread runtime to be interesting.",
       "confidence": {
         "level": "high",
@@ -772,7 +772,7 @@
         "semantics": "always",
         "condition": "for every one of the thirteen reasons `classify` (`crates/host-runtime/src/lifecycle.rs:917`) distinguishes, the operator-visible output produced from that reason differs from the output produced from every other reason. This is a value-mapping assertion over the whole reason set, not location coverage: reaching the renderer once proves nothing when twelve reasons collapse to the same `wedged` output, which is the predicted violation at HEAD."
       },
-      "fault_timing": "none. The classifier computes thirteen distinct reasons; the sole production consumer forwards one and collapses the rest to a bare \"wedged\". A probe *error* also becomes \"wedged\", erasing the distinction between fence incoherence and an I/O failure. Verified: the crate has no tracing or log dependency, so there is no second channel.",
+      "fault_timing": "none. The classifier computes thirteen distinct reasons; the sole production consumer forwards one and collapses the rest to a bare \"wedged\". Two probe *errors*, `InstanceError::Insecure` and `InstanceError::NamespaceDrift`, also render as \"wedged\", erasing the distinction between fence incoherence and those failures; `InstanceError::Io` is distinguishable, rendering as `internal_error` (evidence, `:338-340`). Verified: the crate has no tracing or log dependency, so there is no second channel.",
       "required_faults": "any wedge other than the forwarded one; two are already fixtured in the existing tests.",
       "confidence": {
         "level": "high",

@@ -21,15 +21,15 @@ and coverage checks assert independent preconditions, never the violation.
 | H7 macOS execution | Any in-crate lifecycle or generation test on macOS | **No** - the macOS library step names one unrelated filter |
 | H8 slow-peer and stalled-writer | A peer that authenticates then stops reading, with queued frames | **Partial** - exists for the frame channel, not for the forced-shutdown path |
 | H9 saturation | Pending, reject, and connection pools driven to their caps | **Partial** - connection permits on the candidate path only |
-| H10 CI wiring | The ungated suites named in a workflow | **No** - itself a cataloged finding |
+| H10 CI wiring | The ungated suites named in a workflow | **Yes in this tree** - `ci.yml:118` and `:126` run `cargo test --workspace --all-targets`, so the lifecycle, activation, and host-roundtrip binaries execute on both toolchains; the source repository's "No" is provenance |
 
 ## Map
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| generation-id-strictly-increases-and-is-never-reused | Concurrent accepts; promotions for the two-per-socket case (H1) | No - every test hand-builds one id |
-| at-most-one-registered-generation-per-connection | A committed non-TCP grant plus a drain landing in the bootstrap-to-promoted transfer window (H1) | No |
-| close-disposition-is-a-total-function-of-the-read-exit-cause | Each of the eleven read-exit sites with queued emissions in flight | Partial - proven only by two ungated integration files |
+| generation-id-strictly-increases-and-is-never-reused | A `gen_counter` seeded near `u64::MAX` so wraparound is reached; concurrent mints cannot collide on one `fetch_add`, and the promotion second mint no longer exists | No - every test hand-builds one id |
+| at-most-one-registered-generation-per-connection | A drain landing between setup completion and the single registration at `connection.rs:256-260` (H1); non-TCP grants and the bootstrap-to-promoted transfer were removed with the mandatory ring | No |
+| close-disposition-is-a-total-function-of-the-read-exit-cause | Each `ReadExit` construction site in the current `read_loop` (fourteen between `connection.rs:354` and `:518`; the eleven predates the ring) with queued emissions in flight | Partial - proven only by two ungated integration files |
 | retirement-discards-only-through-the-discard-token | A producer suspended between its cancel precheck and its send, with the cancel landing between (H1) | No |
 | a-retired-generation-emits-nothing-and-mutates-nothing | An in-flight off-reader emission concurrent with a peer-driven close (H1) | Partial - one shape |
 | generation-registry-entry-released-on-every-connection-exit | A panic or abort between insert and removal (H2, H3) | No |

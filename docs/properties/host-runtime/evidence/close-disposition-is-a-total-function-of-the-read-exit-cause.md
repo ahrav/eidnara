@@ -92,9 +92,12 @@ file). Counting constructions, not match arms: **25 sites** - 1 `HostCancelled`,
 **Correction:** the catalog's Fault/timing angle and `fault-map.md` both say
 "eleven read-exit sites". That count is accurate for `2d5a3569` - the last commit
 in the chain, where `git show 2d5a3569:...` yields exactly 11 non-`HostCancelled`
-construction sites - but stale for HEAD, which has 24. The count grew with
-`ReadClose::Overloaded`, the transport-readiness gates, and the candidate-grant
-helpers.
+construction sites - but stale. This file's later count of 24 was taken at a HEAD that still had
+the candidate-grant helpers; the current `read_loop` constructs `ReadExit` at
+fourteen sites between `connection.rs:354` and `:518`, which is the census the
+catalog and `fault-map.md` now carry. The count changed with
+`ReadClose::Overloaded`, the transport-readiness gates, and the removal of the
+candidate-grant helpers, and must be regenerated from the function, not carried.
 
 ## Failure scenario
 

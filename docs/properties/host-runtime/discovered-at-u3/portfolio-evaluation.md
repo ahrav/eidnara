@@ -47,6 +47,12 @@ This evaluation created only this file. No record, source file, test, or
 sibling artifact was edited, and no formatter was run. Dispositions below are
 proposed, not applied.
 
+**Disposition applied.** The sections below are the evaluation as written at
+`572315a`. The catalog has since applied the refinements and review rounds on top
+of them; the "Disposition applied" section at the end of this file records what
+landed and the recomputed distribution, and supersedes the counts and verdict
+below where they differ.
+
 Mechanical state, checked for this pass: 16 records, 16 entries in
 `../index.json`, 16 files in `../evidence/`, slugs equal across all three,
 every evidence link resolves. `../index.json`'s `source_sha256` matches
@@ -555,3 +561,38 @@ Four further triggers, each firing independently.
   edit. Until then `u3_ort_test_skipped_without_library` is the honest oracle,
   and the fault map is right to place it inside `ort_library()`'s `None` arm
   rather than after the early return.
+
+## Disposition applied
+
+Recorded against the merged catalog at the commit that adds this section, from
+`../index.json`.
+
+What landed from this evaluation: R1, R2, R3, and R7 as the catalog's U3 preamble
+states; the Broca and Synapse records reclassified `test-only` (no in-tree
+production caller; the daemon is U4); unresolved evidence conclusions lifted into
+open questions; both Broca checks bounded (retention and teardown now stated in
+the units the code bounds). Later review rounds went further than the evaluation
+asked: the proof, fingerprint, and route-vector records are `partial` because
+their suites do not compare against an independent implementation or run
+production code; the closure-store records are `test-only` and the open-failure
+check is narrowed to the error-preservation the library exposes; the credential
+and manifest records name the exact boundary cases their suites omit.
+
+Recomputed distribution for the 16 records:
+
+| Field | Discovered at U3 (16), now |
+| --- | --- |
+| Type | 15 safety, 1 liveness, 0 reachability |
+| Semantics | 16 `always` |
+| Reachability class | 4 `default-production`, 12 `test-only` |
+| Exercised | 1 `yes`, 15 `partial`, 0 `not yet` |
+| Confidence | 7 high, 9 medium |
+| Records with an open question | 7 of 16 |
+
+Verdict, recomputed: still **REFUTED as finished** for the reason the original
+verdict gives, the absence of concurrent-lifecycle properties in two subsystems
+whose comments are about concurrent lifecycle; gaps G1 and G2 and biases B1 to B3
+remain open. What changed is the reachability picture: 12 of the 16 depend on a
+composition or caller that is not in this tree, so bias B1 is resolved in favour
+of `test-only` until the U4 daemon lands, and the `Exercised` column no longer
+overstates the suites.
