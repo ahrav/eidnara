@@ -1741,9 +1741,16 @@ mod tests {
         ];
         // Values that would collide under naive concatenation: a colon that mimics the
         // field separator, a digit run that mimics a length prefix, one byte, and the
-        // longest admitted value.
+        // longest admitted value. The multibyte value has a byte length (8) that differs
+        // from its character count (6), so a length prefix counted in characters diverges
+        // from the oracle.
         let longest = "v".repeat(CREDENTIAL_VALUE_CAP_BYTES);
-        let values: [&str; 6] = ["secret", "s", "1:a", "3:abc", "sec:ret", &longest];
+        let multibyte = "s\u{e9}cr\u{e9}t";
+        assert_eq!(multibyte.len(), 8);
+        assert_eq!(multibyte.chars().count(), 6);
+        let values: [&str; 7] = [
+            "secret", "s", "1:a", "3:abc", "sec:ret", multibyte, &longest,
+        ];
 
         let mut seen = std::collections::BTreeSet::new();
         for key in &keys {

@@ -927,16 +927,23 @@ mod tests {
         let baseline = manifest();
         let before = canonical_fingerprint(&baseline);
         let replacement = sha256_hex(b"replaced");
-        // Each entry changes one artifact hash or one embedding-space scalar and nothing
-        // else, so an input the pre-image omits leaves the fingerprint equal to `before`.
+        // Each entry changes one artifact hash, one initializer name, or one
+        // embedding-space scalar and nothing else, so an input the pre-image omits leaves
+        // the fingerprint equal to `before`.
         type Mutation = (&'static str, fn(&mut BundleManifest, &str));
-        let fields: [Mutation; 16] = [
+        let fields: [Mutation; 18] = [
             ("model_file", |m, h| m.model_file.sha256 = h.to_owned()),
-            ("external_initializers[0]", |m, h| {
+            ("external_initializers[0].sha256", |m, h| {
                 m.external_initializers[0].sha256 = h.to_owned()
             }),
-            ("external_initializers[1]", |m, h| {
+            ("external_initializers[1].sha256", |m, h| {
                 m.external_initializers[1].sha256 = h.to_owned()
+            }),
+            ("external_initializers[0].name", |m, _| {
+                m.external_initializers[0].name = "renamed-first.bin".to_owned()
+            }),
+            ("external_initializers[1].name", |m, _| {
+                m.external_initializers[1].name = "renamed-second.bin".to_owned()
             }),
             ("tokenizer.tokenizer", |m, h| {
                 m.tokenizer.tokenizer.sha256 = h.to_owned()
