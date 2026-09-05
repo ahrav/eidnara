@@ -70,6 +70,12 @@ pub const CLIENT_QUEUED_BYTES: usize = MAX_BODY_LEN as usize + 1_048_576;
 /// `CLIENT_CONTROL_QUEUED_BYTES` covers exactly `CLIENT_CONTROL_QUEUE_FRAMES` header-only control frames.
 /// A control-byte charge can fail only when the control channel is full; that condition retires the generation.
 pub const CLIENT_CONTROL_QUEUED_BYTES: usize = CLIENT_CONTROL_QUEUE_FRAMES * HEADER_LEN;
+/// Best-effort `Cancel` frames may hold at most this many of the reserved control slots.
+///
+/// The remainder stays available to `Pong` and `Goodbye`, so a burst of cancellations
+/// cannot exhaust the pool and let a host `Ping` retire an otherwise healthy generation.
+pub const CLIENT_CANCEL_QUEUE_FRAMES: usize = CLIENT_CONTROL_QUEUE_FRAMES / 2;
+const _: () = assert!(CLIENT_CANCEL_QUEUE_FRAMES < CLIENT_CONTROL_QUEUE_FRAMES);
 /// The data partition of `CLIENT_QUEUED_BYTES`; it still admits one maximum-sized request frame.
 pub const CLIENT_DATA_QUEUED_BYTES: usize = CLIENT_QUEUED_BYTES - CLIENT_CONTROL_QUEUED_BYTES;
 const _: () = assert!(CLIENT_DATA_QUEUED_BYTES >= MAX_BODY_LEN as usize + HEADER_LEN);
@@ -1439,9 +1445,15 @@ impl Inner {
                 "reserved control admission exhausted",
             )
         };
+        // `Cancel` admits only up to its own ceiling so liveness and close traffic keep headroom.
+        let limit = if ty == FrameType::Cancel {
+            CLIENT_CANCEL_QUEUE_FRAMES * HEADER_LEN
+        } else {
+            CLIENT_CONTROL_QUEUED_BYTES
+        };
         let charge = self
             .control_budget
-            .charge(HEADER_LEN)
+            .charge_within(HEADER_LEN, limit)
             .ok_or_else(exhausted)?;
         let frame = QueuedFrame {
             header,
@@ -2051,9 +2063,15 @@ impl ByteCounter {
     }
 
     fn charge(self: &Arc<Self>, bytes: usize) -> Option<ByteCharge> {
+        self.charge_within(bytes, self.cap)
+    }
+
+    /// Charges `bytes` only if the total stays at or below `limit`, a ceiling at or below
+    /// `cap` that lets one class of caller leave headroom for another.
+    fn charge_within(self: &Arc<Self>, bytes: usize, limit: usize) -> Option<ByteCharge> {
         let mut used = lock_unpoisoned(&self.used);
         let next = used.checked_add(bytes)?;
-        if next > self.cap {
+        if next > self.cap.min(limit) {
             return None;
         }
         *used = next;
@@ -4144,6 +4162,45 @@ mod tests {
             assert!(lock_unpoisoned(&inner.pending).is_empty());
             let _ = terminal_rx.await;
         }
+    }
+
+    #[tokio::test]
+    async fn cancels_cannot_exhaust_the_pong_reserve() {
+        let (inner, mut data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut cancelled = 0usize;
+        for _ in 0..CLIENT_CONTROL_QUEUE_FRAMES {
+            let (kind, _rx) = unary_sender();
+            let (key, publish) = inner
+                .admit(route(1), Vec::new(), false, kind, deadline)
+                .expect("admitted");
+            assert!(bridge_claims(&publish));
+            drop(data_rx.recv().await);
+            // A possibly-sent request queues a best-effort Cancel until its own ceiling.
+            match inner.cancel_key(key, "cancelled") {
+                Ok(_) => cancelled += 1,
+                Err(error) => {
+                    assert_eq!(error.code(), "control_capacity_exhausted");
+                    assert!(
+                        !inner.retired.load(Ordering::Acquire),
+                        "an over-limit Cancel is dropped, not fatal"
+                    );
+                }
+            }
+        }
+        assert_eq!(cancelled, CLIENT_CANCEL_QUEUE_FRAMES);
+        assert_eq!(control_rx.len(), CLIENT_CANCEL_QUEUE_FRAMES);
+        // The rest of the pool still admits liveness traffic.
+        inner
+            .send_control(
+                FrameType::Pong,
+                pure_header_flags(),
+                FrameId::control(9),
+                None,
+            )
+            .expect("Pong admits beyond the Cancel ceiling");
+        assert!(!inner.retired.load(Ordering::Acquire));
+        inner.retire("test_done");
     }
 
     #[tokio::test]
