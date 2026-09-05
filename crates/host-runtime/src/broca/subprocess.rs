@@ -1652,7 +1652,13 @@ pub mod group_registry {
 mod tests {
     use std::ffi::OsString;
 
-    use super::EnvSnapshot;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    use super::{
+        CREDENTIAL_FINGERPRINT_CANONICALIZATION, CREDENTIAL_FINGERPRINT_DOMAIN,
+        CREDENTIAL_VALUE_CAP_BYTES, CredentialRowError, EnvSnapshot,
+    };
 
     /// The vector was produced outside this crate from the documented derivation, so a change to
     /// the domain separator, the canonicalization id, or the row layout fails here.
@@ -1677,5 +1683,126 @@ mod tests {
                 .expect("fingerprint"),
             "ecac831b94bb1d9e972ee993f7798c9ff7c6133b545e489ac1a3f60448127e80"
         );
+    }
+
+    /// The documented derivation, written from the contract rather than from
+    /// `credential_fingerprint`: `HMAC(derive(key, domain), canonical_row)` where every field
+    /// is `len:field` and the value is preceded by its length as its own field.
+    fn documented_fingerprint(
+        key: &[u8; 32],
+        harness: &str,
+        canonical: &str,
+        name: &str,
+        value: &str,
+    ) -> String {
+        let field = |text: &str| format!("{}:{text}", text.len());
+        let message = [
+            field(CREDENTIAL_FINGERPRINT_CANONICALIZATION),
+            field(harness),
+            field(canonical),
+            field(name),
+            field(&value.len().to_string()),
+            field(value),
+        ]
+        .concat();
+        let mut derive = Hmac::<Sha256>::new_from_slice(key).expect("key");
+        derive.update(CREDENTIAL_FINGERPRINT_DOMAIN.as_bytes());
+        let derived = derive.finalize().into_bytes();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&derived).expect("derived key");
+        mac.update(message.as_bytes());
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// Every generated row agrees with the documented derivation, rows that differ in any
+    /// input yield distinct fingerprints, and empty or oversize values are refused before
+    /// fingerprinting.
+    #[test]
+    fn credential_fingerprint_matches_the_documented_derivation_across_rows() {
+        let keys: [[u8; 32]; 3] = [
+            [0u8; 32],
+            std::array::from_fn(|index| index as u8),
+            [0xff; 32],
+        ];
+        // Each (harness, provider) names the variable the row reads and the canonical name
+        // that enters the transcript; the two Pi aliases canonicalize onto shared names.
+        let providers: [(&str, &str, &str, &str); 7] = [
+            ("opencode", "anthropic", "ANTHROPIC_API_KEY", "anthropic"),
+            ("opencode", "google", "GEMINI_API_KEY", "google"),
+            ("opencode", "openai", "OPENAI_API_KEY", "openai"),
+            ("pi", "anthropic", "ANTHROPIC_API_KEY", "anthropic"),
+            ("pi", "google", "GEMINI_API_KEY", "google"),
+            ("pi", "openai", "OPENAI_API_KEY", "openai"),
+            ("pi", "openai-codex", "OPENAI_API_KEY", "openai"),
+        ];
+        // Values that would collide under naive concatenation: a colon that mimics the
+        // field separator, a digit run that mimics a length prefix, one byte, and the
+        // longest admitted value.
+        let longest = "v".repeat(CREDENTIAL_VALUE_CAP_BYTES);
+        let values: [&str; 6] = ["secret", "s", "1:a", "3:abc", "sec:ret", &longest];
+
+        let mut seen = std::collections::BTreeSet::new();
+        for key in &keys {
+            for (harness, provider, variable, canonical) in providers {
+                for value in values {
+                    let snapshot = EnvSnapshot::capture_from(vec![(
+                        OsString::from(variable),
+                        OsString::from(value),
+                    )])
+                    .expect("snapshot");
+                    let actual = snapshot
+                        .credential_fingerprint(key, harness, provider)
+                        .expect("fingerprint");
+                    assert_eq!(
+                        actual,
+                        documented_fingerprint(key, harness, canonical, variable, value),
+                        "{harness}/{provider} value {value:?} disagrees with the documented derivation"
+                    );
+                    // The alias and its canonical provider name enter the same transcript,
+                    // so they share a fingerprint by contract; every other input distinguishes.
+                    let identity = (key, harness, canonical, variable, value);
+                    let fresh = seen.insert((identity, actual.clone()));
+                    assert!(
+                        fresh || seen.contains(&(identity, actual)),
+                        "{harness}/{provider} value {value:?} collides with a different row"
+                    );
+                }
+            }
+        }
+        let distinct_identities: std::collections::BTreeSet<_> =
+            seen.iter().map(|(identity, _)| *identity).collect();
+        let distinct_fingerprints: std::collections::BTreeSet<_> = seen
+            .iter()
+            .map(|(_, fingerprint)| fingerprint.clone())
+            .collect();
+        assert_eq!(
+            distinct_identities.len(),
+            distinct_fingerprints.len(),
+            "distinct rows must yield distinct fingerprints"
+        );
+
+        // An empty value is refused before fingerprinting.
+        let empty = EnvSnapshot::capture_from(vec![(
+            OsString::from("ANTHROPIC_API_KEY"),
+            OsString::from(""),
+        )])
+        .expect("snapshot");
+        assert!(matches!(
+            empty.credential_fingerprint(&keys[1], "opencode", "anthropic"),
+            Err(CredentialRowError::CredentialMissing)
+        ));
+        // A value over the cap is refused before fingerprinting.
+        let oversize = EnvSnapshot::capture_from(vec![(
+            OsString::from("ANTHROPIC_API_KEY"),
+            OsString::from("v".repeat(CREDENTIAL_VALUE_CAP_BYTES + 1)),
+        )])
+        .expect("snapshot");
+        assert!(matches!(
+            oversize.credential_fingerprint(&keys[1], "opencode", "anthropic"),
+            Err(CredentialRowError::CredentialValueTooLarge)
+        ));
     }
 }

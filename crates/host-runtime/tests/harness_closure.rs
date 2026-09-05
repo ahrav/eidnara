@@ -438,6 +438,116 @@ fn canonical_manifest_digest_is_pinned() {
     );
 }
 
+/// Emits `value` as JSON text with every object's keys in reverse order, so the text differs
+/// from serde's key-sorted output while denoting the same manifest.
+fn json_with_reversed_keys(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            keys.reverse();
+            let fields: Vec<String> = keys
+                .into_iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).expect("key"),
+                        json_with_reversed_keys(&map[key])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", fields.join(","))
+        }
+        serde_json::Value::Array(values) => {
+            let items: Vec<String> = values.iter().map(json_with_reversed_keys).collect();
+            format!("[{}]", items.join(","))
+        }
+        scalar => serde_json::to_string(scalar).expect("scalar"),
+    }
+}
+
+#[test]
+fn manifest_digest_is_stable_under_key_reordering() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
+    let text = std::fs::read_to_string(fixture).expect("read closure fixture");
+    let manifest: ClosureManifest = serde_json::from_str(&text).expect("decode closure fixture");
+    let value = serde_json::to_value(&manifest).expect("value");
+    let reordered_text = json_with_reversed_keys(&value);
+    assert_ne!(
+        reordered_text,
+        serde_json::to_string(&manifest).expect("sorted text"),
+        "the reordered text must be a different byte sequence for the same manifest"
+    );
+    let reordered: ClosureManifest =
+        serde_json::from_str(&reordered_text).expect("decode reordered manifest");
+    assert_eq!(
+        manifest_digest(&reordered).expect("digest"),
+        manifest_digest(&manifest).expect("digest"),
+        "key order in the input must not change the digest"
+    );
+}
+
+#[test]
+fn manifest_digest_changes_when_any_field_changes() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
+    let baseline: ClosureManifest =
+        serde_json::from_slice(&std::fs::read(fixture).expect("read closure fixture"))
+            .expect("decode closure fixture");
+    let before = manifest_digest(&baseline).expect("digest");
+    // The schema is not a digest input but a gate: any other value is refused before
+    // hashing, so no manifest with a different schema can reproduce this digest.
+    let mut other_schema = baseline.clone();
+    other_schema.schema.push('x');
+    assert!(manifest_digest(&other_schema).is_err());
+    // Each entry changes one field and nothing else, and keeps the manifest valid so the
+    // digest is computed. A field the canonical form drops leaves the digest equal to
+    // `before`.
+    type Mutation = (&'static str, fn(&mut ClosureManifest));
+    let mutations: [Mutation; 13] = [
+        ("harness", |m| m.harness.push('x')),
+        ("package", |m| m.package.push('x')),
+        ("version", |m| m.version.push('x')),
+        ("argument_variant", |m| m.argument_variant.push('x')),
+        // Roots must stay uniquely sorted; a new last root that sorts after the others is
+        // declared but unreferenced, which the validator allows.
+        ("source_roots", |m| {
+            m.source_roots.push("zz-extra-root".to_owned())
+        }),
+        // The launch fields must name nodes, so the node path moves with them; the new
+        // path keeps the nodes sorted.
+        ("interpreter", |m| {
+            m.nodes[0].path = "bin/node2".to_owned();
+            m.interpreter = Some("bin/node2".to_owned());
+        }),
+        ("extensions", |m| m.extensions.clear()),
+        ("nodes[0].source_path", |m| m.nodes[0].source_path.push('x')),
+        ("nodes[0].sha256", |m| {
+            m.nodes[0].sha256 = format!("{:0>64}", "1")
+        }),
+        ("nodes[0].size_bytes", |m| m.nodes[0].size_bytes += 1),
+        ("nodes[1].dependencies", |m| {
+            m.nodes[1].dependencies.truncate(1)
+        }),
+        ("nodes[1].source_path", |m| m.nodes[1].source_path.push('x')),
+        ("nodes[1].sha256", |m| {
+            m.nodes[1].sha256 = format!("{:0>64}", "2")
+        }),
+    ];
+    let mut seen = std::collections::BTreeSet::from([before.clone()]);
+    for (name, mutate) in mutations {
+        let mut manifest = baseline.clone();
+        mutate(&mut manifest);
+        let after = manifest_digest(&manifest).expect("digest");
+        assert_ne!(before, after, "{name} does not participate in the digest");
+        assert!(
+            seen.insert(after),
+            "{name} yields the same digest as another mutation"
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires U9 external closure roots; run explicitly in release qualification"]
 fn production_closures_from_environment_materialize() {
