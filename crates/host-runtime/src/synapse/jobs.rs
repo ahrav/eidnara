@@ -796,8 +796,12 @@ impl JobTable {
             .map(|job| job.reserved_result_bytes)
             .fold(0, u64::saturating_add);
         let floor = in_flight.saturating_add(result_bytes);
-        // Victims move into `released` and drop after the table lock, so their bytes are subtracted here by hand until then.
-        let mut releasing = 0u64;
+        // Jobs already swept or evicted into `released` drop after the table lock, so their still-counted bytes are subtracted here by hand until then.
+        let mut releasing = released
+            .jobs
+            .iter()
+            .filter(|job| Self::eviction_frees_bytes(job))
+            .fold(0u64, |total, job| total.saturating_add(job.result_bytes));
         loop {
             let live = self
                 .live_result_bytes

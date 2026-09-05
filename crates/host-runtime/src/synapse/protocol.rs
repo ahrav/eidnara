@@ -294,8 +294,17 @@ struct ResultParams<'a> {
     job_id: Cow<'a, str>,
     #[serde(borrow)]
     request_key: Cow<'a, str>,
-    #[serde(default)]
+    /// Required but nullable: the first page sends an explicit `null`, later pages the issued cursor. An omitted field is a malformed request, not a first-page replay.
+    #[serde(borrow, deserialize_with = "required_nullable")]
     cursor: Option<Cow<'a, str>>,
+}
+
+/// A `deserialize_with` field without `default` must be present; this keeps `Option` semantics for an explicit `null` while rejecting omission.
+fn required_nullable<'de, D>(deserializer: D) -> Result<Option<Cow<'de, str>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer)
 }
 
 /// The request decoder classifies malformed JSON and typed-deserialization failures as `schema_violation`.
@@ -1607,6 +1616,35 @@ mod tests {
             let error = parse_request_unreserved(&body, false, &lane, &limits).expect_err(case);
             assert_eq!(error.code, "schema_violation", "{case}: {}", error.message);
         }
+    }
+
+    #[test]
+    fn the_result_cursor_is_required_but_nullable() {
+        let limits = SynapseLimits::default();
+        let lane = lane();
+        let key = "a".repeat(64);
+        let with_cursor = |cursor: &str| {
+            format!(
+                concat!(
+                    "{{\"method\":\"embed.result\",\"params\":{{",
+                    "\"model\":\"{}\",\"required_fingerprint\":\"{}\",",
+                    "\"required_epoch\":{},\"allow_equivalent\":false,",
+                    "\"accept_declared\":false,\"job_id\":\"0123456789abcdef-7\",",
+                    "\"request_key\":\"{}\"{}}}}}"
+                ),
+                lane.model, lane.fingerprint, lane.table_epoch, key, cursor
+            )
+            .into_bytes()
+        };
+        match parse_request_unreserved(&with_cursor(",\"cursor\":null"), false, &lane, &limits)
+            .expect("an explicit null cursor is the first page")
+        {
+            Request::EmbedResult { cursor, .. } => assert_eq!(cursor, None),
+            _ => panic!("result request expected"),
+        }
+        let error = parse_request_unreserved(&with_cursor(""), false, &lane, &limits)
+            .expect_err("an omitted cursor is malformed");
+        assert_eq!(error.code, "schema_violation");
     }
 
     #[test]

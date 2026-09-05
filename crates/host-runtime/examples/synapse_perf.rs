@@ -29,8 +29,8 @@ use host_runtime::{
     RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
 };
 use perf_measurement::{
-    AttemptDisposition, AttemptRecord, DeterministicRng, LatencySummary, LogicalDisposition,
-    LogicalRecord, ServiceSample, SynapseMethod, SynapseVariant, WindowClass,
+    AttemptDisposition, AttemptRecord, DeterministicRng, LogicalDisposition, LogicalRecord,
+    ServiceSample, SynapseMethod, SynapseVariant, WindowClass,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -1824,10 +1824,10 @@ struct Summary {
     fatal_errors: Vec<String>,
 }
 
-/// `GatedLatency` publishes each tail quantile only when the sample count and censoring support it.
+/// `GatedLatency` publishes each quantile over the offered population, not over completed samples alone.
 ///
-/// A quantile below its sample floor rests on too few observations above it.
-/// A quantile `q` is also suppressed when `censored_per_mille` exceeds `1000 * (1 - q)`: the censored mass could occupy the entire tail above `q`, so the observed value is not identifiable.
+/// A censored request (timed out or still in flight) took longer than every completed one, so it sits above every completed sample in the offered distribution. The quantile `q` of the offered population is therefore the completed sample at rank `q / (1 - c)`, where `c` is the censored fraction; when that rank falls into the censored mass (`c > 1 - q`) the value is not identifiable and is suppressed.
+/// A tail quantile below its sample floor rests on too few observations above it and is suppressed as well.
 #[derive(Debug, PartialEq, serde::Serialize)]
 struct GatedLatency {
     count: u64,
@@ -1840,22 +1840,35 @@ struct GatedLatency {
 }
 
 impl GatedLatency {
-    fn from_unsorted(samples: Vec<u64>, censored_per_mille: f64) -> Option<Self> {
-        let base = LatencySummary::from_unsorted(samples)?;
-        let gate = |value: Option<u64>, quantile_per_mille: u64| {
-            let identifiable = censored_per_mille <= (1_000 - quantile_per_mille) as f64;
-            (identifiable && perf_measurement::quantile_publishable(base.count, quantile_per_mille))
-                .then_some(value)
+    fn from_unsorted(mut samples: Vec<u64>, censored_per_mille: f64) -> Option<Self> {
+        samples.sort_unstable();
+        let count = samples.len() as u64;
+        let completed_fraction = 1.0 - censored_per_mille / 1_000.0;
+        // The offered-population quantile maps onto the completed samples at a higher rank; a rank at or past 1.0 is the completed maximum, a rank beyond the completed mass is censored.
+        let offered_quantile = |quantile_per_mille: u64| -> Option<u64> {
+            let adjusted = quantile_per_mille as f64 / 1_000.0 / completed_fraction;
+            // Floating-point slack at the boundary resolves toward publication of the maximum, matching the exact arithmetic of `c == 1 - q`.
+            if adjusted > 1.0 + 1e-9 {
+                return None;
+            }
+            perf_measurement::nearest_rank(
+                &samples,
+                (adjusted.min(1.0) * 100.0).max(f64::MIN_POSITIVE),
+            )
+        };
+        let tail = |quantile_per_mille: u64| {
+            perf_measurement::quantile_publishable(count, quantile_per_mille)
+                .then(|| offered_quantile(quantile_per_mille))
                 .flatten()
         };
         Some(Self {
-            count: base.count,
-            p50_ns: base.p50_ns,
-            p90_ns: base.p90_ns,
-            p95_ns: base.p95_ns,
-            p99_ns: gate(Some(base.p99_ns), 990),
-            p999_ns: gate(base.p999_ns, 999),
-            max_ns: base.max_ns,
+            count,
+            p50_ns: offered_quantile(500)?,
+            p90_ns: offered_quantile(900)?,
+            p95_ns: offered_quantile(950)?,
+            p99_ns: tail(990),
+            p999_ns: tail(999),
+            max_ns: *samples.last()?,
         })
     }
 }
