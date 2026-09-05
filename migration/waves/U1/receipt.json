@@ -23,7 +23,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "6eb92ec40fc48794c51fdfaec52160cd37e6137e22ec4174b033645e53fa375d",
+      "destination_sha256": "6f7692fb27d627d4676e78b363ec52418acd688378eaec7fa4a93894725de503",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -122,7 +122,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "d88a7302dc5746488fa6a0aea814406df60c6360690b27889232cca13048a034",
+      "destination_sha256": "107fe28fc1d79db1c8e0044929909d3530fe2ed4e9baee76ff53a98c0546ce23",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -133,7 +133,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "dd5939dd0fd668cf423e881a407f7ce602877358c462b3fcda3f427a87bb1504",
+      "destination_sha256": "c9b2548b6b9af4de09ad50170b7dc6991257d93ef0d33df381f36723a21ef344",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

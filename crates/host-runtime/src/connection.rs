@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::wire::{FrameType, HEADER_LEN};
 use tokio::net::UnixStream;
@@ -35,9 +36,9 @@ const MAX_INFLIGHT_BUSY_REJECTS: usize = 32;
 /// The writer sets `written_at` immediately after `write_all` returns.
 ///
 /// The reader accepts a Pong observed at or after `written_at` even if it locks `pings` before the writer.
-/// The reader discards a Pong observed before `written_at` because the Ping write had not completed.
 ///
-/// Comparing against write start would admit pre-answers; requiring a mutex transition before the Pong would drop legitimate answers.
+/// A Pong received before `complete_write` can have an `answered_at` before `completed_at`.
+/// The peer can read the ring before the writer records `completed_at`, so timestamps cannot distinguish a guessed correlation from a real Pong.
 /// A peer can answer after receiving the bytes without reading them; no observer can distinguish that answer from a real answer.
 /// The writer's per-frame stall deadline catches a peer that stops draining its socket.
 pub struct PingProbe {
@@ -45,6 +46,26 @@ pub struct PingProbe {
     pub sent: Instant,
     pub written_at: Option<Instant>,
     pub answered_at: Option<Instant>,
+}
+
+impl PingProbe {
+    /// Returns `true` when an already-recorded Pong settles the probe, so the caller removes it.
+    /// Otherwise the probe becomes answerable and its Pong deadline starts at `completed_at`.
+    pub fn complete_write(&mut self, completed_at: Instant, pong_deadline: Duration) -> bool {
+        match self.answered_at {
+            Some(answered_at)
+                if answered_at.saturating_duration_since(completed_at) < pong_deadline =>
+            {
+                true
+            }
+            _ => {
+                self.answered_at = None;
+                self.sent = completed_at;
+                self.written_at = Some(completed_at);
+                false
+            }
+        }
+    }
 }
 
 pub struct PendingEntry {
@@ -65,8 +86,6 @@ pub struct GenerationCore {
     /// The connection owner is released after shutdown queues Goodbye so it cannot tear down the writer while the producer fence drains.
     pub shutdown_complete: CancellationToken,
     pub writer: FrameSender,
-    /// The generation's route map only looks up routes; the registry inserts routes at bind and removes them at close.
-    pub membership: Mutex<HashMap<u16, u32>>,
     pub pending: Mutex<HashMap<PendingKey, PendingEntry>>,
     /// The `pings` map stores outstanding host-originated Pings by correlation with their flags and send time.
     pub pings: Mutex<HashMap<u64, PingProbe>>,
@@ -109,6 +128,8 @@ pub async fn run_connection<H: HostHandler>(
     drop(handshake_permit);
     let _connection_permit = connection_permit;
 
+    // One deadline caps total setup time, anchored before preparation starts.
+    let setup_deadline = Instant::now() + shared.timing.transport_setup_deadline;
     let ring = Arc::clone(&shared.ring);
     let ingress = shared.ingress_budget.clone();
     let queue_frames = shared.limits.writer_queue_frames;
@@ -118,12 +139,7 @@ pub async fn run_connection<H: HostHandler>(
     // A timed-out `prepare` continues because `spawn_blocking` cannot abort it.
     // A dropped `CancellationToken` does not cancel `root`; late completion
     // discards `sender` and cancels `root`.
-    let prepared = match timeout_at(
-        Instant::now() + shared.timing.transport_setup_deadline,
-        &mut prepared,
-    )
-    .await
-    {
+    let prepared = match timeout_at(setup_deadline, &mut prepared).await {
         Ok(joined) => joined,
         Err(_) => {
             shared.spawn_tracked(async move {
@@ -159,7 +175,7 @@ pub async fn run_connection<H: HostHandler>(
         crate::wire::PROTOCOL_VERSION,
         shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
         token.as_str(),
-        shared.timing.transport_setup_deadline,
+        setup_deadline,
     )
     .await
     .is_err()
@@ -222,7 +238,6 @@ fn new_generation<H: HostHandler>(
         read_tasks: TaskTracker::new(),
         shutdown_complete: CancellationToken::new(),
         writer,
-        membership: Mutex::new(HashMap::new()),
         pending: Mutex::new(HashMap::new()),
         pings: Mutex::new(HashMap::new()),
         busy_rejects: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_BUSY_REJECTS)),
@@ -277,12 +292,6 @@ async fn serve_generation<H: HostHandler>(
         // the generation continues draining in protocol order.
         // A cancelled `generation.token` indicates retirement rather than draining, so the code falls through to the silent close.
         ReadExit::HostCancelled if !generation.token.is_cancelled() => {}
-        // For `PeerKeepQueue`, wait for the promised terminal before retiring.
-        ReadExit::PeerKeepQueue(terminal_written) => {
-            let _ = terminal_written.await;
-            generation.token.cancel();
-            generation.writer.discard();
-        }
         // Peer-driven retirement closes silently.
         // Cancelling `generation.token` prevents off-reader emissions from succeeding.
         // Discarding `generation.writer` drops queued frames.
@@ -322,15 +331,10 @@ fn discard_unregistered_generation(generation: &GenerationCore) {
     generation.writer.discard();
 }
 
-/// Only `HostCancelled` may keep the writer draining.
-/// `Peer` retires silently; `PeerKeepQueue` flushes its authoritative early terminal before retirement.
-/// `PeerKeepQueue` permits its authoritative early terminal to flush before the writer discards the remaining queue.
-/// The early terminal is authoritative for its correlation.
+/// Only `HostCancelled` may keep the writer draining; `Peer` retires silently.
 enum ReadExit {
     HostCancelled,
     Peer,
-    /// The receiver completes only after the authoritative terminal reaches the socket.
-    PeerKeepQueue(tokio::sync::oneshot::Receiver<()>),
 }
 
 /// Serves validated frames until close. Returning retires the generation.
@@ -343,26 +347,14 @@ async fn read_loop<H: HostHandler>(
     // closes the generation before dispatch (protocol §8.3, V44). A promoted
     // candidate starts at 2 so application correlations begin at 3 (§7.7.4).
     let mut watermark: u64 = 0;
-    // Written-signal of the most recent rejected-frame terminal: if the
-    // transport's realignment then fails, the close fences exactly that
-    // authoritative frame (protocol §7.1).
-    let mut reject_written: Option<tokio::sync::oneshot::Receiver<()>> = None;
 
     loop {
         let event = match channel.recv().await {
             Ok(event) => event,
             Err(ReadClose::Cancelled) => return ReadExit::HostCancelled,
-            Err(ReadClose::RejectedDrainFailed) => {
-                // `read_loop` preserves the queued early terminal when declared-body drain fails because its correlation remains authoritative (protocol §7.1).
-                return match reject_written.take() {
-                    Some(terminal_rx) => ReadExit::PeerKeepQueue(terminal_rx),
-                    None => ReadExit::Peer,
-                };
+            Err(ReadClose::CleanEof) | Err(ReadClose::Corrupt(_)) | Err(ReadClose::Overloaded) => {
+                return ReadExit::Peer;
             }
-            Err(ReadClose::CleanEof)
-            | Err(ReadClose::Corrupt(_))
-            | Err(ReadClose::Io(_))
-            | Err(ReadClose::Overloaded) => return ReadExit::Peer,
         };
 
         match event {
@@ -389,8 +381,6 @@ async fn read_loop<H: HostHandler>(
                     generation.writer.discard();
                     return ReadExit::Peer;
                 };
-                let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
-                reject_written = Some(terminal_rx);
                 let shared_task = Arc::clone(shared);
                 let gen_task = Arc::clone(generation);
                 shared.spawn_tracked(generation.read_tasks.track_future(async move {
@@ -401,7 +391,6 @@ async fn read_loop<H: HostHandler>(
                         FrameId::control(corr),
                         CODE_INVALID_CONTROL_REQUEST,
                         "control body exceeds profile cap",
-                        terminal_tx,
                     )
                     .await;
                 }));
@@ -460,7 +449,6 @@ async fn read_loop<H: HostHandler>(
                                     // A Ping queued behind large frames can receive a Pong before it is written.
                                     // A Pong received before write completion must not be rejected as late.
                                     // The write-completion hook evaluates stored Pongs against the completion instant.
-                                    // completion instant.
                                     None => probe.answered_at = Some(now),
                                 }
                             }
@@ -529,11 +517,7 @@ fn decode_contiguous<T>(
     frame: &crate::frame_channel::InboundFrame,
     decode: impl FnOnce(&[u8]) -> T,
 ) -> T {
-    let copies = frame.copy_counter();
-    frame.with_lease(|lease| match lease.contiguous_bytes() {
-        Some(body) => decode(body),
-        None => decode(&lease.to_owned(&copies)),
-    })
+    frame.with_lease(|lease| decode(lease.bytes()))
 }
 
 fn decode_control_frame(
@@ -630,15 +614,17 @@ async fn handle_control<H: HostHandler>(
             let gen_task = Arc::clone(generation);
             shared.spawn_tracked(generation.read_tasks.track_future(async move {
                 let _pending_permit = pending_permit;
-                let report = shared_task
-                    .health_snapshot
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                let body = crate::control::host_status_response_json(
-                    &report,
-                    shared_task.ring.diagnostics(),
-                );
+                // Sanitizing from the borrowed snapshot avoids one unbudgeted deep clone of the raw metrics per request; the guard drops before the await.
+                let body = {
+                    let report = shared_task
+                        .health_snapshot
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    crate::control::host_status_response_json(
+                        &report,
+                        shared_task.ring.diagnostics(),
+                    )
+                };
                 if emit_catalog_response(
                     &shared_task.egress_budget,
                     &gen_task,
@@ -701,8 +687,8 @@ async fn reserve_catalog_frame(
         biased;
         () = generation.token.cancelled() => return Err(()),
         charge = timeout_at(deadline, budget.charge(charged_bytes)) => match charge {
-            Ok(charge) => charge,
-            Err(_) => {
+            Ok(Some(charge)) => charge,
+            Ok(None) | Err(_) => {
                 generation.token.cancel();
                 return Err(());
             }
@@ -803,20 +789,10 @@ async fn liveness_loop(
         let pong_deadline = policy.pong_deadline;
         let written_hook = Box::new(move |completed_at: Instant| {
             let mut pings = gen_probe.pings.lock().expect("pings lock");
-            if let Some(probe) = pings.get_mut(&corr) {
-                match probe.answered_at {
-                    Some(answered_at)
-                        if answered_at >= completed_at
-                            && answered_at.duration_since(completed_at) < pong_deadline =>
-                    {
-                        pings.remove(&corr);
-                    }
-                    _ => {
-                        probe.answered_at = None;
-                        probe.sent = completed_at;
-                        probe.written_at = Some(completed_at);
-                    }
-                }
+            if let Some(probe) = pings.get_mut(&corr)
+                && probe.complete_write(completed_at, pong_deadline)
+            {
+                pings.remove(&corr);
             }
             let _ = written_tx.send(());
         });
@@ -851,7 +827,54 @@ async fn liveness_loop(
 mod tests {
     use super::*;
     use crate::frame_channel::frame_sender;
-    use std::time::Duration;
+
+    fn unwritten_probe(sent: Instant) -> PingProbe {
+        PingProbe {
+            flags: 0,
+            sent,
+            written_at: None,
+            answered_at: None,
+        }
+    }
+
+    /// The reader can record the Pong between ring publication and the writer's timestamp.
+    #[test]
+    fn a_pong_recorded_before_the_completion_instant_settles_the_probe() {
+        let sent = Instant::now();
+        let mut probe = unwritten_probe(sent);
+        probe.answered_at = Some(sent + Duration::from_millis(1));
+        let completed_at = sent + Duration::from_millis(5);
+
+        assert!(probe.complete_write(completed_at, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_pong_recorded_after_the_completion_instant_settles_the_probe_within_the_deadline() {
+        let sent = Instant::now();
+        let mut probe = unwritten_probe(sent);
+        let completed_at = sent + Duration::from_millis(5);
+        probe.answered_at = Some(completed_at + Duration::from_millis(500));
+
+        assert!(probe.complete_write(completed_at, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_late_or_missing_pong_arms_the_deadline_from_the_completion_instant() {
+        let sent = Instant::now();
+        let completed_at = sent + Duration::from_millis(5);
+
+        let mut unanswered = unwritten_probe(sent);
+        assert!(!unanswered.complete_write(completed_at, Duration::from_secs(1)));
+        assert_eq!(unanswered.sent, completed_at);
+        assert_eq!(unanswered.written_at, Some(completed_at));
+        assert_eq!(unanswered.answered_at, None);
+
+        let mut late = unwritten_probe(sent);
+        late.answered_at = Some(completed_at + Duration::from_secs(2));
+        assert!(!late.complete_write(completed_at, Duration::from_secs(1)));
+        assert_eq!(late.answered_at, None);
+        assert_eq!(late.written_at, Some(completed_at));
+    }
 
     #[test]
     fn activation_entropy_failure_is_redacted_without_panicking() {
@@ -871,7 +894,6 @@ mod tests {
             read_tasks: TaskTracker::new(),
             shutdown_complete: CancellationToken::new(),
             writer,
-            membership: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             pings: Mutex::new(HashMap::new()),
             busy_rejects: Arc::new(tokio::sync::Semaphore::new(1)),

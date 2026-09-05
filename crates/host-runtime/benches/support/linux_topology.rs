@@ -35,7 +35,9 @@ impl Class {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpuDesc {
     /// (physical_package_id, core_id): distinct tuples are distinct cores.
-    pub core: (u32, u32),
+    /// The kernel formats both with `%d` and reports `-1` when the platform
+    /// exports no id, so the fields are signed.
+    pub core: (i32, i32),
     pub node: u32,
     /// `l3` stores the `shared_cpu_list` that identifies the CPU's unified L3.
     pub l3: Option<String>,
@@ -119,10 +121,10 @@ pub fn read_topology(root: &Path) -> Result<Topology, String> {
     let mut cpus = BTreeMap::new();
     for cpu in online {
         let topo = cpu_base.join(format!("cpu{cpu}/topology"));
-        let package: u32 = read_trimmed(&topo.join("physical_package_id"))?
+        let package: i32 = read_trimmed(&topo.join("physical_package_id"))?
             .parse()
             .map_err(|_| format!("cpu{cpu}: malformed physical_package_id"))?;
-        let core: u32 = read_trimmed(&topo.join("core_id"))?
+        let core: i32 = read_trimmed(&topo.join("core_id"))?
             .parse()
             .map_err(|_| format!("cpu{cpu}: malformed core_id"))?;
         let siblings = parse_cpu_list(&read_trimmed(&topo.join("thread_siblings_list"))?)?

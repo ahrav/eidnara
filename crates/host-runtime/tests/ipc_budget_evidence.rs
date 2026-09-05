@@ -447,6 +447,14 @@ fn bootstrap_interval_is_deterministic_and_bounded() {
         "interval {a:?} not strictly inside"
     );
     assert!(evidence::bootstrap_interval(&[], 100, 1).is_none());
+    assert!(
+        evidence::bootstrap_interval(&values[..evidence::BOOTSTRAP_MIN_SAMPLES - 1], 100, 1)
+            .is_none(),
+        "below the analysis-unit floor no interval is published"
+    );
+    assert!(
+        evidence::bootstrap_interval(&values[..evidence::BOOTSTRAP_MIN_SAMPLES], 100, 1).is_some()
+    );
 }
 
 #[test]

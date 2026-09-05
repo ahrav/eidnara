@@ -15,11 +15,16 @@ use tokio::task::JoinSet;
 
 use super::evidence::HistogramConfig;
 use super::perf_measurement::{
-    FIXTURE_BODY, Outcome, OutcomeCounts, open_loop_offset_ns, validate_open_loop_rate,
+    FIXTURE_BODY, Outcome, OutcomeCounts, first_slot_at_or_after, open_loop_offset_ns,
+    validate_open_loop_rate,
 };
 
 const MODULE_ID: &str = "perf-echo";
-const DRAIN_BUDGET: Duration = Duration::from_secs(5);
+const REQUEST_BUDGET: Duration = Duration::from_secs(5);
+/// The drain outlives the request budget, so a request issued at the window's
+/// edge reports its own terminal before the drain deadline expires instead of
+/// being counted as unresolved.
+const DRAIN_BUDGET: Duration = Duration::from_secs(6);
 const SETUP_BUDGET: Duration = Duration::from_secs(30);
 
 type CallResult = Result<host_runtime::Response, host_runtime::CallError>;
@@ -47,7 +52,7 @@ fn identity(session: &str) -> host_runtime::RouteIdentity {
 async fn open_route(
     publication: &Path,
     session: &str,
-) -> Result<(Arc<host_runtime::Client>, host_runtime::RouteHandle), String> {
+) -> Result<(Arc<host_runtime::Client>, host_runtime::ClientRoute), String> {
     tokio::time::timeout(SETUP_BUDGET, async {
         let client = host_runtime::Client::connect(publication)
             .await
@@ -64,15 +69,16 @@ async fn open_route(
 
 async fn request(
     client: Arc<host_runtime::Client>,
-    route: host_runtime::RouteHandle,
+    route: host_runtime::ClientRoute,
 ) -> CallResult {
     client
         .request(
             route,
             FIXTURE_BODY.to_vec(),
             host_runtime::RequestOptions {
-                timeout: DRAIN_BUDGET,
+                timeout: REQUEST_BUDGET,
                 cancellation: None,
+                binary: false,
             },
         )
         .await
@@ -181,9 +187,11 @@ pub struct OpenLoopResult {
 struct Completion {
     scheduled_ns: u64,
     issue_ns: u64,
+    /// Taken after the response is classified, so the advertised issue-to-validated-terminal
+    /// latency includes validation and excludes nothing the collector does afterwards.
     completion_ns: u64,
     measured: bool,
-    result: CallResult,
+    outcome: Outcome,
 }
 
 fn record_completion(
@@ -194,7 +202,7 @@ fn record_completion(
     lag: &mut Histogram<u64>,
     outcomes: &mut OutcomeCounts,
 ) -> bool {
-    let outcome = classify(&completion.result);
+    let outcome = completion.outcome;
     if !completion.measured {
         return outcome != Outcome::Success;
     }
@@ -303,21 +311,39 @@ async fn run_open_loop_inner(
             if measured {
                 outcomes.record(Outcome::MissedSlot);
             }
+            // Every slot already due while the window is saturated is missed for the same
+            // reason; they are counted in one step rather than iterated one per slot, so a
+            // high offered rate cannot turn the loop into a hot spin past the window.
+            let now_ns = start.elapsed().as_nanos() as u64;
+            let next_pending = first_slot_at_or_after(now_ns.min(deadline_ns), cfg.rate_per_sec);
+            if next_pending > slot {
+                let first_measured = first_slot_at_or_after(warmup_ns, cfg.rate_per_sec);
+                let measured_overdue = next_pending.saturating_sub(first_measured.max(slot));
+                scheduled_slots += measured_overdue;
+                outcomes.missed_slot += measured_overdue;
+                slot = next_pending;
+            }
+            // Saturation only clears when a request task runs; on a current-thread runtime
+            // that needs this loop to yield, or the schedule would spin over expired slots
+            // for the whole window without polling anything.
+            tokio::task::yield_now().await;
             continue;
         }
-        let issue_ns = start.elapsed().as_nanos() as u64;
         if measured {
             measured_inflight += 1;
         }
         let task_client = Arc::clone(&client);
         requests.spawn(async move {
-            let result = request(task_client, route).await;
+            // Taken when the task first runs, so the runtime's task-queue delay lands in
+            // scheduler lag rather than in the request's own latency.
+            let issue_ns = start.elapsed().as_nanos() as u64;
+            let outcome = classify(&request(task_client, route).await);
             Completion {
                 scheduled_ns,
                 issue_ns,
                 completion_ns: start.elapsed().as_nanos() as u64,
                 measured,
-                result,
+                outcome,
             }
         });
     }
@@ -388,7 +414,7 @@ pub struct ThroughputResult {
 fn spawn_request(
     requests: &mut JoinSet<CallResult>,
     client: &Arc<host_runtime::Client>,
-    route: host_runtime::RouteHandle,
+    route: host_runtime::ClientRoute,
 ) {
     let client = Arc::clone(client);
     requests.spawn(async move { request(client, route).await });
@@ -437,13 +463,27 @@ async fn run_throughput_inner(
             _ => break,
         }
     }
-    while let Some(joined) = requests.join_next().await {
-        let result = joined.map_err(|err| format!("request task failed: {err}"))?;
-        if classify(&result) != Outcome::Success {
-            return Err(format!(
-                "warmup drain failed validation ({:?})",
-                classify(&result)
-            ));
+    let warmup_drain_deadline = Instant::now() + DRAIN_BUDGET;
+    while !requests.is_empty() {
+        let remaining = warmup_drain_deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, requests.join_next()).await {
+            Ok(Some(Ok(result))) if classify(&result) == Outcome::Success => {}
+            Ok(Some(Ok(result))) => {
+                requests.abort_all();
+                return Err(format!(
+                    "warmup drain failed validation ({:?})",
+                    classify(&result)
+                ));
+            }
+            Ok(Some(Err(err))) => return Err(format!("request task failed: {err}")),
+            Ok(None) => break,
+            Err(_) => {
+                requests.abort_all();
+                return Err(format!(
+                    "warmup drain exceeded its budget with {} request(s) in flight",
+                    requests.len()
+                ));
+            }
         }
     }
 
@@ -482,10 +522,15 @@ async fn run_throughput_inner(
         let remaining = drain_deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, requests.join_next()).await {
             Ok(Some(Ok(result))) if classify(&result) == Outcome::Success => drained += 1,
-            Ok(Some(Ok(_))) | Err(_) => {
+            Ok(Some(Ok(result))) => {
+                let outcome = classify(&result);
+                requests.abort_all();
+                return Err(format!("post-window drain failed validation ({outcome:?})"));
+            }
+            Err(_) => {
                 requests.abort_all();
                 return Err(format!(
-                    "connection failed with {} in-flight response(s) undrained",
+                    "post-window drain exceeded its budget with {} response(s) undrained",
                     requests.len()
                 ));
             }
@@ -507,10 +552,12 @@ async fn run_throughput_inner(
     })
 }
 
+/// Fields drop in declaration order: the client retires before the runtime
+/// that hosted its tasks shuts down.
 pub struct SerialProbe {
-    runtime: tokio::runtime::Runtime,
     client: Arc<host_runtime::Client>,
-    route: host_runtime::RouteHandle,
+    route: host_runtime::ClientRoute,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl SerialProbe {
@@ -521,9 +568,9 @@ impl SerialProbe {
             .map_err(|err| err.to_string())?;
         let (client, route) = runtime.block_on(open_route(publication, "budget-criterion"))?;
         Ok(Self {
-            runtime,
             client,
             route,
+            runtime,
         })
     }
 

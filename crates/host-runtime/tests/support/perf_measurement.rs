@@ -166,6 +166,16 @@ pub fn open_loop_offset_ns(slot: u64, rate_per_sec: u64) -> u64 {
         .expect("scheduled offset exceeds u64 nanoseconds")
 }
 
+/// The first slot whose offset is at or after `at_ns`: the inverse of
+/// [`open_loop_offset_ns`], so `open_loop_offset_ns(result) >= at_ns` and the slot before it
+/// is strictly earlier. Lets a saturated open-loop sender skip every overdue slot in one step.
+///
+/// Callers must invoke [`validate_open_loop_rate`] before calling this function.
+pub fn first_slot_at_or_after(at_ns: u64, rate_per_sec: u64) -> u64 {
+    let numerator = u128::from(at_ns) * u128::from(rate_per_sec);
+    u64::try_from(numerator.div_ceil(1_000_000_000u128)).expect("slot index fits u64")
+}
+
 /// A run needs at least `TAIL_SAMPLE_FLOOR` successful post-warmup observations to publish p99.9.
 pub fn tail_publishable(successful_observations: u64) -> bool {
     successful_observations >= TAIL_SAMPLE_FLOOR

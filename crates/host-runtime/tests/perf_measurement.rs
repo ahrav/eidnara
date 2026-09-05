@@ -3,8 +3,37 @@ mod perf_measurement;
 
 use perf_measurement::{
     FIXTURE_BODY, LatencySummary, Outcome, OutcomeCounts, TAIL_SAMPLE_FLOOR, WindowClass,
-    fixture_workload, nearest_rank, open_loop_offset_ns, tail_publishable, validate_open_loop_rate,
+    first_slot_at_or_after, fixture_workload, nearest_rank, open_loop_offset_ns, tail_publishable,
+    validate_open_loop_rate,
 };
+
+#[test]
+fn first_slot_at_or_after_inverts_the_offset_schedule() {
+    for rate in [1u64, 3, 7, 20_000, 999_999_937, 1_000_000_000] {
+        for at_ns in [
+            0u64,
+            1,
+            999,
+            1_000,
+            1_000_000_000,
+            1_234_567_891,
+            10_000_000_000,
+        ] {
+            let slot = first_slot_at_or_after(at_ns, rate);
+            assert!(
+                open_loop_offset_ns(slot, rate) >= at_ns,
+                "rate {rate}: slot {slot} is due before {at_ns}"
+            );
+            if slot > 0 {
+                assert!(
+                    open_loop_offset_ns(slot - 1, rate) < at_ns,
+                    "rate {rate}: slot {} is already at or after {at_ns}",
+                    slot - 1
+                );
+            }
+        }
+    }
+}
 
 #[test]
 fn fixture_is_the_committed_compact_json_shape() {

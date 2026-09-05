@@ -15,9 +15,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::config::{HostConfig, HostLimits, HostTiming, LivenessPolicy};
 use crate::connection::{GenerationCore, run_connection};
-use crate::dispatch::{
-    finish_route_close, force_close_all_routes, send_connection_goodbye, settle_route,
-};
+use crate::dispatch::{close_route_decision, force_close_all_routes, send_connection_goodbye};
 use crate::handler::{
     HealthReport, HealthStatus, HostHandler, ResourceDeclaration, RouteClass, TargetKind,
 };
@@ -135,8 +133,23 @@ impl<H: HostHandler> HostShared<H> {
         F::Output: Send + 'static,
     {
         let handle = self.tracker.spawn(future);
+        let abort = handle.abort_handle();
+        // The `is_finished` scan runs outside the lock; handles pushed by concurrent spawns in
+        // the meantime stay in the registry and the pruned batch is appended to them.
+        let batch = {
+            let mut registry = self.abort_handles.lock().expect("abort lock");
+            match registry.take_for_prune() {
+                Some(batch) => batch,
+                None => {
+                    registry.push(abort);
+                    return handle;
+                }
+            }
+        };
+        let pruned: Vec<AbortHandle> = batch.into_iter().filter(|h| !h.is_finished()).collect();
         let mut registry = self.abort_handles.lock().expect("abort lock");
-        registry.prune_and_push(handle.abort_handle());
+        registry.restore_pruned(pruned);
+        registry.push(abort);
         handle
     }
 
@@ -156,7 +169,7 @@ impl<H: HostHandler> HostShared<H> {
         &self,
         what: &'static str,
         mut task: JoinHandle<T>,
-    ) -> Result<T, LifecycleFailure> {
+    ) -> Result<T, LifecycleFailure<T>> {
         match timeout(self.timing.lifecycle_callback_deadline, &mut task).await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(join_err)) => {
@@ -167,30 +180,23 @@ impl<H: HostHandler> HostShared<H> {
                 };
                 self.fatal
                     .trip(&self.shutdown, format!("{what} callback {kind}"));
-                Err(LifecycleFailure { stopped: true })
+                Err(LifecycleFailure { running: None })
             }
             Err(_) => {
                 // `timeout` cannot expire while a future fails to yield.
                 // `shared.tracker.wait()` reaps the detached task.
-                // itself bounded.
                 task.abort();
                 self.fatal
                     .trip(&self.shutdown, format!("{what} callback deadline expired"));
-                Err(LifecycleFailure { stopped: false })
+                Err(LifecycleFailure {
+                    running: Some(task),
+                })
             }
         }
     }
 
     fn abort_all(&self) {
-        for handle in self
-            .abort_handles
-            .lock()
-            .expect("abort lock")
-            .handles
-            .iter()
-        {
-            handle.abort();
-        }
+        self.abort_handles.lock().expect("abort lock").abort_all();
     }
 }
 
@@ -199,6 +205,9 @@ impl<H: HostHandler> HostShared<H> {
 struct AbortRegistry {
     handles: Vec<AbortHandle>,
     prune_at: usize,
+    /// After `abort_all`, `push` and `restore_pruned` abort every arriving handle, so a batch
+    /// that was out for pruning at that moment is not missed.
+    aborted: bool,
 }
 
 const ABORT_PRUNE_FLOOR: usize = 64;
@@ -208,15 +217,40 @@ impl AbortRegistry {
         Self {
             handles: Vec::new(),
             prune_at: ABORT_PRUNE_FLOOR,
+            aborted: false,
         }
     }
 
-    fn prune_and_push(&mut self, handle: AbortHandle) {
-        if self.handles.len() >= self.prune_at {
-            self.handles.retain(|h| !h.is_finished());
-            self.prune_at = (self.handles.len() * 2).max(ABORT_PRUNE_FLOOR);
+    /// `prune_at` is unchanged until `restore_pruned`, so only one batch is out at a time.
+    fn take_for_prune(&mut self) -> Option<Vec<AbortHandle>> {
+        if self.handles.len() < self.prune_at {
+            return None;
+        }
+        Some(std::mem::take(&mut self.handles))
+    }
+
+    fn restore_pruned(&mut self, pruned: Vec<AbortHandle>) {
+        if self.aborted {
+            for handle in &pruned {
+                handle.abort();
+            }
+        }
+        self.handles.extend(pruned);
+        self.prune_at = (self.handles.len() * 2).max(ABORT_PRUNE_FLOOR);
+    }
+
+    fn push(&mut self, handle: AbortHandle) {
+        if self.aborted {
+            handle.abort();
         }
         self.handles.push(handle);
+    }
+
+    fn abort_all(&mut self) {
+        self.aborted = true;
+        for handle in &self.handles {
+            handle.abort();
+        }
     }
 }
 
@@ -230,6 +264,9 @@ fn retain_lock_until_drained<H: HostHandler>(shared: Arc<HostShared<H>>, guard: 
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(async move {
             shared.tracker.wait().await;
+            // A dispatch task that outlived the forced-close deadline left its route without
+            // route-gone; every task has stopped now, so the sweep completes those routes.
+            force_close_all_routes(&shared).await;
             run_handler_shutdown(&shared).await;
             if let Some(message) = shared.fatal.take() {
                 eprintln!("eidnara-host: deferred handler shutdown failed: {message}");
@@ -241,38 +278,12 @@ fn retain_lock_until_drained<H: HostHandler>(shared: Arc<HostShared<H>>, guard: 
     }
 }
 
-/// The cleanup task keeps the instance lock held until the aborted initialization task stops.
-/// The cleanup task runs the handler shutdown callback after the aborted initialization task stops without blocking `run`'s return.
-/// Releasing `guard` before the callback stops permits concurrent initialization.
-/// A successor observes `AlreadyRunning` while the callback runs.
-///
-/// `shutdown` must tolerate interrupted initialization.
-/// `retain_lock_until_stopped` must not time-limit either await: releasing `guard` before handler code stops permits concurrent initialization.
-/// Dropping `guard` while handler code runs releases the single-instance fence.
-fn retain_lock_until_stopped<H: HostHandler, T: Send + 'static>(
-    mut guard: InstanceGuard,
-    handler: Arc<H>,
-    task: tokio_util::task::AbortOnDropHandle<T>,
-) {
-    // `retain_lock_until_stopped` demotes the phase before draining so probes report `stopping` instead of `starting`.
-    // `guard.begin_stopping()` keeps probes in `stopping` throughout the unbounded drain.
-    guard.begin_stopping();
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        runtime.spawn(async move {
-            let _ = task.await;
-            let callback = crate::panic_boundary::redact_sync(|| handler.shutdown());
-            crate::panic_boundary::redact(callback).await;
-            drop(handler);
-            drop(guard);
-        });
-    }
-}
-
-/// `stopped` reports whether the callback has stopped running.
-pub struct LifecycleFailure {
-    /// `false` means the callback still executes because its deadline expired inside a non-yielding poll that `abort` cannot interrupt.
-    /// Callers must not advance cleanup until `stopped` is `true`.
-    pub stopped: bool,
+/// A lifecycle callback that produced no value.
+pub struct LifecycleFailure<T> {
+    /// `Some` holds the aborted task whose deadline expired; the callback may still execute inside a non-yielding poll that `abort` cannot interrupt.
+    /// Awaiting the handle resolves once the callback has stopped.
+    /// `None` means the callback has already stopped.
+    pub running: Option<JoinHandle<T>>,
 }
 
 fn spawn_handler_shutdown<H: HostHandler>(handler: Arc<H>) -> JoinHandle<()> {
@@ -282,13 +293,13 @@ fn spawn_handler_shutdown<H: HostHandler>(handler: Arc<H>) -> JoinHandle<()> {
     })
 }
 
-/// `PrePublicationCleanup` owns the `InstanceGuard` and handler shutdown before `HostShared` exists.
-/// Running shutdown in its own task lets a cancelled waiter transfer cleanup and the guard to a reaper without invoking `shutdown` twice.
-/// Successful publication disarms the owner without spawning cleanup.
-/// spawning cleanup.
+type InitTask = tokio_util::task::AbortOnDropHandle<Result<(), crate::handler::InitError>>;
+
+/// Releasing the guard while this handler's code still runs would let a successor initialize against the same data directory.
 struct PrePublicationCleanup<H: HostHandler> {
     guard: Option<InstanceGuard>,
     handler: Option<Arc<H>>,
+    init: Option<InitTask>,
     shutdown: Option<JoinHandle<()>>,
 }
 
@@ -297,6 +308,7 @@ impl<H: HostHandler> PrePublicationCleanup<H> {
         Self {
             guard: Some(guard),
             handler: Some(handler),
+            init: None,
             shutdown: None,
         }
     }
@@ -305,7 +317,28 @@ impl<H: HostHandler> PrePublicationCleanup<H> {
         self.guard.as_mut().expect("armed startup cleanup")
     }
 
+    fn handler(&self) -> &Arc<H> {
+        self.handler.as_ref().expect("armed startup cleanup")
+    }
+
+    fn start_initialization(&mut self, init: crate::config::HostInit) -> &mut InitTask {
+        let handler = Arc::clone(self.handler());
+        self.init
+            .insert(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                async move {
+                    let callback = crate::panic_boundary::redact_sync(|| handler.initialize(init));
+                    crate::panic_boundary::redact(callback).await
+                },
+            )))
+    }
+
+    /// `Drop` aborts the in-flight initialization and defers guard release to the reaper.
+    fn abandon_initialization(self) {
+        drop(self);
+    }
+
     async fn finish(mut self) {
+        drop(self.init.take());
         if let Some(guard) = self.guard.as_mut() {
             guard.begin_stopping();
         }
@@ -332,14 +365,25 @@ impl<H: HostHandler> Drop for PrePublicationCleanup<H> {
             return;
         };
         // Unwinding demotes the phase before draining shutdown.
-        // `finish`.
         guard.begin_stopping();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let shutdown = self.shutdown.take().unwrap_or_else(|| {
-                spawn_handler_shutdown(self.handler.take().expect("armed startup cleanup"))
-            });
+            let init = self.init.take();
+            let shutdown = self.shutdown.take();
+            let handler = self.handler.take();
             runtime.spawn(async move {
-                let _ = shutdown.await;
+                if let Some(init) = init {
+                    init.abort();
+                    let _ = init.await;
+                }
+                match shutdown {
+                    Some(shutdown) => {
+                        let _ = shutdown.await;
+                    }
+                    None => {
+                        let _ =
+                            spawn_handler_shutdown(handler.expect("armed startup cleanup")).await;
+                    }
+                }
                 drop(guard);
             });
         }
@@ -588,7 +632,9 @@ pub async fn run_with_publish_hook<H: HostHandler>(
         .map_err(HostError::Instance)?;
 
     let handler = Arc::new(handler);
-    handler.install_connection_key(*guard.key().bytes());
+    // The callback receives the bearer key; a panic inside it must not print its payload.
+    let key = *guard.key().bytes();
+    crate::panic_boundary::redact_sync(|| handler.install_connection_key(key));
     let manifests = crate::panic_boundary::redact_sync(|| handler.manifests());
     let declarations = crate::panic_boundary::redact_sync(|| handler.resource_declarations());
     let (targets, reservations) = build_target_index(&manifests, &declarations)?;
@@ -634,27 +680,21 @@ pub async fn run_with_publish_hook<H: HostHandler>(
     }
 
     // Initialization failure or deadline expiration prevents publication.
-    // `init_task` is abort-on-drop so dropping `run` cancels initialization before a successor acquires the instance lock.
+    // `cleanup` owns `guard`, `handler`, and the initialization task; dropping `run` transfers them to a reaper instead of synchronously releasing `guard`.
+    let mut cleanup = PrePublicationCleanup::new(guard, Arc::clone(&handler));
     {
-        let init_handler = Arc::clone(&handler);
         // Move `config.init` rather than cloning it so no second descriptor copy remains outside the byte budgets.
         let init = std::mem::take(&mut config.init);
-        let mut init_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            let callback = crate::panic_boundary::redact_sync(|| init_handler.initialize(init));
-            crate::panic_boundary::redact(callback).await
-        }));
+        let init_task = cleanup.start_initialization(init);
         let joined = tokio::select! {
             biased;
-            // A shutdown request aborts `init_task`; the reaper retains `guard` until cleanup stops the handler.
             () = shutdown.cancelled() => None,
-            joined = timeout(config.timing.lifecycle_callback_deadline, &mut init_task) => {
+            joined = timeout(config.timing.lifecycle_callback_deadline, init_task) => {
                 Some(joined)
             }
         };
         let Some(joined) = joined else {
-            // A detached reaper retains the guard until initialization ends, then shuts down the handler before dropping the guard to prevent concurrent initialization against the same data directory.
-            init_task.abort();
-            retain_lock_until_stopped(guard, Arc::clone(&handler), init_task);
+            cleanup.abandon_initialization();
             return Err(HostError::InitFailed(
                 "shutdown requested during initialization".to_owned(),
             ));
@@ -663,7 +703,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(err))) => {
                 // `PrePublicationCleanup::finish` keeps `guard` held until shutdown stops work that failed initialization may have started.
-                PrePublicationCleanup::new(guard, handler).finish().await;
+                cleanup.finish().await;
 
                 // Initialization errors report only the handler message length because the message may contain storage credentials or endpoints.
                 return Err(HostError::InitFailed(format!(
@@ -673,8 +713,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
             }
             Ok(Err(join_err)) => {
                 // A panic after initialization starts handler-owned work requires the same shutdown cleanup as an initialization error.
-                // initialization error.
-                PrePublicationCleanup::new(guard, handler).finish().await;
+                cleanup.finish().await;
                 let kind = if join_err.is_panic() {
                     "panic"
                 } else {
@@ -683,8 +722,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
                 return Err(HostError::InitFailed(format!("initialize {kind}")));
             }
             Err(_) => {
-                init_task.abort();
-                retain_lock_until_stopped(guard, Arc::clone(&handler), init_task);
+                cleanup.abandon_initialization();
                 return Err(HostError::InitFailed(
                     "initialize deadline expired".to_owned(),
                 ));
@@ -693,7 +731,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
     }
 
     // After initialization runs, `PrePublicationCleanup` keeps `guard` until shutdown drains handler-owned work on every early return.
-    let mut cleanup = PrePublicationCleanup::new(guard, handler);
+    drop(handler);
     let setup = async {
         // If shutdown occurs before publication, cleanup drains the initialized handler and the host exits successfully.
         if shutdown.is_cancelled() {
@@ -704,15 +742,31 @@ pub async fn run_with_publish_hook<H: HostHandler>(
             crate::setup_socket::bind_owner_only(&setup_socket).map_err(HostError::Io)?;
         cleanup
             .guard_mut()
-            .register_setup_socket(setup_socket.clone());
+            .register_setup_socket(&setup_socket)
+            .map_err(HostError::Instance)?;
         cleanup
             .guard_mut()
             .publish(&setup_socket, &config.daemon_ver)
             .map_err(HostError::Instance)?;
-        // A failed lifecycle-phase rewrite does not tear down an already published transport.
-        let _ = cleanup
-            .guard_mut()
-            .write_lifecycle_record(crate::lifecycle::LifecyclePhase::Running);
+        let mut last_err = None;
+        for delay in RUNNING_RECORD_RETRY_DELAYS {
+            match cleanup
+                .guard_mut()
+                .write_lifecycle_record(crate::lifecycle::LifecyclePhase::Running)
+            {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+        if let Some(err) = last_err {
+            return Err(HostError::Instance(err));
+        }
         Ok(Some((listener, setup_socket)))
     }
     .await;
@@ -736,9 +790,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
     drop(manifests);
 
     let ring_limits = crate::ring_transport::process_limits(config.limits.max_connections)
-        .ok_or_else(|| {
-            HostError::InitFailed("shared-memory resource limits overflow".to_owned())
-        })?;
+        .map_err(|err| HostError::InitFailed(err.to_string()))?;
     let ring = Arc::new(crate::ring_transport::RingTransport::for_ring_profile(
         ring_limits,
     ));
@@ -824,6 +876,14 @@ pub async fn run_with_publish_hook<H: HostHandler>(
 
 /// The accept loop delays retries after failed `accept()` calls to avoid a tight loop while persistent resource exhaustion keeps the listener ready.
 const ACCEPT_ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Retry delays keep a transient `running`-record write failure from leaving an expired
+/// `starting` record that `lifecycle::classify` reports as `wedged`.
+const RUNNING_RECORD_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(10),
+    Duration::from_millis(50),
+    Duration::from_millis(200),
+];
 
 /// Startup tracks the handler's post-publication activation without awaiting it because transport is already published.
 /// The accept loop starts regardless of activation progress; an activation `Err`, panic, or task loss trips the fatal latch.
@@ -1003,12 +1063,18 @@ async fn shutdown_sequence<H: HostHandler>(
     // `shutdown` settles each route's admitted work, emitting its terminals, before running each route's `route-gone` callback.
     // `shutdown` runs each route's `route-gone` before it fences read loops so `route-gone` can reject work admitted before admission froze.
     // `shutdown` fences and joins read-side producers only after every route drain reaches a terminal state.
+    // Routes close concurrently, as in `close_generation`, so the drain is bounded by the slowest
+    // route's settle plus `route-gone` rather than by their sum across every live route.
     let drain = async {
+        let mut closes = tokio::task::JoinSet::new();
         for handle in shared.registry.all_routes() {
-            if settle_route(shared, handle).await {
-                finish_route_close(shared, handle).await;
-            }
+            let shared = Arc::clone(shared);
+            closes.spawn(async move {
+                let decision = shared.registry.begin_close(handle);
+                close_route_decision(&shared, handle, decision).await;
+            });
         }
+        while closes.join_next().await.is_some() {}
 
         let generations: Vec<Arc<GenerationCore>> = shared
             .connections
@@ -1063,6 +1129,8 @@ async fn shutdown_sequence<H: HostHandler>(
             );
             return false;
         }
+        // Routes whose dispatch tasks stopped only during this wait still owe route-gone.
+        force_close_all_routes(shared).await;
         run_handler_shutdown(shared).await;
         return false;
     }
@@ -1135,7 +1203,6 @@ mod tests {
                 read_tasks: TaskTracker::new(),
                 shutdown_complete: CancellationToken::new(),
                 writer,
-                membership: std::sync::Mutex::new(HashMap::new()),
                 pending: std::sync::Mutex::new(HashMap::new()),
                 pings: std::sync::Mutex::new(HashMap::new()),
                 busy_rejects: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1160,7 +1227,7 @@ mod tests {
         );
         for queue in [&mut first_queue, &mut second_queue] {
             let frame = queue.try_recv().expect("Goodbye was queued concurrently");
-            assert_eq!(frame.frame.bytes[5], crate::wire::FrameType::Goodbye as u8);
+            assert_eq!(frame.bytes[5], crate::wire::FrameType::Goodbye as u8);
         }
     }
 }

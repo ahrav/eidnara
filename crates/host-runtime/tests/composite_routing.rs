@@ -6,12 +6,12 @@ use std::time::Duration;
 
 use host_runtime::{
     BindOutcome, CancellationToken, CompositeComponent, HealthReport, HealthStatus, HostConfig,
-    HostError, HostHandler, HostInit, HostLimits, InitError, ManifestSnapshot, PrimaryComponent,
-    RequestCtx, RequestOutcome, RouteHandle, RouteIdentity, RouteTarget, SecondaryComponent,
-    ShutdownError, StaticComposite,
+    HostError, HostHandler, HostInit, InitError, ManifestSnapshot, PrimaryComponent, RequestCtx,
+    RequestOutcome, RouteHandle, RouteIdentity, RouteTarget, SecondaryComponent, ShutdownError,
+    StaticComposite,
 };
 
-use support::raw_client::{self, Discovered};
+use support::raw_client;
 
 const ROOT: &str = "/workspace/project";
 const BUDGET: Duration = Duration::from_secs(5);
@@ -201,77 +201,6 @@ async fn independent_component_initializers_overlap() {
     assert_eq!(tertiary.events(), vec![Ev::Initialized]);
 }
 
-struct CompositeHost {
-    info: Discovered,
-    shutdown: CancellationToken,
-    join: tokio::task::JoinHandle<Result<(), HostError>>,
-    _data_root: tempfile::TempDir,
-}
-
-impl CompositeHost {
-    async fn start<H: HostHandler>(handler: H) -> Self {
-        let data_root = tempfile::tempdir().expect("temp data root");
-        let mut config = HostConfig {
-            data_dir: Some(data_root.path().to_path_buf()),
-            daemon_ver: "eidnara-host/test".to_owned(),
-            limits: HostLimits {
-                max_resident_bytes: host_runtime::config::MIN_RESIDENT_BYTES * 2,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        config.timing.frame_deadline = Duration::from_secs(5);
-        config.timing.shutdown_deadline = Duration::from_secs(5);
-        config.timing.route_close_budget = Duration::from_secs(2);
-        config.timing.lifecycle_callback_deadline = Duration::from_secs(2);
-
-        let publication = support::connection_file(data_root.path());
-        let shutdown = CancellationToken::new();
-        let run_shutdown = shutdown.clone();
-        let join =
-            tokio::spawn(async move { host_runtime::run(handler, config, run_shutdown).await });
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if join.is_finished() {
-                panic!(
-                    "host exited before publishing: {:?}",
-                    join.await.expect("run task joins")
-                );
-            }
-            if std::fs::read(&publication).is_ok() {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "host did not publish in time"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let info = raw_client::discover(&publication).expect("publication validates");
-        Self {
-            info,
-            shutdown,
-            join,
-            _data_root: data_root,
-        }
-    }
-
-    async fn client(&self) -> raw_client::RawClient {
-        raw_client::RawClient::connect(&self.info)
-            .await
-            .expect("authenticated connection")
-    }
-
-    async fn shutdown(self) -> Result<(), HostError> {
-        self.shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(20), self.join)
-            .await
-            .expect("host finishes within its shutdown budget")
-            .expect("run task joins")
-    }
-}
-
 async fn request_served_by(client: &mut raw_client::RawClient, channel: u16, epoch: u32) -> String {
     let corr = client.next_corr();
     client
@@ -297,7 +226,7 @@ async fn request_served_by(client: &mut raw_client::RawClient, channel: u16, epo
 async fn three_target_catalog_lists_all_modules_deterministically() {
     let (primary, secondary, tertiary) = fake_trio();
     let composite = StaticComposite::new(primary, secondary, tertiary).expect("distinct ids");
-    let host = CompositeHost::start(composite).await;
+    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
 
     let corr = client
@@ -342,7 +271,7 @@ async fn all_supported_targets_dispatch_to_their_component() {
     let (primary, secondary, tertiary) = fake_trio();
     let composite = StaticComposite::new(primary.clone(), secondary.clone(), tertiary.clone())
         .expect("distinct ids");
-    let host = CompositeHost::start(composite).await;
+    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
 
     let (context_channel, context_epoch) = client
@@ -394,7 +323,7 @@ async fn wrong_role_pairings_reject_without_any_bind() {
     let (primary, secondary, tertiary) = fake_trio();
     let composite = StaticComposite::new(primary.clone(), secondary.clone(), tertiary.clone())
         .expect("distinct ids");
-    let host = CompositeHost::start(composite).await;
+    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
 
     for (kind, module, expected) in [
@@ -433,7 +362,7 @@ async fn disabled_secondary_rejects_its_bind_and_leaves_primary_available() {
     secondary.disable();
     let composite =
         StaticComposite::new(primary.clone(), secondary.clone(), tertiary).expect("distinct ids");
-    let host = CompositeHost::start(composite).await;
+    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
 
     let err = client
@@ -478,7 +407,7 @@ async fn rejected_broca_bind_gets_exactly_one_broca_route_gone() {
     tertiary.disable();
     let composite = StaticComposite::new(primary.clone(), secondary.clone(), tertiary.clone())
         .expect("distinct ids");
-    let host = CompositeHost::start(composite).await;
+    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
 
     let err = client
@@ -523,7 +452,7 @@ async fn a_closed_route_handle_cannot_dispatch_to_stale_child_ownership() {
     let (primary, secondary, tertiary) = fake_trio();
     let composite = StaticComposite::new(primary.clone(), secondary.clone(), tertiary.clone())
         .expect("distinct ids");
-    let host = CompositeHost::start(composite).await;
+    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
 
     let (channel, epoch) = client
@@ -592,7 +521,7 @@ async fn shutdown_runs_after_route_cleanup_and_orders_children() {
     let (primary, secondary, tertiary) = fake_trio();
     let composite = StaticComposite::new(primary.clone(), secondary.clone(), tertiary.clone())
         .expect("distinct ids");
-    let host = CompositeHost::start(composite).await;
+    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
 
     for (kind, module) in [
@@ -909,7 +838,7 @@ async fn a_child_shutdown_failure_makes_the_host_incarnation_non_graceful() {
     tertiary.fail_shutdown("late broca cleanup fault");
     let composite =
         StaticComposite::new(primary.clone(), secondary.clone(), tertiary).expect("distinct ids");
-    let host = CompositeHost::start(composite).await;
+    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
 
     // The composite surfaces a collected shutdown failure only after every child drains.
     // The host marks the incarnation non-graceful while retaining the instance fence.
