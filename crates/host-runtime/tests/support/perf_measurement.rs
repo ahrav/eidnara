@@ -23,6 +23,9 @@ pub const FIXTURE_BINARY: bool = false;
 /// A run requires at least 30,000 successful post-warmup observations before publishing p99.9.
 pub const TAIL_SAMPLE_FLOOR: u64 = 30_000;
 
+/// A published headline p99.9 row requires at least 100,000 successful post-warmup observations per repetition.
+pub const HEADLINE_TAIL_FLOOR: u64 = 100_000;
+
 /// `MAX_BODY_LEN` caps bodies at 1 MiB because valid fixture and error bodies are small, preventing untrusted `u32` lengths from causing multi-gigabyte allocations.
 pub const MAX_BODY_LEN: u32 = 1 << 20;
 
@@ -161,6 +164,16 @@ pub fn validate_open_loop_rate(rate_per_sec: u64) -> Result<(), String> {
 pub fn open_loop_offset_ns(slot: u64, rate_per_sec: u64) -> u64 {
     u64::try_from(u128::from(slot) * 1_000_000_000u128 / u128::from(rate_per_sec))
         .expect("scheduled offset exceeds u64 nanoseconds")
+}
+
+/// The first slot whose offset is at or after `at_ns`: the inverse of
+/// [`open_loop_offset_ns`], so `open_loop_offset_ns(result) >= at_ns` and the slot before it
+/// is strictly earlier. Lets a saturated open-loop sender skip every overdue slot in one step.
+///
+/// Callers must invoke [`validate_open_loop_rate`] before calling this function.
+pub fn first_slot_at_or_after(at_ns: u64, rate_per_sec: u64) -> u64 {
+    let numerator = u128::from(at_ns) * u128::from(rate_per_sec);
+    u64::try_from(numerator.div_ceil(1_000_000_000u128)).expect("slot index fits u64")
 }
 
 /// A run needs at least `TAIL_SAMPLE_FLOOR` successful post-warmup observations to publish p99.9.

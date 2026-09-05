@@ -343,11 +343,7 @@ impl<P: PrimaryComponent, S: SecondaryComponent, B: SecondaryComponent> HostHand
             .unwrap_or_else(|ChildPanic| panicked(&self.tertiary_id));
         // `Ok < Degraded < Failing`; equal severities use catalog order: primary, secondary, then tertiary.
         // child.
-        let component_status = |report: &HealthReport| match report.status {
-            HealthStatus::Ok => "ok",
-            HealthStatus::Degraded => "degraded",
-            HealthStatus::Failing => "failing",
-        };
+        let component_status = |report: &HealthReport| report.status.as_str();
         let mut components = serde_json::Map::new();
         for (id, report) in [
             (self.primary_id.as_ref(), &primary),

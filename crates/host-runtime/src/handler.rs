@@ -163,6 +163,23 @@ pub enum HealthStatus {
     Failing,
 }
 
+impl HealthStatus {
+    /// Wire spelling shared by `host.status` bodies, component reports, and the client decoder.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Degraded => "degraded",
+            Self::Failing => "failing",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        [Self::Ok, Self::Degraded, Self::Failing]
+            .into_iter()
+            .find(|status| status.as_str() == text)
+    }
+}
+
 /// Client JSON operations do not expose the health snapshot.
 /// (protocol §9.3).
 #[derive(Debug, Clone)]

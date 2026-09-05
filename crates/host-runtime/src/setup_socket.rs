@@ -381,7 +381,6 @@ pub async fn commit_activation(
     Ok(())
 }
 
-#[allow(dead_code)] // U1: used by client (U2)
 pub(crate) fn encoded_goodbye() -> Result<Vec<u8>, SetupError> {
     encode_message(&ClientMessage::Goodbye)
 }

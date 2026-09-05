@@ -12,7 +12,7 @@ use std::{fmt, io};
 use crate::setup_socket::RING_DESCRIPTOR_COUNT;
 use crate::wire::{EnvelopeHeader, FrameType, decode_header};
 use shm_transport::backend::ring::RingGrant;
-use shm_transport::backend::ring::{DuplexRing, ProducerReservation, Ring};
+use shm_transport::backend::ring::{DuplexRing, ProducerError, ProducerReservation, Ring};
 use shm_transport::profile::{
     AdmissionController, HostLimits as ShmHostLimits, ResourceCharges, TargetProfile,
 };
@@ -887,15 +887,48 @@ impl RingClientEndpoint {
         header: EnvelopeHeader,
         body: &[u8],
         deadline: StdInstant,
-    ) -> Result<(), RingClientError> {
+    ) -> Result<(), SendFailure> {
+        self.send_bounded(header, body, deadline, deadline)
+    }
+
+    /// Publishes one frame, waiting for capacity only until `reserve_deadline`
+    /// and refusing to commit once `frame_deadline` has passed.
+    ///
+    /// The body copy runs after the reservation returns, so the frame deadline
+    /// is re-checked before `commit`; an uncommitted reservation is aborted on
+    /// drop and publishes nothing. A caller that waits in slices passes a short
+    /// `reserve_deadline` and the frame's own `frame_deadline`.
+    pub fn send_bounded(
+        &self,
+        header: EnvelopeHeader,
+        body: &[u8],
+        reserve_deadline: StdInstant,
+        frame_deadline: StdInstant,
+    ) -> Result<(), SendFailure> {
         let mut reservation = self
             .to_host
-            .reserve_until(body.len(), header.encode(), deadline)
-            .map_err(|_| RingClientError)?;
-        reservation.write(body).map_err(|_| RingClientError)?;
+            .reserve_until(body.len(), header.encode(), reserve_deadline)
+            .map_err(|error| match error {
+                ProducerError::Deadline => SendFailure::Deadline,
+                _ => SendFailure::Unreserved,
+            })?;
+        // A failed `write` aborts the reservation, so nothing was published.
+        reservation
+            .write(body)
+            .map_err(|_| SendFailure::Unreserved)?;
+        if StdInstant::now() >= frame_deadline {
+            return Err(SendFailure::Deadline);
+        }
+        // `commit` aborts on a quarantined ring without publishing, but its error does not say
+        // whether the quarantine was seen before or after publication. Checking here first
+        // classifies the common pre-commit case as zero-byte; only a quarantine that lands
+        // between this check and `commit` stays ambiguous.
+        if self.to_host.is_quarantined() {
+            return Err(SendFailure::Unreserved);
+        }
         reservation
             .commit(body.len())
-            .map_err(|_| RingClientError)?;
+            .map_err(|_| SendFailure::Reserved)?;
         Ok(())
     }
 
@@ -948,6 +981,19 @@ fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N], RingClientError> {
 /// Redacted test-peer attachment or I/O failure.
 #[derive(Clone, Copy)]
 pub struct RingClientError;
+
+/// The stage at which [`RingClientEndpoint::send`] failed.
+///
+/// A frame that never obtained a reservation wrote zero bytes; after reservation, the host's view is unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendFailure {
+    /// The ring stayed full until the reservation deadline, or the frame deadline passed before commit; no bytes were published and a later attempt can succeed.
+    Deadline,
+    /// The frame was aborted before publication for a reason a retry cannot clear, such as a quarantined ring or a body that does not fit its reservation; no bytes were published.
+    Unreserved,
+    /// `commit` failed and may have published the frame.
+    Reserved,
+}
 
 impl fmt::Debug for RingClientError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1030,8 +1076,10 @@ mod tests {
     #[test]
     fn shared_memory_workers_have_no_periodic_polling() {
         let endpoint = include_str!("ring_transport.rs");
+        let client = include_str!("client.rs");
         let micro_poll = concat!("Duration::from_micros(", "50)");
         assert!(!endpoint.contains(micro_poll));
+        assert!(!client.contains(micro_poll));
         assert!(!endpoint.contains(concat!("POLL_", "INTERVAL")));
     }
 
@@ -1836,6 +1884,37 @@ mod tests {
             attached.try_receive().unwrap().is_none(),
             "the aborted reservation leaves no frame in the ring"
         );
+    }
+
+    #[test]
+    fn a_client_send_past_its_frame_deadline_publishes_nothing() {
+        // Reservation succeeds (`reserve_deadline` is ahead) but the frame deadline has passed.
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let (descriptor, descriptors) = worker_descriptor(&rings).expect("descriptor");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let header = EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 7,
+            epoch: 1,
+            corr: 1,
+        };
+        let now = StdInstant::now();
+        assert_eq!(
+            peer.send_bounded(header, &[1], now + Duration::from_secs(1), now),
+            Err(SendFailure::Deadline)
+        );
+        assert!(
+            rings.second.try_receive().unwrap().is_none(),
+            "the aborted reservation leaves no frame in the ring"
+        );
+        let live_deadline = StdInstant::now() + Duration::from_secs(1);
+        peer.send_bounded(header, &[1], live_deadline, live_deadline)
+            .expect("a live frame deadline publishes");
+        assert!(rings.second.try_receive().unwrap().is_some());
     }
 
     #[tokio::test]

@@ -48,20 +48,20 @@ impl TargetIndex {
 }
 
 const MAX_OP_LEN: usize = 64;
-const MAX_MODULE_ID_LEN: usize = 128;
-const MAX_PROJECT_ROOT_LEN: usize = 4096;
-const MAX_HARNESS_LEN: usize = 128;
-const MAX_SESSION_LEN: usize = 256;
-const MAX_LAUNCH_NONCE_LEN: usize = 256;
-const MAX_CAPABILITY_LEN: usize = 64;
-const MAX_CAPABILITIES: usize = 32;
-const MAX_CREDENTIAL_FINGERPRINTS: usize = 3;
-const MAX_ADMISSION_FACTS_BYTES: usize = 8192;
-const MAX_ADMISSION_FACTS_DEPTH: usize = 32;
+pub(crate) const MAX_MODULE_ID_LEN: usize = 128;
+pub(crate) const MAX_PROJECT_ROOT_LEN: usize = 4096;
+pub(crate) const MAX_HARNESS_LEN: usize = 128;
+pub(crate) const MAX_SESSION_LEN: usize = 256;
+pub(crate) const MAX_LAUNCH_NONCE_LEN: usize = 256;
+pub(crate) const MAX_CAPABILITY_LEN: usize = 64;
+pub(crate) const MAX_CAPABILITIES: usize = 32;
+pub(crate) const MAX_CREDENTIAL_FINGERPRINTS: usize = 3;
+pub(crate) const MAX_ADMISSION_FACTS_BYTES: usize = 8192;
+pub(crate) const MAX_ADMISSION_FACTS_DEPTH: usize = 32;
 /// Whole-request nesting bound: the root object plus a maximal
 /// `admission_facts` subtree. Unknown fields count toward nesting limits
 /// (protocol §7.1), so the bound applies to the complete control object
-const MAX_CONTROL_DEPTH: usize = MAX_ADMISSION_FACTS_DEPTH + 1;
+pub(crate) const MAX_CONTROL_DEPTH: usize = MAX_ADMISSION_FACTS_DEPTH + 1;
 
 /// The direct-linked profile cannot change catalog content at runtime, so the generation is always 1.
 pub const CATALOG_GENERATION: u64 = 1;
@@ -508,11 +508,7 @@ pub fn host_status_response_json(
     report: &crate::handler::HealthReport,
     shared_memory: serde_json::Value,
 ) -> Vec<u8> {
-    let health = match report.status {
-        crate::handler::HealthStatus::Ok => "ok",
-        crate::handler::HealthStatus::Degraded => "degraded",
-        crate::handler::HealthStatus::Failing => "failing",
-    };
+    let health = report.status.as_str();
     let mut components = serde_json::Map::new();
     let raw_components = report
         .metrics
@@ -538,7 +534,7 @@ pub fn host_status_response_json(
         let Some(status) = component.get("status").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        if !matches!(status, "ok" | "degraded" | "failing") {
+        if crate::handler::HealthStatus::parse(status).is_none() {
             continue;
         }
         // A component whose health check panicked reports no metrics; its allowlisted status still names it in the response so a failing subsystem is never hidden. commentlint: allow(JUDGE)
