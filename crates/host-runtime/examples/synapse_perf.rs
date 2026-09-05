@@ -1046,7 +1046,7 @@ async fn execute_batch(
     // Each resubmission receives a fresh `callWithRetry` budget.
     'logical: loop {
         let mut submit_attempts = 0u32;
-        let (job_id, served_poll_cap) = loop {
+        let (job_id, _descriptor_retry_after_ms) = loop {
             // The retry loop checks the deadline before each attempt because a retry sleep can wake after the deadline.
             // `RoutedWire::call` returns `ExpiredBeforeSend` without starting a frame when `deadline` has expired.
             // An expired submission returns `ExpiredBeforeSend` without writing a frame.
@@ -1108,11 +1108,7 @@ async fn execute_batch(
             };
             first_send.get_or_insert(reply.sent_ns);
             if reply.frame.ty == raw_client::TY_RESPONSE {
-                let job_id = validate_batch_descriptor(&json, &request_key)?;
-                break (
-                    job_id,
-                    json["result"]["retry_after_ms"].as_u64().unwrap_or(50),
-                );
+                break validate_batch_descriptor(&json, &request_key)?;
             }
             let code = json["code"].as_str().unwrap_or("unparsable");
             if code == "module_restarted" {
@@ -1299,7 +1295,7 @@ async fn execute_batch(
             }
             let result = &json["result"];
             if let Some(vectors) = result["vectors"].as_array() {
-                validate_batch_page(&json, &expected_items)?;
+                validate_batch_page(&json, &expected_items, shape.page_vectors())?;
                 // A page is either final (`done:true`, no cursor) or a nonempty continuation (`done:false`, string cursor); anything else is a malformed envelope, not evidence.
                 let final_page = result["done"] == true && result.get("next_cursor").is_none();
                 let continuation = result["done"] == false
@@ -1357,8 +1353,7 @@ async fn execute_batch(
                 }
                 continue;
             }
-            validate_pending_envelope(&json, &job_id)?;
-            let served_delay = result["retry_after_ms"].as_u64().unwrap_or(served_poll_cap);
+            let served_delay = validate_pending_envelope(&json, &job_id)?;
             let delay_ms = ctx
                 .opts
                 .variant
@@ -1386,14 +1381,18 @@ async fn execute_batch(
 
 /// A descriptor that is not attributed to the submitted batch, or whose shape the host never emits, is a protocol regression rather than a job to poll.
 /// An idempotent replay after a lost response can return the same job already `ready` or `failed`; both are valid descriptors, and polling reports the outcome.
+/// Returns the job ID and the advertised `retry_after_ms`; the host must state its retry policy, so a missing or mistyped value is a harness error rather than a default.
 fn validate_batch_descriptor(
     json: &serde_json::Value,
     request_key: &str,
-) -> Result<String, String> {
+) -> Result<(String, u64), String> {
     let result = &json["result"];
     let job_id = result["job_id"]
         .as_str()
         .ok_or_else(|| format!("batch descriptor omitted job_id: {json}"))?;
+    let retry_after_ms = result["retry_after_ms"]
+        .as_u64()
+        .ok_or_else(|| format!("batch descriptor omitted retry_after_ms: {json}"))?;
     if result["request_key"] != request_key
         || result["done"] != false
         || !matches!(
@@ -1405,11 +1404,11 @@ fn validate_batch_descriptor(
             "batch descriptor is not a descriptor for this batch: {json}"
         ));
     }
-    Ok(job_id.to_owned())
+    Ok((job_id.to_owned(), retry_after_ms))
 }
 
-/// A pending result envelope must name the polled job and carry a pending status; a page later accepted after a malformed envelope would record a completed request on corrupt evidence.
-fn validate_pending_envelope(json: &serde_json::Value, job_id: &str) -> Result<(), String> {
+/// A pending result envelope must name the polled job, carry a pending status, and state `retry_after_ms`; a page later accepted after a malformed envelope would record a completed request on corrupt evidence.
+fn validate_pending_envelope(json: &serde_json::Value, job_id: &str) -> Result<u64, String> {
     let result = &json["result"];
     if result["job_id"] != job_id
         || result["done"] != false
@@ -1419,7 +1418,9 @@ fn validate_pending_envelope(json: &serde_json::Value, job_id: &str) -> Result<(
             "pending result envelope is malformed for job {job_id}: {json}"
         ));
     }
-    Ok(())
+    result["retry_after_ms"]
+        .as_u64()
+        .ok_or_else(|| format!("pending result envelope omitted retry_after_ms: {json}"))
 }
 
 /// The delayed engine returns this vector for every text; a completed request must carry exactly it.
@@ -1480,6 +1481,7 @@ fn validate_vectors(json: &serde_json::Value, expected: usize) -> Result<(), Str
 fn validate_batch_page(
     json: &serde_json::Value,
     expected: &std::collections::BTreeMap<&str, &str>,
+    max_page_vectors: usize,
 ) -> Result<(), String> {
     let result = &json["result"];
     if result["model"] != MODEL
@@ -1494,6 +1496,13 @@ fn validate_batch_page(
     let vectors = result["vectors"]
         .as_array()
         .ok_or_else(|| format!("batch page omitted vectors: {json}"))?;
+    // A page above the configured bound means the host ignored `max_page_vectors`, which would understate the poll count.
+    if vectors.len() > max_page_vectors {
+        return Err(format!(
+            "batch page carries {} vectors above the {max_page_vectors}-vector bound: {json}",
+            vectors.len()
+        ));
+    }
     for item in vectors {
         let id = item["id"]
             .as_str()

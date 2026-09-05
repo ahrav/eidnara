@@ -161,7 +161,7 @@ pub struct Corpus {
 pub struct VerifiedBundle {
     pub manifest: BundleManifest,
     pub max_text_bytes: usize,
-    /// Rows in the multi-row certification call: at least two whenever the host admits multi-item batches, at most the recommended batch, never above `max_batch_items`.
+    /// Rows in the multi-row certification call: the largest batch the host admits, so a graph that misbehaves only at sizes above the recommended batch fails certification instead of an ordinary request.
     pub certification_rows: usize,
     pub onnx: Vec<u8>,
     pub initializers: Vec<(String, Vec<u8>)>,
@@ -277,10 +277,7 @@ pub fn load_bundle(
         )));
     }
 
-    let certification_rows = (manifest.recommended_batch.rows as usize)
-        .max(2)
-        .min(limits.max_batch_items)
-        .max(1);
+    let certification_rows = limits.max_batch_items.max(1);
     Ok(VerifiedBundle {
         manifest,
         max_text_bytes: limits.max_text_bytes,
@@ -904,7 +901,7 @@ fn parse_corpus(bytes: &[u8], dims: usize) -> Result<Corpus, BundleError> {
     let distinct_pair_exists = items.iter().enumerate().any(|(index, first)| {
         items[index + 1..]
             .iter()
-            .any(|second| expectations_differ(&first.expected, &second.expected, raw.tolerance))
+            .any(|second| certification_mismatch(&first.expected, &second.expected, raw.tolerance))
     });
     if !distinct_pair_exists {
         return Err(err(
@@ -917,12 +914,27 @@ fn parse_corpus(bytes: &[u8], dims: usize) -> Result<Corpus, BundleError> {
     })
 }
 
-/// Two expectations are distinct for certification when some component differs by more than the corpus tolerance.
-pub(crate) fn expectations_differ(first: &[f32], second: &[f32], tolerance: f32) -> bool {
-    first
+/// The certification criterion: two unit vectors match when every component is within `tolerance` and their cosine similarity is within `tolerance` of 1.
+/// Componentwise drift alone admits orthogonal unit vectors at high dimensions, and cosine alone admits a few large single-component errors, so both must hold.
+/// The cosine is normalized by both norms because each side may sit up to `UNIT_NORM_TOLERANCE` from 1.
+/// The same criterion decides whether two corpus expectations are distinct enough to detect a row permutation.
+pub(crate) fn certification_mismatch(got: &[f32], expected: &[f32], tolerance: f32) -> bool {
+    if got.len() != expected.len() {
+        return true;
+    }
+    let componentwise_drift = got
         .iter()
-        .zip(second)
-        .any(|(a, b)| (a - b).abs() > tolerance)
+        .zip(expected)
+        .any(|(g, e)| (g - e).abs() > tolerance);
+    let (dot, got_sq, expected_sq) =
+        got.iter()
+            .zip(expected)
+            .fold((0.0f64, 0.0f64, 0.0f64), |(dot, g_sq, e_sq), (g, e)| {
+                let (g, e) = (f64::from(*g), f64::from(*e));
+                (dot + g * e, g_sq + g * g, e_sq + e * e)
+            });
+    let cosine = dot / (got_sq.sqrt() * expected_sq.sqrt());
+    componentwise_drift || cosine < 1.0 - f64::from(tolerance)
 }
 
 #[cfg(test)]

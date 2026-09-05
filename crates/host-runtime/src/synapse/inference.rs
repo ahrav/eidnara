@@ -389,24 +389,10 @@ impl Backend {
     /// certify uses a corpus that detects incorrect output selection, pooling, and truncation.
     /// certify rejects structurally healthy models with semantically incorrect output.
     /// load rejects semantically wrong models before returning a backend that can serve vectors.
-    /// `batch_rows` is the size of the multi-row check, sized by `load_bundle` from the recommended batch and the host's batch cap; the corpus itself may hold more items than any routed request.
+    /// `batch_rows` is the size of the multi-row check: the largest batch the host admits, as sized by `load_bundle`.
     fn certify(&self, corpus: &Corpus, batch_rows: usize) -> Result<(), InferenceError> {
-        // Componentwise drift alone cannot certify a unit vector: at high dimensions two orthogonal unit vectors can differ by less than the tolerance in every component, so the cosine similarity must also stay within the tolerance of 1.
-        // The cosine is normalized by both norms because each side may sit up to `UNIT_NORM_TOLERANCE` from 1; a raw dot product would fail an exact match under a tight corpus tolerance.
         let matches = |got: &[f32], item: &CorpusItem| {
-            let componentwise = got
-                .iter()
-                .zip(&item.expected)
-                .all(|(g, e)| (g - e).abs() <= corpus.tolerance);
-            let (dot, got_sq, expected_sq) = got.iter().zip(&item.expected).fold(
-                (0.0f64, 0.0f64, 0.0f64),
-                |(dot, g_sq, e_sq), (g, e)| {
-                    let (g, e) = (f64::from(*g), f64::from(*e));
-                    (dot + g * e, g_sq + g * g, e_sq + e * e)
-                },
-            );
-            let cosine = dot / (got_sq.sqrt() * expected_sq.sqrt());
-            componentwise && cosine >= 1.0 - f64::from(corpus.tolerance)
+            !super::bundle::certification_mismatch(got, &item.expected, corpus.tolerance)
         };
         for item in &corpus.items {
             let got = self.embed(&[item.text.as_str()])?;
@@ -426,7 +412,7 @@ impl Backend {
                 corpus.items[index + 1..]
                     .iter()
                     .find(|second| {
-                        super::bundle::expectations_differ(
+                        super::bundle::certification_mismatch(
                             &first.expected,
                             &second.expected,
                             corpus.tolerance,

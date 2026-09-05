@@ -57,11 +57,13 @@ impl SynapseLimits {
     /// `per_waiter_charge_bound` bounds resident memory retained by one admitted query while it waits for or uses the CPU lane.
     /// JSON decoding can retain twice the decoded text length as `String` capacity.
     /// The handler retains response scratch until it encodes the terminal response.
+    /// A completed query keeps its returned vector (at most `MAX_DIMS` components) while its permit is held, so the bound covers one maximal vector too.
     pub fn per_waiter_charge_bound(&self) -> Option<u64> {
         u64::try_from(self.max_text_bytes)
             .ok()?
             .checked_mul(2)?
-            .checked_add(RESPONSE_SCRATCH_BYTES as u64)
+            .checked_add(RESPONSE_SCRATCH_BYTES as u64)?
+            .checked_add(bundle::MAX_DIMS.checked_mul(std::mem::size_of::<f32>() as u64)?)
     }
 
     /// `query_admission_permits` returns permits for one running query plus every allowed waiter.

@@ -377,12 +377,13 @@ async fn route_loss_drops_queued_query_without_engine_work_and_releases_slot() {
 /// Resident accounting rejects the bound-plus-one request with `queue_full`.
 // `WAITER_BOUNDARY` is the largest feasible value under the startup scratch formula.
 // Formula or pool changes require recomputing it.
-// Each waiter slot reserves 2,097,408 bytes: twice `max_text_bytes` plus 256.
+// Each waiter slot reserves 2,162,944 bytes: twice `max_text_bytes`, 256 response bytes, and one maximal 65,536-byte vector.
 // Queued text reserves `max_queued_request_bytes` (8,388,608 bytes).
 // Queued metadata reserves 3,940,352 bytes for 64 jobs.
 // Worst-case parsing reserves 100,708,352 bytes.
-// The boundary is 32 because at most 33 waiter charges fit in the reservable pool.
-const WAITER_BOUNDARY: usize = 32;
+// The reservable pool is 182,781,184 bytes.
+// The boundary is 31 because at most 32 waiter charges fit in the reservable pool.
+const WAITER_BOUNDARY: usize = 31;
 
 #[test]
 fn waiter_boundary_is_the_last_feasible_startup_configuration() {
@@ -409,7 +410,7 @@ fn waiter_boundary_is_the_last_feasible_startup_configuration() {
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "opens 33 concurrent ring clients, but MAX_RING_RESIDENT_BYTES (1 GiB of arena) \
+#[ignore = "opens 32 concurrent ring clients, but MAX_RING_RESIDENT_BYTES (1 GiB of arena) \
             admits at most 8 rings per process, so the ninth setup socket closes before its \
             descriptor grant and the test never reaches its assertions"]
 async fn boundary_waiters_with_maximal_texts_are_all_admitted() {
