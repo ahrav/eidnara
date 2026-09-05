@@ -2011,6 +2011,23 @@ mod tests {
         let meta = std::fs::symlink_metadata(&lock_path).expect("transaction.lock exists");
         assert!(meta.file_type().is_file(), "the lock is a regular file");
         let identity = (meta.dev(), meta.ino());
+        // Acquiring either lock materializes both. The lifetime lock path is spelled here
+        // so the assertion does not move with `LIFETIME_LOCK_NAME`; a distinct inode
+        // proves the two fences are two files.
+        let lifetime_path = root
+            .path()
+            .join(".eidnara-coordination")
+            .join("lifetime.lock");
+        let lifetime = std::fs::symlink_metadata(&lifetime_path).expect("lifetime.lock exists");
+        assert!(
+            lifetime.file_type().is_file(),
+            "the lifetime lock is a regular file"
+        );
+        let lifetime_identity = (lifetime.dev(), lifetime.ino());
+        assert_ne!(
+            lifetime_identity, identity,
+            "the transaction and lifetime locks are distinct files"
+        );
         drop(first);
 
         let eidnara = root.path().join("eidnara");
@@ -2024,6 +2041,13 @@ mod tests {
             (meta.dev(), meta.ino()),
             identity,
             "every opener must lock the same never-renamed coordination inode"
+        );
+        let lifetime =
+            std::fs::symlink_metadata(&lifetime_path).expect("lifetime.lock still exists");
+        assert_eq!(
+            (lifetime.dev(), lifetime.ino()),
+            lifetime_identity,
+            "the lifetime lock inode survives the managed-subtree replacement"
         );
     }
 
