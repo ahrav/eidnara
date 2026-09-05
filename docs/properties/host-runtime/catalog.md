@@ -866,9 +866,11 @@ not (`tokio/src/sync/notify.rs:529-531`); `enable()` is load-bearing for
 `notify_one`, not for this primitive. The lost-wake fence is therefore creating
 `changed()` before calling `try_own()`; a mutation that moves the creation below
 the state check reintroduces the lost wake even if `enable()` is still called.
-Reopen releases the phase lock before notifying while commit notifies while
-holding it; the asymmetry is harmless for a wake-all but is undocumented and
-would matter if either became a wake-one.
+Both `reopen` and `commit` release the phase lock before notifying: in `commit`
+the guard from `*self.phase.lock().expect(..) = ..` is a temporary dropped at the
+semicolon (`lifecycle.rs:1087`), so `notify_waiters` on the next line runs
+unlocked. The source catalog described a notify-under-lock asymmetry here; it does
+not exist, and the evidence file records the same correction.
 Required faults and enabling state: at least two concurrent requests on distinct
 generations, plus a pre-acknowledgement failure so reopen fires rather than
 commit. Needs a multi-thread runtime for the notify-between-check-and-poll
@@ -3531,10 +3533,15 @@ empty observation returns `Ok(false)` and reaches the `read_cancel` check
 (`:397`), which takes the `inbound` sender (`:398`) and sends `Cancelled`
 (`:400`). Second, nothing is forwarded on the inbound channel after `Cancelled`
 is sent. Third, because the guarantee holds only while the connection task
-drains the inbound channel, the campaign keeps that drain running and asserts
-that the `Cancelled` send (`:400`) completes and the thread exits within the
-campaign's bounded wait; the send itself carries no deadline, so with the drain
-stopped the record makes no exit claim and the check does not run. `always` rather than `sometimes`
+drains the inbound channel, the campaign keeps that drain running, and the bound is
+stated in the unit the code bounds: with the receiver draining, `send` on the
+bounded `inbound` channel (`:400`) completes as soon as one slot is free, so the
+check asserts the `Cancelled` report is received by the drain within
+`queue_frames + 1` receives after the cancellation edge (the channel holds at
+most `queue_frames` earlier frames, `ring_transport.rs:227`), and that the
+endpoint thread has exited by the time that report is received plus one join;
+the send carries no wall-clock deadline, so with the drain stopped the record
+makes no exit claim and the check does not run. `always` rather than `sometimes`
 because the assertion is a bound that must hold every time the window closes,
 not a state to reach.
 **Re-derived 2026-08-31 against the eventfd transport (PR #131), which removed
@@ -6937,18 +6944,15 @@ and none changes a finding.
 - `dispatch.rs` is 1,539 lines but decides every terminal in 1,497 production
   lines. Lens A cited the file total; lens B the production half. Both stated
   above.
-- **Lens A's own heading count of CI-named test binaries is wrong and lens B
-  corrects it.** Lens A's reachability evidence 3 says "Only two of this
-  sub-part's five test binaries run in CI", and then its own body lists the
-  CI-named binaries as `client`, `lifecycle`, `shm_failure_modes`, and
-  `shm_soak`, none of which is a 2e binary. Lens B enumerates six binaries
-  whose subject is the request path and finds **zero** named. Re-verified here:
-  the 13 `host-runtime` hits in `ci.yml` are `:87`, `:132`, `:133`, `:134`, `:168`,
-  `:169`, `:178`, `:187`, `:190`, `:211`, `:361`, `:442`, and `:461`, and none
-  names `dispatch`, `routing`, `handler_contract`, `composite_routing`,
-  `protocol_vectors`, or `broca_protocol`. Lens A's per-record
-  `Existing check: ... Not in CI.` lines are correct; only its heading count was
-  not.
+- **Lens A's heading count of CI-named test binaries was wrong, and its
+  `Not in CI` conclusion was wrong too.** Lens B enumerated six binaries whose
+  subject is the request path and found none named in `ci.yml`; that is true
+  and irrelevant, because `ci.yml:118` and `:126` run
+  `cargo test --workspace --all-targets` on both toolchains, which builds and
+  runs every integration binary in the workspace without naming it. The
+  per-record `Existing check:` lines in this group therefore read "runs in CI"
+  rather than the source catalog's `Not in CI`, and the `Exercised:` fields
+  are classified on that basis.
 
 ## What this part is about
 
@@ -7383,7 +7387,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `tests/dispatch.rs:358` and `:453` race cancel against
-completion and assert one terminal; neither binary runs in CI, and neither
+completion and assert one terminal; both binaries run in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`), and neither
 races route close or generation teardown into the same settlement.
 Guarantee: For one routed correlation, at most one of `Response`, `Error`, or
 `StreamEnd` reaches the writer queue, whichever of handler completion,
@@ -7405,8 +7409,8 @@ Verified the `swap` is the only mutator of `won`, that all five emission sites
 take the order lock, and that the `streamed` store precedes lock release.
 Existing check: `tests/dispatch.rs:358` `cancel_and_completion_settle_exactly_once`,
 `:453` `simultaneous_cancel_and_completion_still_emit_one_terminal`,
-`:504` `cancelling_a_stream_stops_it_with_one_terminal`. Status unaudited. Not
-in CI.
+`:504` `cancelling_a_stream_stops_it_with_one_terminal`. Status unaudited; runs
+in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 Impact: A duplicate terminal settles a correlation the client has already
 retired and, per Part 2d, is dropped as unmatched; a `Response` after
 `StreamData` corrupts the client's view of the stream.
@@ -7445,7 +7449,7 @@ on both sides of the await so a charge granted before cancellation cannot be
 used after it.
 Existing check: `tests/dispatch.rs:835`, `tests/routing.rs:435`
 `closed_route_requests_are_unknown_and_cleanup_is_idempotent`. Status
-unaudited. Not in CI.
+unaudited; runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 Impact: A frame emitted onto a retired generation would be delivered to a
 successor connection's peer if the writer were reused, or dropped as unmatched
 if not. Part 2a's silent-close rule depends on this holding: a retirement that
@@ -7492,7 +7496,7 @@ Verified the permit is acquired before the spawn on both call paths and that the
 exhaustion arm cancels and discards rather than awaiting inline.
 Existing check: `tests/dispatch.rs:271` `an_unknown_route_is_refused_with_zero_dispatch`,
 `:295` `saturated_request_capacity_returns_server_busy_without_dispatch`. Status
-unaudited. Not in CI.
+unaudited; runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 Impact: `writer.discard()` drops queued frames belonging to *other*
 correlations, so one client's rejection flood converts every in-flight peer
 request on that generation into `outcome_unknown`. Protocol §10.2 lists
@@ -7532,7 +7536,7 @@ lifecycle-failure variants trip the fatal latch before returning.
 Existing check: `tests/routing.rs:396` `rejected_bind_never_publishes_and_still_reports_route_gone`,
 `:570` `route_capacity_exhaustion_is_refused_without_binding`,
 `tests/handler_contract.rs:229` `a_rejected_bind_carries_the_handler_code_to_the_client`.
-Status unaudited. Not in CI.
+Status unaudited; runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 Impact: Protocol §8.2 acknowledges an abandoned `route.open` and gives the
 client a remedy keyed on receiving an *unmatched control `Response`*. On these
 three exits there is no frame at all, so that remedy never triggers and the
@@ -7755,8 +7759,8 @@ handler *failure* surfacing as a success: the handler explicitly returned the
 variant `handler.rs:220-225` documents as "Unary success", so nothing in the
 observable state distinguishes a failed reservation from a deliberate empty
 result. That question is upstream of the record and is referred to a human.
-Existing check: `tests/dispatch.rs:665` for the ceiling. Status unaudited. Not
-in CI.
+Existing check: `tests/dispatch.rs:665` for the ceiling. Status unaudited; runs
+in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 Impact: An empty `Response` is indistinguishable from a legitimately empty result
 at every layer that could reject it, so a handler that abandons its output
 mid-request and still reports success is invisible. The severity depends entirely
@@ -7822,7 +7826,7 @@ Existing check: `tests/dispatch.rs:976` `saturated_broca_reserve_cannot_consume_
 `:1074` `saturated_general_capacity_cannot_consume_the_broca_reserve`,
 `tests/handler_contract.rs:323` `reservations_must_leave_one_general_slot_in_each_pool`,
 `:636` `zero_reservation_handlers_keep_single_pool_admission`. Status unaudited.
-None in CI.
+All run in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 Impact: All four pools are host-global, so one connection can hold every general
 permit. Per-connection fairness is not provided at this layer; if it is
 required, it is required somewhere else and nothing here supplies it.
@@ -7875,7 +7879,7 @@ Confidence: high - [evidence](evidence/req-a-a-handler-outliving-every-host-dead
 Read all seven `HostTiming` fields and every `timeout`/`timeout_at` call in
 `dispatch.rs`; none wraps the handler callback.
 Existing check: `tests/dispatch.rs:295` constructs the state incidentally.
-Status unaudited. Not in CI.
+Status unaudited; runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 Impact: Handler-task capacity is reclaimed only by handler cooperation, client
 `Cancel`, route close, or generation teardown. A module with a missing internal
 timeout can hold all 256 general task permits, at which point every other
@@ -7916,7 +7920,7 @@ Confidence: high - [evidence](evidence/req-a-both-admission-classes-and-the-reje
 Enumerated the five `try_acquire_owned` sites and confirmed which existing tests
 reach which.
 Existing check: `tests/dispatch.rs:295`, `:976`, `:1074` for pending in both
-classes. Status unaudited. Not in CI.
+classes. Status unaudited; runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 Impact: The reserved class exists specifically to survive general-load
 saturation. If reserved *task* exhaustion is never constructed, the carve-out's
 second half is unverified, and `runtime.rs:118-119`'s claim that the reserved
@@ -8018,7 +8022,7 @@ All three call sites and both bounding counters read; `MAX_INFLIGHT_BUSY_REJECTS
 confirmed as 32 at `connection.rs:42` and used at `:244`.
 Existing check: `tests/routing.rs:98` `unsupported_operations_leave_the_generation_usable`,
 `:212` `malformed_control_bodies_are_refused_before_handler_work`. Status
-unaudited. Not in CI.
+unaudited; runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
 Impact: A semantic-rejection flood consumes the same global pool that funds real
 requests, so malformed control traffic degrades application throughput on every
 connection, while a capacity-rejection flood is contained per generation. The
@@ -8057,7 +8061,7 @@ Confidence: high - [evidence](evidence/req-a-handler-authored-diagnostics-are-ca
 Both capping sites read and their limits compared: same constants, different
 substitute messages, and the bind path re-implements the comparison by hand
 instead of calling `bounded_terminal_error`.
-Existing check: `tests/dispatch.rs:1524` (inline, not in CI). Status unaudited.
+Existing check: `tests/dispatch.rs:1524` (inline; runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`)). Status unaudited.
 Impact: Without the cap, `max_pending_requests` (1024) times an arbitrary
 message is unbounded uncharged residency. With two hand-written copies of one
 policy, a future limit change applied to one and missed in the other silently
@@ -8225,12 +8229,16 @@ children's are at `:318` and `:321`.
 ### composite-route-entry-is-removed-by-exactly-one-route-gone
 
 Type: safety
-Reachability: default-production - the composite is constructed at
-`serve.rs:575` and handed to `host_runtime::run` at `:632`. Its `bind`, `handle` and
-`route_gone` are the composite's leg of the routed path Fact 1 of
+Reachability: test-only - the composite is composition-dependent state, and the
+binary that composes it in production, `crates/daemon/src/bin/eidnara_host/serve.rs`,
+is not in this tree (the daemon is scheduled for U4, `docs/properties/README.md:52`);
+a repo-wide search for `StaticComposite::new` finds only `crates/host-runtime/tests/`
+and the two examples. Once composed, its `bind`, `handle` and `route_gone` are the
+composite's leg of the routed path Fact 1 of
 [Reachability](#reachability-admission-and-dispatch) establishes, and the route map they share
 (`composite.rs:112`, initialized at `:134`) is plain `Mutex<HashMap<..>>` state
-with no gate. `composite.rs` has zero `#[cfg]` attributes.
+with no gate. `composite.rs` has zero `#[cfg]` attributes. The `serve.rs` line
+citations elsewhere in this record are source-repository evidence.
 Status: active
 Exercised: partial - one rejected-bind case is covered; panic and
 close-wins-bind are not.
@@ -8305,10 +8313,11 @@ Open questions:
 ### composite-panic-containment-covers-only-optional-health-and-shutdown
 
 Type: safety
-Reachability: default-production - same construction chain, `serve.rs:575` and
-`:632`. Every one of the eleven child call positions enumerated below is an
+Reachability: test-only - same composition dependency as the record above: no
+in-tree production caller constructs `StaticComposite`, and `serve.rs` is not in
+this tree. Every one of the eleven child call positions enumerated below is an
 unconditional statement in `composite.rs`, which has zero `#[cfg]` attributes, so
-none of the contained or uncontained sites is gated.
+once composed none of the contained or uncontained sites is gated.
 Status: active
 Exercised: partial - both contained categories have dedicated tests; no test
 pins that the other categories deliberately escalate.
@@ -9124,7 +9133,7 @@ joint postcondition at the construction site is unasserted
 Guarantee: If `run` reaches `HostShared` construction, every permit count and
 byte quantity it computes is non-negative, within `Semaphore::MAX_PERMITS`, and
 leaves at least one maximum request body of ingress headroom.
-Check: `always` - at `HostShared` construction (`runtime.rs:748`, re-verified; the source catalog cited `:882`), assert `max_pending_requests > reservations.pending`, `max_handler_tasks > reservations.tasks`, `general_task_holds < max_handler_tasks - reservations.tasks`, `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog_resident + retained_bytes`, and, for every count passed to `Semaphore::new` at `:771-779` (pending, task, reserved pending, reserved task, handshake), that the count is at most `Semaphore::MAX_PERMITS`, and for every quantity passed to `ByteBudget::new` at `:762-770` that it is within the budget type's range. `always` rather than `always-or-unreached` because this construction is on every successful startup path with no condition, per the map above.
+Check: `always` - at `HostShared` construction (`runtime.rs:748`, re-verified; the source catalog cited `:882`; the `Semaphore::new` calls span `:771-780`, and `connection_permits` at `:780` from `max_connections` is in the enumeration alongside the five counts derived from reservations), assert `max_pending_requests > reservations.pending`, `max_handler_tasks > reservations.tasks`, `general_task_holds < max_handler_tasks - reservations.tasks`, `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog_resident + retained_bytes`, and, for every count passed to `Semaphore::new` at `:771-779` (pending, task, reserved pending, reserved task, handshake), that the count is at most `Semaphore::MAX_PERMITS`, and for every quantity passed to `ByteBudget::new` at `:762-770` that it is within the budget type's range. `always` rather than `always-or-unreached` because this construction is on every successful startup path with no condition, per the map above.
 Fault/timing angle: none. Startup is single-threaded here and the inputs are
 fixed by the time the gates run.
 Required faults and enabling state: a handler whose `resource_declarations` sum
@@ -9331,21 +9340,25 @@ Guarantee: Given handler callbacks that yield to the runtime (cooperatively canc
 Check: `always`, per exit, because `shutdown_sequence` has three and they do
 different amounts of work. From the shutdown token's cancellation to `run`'s
 return, assert elapsed time is at most:
-- `shutdown_deadline + lifecycle_callback_deadline` on the graceful exit at
-  `runtime.rs:1069`, where the drain or the tracker wait finished inside
-  `deadline` and `run_handler_shutdown` then ran under its own budget (`:1098`);
-- `shutdown_deadline + 2 * lifecycle_callback_deadline` on the fatal-latch exit at
-  `:1064`, which is the *only* exit that never calls `run_handler_shutdown`
-  (`:1060-1064` returns before `:1066`);
-- `shutdown_deadline + 3 * lifecycle_callback_deadline` on the forced exit at
-  `:1067`, which pays the drain (`:1006`, `:1037`), the doubled chain (`:1053`,
-  `:1054`), **and** the handler callback (`:1066`, bounded at `:1098`).
-Each bound also admits the two `force_close_all_routes` calls at `:1042` and
-`:1050`, which no `timeout` wraps and which are each internally bounded at
-`lifecycle_callback_deadline` for the tracker wait (`dispatch.rs:1299`) plus
-another `lifecycle_callback_deadline` in `run_route_gone` (`:1162-1166`), so up
-to `2 * lifecycle_callback_deadline` per call and `4 *` across both; an oracle should either
-measure them separately or state that its bound is the sum plus those.
+writing `L` for `lifecycle_callback_deadline` and `R = 2 * L` for one
+`force_close_all_routes` call (the tracker wait at `dispatch.rs:1299` plus
+`run_route_gone` at `:1162-1166`, each under `L`, and no `timeout` wraps the call):
+- `shutdown_deadline + L` on the graceful exit at `runtime.rs:1069` when the drain
+  finished inside `deadline`, and `shutdown_deadline + R + L` when it did not but
+  the tracker wait at `:1048` still succeeded, since the first
+  `force_close_all_routes` (`:1042`) runs before that wait; `run_handler_shutdown`
+  then runs under its own budget (`:1098`);
+- `shutdown_deadline + 3R = shutdown_deadline + 6L` on the fatal-latch exit at
+  `:1064`: the first route close (`:1042`, only when the drain missed), the second
+  (`:1050`), and the doubled chain (`:1053-1054`, `2L`); it is the *only* exit
+  that never calls `run_handler_shutdown` (`:1060-1064` returns before `:1066`);
+- `shutdown_deadline + 3R + L = shutdown_deadline + 7L` on the forced exit at
+  `:1067`, which pays both route closes, the doubled chain, **and** the handler
+  callback (`:1066`, bounded at `:1098`).
+The route-close terms are inside the formulas, not measured separately, so a
+compliant forced path that spends them does not fail the assertion; the
+`shutdown_deadline` term is absolute (`:1037` and `:1048` share one `deadline`),
+so the first route close does not extend the tracker wait.
 `always` because each bound must hold on every shutdown that takes its exit, and
 the bounds are in the units the code bounds.
 **Every bound above is conditional, and the condition is not a detail.** These
