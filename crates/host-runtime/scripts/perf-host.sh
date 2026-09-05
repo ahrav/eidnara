@@ -203,9 +203,12 @@ budget-preflight)
     EIDNARA_IPC_BUDGET_WARMUP_OPS=200 EIDNARA_IPC_BUDGET_MEASURED_OPS=1000
   # The same-L3 arms are the experiment's primary measurements; the bench
   # finalizes a structured skip with exit 0 when no valid pair exists, so the
-  # collection log is inspected rather than trusting the exit status alone.
-  if grep -q '^SKIPPED ' "$BUDGET_OUT/collection.log"; then
-    grep '^SKIPPED ' "$BUDGET_OUT/collection.log" >&2
+  # finalized manifests are inspected rather than trusting the exit status.
+  # The manifests are written by the bench itself before it exits, unlike the
+  # tee'd collection log, which a separate process may still be flushing.
+  skipped=$(grep -l '"state": *"skipped"' "$BUDGET_OUT"/*/manifest.json 2>/dev/null || true)
+  if [[ -n "$skipped" ]]; then
+    echo "$skipped" >&2
     echo "preflight failed: a required same-L3 arm was skipped" >&2
     rm -rf "$BUDGET_OUT"
     exit 1

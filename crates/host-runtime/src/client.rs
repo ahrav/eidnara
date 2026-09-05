@@ -150,16 +150,16 @@ impl CallError {
     }
 
     /// `None` means the body is not a canonical `ErrorBody` (§6.2): a JSON object
-    /// with string `code` and `message`. Unknown members are permitted.
+    /// with string `code` and `message`, and an unsigned `retry_after_ms` when present.
+    /// Unknown members are permitted.
     fn host_terminal(body: &[u8]) -> Option<Self> {
         let value = serde_json::from_slice::<Value>(body).ok()?;
         let code = value.get("code")?.as_str()?;
         value.get("message")?.as_str()?;
-        // `retry_after_ms` is an optional unsigned integer (§7.4); any other shape is an unknown member and is ignored.
-        let retry_after = value
-            .get("retry_after_ms")
-            .and_then(Value::as_u64)
-            .map(Duration::from_millis);
+        let retry_after = match value.get("retry_after_ms") {
+            None => None,
+            Some(delay) => Some(Duration::from_millis(delay.as_u64()?)),
+        };
         // Raw terminal messages may contain request, credential, or identity data.
         // `CallError` retains the bounded terminal code and discards the raw terminal message.
         // `host.` identifies host-supplied codes.
@@ -981,8 +981,9 @@ struct PendingState {
 /// The bridge thread's join state across `close` attempts.
 enum BridgeJoin {
     Thread(std::thread::JoinHandle<()>),
-    /// A blocking join task that outlived one shutdown deadline; the next `close` awaits it.
-    Joining(JoinHandle<()>),
+    /// The blocking join task, shared so a `close` that times out or is dropped mid-await
+    /// leaves it for the next `close`; the inner `None` marks a completed join.
+    Joining(Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>),
     Done,
 }
 
@@ -1913,17 +1914,35 @@ impl Inner {
         // its `blocking_send`, and a capacity wait re-checks cancellation every
         // `BRIDGE_RESERVE_SLICE`. Joining it here keeps the setup socket and
         // mappings from outliving a successful `close`.
-        let mut join =
-            match std::mem::replace(&mut *lock_unpoisoned(&self.bridge), BridgeJoin::Done) {
+        // The join task lives in the slot while it is awaited, so a `close` future dropped
+        // mid-await leaves the next `close` waiting on the same join rather than on nothing.
+        let join = {
+            let mut slot = lock_unpoisoned(&self.bridge);
+            if let BridgeJoin::Thread(bridge) = std::mem::replace(&mut *slot, BridgeJoin::Done) {
+                *slot = BridgeJoin::Joining(Arc::new(tokio::sync::Mutex::new(Some(
+                    tokio::task::spawn_blocking(move || {
+                        let _ = bridge.join();
+                    }),
+                ))));
+            }
+            match &*slot {
                 BridgeJoin::Done => return within_deadline,
-                BridgeJoin::Thread(bridge) => tokio::task::spawn_blocking(move || {
-                    let _ = bridge.join();
-                }),
-                BridgeJoin::Joining(join) => join,
-            };
-        if tokio::time::timeout_at(deadline, &mut join).await.is_err() {
+                BridgeJoin::Joining(join) => Arc::clone(join),
+                BridgeJoin::Thread(_) => unreachable!("replaced above"),
+            }
+        };
+        let joined = tokio::time::timeout_at(deadline, async {
+            let mut task = join.lock().await;
+            if let Some(handle) = task.as_mut() {
+                let _ = handle.await;
+                *task = None;
+            }
+        })
+        .await;
+        if joined.is_err() {
             within_deadline = false;
-            *lock_unpoisoned(&self.bridge) = BridgeJoin::Joining(join);
+        } else {
+            *lock_unpoisoned(&self.bridge) = BridgeJoin::Done;
         }
         within_deadline
     }
@@ -2884,17 +2903,20 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
             return Err(invalid(String::new()));
         }
     }
+    // The byte cap runs first: its counting writer stops the serializer at the cap, so
+    // every later check runs over a value already known to encode within it.
     if identity.admission_facts.as_ref().is_some_and(|facts| {
-        exceeds_depth(facts, MAX_ADMISSION_FACTS_DEPTH)
-            || !compact_json_fits(facts, MAX_ADMISSION_FACTS_BYTES)
+        !compact_json_fits(facts, MAX_ADMISSION_FACTS_BYTES)
+            || exceeds_depth(facts, MAX_ADMISSION_FACTS_DEPTH)
     }) {
         return Err(invalid(String::new()));
     }
     Ok(())
 }
 
-/// Whether `value` nests deeper than `limit`. The walk is iterative and stops at the
-/// first container below `limit`, so a caller-built value cannot exhaust the stack.
+/// Whether `value` nests deeper than `limit`. The walk is iterative, so it cannot exhaust
+/// the stack; each nesting level costs at least one byte to encode, so on a value that
+/// fits the byte cap the frontier is bounded by that cap.
 fn exceeds_depth(value: &Value, limit: usize) -> bool {
     let mut frontier: Vec<(&Value, usize)> = vec![(value, 0)];
     while let Some((node, depth)) = frontier.pop() {
@@ -4488,11 +4510,18 @@ mod tests {
         let error = CallError::host_terminal(br#"{"code":"queue_full","message":"m"}"#)
             .expect("canonical body");
         assert_eq!(error.retry_after(), None);
-        let error = CallError::host_terminal(
-            br#"{"code":"queue_full","message":"m","retry_after_ms":"soon"}"#,
-        )
-        .expect("an unknown-shaped member is ignored");
-        assert_eq!(error.retry_after(), None);
+        for body in [
+            &br#"{"code":"queue_full","message":"m","retry_after_ms":"soon"}"#[..],
+            br#"{"code":"queue_full","message":"m","retry_after_ms":null}"#,
+            br#"{"code":"queue_full","message":"m","retry_after_ms":-1}"#,
+            br#"{"code":"queue_full","message":"m","retry_after_ms":1.5}"#,
+        ] {
+            assert!(
+                CallError::host_terminal(body).is_none(),
+                "a present retry_after_ms must be an unsigned integer: {}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[tokio::test]
