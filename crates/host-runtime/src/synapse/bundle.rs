@@ -211,15 +211,6 @@ pub fn load_bundle(
         manifest.recommended_batch.rows as usize,
         limits,
     )?;
-    // The long-input probe reaches the token window with whitespace-separated single characters, one token per two bytes, so a window above half the byte cap can never be exercised or served in full. The mismatch is named here as a configuration error instead of surfacing as a probe shortfall; substituted engines have no tokenizer and no probe, so the check belongs to loaded bundles only.
-    let max_tokens = manifest.max_tokens as usize;
-    if max_tokens > limits.max_text_bytes / 2 {
-        return Err(err(format!(
-            "the bundle's max_tokens ({max_tokens}) cannot be reached within the host's max_text_bytes ({}); raise max_text_bytes to at least twice max_tokens",
-            limits.max_text_bytes
-        )));
-    }
-
     let mut listed: Vec<&ArtifactRef> = vec![&manifest.model_file, &manifest.corpus];
     listed.extend(manifest.external_initializers.iter());
     listed.extend(manifest.tokenizer.all());

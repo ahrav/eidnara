@@ -26,7 +26,7 @@ pub struct RequestError {
     pub message: String,
 }
 
-/// Caps a diagnostic at `MAX_DIAGNOSTIC_BYTES` on a char boundary and releases the excess capacity, so a retained or emitted message never holds more resident bytes than the wire may carry.
+/// Caps a diagnostic at `MAX_DIAGNOSTIC_BYTES` on a char boundary and releases excess capacity, so a retained or emitted message never holds more resident bytes than the wire may carry.
 pub(crate) fn bound_diagnostic(message: &mut String) {
     if message.len() > MAX_DIAGNOSTIC_BYTES {
         let mut end = MAX_DIAGNOSTIC_BYTES;
@@ -34,9 +34,9 @@ pub(crate) fn bound_diagnostic(message: &mut String) {
             end -= 1;
         }
         message.truncate(end);
-        // Truncation alone keeps the original capacity allocated.
-        message.shrink_to_fit();
     }
+    // A short message can arrive in an oversized allocation, and a retained job keeps whatever capacity the string carries; the shrink is unconditional.
+    message.shrink_to_fit();
 }
 
 pub(crate) fn schema(message: impl Into<String>) -> RequestError {

@@ -644,6 +644,10 @@ impl SynapseComponent {
             + std::time::Duration::from_millis(
                 deadline_ms.unwrap_or(protocol::DEFAULT_DEADLINE_MS),
             );
+        // Cancellation outranks expiry on every path: a query whose deadline passed while the host began shutting down reports `cancelled`, which clients retry as a transport-class failure.
+        if self.inner.closing.is_cancelled() {
+            return app_error("cancelled", "the host is shutting down");
+        }
         // A query that spent its deadline on parsing is reported expired here, before it takes an admission slot or spawns a worker, and before saturation could misreport it as `queue_full`.
         if tokio::time::Instant::now() >= deadline {
             return expired_query();
@@ -1140,7 +1144,7 @@ impl CompositeComponent for SynapseComponent {
     /// Shutdown closes admission and cancels queued wrappers before joining every started native call through its incarnation.
     /// Shutdown never aborts a started native call.
     /// The lane ends `Disabled` so a late `bind`, `health`, or `embed_blocking` observes the shutdown instead of a ready lane whose admission is closed.
-    /// `embed_blocking` calls are not tracked, so shutdown takes the CPU permit after disabling the lane: an in-flight blocking call holds that permit until it returns, and a call that read `Ready` earlier rechecks the state after acquiring it.
+    /// `embed_blocking` calls are not tracked, so shutdown joins them through the CPU permit: an in-flight blocking call holds that permit until it returns, and the terminal state is written while shutdown holds it, so a call that read `Ready` earlier observes `Disabled` when it rechecks after acquiring the permit, and a joined call that failed cannot overwrite the shutdown state.
     async fn shutdown(&self) -> Result<(), crate::composite::ShutdownError> {
         self.inner.closing.cancel();
         self.inner.jobs.close_admission();
@@ -1149,11 +1153,12 @@ impl CompositeComponent for SynapseComponent {
         self.inner.tracker.close();
         self.inner.tracker.wait().await;
         self.inner.jobs.clear();
+        // Taking the permit joins an in-flight `embed_blocking` call; its own failure transition settles before the shutdown state is written.
+        let permit = self.inner.cpu.acquire().await;
         *self.inner.lock_state() = LaneState::Disabled {
             reason: SHUT_DOWN_REASON.to_owned(),
         };
-        // Taking the permit joins an in-flight `embed_blocking` call.
-        drop(self.inner.cpu.acquire().await);
+        drop(permit);
         Ok(())
     }
 }
