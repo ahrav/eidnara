@@ -78,6 +78,9 @@ struct Channel {
     from_host: Box<Ring>,
     next_producer: u32,
     next_lease: u32,
+    // `next_lease` as of the previous readiness evaluation. A handler that took no frame since
+    // then is not consuming, so visible data does not earn another redispatch.
+    dispatched_lease: u32,
     closed: bool,
     setup: Option<UnixStream>,
     // Held for its Drop: releasing the process-wide claim exactly when the
@@ -702,6 +705,7 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
                     from_host: Box::new(from_host),
                     next_producer: 0,
                     next_lease: 0,
+                    dispatched_lease: 0,
                     closed: false,
                     setup: None,
                     _reservation: Some(reservation),
@@ -826,6 +830,7 @@ impl Task for FinishSetupTask {
                     from_host: pending.from_host,
                     next_producer: 0,
                     next_lease: 0,
+                    dispatched_lease: 0,
                     closed: false,
                     setup: Some(stream),
                     _reservation: Some(pending.reservation),
@@ -904,6 +909,7 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                     from_host: Box::new(first_from_second),
                     next_producer: 0,
                     next_lease: 0,
+                    dispatched_lease: 0,
                     closed: false,
                     setup: None,
                     // Test pairs attach freshly created local rings, never a
@@ -921,6 +927,7 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                     from_host: Box::new(second_from_first),
                     next_producer: 0,
                     next_lease: 0,
+                    dispatched_lease: 0,
                     closed: false,
                     setup: None,
                     _reservation: None,
@@ -1110,11 +1117,13 @@ pub fn commit_reservation(
             .channels
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
-        let mut reservation = detach_producer(env, channel, token)?;
+        // The header is validated before detaching the producer token, so an invalid
+        // length leaves the token's reservation retryable.
         let header: [u8; WIRE_V2_HEADER_BYTES] = header
             .as_ref()
             .try_into()
             .map_err(|_| error("wire header has invalid length"))?;
+        let mut reservation = detach_producer(env, channel, token)?;
         reservation
             .set_wire_header(header)
             .and_then(|()| reservation.advance(written as usize))
@@ -1137,6 +1146,10 @@ pub fn abort_reservation(env: &Env, channel_id: u32, token: u32) -> Result<()> {
             .channels
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
+        // Abort is idempotent: an absent producer requires no cleanup.
+        if !channel.producers.contains_key(&token) {
+            return Ok(());
+        }
         detach_producer(env, channel, token)?.abort();
         Ok(())
     })
@@ -1214,6 +1227,7 @@ mod tests {
             from_host: Box::new(from_host),
             next_producer: 1,
             next_lease: 0,
+            dispatched_lease: 0,
             closed: false,
             setup: None,
             _reservation: None,
@@ -1268,14 +1282,23 @@ pub fn readiness_handled() -> bool {
             if !reactor.is_registered(channel_id) {
                 continue;
             }
-            let Some(channel) = channels.get(&channel_id) else {
+            let Some(channel) = channels.get_mut(&channel_id) else {
                 reactor.unregister(channel_id);
                 continue;
             };
+            let progressed = channel.next_lease != channel.dispatched_lease;
+            channel.dispatched_lease = channel.next_lease;
             let completed = channel.from_host.complete_data_wait().is_ok();
             match (completed, channel.from_host.arm_data_wait()) {
                 (true, Ok(true)) => {}
-                (true, Ok(false)) => redispatch = true,
+                // A lease advanced while data remains ready, so re-queue the channel.
+                (true, Ok(false)) if progressed => {
+                    reactor.mark_ready(channel_id);
+                    redispatch = true;
+                }
+                // `Ring::signal_wake` wakes only parked consumers; `poll` arms the channel
+                // once the ring is empty.
+                (true, Ok(false)) => {}
                 (false, _) | (true, Err(_)) => reactor.unregister(channel_id),
             }
         }

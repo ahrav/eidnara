@@ -499,7 +499,8 @@ export class NativeProducerReservation {
     ): void {
         this.assertActive();
         assertUint32Argument("written", written);
-        this.active = false;
+        // The handle stays active until the addon accepts the call: a rejected commit (for
+        // example a re-entrant call while the channel is busy) must remain abortable.
         this.native.commitReservation(
             this.channel,
             this.token,
@@ -507,12 +508,13 @@ export class NativeProducerReservation {
             written,
             beforePublish ?? (() => {}),
         );
+        this.active = false;
     }
 
     abort(): void {
         if (!this.active) return;
-        this.active = false;
         this.native.abortReservation(this.channel, this.token);
+        this.active = false;
     }
 
     private assertActive(): void {
@@ -555,8 +557,8 @@ export class NativeReceiveLease {
 
     release(): void {
         if (this.released) throw new Error("receive lease is already released");
-        this.released = true;
         this.native.release(this.channel, this.token);
+        this.released = true;
     }
 
     [Symbol.dispose](): void {

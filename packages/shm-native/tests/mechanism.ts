@@ -464,6 +464,64 @@ describe("raw N-API descriptor boundary", () => {
         expect(report.handlers).toBe(1);
     });
 
+    test("a handler that takes one frame per callback is redispatched until the ring is empty", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        const script = join(scratch, "one-per-callback.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const pair = addon.createTestPair();\n` +
+                `const received = []; let callbacks = 0; let closed = false;\n` +
+                `const onReady = () => {\n` +
+                `  if (closed) { addon.readinessHandled(); return; }\n` +
+                `  callbacks += 1;\n` +
+                `  try { addon.poll(pair.second, (token, _h, segments) => { received.push(segments[0][0]); addon.release(pair.second, token); }); }\n` +
+                `  finally { if (addon.readinessHandled()) queueMicrotask(onReady); }\n` +
+                `};\n` +
+                `addon.watch(pair.second, onReady);\n` +
+                `const header = new Uint8Array(21);\n` +
+                `const view = new DataView(header.buffer);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 2); view.setUint8(5, 3);\n` +
+                `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
+                `const publish = (value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(pair.first, header, 1, 0, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
+                `publish(1); publish(2); publish(3);\n` +
+                `await until(() => received.length >= 3);\n` +
+                `const firstBatch = [...received]; const firstCallbacks = callbacks;\n` +
+                `// The ring is empty and armed again: a later publish must wake the handler on its own.\n` +
+                `publish(4);\n` +
+                `await until(() => received.length >= 4);\n` +
+                `console.log(JSON.stringify({ firstBatch, firstCallbacks, received, callbacks, stillArmed: addon.poll(pair.second, () => {}) === false }));\n` +
+                `closed = true; addon.close(pair.first); addon.close(pair.second);\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            firstBatch: number[];
+            firstCallbacks: number;
+            received: number[];
+            callbacks: number;
+            stillArmed: boolean;
+        };
+        expect(report.firstBatch).toEqual([1, 2, 3]);
+        // Three frames need three deliveries plus one empty poll that re-arms; no spin beyond that.
+        expect(report.firstCallbacks).toBeGreaterThanOrEqual(3);
+        expect(report.firstCallbacks).toBeLessThanOrEqual(4);
+        expect(report.received).toEqual([1, 2, 3, 4]);
+        expect(report.stillArmed).toBe(true);
+    });
+
     test("readiness acknowledgement preserves a frame published during callback", async () => {
         const addon = loadRawAddon();
         if (!supportsMechanismTests(addon)) return;
@@ -637,6 +695,63 @@ describe("raw N-API descriptor boundary", () => {
             addon.close(released.second);
             addon.close(held.first);
             addon.close(held.second);
+        }
+    });
+
+    test("a rejected commit leaves the reservation retryable and abort is idempotent", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const raw = addon as RawAttachAddon & {
+            reserve(
+                channel: number,
+                capacity: number,
+                timeoutMs: number,
+                deliver: (token: number, segments: Uint8Array[]) => void,
+            ): void;
+            commitReservation(
+                channel: number,
+                token: number,
+                header: Uint8Array,
+                written: number,
+                beforePublish: () => void,
+            ): void;
+            abortReservation(channel: number, token: number): void;
+        };
+        const pair = raw.createTestPair();
+        try {
+            let token = -1;
+            raw.reserve(pair.first, 1, 0, (reserved, segments) => {
+                token = reserved;
+                segments[0]![0] = 5;
+            });
+            expect(token).toBeGreaterThan(0);
+            // A header of the wrong length is rejected before the token is consumed.
+            expect(() =>
+                raw.commitReservation(pair.first, token, new Uint8Array(3), 1, () => {}),
+            ).toThrow(/wire header has invalid length/);
+            const header = new Uint8Array(21);
+            const view = new DataView(header.buffer);
+            view.setUint32(0, 1, true);
+            view.setUint8(4, 2);
+            view.setUint8(5, 3);
+            view.setUint16(7, 1, true);
+            view.setUint32(9, 1, true);
+            view.setBigUint64(13, 5n, true);
+            raw.commitReservation(pair.first, token, header, 1, () => {});
+            let delivered = -1;
+            expect(
+                raw.poll(pair.second, (lease, _h, segments) => {
+                    delivered = segments[0]![0] ?? -1;
+                    addon.release(pair.second, lease);
+                }),
+            ).toBe(true);
+            expect(delivered).toBe(5);
+            // The committed token is gone; aborting it again is a no-op, not an error.
+            raw.abortReservation(pair.first, token);
+            raw.abortReservation(pair.first, 999);
+        } finally {
+            addon.close(pair.first);
+            addon.close(pair.second);
         }
     });
 

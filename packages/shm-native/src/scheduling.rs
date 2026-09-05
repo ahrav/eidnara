@@ -350,11 +350,16 @@ impl Reactor {
 
     /// Marks `channel_id` ready without a doorbell event, for data found visible while arming.
     pub(crate) fn kick(&self, channel_id: u32) {
+        self.mark_ready(channel_id);
+        self.kick.store(true, Ordering::Release);
+        let _ = rustix::io::write(&self.control, &1u64.to_ne_bytes());
+    }
+
+    /// Records `channel_id` as ready without waking the watcher.
+    pub(crate) fn mark_ready(&self, channel_id: u32) {
         if let Ok(mut state) = self.ready.lock() {
             state.data.insert(channel_id);
         }
-        self.kick.store(true, Ordering::Release);
-        let _ = rustix::io::write(&self.control, &1u64.to_ne_bytes());
     }
 
     pub(crate) fn shutdown(&mut self) {

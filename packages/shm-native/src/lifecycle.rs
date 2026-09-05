@@ -19,7 +19,6 @@ unsafe extern "C" fn finish_probe_hook(
     let _ = unsafe { sys::napi_remove_async_cleanup_hook(handle) };
 }
 
-/// If explicit removal fails, the hook removes its handle during environment cleanup.
 pub(crate) fn probe_async_cleanup_hooks(env: &Env) -> Result<()> {
     let mut handle = std::ptr::null_mut();
     // SAFETY: `handle` is writable storage for the registration; the hook carries no data.
@@ -35,6 +34,8 @@ pub(crate) fn probe_async_cleanup_hooks(env: &Env) -> Result<()> {
         return Err(super::error("async cleanup hook registration failed"));
     }
     // SAFETY: handle was just issued for this env and has not been removed.
-    let _ = unsafe { sys::napi_remove_async_cleanup_hook(handle) };
+    if unsafe { sys::napi_remove_async_cleanup_hook(handle) } != sys::Status::napi_ok {
+        return Err(super::error("async cleanup hook removal failed"));
+    }
     Ok(())
 }
