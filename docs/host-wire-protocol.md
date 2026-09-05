@@ -445,7 +445,7 @@ The application error vocabulary is closed:
 
 | Code | Meaning | Retry disposition |
 | --- | --- | --- |
-| `queue_full` | admission capacity (job count, aggregate queued request bytes, or query-lane slot) exhausted before admission, or the fail-fast resident-byte reservation for request parsing and input ownership could not be acquired; in every case no state was created | bounded client-side retry; query-lane admission rejection carries the configured `query_retry_after_ms`, while other rejection sites omit the field |
+| `queue_full` | admission capacity (job count, aggregate queued request bytes, or query-lane slot) exhausted before admission, or the fail-fast resident-byte reservation for request parsing, input ownership, or a result page could not be acquired; in every case no state was created | bounded client-side retry; every `queue_full` carries a retry hint: query-lane admission rejection carries the configured `query_retry_after_ms`, and batch admission, parse-reservation, and result-page reservation rejections carry the configured `retry_after_ms` |
 | `model_loading` | reserved; not emitted by the current host: initialization completes before publication, so loading faults surface as bind-time `artifact_invalid` | bounded retry |
 | `timeout` | request-scoped deadline expired host-side | caller policy |
 | `artifact_invalid` | bundle missing/invalid (bind rejection) or response identity guard failed | permanent; no retry |
@@ -499,7 +499,7 @@ A wrong model, fingerprint, or epoch, or either flag not literally `false`, is t
 {"result":{"job_id":"<opaque>","request_key":"<echoed>","done":false,"status":"queued","retry_after_ms":50}}
 ```
 
-Reusing a retained `request_key` with the byte-identical canonical payload returns the same `job_id` and runs inference at most once. Reusing it with any differing payload (order, IDs, texts, or hashes) is terminal `idempotency_conflict`; the original job is never replaced or rerun. Jobs are process-local and host-incarnation-fenced: they do not survive restart, and the durable recovery authority is the TypeScript ledger.
+Reusing a retained `request_key` with the byte-identical canonical payload returns the same `job_id` and runs inference at most once while that job is queued, running, ready, or failed with a permanent code. A retained job that failed with a retryable code (`internal_error`, a batch worker that exited before publishing) is the one exception: the identical resubmission evicts it and admits a new job with a new `job_id`, because the key is canonical over the payload and the caller has no other way to retry. Reusing it with any differing payload (order, IDs, texts, or hashes) is terminal `idempotency_conflict`; the original job is never replaced or rerun. Jobs are process-local and host-incarnation-fenced: they do not survive restart, and the durable recovery authority is the TypeScript ledger.
 
 #### 7.5.6 `embed.result`
 

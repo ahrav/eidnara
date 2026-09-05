@@ -1,0 +1,678 @@
+mod support;
+
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use host_runtime::synapse::SynapseLimits;
+use host_runtime::synapse::jobs::{AdmitOutcome, BatchItem, JobTable, PollOutcome};
+use support::synapse::{
+    BUDGET, DeterministicEngine, SynapseHost, batch_params, call, constraints, items,
+    open_synapse_route, ready_component, request_key, test_lane,
+};
+
+/// Retries `embed.batch` until admission reopens or `BUDGET` expires.
+/// A `queue_full` rejection creates no state, so each retry is a fresh admission attempt rather than a duplicate.
+async fn batch_until_admitted(
+    client: &mut support::raw_client::RawClient,
+    channel: u16,
+    epoch: u32,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    loop {
+        let frame = call(client, channel, epoch, "embed.batch", params.clone()).await;
+        let body = frame.json();
+        if body["code"] != "queue_full" {
+            return body;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "admission never reopened"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_ready(
+    client: &mut support::raw_client::RawClient,
+    channel: u16,
+    epoch: u32,
+    job_id: &str,
+    key: &str,
+) -> serde_json::Value {
+    let lane = test_lane();
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    loop {
+        let mut params = constraints(&lane);
+        params["job_id"] = job_id.into();
+        params["request_key"] = key.into();
+        params["cursor"] = serde_json::Value::Null;
+        let frame = call(client, channel, epoch, "embed.result", params).await;
+        let body = frame.json();
+        if body["result"]["vectors"].is_array() || body["code"].is_string() {
+            return body;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "job {job_id} never became ready"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn admission_count_boundary_is_exact_and_never_evicts_live_work() {
+    let engine = DeterministicEngine::new();
+    engine.set_delay(Duration::from_millis(300));
+    let limits = SynapseLimits {
+        max_queued_jobs: 2,
+        ..Default::default()
+    };
+    let host = SynapseHost::start(ready_component(engine.clone(), limits)).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    // Two admitted (one running, one queued) fill the class exactly.
+    for (id, text) in [("a", "job one"), ("b", "job two")] {
+        let frame = call(
+            &mut client,
+            channel,
+            epoch,
+            "embed.batch",
+            batch_params(&lane, &items(&[(id, text)])),
+        )
+        .await;
+        assert!(frame.json()["result"]["job_id"].is_string());
+    }
+    // The third is refused rather than displacing live work.
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &items(&[("c", "job three")])),
+    )
+    .await;
+    assert_eq!(frame.error_code(), "queue_full");
+
+    // Once the backlog drains, admission reopens.
+    let body = batch_until_admitted(
+        &mut client,
+        channel,
+        epoch,
+        batch_params(&lane, &items(&[("c", "job three")])),
+    )
+    .await;
+    assert!(body["result"]["job_id"].is_string(), "{body}");
+
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn batch_descriptor_and_pending_poll_keep_batch_retry_delay() {
+    let engine = DeterministicEngine::new();
+    engine.set_delay(Duration::from_millis(300));
+    let limits = SynapseLimits {
+        retry_after_ms: 73,
+        ..Default::default()
+    };
+    let host = SynapseHost::start(ready_component(engine, limits)).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+    let page = items(&[("a", "slow job")]);
+    let key = request_key(&lane, &page);
+
+    let descriptor = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &page),
+    )
+    .await
+    .json();
+    assert_eq!(descriptor["result"]["retry_after_ms"], 73);
+
+    let mut params = constraints(&lane);
+    params["job_id"] = descriptor["result"]["job_id"].clone();
+    params["request_key"] = key.into();
+    params["cursor"] = serde_json::Value::Null;
+    let pending = call(&mut client, channel, epoch, "embed.result", params)
+        .await
+        .json();
+    assert_eq!(pending["result"]["done"], false);
+    assert_eq!(pending["result"]["retry_after_ms"], 73);
+
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn queued_byte_boundary_is_exact_and_releases_on_completion() {
+    let engine = DeterministicEngine::new();
+    engine.set_delay(Duration::from_millis(200));
+    let limits = SynapseLimits {
+        max_queued_request_bytes: 8,
+        max_batch_text_bytes: 8,
+        max_text_bytes: 8,
+        ..Default::default()
+    };
+    let host = SynapseHost::start(ready_component(engine.clone(), limits)).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &items(&[("a", "12345678")])),
+    )
+    .await;
+    assert!(frame.json()["result"]["job_id"].is_string());
+
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &items(&[("b", "x")])),
+    )
+    .await;
+    assert_eq!(frame.error_code(), "queue_full");
+
+    // Results replace inputs, releasing the queued bytes.
+    let body = batch_until_admitted(
+        &mut client,
+        channel,
+        epoch,
+        batch_params(&lane, &items(&[("b", "x")])),
+    )
+    .await;
+    assert!(body["result"]["job_id"].is_string(), "{body}");
+
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn completed_jobs_evict_oldest_first_under_count_pressure() {
+    let engine = DeterministicEngine::new();
+    let limits = SynapseLimits {
+        max_retained_jobs: 1,
+        ..Default::default()
+    };
+    let host = SynapseHost::start(ready_component(engine, limits)).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    let first_page = items(&[("a", "first job")]);
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &first_page),
+    )
+    .await;
+    let first_job = frame.json()["result"]["job_id"]
+        .as_str()
+        .expect("job")
+        .to_owned();
+    let first_key = request_key(&lane, &first_page);
+    let body = wait_ready(&mut client, channel, epoch, &first_job, &first_key).await;
+    assert!(body["result"]["done"].as_bool().expect("done"));
+
+    // A second completion displaces the oldest retained job.
+    let second_page = items(&[("b", "second job")]);
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &second_page),
+    )
+    .await;
+    let second_job = frame.json()["result"]["job_id"]
+        .as_str()
+        .expect("job")
+        .to_owned();
+    let second_key = request_key(&lane, &second_page);
+    let body = wait_ready(&mut client, channel, epoch, &second_job, &second_key).await;
+    assert!(body["result"]["done"].as_bool().expect("done"));
+
+    // Polling the evicted job returns the same response as after a restart.
+    let mut params = constraints(&lane);
+    params["job_id"] = first_job.into();
+    params["request_key"] = first_key.into();
+    params["cursor"] = serde_json::Value::Null;
+    let frame = call(&mut client, channel, epoch, "embed.result", params).await;
+    assert_eq!(frame.error_code(), "module_restarted");
+
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn expired_jobs_return_module_restarted() {
+    let engine = DeterministicEngine::new();
+    let limits = SynapseLimits {
+        retention: Duration::from_millis(100),
+        ..Default::default()
+    };
+    let host = SynapseHost::start(ready_component(engine, limits)).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    let page = items(&[("a", "expiring job")]);
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &page),
+    )
+    .await;
+    let job_id = frame.json()["result"]["job_id"]
+        .as_str()
+        .expect("job")
+        .to_owned();
+    let key = request_key(&lane, &page);
+    wait_ready(&mut client, channel, epoch, &job_id, &key).await;
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let mut params = constraints(&lane);
+    params["job_id"] = job_id.into();
+    params["request_key"] = key.into();
+    params["cursor"] = serde_json::Value::Null;
+    let frame = call(&mut client, channel, epoch, "embed.result", params).await;
+    assert_eq!(frame.error_code(), "module_restarted");
+
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn jobs_survive_route_loss_and_serve_a_fresh_route() {
+    let engine = DeterministicEngine::new();
+    engine.set_delay(Duration::from_millis(200));
+    let host = SynapseHost::start(ready_component(engine.clone(), SynapseLimits::default())).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    let page = items(&[("a", "surviving job")]);
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &page),
+    )
+    .await;
+    let job_id = frame.json()["result"]["job_id"]
+        .as_str()
+        .expect("job")
+        .to_owned();
+    let key = request_key(&lane, &page);
+
+    // Closing the route does not cancel an admitted job.
+    client
+        .send_frame(support::raw_client::TY_GOODBYE, 0, channel, epoch, 0, b"")
+        .await
+        .expect("route goodbye");
+
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let body = wait_ready(&mut client, channel, epoch, &job_id, &key).await;
+    assert_eq!(body["result"]["done"], true);
+    assert_eq!(body["result"]["vectors"][0]["id"], "a");
+    assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn cancelled_query_before_cpu_admission_runs_no_inference() {
+    let engine = DeterministicEngine::new();
+    engine.set_delay(Duration::from_millis(400));
+    let host = SynapseHost::start(ready_component(engine.clone(), SynapseLimits::default())).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &items(&[("a", "cpu hog")])),
+    )
+    .await;
+    assert!(frame.json()["result"]["job_id"].is_string());
+
+    let mut params = constraints(&lane);
+    params["text"] = "never embedded".into();
+    let corr = client.next_corr();
+    let body = serde_json::to_vec(&serde_json::json!({"method": "embed.query", "params": params}))
+        .expect("request serializes");
+    client
+        .send_frame(
+            support::raw_client::TY_REQUEST,
+            support::raw_client::FLAGS_INTERACTIVE,
+            channel,
+            epoch,
+            corr,
+            &body,
+        )
+        .await
+        .expect("send query");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    client
+        .send_frame(support::raw_client::TY_CANCEL, 0, channel, epoch, corr, b"")
+        .await
+        .expect("send cancel");
+    let frame = client.frame_within(BUDGET).await.expect("terminal");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.error_code(), "cancelled");
+
+    // The cancelled queued query never reached the engine.
+    // engine.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(engine.texts_embedded.load(Ordering::SeqCst), 1);
+
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn queued_query_wait_is_bounded_by_its_deadline() {
+    let engine = DeterministicEngine::new();
+    engine.set_delay(Duration::from_millis(400));
+    let host = SynapseHost::start(ready_component(engine.clone(), SynapseLimits::default())).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &items(&[("a", "cpu hog")])),
+    )
+    .await;
+    assert!(frame.json()["result"]["job_id"].is_string());
+    let started_by = tokio::time::Instant::now() + BUDGET;
+    while engine.calls.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < started_by,
+            "batch inference never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let mut params = constraints(&lane);
+    params["text"] = "deadline-bound query".into();
+    params["deadline_ms"] = 50.into();
+    let frame = tokio::time::timeout(
+        BUDGET,
+        call(&mut client, channel, epoch, "embed.query", params),
+    )
+    .await
+    .expect("deadline-bound query must not hang");
+    assert_eq!(frame.error_code(), "timeout");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        engine.calls.load(Ordering::SeqCst),
+        1,
+        "a query whose queue deadline expires must not reach inference"
+    );
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn failed_jobs_report_their_stored_error() {
+    let engine = DeterministicEngine::new();
+    engine.fail_next(host_runtime::synapse::inference::InferenceError::Invariant(
+        "vector is not L2-normalized".to_owned(),
+    ));
+    let host = SynapseHost::start(ready_component(engine.clone(), SynapseLimits::default())).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    let page = items(&[("a", "will fail")]);
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &page),
+    )
+    .await;
+    let job_id = frame.json()["result"]["job_id"]
+        .as_str()
+        .expect("job")
+        .to_owned();
+    let key = request_key(&lane, &page);
+
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    loop {
+        let mut params = constraints(&lane);
+        params["job_id"] = job_id.clone().into();
+        params["request_key"] = key.clone().into();
+        params["cursor"] = serde_json::Value::Null;
+        let frame = call(&mut client, channel, epoch, "embed.result", params).await;
+        if frame.ty == 5 {
+            assert_eq!(frame.error_code(), "artifact_invalid");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "job never failed");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The result-count invariant failure marks the lane failing; new work is refused.
+    // Later binds reject after the lane fails.
+    let mut params = constraints(&lane);
+    params["text"] = "after failure".into();
+    let frame = call(&mut client, channel, epoch, "embed.query", params).await;
+    assert_eq!(frame.error_code(), "artifact_invalid");
+
+    let err = client
+        .route_open_target(
+            "management_surface",
+            "synapse",
+            "/workspace/project",
+            "h",
+            "s2",
+        )
+        .await
+        .expect_err("failing lanes reject binds");
+    assert_eq!(err, "artifact_invalid");
+
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn shutdown_with_queued_running_and_retained_jobs_is_graceful() {
+    let engine = DeterministicEngine::new();
+    let host = SynapseHost::start(ready_component(engine.clone(), SynapseLimits::default())).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    let done_page = items(&[("done", "finished work")]);
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &done_page),
+    )
+    .await;
+    let done_job = frame.json()["result"]["job_id"]
+        .as_str()
+        .expect("job")
+        .to_owned();
+    wait_ready(
+        &mut client,
+        channel,
+        epoch,
+        &done_job,
+        &request_key(&lane, &done_page),
+    )
+    .await;
+
+    engine.set_delay(Duration::from_millis(300));
+    for (id, text) in [("run", "running work"), ("wait", "queued work")] {
+        let frame = call(
+            &mut client,
+            channel,
+            epoch,
+            "embed.batch",
+            batch_params(&lane, &items(&[(id, text)])),
+        )
+        .await;
+        assert!(frame.json()["result"]["job_id"].is_string());
+    }
+    // The native call must start before cancellation so shutdown observes the second job in flight.
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while engine.calls.load(Ordering::SeqCst) < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "running job never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Graceful shutdown joins the running native call, cancels the queued wrapper, and releases retention before the handler drops.
+    host.shutdown().await.expect("graceful shutdown");
+
+    // The queued job never ran; the engine received one call for the retained job.
+    // running job.
+    assert_eq!(engine.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_job_being_paged_outlives_an_older_unread_job_under_count_pressure() {
+    let limits = SynapseLimits {
+        max_retained_jobs: 2,
+        ..SynapseLimits::default()
+    };
+    let jobs = JobTable::new(limits);
+    let complete = |key: &str| {
+        let batch = vec![BatchItem {
+            id: key.to_owned(),
+            content_sha256: "0".repeat(64),
+            text: "alpha".to_owned(),
+        }];
+        let AdmitOutcome::Admitted { job_id, seq } =
+            jobs.admit_uncharged_for_tests(key.to_owned(), batch, 2)
+        else {
+            panic!("job {key} is admitted");
+        };
+        jobs.start(seq).expect("job starts");
+        jobs.publish_ready(seq, vec![vec![0.5, 0.5]]);
+        job_id
+    };
+
+    let first = complete("first");
+    let second = complete("second");
+    // The poll must land strictly after the second completion so the ranks differ on any clock resolution.
+    std::thread::sleep(Duration::from_millis(2));
+    assert!(matches!(
+        jobs.poll(&first, "first", None),
+        PollOutcome::Page(_)
+    ));
+
+    // The third completion evicts one job: the unread second, not the older first that is being read.
+    let third = complete("third");
+    assert!(matches!(
+        jobs.poll(&first, "first", None),
+        PollOutcome::Page(_)
+    ));
+    assert!(matches!(
+        jobs.poll(&second, "second", None),
+        PollOutcome::Restarted
+    ));
+    assert!(matches!(
+        jobs.poll(&third, "third", None),
+        PollOutcome::Page(_)
+    ));
+}
+
+#[test]
+fn a_vector_shape_that_disagrees_with_the_job_fails_only_that_job() {
+    // JobTable requires one engine result for each input item.
+    // The engine trait is an open seam; JobTable cannot assume upstream result-count validation.
+    let jobs = JobTable::new(SynapseLimits::default());
+    let batch = |id: &str| {
+        vec![BatchItem {
+            id: id.to_owned(),
+            content_sha256: "0".repeat(64),
+            text: "alpha".to_owned(),
+        }]
+    };
+
+    let AdmitOutcome::Admitted { job_id, seq } =
+        jobs.admit_uncharged_for_tests("key-1".to_owned(), batch("item:0"), 2)
+    else {
+        panic!("the first job is admitted");
+    };
+    jobs.start(seq).expect("the job starts");
+    jobs.publish_ready(seq, vec![vec![0.5, 0.5], vec![0.5, 0.5]]);
+
+    match jobs.poll(&job_id, "key-1", None) {
+        PollOutcome::Failed { code, message } => {
+            assert_eq!(code, "artifact_invalid");
+            assert!(
+                message.contains("item count"),
+                "message {message:?} does not name the count disagreement"
+            );
+        }
+        other => panic!(
+            "expected a failed job, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    }
+
+    let AdmitOutcome::Admitted { job_id, seq } =
+        jobs.admit_uncharged_for_tests("key-2".to_owned(), batch("item:1"), 2)
+    else {
+        panic!("the second job is admitted");
+    };
+    jobs.start(seq).expect("the job starts");
+    jobs.publish_ready(seq, vec![vec![1.0, 0.0, 2.0]]);
+    match jobs.poll(&job_id, "key-2", None) {
+        PollOutcome::Failed { code, message } => {
+            assert_eq!(code, "artifact_invalid");
+            assert!(
+                message.contains("dimension"),
+                "message {message:?} does not name the dimension disagreement"
+            );
+        }
+        other => panic!(
+            "expected a failed job, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    }
+
+    // The table and result-byte bookkeeping survive a result-count failure and a result-byte failure; later jobs still admit, publish, and serve.
+    let AdmitOutcome::Admitted { job_id, seq } =
+        jobs.admit_uncharged_for_tests("key-3".to_owned(), batch("item:2"), 2)
+    else {
+        panic!("the third job is admitted");
+    };
+    jobs.start(seq).expect("the job starts");
+    jobs.publish_ready(seq, vec![vec![1.0, 0.0]]);
+    match jobs.poll(&job_id, "key-3", None) {
+        PollOutcome::Page(page) => {
+            assert!(page.done);
+            assert_eq!(page.vectors.len(), 1);
+            assert_eq!(page.vectors[0].0, "item:2");
+        }
+        _ => panic!("expected a served page after the failed job"),
+    }
+}

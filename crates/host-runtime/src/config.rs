@@ -31,7 +31,8 @@ pub(crate) const SCRATCH_RESERVED_BYTES: u64 = (MAX_BODY_LEN as u64 * 5 / 2)
     + RETAINED_METADATA_RESERVED_BYTES;
 
 /// Startup rejects `max_waiting_queries >= 1` without this headroom.
-pub(crate) const SYNAPSE_WAITER_HEADROOM_BYTES: u64 = 4 * (2 * 1024 * 1024 + 256);
+/// Each waiter slot carries twice the default maximum text, the response scratch, and one maximal returned vector.
+pub(crate) const SYNAPSE_WAITER_HEADROOM_BYTES: u64 = 4 * (2 * 1024 * 1024 + 256 + 64 * 1024);
 
 /// Retained job metadata occupies this slice for the full retention window.
 /// Validation excludes this slice when reserving parse and page capacity.

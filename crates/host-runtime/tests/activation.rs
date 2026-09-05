@@ -13,7 +13,7 @@ use host_runtime::{
     RequestOutcome, RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
 };
 
-use support::EchoPrimary;
+use support::synapse::EchoPrimary;
 
 const BUDGET: Duration = Duration::from_secs(10);
 
