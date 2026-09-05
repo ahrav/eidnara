@@ -358,7 +358,7 @@ pre-registration window.
 Guarantee: When a connection ends, every permit, charge, map entry, task, and
 cancellation root created for it is released, including on the early-return path
 taken while the host is draining.
-Check: `always` - after the connection task returns, both permits are released, the registry holds neither generation id, every owned route is finalized, and the generation's root token is cancelled, on the normal path and on the draining early return at `connection.rs:256-258`.
+Check: `always` - after the connection task returns, both permits are released, every setup-phase byte and ring charge has returned the accounting snapshot to its pre-connection baseline, the registry holds neither generation id, every owned route is finalized, no connection-owned task set retains a task and no reference to the `GenerationCore` survives, and the generation's root token is cancelled, on the normal path and on the draining early return at `connection.rs:256-258`. Permits and registry entries alone are not enough, because the early return can leave a setup-phase charge or a detached task live while both permits are back.
 Fault/timing angle: the window is a committed shutdown landing after setup completes and before the generation is registered under the connections lock. The early return at `connection.rs:256-258` handles it with one arm that cancels the root directly, so release no longer depends on the abort-on-drop handle. What is unverified is the rest of the guarantee on that arm: whether the setup-phase permits and charges taken before `:256` are released by the discard or only by task exit.
 Required faults and enabling state: a committed shutdown landing between setup completion and the generation's registration at `connection.rs:260`.
 Confidence: medium - [evidence](evidence/disconnect-releases-every-resource-keyed-to-the-connection.md). The early return and the discard are read directly at HEAD; the source catalog's candidate-specific fault is recorded in the evidence file as history. What is not established is which permits the early return releases.
@@ -535,8 +535,7 @@ Status: active
 Exercised: not yet - practically unreachable by exhaustion.
 Guarantee: A correlation is never reused or wrapped; at exhaustion the sender
 retires the generation instead.
-Check: `always` - ingress holds by the strict watermark. Egress: the host's ping
-allocator either saturates with a retirement or is proven not to wrap.
+Check: `always` - ingress holds by the strict watermark. Egress: seed `next_ping_corr` (`connection.rs:75`, allocated by `fetch_add` at `:780`) at `u64::MAX` before the next tick and assert that the generation retires without writing a Ping carrying a reused or wrapped correlation; an allocator that stops incrementing, returns an error, or saturates without retiring fails the check, because the guarantee requires both halves, no reuse and retirement at exhaustion. Predicted to fail at HEAD: `fetch_add` wraps and no retirement path exists.
 Fault/timing angle: none. The ping counter uses an unbounded `fetch_add`, so the
 2^64-th ping wraps to correlation 0, and a ping with correlation 0 violates the
 frame-shape rule the host's own client-side matching enforces.
@@ -2298,10 +2297,13 @@ Guarantee: Wherever the digest-target exchange runs, the two names are swapped
 atomically inside one directory, or an error is returned and neither name is
 left unoccupied; on a platform without the primitive it fails closed.
 Check: `always-or-unreached` - for each supported platform, drive
-`promote_temp` into the exchange branch and assert that after the call the
-digest name holds the validated candidate and the temp name holds the displaced
-corrupt orphan, with no observable state in which either name is absent. Also
-assert the non-Linux non-macOS stub returns an error rather than succeeding.
+`promote_temp` into the exchange branch and branch on the result: on `Ok`,
+assert the digest name holds the validated candidate and the temp name holds
+the displaced corrupt orphan; on `Err`, assert both names are still occupied by
+the bytes they held before the call, so the fail-closed outcome the guarantee
+permits passes and only a lost or deleted name fails. In neither case is there an
+observable state in which either name is absent. Also assert the non-Linux
+non-macOS stub returns an error rather than succeeding.
 `always-or-unreached` because the branch is optional: it is entered only when
 the digest target is occupied by a corrupt unprotected generation
 (`generation.rs:751-770`), so a run that never meets that condition owes
@@ -3726,10 +3728,14 @@ Guarantee: Every `ReadClose` variant the connection engine handles is
 producible by the transport, so the engine's close taxonomy has no dead arm and
 `docs/host-wire-protocol.md:321`'s authoritative-early-terminal guarantee
 has a live carrier.
-Check: `reachable` - the code location `connection.rs:397`
-(`ReadExit::PeerKeepQueue`) is executed at least once per campaign.
-`reachable` fits because the claim is location coverage over a specific branch,
-and the finding is that no input can reach it.
+Check: `reachable` - for every `ReadClose` variant the engine handles
+(`frame_channel.rs:32-45`: `CleanEof`, `Corrupt`, `Cancelled`, `Overloaded`,
+`Io`, `RejectedDrainFailed`), the engine arm that consumes it is executed at least
+once per campaign, asserted per variant; the two arms the producer census found
+unproduced are `connection.rs:397` (`ReadExit::PeerKeepQueue`, from
+`RejectedDrainFailed`) and the `Io` arm. `reachable` fits because the claim is
+location coverage over each branch, and the finding is that no input can reach
+those two.
 Fault/timing angle: none. Static producer enumeration.
 Required faults and enabling state: for the branch to be reachable at all, the
 transport would have to emit `ReadClose::RejectedDrainFailed` after an
@@ -5146,8 +5152,11 @@ setup exchange has its connection torn down, and its handshake and connection
 permits and ring charge released, within one `transport_setup_deadline` of the
 grant send.
 Check: `always` - evaluated at the close of an explicit bounded window. Drive a
-peer that authenticates, calls `receive_grant`, and then sends nothing; **stop all
-peer activity**, which is what makes the window fault-free; then poll until the
+peer that authenticates and then stalls at each post-grant I/O position in turn:
+before the `Activate` message, mid-length-prefix, after `Activate` (so the host
+blocks in the `Activated` write against a full peer buffer), before `Commit`, and
+after `Commit` (blocking the `Committed` write); at each position **stop all peer
+activity**, which is what makes the window fault-free; then poll until the
 host has released the connection and assert it happened within
 `transport_setup_deadline` measured from the deadline anchor. The bound is stated
 in the unit the code bounds, a **single absolute deadline**:
@@ -7505,10 +7514,15 @@ Exercised: not yet - no test inspects `gen.pending` after a forced close.
 Guarantee: Every entry inserted into `gen.pending` is removed either by the
 outer dispatch task on each of its exits, or by the route close that aborted
 that task.
-Check: `always` - after a generation quiesces, assert `gen.pending` is empty.
-`always` on an emptiness postcondition rather than `unreachable` on a leak site,
-because a stranded entry is a forbidden *state* with no dedicated detection point,
-which METHOD's first coverage rule assigns to `always(!X)`.
+Check: `always` - for every key inserted into `gen.pending`, its removal originates
+either from the outer dispatch task on one of its exits or from the route close
+that aborted that task, and no other path removes a live entry; and after the
+generation quiesces, `gen.pending` is empty. Owner attribution is asserted per
+key, by recording the inserting task and the removing site, because an early
+removal by an unrelated path leaves the map empty at quiescence while a later
+`Cancel` can no longer find its request. The emptiness postcondition is
+`always(!X)` on a forbidden state; the ownership clause is `always` over every
+removal.
 Fault/timing angle: `remove_pending` is called on all five outer-task exits
 (`dispatch.rs:935`, `:958`, `:1059`, `:1066`). The abort case is covered by
 `settle_route_work`'s explicit sweep of the keys it collected
@@ -9167,8 +9181,9 @@ which coincides with the hardcoded value and therefore cannot distinguish the tw
 branches
 Guarantee: The health probe cadence is either the configured `health_interval` or
 the fixed 50 ms activation cadence, and which one applies is a stated function of
-the component-reported activation state rather than an unbounded override of
-operator configuration.
+the component-reported activation state. The code places no bound on how long a
+component may hold the fast cadence by reporting `starting`; that bound is the
+open product decision below, not a promise this record makes.
 Check: `always` - over two assertable conjuncts and one measurement, and the split is the point. **Conjunct 0:** at `runtime.rs:972-973` (re-verified), whenever `activation_in_progress` is true the selected interval equals `Duration::from_millis(50)` exactly, and whenever it is false the selected interval equals `shared.timing.health_interval`; both branches are unconditional within the loop, so `always` holds on every iteration. The remaining text names the source catalog's conjuncts.
 **Conjunct 1, which carries the `always` semantics:** at `runtime.rs:972-976`,
 whenever `activation_in_progress` is false the selected interval equals
@@ -9953,7 +9968,7 @@ Reachability: test-only - every harness child a composed `BrocaComponent` spawns
 Status: active
 Exercised: partial - SIGTERM-then-SIGKILL reaping on cancel, delete, and shutdown is covered with real processes; the orphan sweep is covered for dead owners.
 Guarantee: On cancellation, deletion, or shutdown, every harness child's process group is terminated within four applications of `termination_grace`, or `terminate_group` reports the group unresolved and the terminal carries `teardown_unconfirmed`; the orphan sweep never signals a group whose owner is alive.
-Check: `always` - after every terminal, either no process of the reaped group survives, or `terminate_group` (`crates/host-runtime/src/broca/subprocess.rs:670`) has reported the group unresolved and the terminal carries `teardown_unconfirmed`; and the sweep never signals a group whose owner is alive. The disjunction is the code's own contract: the bound is four applications of `termination_grace` (`:679-691`), after which survival is reported rather than denied.
+Check: `always` - measured from the cancellation, deletion, or shutdown instant, within four applications of `termination_grace` (the TERM wait, the KILL wait, the member sweep, and the bounded leader reap at `crates/host-runtime/src/broca/subprocess.rs:679-693`) the terminal has been produced and either no process of the reaped group survives, or `terminate_group` (`crates/host-runtime/src/broca/subprocess.rs:670`) has reported the group unresolved and the terminal carries `teardown_unconfirmed`; and the sweep never signals a group whose owner is alive; a terminal that arrives after the deadline, or a teardown that never produces one, fails the check rather than deferring it. The disjunction is the code's own contract: the bound is four applications of `termination_grace` (`:679-691`), after which survival is reported rather than denied.
 Fault/timing angle: A grandchild that survives its parent keeps a credential in its environment.
 Required faults and enabling state: A child that ignores SIGTERM; a forked grandchild; a dead owner with a live group.
 Confidence: medium - [evidence](evidence/broca-children-are-reaped-as-a-process-group.md). `cancel_reaps_group_with_sigterm_first`, `sigkill_escalation_when_term_ignored`, `supervisor_shutdown_reaps_group`, `group_registry_sweep_kills_only_dead_owner_groups` (`crates/host-runtime/tests/broca_subprocess.rs`, `harness = false` runner).
