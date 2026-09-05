@@ -5502,37 +5502,65 @@ Open questions: None.
 
 Type: liveness
 Reachability: default-production - every lease release on the consumer side
-runs `Ring::release` (`crates/shm-transport/src/backend/ring.rs:1528`), which
-signals only the capacity doorbell (`:1598-1599`) and never touches the data
-wake's `parked` marker; every publication decides whether to signal the data
-doorbell by swapping that marker (`signal_wake`, `:2032-2035`).
+runs `Ring::release` (`crates/shm-transport/src/backend/ring.rs:1528`), whether
+the holder calls `ReceiveLease::release` or drops the lease
+(`crates/shm-transport/src/lease.rs:350-357`, `:366-372`). On the success path
+`release_inner` signals only the capacity doorbell (`:1598-1599`) and never
+touches the data wake's `parked` marker; its doc comment states that contract
+(`:1518-1523`). The failure path is the deliberate exception: `Ring::release`
+quarantines on any error (`:1532-1533`) and `enter_quarantine` (`:1915`)
+rings both doorbells (`:1920-1921`), which clears `parked` by design and
+belongs to `quarantine-wakes-a-parked-waiter`. Every publication decides
+whether to signal the data doorbell by swapping the same marker
+(`publish_commit`, `:2376`, through `signal_wake`, `:2033-2035`).
 Status: active
-Exercised: yes - `release_leaves_the_consumers_data_wait_armed_for_the_next_publish`
-(`ring.rs:3737-3762`) publishes one frame, has the consumer receive it and arm
-its data wait, releases the previous lease, asserts the consumer's `parked`
-marker is still set (`:3748-3752`), publishes a second frame, and asserts the
-parked consumer is woken (`:3754-3760`). In-process, one thread.
-Guarantee: Releasing a lease does not clear the releasing consumer's own data-wait
-`parked` marker, so a publication that follows the release still finds the
-marker set, signals the data doorbell, and wakes the consumer; a consumer that
-armed its wait and then released cannot be stranded by its own release.
-Check: `always` - after `arm_data_wait` returns true and a lease is released,
-the data wake's `parked` is non-zero; the next `commit` signals the data
-doorbell and `wait_for_data` (or the reactor's readiness) returns.
+Exercised: partial - `release_leaves_the_consumers_data_wait_armed_for_the_next_publish`
+(`ring.rs:3737-3763`) publishes one frame, receives it, arms the data wait while
+still holding that lease (`:3742-3745`), releases it (`:3746`), and asserts the
+data wake's `parked` is still non-zero (`:3748-3752`); it then publishes a
+second frame and asserts a doorbell token arrives within a 5 s deadline through
+`data_ready.wait_until` (`:3754-3760`), then drains the frame. The marker half
+is asserted directly; the wake half is asserted as a token left for a waiter
+that arrives afterwards, on one thread, with the publish running on the thread
+that would have been sleeping, which is the same oracle shape
+`quarantine-wakes-a-parked-waiter` classifies as partial. Not covered: a real
+parked waiter released by the post-release publish, release and publish on
+different threads, and any cross-process pairing.
+Guarantee: A successful release does not clear the releasing consumer's own
+data-wait `parked` marker, so a successful publication that follows the release
+still finds the marker set, signals the data doorbell, and wakes the consumer; a
+consumer that armed its wait and then released cannot be stranded by its own
+release.
+Check: `always` - after `arm_data_wait` returns `Ok(true)` and a release
+returns `Ok`, the data wake's `parked` is non-zero (non-zero rather than one,
+because `ParkGuard::arm` stores the incremented generation, `:645-650`); the
+next successful `commit` signals the data doorbell, and a
+`wait_for_data(deadline)` armed before the release returns `Ok(true)` strictly
+before `deadline` rather than expiring on it. A failing release is out of scope:
+it quarantines and clears `parked` on purpose.
 Fault/timing angle: `signal_wake` sends a doorbell byte only when it swaps a
 non-zero `parked` (`:2033`), so any path that clears the consumer's marker
 between arm and publish makes the publisher skip the signal and leaves the
 consumer blocked until an unrelated wake. Release is the operation most likely
 to run in that window, because a consumer typically releases the frame it just
 processed before parking for the next one; it must touch only the capacity
-side. The hazard is a release path that resets both wake epochs, or a shared
-helper that clears `parked` on any doorbell traffic.
+side. The hazard is narrow and mechanical: `signal_wake` (`:2026-2037`) clears
+`parked` on whichever `WakeEpoch` it receives, so the property rests on the
+argument at `:1598` being `self.capacity_wake()`. Passing `self.data_wake()`
+there, adding a second `signal_wake` call on the data side, or routing release
+through a helper that rings both epochs the way `enter_quarantine` does
+(`:1920-1921`) each breaks it without changing the release's observable success
+behaviour.
 Required faults and enabling state: none; an armed consumer, a release, and a
 publication in that order.
 Confidence: high - [evidence](evidence/release-leaves-the-consumer-parked-marker-intact.md).
-`Ring::release`'s doorbell signalling, `signal_wake`'s marker swap, and the
-test were read directly.
-Existing check: the test named above, unaudited.
+`release_inner`'s single `signal_wake` call and its capacity-wake argument
+(`:1598`), `signal_wake`'s unconditional marker swap (`:2033`), all four
+`signal_wake` call sites (`:1598`, `:1920`, `:1921`, `:2376`), both lease
+release entry points, and the test were read directly; the failure path through
+`:1533` into `enter_quarantine` was checked and is scoped out of the guarantee.
+Existing check: the test named above, unaudited; it asserts the marker directly
+and the wake only as an observable token.
 Impact: a lost wake at the most common consumer transition: the consumer parks
 after releasing, the publisher skips the doorbell, and the frame sits until an
 unrelated event; on an idle channel, forever.

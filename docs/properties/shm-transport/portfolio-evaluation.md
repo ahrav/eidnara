@@ -971,3 +971,78 @@ Test names below were checked against the catalog before being claimed.
 7. Whether the leaked-descriptor impact is a confidentiality and integrity
    finding rather than a liveness one, since an execed child holds read and write
    access to the arena.
+
+## Evaluation of the parked-marker addition (fresh context, 86 records)
+
+A fresh-context evaluator that had not read this file or the evidence directory
+evaluated `release-leaves-the-consumer-parked-marker-intact` against the merged
+HEAD and the other 85 records. Of eight citations, six resolved exactly and two
+were imprecise (`signal_wake`'s marker swap is `:2033-2035`, not `:2032-2035`;
+the test ends at `:3763`); both are corrected, and three citations the record
+should carry were added (the `Ring::release` doc comment at `:1518-1523`, the
+`publish_commit` call site at `:2376`, and `ParkGuard::arm` at `:645-650`,
+which explains why the marker check is non-zero rather than one). The Index row
+matches the body.
+
+### Refinements applied
+
+1. Reachability no longer says `Ring::release` never touches the data wake: the
+   failure path quarantines and `enter_quarantine` rings both epochs by design,
+   which `quarantine-wakes-a-parked-waiter` owns; the success path is the
+   record's subject, and both lease release entry points are cited.
+2. The Check is conditioned on a successful release and states its bound in the
+   code's units (`wait_for_data(deadline)` returns `Ok(true)` strictly before
+   the deadline), instead of an unbounded "returns".
+3. The Fault/timing angle names the actual hazard: `signal_wake` clears
+   `parked` on whichever epoch it is handed, so the property rests on the single
+   argument at `:1598` being the capacity wake.
+4. Exercised moves to partial. The test asserts the marker directly but asserts
+   the wake as a doorbell token observed afterwards on the same thread, with no
+   blocked waiter, which is the oracle shape the sibling record already classes
+   as partial; applying the same standard keeps the field comparable. The
+   fault-map row moves with it.
+5. The Guarantee gains "successful" before "publication", since a commit that
+   fails earlier signals nothing and belongs to
+   `publish-signal-implies-committed-frame`.
+
+### Gaps queued
+
+Each test below has no citing record in the catalog.
+
+1. `reserve_until_deadline_leaves_the_capacity_wake_unparked`
+   (`ring.rs:4189-4210`): the producer-side mirror of this record with opposite
+   polarity, an abandoned park must clear `parked`; the capacity half of the
+   wake protocol has no record at all.
+2. `stale_capacity_token_after_a_drain_does_not_deadlock_the_next_park`
+   (`:4213-4240`): bounded liveness across the drain and re-park, and the only
+   two-thread test in the file.
+3. `forged_consumer_cursors_fail_waits_instead_of_parking` (`:3304-3326`): the
+   safety precondition under the arm step, a wait on unverifiable cursors must
+   fail rather than park.
+4. `forged_active_lease_count_quarantines_on_release` (`:3255-3268`): the only
+   test that drives `Ring::release`'s error path.
+5. `receive_that_raced_a_quarantine_is_not_reported_as_delivered`
+   (`:3705-3716`): the consumer-side twin of an owned producer-side test.
+6. `two_producer_reserved_slots_are_impossible` (`:3719-3734`), adjacent by
+   position.
+
+### Biases requiring human judgment
+
+1. Which `Exercised` standard governs a doorbell-token oracle; this pass applied
+   the sibling record's standard, and the catalog should say so once rather than
+   record by record.
+2. Whether the wake protocol should be catalogued as one two-sided property
+   (consumer must not un-park itself on release; producer must un-park itself on
+   deadline) rather than as two mirror records.
+3. Whether a single-threaded token oracle can ever support `Confidence: high`
+   for a liveness claim, or whether the two-thread test in gap 2 should be the
+   shared witness for every wake record.
+4. The doc comment at `ring.rs:1518-1523` states this record's contract in the
+   source; whether a record that restates a documented invariant earns a place
+   in the catalog, or whether the catalog should point at the comment and stop.
+5. `Reaches production: yes` rests on the shipped addon's `poll`, which arms and
+   releases in the order the record describes; whether the bridge endpoint, which
+   releases through `ReceiveLease` drop, shares the same exposure was not traced.
+6. The record's Impact says "forever" for an idle channel; whether the reactor's
+   readiness path or a setup-socket event bounds that in practice was not
+   established.
