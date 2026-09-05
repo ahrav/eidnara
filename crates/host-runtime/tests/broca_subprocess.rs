@@ -948,7 +948,7 @@ fn fixture_snapshot(extra: &[(&str, &str)]) -> EnvSnapshot {
         (os("EIDNARA_MODULE_ID"), os("host-identity")),
         (os("EIDNARA_LAUNCH_NONCE"), os("host-nonce")),
     ];
-    EnvSnapshot::from_vars(vars)
+    EnvSnapshot::capture_from(vars).expect("fixture snapshot within the bound")
 }
 
 fn collecting_sink() -> (EventSink, Arc<Mutex<Vec<BackendEvent>>>) {
@@ -3026,11 +3026,12 @@ fn cleanup_failure_never_unqualified_success() {
 }
 
 fn env_snapshot_strips_launch_identity() {
-    let snapshot = EnvSnapshot::from_vars(vec![
+    let snapshot = EnvSnapshot::capture_from(vec![
         (os("EIDNARA_MODULE_ID"), os("evil")),
         (os("EIDNARA_LAUNCH_NONCE"), os("evil")),
         (os("KEEP_ME"), os("value")),
-    ]);
+    ])
+    .expect("small snapshot within the bound");
     let names: Vec<String> = snapshot
         .vars()
         .iter()

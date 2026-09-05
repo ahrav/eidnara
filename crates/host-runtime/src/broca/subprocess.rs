@@ -114,9 +114,9 @@ impl EnvSnapshot {
         Ok(snapshot)
     }
 
-    /// Snapshots never carry `EIDNARA_MODULE_ID` or `EIDNARA_LAUNCH_NONCE`.
     /// Snapshots exclude `EIDNARA_MODULE_ID` and `EIDNARA_LAUNCH_NONCE` regardless of construction path.
-    pub fn from_vars(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Self {
+    /// Private because it skips the size bound; `capture_from` is the only constructor, so every snapshot the component retains is charged against `MAX_ENV_SNAPSHOT_BYTES`. commentlint: allow(JUDGE)
+    fn from_vars(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Self {
         let vars = vars
             .into_iter()
             .filter(|(name, _)| {

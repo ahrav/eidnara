@@ -338,15 +338,20 @@ fn detach_active(env: &Env, channel: &mut Channel, token: u32, complete: bool) -
         channel.active.insert(token, active);
         return Err(error("receive alias state is unknown; storage quarantined"));
     }
+    // Past the successful detach the token is consumed: these failures carry the prefix the
+    // JavaScript wrapper uses to release its handle rather than offer a retry that would fail as
+    // already released.
     if napi_buffers::delete_all(env, active.buffers).is_err() {
         channel.from_host.enter_quarantine();
-        return Err(error("receive alias cleanup failed; storage quarantined"));
+        return Err(consumed_error(
+            "receive alias cleanup failed; storage quarantined",
+        ));
     }
     if complete {
         active
             .lease
             .release()
-            .map_err(|_| error("receive completion failed"))?;
+            .map_err(|_| consumed_error("receive completion failed"))?;
     }
     Ok(())
 }
@@ -368,7 +373,9 @@ fn detach_producer(
     }
     if napi_buffers::delete_all(env, active.buffers).is_err() {
         channel.to_host.enter_quarantine();
-        return Err(error("producer alias cleanup failed; storage quarantined"));
+        return Err(consumed_error(
+            "producer alias cleanup failed; storage quarantined",
+        ));
     }
     Ok(active.reservation)
 }
@@ -1140,28 +1147,29 @@ pub fn commit_reservation(
         // Past this point the token is consumed, so every failure carries the prefix the
         // JavaScript wrapper uses to release its handle instead of offering a retry that
         // would fail as already released.
-        let consumed = |message: &str| {
-            Error::new(
-                Status::GenericFailure,
-                format!("{RESERVATION_CONSUMED_PREFIX}{message}"),
-            )
-        };
         reservation
             .set_wire_header(header)
             .and_then(|()| reservation.advance(written as usize))
-            .map_err(|_| consumed("producer overflow"))?;
+            .map_err(|_| consumed_error("producer overflow"))?;
         before_publish
             .call(())
-            .map_err(|callback_error| consumed(&callback_error.to_string()))?;
+            .map_err(|callback_error| consumed_error(&callback_error.to_string()))?;
         reservation
             .commit(written as usize)
-            .map_err(|_| consumed("producer underfill or invalid commit"))?;
+            .map_err(|_| consumed_error("producer underfill or invalid commit"))?;
         Ok(())
     })
 }
 
-/// Prefix on errors raised after a reservation's token was detached; the wrapper treats such an error as consuming the handle. commentlint: allow(JUDGE)
-const RESERVATION_CONSUMED_PREFIX: &str = "producer reservation consumed: ";
+/// Prefix on errors raised after a handle's native token was detached; the JavaScript wrapper treats such an error as consuming the handle. commentlint: allow(JUDGE)
+const HANDLE_CONSUMED_PREFIX: &str = "native handle consumed: ";
+
+fn consumed_error(message: &str) -> Error {
+    Error::new(
+        Status::GenericFailure,
+        format!("{HANDLE_CONSUMED_PREFIX}{message}"),
+    )
+}
 
 #[napi]
 pub fn abort_reservation(env: &Env, channel_id: u32, token: u32) -> Result<()> {

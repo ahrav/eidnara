@@ -155,8 +155,12 @@ const PLATFORM_PACKAGES = {
 
 const ADDON_PAYLOAD_PATH = "payload/native/shm_native.node";
 
-/** Errors the addon raises after a reservation token was detached carry this prefix. */
-const RESERVATION_CONSUMED_PREFIX = "producer reservation consumed: ";
+/** Errors the addon raises after a handle's native token was detached carry this prefix. */
+const HANDLE_CONSUMED_PREFIX = "native handle consumed: ";
+
+function consumesHandle(error: unknown): boolean {
+    return error instanceof Error && error.message.startsWith(HANDLE_CONSUMED_PREFIX);
+}
 
 type PlatformPackage = (typeof PLATFORM_PACKAGES)[keyof typeof PLATFORM_PACKAGES];
 
@@ -515,12 +519,7 @@ export class NativeProducerReservation {
                 beforePublish ?? (() => {}),
             );
         } catch (error) {
-            if (
-                error instanceof Error &&
-                error.message.startsWith(RESERVATION_CONSUMED_PREFIX)
-            ) {
-                this.active = false;
-            }
+            if (consumesHandle(error)) this.active = false;
             throw error;
         }
         this.active = false;
@@ -572,7 +571,14 @@ export class NativeReceiveLease {
 
     release(): void {
         if (this.released) throw new Error("receive lease is already released");
-        this.native.release(this.channel, this.token);
+        // A failure after the addon detached the token cannot be retried; the wrapper releases
+        // so `segment()` stops returning detached views.
+        try {
+            this.native.release(this.channel, this.token);
+        } catch (error) {
+            if (consumesHandle(error)) this.released = true;
+            throw error;
+        }
         this.released = true;
     }
 
