@@ -558,13 +558,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/cancelled-frame-disposition-is-declared.md"
@@ -1753,13 +1753,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/routing.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/generation-id-strictly-increases-and-is-never-reused.md"
@@ -2972,17 +2972,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "partial",
-        "check_status": "none",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
+      "check_pointer": "crates/shm-transport/tests/profile.rs#released_admissions_recompute_active_span_charge",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-admission-charge-releases-on-every-endpoint-thread-exit.md"
     },
     {
@@ -3230,13 +3230,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-rejected-drain-failure-close-has-no-producer.md"
@@ -3257,13 +3257,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/client.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-segmented-inbound-body-has-no-production-producer.md"

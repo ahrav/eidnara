@@ -2995,8 +2995,10 @@ outside the `catch_unwind`, so a panic inside `run_endpoint` still reaches it;
 `AdmissionController::release` (`profile.rs:512-520`) is a `checked_sub` that
 silently no-ops on underflow, so a double release cannot go negative but also
 cannot be detected.
-Existing check: none in the 2b file set. `crates/shm-transport/tests/contract.rs:472`
-covers `Admission::release` at the transport layer. Status unaudited.
+Existing check: `released_admissions_recompute_active_span_charge`
+(`crates/shm-transport/tests/profile.rs`) covers `Admission::release` and the
+`Drop` path at the transport layer; nothing in the 2b file set covers the
+endpoint thread's exits. Status unaudited.
 Impact: a stranded charge is permanent. Since `process_limits` multiplies the
 per-connection charge by the connection count - post-#131 additionally capped
 by `MAX_RING_RESIDENT_BYTES` (`ring_transport.rs:60-80`) - one

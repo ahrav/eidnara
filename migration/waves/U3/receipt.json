@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "a5b667fd8aff42a4dacc91ed5d77abc223b00fb57f889efe76760bf2e2d3421b",
+      "destination_sha256": "f93b0322a78a816914cab392882593e81872d29c5b6f8872c05f79c20cc8696e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "abbfde09b53bd9d1ebce662a49cde42e732d34371221341dbb520c848576e4f9",
+      "destination_sha256": "941369c24361ed91902f6b32f6627a8d945e35982d494bcb1ee9e5fc22e45b6f",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "a62fb5011856f95dc6ac515c2f121e42da2359d5f8f70b7ea8e0fff9155f8cce",
+      "destination_sha256": "0b68a82f4cf734ffb1071dcbe1187a3c8d3b88b93f63ed78f072db2c0ced2b57",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
