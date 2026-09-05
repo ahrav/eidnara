@@ -509,7 +509,7 @@ transport half; none for the addon-side entry and claim. Status unaudited.
 Impact: if the attach gate were removed, a caller would receive a channel id and
 a usable-looking channel that fails at first reserve or receive. The grant claim
 is held until the registry entry is removed; `close` and `force_close` do remove it once producers, active leases,
-and stranded aliases are all empty (`packages/shm-native/src/lib.rs:1515-1524`,
+and stranded aliases are all empty (`packages/shm-native/src/lib.rs:1515-1528`,
 `:1359-1362`), so the claim is pinned indefinitely only when a detach has already
 stranded an alias. An earlier draft of this record overstated that as "for the
 process lifetime".
@@ -841,7 +841,7 @@ published and the peer sees no frame.
 Fault/timing angle: `before_publish` is invoked before `reservation.commit` on
 both native produce paths (`packages/shm-native/src/lib.rs:1025-1028`,
 `:1154-1159`), so whatever a JavaScript caller does inside `beforePublish`
-(`packages/shm-native/index.ts:505`, `:674`) runs while commit can still fail.
+(`packages/shm-native/index.ts:527`, `:717`) runs while commit can still fail.
 The host's `publish_one` (`crates/host-runtime/src/ring_transport.rs:749`)
 runs its `publish_hook` and `written` callbacks only after
 `matches!(result, Ok(Ok(())))` (`:773-785`), so the two sides place their
@@ -1551,7 +1551,7 @@ wrapper would reject.
 Confidence: high — [evidence](evidence/native-boundary-not-weaker-than-its-wrapper.md).
 The native field reads are enumerable at
 `packages/shm-native/src/lib.rs:602-659` and contain none of these checks;
-`NativeDescriptor` (`packages/shm-native/index.ts:54-64`) structurally omits
+`NativeDescriptor` (`packages/shm-native/index.ts:55-65`) structurally omits
 `candidateId`, so the replay fence is dropped by the type contract.
 Existing check: none at the native boundary; the TypeScript tests exercise the
 wrapper.
@@ -1560,7 +1560,7 @@ gap: nothing binds a grant to its direction — field *position* is the only rol
 assignment, so swapped fields would put two producers on one single-producer
 lane.
 Invalidated: the wrapper this record compared against does not exist in the
-U3 tree. `NativeChannel.attach` (`packages/shm-native/index.ts:643-646`)
+U3 tree. `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`)
 forwards the caller's descriptor to `native.attach` unchanged, so there is no
 TypeScript grant decoder, no wrapper error code, and nothing for the native
 boundary to be weaker than; the rejection set lives in the addon alone
@@ -1842,8 +1842,8 @@ Open questions:
 ### capability-probe-gates-every-advertised-mechanism
 
 Type: safety
-Reachability: default-production - `capableAddon` (`packages/shm-native/index.ts:255-260`)
-calls `probeCapabilities` (`:257`) once and throws
+Reachability: default-production - `capableAddon` (`packages/shm-native/index.ts:264-269`)
+calls `probeCapabilities` (`:266`) once and throws
 `NativeStartupError("capability_unavailable")` when it reports
 `available: false`, so every channel construction consults the probe. The
 source tree's `ShmFrameChannel` in `packages/plugin`, which bypassed it, is
@@ -1884,15 +1884,15 @@ Open questions:
 - An earlier draft asserted that the code's step order differs from the
   document's numbering. That is **not supported**: steps one through eight appear
   in documented order. Two real divergences replace it. At HEAD
-  `probeCapabilities` (`packages/shm-native/index.ts:298-422`) refuses in the
-  order `addon_unavailable` (`:310-311`), `node_detachment_unavailable`
-  (`:312-313`), `napi_8_unavailable` (`:317-324`),
-  `external_exact_bounds_unavailable` (`:332-339`),
-  `transfer_prevention_unavailable` (`:352-361`), `detachment_unavailable`
-  (`:376-386`), `cleanup_hooks_unavailable` (`:394-405`), then the catch-all
-  `runtime_mechanism_unavailable` (`:415-421`); the addon-load gate precedes the
+  `probeCapabilities` (`packages/shm-native/index.ts:307-431`) refuses in the
+  order `addon_unavailable` (`:319-320`), `node_detachment_unavailable`
+  (`:321-322`), `napi_8_unavailable` (`:326-333`),
+  `external_exact_bounds_unavailable` (`:341-348`),
+  `transfer_prevention_unavailable` (`:361-370`), `detachment_unavailable`
+  (`:385-395`), `cleanup_hooks_unavailable` (`:403-414`), then the catch-all
+  `runtime_mechanism_unavailable` (`:424-430`); the addon-load gate precedes the
   Node detachment gate so an unavailable addon is not reported as a detachment
-  failure (`:307-308`). Whether the enumeration is meant to be one gate per
+  failure (`:316-317`). Whether the enumeration is meant to be one gate per
   documented step is the open question. (needs human input)
 
 ### clean-reclamation-is-reachable
@@ -1969,7 +1969,7 @@ The addon source contains no `cfg(test)`, `cfg(feature)`, or
 `cfg(debug_assertions)` gates at all, and exports the failpoint setter, an
 arbitrary `ArrayBuffer` detach, the external probe, an arbitrary-path cleanup
 probe, the test-pair constructor, and a forced close
-(`packages/shm-native/src/lib.rs:524-570`, `:889`, `:1527`). The ungated block
+(`packages/shm-native/src/lib.rs:524-570`, `:889`, `:1531`). The ungated block
 grew rather than shrank: `d8bde128` added `build_profile` (`:500-507`) and
 `build_target` (`:509-512`) to it. The fuzz harness
 module is likewise ungated in the library (`crates/shm-transport/src/lib.rs:33`).
@@ -2117,8 +2117,8 @@ Open questions:
 
 Type: safety
 Reachability: default-production - a client that installs the platform package
-loads the addon through `packageAddonPath` (`packages/shm-native/index.ts:190-228`),
-which `requireAddon` (`:230-253`) reaches whenever no `shm_native.node` sits
+loads the addon through `packageAddonPath` (`packages/shm-native/index.ts:191-229`),
+which `requireAddon` (`:231-262`) reaches whenever no `shm_native.node` sits
 beside `index.ts`; that is every clean install, and the only path a shipped
 client takes.
 Status: active
@@ -2130,14 +2130,14 @@ manifest, checksum, and package-name checks have never executed under
 observation.
 Guarantee: Loading the addon from the platform package refuses to load a binary
 whose provenance is not established: a missing package directory or payload is
-`missing_addon` (`:196`, `:221`); an unreadable or unparsable
-`payload-manifest.json` is `missing_manifest` (`:207`); a manifest naming
-another package or target is `wrong_platform_payload` (`:209-214`); a manifest
+`missing_addon` (`:197`, `:222`); an unreadable or unparsable
+`payload-manifest.json` is `missing_manifest` (`:208`); a manifest naming
+another package or target is `wrong_platform_payload` (`:210-215`); a manifest
 without a 64-hex-digit SHA-256 entry for the payload is `missing_checksum`
-(`:215-218`); a payload whose SHA-256 differs from the entry is
-`checksum_mismatch` (`:223-226`); and only then is the path handed to
-`createRequire`, after which a non-release build is `debug_build` (`:240-242`)
-and a binary for another target is `wrong_platform_binary` (`:243-245`). Each
+(`:216-219`); a payload whose SHA-256 differs from the entry is
+`checksum_mismatch` (`:224-227`); and only then is the path handed to
+`createRequire`, after which a loader failure is `addon_load_failed` (`:243-246`, the raw loader error is dropped so no path or dynamic-linker text crosses the package boundary), a non-release build is `debug_build` (`:249-251`)
+and a binary for another target is `wrong_platform_binary` (`:252-254`). Each
 refusal is a `NativeStartupError` with a closed reason, and none loads code.
 Check: `always` - against a staged platform package directory with no local
 `shm_native.node` beside `index.ts`, each of the six fault shapes (absent
@@ -3472,7 +3472,7 @@ Open questions:
 Type: safety
 Reachability: default-production - the addon is the shipped client and its
 `attach` (`packages/shm-native/src/lib.rs:592`) is the only descriptor
-validator; `NativeChannel.attach` (`packages/shm-native/index.ts:643-646`)
+validator; `NativeChannel.attach` (`packages/shm-native/index.ts:686-689`)
 forwards the caller's object unchanged, and the addon is directly requirable
 without the wrapper.
 Status: active
@@ -3680,7 +3680,7 @@ Open questions:
   (`packages/shm-native/src/lib.rs:1397`) and only `release` (`:1455`,
   through `detach_active`, `:332-357`) removes it, and the wrapper hands the
   release decision to the caller (`NativeReceiveLease.release` and
-  `[Symbol.dispose]`, `packages/shm-native/index.ts:572-588`). The property
+  `[Symbol.dispose]`, `packages/shm-native/index.ts:608-624`). The property
   is live for the client-side ring whenever a caller holds eight frames.
 - Mechanism note (2026-09-05): this record's doorbell prose and `ring.rs` line
   references were written against the source tree's eventfd doorbells. The
@@ -3832,7 +3832,7 @@ the host-side receive ring never reaches the cap. The addon's `poll` stores
 every lease it hands out in `channel.active`
 (`packages/shm-native/src/lib.rs:1397`) until the caller invokes `release`
 (`:1455`, reached from `NativeReceiveLease.release` or `[Symbol.dispose]`,
-`packages/shm-native/index.ts:572-588`), so a caller holding eight frames puts
+`packages/shm-native/index.ts:608-624`), so a caller holding eight frames puts
 the client-side receive ring at the cap with no fault. The label stays
 `default-production` for that reason; the host-side unreachability is a
 finding about one receiver, not about the transport.
@@ -4041,7 +4041,7 @@ Open questions:
 Type: liveness
 Reachability: default-production - the addon readiness path is the shipped
 client's delivery path: `NativeChannel.startReadiness`
-(`packages/shm-native/index.ts:723`) is the wrapper's public readiness entry
+(`packages/shm-native/index.ts:767`) is the wrapper's public readiness entry
 point and wires the reactor through `watch` (`packages/shm-native/src/lib.rs`).
 The downstream consumer that registers a handler (`ShmFrameChannel` in the
 source tree's `packages/plugin`) is not in this tree; the in-tree callers are
@@ -4059,7 +4059,7 @@ acknowledgement cycle.
 Check: `always` — every `readiness_handled` acknowledgement whose per-channel
 re-arm observes visible data or a generation change (`arm_data_wait` returning
 false, `lib.rs:1326-1338`) returns `redispatch = true`, and the dispatcher
-re-enters on true (`index.ts:627-628`). `always` because the acknowledgement
+re-enters on true (`index.ts:670-671`). `always` because the acknowledgement
 runs after every callback and is the sole carrier of a wake whose doorbell
 token was already drained; a bounded window (one cycle) makes this checkable
 by a finite test.
@@ -4359,7 +4359,7 @@ Open questions:
 Type: safety
 Reachability: default-production - the reactor is created on the first `watch`
 (`packages/shm-native/src/lib.rs`), which the shipped wrapper reaches through
-`NativeChannel.startReadiness` (`packages/shm-native/index.ts:723`); the source
+`NativeChannel.startReadiness` (`packages/shm-native/index.ts:767`); the source
 tree's `ShmFrameChannel` caller in `packages/plugin` is not in this tree and the
 in-tree callers are `packages/shm-native/tests/mechanism.ts:193`.
 Status: active
@@ -4702,7 +4702,7 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   `wake-published-during-readiness-callback-is-not-lost` dominates
   `each-channel-wake-survives-a-shared-acknowledgement`: one boolean over all
   channels (`lib.rs:1152-1162`) plus a dispatcher that runs every handler on
-  re-entry (`index.ts:517`) gives the second channel's delivery for free. The
+  re-entry (`index.ts:539`) gives the second channel's delivery for free. The
   undominated residue is the raw addon, whose reactor holds a single callback
   (`lib.rs:1126-1128`).
 
@@ -4764,7 +4764,7 @@ Reachability: default-production - `watch` callbacks and readiness acknowledgeme
 Status: active
 Exercised: partial - one unit test covers acknowledgement waiting, and `packages/shm-native/tests/mechanism.ts` covers a frame published during a callback; no test covers a lost eventfd wake with no frame behind it.
 Guarantee: At most one readiness callback batch is in flight: the next readiness notification is delivered only after the previous batch has been acknowledged through `readinessHandled()`, and an interrupted wait retries until success or close rather than reporting a spurious wake.
-Check: `always` - `dispatchReadiness` (`packages/shm-native/index.ts:612-633`) runs every registered handler and calls `readinessHandled()` in its `finally`, and `wait_until_handled` (`packages/shm-native/src/scheduling.rs`) does not release a new wake while the pending flag is set, so no second dispatch begins before the first is acknowledged; and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. The handler runs first and the acknowledgement follows it; the ordering this record forbids is a second dispatch ahead of that acknowledgement. The `wait_until_handled` error arm (`packages/shm-native/src/scheduling.rs:234-239`), which records failure, fires one final callback without the pending gate, and stops the reactor, is outside this guarantee, as it is for `reactor-callback-is-one-in-flight`; the record covers the non-error arms. `always` because it must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`.
+Check: `always` - `dispatchReadiness` (`packages/shm-native/index.ts:652-676`) runs every registered handler and calls `readinessHandled()` in its `finally`, and `wait_until_handled` (`packages/shm-native/src/scheduling.rs`) does not release a new wake while the pending flag is set, so no second dispatch begins before the first is acknowledged; and `retry_interrupted` returns only a completed result or the closed sentinel, never an `EINTR` surfaced as a wake. The handler runs first and the acknowledgement follows it; the ordering this record forbids is a second dispatch ahead of that acknowledgement. The `wait_until_handled` error arm (`packages/shm-native/src/scheduling.rs:234-239`), which records failure, fires one final callback without the pending gate, and stops the reactor, is outside this guarantee, as it is for `reactor-callback-is-one-in-flight`; the record covers the non-error arms. `always` because it must hold on every wake; reaching the EOF and `EINTR` situations is the sibling record `addon-scheduling-reaches-peer-eof-and-interrupted-wait`.
 Fault/timing angle: A missed or duplicated wake leaves the JavaScript side spinning or stalled.
 Required faults and enabling state: A readiness event with no pending callback; a signal interrupting the wait.
 Confidence: medium - [evidence](evidence/addon-scheduling-wakes-only-on-acknowledged-readiness.md). `pending_callback_waits_for_acknowledgement` and `interrupted_wait_retries_until_success_or_close` (`packages/shm-native/src/scheduling.rs`).
@@ -4776,7 +4776,7 @@ Open questions: None.
 
 Type: liveness
 Reachability: default-production - the addon is the shipped client and
-`dispatchReadiness` (`packages/shm-native/index.ts:612-633`) is the readiness
+`dispatchReadiness` (`packages/shm-native/index.ts:652-676`) is the readiness
 path of every watched channel; a quarantined ring is an ordinary outcome of peer
 death or a verification failure, so a registered channel whose re-arm fails
 persistently is a production state.
@@ -4807,10 +4807,10 @@ caller closed it. At HEAD `readiness_handled`
 unregisters the channel (`:1337`), `(true, Ok(false))` sets `redispatch` only
 when a lease advanced during the callback (`:1324-1325`, `:1330-1333`), and a
 non-progressing `Ok(false)` does nothing (`:1336`). The dispatcher's `finally`
-calls `scheduleRedispatch` (`index.ts:628`), which queues a microtask only
+calls `scheduleRedispatch` (`index.ts:671`), which queues a microtask only
 while `consecutiveMicrotaskRedispatches < REDISPATCH_MICROTASK_BUDGET` (16,
-`:597`) and otherwise resets the counter and defers through `setImmediate`
-(`:602-610`), so a macrotask runs at least every seventeen dispatches.
+`:637`) and otherwise resets the counter and defers through `setImmediate`
+(`:642-650`), so a macrotask runs at least every seventeen dispatches.
 `Reactor::register` unregisters a channel whose first `arm_data_wait` fails
 (`packages/shm-native/src/scheduling.rs:292-302`), so a ring quarantined before
 `watch` never enters the loop either. The hazard the record guards is a
@@ -4891,7 +4891,8 @@ healthy; with a request/response protocol on that channel, the stall is a hang.
 Open questions:
 - Should the walk return per-channel results so the dispatcher can run only
   the handlers with visible data, rather than every registered handler on every
-  batch (`index.ts:614-624`)? (needs human input)
+  batch (`index.ts:654-668`; a handler that throws is now removed from the map
+  at `:664-667` instead of being retried on the next batch)? (needs human input)
 
 ---
 
