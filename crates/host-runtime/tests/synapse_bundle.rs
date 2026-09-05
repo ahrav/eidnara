@@ -112,9 +112,6 @@ async fn expect_disabled_with(mutate: impl FnOnce(&Path), expected_fragment: &st
 }
 
 /// Infeasible limits fail host startup instead of disabling Synapse while the host remains healthy.
-/// Infeasible limits fail host startup instead of disabling Synapse while the host remains healthy.
-///
-/// An `Err` from `activate` fails host startup.
 /// An `Err` from `activate` fails host startup.
 async fn expect_limits_fail_startup(
     mutate: impl FnOnce(&mut SynapseLimits),
@@ -449,6 +446,12 @@ async fn incoherent_host_serving_limits_fail_startup_before_ort() {
     expect_limits_fail_startup(|limits| limits.max_text_bytes = 3, "UTF-8 code point").await;
     expect_limits_fail_startup(|limits| limits.max_batch_items = 0, "max batch items").await;
     expect_limits_fail_startup(|limits| limits.max_retained_jobs = 0, "retained job count").await;
+    expect_limits_fail_startup(|limits| limits.max_queued_jobs = 0, "queued job count").await;
+    expect_limits_fail_startup(
+        |limits| limits.retention = std::time::Duration::ZERO,
+        "result retention",
+    )
+    .await;
     expect_limits_fail_startup(
         |limits| limits.max_queued_request_bytes = limits.max_batch_text_bytes as u64 - 1,
         "queued request bytes",

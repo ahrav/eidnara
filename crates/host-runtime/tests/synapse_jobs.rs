@@ -537,6 +537,54 @@ async fn shutdown_with_queued_running_and_retained_jobs_is_graceful() {
 }
 
 #[test]
+fn a_job_being_paged_outlives_an_older_unread_job_under_count_pressure() {
+    let limits = SynapseLimits {
+        max_retained_jobs: 2,
+        ..SynapseLimits::default()
+    };
+    let jobs = JobTable::new(limits);
+    let complete = |key: &str| {
+        let batch = vec![BatchItem {
+            id: key.to_owned(),
+            content_sha256: "0".repeat(64),
+            text: "alpha".to_owned(),
+        }];
+        let AdmitOutcome::Admitted { job_id, seq } =
+            jobs.admit_uncharged_for_tests(key.to_owned(), batch, 2)
+        else {
+            panic!("job {key} is admitted");
+        };
+        jobs.start(seq).expect("job starts");
+        jobs.publish_ready(seq, vec![vec![0.5, 0.5]]);
+        job_id
+    };
+
+    let first = complete("first");
+    let second = complete("second");
+    // The poll must land strictly after the second completion so the ranks differ on any clock resolution.
+    std::thread::sleep(Duration::from_millis(2));
+    assert!(matches!(
+        jobs.poll(&first, "first", None),
+        PollOutcome::Page(_)
+    ));
+
+    // The third completion evicts one job: the unread second, not the older first that is being read.
+    let third = complete("third");
+    assert!(matches!(
+        jobs.poll(&first, "first", None),
+        PollOutcome::Page(_)
+    ));
+    assert!(matches!(
+        jobs.poll(&second, "second", None),
+        PollOutcome::Restarted
+    ));
+    assert!(matches!(
+        jobs.poll(&third, "third", None),
+        PollOutcome::Page(_)
+    ));
+}
+
+#[test]
 fn a_vector_shape_that_disagrees_with_the_job_fails_only_that_job() {
     // JobTable requires one engine result for each input item.
     // The engine trait is an open seam; JobTable cannot assume upstream result-count validation.

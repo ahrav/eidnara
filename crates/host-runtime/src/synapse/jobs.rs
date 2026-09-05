@@ -1,5 +1,4 @@
 //! JobTable retains bounded process-local batch jobs with deterministic idempotency, ephemeral retention, opaque incarnation-fenced identifiers, and replayable boundary-checked result cursors.
-//!
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,8 +57,8 @@ pub enum PollOutcome {
 }
 
 pub struct ResultPage {
-    /// Shared backing keeps concurrent polls from copying retained vectors
-    /// before their output reservations are acquired.
+    /// Shared backing lets concurrent polls serve retained vectors without
+    /// copying them.
     pub vectors: Vec<(String, String, Arc<[f32]>)>,
     pub done: bool,
     pub next_cursor: Option<String>,
@@ -93,6 +92,8 @@ struct Job {
     result_bytes: u64,
     state: JobState,
     completed_at: Option<Instant>,
+    /// Timestamp of the most recently served result page; `None` until one is served.
+    last_polled_at: Option<Instant>,
     /// Resident-byte charge for this job's request inputs. Sized by
     /// [`job_input_bytes`] at admission, shrunk to [`Job::retained_input_bytes`]
     /// when the texts die, and released by dropping the job on removal,
@@ -125,6 +126,11 @@ impl Job {
     fn is_completed(&self) -> bool {
         matches!(self.state, JobState::Ready { .. } | JobState::Failed { .. })
     }
+
+    /// Eviction rank uses last poll time, falling back to completion time; ties fall to the earlier completion.
+    fn retention_rank(&self) -> (Option<Instant>, Option<Instant>) {
+        (self.last_polled_at.or(self.completed_at), self.completed_at)
+    }
 }
 
 struct Jobs {
@@ -134,6 +140,24 @@ struct Jobs {
     queued_text_bytes: u64,
     retained_result_bytes: u64,
     closed: bool,
+}
+
+impl Jobs {
+    /// These counters sum live jobs' `text_bytes` and `result_bytes`; a larger release is an accounting bug. Saturation prevents integer wraparound in release builds.
+    fn release_bytes(&mut self, text: u64, result: u64) {
+        debug_assert!(
+            self.queued_text_bytes >= text,
+            "queued_text_bytes {} cannot release {text}",
+            self.queued_text_bytes
+        );
+        debug_assert!(
+            self.retained_result_bytes >= result,
+            "retained_result_bytes {} cannot release {result}",
+            self.retained_result_bytes
+        );
+        self.queued_text_bytes = self.queued_text_bytes.saturating_sub(text);
+        self.retained_result_bytes = self.retained_result_bytes.saturating_sub(result);
+    }
 }
 
 pub struct JobTable {
@@ -216,8 +240,7 @@ pub(crate) fn retained_input_bytes(
     )
 }
 
-/// The removal path releases `ByteCharge`s and drops `Job`s after releasing the table guard so retained vectors are freed outside the lock.
-/// The removal path drops `Job`s after releasing the table guard so retained vectors are freed outside the lock.
+/// Collects `Job`s and `ByteCharge`s removed under the table lock so they drop after the guard releases; retained vectors and permits are then freed outside the lock.
 #[derive(Default)]
 struct Released {
     jobs: Vec<Job>,
@@ -319,7 +342,6 @@ impl JobTable {
     }
 
     /// `admit_charged` transfers `charge` only when it returns `Admitted`; all other outcomes leave it with the caller.
-    /// charge.
     pub(crate) fn admit_charged(
         &self,
         key: String,
@@ -406,6 +428,7 @@ impl JobTable {
                 result_bytes: 0,
                 state: JobState::Queued { items },
                 completed_at: None,
+                last_polled_at: None,
                 charge: charge.split_or_take(input_bytes),
             },
         );
@@ -435,6 +458,10 @@ impl JobTable {
         let Some(job) = jobs.by_seq.get_mut(&seq) else {
             return;
         };
+        // A late publication cannot alter a completed job's result or byte accounting.
+        if job.is_completed() {
+            return;
+        }
         // Reject mismatched item counts before positional pairing to avoid panicking while `jobs` is locked.
         if vectors.len() != job.item_meta.len() {
             self.fail_job(
@@ -471,7 +498,7 @@ impl JobTable {
         let retained = job.retained_input_bytes();
         let excess = job.charge.split_excess(retained);
         released.charge(excess);
-        jobs.queued_text_bytes -= text_bytes;
+        jobs.release_bytes(text_bytes, 0);
         jobs.retained_result_bytes += result_bytes;
         self.enforce_retention(&mut jobs, Some(seq), &mut released);
     }
@@ -506,7 +533,7 @@ impl JobTable {
         let retained = job.retained_input_bytes();
         let excess = job.charge.split_excess(retained);
         released.charge(excess);
-        jobs.queued_text_bytes -= text_bytes;
+        jobs.release_bytes(text_bytes, 0);
         self.enforce_retention(jobs, Some(seq), released);
     }
 
@@ -518,7 +545,7 @@ impl JobTable {
         let Some(seq) = self.parse_job_id(job_id) else {
             return PollOutcome::Restarted;
         };
-        let Some(job) = jobs.by_seq.get(&seq) else {
+        let Some(job) = jobs.by_seq.get_mut(&seq) else {
             return PollOutcome::Restarted;
         };
         if job.key != key {
@@ -556,6 +583,8 @@ impl JobTable {
                     .collect();
                 let done = next_boundary >= vectors.len();
                 let next_cursor = (!done).then(|| format!("{}:{next_boundary}", self.job_id(seq)));
+                // A served page marks the job as in use so retention prefers evicting jobs nobody is reading.
+                job.last_polled_at = Some(Instant::now());
                 PollOutcome::Page(ResultPage {
                     vectors: page,
                     done,
@@ -566,7 +595,6 @@ impl JobTable {
     }
 
     /// Accept a cursor only when it names this job and its offset is a page boundary; allow previously served pages to be retried after a lost response.
-    /// Allow an already-served page so a client can retry after a lost response.
     /// The offset uses the same canonical-decimal rule as the job sequence so a never-issued spelling such as `+16` or `0016` is rejected.
     fn parse_cursor(&self, cursor: &str, seq: u64, boundaries: &[usize]) -> Option<usize> {
         let (job_id, offset) = cursor.rsplit_once(':')?;
@@ -583,13 +611,10 @@ impl JobTable {
     pub(crate) const MAX_F32_JSON_BYTES: usize = 16;
     /// Reserve worst-case JSON bytes for one `f32` component plus its `,` separator.
     const ENCODED_BYTES_PER_COMPONENT: usize = Self::MAX_F32_JSON_BYTES + 1;
-    /// Charge the fixed JSON envelope for each vector item.
-    /// quotes, separators).
+    /// Charge the fixed JSON envelope for each vector item (field names, quotes, separators).
     const ENCODED_ITEM_OVERHEAD: usize = 64;
 
-    /// Overestimate each result item's JSON size because undercounting can produce a page that exceeds its byte limit.
-    /// Undercounting can create a page whose JSON body exceeds the frame limit; no cursor can serve that page.
-    /// `encoded_item_cost` is an upper bound on one item's serialized bytes.
+    /// Overestimate each result item's JSON size: undercounting can create a page whose body exceeds the frame limit, and no cursor could serve that page.
     pub(crate) fn encoded_item_cost(vector_len: usize, id: &str, hash: &str) -> usize {
         debug_assert!(
             hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -654,6 +679,7 @@ impl JobTable {
     }
 
     /// The job identified by `keep` remains exempt while another completed job is eligible for eviction.
+    /// Victims are ordered by [`Job::retention_rank`].
     fn enforce_retention(&self, jobs: &mut Jobs, keep: Option<u64>, released: &mut Released) {
         loop {
             let retained = jobs
@@ -666,14 +692,13 @@ impl JobTable {
             if !over_count && !over_bytes {
                 return;
             }
-            let oldest = jobs
+            let victim = jobs
                 .by_seq
                 .values()
                 .filter(|job| job.is_completed() && Some(job.seq) != keep)
-                .min_by_key(|job| job.completed_at)
+                .min_by_key(|job| job.retention_rank())
                 .map(|job| job.seq);
-            let Some(seq) = oldest else {
-                // Evicting the protected job prevents a single oversized result from permanently exceeding a cap.
+            let Some(seq) = victim else {
                 // Evicting the protected job prevents a single oversized result from permanently exceeding a cap.
                 let Some(seq) = keep else { return };
                 released.job(Self::remove(jobs, seq));
@@ -685,8 +710,7 @@ impl JobTable {
 
     fn remove(jobs: &mut Jobs, seq: u64) -> Option<Job> {
         let job = jobs.by_seq.remove(&seq)?;
-        jobs.queued_text_bytes -= job.text_bytes;
-        jobs.retained_result_bytes -= job.result_bytes;
+        jobs.release_bytes(job.text_bytes, job.result_bytes);
         jobs.by_key.remove(&job.key);
         Some(job)
     }
@@ -898,7 +922,6 @@ mod tests {
         assert_eq!(budget.available(), POOL);
     }
 
-    /// permanent `queue_full`.
     #[test]
     fn sweep_releases_expired_charges_without_a_request_path() {
         const POOL: usize = 1_000_000;
@@ -970,7 +993,7 @@ mod tests {
             "the failed job's retained charge was released with its eviction"
         );
 
-        // re-running inference.
+        // A permanent failure replays as `Existing` instead of re-running inference.
         jobs.publish_failed(
             retry_seq,
             "schema_violation".to_owned(),
@@ -1021,6 +1044,54 @@ mod tests {
         jobs.clear();
         assert_eq!(first.vectors[0].2.len(), 256 * 1024);
         assert_eq!(second.vectors[0].2[0], 0.5);
+    }
+
+    #[test]
+    fn a_late_publish_ready_leaves_a_completed_job_unchanged() {
+        let jobs = JobTable::new(SynapseLimits::default());
+        let item = |id: &str| vec![charged_item(id, "alpha")];
+
+        let AdmitOutcome::Admitted { job_id, seq } =
+            jobs.admit_uncharged_for_tests("ready".to_owned(), item("a"), 2)
+        else {
+            panic!("ready job is admitted");
+        };
+        jobs.start(seq).expect("ready job starts");
+        jobs.publish_ready(seq, vec![vec![0.5, 0.5]]);
+        let retained = jobs.lock_jobs().retained_result_bytes;
+        assert!(retained > 0, "publication charges retained result bytes");
+
+        jobs.publish_ready(seq, vec![vec![1.0, 0.0]]);
+        assert_eq!(
+            jobs.lock_jobs().retained_result_bytes,
+            retained,
+            "a second publication is a no-op on accounting"
+        );
+        let PollOutcome::Page(page) = jobs.poll(&job_id, "ready", None) else {
+            panic!("the first result is still served");
+        };
+        assert_eq!(&page.vectors[0].2[..], &[0.5, 0.5]);
+
+        let AdmitOutcome::Admitted { job_id, seq } =
+            jobs.admit_uncharged_for_tests("failed".to_owned(), item("b"), 2)
+        else {
+            panic!("failed job is admitted");
+        };
+        jobs.start(seq).expect("failed job starts");
+        jobs.publish_failed(seq, "internal_error".to_owned(), "worker died".to_owned());
+        jobs.publish_ready(seq, vec![vec![0.5, 0.5]]);
+        assert!(
+            matches!(
+                jobs.poll(&job_id, "failed", None),
+                PollOutcome::Failed { code, .. } if code == "internal_error"
+            ),
+            "a publication after failure does not resurrect the job"
+        );
+        assert_eq!(
+            jobs.lock_jobs().retained_result_bytes,
+            retained,
+            "a failed job never charges result bytes"
+        );
     }
 
     #[test]

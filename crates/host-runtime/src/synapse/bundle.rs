@@ -33,7 +33,6 @@ const OUTPUT_NAME_ALLOWLIST: &[&str] = &[
 const MAX_OUTPUT_INDEX: u64 = 7;
 
 /// Bundle errors omit artifact bytes.
-/// their manifest.
 #[derive(Debug, Clone)]
 pub struct BundleError(pub String);
 
@@ -122,7 +121,7 @@ pub enum SelectedOutput {
 }
 
 impl BundleManifest {
-    /// FastEmbed vocabulary.
+    /// `selected_output` maps the manifest's output selector onto the FastEmbed `OutputKey` vocabulary; names outside `OUTPUT_NAME_ALLOWLIST` and indices above `MAX_OUTPUT_INDEX` are rejected.
     pub fn selected_output(&self) -> Result<SelectedOutput, BundleError> {
         match (&self.output.name, self.output.index, self.output.only_one) {
             (Some(name), None, None) => OUTPUT_NAME_ALLOWLIST
@@ -168,7 +167,6 @@ pub struct VerifiedBundle {
     pub corpus: Corpus,
 }
 
-///
 /// `expected_manifest_sha256` binds the parsed `manifest.json` to the outer trust root.
 /// The outer manifest digest extends trust over every artifact named by `manifest.json`.
 /// `None` permits callers that have no outer digest.
@@ -333,7 +331,6 @@ fn validate_manifest(manifest: &BundleManifest) -> Result<(), BundleError> {
 /// The startup budget must include `jobs::job_input_bytes` for each admitted job.
 /// `jobs::job_input_bytes` includes both key copies, decoded ID/hash capacities, and admission-time metadata copies.
 /// `max_queued_request_bytes` alone can permit scratch exhaustion because it excludes the per-job runtime charge.
-///
 /// `per_waiter_charge_bound` uses the runtime accounting on worst-case-shaped inputs to avoid duplicated formulas drifting apart.
 fn max_queued_metadata_bytes(limits: &SynapseLimits) -> Option<u64> {
     let worst_item = jobs::BatchItem {
@@ -435,6 +432,12 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
     }
     if limits.max_retained_jobs == 0 {
         return Err(err("host retained job count must be nonzero"));
+    }
+    if limits.max_queued_jobs == 0 {
+        return Err(err("host queued job count must be nonzero"));
+    }
+    if limits.retention.is_zero() {
+        return Err(err("host result retention must be nonzero"));
     }
     if u64::try_from(limits.max_batch_text_bytes)
         .map(|max_batch_text_bytes| limits.max_queued_request_bytes < max_batch_text_bytes)
@@ -580,7 +583,6 @@ pub(crate) fn validate_sha256_hex(hash: &str) -> Result<(), &'static str> {
 
 /// The lane fingerprint uses SHA-256 over a versioned, newline-joined `key=value` serialization.
 /// The fingerprint excludes model name, provenance, and `recommended_batch` because they cannot change a served vector.
-///
 /// Length-prefixing initializer names prevents delimiters in legal filenames from forging fields.
 pub fn canonical_fingerprint(manifest: &BundleManifest) -> String {
     let output = match (
@@ -633,7 +635,6 @@ pub fn canonical_fingerprint(manifest: &BundleManifest) -> String {
 }
 
 /// The reader must use the descriptor whose metadata was validated.
-///
 /// A second path lookup can read bytes whose type and length were never checked.
 /// A path replacement can redirect the second lookup to a symlink or larger file.
 #[derive(Debug)]
@@ -644,7 +645,8 @@ pub(crate) struct OpenRegularFile {
 
 #[derive(Debug)]
 pub(crate) enum OpenRegularFileError {
-    Missing,
+    /// The open or the descriptor stat failed; the errno separates absence (`ENOENT`) from a permission or descriptor-limit failure.
+    Missing(rustix::io::Errno),
     NotRegular,
 }
 
@@ -667,11 +669,15 @@ pub(crate) fn open_regular_file(path: &Path) -> Result<OpenRegularFile, OpenRegu
         if errno == rustix::io::Errno::LOOP {
             OpenRegularFileError::NotRegular
         } else {
-            OpenRegularFileError::Missing
+            OpenRegularFileError::Missing(errno)
         }
     })?;
     let file = std::fs::File::from(fd);
-    let metadata = file.metadata().map_err(|_| OpenRegularFileError::Missing)?;
+    let metadata = file.metadata().map_err(|error| {
+        OpenRegularFileError::Missing(
+            rustix::io::Errno::from_io_error(&error).unwrap_or(rustix::io::Errno::IO),
+        )
+    })?;
     if !metadata.is_file() {
         return Err(OpenRegularFileError::NotRegular);
     }
@@ -686,13 +692,13 @@ fn open_artifact(dir: &Path, name: &str) -> Result<OpenRegularFile, BundleError>
     // NOFOLLOW turns a symlink into an open failure rather than a redirect.
     // `O_NONBLOCK` prevents opening a planted FIFO from blocking.
     open_regular_file(&path).map_err(|error| match error {
-        OpenRegularFileError::Missing => err(format!("artifact is missing: {name}")),
+        OpenRegularFileError::Missing(errno) => {
+            err(format!("artifact is missing: {name} ({errno})"))
+        }
         OpenRegularFileError::NotRegular => err(format!("artifact is not a regular file: {name}")),
     })
 }
 
-/// The reader limits reads to the checked length to bound allocation.
-/// The reader limits reads to the checked length to bound allocation.
 /// The reader limits reads to the checked length to bound allocation.
 fn read_open_artifact(open: OpenRegularFile, name: &str) -> Result<Vec<u8>, BundleError> {
     open.read()
@@ -962,7 +968,6 @@ mod tests {
         assert!(error.0.contains("maximum batch result"));
     }
 
-    /// startup.
     #[test]
     fn a_page_bound_above_the_scratch_pool_is_rejected() {
         let manifest = manifest();
@@ -1027,6 +1032,32 @@ mod tests {
             ..SynapseLimits::default()
         };
         assert!(validate_test_serving(&manifest, &limits).is_ok());
+    }
+
+    #[test]
+    fn zero_job_and_retention_counts_are_rejected() {
+        for (mutate, fragment) in [
+            (
+                (|limits: &mut SynapseLimits| limits.max_retained_jobs = 0)
+                    as fn(&mut SynapseLimits),
+                "retained job count",
+            ),
+            (|limits| limits.max_queued_jobs = 0, "queued job count"),
+            (
+                |limits| limits.retention = std::time::Duration::ZERO,
+                "result retention",
+            ),
+        ] {
+            let mut limits = SynapseLimits::default();
+            mutate(&mut limits);
+            let error = validate_limits(&limits).expect_err("a zero limit disables the lane");
+            assert!(
+                error.0.contains(fragment),
+                "reason {:?} does not mention {fragment:?}",
+                error.0
+            );
+        }
+        assert!(validate_limits(&SynapseLimits::default()).is_ok());
     }
 
     #[test]

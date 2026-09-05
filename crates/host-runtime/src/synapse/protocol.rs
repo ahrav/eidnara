@@ -1,7 +1,7 @@
 //! Synapse validates four request operations, canonicalizes request keys across languages, and encodes responses.
-//! encoding.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
@@ -17,6 +17,8 @@ const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub(crate) const MAX_JOB_ID_BYTES: usize = 128;
 pub(crate) const MAX_CURSOR_BYTES: usize = 128;
 pub(crate) const MAX_DEADLINE_MS: u64 = 3_600_000;
+/// `DEFAULT_DEADLINE_MS` applies when a query omits `deadline_ms`; `MAX_DEADLINE_MS` is the ceiling a client may request.
+pub(crate) const DEFAULT_DEADLINE_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestError {
@@ -297,7 +299,6 @@ struct ResultParams<'a> {
 }
 
 /// The request decoder classifies malformed JSON and typed-deserialization failures as `schema_violation`.
-/// those carry.
 fn decode<'a, T: serde::Deserialize<'a>>(body: &'a [u8]) -> Result<T, RequestError> {
     serde_json::from_slice(body).map_err(|err| schema(err.to_string()))
 }
@@ -724,26 +725,31 @@ pub fn parse_request_unreserved(
     decode_request(body, lane, limits)
 }
 
-/// clients retry.
+/// `unservable_body_error` reports a schema violation rather than `queue_full` because `required > capacity`:
+/// retrying without shrinking the request cannot make the reservation admissible.
+/// The message tells the client only that its body is too large; `required` and `capacity` stay server-side.
 pub(crate) fn unservable_body_error(
     body_len: usize,
     required: usize,
     capacity: usize,
 ) -> RequestError {
+    debug_assert!(
+        required > capacity,
+        "unservable_body_error requires a reservation above capacity"
+    );
     schema(format!(
-        "request body of {body_len} bytes needs {required} resident bytes, \
-         above this host's {capacity}-byte resident capacity"
+        "request body of {body_len} bytes is too large for this host"
     ))
 }
 
 const RESERVE_PER_ITEM_BYTES: usize = 640;
 
-/// diagnostic.
+/// `RESERVE_ENVELOPE_BYTES` covers the decoded envelope fields, the request key, and one bounded diagnostic.
 const RESERVE_ENVELOPE_BYTES: usize = 4096;
 
 const RESERVE_BODY_FACTOR: usize = 3;
 
-/// bound.
+/// `RESERVE_MIN_ITEM_BODY_BYTES` prevents small bodies from reserving `max_batch_items`.
 const RESERVE_MIN_ITEM_BODY_BYTES: usize = 64;
 
 fn body_item_bound(body_len: usize, max_batch_items: usize) -> usize {
@@ -758,7 +764,6 @@ pub(crate) fn parse_reservation_bytes(body_len: usize, limits: &SynapseLimits) -
         .checked_add(RESERVE_ENVELOPE_BYTES)
 }
 
-/// embedding space.
 fn check_constraints(
     model: &str,
     fingerprint: &str,
@@ -832,23 +837,21 @@ fn parse_batch(
         return Err(schema("item count out of bounds"));
     }
     let mut items = Vec::with_capacity(params.items.len());
+    let mut seen_ids: HashSet<&str> = HashSet::with_capacity(params.items.len());
     let mut total_text_bytes = 0usize;
     for raw in &params.items {
-        check_string("item id", &raw.0.id, MAX_ITEM_ID_BYTES, true).map_err(schema)?;
-        check_string("item text", &raw.0.text, limits.max_text_bytes, true).map_err(schema)?;
-        // The aggregate cap is checked before hashing so an oversize batch never pays for hashing or copying text beyond the cap.
-        total_text_bytes += raw.0.text.len();
+        // The aggregate cap is checked before this item's string scan and hash so an overflowing item costs no per-byte work.
+        total_text_bytes = total_text_bytes.saturating_add(raw.0.text.len());
         if total_text_bytes > limits.max_batch_text_bytes {
             return Err(schema("aggregate item text exceeds the batch cap"));
         }
+        check_string("item id", &raw.0.id, MAX_ITEM_ID_BYTES, true).map_err(schema)?;
+        check_string("item text", &raw.0.text, limits.max_text_bytes, true).map_err(schema)?;
         let actual = sha256_hex(raw.0.text.as_bytes());
         if raw.0.content_sha256 != actual {
             return Err(schema("item content_sha256 does not match its text"));
         }
-        if items
-            .iter()
-            .any(|existing: &BatchItem| existing.id == raw.0.id)
-        {
+        if !seen_ids.insert(raw.0.id.as_ref()) {
             return Err(schema("duplicate item id"));
         }
         items.push(BatchItem {
@@ -924,13 +927,7 @@ fn json_string(value: &str) -> String {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    crate::instance::hex(&Sha256::digest(bytes))
 }
 
 fn is_lower_hex_64(value: &str) -> bool {
@@ -1019,8 +1016,7 @@ const VECTOR_BODY_ENVELOPE: usize = 256;
 /// `vector_body_reservation` upper-bounds serialized vector-body length using the job table's per-item accounting.
 /// A page that satisfies the job table's page cap fits the reservation.
 /// The reservation charges `lane.model` at its escaped length; the manifest permits 128 unconstrained bytes, which can occupy 768 escaped bytes.
-/// TODO: Charge `next_cursor` at its escaped length.
-/// unchanged.
+/// Host-generated cursors are `<hex incarnation>-<seq>:<offset>`; hex digits, decimal digits, `-`, and `:` need no JSON escaping, so the reservation charges `next_cursor` at its raw length.
 pub fn vector_body_reservation(
     lane: &LaneInfo,
     items: &[VectorItemView<'_>],
@@ -1275,6 +1271,53 @@ mod tests {
             panic!("expected a batch");
         };
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn the_item_that_crosses_the_text_cap_is_rejected_before_its_hash_is_checked() {
+        let limits = SynapseLimits {
+            max_batch_text_bytes: 5,
+            ..SynapseLimits::default()
+        };
+        let lane = lane();
+        // The overflowing item carries a bogus hash; the aggregate error proves the cap fired before hashing.
+        let overflow = format!(
+            "[{},{{\"id\":\"b\",\"text\":\"two\",\"content_sha256\":\"zzz\"}}]",
+            item_json("a", "one"),
+        );
+        let error = parse_request_unreserved(&batch_body(&lane, &overflow), false, &lane, &limits)
+            .expect_err("six text bytes exceed a five-byte cap");
+        assert_eq!(error.code, "schema_violation");
+        assert!(
+            error
+                .message
+                .contains("aggregate item text exceeds the batch cap"),
+            "{}",
+            error.message
+        );
+
+        let exact = format!("[{},{}]", item_json("a", "one"), item_json("b", "tw"));
+        let key = canonical_request_key(&lane, &[item("a", "one"), item("b", "tw")]);
+        let body = String::from_utf8(batch_body(&lane, &exact))
+            .expect("utf8")
+            .replace(&"0".repeat(64), &key)
+            .into_bytes();
+        parse_request_unreserved(&body, false, &lane, &limits).expect("exactly five bytes parse");
+    }
+
+    #[test]
+    fn duplicate_item_ids_are_rejected() {
+        let lane = lane();
+        let dup = format!("[{},{}]", item_json("a", "one"), item_json("a", "two"));
+        let error = parse_request_unreserved(
+            &batch_body(&lane, &dup),
+            false,
+            &lane,
+            &SynapseLimits::default(),
+        )
+        .expect_err("repeated id");
+        assert_eq!(error.code, "schema_violation");
+        assert_eq!(error.message, "duplicate item id");
     }
 
     #[test]

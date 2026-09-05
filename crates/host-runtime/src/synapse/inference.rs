@@ -1,5 +1,4 @@
 //! This CPU-only backend owns dynamic ORT initialization and performs a structural startup probe and semantic certification against the bundle corpus.
-//! corpus.
 
 #[cfg(target_os = "linux")]
 use std::io::Write;
@@ -28,9 +27,9 @@ pub struct OrtIdentity {
     pub sha256: String,
 }
 
-/// `Input` errors reject the affected request.
+/// `Input` errors reject the affected request; a native inference failure over one page is `Input` because the model stays usable for other pages.
 /// `Artifact` errors disable the component.
-/// `Invariant` errors mark the component failing and prevent suspect vectors from being returned.
+/// `Invariant` errors mark the component failing and prevent suspect vectors from being returned; only the dimension, finiteness, and norm postconditions raise them.
 #[derive(Debug, Clone)]
 pub enum InferenceError {
     Input(String),
@@ -70,25 +69,35 @@ impl VerifiedOrtLibrary {
     fn is_mapped(&self) -> Result<bool, InferenceError> {
         use std::os::unix::fs::MetadataExt;
 
-        let inode = self
+        let metadata = self
             .file
             .metadata()
-            .map_err(|_| InferenceError::Artifact("ONNX Runtime memfd stat failed".to_owned()))?
-            .ino();
+            .map_err(|_| InferenceError::Artifact("ONNX Runtime memfd stat failed".to_owned()))?;
         let maps = std::fs::read_to_string("/proc/self/maps")
             .map_err(|_| InferenceError::Artifact("process memory map is unreadable".to_owned()))?;
-        Ok(memfd_inode_is_mapped(&maps, inode))
+        Ok(memfd_inode_is_mapped(&maps, metadata.dev(), metadata.ino()))
     }
 }
 
 /// `/proc/self/maps` lines begin with `address perms offset dev inode`; a pathname, when present, follows.
+/// `dev` is `major:minor` in hex; inode numbers are unique only within one device, so both must match the memfd's `st_dev` and `st_ino`.
 #[cfg(target_os = "linux")]
-fn memfd_inode_is_mapped(maps: &str, inode: u64) -> bool {
+fn memfd_inode_is_mapped(maps: &str, dev: u64, inode: u64) -> bool {
+    let (major, minor) = (rustix::fs::major(dev), rustix::fs::minor(dev));
     maps.lines().any(|line| {
         let mut fields = line.split_whitespace();
-        let mapped_inode = fields.nth(4).and_then(|field| field.parse::<u64>().ok());
+        let mapped_dev = fields.nth(3).and_then(|field| {
+            let (major, minor) = field.split_once(':')?;
+            Some((
+                u32::from_str_radix(major, 16).ok()?,
+                u32::from_str_radix(minor, 16).ok()?,
+            ))
+        });
+        let mapped_inode = fields.next().and_then(|field| field.parse::<u64>().ok());
         let pathname = fields.next();
-        mapped_inode == Some(inode) && pathname.is_some_and(|path| path.starts_with("/memfd:"))
+        mapped_dev == Some((major, minor))
+            && mapped_inode == Some(inode)
+            && pathname.is_some_and(|path| path.starts_with("/memfd:"))
     })
 }
 
@@ -141,8 +150,8 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
         InferenceError::Artifact("expected ONNX Runtime hash is not a real digest".to_owned())
     })?;
     let open = open_regular_file(&identity.library).map_err(|error| match error {
-        OpenRegularFileError::Missing => {
-            InferenceError::Artifact("ONNX Runtime library is missing".to_owned())
+        OpenRegularFileError::Missing(errno) => {
+            InferenceError::Artifact(format!("ONNX Runtime library is missing: {errno}"))
         }
         OpenRegularFileError::NotRegular => {
             InferenceError::Artifact("ONNX Runtime library is not a regular file".to_owned())
@@ -321,7 +330,7 @@ impl Backend {
         }
         let vectors = model
             .embed(texts, None)
-            .map_err(|e| InferenceError::Invariant(format!("inference failed: {e}")))?;
+            .map_err(|e| InferenceError::Input(format!("inference failed: {e}")))?;
         drop(model);
         if vectors.len() != texts.len() {
             return Err(InferenceError::Invariant(
@@ -393,23 +402,42 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_memfd_mapping_is_recognized_only_by_inode_and_memfd_path() {
+    fn a_memfd_mapping_is_recognized_only_by_device_inode_and_memfd_path() {
         let maps = "\
 7f0000000000-7f0000001000 r--p 00000000 00:1d 4242 /memfd:host-onnxruntime (deleted)
 7f0000001000-7f0000002000 r-xp 00001000 fd:01 4242 /usr/lib/libonnxruntime.so
 7f0000002000-7f0000003000 rw-p 00000000 00:00 0
 7f0000003000-7f0000004000 r--p 00000000 00:1d 99 /memfd:other (deleted)
+7f0000004000-7f0000005000 r--p 00000000 00:1e 4242 /memfd:elsewhere (deleted)
 ";
-        assert!(memfd_inode_is_mapped(maps, 4242));
-        assert!(memfd_inode_is_mapped(maps, 99));
+        let memfd_dev = rustix::fs::makedev(0, 0x1d);
+        assert!(memfd_inode_is_mapped(maps, memfd_dev, 4242));
+        assert!(memfd_inode_is_mapped(maps, memfd_dev, 99));
+        // A memfd mapping with the same inode number on another device does not count.
+        assert!(!memfd_inode_is_mapped(
+            "7f0000004000-7f0000005000 r--p 00000000 00:1e 4242 /memfd:elsewhere (deleted)\n",
+            memfd_dev,
+            4242
+        ));
+        assert!(memfd_inode_is_mapped(
+            maps,
+            rustix::fs::makedev(0, 0x1e),
+            4242
+        ));
         // A regular-file mapping with the same inode number does not count.
         assert!(!memfd_inode_is_mapped(
             "7f0000001000-7f0000002000 r-xp 00001000 fd:01 4242 /usr/lib/libonnxruntime.so\n",
+            memfd_dev,
             4242
         ));
-        assert!(!memfd_inode_is_mapped(maps, 4243));
-        assert!(!memfd_inode_is_mapped(maps, 0));
-        assert!(!memfd_inode_is_mapped("", 4242));
+        assert!(!memfd_inode_is_mapped(
+            "7f0000001000-7f0000002000 r-xp 00001000 fd:01 4242 /usr/lib/libonnxruntime.so\n",
+            rustix::fs::makedev(0xfd, 1),
+            4242
+        ));
+        assert!(!memfd_inode_is_mapped(maps, memfd_dev, 4243));
+        assert!(!memfd_inode_is_mapped(maps, memfd_dev, 0));
+        assert!(!memfd_inode_is_mapped("", memfd_dev, 4242));
     }
 
     #[cfg(target_os = "linux")]

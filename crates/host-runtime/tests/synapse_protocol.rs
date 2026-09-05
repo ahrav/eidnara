@@ -158,7 +158,7 @@ async fn expired_waiter_releases_its_slot_without_engine_work() {
     assert_eq!(expired_terminal.error_code(), "timeout");
     assert_eq!(
         expired_terminal.json()["message"],
-        "the query deadline expired while queued"
+        "the query deadline expired"
     );
     assert_eq!(engine.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
@@ -793,6 +793,54 @@ async fn embed_batch_always_returns_a_job_descriptor() {
 }
 
 #[tokio::test]
+async fn full_job_admission_rejects_with_the_batch_retry_delay() {
+    let engine = DeterministicEngine::new();
+    let gate = engine.block_calls();
+    let limits = SynapseLimits {
+        max_queued_jobs: 1,
+        retry_after_ms: 91,
+        ..SynapseLimits::default()
+    };
+    let host = SynapseHost::start(ready_component(engine.clone(), limits)).await;
+    let mut client = host.client().await;
+    let (channel, epoch) = open_synapse_route(&mut client).await;
+    let lane = test_lane();
+
+    let running = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &items(&[("a", "running batch")])),
+    )
+    .await;
+    assert!(running.json()["result"]["job_id"].is_string());
+    let started_by = tokio::time::Instant::now() + BUDGET;
+    while engine.calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < started_by,
+            "the first batch never reached inference"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let rejected = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.batch",
+        batch_params(&lane, &items(&[("b", "rejected batch")])),
+    )
+    .await;
+    assert_eq!(rejected.ty, TY_ERROR);
+    assert_eq!(rejected.error_code(), "queue_full");
+    assert_eq!(rejected.json()["retry_after_ms"], 91);
+
+    DeterministicEngine::release_calls(&gate);
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
 async fn batch_result_over_retention_cap_is_rejected_before_inference() {
     let engine = DeterministicEngine::new();
     // Each encoded record contains eight `f32` components, one ID byte, and one 64-byte content hash.
@@ -970,7 +1018,7 @@ async fn equal_replays_reuse_one_job_and_one_inference() {
         "equal replays run inference exactly once"
     );
 
-    // Resending a retained key with changed order, IDs, texts, or hashes creates a permanent conflict and never reruns the job.
+    // Resending a retained key over changed order, IDs, texts, or hashes fails the canonical-key check before the job table is consulted, and never reruns the job.
     for other in [
         items(&[("item:0", "different text")]),
         items(&[("item:1", "replay me")]),
@@ -979,9 +1027,9 @@ async fn equal_replays_reuse_one_job_and_one_inference() {
         let mut conflicting = batch_params(&lane, &other);
         conflicting["request_key"] = request_key(&lane, &page).into();
         let frame = call(&mut client, channel, epoch, "embed.batch", conflicting).await;
-        assert_eq!(frame.error_code(), "idempotency_conflict");
+        assert_eq!(frame.error_code(), "schema_violation");
     }
-    // An unretained key that fails the canonical check is a schema fault.
+    // An unretained key that fails the canonical check gets the same verdict.
     let mut fresh = batch_params(&lane, &items(&[("item:9", "fresh text")]));
     fresh["request_key"] = sha256_hex("some other key").into();
     let frame = call(&mut client, channel, epoch, "embed.batch", fresh).await;
