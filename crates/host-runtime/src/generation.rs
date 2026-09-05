@@ -572,14 +572,13 @@ impl GenerationStore {
         if self.read_current()? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
         }
-        // Opening before the capacity check pins each source inode, so the preflight and the
-        // copy read the same file even if the working directory or the pathname changes.
-        let mut opened = Vec::with_capacity(sources.len());
+        // The preflight records each source's absolute path and inode snapshot; the copy reopens by that path and rejects a changed snapshot, so only one descriptor is open at a time.
+        let mut preflighted = Vec::with_capacity(sources.len());
         let mut sizes = Vec::with_capacity(sources.len());
         for spec in sources {
-            let source = open_source(spec)?;
+            let source = preflight_source(spec)?;
             sizes.push(source.stat.st_size as u64);
-            opened.push(source);
+            preflighted.push(source);
         }
         let required =
             required_stage_bytes(&sizes).ok_or_else(|| invalid("manifest size overflow"))?;
@@ -591,7 +590,7 @@ impl GenerationStore {
         }
 
         let (temp_name, temp_fd) = self.create_staging_temp()?;
-        let result = self.stage_into_temp(&temp_fd, sources, &opened, meta);
+        let result = self.stage_into_temp(&temp_fd, sources, &preflighted, meta);
         let manifest = match result {
             Ok(manifest) => manifest,
             Err(err) => {
@@ -647,14 +646,14 @@ impl GenerationStore {
         &self,
         temp_fd: &OwnedFd,
         sources: &[SourceSpec],
-        opened: &[OpenedSource],
+        preflighted: &[PreflightSource],
         meta: &StageMeta,
     ) -> Result<GenerationManifest, GenerationError> {
         let mut files = Vec::with_capacity(sources.len());
         let mut seen = BTreeSet::new();
         // The code fsyncs each directory that receives an entry because fsyncing a file does not persist its parent entry.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
-        for (spec, source) in sources.iter().zip(opened) {
+        for (spec, source) in sources.iter().zip(preflighted) {
             validate_rel_path(&spec.rel_path)?;
             if !seen.insert(spec.rel_path.clone()) {
                 return Err(invalid("duplicate staged path"));
@@ -708,6 +707,8 @@ impl GenerationStore {
         };
         if result {
             fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
+            // A same-UID writer can alter a staged file between its copy and this rename.
+            self.validate(digest)?;
             return Ok(());
         }
         match self.validate(digest) {
@@ -939,17 +940,33 @@ fn ensure_parent_dirs(
     Ok(())
 }
 
-struct OpenedSource {
-    fd: OwnedFd,
-    /// `fstat` snapshot of `fd` at open time.
+struct PreflightSource {
+    /// Absolute at preflight time, so a later `chdir` cannot redirect the reopen.
+    path: PathBuf,
+    /// `fstat` snapshot taken through the preflight descriptor.
     stat: rustix::fs::Stat,
 }
 
-/// `open_source` requires a regular file whose size matches `expected_size` when specified.
-fn open_source(spec: &SourceSpec) -> Result<OpenedSource, GenerationError> {
+/// Opens one source, checks it is a regular file whose size matches `expected_size` when
+/// specified, and returns its snapshot. The descriptor is closed on return so a generation with
+/// more files than the descriptor limit can still be preflighted.
+fn preflight_source(spec: &SourceSpec) -> Result<PreflightSource, GenerationError> {
+    let path = std::path::absolute(&spec.source)
+        .map_err(|_| invalid("staging source path cannot be made absolute"))?;
+    let (_, stat) = open_source_file(&path)?;
+    if spec
+        .expected_size
+        .is_some_and(|size| size != stat.st_size as u64)
+    {
+        return Err(invalid("staging source size differs from payload manifest"));
+    }
+    Ok(PreflightSource { path, stat })
+}
+
+fn open_source_file(path: &Path) -> Result<(OwnedFd, rustix::fs::Stat), GenerationError> {
     let fd = openat(
         rustix::fs::CWD,
-        &*spec.source,
+        path,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
@@ -958,24 +975,22 @@ fn open_source(spec: &SourceSpec) -> Result<OpenedSource, GenerationError> {
     if (mode_bits(&stat) & S_IFMT) != S_IFREG {
         return Err(invalid("staging source is not a regular file"));
     }
-    if spec
-        .expected_size
-        .is_some_and(|size| size != stat.st_size as u64)
-    {
-        return Err(invalid("staging source size differs from payload manifest"));
-    }
-    Ok(OpenedSource { fd, stat })
+    Ok((fd, stat))
 }
 
-/// The copy fails if the source's identity or timestamps change between open and completion.
+/// The copy reopens the preflighted path and fails if the source's identity or timestamps
+/// differ from the preflight snapshot or change before the copy completes.
 fn copy_source_into(
     temp_fd: &OwnedFd,
     spec: &SourceSpec,
-    source: &OpenedSource,
+    source: &PreflightSource,
     dirs: &mut BTreeSet<String>,
 ) -> Result<ManifestFile, GenerationError> {
-    let source_fd = &source.fd;
-    let before = &source.stat;
+    let (source_fd, before) = open_source_file(&source.path)?;
+    if !same_snapshot(&source.stat, &before) {
+        return Err(invalid("staging source changed since preflight"));
+    }
+    let (source_fd, before) = (&source_fd, &before);
     ensure_parent_dirs(temp_fd, &spec.rel_path, dirs)?;
     let mode: u32 = if spec.executable { 0o700 } else { 0o600 };
     let dest_fd = openat(

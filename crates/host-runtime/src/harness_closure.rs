@@ -716,14 +716,15 @@ impl HarnessClosureStore {
         let name = format!("{TEMP_PREFIX}{}", hex(&random));
         mkdirat(&self.root_fd, name.as_str(), Mode::from_raw_mode(0o700))
             .map_err(|_| invalid("temporary closure creation failed"))?;
-        match open_created_dir(&self.root_fd, &name) {
-            Ok(fd) => {
-                verify_owned_directory(&fd)?;
-                Ok((name, fd))
-            }
-            Err(_) => {
+        // The error path removes the unreturned directory so retries do not accumulate `.tmp-*` directories.
+        let opened = open_created_dir(&self.root_fd, &name)
+            .map_err(|_| invalid("temporary closure open failed"))
+            .and_then(|fd| verify_owned_directory(&fd).map(|()| fd));
+        match opened {
+            Ok(fd) => Ok((name, fd)),
+            Err(error) => {
                 let _ = remove_tree(&self.root_fd, &name);
-                Err(invalid("temporary closure open failed"))
+                Err(error)
             }
         }
     }
