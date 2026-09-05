@@ -2155,24 +2155,26 @@ against a correct implementation; neither asserts a retirement, an expiry, or
 any violation.
 Fault/timing angle: the window exists because the host writer has no control
 lane. `frame_channel.rs:590-597` (re-verified) holds a single
-`mpsc::Sender<QueuedOutboundFrame>`, created at `:862` with capacity
-`queue_frames`, default 64 (`config.rs:141`, passed at `connection.rs:181`).
+`mpsc::Sender<QueuedOutboundFrame>`, created at `:686` with capacity
+`queue_frames`, default 64 (`config.rs:88`), passed in by the ring transport at
+`ring_transport.rs:226` (all re-verified).
 There is no reserved control slot, unlike the client, which reserves one
 (`client.rs:954`). Two distinct consequences follow, and only the first is
 handled. First, a Ping queued behind application frames is deadline-anchored at
 completion (`connection.rs:816-817` (re-verified)) and its Pong is parked rather than judged
 (`:528-535`), so queueing delay is not charged to the peer. That is correct and
 deliberate. Second, and unhandled: the Ping's *admission* is bounded.
-`gen.writer.send(...)` at `:1449` reaches `FrameSender::send`
+`generation.writer.send(...)` at `connection.rs:823-835` (re-verified) reaches `FrameSender::send`
 (`frame_channel.rs:609-614` (re-verified)), which passes `admission_deadline()`, that is
-`now + admission_timeout` (`:783-785`), and `connection.rs:178-186` supplies
-`shared.timing.frame_deadline` there, default 30 seconds (`config.rs:224`). The
+`now + admission_timeout` (`:613-614`), and the ring transport supplies
+`shared.timing.frame_deadline` as that timeout when it constructs the sender
+(`ring_transport.rs:226`), default 30 seconds (`config.rs:168`); all re-verified. The
 timeout arm at `frame_channel.rs:647-651` (re-verified) calls `self.retired.cancel()` and
 `self.generation.cancel()`. So a Ping that cannot be admitted within
 `frame_deadline` retires the generation from inside the sender, before
-`liveness_loop` observes `sent.is_err()` at `:1457`. This bypasses
-`invalidate_on_missed` entirely: the missed-Pong retirement at `:1376` is gated
-on that flag and the admission retirement is not.
+`liveness_loop` observes `sent.is_err()` at `:834`. This bypasses
+`invalidate_on_missed` entirely: the missed-Pong retirement at `:761` is gated
+on that flag and the admission retirement is not (both re-verified).
 Required faults and enabling state: a configured `LivenessPolicy` with
 `invalidate_on_missed: false`; a handler producing frames faster than the peer
 drains them so all 64 slots stay occupied; and a peer that keeps reading fast
@@ -6744,8 +6746,9 @@ Type: safety
 Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `inbound_validation_enforces_the_direct_profile_table`
-(`client.rs:2658`) exercises `validate_inbound` broadly; whether it asserts the
-`Cancel` disposition is unverified
+(`client.rs:2658`) exercises `validate_inbound` broadly but does not assert the
+`Cancel` disposition: its body (`:2658-2751`) names only `FrameType::Request`
+(`:2750`) among the five residue types, so the `Cancel` case is a confirmed gap
 Guarantee: The client treats a host-originated `Cancel` as a framing violation
 that retires the whole generation, although the protocol's role table does not
 list host-originated `Cancel` as role-invalid and assigns `Cancel` an idempotent
@@ -6765,7 +6768,8 @@ Verified `validate_inbound`'s arms are exactly `Response|Error`,
 `Cancel` is therefore in the residue. Contract side at
 `docs/host-wire-protocol.md:269` and `:280`.
 Existing check: `inbound_validation_enforces_the_direct_profile_table` (`:2658`);
-status `unaudited`, and its coverage of `Cancel` specifically is unverified.
+status `unaudited`. Verified: its body (`:2658-2751`) contains no `Cancel` case, so
+it does not assert this disposition; the `Cancel` gap is confirmed, not open.
 Impact: If a host ever emits `Cancel`, every route on the generation dies. If a
 host never does, the strictness is free and the finding is a documentation defect
 rather than a code defect. Which of those holds is the open question.
@@ -6798,7 +6802,7 @@ Open questions:
 Type: reachability
 Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
-Exercised: partial - reached only by the test module's 16 direct `dispatch` calls
+Exercised: partial - reached only by the test module's 15 direct `dispatch` calls (the source catalog said 16; grepping the test module finds 15)
 Guarantee: `dispatch`'s catch-all retirement arm is unreachable from the
 production reader, because `validate_inbound` already rejects every frame type
 that would land there.
@@ -6817,7 +6821,7 @@ Verified that `dispatch` handles `Ping`, `Goodbye`, `Push`,
 `Request`, `Cancel`, `Pong`, `Hello`, and `HelloAck` (`wire.rs:52-63`), and that
 `validate_inbound:2067` rejects all five. Confirmed `dispatch`'s only non-test
 caller is `:1982`.
-Existing check: none as a guard. The 16 test call sites listed in the evidence
+Existing check: none as a guard. The 15 test call sites listed in the evidence (the evidence file's count of 16 is the source catalog's)
 file reach `dispatch` directly, bypassing validation.
 Impact: Low on its own. It matters as a structural fact: the tests exercise a
 dispatch surface the production reader cannot reach, so a regression that
@@ -9147,7 +9151,7 @@ start", and that boundary is not where `validate` is.
 ### rt-a-startup-refuses-every-configuration-it-cannot-fund
 
 Type: safety
-Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.
+Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`), then binds and publishes the setup socket and writes the running phase (`:702-715`), and only then constructs `HostShared` (`:748`), on every start; no option skips any step, and the construction runs after publication, which is why a construction-time panic is client-visible.
 Status: active
 Exercised: partial - `handler_contract.rs:323`
 `reservations_must_leave_one_general_slot_in_each_pool`, `:375`
@@ -9177,7 +9181,7 @@ Open questions: None.
 ### rt-a-the-ingress-pool-derivation-cannot-underflow
 
 Type: safety
-Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.
+Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`), then binds and publishes the setup socket and writes the running phase (`:702-715`), and only then constructs `HostShared` (`:748`), on every start; no option skips any step, and the construction runs after publication, which is why a construction-time panic is client-visible.
 Status: active
 Exercised: not yet - no test relates `config.rs:23-24` to `runtime.rs:762-767`;
 `config.rs:520-548` asserts the floor decomposition but never the runtime
@@ -9208,7 +9212,7 @@ Open questions: None.
 ### rt-a-no-configured-limit-is-silently-clamped
 
 Type: safety
-Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.
+Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`), then binds and publishes the setup socket and writes the running phase (`:702-715`), and only then constructs `HostShared` (`:748`), on every start; no option skips any step, and the construction runs after publication, which is why a construction-time panic is client-visible.
 Status: active
 Exercised: partial - `config.rs:503`, `:551`, `:565`, `:577`, `:604`, `:637`,
 `:647` cover rejection for individual keys; no test asserts that no path clamps
@@ -9631,7 +9635,7 @@ Open questions:
 ### rt-a-configuration-is-frozen-for-the-incarnation
 
 Type: safety
-Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.
+Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`), then binds and publishes the setup socket and writes the running phase (`:702-715`), and only then constructs `HostShared` (`:748`), on every start; no option skips any step, and the construction runs after publication, which is why a construction-time panic is client-visible.
 Status: active
 Exercised: not yet - no test mutates a config after startup, because no API
 permits it
@@ -9661,7 +9665,7 @@ Open questions: None.
 ### rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration
 
 Type: safety
-Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.
+Reachability: default-production - `run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`), then binds and publishes the setup socket and writes the running phase (`:702-715`), and only then constructs `HostShared` (`:748`), on every start; no option skips any step, and the construction runs after publication, which is why a construction-time panic is client-visible.
 Status: active
 Exercised: partial - `handler_contract.rs:636`
 `zero_reservation_handlers_keep_single_pool_admission` and `:375`
