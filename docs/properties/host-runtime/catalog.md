@@ -11,9 +11,11 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   TCP frame channel, transport negotiation, provider recovery, and the second transport backend. Records whose
   mechanism that refactor deleted carry `Status: invalidated` with the removal named in `Invalidated:`; records
   whose mechanism moved keep their status and cite the file that owns the mechanism now.
-- Line citations in record bodies are the source catalogs' citations and name lines of the source files at the
-  time the catalog was written; test names are the stable anchors. Where a record's line citation has been
-  re-verified against this tree, the record says so. This tree has no `migration/waves/U3/` ledger: each record's
+- Every line citation inside the `Check:` field of an active record is verified against this tree, because
+  those are the lines a campaign instruments; a construct the tree no longer has is named as removed rather than
+  given a line. Citations in the other fields are the source catalogs' and name lines of the source files at the
+  time the catalog was written; test names are the stable anchors there, and where such a citation has been
+  re-verified against this tree the record says so. This tree has no `migration/waves/U3/` ledger: each record's
   `Status` and `Reachability` fields are the coverage authority for this catalog, and the wave-level
   `core`/`carried-forward`/`invalidated` classification is recorded when the U3 `property-impact.json` lands.
 - `default-production` in this catalog means "on the default path of `host_runtime::run`
@@ -2055,14 +2057,14 @@ write completion.
 Check: `always` - under paused virtual time, for a policy with a chosen
 `ping_interval` and `pong_deadline`: (a) answer every Ping strictly inside
 `pong_deadline` measured from the write-completion instant recorded at
-`connection.rs:1443`, advance the clock by `k * ping_interval + pong_deadline`
+`connection.rs:816`, advance the clock by `k * ping_interval + pong_deadline`
 for a fixed small `k`, and assert `gen.token` is not cancelled and exactly `k`
 Pings were written; (b) with `invalidate_on_missed: true`, answer nothing,
 advance to `write_completion + pong_deadline`, and assert `gen.token` is
 cancelled; and assert it is *not* cancelled at `write_completion +
 pong_deadline
 - 1ns`. `always` because the two directions are the dual outcomes of one
-  predicate, `expired` at `connection.rs:1370-1375`, and both must hold at
+  predicate, `expired` at `connection.rs:755-760`, and both must hold at
   every evaluation of the loop.
 Fault/timing angle: the bound is stated in the units the code bounds, so this
 is a finite check rather than an unbounded "eventually". The wake is the
@@ -2117,9 +2119,9 @@ fires when all of these independent, legal preconditions hold at one instant: a
 queue holds `writer_queue_frames` admitted frames; and a Ping tick is due. A
 second constant marker `pong_parked_pending_write_completion` fires when a
 matching Pong is observed while `probe.written_at.is_none()`, which is the park
-branch at `connection.rs:535`. `sometimes` rather than `reachable` because a
+branch at `connection.rs:464`. `sometimes` rather than `reachable` because a
 campaign can execute those lines while never producing the operational state:
-line coverage of `:535` proves the branch compiled and ran, whereas the
+line coverage of `:464` proves the branch compiled and ran, whereas the
 property needs a full queue coinciding with a due tick, which is situation
 coverage. Both markers assert only legal preconditions, so they still fire
 against a correct implementation; neither asserts a retirement, an expiry, or
@@ -2303,7 +2305,7 @@ corrupt orphan, with no observable state in which either name is absent. Also
 assert the non-Linux non-macOS stub returns an error rather than succeeding.
 `always-or-unreached` because the branch is optional: it is entered only when
 the digest target is occupied by a corrupt unprotected generation
-(`generation.rs:886-905`), so a run that never meets that condition owes
+(`generation.rs:751-770`), so a run that never meets that condition owes
 nothing and the check must not fail.
 Fault/timing angle: the risk is platform divergence behind one expression.
 `generation.rs:1191-1198` gives Linux and macOS a shared arm calling
@@ -2361,7 +2363,7 @@ assertion for an empty occupant and a nonempty occupant, on both the flagged
 Linux path and the portable path, forcing the portable path either by a
 filesystem that rejects `renameat2` flags or by extracting the fallback so it
 can be called directly. `always` because the caller's contract at
-`generation.rs:868-871` is unconditional, so an occupied target that gets
+`generation.rs:744` is unconditional, so an occupied target that gets
 replaced is a violation rather than a tolerated case.
 Fault/timing angle: this is a check-then-act window that is dead on one
 platform and load-bearing on another. `generation.rs:1216-1242`: the Linux
@@ -2844,15 +2846,15 @@ Guarantee: No host or client producer path retains the `ReleaseIdentity`
 returned by `ProducerReservation::commit`, so `Ring::release` is never called
 with a producer-derived identity, and the producer-side half of Part 1's
 release contract stays unreachable.
-Check: `always` - `always(!X)` where X is "`Ring::release` (`ring.rs:1175`) is
+Check: `always` - `always(!X)` where X is "`Ring::release` (`ring.rs:1469`) is
 entered with an identity that originated from `ProducerReservation::commit`
-(`ring.rs:1769`)". Discharged today by enumerating every `.commit(` site and
+(`ring.rs:2561`)". Discharged today by enumerating every `.commit(` site and
 showing each discards its `Ok` value; optionally backed by a
 `#[cfg(debug_assertions)]` counter on the producer-identity path that must stay
 at zero. **This record previously claimed `unreachable`, which was wrong and is
 corrected here.** `unreachable` is reserved for a code location that must never
 execute, and `Ring::release` executes on every lease drop in production, through
-`ring_release_callback` (`ring.rs:1670-1677`) carrying a lease-derived identity.
+`ring_release_callback` (`ring.rs:2458-2465`) carrying a lease-derived identity.
 What the property forbids is not the location but the *provenance of an
 argument* at a shared function, which is a state with no dedicated detection
 point, and METHOD.md's rule for that is `always(!X)`. The type moves from
@@ -2985,7 +2987,7 @@ zero, because no `host-runtime` path calls `Admission::quarantine`; every endpoi
 exit, including one caused by ring corruption or a swallowed panic, releases the
 charge as if the storage were cleanly recycled.
 Check: `unreachable` - the code location `Admission::quarantine`
-(`profile.rs:568`) is never entered from any `host-runtime` call path.
+(`profile.rs:561`) is never entered from any `host-runtime` call path.
 `unreachable` fits because the subject is a specific unentered function, not a
 forbidden state; the derived state claim (`snapshot().quarantined ==
 ResourceCharges::ZERO` for every host process) follows from it and is the
@@ -3134,7 +3136,7 @@ Guarantee: A panic that escapes `run_endpoint` is distinguishable by the
 connection engine from an orderly endpoint exit, and the frame it was
 publishing is not left recorded as complete.
 Check: `always-or-unreached` - if the outer `catch_unwind` at
-`ring_transport.rs:264` observes `Err`, then the connection observes a cause
+`ring_transport.rs:261` observes `Err`, then the connection observes a cause
 other than a clean completion, and no `QueuedOutboundFrame` remains in state
 `COMPLETE` without having reached the ring. `always-or-unreached` fits because
 a panic on this thread is an optional path that a correct build never takes, but
@@ -3337,7 +3339,7 @@ an observed error into `SharedMemoryTerminalClass` (`types.ts:68-73`), and
 (`policy.ts:854-872`), which builds the entire terminal object including
 `error_class`, `bounds`, `peer_death`, and `exhaustion` without consulting the
 host at all. Exactly one of the five literals exists in Rust, `"setup_failure"`
-at `ring_transport.rs:176`, and it is the host's own poisoned-mutex arm rather
+at `ring_transport.rs:173`, and it is the host's own poisoned-mutex arm rather
 than a member of the client taxonomy. So `reachable` was location coverage over
 locations that do not exist. The five classes are **situations** - an addon that
 will not load, an identity that does not match, a setup that failed, a peer that
@@ -3438,7 +3440,7 @@ the underlying `Ring::release` returns `Err` then the invocation returns a
 `ReadClose` other than the cause it would have returned had the release
 succeeded. `always` fits because a lease that fails to release does not free
 its slot, so the loss is cumulative against `max_leases` = 8
-(profile-pinned post-#131; asserted at `ring_transport.rs:904`) and eight
+(profile-pinned post-#131; asserted at `ring_transport.rs:907`) and eight
 silent failures wedge the direction.
 Fault/timing angle: the two explicit release calls (`:507-509` for the oversize
 rejection and `:546-548` on the delivery path) map `Err` to
@@ -3540,8 +3542,8 @@ cancellation edge: the loop at `ring_transport.rs:384-409` calls `receive_one`
 before it checks `read_cancel`, so a frame committed after the edge but before
 the stop is forwarded on its `Ok(true)` pass and counts toward `N`. The first
 empty observation returns `Ok(false)` and reaches the `read_cancel` check
-(`:399`), which takes the `inbound` sender (`:400`) and sends `Cancelled`
-(`:402`). Second, nothing is forwarded on the inbound channel after `Cancelled`
+(`:397`), which takes the `inbound` sender (`:398`) and sends `Cancelled`
+(`:400`). Second, nothing is forwarded on the inbound channel after `Cancelled`
 is sent. `always` rather than `sometimes`
 because the assertion is a bound that must hold every time the window closes,
 not a state to reach.
@@ -3550,14 +3552,14 @@ not a state to reach.
 wall-clock bound; the rewrite makes the frame-count unit the only honest one
 left, because the empty-ring wait is now event-driven rather than periodic.
 `frame_deadline` still bounds exactly one thing inside `receive_one`, now the
-charge wait: `let deadline = Instant::now() + frame_deadline` at `:519` is
-consumed by the `sleep_until` arm at `:527-532`, exiting `Overloaded` at
-`:531`. It bounds nothing else in the loop. The cancellation report itself is
-still an unbounded await: `:402` does
+charge wait: `let deadline = Instant::now() + frame_deadline` at `:516` is
+consumed by the `sleep_until` arm at `:524-529`, exiting `Overloaded` at
+`:528`. It bounds nothing else in the loop. The cancellation report itself is
+still an unbounded await: `:400` does
 `inbound.send(Err(ReadClose::Cancelled)).await` on a bounded `mpsc` channel of
-`queue_frames` capacity (`:230`), and if the connection task is not draining,
+`queue_frames` capacity (`:227`), and if the connection task is not draining,
 that send parks with no deadline. The rejection and frame-delivery sends at
-`:510-515` and `:551-556` have the same shape. So the residual wall-clock
+`:507-512` and `:548-553` have the same shape. So the residual wall-clock
 question is unchanged by the rewrite and stays recorded as unresolved in the
 open questions.
 Fault/timing angle: the drain-before-report design survived the rewrite. The
@@ -3645,10 +3647,10 @@ Guarantee: The state in which one receive lease is held across a saturated
 ingress-budget wait while the same loop publishes a queued outbound frame occurs
 at least once.
 Check: `sometimes` - at least once per campaign, observe both preconditions
-jointly: `receive_one` is parked inside the charge `select!` at `:522-542`,
-meaning a lease is held (bound at `:496-501`) and the `charge` future
-(`:520-521`) has been polled pending at least once; and the publish arm at
-`:533-540` executed during that same invocation. `sometimes` rather than
+jointly: `receive_one` is parked inside the charge `select!` at `:519-539`,
+meaning a lease is held (bound at `:493-498`) and the `charge` future
+(`:517-518`) has been polled pending at least once; and the publish arm at
+`:530-537` executed during that same invocation. `sometimes` rather than
 `reachable` because executing those lines is not the point: a campaign can run
 the charge-wait branch and the publish-from-wait branch in separate invocations
 without ever producing the operational state in which they coincide. Per the
@@ -3795,7 +3797,7 @@ Guarantee: The zero-copy segmented inbound path that the frame-channel
 abstraction and the transport doc both describe has a production producer, so
 the copy accounting and the wrap-around lease handling are exercised.
 Check: `reachable` - the code location `InboundFrame::segmented`
-(`frame_channel.rs:477`) is executed at least once per campaign.
+(removed at HEAD; see the evidence file) is executed at least once per campaign.
 `reachable` fits because this is location coverage; the derived state claim,
 that every host inbound frame carries exactly one copy, is what a cheaper
 screen would assert.
@@ -4645,9 +4647,9 @@ Exercised: partial - three integration tests prove an unauthenticated socket
 receives no bytes; none instruments the descriptor-send site itself.
 Guarantee: A `SCM_RIGHTS` message carrying ring descriptors is never written to a
 setup socket on which `authenticate_server` has not returned `Ok`.
-Check: `always` - instrument `send_grant` (`setup_socket.rs:151-159`); every
+Check: `always` - instrument `send_grant` (`setup_socket.rs:153-159`); every
 invocation is preceded on that same stream by an `Ok(Authenticated)` from
-`auth.rs:279`. `always` because it is a per-send ordering invariant with no
+`auth.rs:251`. `always` because it is a per-send ordering invariant with no
 optional path and no eventual convergence; a single violation is a full loss of
 the boundary.
 Fault/timing angle: none in the ordering itself, it is straight-line. The window
@@ -4689,11 +4691,11 @@ can refuse it.
 Check: `always` - for a peer that authenticates and then sends nothing, a wrong
 token, or a truncated `Activate`, the two descriptors it already holds still map
 successfully. Stated as `always` because it is a standing property of the message
-order at `setup_socket.rs:249-276` rather than an occasional outcome.
+order at `setup_socket.rs:247-274` rather than an occasional outcome.
 **This is a regression property over documented design, not a report of a
 second-factor bypass**, and an earlier revision of this record read as the latter.
-The bearer-capability model is stated in `docs/host-wire-protocol.md:27` and
-restated in `auth.rs:70-81`, which says the handshake proves key possession and
+The bearer-capability model is stated in `docs/host-wire-protocol.md:26` and
+restated in `auth.rs:61-64`, which says the handshake proves key possession and
 "Nothing more". So the check is not "the token fails to gate mapping" - nothing
 claims it does - but "the relationship between key possession and mapping
 authority is still exactly one-to-one", which a future refactor could silently
@@ -4742,8 +4744,8 @@ Guarantee: An activation token accepted on one connection is refused on every
 other connection, and no connection accepts a second `Activate`.
 Check: `always` - run two setups concurrently, feed connection A's token to
 connection B, and assert `SetupError::InvalidActivation` from
-`setup_socket.rs:275`. Separately, send `Activate` twice on one connection and
-assert the second is `SetupError::InvalidMessage` from `:283`. `always` because
+`setup_socket.rs:273`. Separately, send `Activate` twice on one connection and
+assert the second is `SetupError::InvalidMessage` from `:281`. `always` because
 both are per-connection invariants.
 Fault/timing angle: two setups overlapping inside the same
 `transport_setup_deadline`. `max_handshakes` defaults to 32 and
@@ -4800,7 +4802,7 @@ Guarantee: Bytes captured from one successful handshake, replayed verbatim as
 refused with `InvalidClientAuth`.
 Check: `always` - record a full transcript, open a new connection, send the
 recorded `ClientHello` and then the recorded `ClientAuth` without recomputing,
-and assert `AuthError::InvalidClientAuth` from `auth.rs:275-277` specifically,
+and assert `AuthError::InvalidClientAuth` from `auth.rs:247-249` specifically,
 not merely a closed socket. `always` because every handshake must resist it.
 Fault/timing angle: none temporal. The defence is structural: the host draws a
 fresh `server_nonce` at `auth.rs:245` and folds it into the expected proof at
@@ -4840,7 +4842,7 @@ authenticates against no later incarnation, and the peer refuses before it emits
 `ClientAuth`.
 Check: `always` - capture a snapshot, restart the host, dial the new socket with
 the old snapshot, and assert the peer fails at `InvalidServerProof`
-(`auth.rs:333-335`) or `DaemonIdMismatch` (`:336-338`) and that no `ClientAuth`
+(`auth.rs:306-308`) or `DaemonIdMismatch` (`:309-311`) and that no `ClientAuth`
 frame was written. `always` because it must hold for every pair of incarnations.
 Fault/timing angle: the interesting window is a host restart while a client holds
 a cached `ConnectionInfo`. The client is not required to re-read the file, so
@@ -5054,8 +5056,8 @@ Check: `always` - with `max_handshakes = 1`, hold the slot with a socket that
 never speaks, assert a second accept closes with no bytes read, then release the
 squatter and assert the slot becomes available. Enumerate every exit from
 `run_connection` before `drop(handshake_permit)` and assert each releases:
-auth error (`connection.rs:130-133`) and connection-permit exhaustion
-(`:137-139`). `always` because the bound must hold at every instant.
+auth error (`connection.rs:101-103`) and connection-permit exhaustion
+(`:106-108`). `always` because the bound must hold at every instant.
 Fault/timing angle: the permit swap at `connection.rs:137-141` acquires the
 connection permit *before* releasing the handshake permit, so a peer is briefly
 charged to both classes. The consequence is that the post-auth descriptor
@@ -5098,7 +5100,7 @@ Guarantee: Every exit from `run_connection` that occurs after `ring.prepare`
 succeeds and before activation completes releases the prepared ring's charge, so
 repeated abandoned setups do not ratchet capacity.
 Check: `always` - drive N abandoned setups through each distinct exit and assert
-the ring accounting reported at `ring_transport.rs:199-203` returns to its
+the ring accounting reported at `ring_transport.rs:186-190` returns to its
 pre-attempt value. `always` because the accounting must balance after every
 attempt, not eventually.
 Fault/timing angle: one exit is not covered by the discard pattern. The
@@ -5176,11 +5178,11 @@ host has released the connection and assert it happened within
 `transport_setup_deadline` measured from the deadline anchor. The bound is stated
 in the unit the code bounds, a **single absolute deadline**:
 `activate_server` computes `deadline = Instant::now() + timeout` **once**
-(`setup_socket.rs:246-248`) and threads that same `Instant` through every
-subsequent I/O - `send_grant` (`:249-260`), the `Activate` read (`:261`), the
-`Activated` write (`:273`), the `Commit` read (`:281`), and the `Committed` write
-(`:282`) - and `read_message` enforces it with `timeout_at` on **both** its
-`read_exact` calls (`:374-376`, `:382-384`). So there is no accumulation across
+(`setup_socket.rs:244-246`) and threads that same `Instant` through every
+subsequent I/O - `send_grant` (`:247-258`), the `Activate` read (`:259`), the
+`Activated` write (`:271`), the `Commit` read (`:279`), and the `Committed` write
+(`:280`) - and `read_message` enforces it with `timeout_at` on **both** its
+`read_exact` calls (`:365-367`, `:373-375`). So there is no accumulation across
 messages: a peer that stalls at any of the four message positions, or at three of
 four length bytes, is refused at the same wall-clock instant. `always` because the
 bound must hold every time the window closes.
@@ -5293,8 +5295,8 @@ sentinel by sending three of the four length-prefix bytes and stopping, cancel
 `read_cancel`, **send nothing further**, then poll the generation's tracked task
 set until it is empty and assert it emptied. The bound is stated in the unit the
 code bounds, which is a **cancellation edge and one poll of a `biased` select**,
-not a duration: `connection.rs:196-206` is `tokio::select!` with `biased` and
-`peer_read_cancel.cancelled()` as its **first** arm (`:198`), so the cancellation
+not a duration: `connection.rs:180-190` is `tokio::select!` with `biased` and
+`peer_read_cancel.cancelled()` as its **first** arm (`:182`), so the cancellation
 branch is chosen the next time the task is polled and the `observe_peer` future is
 dropped where it stands. The polling cap is a test parameter and must be stated as
 an explicit attempt count in the test, not as a generous timeout.
@@ -5351,12 +5353,12 @@ handshake class is saturated at the same time as at least one authenticated
 connection sits between the descriptor send and the `Activated` reply.
 Check: `sometimes` - a marker fires when, at one observation, handshake permits
 available equals zero **and** at least one connection is inside
-`activate_server` between `setup_socket.rs:260` and `:273`. The two clauses are
+`activate_server` between `setup_socket.rs:258` and `:271`. The two clauses are
 independent preconditions of the vulnerable window, so the marker still fires on
 a correct implementation, per the coverage-check rule. `sometimes` and not
 `reachable` because a campaign can execute every line of both bounding paths
 while never producing the concurrent operational state that makes the
-class-crossing window at `connection.rs:137-141` observable.
+class-crossing window at `connection.rs:106-110` observable.
 Fault/timing angle: this record exists because records
 `setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released`,
 `setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it` and
@@ -5409,9 +5411,9 @@ by the managed Rust peer, so choosing the Rust client cannot admit a descriptor
 the native addon would refuse.
 Check: `always` - for each native rejection reason, construct the grant that
 triggers it and assert the managed Rust path also refuses. Enumerated from the
-native side: wire version (`setup.rs:115`), descriptor schema (`:116`), grant hex
-and decode (`:120-121`), profile (`:122`), grant distinctness (`:122`), and the
-process-wide claim (`lib.rs:591-594` in `connect_setup`, `:540-543` in `attach`).
+native side: wire version (`setup.rs:113`), descriptor schema (`:114`), grant hex
+and decode (`:118-119`), profile (`:120`), grant distinctness (`:120`), and the
+process-wide claim (`lib.rs:673-676` in `connect_setup`, `:608-611` in `attach`).
 `always` because it is a per-descriptor invariant, the same shape as Part 1's
 `native-boundary-not-weaker-than-its-wrapper`.
 Fault/timing angle: none temporal. The exposure is a divergence in two
@@ -5466,7 +5468,7 @@ registry originates from `connect_setup`, which authenticated over the setup
 socket, and never from `attach`, which takes caller-supplied descriptors and
 authenticates nothing.
 Check: `always` - instrument both insertion sites, the `insert_channel` calls at
-`lib.rs:551` (from `attach`) and `:612` (from `connect_setup`), and assert that a
+`lib.rs:619` (from `attach`) and `:745` (from `connect_setup`), and assert that a
 full shipped-plugin run inserts only through `connect_setup`. `always` rather than
 `unreachable` because `attach` is a published export that tests and embedders may
 legitimately call; the forbidden thing is a *state*, a registry entry with no
@@ -5474,7 +5476,7 @@ authenticated provenance, and METHOD's rule for a forbidden state with no
 dedicated detection point is `always(!X)`.
 **The scope of this guarantee is narrowed, and the narrowing matters.** An earlier
 form of this record read as a claim over the addon as a whole. It cannot be one.
-`attach` is a `#[napi]` export (`lib.rs:490-491`) reachable from any JavaScript in
+`attach` is a `#[napi]` export (`lib.rs:524-525`) reachable from any JavaScript in
 the process, so no campaign can establish that *no* caller reaches it - a claim
 universally quantified over the callers of a published API is not falsifiable by
 running the shipped wrapper, and it is **false** as stated for an arbitrary
@@ -6048,8 +6050,8 @@ Guarantee: A caller that arrives after the generation retires can determine that
 it retired but never why.
 Check: `always` - whenever `retire` has run and a subsequent `admit` or
 `send_control` rejects a call, the returned `CallError::code()` is one of the two
-constants `connection_retired` (`client.rs:1129`) or `generation_retired`
-(`:2237`), and never the `&'static str` that `retire` was called with. `always`
+constants `connection_retired` (`client.rs:1078`) or `generation_retired`
+(`:2290`), and never the `&'static str` that `retire` was called with. `always`
 because the condition is evaluable at every post-retirement call, and the
 property is about a total function from state to observable code rather than
 about one window.
@@ -6141,13 +6143,13 @@ clean exit from a transport failure: the bridge thread *attempts* the same
 goodbye write on every exit, so whenever that write lands the host's peer-death
 accounting under-reports ring faults.
 Check: `always` - whenever the bridge thread leaves its `while` loop at
-`client.rs:1866`, it reaches `:1890-1893` and attempts `encoded_goodbye` followed
+`client.rs:1842`, it reaches `:1954-1957` and attempts `encoded_goodbye` followed
 by `shutdown(Both)`, with no branch on why the loop ended. `always` because the
 post-loop block is unconditional and evaluable on every thread exit. **Scope
 correction applied during disposition: the check is over the attempt, not over
-the host's resulting classification.** `:1890` is `if let Ok(goodbye)` and `:1891`
+the host's resulting classification.** `:1954` is `if let Ok(goodbye)` and `:1955`
 is `let _ = setup.write_all(&goodbye)`, so both the encode and the write can fail
-with the result discarded; and the host's watcher (`connection.rs:195-207`) is a
+with the result discarded; and the host's watcher (`connection.rs:180-190`) is a
 `biased` select whose first arm is `peer_read_cancel.cancelled()`, so a
 generation already retired by ring evidence stops observing the socket before
 `observe_peer` resolves. Asserting that `record_peer_death` did not fire therefore
@@ -6204,8 +6206,8 @@ close, contrary to protocol `:691`'s "followed by joined ring teardown and
 setup-socket close".
 Check: `sometimes` - at least once per campaign, observe the joint state:
 `close()` has returned, `join_tasks_until` reported both Tokio tasks joined, and
-the bridge thread has not yet executed `client.rs:1891`. `sometimes` rather than
-`reachable` because the lines at `:1890-1893` are executed on essentially every
+the bridge thread has not yet executed `client.rs:1955`. `sometimes` rather than
+`reachable` because the lines at `:1954-1957` are executed on essentially every
 shutdown; what must be produced is the operational *ordering* in which the owner
 outruns them, and location coverage cannot witness that.
 Fault/timing angle: The whole record. `close` cancels at `:711`, joins only
@@ -6281,7 +6283,7 @@ a send outcome that is `NotSent` only if its bytes provably never reached the
 writer, and no pending request is silently dropped or retried.
 Check: `always` - after any `retire`, the `pending` map is empty and, per pending
 identity, exactly one settlement was delivered whose outcome is `NotSent` if and
-only if `cancel_classification` (`client.rs:2223`) won the `QUEUED -> CANCELLED`
+only if `cancel_classification` (`client.rs:2276`) won the `QUEUED -> CANCELLED`
 CAS. Per METHOD's effect-accounting rule the per-identity check is primary; the
 cheap screen is that observed host-side effects lie between the count of
 `NotSent` settlements subtracted from the total and the total. `always` because
@@ -6320,8 +6322,8 @@ closes the generation on this client.
 Check: `always` - for every pair of `Request` frames the writer completes in
 order, the second correlation is strictly greater than the first, across control
 (`0/0`) and routed identities alike, since both draw from one `Correlations`
-(`client.rs:393`). `always` because the host evaluates it on every ingress frame
-(`docs/host-wire-protocol.md:656`).
+(`client.rs:368`). `always` because the host evaluates it on every ingress frame
+(`docs/host-wire-protocol.md:713`).
 Fault/timing angle: Two windows. First, `admit` must not release the
 `correlations` guard between allocation and enqueue; it does not (`:1176-1217`).
 Second, `restore` must never rewind past a frame already handed to the writer;
@@ -6372,10 +6374,10 @@ enqueue failure paths retire the whole generation with
 admission fault rather than as a liveness event, and the `Ping` arm proceeds as
 though the answer was sent.
 Check: `always` - whenever `send_control` returns `Err` while called from the
-`Ping` arm (`client.rs:1390`), `self.retired` is true afterwards, and the code
+`Ping` arm (`client.rs:1318`), `self.retired` is true afterwards, and the code
 that produced it is `control_capacity_exhausted` from the charge branch
-(`:1340-1347`) or the try-send branch (`:1355-1361`), never a code naming the
-probe. The encode branch (`:1329-1335`) is excluded because it cannot run for a
+(`:1268-1275`) or the try-send branch (`:1283-1290`), never a code naming the
+probe. The encode branch (`:1259-1265`) is excluded because it cannot run for a
 `Pong`; see the confidence line. `always` because the disjunction over
 `send_control`'s failure paths is total, and every path in it retires.
 Fault/timing angle: None for the retirement itself, which is synchronous inside
@@ -6424,10 +6426,10 @@ Guarantee: Once inbound delivery backpressures, an enqueued Pong waits on the
 same bridge thread that is parked delivering inbound frames, and the client
 tolerates that for the full 30-second frame deadline before reacting.
 Check: `always` - with the inbound channel full and the bridge parked in
-`read_tx.blocking_send` (`client.rs:1882`), a control frame enqueued at `:1355`
+`read_tx.blocking_send` (`client.rs:1905`), a control frame enqueued at `:1283`
 is not written until either the bridge resumes or
-`timeout_at(frame.deadline, completed_rx)` (`:1960`) expires, where
-`frame.deadline` is `now + CLIENT_FRAME_TIMEOUT` (`:1353`, 30 s per `:45`). State
+`timeout_at(frame.deadline, completed_rx)` (`:2031`) expires, where
+`frame.deadline` is `now + CLIENT_FRAME_TIMEOUT` (`:1281`, 30 s per `:45`). State
 the bound in the unit the code bounds: one frame deadline, not "eventually".
 `always` because the dependency holds on every control write once the
 precondition is met.
@@ -6476,8 +6478,8 @@ Exercised: not yet - no test opens routes to exhaustion
 Guarantee: The client imposes no limit on concurrently live route handles, so the
 only bound on its route cache is the host's willingness to keep binding.
 Check: `always` - every successful `open_route` inserts into `routes` at
-`client.rs:507` with no capacity predicate anywhere on that path, in contrast to
-`pending` (`:1169`) and `streams` (`:1058`). `always` because the absence is a
+`client.rs:477` with no capacity predicate anywhere on that path, in contrast to
+`pending` (`:1118`) and `streams` (`:1009`). `always` because the absence is a
 total property of the insert path.
 Fault/timing angle: None. The growth is caller-driven, not race-driven.
 Required faults and enabling state: A host that binds every `route.open`. Open
@@ -6512,9 +6514,9 @@ Guarantee: If the host answers two `route.open` requests with the same
 `close_route` settles both callers' work while neither bind is separately
 released.
 Check: `always` - whenever `parse_route_open` yields a handle already present in
-`routes`, `routes.insert` (`client.rs:507`) returns `false` and the set is
-unchanged, so `settle_route` (`:1623`) can remove it at most once and
-`release_stranded_route` returns early at `:1576-1578`. `always` because the set
+`routes`, `routes.insert` (`client.rs:477`) returns `false` and the set is
+unchanged, so `settle_route` (`:1525`) can remove it at most once and
+`release_stranded_route` returns early at `:1485-1487`. `always` because the set
 semantics hold on every insert.
 Fault/timing angle: None required, but the damage compounds if the two opens
 overlap: the second caller receives `Ok(handle)` for a route the first caller can
@@ -6613,8 +6615,8 @@ no producer in the tree at all.
 Check: `always` - for a sequence of `open_route` attempts ending in success, the
 number of routes the host bound for that call is exactly one. Per METHOD's
 effect-accounting rule, track attempted and acknowledged separately: attempts
-equal loop iterations at `client.rs:461`, acknowledged failures equal the retried
-terminals at `:511-519`, and host-side binds must equal one, not the attempt
+equal loop iterations at `client.rs:435`, acknowledged failures equal the retried
+terminals at `:481-490`, and host-side binds must equal one, not the attempt
 count. The aggregate bound is the cheap screen; the per-attempt check is the
 oracle. `always` because it must hold for every `open_route` call, not merely be
 witnessed once.
@@ -6701,9 +6703,9 @@ Guarantee: The client treats a host-originated `Cancel` as a framing violation
 that retires the whole generation, although the protocol's role table does not
 list host-originated `Cancel` as role-invalid and assigns `Cancel` an idempotent
 no-op disposition.
-Check: `always` - for `header.ty == FrameType::Cancel` (`wire.rs:58`),
-`validate_inbound` (`client.rs:2006`) has no matching arm and falls to
-`_ => return Err(())` at `:2067`, so `ring_reader_loop:1979` retires with
+Check: `always` - for `header.ty == FrameType::Cancel` (`wire.rs:53`),
+`validate_inbound` (`client.rs:2073`) has no matching arm and falls to
+`_ => return Err(())` at `:2121`, so `ring_reader_loop:2050` retires with
 `protocol_violation`. `always` because the classification is total over inbound
 frame types.
 Fault/timing angle: None.
@@ -7464,7 +7466,7 @@ Check: `always` - on every `emit_rejection` call, assert either that a terminal
 frame for the correlation is queued, or that `gen.token.is_cancelled()` and
 `gen.writer` is discarding. `always` because the disjunction must hold at every
 call, and the second disjunct is the code's actual answer past the bound
-(`dispatch.rs:629-639`).
+(`dispatch.rs:598-602`).
 Fault/timing angle: The window is 32 concurrent no-dispatch rejections per
 generation, all blocked on contended egress budget, before a 33rd arrives.
 `busy_rejects` is `MAX_INFLIGHT_BUSY_REJECTS = 32` (`connection.rs:42`, `:244`).
@@ -7706,7 +7708,7 @@ size ceiling and nothing else, so a handler that reserved owned output and wrote
 nothing produces a well-formed zero-length `Response` terminal that every layer
 below accepts.
 Check: `always` - for every `RequestOutcome::Response` accepted at
-`dispatch.rs:1031`, the only predicate applied is
+`dispatch.rs:963-964`, the only predicate applied is
 `body.len() <= MAX_BODY_LEN`; assert there is no lower-bound, emptiness, or
 declared-versus-written comparison anywhere on the path to
 `emit_reserved_frame`. `always` because the check runs on every unary success.
@@ -9209,7 +9211,7 @@ the fixed 50 ms activation cadence, and which one applies is a stated function o
 the component-reported activation state rather than an unbounded override of
 operator configuration.
 Check: `always` - over two assertable conjuncts and one measurement, and the split is the point. **Conjunct 0:** at `runtime.rs:972-973` (re-verified), whenever `activation_in_progress` is true the selected interval equals `Duration::from_millis(50)` exactly, and whenever it is false the selected interval equals `shared.timing.health_interval`; both branches are unconditional within the loop, so `always` holds on every iteration. The remaining text names the source catalog's conjuncts.
-**Conjunct 1, which carries the `always` semantics:** at `runtime.rs:1129`,
+**Conjunct 1, which carries the `always` semantics:** at `runtime.rs:972-976`,
 whenever `activation_in_progress` is false the selected interval equals
 `shared.timing.health_interval` exactly. That is a pass/fail bound, it holds on
 every loop iteration, and `always` is correct because the selection is
@@ -9227,7 +9229,7 @@ both invent a limit the code does not contain:
   in `HostTiming` supplies one and no constant in `runtime.rs` is a candidate.
 - **A duration bound**, `time_in_fast_cadence <= lifecycle_callback_deadline` or
   some other configured span, which needs a decision about which existing knob
-  ought to govern activation, and there is no reading of `config.rs:216-232`
+  ought to govern activation, and there is no reading of `config.rs:144-162`
   under which any of them does.
 Until one is chosen, the honest oracle is conjunct 1 plus an instrumented count
 reported as a **measurement**, not asserted. Recording that distinction is what
@@ -9277,7 +9279,7 @@ Guarantee: The host's total pre-service budget for one accepted socket is a
 stated function of the configured deadlines, and the specification's coupling
 warning accounts for every stage that consumes one.
 Check: `always` - measure wall-clock from `run_connection` entry
-(`connection.rs:115`) to the return of `activate_server` (`:177`) on a peer that
+(`connection.rs:86`) to the return of `activate_server` (`:155-165`) on a peer that
 stalls maximally at each stage, and assert the total is at most
 `auth_deadline + 2 * transport_setup_deadline`. `always` because the bound must
 hold on every accepted socket.
@@ -9313,25 +9315,25 @@ Check: `always`, per exit, because `shutdown_sequence` has three and they do
 different amounts of work. From the shutdown token's cancellation to `run`'s
 return, assert elapsed time is at most:
 - `shutdown_deadline + lifecycle_callback_deadline` on the graceful exit at
-  `runtime.rs:1243`, where the drain or the tracker wait finished inside
-  `deadline` and `run_handler_shutdown` then ran under its own budget (`:1276`);
+  `runtime.rs:1069`, where the drain or the tracker wait finished inside
+  `deadline` and `run_handler_shutdown` then ran under its own budget (`:1098`);
 - `shutdown_deadline + 2 * lifecycle_callback_deadline` on the fatal-latch exit at
-  `:1238`, which is the *only* exit that never calls `run_handler_shutdown`
-  (`:1234-1238` returns before `:1240`);
+  `:1064`, which is the *only* exit that never calls `run_handler_shutdown`
+  (`:1060-1064` returns before `:1066`);
 - `shutdown_deadline + 3 * lifecycle_callback_deadline` on the forced exit at
-  `:1241`, which pays the drain (`:1148`, `:1200`), the doubled chain (`:1223`,
-  `:1224`), **and** the handler callback (`:1240`, bounded at `:1276`).
-Each bound also admits the two `force_close_all_routes` calls at `:1206` and
-`:1216`, which no `timeout` wraps and which are internally bounded at 30 s
-(`dispatch.rs:1434`) plus 30 s in `run_route_gone`; an oracle should either
+  `:1067`, which pays the drain (`:1006`, `:1037`), the doubled chain (`:1053`,
+  `:1054`), **and** the handler callback (`:1066`, bounded at `:1098`).
+Each bound also admits the two `force_close_all_routes` calls at `:1042` and
+`:1050`, which no `timeout` wraps and which are internally bounded at 30 s
+(`dispatch.rs:1299`) plus 30 s in `run_route_gone`; an oracle should either
 measure them separately or state that its bound is the sum plus those.
 `always` because each bound must hold on every shutdown that takes its exit, and
 the bounds are in the units the code bounds.
 **Every bound above is conditional, and the condition is not a detail.** These
 are `tokio::time::timeout` and `timeout_at` budgets over awaited futures, and a
 timeout cannot preempt a future that never yields. A handler whose `shutdown()`
-blocks its worker thread instead of awaiting is not interrupted by `:1276`; the
-function's own doc comment at `:1256-1258` states that the callback "is never
+blocks its worker thread instead of awaiting is not interrupted by `:1098`; the
+function's own doc comment at `:1082-1084` states that the callback "is never
 aborted" and that an overrun "trips the fatal latch and returns non-graceful
 while the still-tracked task keeps running". The same holds for both
 `tracker.wait()` calls. So the check is `elapsed <= bound` **given cooperatively
@@ -9567,7 +9569,7 @@ permits it
 Guarantee: No configured limit, deadline, or policy changes value between
 `HostShared` construction and `run`'s return.
 Check: `always` - capture `shared.limits`, `shared.timing`, and
-`shared.liveness` immediately after `runtime.rs:927` and assert equality at
+`shared.liveness` immediately after `runtime.rs:748` and assert equality at
 `run`'s return, and assert no interior mutability exists on those fields.
 `always` because every config-dependent property in the catalog depends on it
 holding continuously.
@@ -9701,12 +9703,12 @@ Guarantee: The state in which a handler completed initialization and then draine
 without the host ever publishing a transport occurs at least once per campaign,
 so `PrePublicationCleanup::finish` runs against a fully initialized handler.
 Check: `sometimes` - a marker inside `PrePublicationCleanup::finish`
-(`runtime.rs:351`), fired only when initialization had returned `Ok`.
+(`runtime.rs:308`), fired only when initialization had returned `Ok`.
 `sometimes` and not `reachable` because `finish` is also reached from the
-initialization-failure arms at `:789` and `:803`, so a campaign can cover the
+initialization-failure arms at `:666` and `:677`, so a campaign can cover the
 function's lines while never producing the operational state that matters: a
 *successfully* initialized handler being drained with nothing published. That
-distinction is exactly what `:821-825` says the grouping exists to protect.
+distinction is exactly what `:695-696` says the grouping exists to protect.
 Fault/timing angle: three entries. `bind_owner_only` failing at `:836`; `publish`
 failing at `:843`; and the shutdown token already cancelled at `:831`, which
 returns `Ok(None)` and drains through `:856`. The third is the cheapest to
