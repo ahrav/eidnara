@@ -479,13 +479,13 @@
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/shm-transport/src/backend/ring.rs#attach_refuses_a_mapping_whose_cursors_already_break_the_protocol",
       "evidence_pointer": "docs/properties/shm-transport/evidence/attach-reconciles-or-refuses-stale-shared-cursors.md"
@@ -504,13 +504,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/crashed-producer-does-not-wedge-the-sequence.md"
@@ -961,13 +961,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/shm-transport/tests/contract.rs#descriptor_rejects_every_untrusted_identity_and_span_failure",
       "evidence_pointer": "docs/properties/shm-transport/evidence/identity-and-schema-rejection-is-one-contract.md"
@@ -2397,13 +2397,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/runtime.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/an-observed-wedge-cause-reaches-the-operator.md"
@@ -3053,13 +3053,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/connection.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-endpoint-thread-panic-is-reported-as-orderly-completion.md"
@@ -3078,13 +3078,13 @@
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/ring_transport.rs#diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-ring-unavailability-fails-closed-without-a-classified-reason.md"
@@ -3154,13 +3154,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/shm-transport/tests/ring.rs#quarantine_rejects_all_operations_and_reports_conservation",
       "evidence_pointer": "docs/properties/host-runtime/evidence/ring-a-lease-release-failure-is-observable-only-on-the-success-path.md"
@@ -3746,13 +3746,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/client.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection.md"
