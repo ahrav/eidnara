@@ -334,12 +334,18 @@ impl CompositeComponent for BrocaComponent {
         // The wire contract admits `ready | unavailable`; `unavailable` means no supported harness can run.
         // A harness whose descriptor resolves but whose snapshot holds no usable credential rejects every send at `CredentialVerifier::verify`, so it cannot run either. commentlint: allow(JUDGE)
         // The descriptor probes open, hash, and stat closure nodes, so they run on the blocking pool; a probe that cannot complete reads as unavailable. commentlint: allow(JUDGE)
+        // The probe is bounded well under the host's lifecycle callback deadline so a stalled closure store degrades Broca instead of making the health callback host-fatal. commentlint: allow(JUDGE)
         let supervisor = Arc::clone(&self.supervisor);
-        let descriptor_unavailable = subprocess::off_runtime(move || {
-            [Harness::OpenCode, Harness::Pi]
-                .map(|harness| supervisor.harness_unavailable_reason(harness).is_some())
-        })
+        let descriptor_unavailable = tokio::time::timeout(
+            config::AVAILABILITY_PROBE_BUDGET,
+            subprocess::off_runtime(move || {
+                [Harness::OpenCode, Harness::Pi]
+                    .map(|harness| supervisor.harness_unavailable_reason(harness).is_some())
+            }),
+        )
         .await
+        .ok()
+        .and_then(Result::ok)
         .unwrap_or([true, true]);
         let unavailable = [Harness::OpenCode, Harness::Pi]
             .into_iter()

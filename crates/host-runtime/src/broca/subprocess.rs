@@ -179,16 +179,23 @@ impl EnvSnapshot {
     ) -> Result<String, CredentialRowError> {
         let canonical = canonical_provider(harness, provider)?;
         let row = self.provider_row(harness, canonical)?;
-        let encoded = |field: &str| format!("{}:{field}", field.len());
-        let mut message = encoded(CREDENTIAL_FINGERPRINT_CANONICALIZATION)
-            + &encoded(harness)
-            + &encoded(canonical);
+        // Fields are length-prefixed raw bytes (`{len}:{bytes}`): the child receives the credential's original `OsStr` bytes, so the fingerprint must cover those same bytes, not a lossy Unicode rendering that would collide distinct non-UTF-8 values. For UTF-8 values this is byte-identical to the committed vector. commentlint: allow(JUDGE)
+        let mut message: Vec<u8> = Vec::new();
+        let mut encode = |field: &[u8]| {
+            message.extend_from_slice(field.len().to_string().as_bytes());
+            message.push(b':');
+            message.extend_from_slice(field);
+        };
+        encode(CREDENTIAL_FINGERPRINT_CANONICALIZATION.as_bytes());
+        encode(harness.as_bytes());
+        encode(canonical.as_bytes());
         for (name, value) in row {
-            let name = name.to_string_lossy();
-            let value = value.to_string_lossy();
-            message.push_str(&encoded(&name));
-            message.push_str(&encoded(&value.len().to_string()));
-            message.push_str(&encoded(&value));
+            use std::os::unix::ffi::OsStrExt;
+            let name = name.as_os_str().as_bytes();
+            let value = value.as_os_str().as_bytes();
+            encode(name);
+            encode(value.len().to_string().as_bytes());
+            encode(value);
         }
         let mut derive =
             Hmac::<Sha256>::new_from_slice(connection_key).expect("HMAC accepts any key length");
@@ -196,7 +203,7 @@ impl EnvSnapshot {
         let derived = derive.finalize().into_bytes();
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&derived).expect("HMAC accepts any key length");
-        mac.update(message.as_bytes());
+        mac.update(&message);
         Ok(mac
             .finalize()
             .into_bytes()
@@ -611,9 +618,11 @@ pub async fn run(
         let _ = child.start_kill();
         // `timeout` prevents an uninterruptible leader from blocking `work_done` waiters indefinitely.
         let members_gone = wait_other_members_gone(group, limits.termination_grace).await;
-        let reaped = tokio::time::timeout(limits.termination_grace, child.wait())
-            .await
-            .is_ok();
+        // Only a successful reap proves the leader gone; a wait error is as unproven as a timeout.
+        let reaped = matches!(
+            tokio::time::timeout(limits.termination_grace, child.wait()).await,
+            Ok(Ok(_))
+        );
         if !(signalled && members_gone && reaped) {
             // The registration-failure path returns `RegistrationTeardownUnproven` when teardown cannot be proven.
             // No prompt bytes have flowed because registration precedes stdin delivery.
@@ -1094,7 +1103,8 @@ async fn terminate_group(
     // Wait for members to disappear rather than treating `SIGKILL` delivery as teardown proof.
     let members_gone = wait_other_members_gone(group, grace).await;
     // Bound `child.wait()` by `grace` to prevent an unreapable leader from blocking teardown indefinitely.
-    if tokio::time::timeout(grace, child.wait()).await.is_err() {
+    // A wait error is as unproven as a timeout: `wait_other_members_gone` excludes the leader, so only a successful reap proves it gone. commentlint: allow(JUDGE)
+    if !matches!(tokio::time::timeout(grace, child.wait()).await, Ok(Ok(_))) {
         return Err(io::Error::other(
             "harness leader was not reapable within the termination grace",
         ));

@@ -529,8 +529,9 @@ fn pi_line_probe_signal(line: &[u8]) -> ProbeSignal {
     if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
         return ProbeSignal::Quiet;
     }
+    // A nonterminal assistant message (tool request, missing or intermediate stop reason) means the run continues, so it revokes an earlier arming like the lifecycle-start events do. commentlint: allow(JUDGE)
     if message_requests_tools(message) {
-        return ProbeSignal::Quiet;
+        return ProbeSignal::Continues;
     }
     // Every Pi terminal arms provisionally: a compatibility transcript can resume with `message_start` or `auto_retry_*` after `agent_end`, and the parser then requires a later terminal, so the drain deadline must be revocable rather than kill the continuation. commentlint: allow(JUDGE)
     match message
@@ -538,7 +539,7 @@ fn pi_line_probe_signal(line: &[u8]) -> ProbeSignal {
         .and_then(serde_json::Value::as_str)
     {
         Some("stop" | "length" | "error" | "aborted") => ProbeSignal::Provisional,
-        _ => ProbeSignal::Quiet,
+        _ => ProbeSignal::Continues,
     }
 }
 
@@ -606,11 +607,9 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
                 if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
                     continue;
                 }
-                // A later terminal supersedes a retried attempt's terminal and assistant text; first-terminal-wins would reject valid retries.
-                // contradictory transcript.
-                if let Some(decision) = assistant_message_terminal(message, line_no)? {
-                    provisional = Some(decision);
-                }
+                // Every later assistant `message_end` replaces the stored decision — a nonterminal one (tool request, missing or intermediate stop reason) clears it — so the transcript's last word always decides, and a resumption after `agent_end` invalidates that final. commentlint: allow(JUDGE)
+                provisional = assistant_message_terminal(message, line_no)?;
+                agent_end_final = None;
             }
             "agent_end" => {
                 // The authoritative final event must carry a well-formed `messages` array (an empty one is valid); a malformed one cannot be allowed to leave an earlier provisional answer standing. commentlint: allow(JUDGE)
@@ -629,11 +628,12 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
             _ => return Err(format!("unknown event type at line {line_no}")),
         }
     }
-    // A decisive `agent_end` decision overrides `message_end`; a nonterminal final assistant or missing `agent_end` uses the last provisional `message_end` decision.
-    if let Some((message, line_no)) = &agent_end_final
-        && let Some((text, terminal)) = assistant_message_terminal(message, *line_no)?
-    {
-        return Ok((text.into_iter().collect(), terminal));
+    // `agent_end` is authoritative: its final assistant decides, and a nonterminal final (tool request, missing or intermediate stop reason) means the run never reached a terminal answer, so the provisional `message_end` decision must not stand in for it. commentlint: allow(JUDGE)
+    if let Some((message, line_no)) = &agent_end_final {
+        return match assistant_message_terminal(message, *line_no)? {
+            Some((text, terminal)) => Ok((text.into_iter().collect(), terminal)),
+            None => Err("agent_end without a terminal final assistant message".to_owned()),
+        };
     }
     let Some((text, terminal)) = provisional else {
         return Err("output ended without a terminal event".to_owned());
