@@ -3606,7 +3606,7 @@ fn group_record_mode_forced_under_umask() {
             & 0o7777;
         assert_eq!(mode, 0o600, "record mode under umask {mask:o}");
         let body = fs::read_to_string(&record_path).expect("record readable");
-        assert!(body.starts_with("v3\n"), "record is complete when visible");
+        assert!(body.starts_with("v4\n"), "record is complete when visible");
         record.remove().expect("remove record");
     }
 }

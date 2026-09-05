@@ -155,6 +155,9 @@ const PLATFORM_PACKAGES = {
 
 const ADDON_PAYLOAD_PATH = "payload/native/shm_native.node";
 
+/** Errors the addon raises after a reservation token was detached carry this prefix. */
+const RESERVATION_CONSUMED_PREFIX = "producer reservation consumed: ";
+
 type PlatformPackage = (typeof PLATFORM_PACKAGES)[keyof typeof PLATFORM_PACKAGES];
 
 /**
@@ -500,14 +503,26 @@ export class NativeProducerReservation {
         this.assertActive();
         assertUint32Argument("written", written);
         // The handle stays active until the addon accepts the call: a rejected commit (for
-        // example a re-entrant call while the channel is busy) must remain abortable.
-        this.native.commitReservation(
-            this.channel,
-            this.token,
-            privateBytes(header),
-            written,
-            beforePublish ?? (() => {}),
-        );
+        // example a re-entrant call while the channel is busy) must remain abortable. Once the
+        // addon reports the token consumed, a retry would fail as already released, so the
+        // handle is released here even though the commit failed.
+        try {
+            this.native.commitReservation(
+                this.channel,
+                this.token,
+                privateBytes(header),
+                written,
+                beforePublish ?? (() => {}),
+            );
+        } catch (error) {
+            if (
+                error instanceof Error &&
+                error.message.startsWith(RESERVATION_CONSUMED_PREFIX)
+            ) {
+                this.active = false;
+            }
+            throw error;
+        }
         this.active = false;
     }
 

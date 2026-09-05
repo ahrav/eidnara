@@ -1670,6 +1670,14 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
         "unavailable",
     ];
     const TRANSIENT_CODES: [&str; 3] = ["429", "503", "529"];
+    // Explicit rate-limit evidence outranks the broad authentication phrases: "rate limit exceeded for this API key" is a retry-after condition, not a missing credential. commentlint: allow(JUDGE)
+    if ["rate limit", "rate_limit"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        || contains_status_code(&lower, "429")
+    {
+        return ErrorClass::Transient;
+    }
     if AUTH.iter().any(|needle| lower.contains(needle))
         || AUTH_CODES
             .iter()
@@ -2133,6 +2141,14 @@ pub mod group_registry {
     pub const GROUP_NONCE_ENV: &str = "EIDNARA_BROCA_GROUP_NONCE";
     const GROUP_NONCE_HEX_LEN: usize = 32;
 
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     /// A fresh 128-bit hex nonce for one run's process group.
     pub fn new_group_nonce() -> io::Result<String> {
         let mut bytes = [0u8; 16];
@@ -2196,9 +2212,18 @@ pub mod group_registry {
     }
 
     impl Entry {
+        /// The final line is the SHA-256 of everything before it; a record whose checksum does not verify is uninterpretable, so a mismatched boot line cannot be mistaken for a foreign-boot record. commentlint: allow(JUDGE)
+        fn verified_body(text: &str) -> Option<&str> {
+            let (body, checksum) = text.trim_end_matches('\n').rsplit_once('\n')?;
+            let body_with_newline = &text[..body.len() + 1];
+            let expected = sha256_hex(body_with_newline.as_bytes());
+            (checksum == expected).then_some(body_with_newline)
+        }
+
         fn parse(text: &str) -> Option<Self> {
+            let text = Self::verified_body(text)?;
             let mut lines = text.lines();
-            if lines.next()? != "v3" {
+            if lines.next()? != "v4" {
                 return None;
             }
             // The boot line is consumed here; the sweep compares it before parsing so foreign-boot records of any version are retired. commentlint: allow(JUDGE)
@@ -2246,10 +2271,13 @@ pub mod group_registry {
             getrandom::getrandom(&mut nonce).ok()?;
             let name = format!("{leader_pid}-{:016x}", u64::from_le_bytes(nonce));
             let path = dir.join(&name);
-            let body = format!(
-                "v3\n{}\n{leader_pid} {leader_start}\n{owner_pid} {owner_start}\n{owner_sid}\n{group_nonce}\n",
+            let mut body = format!(
+                "v4\n{}\n{leader_pid} {leader_start}\n{owner_pid} {owner_start}\n{owner_sid}\n{group_nonce}\n",
                 boot_id().ok()?
             );
+            let checksum = sha256_hex(body.as_bytes());
+            body.push_str(&checksum);
+            body.push('\n');
             // A record is visible only once it is complete: a host crash between create and write must not leave a truncated record that the sweep discards without signaling its group.
             let temp = dir.join(format!(".{name}.tmp"));
             let written = fs::OpenOptions::new()
@@ -2344,11 +2372,10 @@ pub mod group_registry {
                 std::io::Read::read_to_string(&mut file, &mut text)?;
                 text
             };
-            // A record from a different boot is removed without signaling because its PIDs may be reused; the boot line is read before full parsing so that holds for any record version. commentlint: allow(JUDGE)
-            if text
-                .lines()
-                .nth(1)
-                .is_some_and(|boot| boot.len() == current_boot.len() && boot != current_boot)
+            // A record from a different boot is removed without signaling because its PIDs may be reused. The boot line is trusted only when the record's checksum verifies, so a corrupted boot line cannot masquerade as a stale record. commentlint: allow(JUDGE)
+            if Entry::verified_body(&text)
+                .and_then(|body| body.lines().nth(1))
+                .is_some_and(|boot| boot != current_boot)
             {
                 remove_swept_record(&path)?;
                 continue;

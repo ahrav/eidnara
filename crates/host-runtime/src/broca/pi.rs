@@ -507,7 +507,9 @@ fn pi_line_probe_signal(line: &[u8]) -> ProbeSignal {
     let message = match value.get("type").and_then(serde_json::Value::as_str) {
         // `message_start` and `auto_retry_*` indicate that the run is not over.
         // `message_start` and `auto_retry_*` clear a preceding provisional terminal.
-        Some("message_start" | "auto_retry_start" | "auto_retry_end") => {
+        Some(
+            "agent_start" | "turn_start" | "message_start" | "auto_retry_start" | "auto_retry_end",
+        ) => {
             return ProbeSignal::Continues;
         }
         Some("message_end") => value.get("message"),
@@ -579,8 +581,6 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
         };
         match event_type {
             "session"
-            | "agent_start"
-            | "turn_start"
             | "turn_end"
             | "message_update"
             | "compaction_start"
@@ -589,7 +589,8 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
             | "session_info_changed"
             | "thinking_level_changed" => {}
             // Resumed lifecycle output invalidates every stored decision: without a later terminal, parsing returns a missing-terminal error rather than an answer the transcript itself moved past. commentlint: allow(JUDGE)
-            "message_start" | "auto_retry_start" | "auto_retry_end" => {
+            "agent_start" | "turn_start" | "message_start" | "auto_retry_start"
+            | "auto_retry_end" => {
                 provisional = None;
                 agent_end_final = None;
             }

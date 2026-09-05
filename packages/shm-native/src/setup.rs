@@ -159,12 +159,24 @@ fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
         SocketFlags::CLOEXEC,
         None,
     )?;
-    sockopt::set_socket_timeout(&socket, sockopt::Timeout::Send, Some(remaining))?;
     let address = SocketAddrUnix::new(path)?;
+    // `SO_SNDTIMEO` bounds each blocking `connect` independently, so the remaining budget is
+    // re-armed before every attempt; otherwise each `EINTR` retry would receive the original
+    // duration again.
+    let mut remaining = remaining;
     loop {
+        sockopt::set_socket_timeout(&socket, sockopt::Timeout::Send, Some(remaining))?;
         match rustix::net::connect(&socket, &address) {
             Ok(()) => return Ok(UnixStream::from(socket)),
-            Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::INTR) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(timed_out());
+                }
+                remaining =
+                    Duration::from_micros(u64::try_from(left.as_micros()).unwrap_or(u64::MAX))
+                        .max(Duration::from_micros(1));
+            }
             Err(rustix::io::Errno::AGAIN) => return Err(timed_out()),
             Err(errno) => return Err(errno.into()),
         }

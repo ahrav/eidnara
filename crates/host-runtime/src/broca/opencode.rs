@@ -338,7 +338,10 @@ fn parse_opencode_transcript(
                             "tool-calls finish in a tool-less run at line {line_no}"
                         ));
                     }
-                    None => continue,
+                    // A finish without a reason is structurally malformed; skipping it would keep that step's text for a later success to publish. commentlint: allow(JUDGE)
+                    None => {
+                        return Err(format!("step_finish without part.reason at line {line_no}"));
+                    }
                     Some("stop") => FinishReason::Completed,
                     // OpenCode's AI-SDK finish reason is `length`.
                     Some("length") => FinishReason::Length,

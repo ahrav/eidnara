@@ -1137,17 +1137,31 @@ pub fn commit_reservation(
         check_wire_header(&header, u64::from(written))
             .map_err(|_| error("wire header does not describe the committed body"))?;
         let mut reservation = detach_producer(env, channel, token)?;
+        // Past this point the token is consumed, so every failure carries the prefix the
+        // JavaScript wrapper uses to release its handle instead of offering a retry that
+        // would fail as already released.
+        let consumed = |message: &str| {
+            Error::new(
+                Status::GenericFailure,
+                format!("{RESERVATION_CONSUMED_PREFIX}{message}"),
+            )
+        };
         reservation
             .set_wire_header(header)
             .and_then(|()| reservation.advance(written as usize))
-            .map_err(|_| error("producer overflow"))?;
-        before_publish.call(())?;
+            .map_err(|_| consumed("producer overflow"))?;
+        before_publish
+            .call(())
+            .map_err(|callback_error| consumed(&callback_error.to_string()))?;
         reservation
             .commit(written as usize)
-            .map_err(|_| error("producer underfill or invalid commit"))?;
+            .map_err(|_| consumed("producer underfill or invalid commit"))?;
         Ok(())
     })
 }
+
+/// Prefix on errors raised after a reservation's token was detached; the wrapper treats such an error as consuming the handle. commentlint: allow(JUDGE)
+const RESERVATION_CONSUMED_PREFIX: &str = "producer reservation consumed: ";
 
 #[napi]
 pub fn abort_reservation(env: &Env, channel_id: u32, token: u32) -> Result<()> {
