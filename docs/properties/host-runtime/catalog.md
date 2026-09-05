@@ -83,15 +83,13 @@ label belongs per record rather than in a blanket preamble. Deriving these label
 mechanically rather than by hand is an open bias, the same one Part 1 raised about
 "reaches production".
 
-One coverage fact still shapes the whole catalog and is verified: of `host-runtime`'s
-26 integration test binaries, CI names **four**. `tests/lifecycle.rs` (36 tests,
-1872 lines), `tests/activation.rs`, and `tests/host_roundtrip.rs` are named in no
-workflow. See
-[the-largest-lifecycle-proof-runs-in-ci](#the-largest-lifecycle-proof-runs-in-ci).
-That record is retained and it is no longer open: the ring-transport refactor
-(`ed487e11 refactor(host): make ring transport mandatory`) rewrote the workflow to
-name `--test lifecycle` on both platforms, and the record carries the closure and
-its two residual gaps in its own `Impact:` line.
+One coverage fact from the source repository shaped the whole catalog: of
+`host-runtime`'s 26 integration test binaries, that repository's CI named four,
+and `tests/lifecycle.rs`, `tests/activation.rs`, and `tests/host_roundtrip.rs`
+were named in no workflow. In this tree that gap does not exist: `ci.yml:118` and
+`:126` run `cargo test --workspace --all-targets`, which executes every binary. See
+[the-largest-lifecycle-proof-runs-in-ci](#the-largest-lifecycle-proof-runs-in-ci),
+which is `Exercised: yes` here and keeps the source history as provenance.
 
 ### Repair provenance
 
@@ -655,13 +653,16 @@ teardown path whenever draining is set
 (`crates/host-runtime/src/connection.rs:328-330`).
 Status: active
 Exercised: not yet.
-Guarantee: A generation that observes draining while tearing down eventually
-proceeds past the shutdown rendezvous, or the host declares that it did not.
-Check: `always-or-unreached` - after the shutdown sequence returns, no task is
-parked at the rendezvous; and if the drain timed out, the return value is
-non-graceful and names it. `always-or-unreached` because the rendezvous is reached
-only when draining was true at that instant; when the branch is skipped the
-obligation does not exist and the check must not fail.
+Guarantee: A generation that observes draining while tearing down proceeds past the shutdown rendezvous, or the host declares that it did not, within the forced-exit bound `run` already carries.
+Check: `always-or-unreached` - within `shutdown_deadline + 3 * lifecycle_callback_deadline`
+plus the two internally bounded `force_close_all_routes` calls (30 s each) after the shutdown token cancels, the shutdown sequence has
+returned, no task is parked at the rendezvous, and if the drain timed out the
+return value is non-graceful and names it. The bound is the forced-exit figure in
+[rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline](#rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline);
+a sequence that has not returned inside it is a lost rendezvous and the check
+fails rather than waiting. `always-or-unreached` because the rendezvous is
+reached only when draining was true at that instant; when the branch is skipped
+the obligation does not exist and the check must not fail.
 Fault/timing angle: the rendezvous await has no timeout and no competing arm. If
 the drain times out during the route-settle loop, the cancelling line is never
 reached and the parked task survives only because the forced sweep happens to hold
@@ -2723,6 +2724,13 @@ They were recorded as this sub-part's only CI-executed source-resident checks,
 which the `--lib` finding above supersedes - they are two of many.
 `wire.rs:4-14` is a ```text``` fence and is not compiled.
 
+**CI in this tree.** `.github/workflows/ci.yml:118` and `:126` run
+`cargo test --workspace --all-targets --all-features --locked` on the 1.98 and stable
+toolchains, so every integration binary and every inline test this section counts
+executes in CI. The named-versus-unnamed distinction and the `ci.yml` line numbers
+below describe the source repository's workflow at authoring time and are kept as
+provenance; they are not coverage gaps here.
+
 Coverage does arrive from integration tests, indirectly. **Ten of the 24
 integration binaries use `support::TestHost`, which starts a real host and
 therefore a real ring, and four of the ten are named in CI.** This synthesis
@@ -4571,7 +4579,7 @@ from `docs/host-wire-protocol.md:180` and `:182`; only the peer's runs. Per
 METHOD.md rule 3 both disagreements are recorded with each side cited and neither
 is resolved in the comment's favour.
 
-### Coverage: the two halves of one protocol have opposite CI status
+### Coverage: the two halves of one protocol had opposite CI status at the source
 
 There are **51 in-crate tests** across the five scope files: 22 in `instance.rs`,
 12 in `setup_socket.rs`, 11 in `auth.rs`, 4 in `connection_file.rs`, and 2 in
@@ -5920,6 +5928,13 @@ builds the lib target. Re-verified at `HEAD`: the 13 `host-runtime` hits are `:8
 `:132`, `:133`, `:134`, `:168`, `:169`, `:178`, `:187`, `:190`, `:211`, `:361`,
 `:442`, and `:461`, and `:168-169` are `cargo build`.
 
+**CI in this tree.** `.github/workflows/ci.yml:118` and `:126` run
+`cargo test --workspace --all-targets --all-features --locked` on the 1.98 and stable
+toolchains, so every integration binary and every inline test this section counts
+executes in CI. The named-versus-unnamed distinction and the `ci.yml` line numbers
+below describe the source repository's workflow at authoring time and are kept as
+provenance; they are not coverage gaps here.
+
 Six integration tests in `crates/host-runtime/tests/client.rs` (243 lines) do run, and
 the binary is named in CI twice at HEAD: `ci.yml:119` ("Mandatory ring client
 suite", Linux, job `shm-crash-recovery`) and `:168-169` (a wrapped
@@ -7186,16 +7201,23 @@ That is a **forward** reference, not a stale one - `handler.rs:3` says
 the source module-host work will adapt `Handler` onto this boundary, while the code
 carries the boundary that exists, `HostHandler` (`:558`).
 
-**Coverage: 37 in-crate and 84 integration tests, none CI-named, but 4
+**Coverage: 37 in-crate and 84 integration tests, all executed by CI in this tree, plus 4
 `compile_fail` doctests do run, so 2e owns 4 of the library's 6 CI-executed
 source-resident checks.** The 37 in-crate tests are `control.rs` 23,
 `routing.rs` 12, and `dispatch.rs` 2; `handler.rs` and `composite.rs` have
 none. The 84 integration tests are spread over six binaries whose subject is
 this sub-part - `tests/dispatch.rs` (20), `tests/composite_routing.rs` (16),
 `tests/protocol_vectors.rs` (15), `tests/handler_contract.rs` (12),
-`tests/routing.rs` (12), `tests/broca_protocol.rs` (9) - and CI names none of
-them. So the sub-part is *well tested* and *barely gated*: 121 claim-bearing
-tests, zero executed by CI.
+`tests/routing.rs` (12), `tests/broca_protocol.rs` (9). The source repository's CI
+named none of them; in this tree all six run under `ci.yml:118` and `:126`. The
+source finding, 121 claim-bearing tests and zero executed by CI, is provenance here.
+
+**CI in this tree.** `.github/workflows/ci.yml:118` and `:126` run
+`cargo test --workspace --all-targets --all-features --locked` on the 1.98 and stable
+toolchains, so every integration binary and every inline test this section counts
+executes in CI. The named-versus-unnamed distinction and the `ci.yml` line numbers
+below describe the source repository's workflow at authoring time and are kept as
+provenance; they are not coverage gaps here.
 
 **One correction to that framing, applied during disposition, and it is the only
 CI-executed check on any record in this catalog.** "Zero executed by CI" is true
@@ -8947,14 +8969,21 @@ problem on the closure root presents as "no harness available" rather than as
 
 ### Coverage: the weakest source-resident position of the three sub-parts
 
-**11 in-crate tests reach 3,246 lines, none runs in CI, and there are zero
+**CI in this tree.** `.github/workflows/ci.yml:118` and `:126` run
+`cargo test --workspace --all-targets --all-features --locked` on the 1.98 and stable
+toolchains, so every integration binary and every inline test this section counts
+executes in CI. The named-versus-unnamed distinction and the `ci.yml` line numbers
+below describe the source repository's workflow at authoring time and are kept as
+provenance; they are not coverage gaps here.
+
+**11 in-crate tests reach 3,246 lines, all run in CI in this tree, and there are zero
 doctests.** The 11 are 10 in `config.rs` (`:467`, `:472`, `:502`, `:520`,
 `:550`, `:564`, `:576`, `:603`, `:636`, `:646`) and 1 in `runtime.rs` (`:1326`,
 `stalled_generations_share_one_shutdown_goodbye_deadline`).
 `harness_closure.rs`, `lib.rs`, and `file_mode.rs` have none. Four integration
 binaries carry this sub-part's claims - `tests/synapse_bundle.rs` (24 tests),
 `tests/harness_closure.rs` (15), `tests/ipc_budget_topology.rs` (9),
-`tests/activation.rs` (4) - and CI names none of them.
+`tests/activation.rs` (4). The source repository's CI named none of them; in this tree all four run under `ci.yml:118` and `:126`.
 
 2e owns four CI-executed `compile_fail` doctests and 2b owns two; **2f owns
 none**, and that is the largest structural gap in its inventory, because
@@ -10010,15 +10039,14 @@ Type: safety
 Reachability: test-only - every Broca send through a composed `BrocaComponent` is deduplicated by the supervisor. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - identical resends and racing identical sends are covered; a resend after the run's terminal was retained then evicted is not.
-Guarantee: Two byte-identical sends converge on one run and one backend start; any byte difference under the same key is a conflict, never a silent second run.
-Check: `always` - `runs_started <= 1` per identical send key; a differing body returns the conflict terminal.
+Guarantee: While a session entry is retained, byte-identical resends of `session.send` converge on one backend run and a differing body for the same key is rejected as a conflict. Retention ends when `TERMINAL_RETENTION` (15 minutes, `crates/host-runtime/src/broca/config.rs:126`) expires or `enforce_terminal_cap` evicts the entry beyond `MAX_TERMINAL_SESSIONS` (256, `:122`); a resend after that legitimately starts a new run.
+Check: `always` - within the retention of a session entry, `runs_started <= 1` per identical send key and a differing body returns the conflict terminal; the campaign reads `terminal_retention` and the cap from the supervisor limits and stops counting a key once `sweep_for` or `enforce_terminal_cap` (`supervisor.rs:1085`, `:1005`) has removed it.
 Fault/timing angle: Two harness clients retry the same prompt concurrently.
 Required faults and enabling state: Concurrent identical sends; a differing resend under the same key.
 Confidence: medium - [evidence](evidence/broca-identical-resends-converge-on-one-run.md). `identical_resend_dedups_and_any_byte_difference_conflicts`, `racing_identical_sends_converge_on_one_run_and_one_backend_start` (`crates/host-runtime/tests/broca_supervisor.rs`).
 Existing check: The two tests named above; unaudited.
 Impact: Two model calls billed and two divergent transcripts for one prompt.
-Open questions:
-- The Guarantee states no bound, but dedup holds only while the session entry exists: after the 15-minute retention or the 256-session eviction an identical resend starts a second backend. Should the Guarantee say "within retention"? (needs human input)
+Open questions: None.
 
 ### broca-permits-and-charges-return-to-baseline
 
@@ -10041,7 +10069,7 @@ Type: safety
 Reachability: test-only - every harness child a composed `BrocaComponent` spawns runs in its own process group under `PR_SET_PDEATHSIG`. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - SIGTERM-then-SIGKILL reaping on cancel, delete, and shutdown is covered with real processes; the orphan sweep is covered for dead owners.
-Guarantee: Cancelling, deleting, or shutting down a run terminates the whole harness process group, escalating from SIGTERM to SIGKILL when the child ignores the first, and the orphan sweep kills only groups whose owner is dead.
+Guarantee: On cancellation, deletion, or shutdown, every harness child's process group is terminated within four applications of `termination_grace`, or `terminate_group` reports the group unresolved and the terminal carries `teardown_unconfirmed`; the orphan sweep never signals a group whose owner is alive.
 Check: `always` - after every terminal, either no process of the reaped group survives, or `terminate_group` (`crates/host-runtime/src/broca/subprocess.rs:670`) has reported the group unresolved and the terminal carries `teardown_unconfirmed`; and the sweep never signals a group whose owner is alive. The disjunction is the code's own contract: the bound is four applications of `termination_grace` (`:679-691`), after which survival is reported rather than denied.
 Fault/timing angle: A grandchild that survives its parent keeps a credential in its environment.
 Required faults and enabling state: A child that ignores SIGTERM; a forked grandchild; a dead owner with a live group.

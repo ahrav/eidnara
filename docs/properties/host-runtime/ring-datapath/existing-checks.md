@@ -154,7 +154,7 @@ each of the three roles and asserts resources return to a baseline, and
 `repeated_crashes_do_not_ratchet_single_connection_capacity` (`:248`) does
 twelve alternating cycles. Both use `max_connections = 1`. This is the closest
 existing check to
-[ring-a-admission-charge-releases-on-every-endpoint-thread-exit](catalog.md#ring-a-admission-charge-releases-on-every-endpoint-thread-exit),
+[ring-a-admission-charge-releases-on-every-endpoint-thread-exit](../catalog.md#ring-a-admission-charge-releases-on-every-endpoint-thread-exit),
 it asserts a resource baseline rather than a per-exit-path charge delta, and its
 significance for constructability is worked through in
 [fault-map.md](fault-map.md). Status unaudited.
@@ -232,7 +232,7 @@ semaphore, so its label is unverified. Status unaudited for all ten.
   is discarded with `let _ =` at `:279`, so an endpoint panic falls through to
   `admission.release()` (`:291`) and `done_tx.send(())` (`:292`): a panicking
   worker is reported to the host as orderly completion. Owned by
-  [ring-a-endpoint-thread-panic-is-reported-as-orderly-completion](catalog.md#ring-a-endpoint-thread-panic-is-reported-as-orderly-completion).
+  [ring-a-endpoint-thread-panic-is-reported-as-orderly-completion](../catalog.md#ring-a-endpoint-thread-panic-is-reported-as-orderly-completion).
 - `:560-563` wraps one publication, converting a panic into `Err(())` and thence
   into channel retirement at `:447-451`.
 
@@ -323,7 +323,7 @@ check proves.
    or fails immediately is undetermined by any check in this sub-part, and the
    answer decides whether a maximal frame degrades throughput or retires the
    connection. Note the interaction with
-   [ring-a-publish-failure-is-reported-as-a-clean-peer-close](catalog.md#ring-a-publish-failure-is-reported-as-a-clean-peer-close):
+   [ring-a-publish-failure-is-reported-as-a-clean-peer-close](../catalog.md#ring-a-publish-failure-is-reported-as-a-clean-peer-close):
    if it fails, the cause is erased to `()` and arrives as a clean peer EOF.
 
 ## Sampling limits on this inventory
@@ -373,8 +373,8 @@ Stated so a later pass knows what was and was not looked at.
 ## Checks cited by the four records carried from `part-2b-wire-and-channels`
 
 Appended when the four wire-header records were carried into this sub-part; see
-[catalog.md](catalog.md#group-g-the-wire-header-decode-contract) for the carry
-and [../part-2b-wire-and-channels/README.md](../part-2b-wire-and-channels/README.md)
+[catalog.md](../catalog.md#group-g-the-wire-header-decode-contract) for the carry
+and `part-2b-wire-and-channels/README.md` (source-tree only, not migrated)
 for the superseded directory. Nothing above changes. This section adds only the
 named checks those four records cite, so every check they name is in the
 inventory. Every location was re-verified at carry time.
@@ -434,7 +434,7 @@ production encoder output back through `decode_header` plus
 (`ring_transport.rs:503`, `:730`, the test-only-hook site `:593`, `client.rs:1978`, plus the test-side
 `raw_client.rs:286` and `:556`): no test composes one with the other. This is the
 `Existing check: none.` on
-[encoder-never-emits-a-frame-its-own-decoder-rejects](catalog.md#encoder-never-emits-a-frame-its-own-decoder-rejects).
+[encoder-never-emits-a-frame-its-own-decoder-rejects](../catalog.md#encoder-never-emits-a-frame-its-own-decoder-rejects).
 
 **Fuzz targets for `wire::decode_header`: none found.** `find -type d -name fuzz`
 over the repository returns one directory, `crates/shm-transport/fuzz`, whose

@@ -219,7 +219,7 @@ of the record is even about this gate.** The *direct*-output form is caught. A
 declared `exact_len` that the serializer never satisfies passes the gate (because
 `len()` reports the declared value) and then fails at publication, where
 `reservation.commit(body_len)` returns `ProducerError::Underfill`. That is
-[req-a-a-response-publication-failure-never-reaches-the-settling-path](catalog.md#req-a-a-response-publication-failure-never-reaches-the-settling-path)'s
+[req-a-a-response-publication-failure-never-reaches-the-settling-path](../catalog.md#req-a-a-response-publication-failure-never-reaches-the-settling-path)'s
 subject,
 not this one. So the gap here is specifically the **owned** path, where declared and
 written are the same field and zero is legal. The record, its fault-map row, and

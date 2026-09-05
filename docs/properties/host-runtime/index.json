@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "142486fcc088284953a2c940ac139ef4e14831a1efc53a52368507522c3e7c6c",
+  "source_sha256": "dd38c61468de84c00f243812509590b52211961ca7d0b22f3b3c98a272ba819c",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -393,10 +393,10 @@
         "state": "not-yet",
         "note": "not yet."
       },
-      "guarantee": "A generation that observes draining while tearing down eventually proceeds past the shutdown rendezvous, or the host declares that it did not.",
+      "guarantee": "A generation that observes draining while tearing down proceeds past the shutdown rendezvous, or the host declares that it did not, within the forced-exit bound `run` already carries.",
       "check": {
         "semantics": "always-or-unreached",
-        "condition": "after the shutdown sequence returns, no task is parked at the rendezvous; and if the drain timed out, the return value is non-graceful and names it. `always-or-unreached` because the rendezvous is reached only when draining was true at that instant; when the branch is skipped the obligation does not exist and the check must not fail."
+        "condition": "within `shutdown_deadline + 3 * lifecycle_callback_deadline` plus the two internally bounded `force_close_all_routes` calls (30 s each) after the shutdown token cancels, the shutdown sequence has returned, no task is parked at the rendezvous, and if the drain timed out the return value is non-graceful and names it. The bound is the forced-exit figure in [rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline](#rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline); a sequence that has not returned inside it is a lost rendezvous and the check fails rather than waiting. `always-or-unreached` because the rendezvous is reached only when draining was true at that instant; when the branch is skipped the obligation does not exist and the check must not fail."
       },
       "fault_timing": "the rendezvous await has no timeout and no competing arm. If the drain times out during the route-settle loop, the cancelling line is never reached and the parked task survives only because the forced sweep happens to hold its abort handle. That handle exists because the connection task uses the tracked spawn helper; had it used the lifecycle helper, the host would hang holding the instance lock.",
       "required_faults": "draining true, a generation whose read loop exits inside the drain window, and a route-settle phase slow enough to consume the shutdown deadline.",
@@ -3866,10 +3866,10 @@
         "state": "partial",
         "note": "identical resends and racing identical sends are covered; a resend after the run's terminal was retained then evicted is not."
       },
-      "guarantee": "Two byte-identical sends converge on one run and one backend start; any byte difference under the same key is a conflict, never a silent second run.",
+      "guarantee": "While a session entry is retained, byte-identical resends of `session.send` converge on one backend run and a differing body for the same key is rejected as a conflict. Retention ends when `TERMINAL_RETENTION` (15 minutes, `crates/host-runtime/src/broca/config.rs:126`) expires or `enforce_terminal_cap` evicts the entry beyond `MAX_TERMINAL_SESSIONS` (256, `:122`); a resend after that legitimately starts a new run.",
       "check": {
         "semantics": "always",
-        "condition": "`runs_started <= 1` per identical send key; a differing body returns the conflict terminal."
+        "condition": "within the retention of a session entry, `runs_started <= 1` per identical send key and a differing body returns the conflict terminal; the campaign reads `terminal_retention` and the cap from the supervisor limits and stops counting a key once `sweep_for` or `enforce_terminal_cap` (`supervisor.rs:1085`, `:1005`) has removed it."
       },
       "fault_timing": "Two harness clients retry the same prompt concurrently.",
       "required_faults": "Concurrent identical sends; a differing resend under the same key.",
@@ -3879,9 +3879,7 @@
       },
       "existing_check": "The two tests named above; unaudited.",
       "impact": "Two model calls billed and two divergent transcripts for one prompt.",
-      "open_questions": [
-        "The Guarantee states no bound, but dedup holds only while the session entry exists: after the 15-minute retention or the 256-session eviction an identical resend starts a second backend. Should the Guarantee say \"within retention\"? (needs human input)"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {
@@ -3920,7 +3918,7 @@
         "state": "partial",
         "note": "SIGTERM-then-SIGKILL reaping on cancel, delete, and shutdown is covered with real processes; the orphan sweep is covered for dead owners."
       },
-      "guarantee": "Cancelling, deleting, or shutting down a run terminates the whole harness process group, escalating from SIGTERM to SIGKILL when the child ignores the first, and the orphan sweep kills only groups whose owner is dead.",
+      "guarantee": "On cancellation, deletion, or shutdown, every harness child's process group is terminated within four applications of `termination_grace`, or `terminate_group` reports the group unresolved and the terminal carries `teardown_unconfirmed`; the orphan sweep never signals a group whose owner is alive.",
       "check": {
         "semantics": "always",
         "condition": "after every terminal, either no process of the reaped group survives, or `terminate_group` (`crates/host-runtime/src/broca/subprocess.rs:670`) has reported the group unresolved and the terminal carries `teardown_unconfirmed`; and the sweep never signals a group whose owner is alive. The disjunction is the code's own contract: the bound is four applications of `termination_grace` (`:679-691`), after which survival is reported rather than denied."
