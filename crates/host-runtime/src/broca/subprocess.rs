@@ -465,16 +465,36 @@ pub async fn run(
     };
     if let Some(end) = aborted_end {
         abort_registration.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut spawn_reply = Some(spawn_reply);
         // The child reports its pid immediately after `fork`, so this wait is bounded by process startup rather than the registry filesystem. commentlint: allow(JUDGE)
         // The timeout bounds pid reporting; the abort flag makes a still-queued job's registrar withhold the exec barrier when it runs. commentlint: allow(JUDGE)
-        let reported = tokio::time::timeout(limits.termination_grace, &mut pid_reported)
-            .await
-            .ok()
-            .and_then(Result::ok);
-        let group = reported.and_then(rustix::process::Pid::from_raw);
-        let signalled = kill_group(group, rustix::process::Signal::KILL).is_ok();
-        let members_gone = wait_other_members_gone(group, limits.termination_grace).await;
-        let group_gone = signalled && members_gone;
+        let group_gone =
+            match tokio::time::timeout(limits.termination_grace, &mut pid_reported).await {
+                // A reported pid names the group: teardown is proven by the kill plus member disappearance. commentlint: allow(JUDGE)
+                Ok(Ok(pid)) => {
+                    let group = rustix::process::Pid::from_raw(pid);
+                    let signalled = kill_group(group, rustix::process::Signal::KILL).is_ok();
+                    signalled && wait_other_members_gone(group, limits.termination_grace).await
+                }
+                // A closed channel means the child died before completing its pid report, so it never passed the barrier or forked; reaping the settled spawn reply proves the leader gone. commentlint: allow(JUDGE)
+                Ok(Err(_)) => {
+                    let reply = spawn_reply
+                        .take()
+                        .expect("the abort path consumes the reply once");
+                    match tokio::time::timeout(limits.termination_grace, reply).await {
+                        Ok(Ok(Ok(mut child))) => {
+                            tokio::time::timeout(limits.termination_grace, child.wait())
+                                .await
+                                .is_ok_and(|waited| waited.is_ok())
+                        }
+                        // A spawn error means std already reaped the failed child.
+                        Ok(Ok(Err(_))) => true,
+                        _ => false,
+                    }
+                }
+                // Without a pid the child cannot be identified, so teardown stays unproven. commentlint: allow(JUDGE)
+                Err(_) => false,
+            };
         let mut registrar = registrar;
         // A registrar that settles within the grace yields an exact record verdict; one still
         // stalled has an unknown record fate, so the run conservatively reports the record
@@ -501,8 +521,14 @@ pub async fn run(
                     group_gone
                 }
             };
-        // Dropping `spawn_reply` makes the spawner-side send fail, so the dead child is dropped there and `kill_on_drop` reaps it. commentlint: allow(JUDGE)
-        drop(spawn_reply);
+        // The leader is reaped explicitly whenever the spawner eventually replies; `kill_on_drop` plus the runtime's orphan reaper only backstop a lost reply. commentlint: allow(JUDGE)
+        if let Some(reply) = spawn_reply.take() {
+            tokio::spawn(async move {
+                if let Ok(Ok(mut child)) = reply.await {
+                    let _ = child.wait().await;
+                }
+            });
+        }
         return Ok(SubprocessResult {
             stdout: Vec::new(),
             stderr: Vec::new(),
