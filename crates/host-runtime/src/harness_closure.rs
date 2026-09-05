@@ -24,8 +24,9 @@ use crate::instance::{
 use crate::lifecycle::is_canonical_payload_digest;
 use crate::store_fs::{
     HARDENED_DIR_FLAGS, create_owned_dir, exchange_dirs, hash_copy, is_stale_mtime, is_temp_name,
-    open_created_dir, open_dir_for_removal, open_rel_nofollow, read_dir_names,
-    read_dir_names_partitioned, remove_tree, rename_no_replace, same_snapshot, write_new_file,
+    open_created_dir, open_dir_for_removal, open_or_create_parents, open_rel_nofollow,
+    read_dir_names, read_dir_names_partitioned, remove_tree, rename_no_replace, same_snapshot,
+    write_new_file,
 };
 
 const MANIFEST_NAME: &str = "manifest.json";
@@ -36,6 +37,9 @@ const TEMP_PREFIX: &str = ".tmp-";
 const TEMP_HEX_LEN: usize = 24;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NODES: usize = 65_536;
+/// Every declared root is opened and held for the duration of staging, so the count is bounded
+/// well below common `RLIMIT_NOFILE` soft limits.
+const MAX_SOURCE_ROOTS: usize = 64;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_STRING_BYTES: usize = 1024;
 
@@ -219,6 +223,9 @@ impl ResolvedHarnessNode {
     ///
     /// A descriptor-rooted `module_path` identifies this node by descriptor number; the child
     /// must retain that descriptor through `exec` via [`Self::inherit_in_child`].
+    ///
+    /// A pathname-based `module_path` is verified against the resolved inode at resolution time only.
+    /// On macOS the caller must hold `transaction.lock` from `resolve_node_descriptor` through the child's `exec`, because that lock excludes `materialize` and `prune`, the only writers that rename digest directories.
     pub fn module_path(&self) -> &Path {
         if DESCRIPTOR_PATHS_ARE_FILE_LIKE {
             &self.descriptor_path
@@ -329,6 +336,9 @@ fn validate_header(manifest: &ClosureManifest) -> Result<(), HarnessClosureError
             .any(|pair| pair[0] >= pair[1])
     {
         return Err(invalid("manifest source roots are not uniquely sorted"));
+    }
+    if manifest.source_roots.len() > MAX_SOURCE_ROOTS {
+        return Err(invalid("manifest declares too many source roots"));
     }
     for root in &manifest.source_roots {
         validate_identifier(root)?;
@@ -860,25 +870,11 @@ fn create_parent_dirs(
     root: &OwnedFd,
     relative: &str,
 ) -> Result<(OwnedFd, String), HarnessClosureError> {
-    let mut parts = relative.split('/').peekable();
-    let mut current = crate::store_fs::dup_cloexec(root)
-        .map_err(|_| invalid("closure files descriptor dup failed"))?;
-    while let Some(part) = parts.next() {
-        if parts.peek().is_none() {
-            return Ok((current, part.to_owned()));
-        }
-        current = match mkdirat(&current, part, Mode::from_raw_mode(0o700)) {
-            Ok(()) => {
-                let fd = open_created_dir(&current, part)
-                    .map_err(|_| invalid("closure layout directory open failed"))?;
-                verify_owned_directory(&fd)?;
-                fd
-            }
-            Err(rustix::io::Errno::EXIST) => open_owned_dir(&current, part)?,
-            Err(_) => return Err(invalid("closure layout directory creation failed")),
-        };
-    }
-    Err(invalid("closure node path is empty"))
+    open_or_create_parents(root, relative).map_err(|e| match e {
+        rustix::io::Errno::PERM => invalid("closure directory is not owner-only"),
+        rustix::io::Errno::INVAL => invalid("closure node path is empty"),
+        _ => invalid("closure layout directory creation failed"),
+    })
 }
 
 fn validate_tree(

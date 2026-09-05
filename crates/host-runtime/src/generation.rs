@@ -33,8 +33,8 @@ use crate::instance::{
 use crate::lifecycle::{is_canonical_payload_digest, lifecycle_dir_path};
 use crate::store_fs::{
     HARDENED_DIR_FLAGS, hash_copy, is_stale_mtime, is_temp_name, open_created_dir,
-    open_rel_nofollow, read_dir_names, read_dir_names_partitioned, rename_no_replace,
-    same_snapshot,
+    open_or_create_parents, open_rel_nofollow, read_dir_names, read_dir_names_partitioned,
+    rename_no_replace, same_snapshot,
 };
 
 pub const GENERATIONS_DIR_NAME: &str = "generations";
@@ -909,35 +909,28 @@ fn storage_or(e: std::io::Error, detail: &'static str) -> GenerationError {
     }
 }
 
-/// Creates every parent directory of `rel_path` under `temp_fd` and records each created or
-/// reused prefix in `dirs` so the caller can fsync it before promotion.
+/// Opens or creates every parent of `rel_path` component by component and records each prefix
+/// in `dirs` so the caller can fsync it before promotion. Returns the pinned final parent and
+/// the basename to create under it.
 fn ensure_parent_dirs(
     temp_fd: &OwnedFd,
     rel_path: &str,
     dirs: &mut BTreeSet<String>,
-) -> Result<(), GenerationError> {
-    let mut dir_path = String::new();
-    let components: Vec<&str> = rel_path.split('/').collect();
-    for component in &components[..components.len() - 1] {
-        if !dir_path.is_empty() {
-            dir_path.push('/');
+) -> Result<(OwnedFd, String), GenerationError> {
+    let (parent, basename) = open_or_create_parents(temp_fd, rel_path).map_err(|e| match e {
+        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
+        rustix::io::Errno::PERM => invalid("staging directory failed security checks"),
+        _ => invalid("staging directory creation failed"),
+    })?;
+    let mut prefix = String::new();
+    for component in rel_path.split('/').take(rel_path.matches('/').count()) {
+        if !prefix.is_empty() {
+            prefix.push('/');
         }
-        dir_path.push_str(component);
-        match mkdirat(temp_fd, dir_path.as_str(), Mode::from_raw_mode(0o700)) {
-            // `mkdirat` success proves this call created the entry, so the pathname `chmod` inside cannot follow a planted symlink.
-            Ok(()) => {
-                open_created_dir(temp_fd, dir_path.as_str())
-                    .map_err(|_| invalid("staging directory chmod failed"))?;
-            }
-            Err(rustix::io::Errno::EXIST) => {}
-            Err(rustix::io::Errno::NOSPC) | Err(rustix::io::Errno::DQUOT) => {
-                return Err(GenerationError::InsufficientStorage);
-            }
-            Err(_) => return Err(invalid("staging directory creation failed")),
-        }
-        dirs.insert(dir_path.clone());
+        prefix.push_str(component);
+        dirs.insert(prefix.clone());
     }
-    Ok(())
+    Ok((parent, basename))
 }
 
 struct PreflightSource {
@@ -991,11 +984,11 @@ fn copy_source_into(
         return Err(invalid("staging source changed since preflight"));
     }
     let (source_fd, before) = (&source_fd, &before);
-    ensure_parent_dirs(temp_fd, &spec.rel_path, dirs)?;
+    let (parent, basename) = ensure_parent_dirs(temp_fd, &spec.rel_path, dirs)?;
     let mode: u32 = if spec.executable { 0o700 } else { 0o600 };
     let dest_fd = openat(
-        temp_fd,
-        spec.rel_path.as_str(),
+        &parent,
+        basename.as_str(),
         OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(raw_mode(mode)),
     )

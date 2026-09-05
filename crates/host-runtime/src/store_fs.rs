@@ -140,6 +140,39 @@ pub(crate) fn create_owned_dir(parent: &OwnedFd, name: &str) -> rustix::io::Resu
     open_created_dir(parent, name)
 }
 
+pub(crate) fn is_owned_private_dir(stat: &rustix::fs::Stat) -> bool {
+    let mode = mode_bits(stat);
+    mode & S_IFMT == S_IFDIR && stat.st_uid == owner_uid() && mode & 0o7777 == 0o700
+}
+
+/// `O_NOFOLLOW` on a multi-component `openat` protects only the final component.
+/// Components are opened one at a time relative to the previous pinned descriptor.
+/// `EPERM` reports an existing component that is not an owner-only directory.
+pub(crate) fn open_or_create_parents(
+    root: &OwnedFd,
+    relative: &str,
+) -> rustix::io::Result<(OwnedFd, String)> {
+    let mut parts = relative.split('/').peekable();
+    let mut current = dup_cloexec(root)?;
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            return Ok((current, part.to_owned()));
+        }
+        let next = match mkdirat(&current, part, Mode::from_raw_mode(0o700)) {
+            Ok(()) => open_created_dir(&current, part)?,
+            Err(rustix::io::Errno::EXIST) => {
+                openat(&current, part, HARDENED_DIR_FLAGS, Mode::empty())?
+            }
+            Err(e) => return Err(e),
+        };
+        if !is_owned_private_dir(&rustix::fs::fstat(&next)?) {
+            return Err(rustix::io::Errno::PERM);
+        }
+        current = next;
+    }
+    Err(rustix::io::Errno::INVAL)
+}
+
 /// Removal accepts directories owned by `owner_uid()` regardless of their mode bits, so a
 /// stale entry with a foreign mode can still be reclaimed. A foreign owner fails with `EPERM`.
 pub(crate) fn open_dir_for_removal<N: AsRef<OsStr> + ?Sized>(

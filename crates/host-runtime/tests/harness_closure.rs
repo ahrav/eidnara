@@ -442,6 +442,22 @@ fn ordered_extensions_are_part_of_manifest_identity() {
     assert_ne!(first, second);
 }
 
+/// Every declared root is held open while staging, so the count is bounded to keep an
+/// otherwise valid manifest from failing on `RLIMIT_NOFILE`.
+#[test]
+fn a_manifest_declaring_too_many_source_roots_is_rejected() {
+    let (_temp, _source, candidate) = setup();
+    let mut crowded = candidate.manifest.clone();
+    crowded.source_roots = (0..65).map(|index| format!("root-{index:03}")).collect();
+    crowded.source_roots.sort();
+    assert_eq!(
+        validate_manifest(&crowded)
+            .expect_err("65 roots exceed the bound")
+            .detail(),
+        "manifest declares too many source roots"
+    );
+}
+
 #[test]
 fn strict_manifest_decode_rejects_unknown_fields() {
     let (_temp, _source, candidate) = setup();
