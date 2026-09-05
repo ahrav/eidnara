@@ -309,10 +309,14 @@ impl CompositeComponent for BrocaComponent {
 
     async fn health(&self) -> HealthReport {
         // The wire contract admits `ready | unavailable`; `unavailable` means no supported harness can run.
+        // A harness whose descriptor resolves but whose snapshot holds no usable credential rejects every send at `CredentialVerifier::verify`, so it cannot run either. commentlint: allow(JUDGE)
         let unavailable = [Harness::OpenCode, Harness::Pi].into_iter().all(|harness| {
             self.supervisor
                 .harness_unavailable_reason(harness)
                 .is_some()
+                || self.credential_verifier.as_ref().is_some_and(|verifier| {
+                    !verifier.env.any_credential_available(harness.as_str())
+                })
         });
         if unavailable {
             return HealthReport {

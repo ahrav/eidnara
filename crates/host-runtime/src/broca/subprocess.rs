@@ -161,6 +161,16 @@ impl EnvSnapshot {
         Ok(vec![(name.clone(), value.clone())])
     }
 
+    /// Every provider `canonical_provider` admits for `harness`.
+    pub const SUPPORTED_PROVIDERS: [&'static str; 3] = ["anthropic", "google", "openai"];
+
+    /// A snapshot with no usable credential for any supported provider cannot run any send for `harness`, whatever the harness's own availability. commentlint: allow(JUDGE)
+    pub fn any_credential_available(&self, harness: &str) -> bool {
+        Self::SUPPORTED_PROVIDERS
+            .iter()
+            .any(|provider| self.provider_row(harness, provider).is_ok())
+    }
+
     pub fn credential_fingerprint(
         &self,
         connection_key: &[u8; 32],
@@ -349,6 +359,13 @@ pub async fn run(
     // The parent check aborts when the child no longer has `host_pid` as its parent.
     let host_pid = std::process::id();
     let child_inherit_fds = inherit_fds.clone();
+    // Every descendant inherits this per-run nonce; the startup sweep uses it to prove that a member of a leaderless group descends from this run rather than from an unrelated group that recycled the numeric pgid. commentlint: allow(JUDGE)
+    let group_nonce = group_registry::new_group_nonce()?;
+    let mut env = env;
+    env.push((
+        OsString::from(group_registry::GROUP_NONCE_ENV),
+        OsString::from(group_nonce.clone()),
+    ));
     // Register crash ownership before `exec` so successor sweeps can find helpers after a host crash: `pdeathsig` kills only the leader, and a helper forked before record publication would otherwise be unrecorded. commentlint: allow(JUDGE)
     // `spawn` waits for `exec`, so the blocking-pool registrar reads `pid_report`, publishes the record, then releases `exec_barrier`.
     let (pid_report_read, pid_report_write) =
@@ -445,7 +462,7 @@ pub async fn run(
             // Withholding the barrier aborts the child before exec, so no record is needed.
             return None;
         }
-        let record = group_registry::GroupRecord::record(&state_root, leader)?;
+        let record = group_registry::GroupRecord::record(&state_root, leader, &group_nonce)?;
         if registrar_abort.load(std::sync::atomic::Ordering::SeqCst) {
             // The run gave up during publication; the barrier stays withheld so the child aborts, and the published record is returned for the abort path's cleanup task. commentlint: allow(JUDGE)
             return Some(record);
@@ -926,14 +943,31 @@ pub(crate) async fn bounded_cleanup(
     }
 }
 
+/// Blocking filesystem and `/proc` jobs are admitted through this many slots, each held until the job actually returns rather than until its caller stops waiting. commentlint: allow(JUDGE)
+/// A caller that times out drops only its join handle; without the slot, repeated sends against a stalled filesystem would pile up detached jobs, their captured descriptors, and pool threads without bound. commentlint: allow(JUDGE)
+const BLOCKING_SLOTS: usize = 4 * super::config::MAX_BACKEND_PROCESSES;
+
+fn blocking_slots() -> &'static Arc<tokio::sync::Semaphore> {
+    static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(BLOCKING_SLOTS)))
+}
+
 /// Runs a synchronous `/proc` or filesystem step on the blocking pool so it never stalls a runtime worker.
 /// A cancelled or panicked blocking task reads as an unknown answer.
+/// The slot moves into the job, so a stalled job keeps its slot until it returns and callers behind it wait (and time out) instead of adding more. commentlint: allow(JUDGE)
 pub(crate) async fn off_runtime<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> io::Result<T> {
-    tokio::task::spawn_blocking(work)
+    let slot = Arc::clone(blocking_slots())
+        .acquire_owned()
         .await
-        .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
+        .map_err(|_| io::Error::other("blocking slots are closed"))?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        work()
+    })
+    .await
+    .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
 }
 
 /// Queues a fork on one immortal OS thread and returns the reply channel without waiting. commentlint: allow(JUDGE)
@@ -1232,7 +1266,7 @@ impl PrivateDir {
     /// The child controls the size of the tree under `HOME`, so the recursive delete runs on the blocking pool.
     /// A failed blocking task still reports a cleanup failure so no path can claim the private files are gone without proof.
     pub async fn cleanup_async(self) -> Result<(), CleanupFailure> {
-        match tokio::task::spawn_blocking(move || self.cleanup()).await {
+        match off_runtime(move || self.cleanup()).await {
             Ok(result) => result,
             Err(_) => Err(CleanupFailure {
                 kind: io::ErrorKind::Other,
@@ -1925,13 +1959,16 @@ pub mod group_registry {
         scan_group_members(pgid, Some(pgid))
     }
 
-    /// Membership plus identity: a member must share `owner_sid` (descendants never leave the owner's session without also leaving the pgid, because only `setsid` changes a session and it also creates a new group) and must have started at or after the recorded leader. commentlint: allow(JUDGE)
-    /// A group that recycled the numeric pgid inside another session fails the session check; one inside the same session with pre-leader members fails the start check. commentlint: allow(JUDGE)
+    /// Membership plus identity: a member must share `owner_sid`, must have started at or after the recorded leader, and must carry the recorded [`GROUP_NONCE_ENV`] in its environment. commentlint: allow(JUDGE)
+    /// The nonce is the non-reusable fence: a group that recycled the numeric pgid — even inside the owner's still-live session — never inherited it, whereas every descendant of the recorded leader did. commentlint: allow(JUDGE)
+    /// An unreadable environment (another user's process, or a descendant that a sandbox hid) reads as unverified, so the sweep leaks rather than kills when it cannot prove identity. commentlint: allow(JUDGE)
     fn group_has_verified_descendants(
         pgid: i32,
         owner_sid: i32,
         leader_start: u64,
+        group_nonce: &str,
     ) -> io::Result<bool> {
+        let marker = format!("{GROUP_NONCE_ENV}={group_nonce}");
         for proc_entry in fs::read_dir("/proc")? {
             let Some(pid) = proc_entry?
                 .file_name()
@@ -1946,7 +1983,8 @@ pub mod group_registry {
                         && row.state != 'Z'
                         && row.state != 'X'
                         && row.sid == owner_sid
-                        && row.start >= leader_start =>
+                        && row.start >= leader_start
+                        && environ_has_entry(pid, marker.as_bytes()) =>
                 {
                     return Ok(true);
                 }
@@ -1957,6 +1995,13 @@ pub mod group_registry {
             }
         }
         Ok(false)
+    }
+
+    /// `/proc/<pid>/environ` is NUL-separated `NAME=value` entries; a read failure means the identity cannot be proven.
+    fn environ_has_entry(pid: i32, entry: &[u8]) -> bool {
+        fs::read(format!("/proc/{pid}/environ"))
+            .map(|environ| environ.split(|byte| *byte == 0).any(|item| item == entry))
+            .unwrap_or(false)
     }
 
     fn scan_group_members(pgid: i32, exclude_pid: Option<i32>) -> io::Result<bool> {
@@ -2042,6 +2087,18 @@ pub mod group_registry {
 
     pub const STATE_DIR_NAME: &str = "broca";
 
+    /// Set in every harness child's environment; the startup sweep matches it against the recorded value when the group's leader is gone. commentlint: allow(JUDGE)
+    pub const GROUP_NONCE_ENV: &str = "EIDNARA_BROCA_GROUP_NONCE";
+    const GROUP_NONCE_HEX_LEN: usize = 32;
+
+    /// A fresh 128-bit hex nonce for one run's process group.
+    pub fn new_group_nonce() -> io::Result<String> {
+        let mut bytes = [0u8; 16];
+        getrandom::getrandom(&mut bytes)
+            .map_err(|_| io::Error::other("group nonce generation failed"))?;
+        Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+
     /// `<managed eidnara dir>/broca`: the crash-ownership registry plus the `runs/` root for per-run private directories.
     ///
     /// The directory is shared by every host incarnation configured with the same data root, so a successor finds its predecessor's records.
@@ -2091,14 +2148,16 @@ pub mod group_registry {
         leader_start: u64,
         owner_pid: i32,
         owner_start: u64,
-        /// The leader joins a fresh process group but keeps the owner's session, so every descendant shares this session id; it is the identity proof for a group whose leader is gone. commentlint: allow(JUDGE)
+        /// The leader joins a fresh process group but keeps the owner's session, so every descendant shares this session id. commentlint: allow(JUDGE)
         owner_sid: i32,
+        /// The per-run value of [`GROUP_NONCE_ENV`] in the leader's environment; descendants inherit it, and a process that recycled the numeric pgid cannot have it. commentlint: allow(JUDGE)
+        group_nonce: String,
     }
 
     impl Entry {
         fn parse(text: &str) -> Option<Self> {
             let mut lines = text.lines();
-            if lines.next()? != "v2" {
+            if lines.next()? != "v3" {
                 return None;
             }
             let boot_id = lines.next()?.to_owned();
@@ -2109,6 +2168,12 @@ pub mod group_registry {
             let (leader_pid, leader_start) = pid_line(&mut lines)?;
             let (owner_pid, owner_start) = pid_line(&mut lines)?;
             let owner_sid = lines.next()?.parse().ok()?;
+            let group_nonce = lines.next()?.to_owned();
+            if group_nonce.len() != GROUP_NONCE_HEX_LEN
+                || !group_nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return None;
+            }
             Some(Self {
                 boot_id,
                 leader_pid,
@@ -2116,6 +2181,7 @@ pub mod group_registry {
                 owner_pid,
                 owner_start,
                 owner_sid,
+                group_nonce,
             })
         }
     }
@@ -2129,7 +2195,7 @@ pub mod group_registry {
     impl GroupRecord {
         /// `record` returns `None` if it cannot write the record or establish either process identity.
         /// The registrar then withholds the exec barrier, so the child aborts before executing harness code.
-        pub fn record(root: &StateRoot, leader_pid: i32) -> Option<Self> {
+        pub fn record(root: &StateRoot, leader_pid: i32, group_nonce: &str) -> Option<Self> {
             let leader_start = proc_start_time(leader_pid).ok().flatten()?;
             let owner_pid = std::process::id() as i32;
             let owner_start = proc_start_time(owner_pid).ok().flatten()?;
@@ -2140,7 +2206,7 @@ pub mod group_registry {
             let name = format!("{leader_pid}-{:016x}", u64::from_le_bytes(nonce));
             let path = dir.join(&name);
             let body = format!(
-                "v2\n{}\n{leader_pid} {leader_start}\n{owner_pid} {owner_start}\n{owner_sid}\n",
+                "v3\n{}\n{leader_pid} {leader_start}\n{owner_pid} {owner_start}\n{owner_sid}\n{group_nonce}\n",
                 boot_id().ok()?
             );
             // A record is visible only once it is complete: a host crash between create and write must not leave a truncated record that the sweep discards without signaling its group.
@@ -2265,6 +2331,7 @@ pub mod group_registry {
                     entry.leader_pid,
                     entry.owner_sid,
                     entry.leader_start,
+                    &entry.group_nonce,
                 )?,
             };
             if group_live {

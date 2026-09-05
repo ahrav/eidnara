@@ -646,16 +646,16 @@ fn assistant_message_terminal(
     let stop_reason = message
         .get("stopReason")
         .and_then(serde_json::Value::as_str);
-    let text = assistant_text(message);
     let decision = match stop_reason {
         // This executor does not run tools.
         // The parser accepts `toolUse` as an intermediate stop-reason spelling.
         None | Some("toolUse") => None,
         // `stop` and `length` messages with tool requests are not terminal because this executor does not execute tools.
         Some("stop" | "length") if message_requests_tools(message) => None,
+        // A success message with a malformed `content` is a parse failure, not an empty answer: publishing it as completed would turn a schema change into a silently truncated result. commentlint: allow(JUDGE)
         Some("stop") => Some((
             Some(BackendEvent::AssistantText {
-                text,
+                text: assistant_text(message, line_no)?,
                 finish_reason: None,
             }),
             BackendTerminal::Completed {
@@ -664,7 +664,7 @@ fn assistant_message_terminal(
         )),
         Some("length") => Some((
             Some(BackendEvent::AssistantText {
-                text,
+                text: assistant_text(message, line_no)?,
                 finish_reason: Some(FinishReason::Length),
             }),
             BackendTerminal::Completed {
@@ -694,19 +694,27 @@ fn assistant_message_terminal(
     Ok(decision)
 }
 
-fn assistant_text(message: &serde_json::Value) -> String {
-    let Some(content) = message.get("content").and_then(serde_json::Value::as_array) else {
-        return String::new();
-    };
+/// `content` must be an array; an explicitly empty array is a valid empty answer. Each `text` block must carry a string `text`; other block kinds are skipped, since this executor never publishes them. commentlint: allow(JUDGE)
+fn assistant_text(message: &serde_json::Value, line_no: usize) -> Result<String, String> {
+    let content = message
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("assistant content is missing or not an array at line {line_no}"))?;
     let mut text = String::new();
     for block in content {
-        if block.get("type").and_then(serde_json::Value::as_str) == Some("text")
-            && let Some(part) = block.get("text").and_then(serde_json::Value::as_str)
-        {
+        let kind = block
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("assistant content block has no type at line {line_no}"))?;
+        if kind == "text" {
+            let part = block
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("assistant text block has no text at line {line_no}"))?;
             text.push_str(part);
         }
     }
-    text
+    Ok(text)
 }
 
 /// `stop` is non-terminal when `message_requests_tools(message)` is true because this executor does not execute tools.
