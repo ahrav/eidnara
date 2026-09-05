@@ -591,7 +591,7 @@ Reachability: default-production - the spawn sites enumerated are on the
 default connection and dispatch path, reached from `run_connection`
 (`crates/host-runtime/src/runtime.rs:1043`).
 Status: active
-Exercised: not yet.
+Exercised: not yet - no test enumerates the spawn sites reachable from a generation and asserts each is bound to the generation's token or tracker; the spawn inventory in the record is a manual read.
 Guarantee: Every task holding a generation reference is a member of a set that
 some shutdown path closes and waits on.
 Check: `always` - enumerate spawn sites reachable from a generation; each is in
@@ -652,7 +652,7 @@ Reachability: default-production - the rendezvous await is on the default
 teardown path whenever draining is set
 (`crates/host-runtime/src/connection.rs:328-330`).
 Status: active
-Exercised: not yet.
+Exercised: not yet - no test drives a generation into the rendezvous with draining set, exhausts the drain window during route-settle, and asserts that the sequence returns inside the forced-exit bound with a non-graceful result.
 Guarantee: A generation that observes draining while tearing down proceeds past the shutdown rendezvous, or the host declares that it did not, within the forced-exit bound `run` already carries.
 Check: `always-or-unreached` - within `shutdown_deadline + 3 * lifecycle_callback_deadline`
 plus the two internally bounded `force_close_all_routes` calls (30 s each) after the shutdown token cancels, the shutdown sequence has
@@ -688,7 +688,7 @@ Reachability: default-production - the draining check and the registry insert
 share the connections lock on every accepted connection
 (`crates/host-runtime/src/connection.rs:267-278`).
 Status: active
-Exercised: not yet.
+Exercised: not yet - no test races a registration against the drain snapshot and asserts the late generation is either in the snapshot or cancelled by the read-loop wait.
 Guarantee: The shutdown sequence's one-shot registry snapshot contains every
 generation that will ever wait on the shutdown rendezvous.
 Check: `always` - every inserted generation either appears in the snapshot or
@@ -862,7 +862,7 @@ Reachability: default-production - the shutdown latch is constructed for every
 host incarnation (`crates/host-runtime/src/runtime.rs:919`) and driven by the
 ordinary shutdown path; nothing gates it on configuration.
 Status: active
-Exercised: not yet.
+Exercised: not yet - one test covers the hook never running; nothing runs the hook and fails it partway to assert that draining and the latch either both moved or neither did.
 Guarantee: The commit point either applies all three effects - draining, frozen
 route admission, latch commit plus token cancellation - or none.
 Check: `always` - for every prefix of the hook body, if draining is set then the
@@ -897,9 +897,7 @@ Status: active
 Exercised: yes - `an_enabled_change_future_survives_a_pre_poll_notification` (`crates/host-runtime/src/lifecycle.rs:1771`) pins that a notification landing between `try_own` and the first poll is observed; note that it constructs `changed()` before `try_own()`, which is the ordering that carries the guarantee (see the timing angle).
 Guarantee: A shutdown requester that observes the wait state is always woken by
 the next phase change.
-Check: `always` - for every interleaving of ownership attempt, reopen, commit, and a waiter's change-future lifecycle, the waiter eventually returns owner or committed; the invariant a test must protect is that the `Notified` future is created (`changed()`, `lifecycle.rs:1091`) before the state is re-checked (`try_own()`, `:1065`).
-a waiter's change-future lifecycle, the waiter eventually returns owner or
-committed.
+Check: `always` - for every interleaving of ownership attempt, reopen, commit, and a waiter's change-future lifecycle, the waiter returns owner or committed within a bounded window after the phase change: the existing test bounds it at 1 s of wall clock (`lifecycle.rs:1779`), and under `start_paused` the waiter must be ready at the first poll after the notify. The invariant a test must protect is that the `Notified` future is created (`changed()`, `lifecycle.rs:1091`) before the state is re-checked (`try_own()`, `:1065`).
 Fault/timing angle: the latch notifies with `notify_waiters` (`lifecycle.rs:1083`,
 `:1088`), which stores no permit. For the pinned Tokio 1.53.1, a `Notified` future
 is guaranteed to observe `notify_waiters` from the moment it is created, polled or
@@ -999,7 +997,7 @@ this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outs
 (`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
 Status: active - **reframed after portfolio evaluation**
-Exercised: not yet.
+Exercised: not yet - the two existing tests assert that expiry produces wedged; nothing holds both fences through a phase longer than the evidence window and asserts the probe never reports wedged.
 Guarantee: The documented freshness window is wide enough for every phase the
 implementation can legitimately take, or the phase budget is coupled to the window
 so the two cannot disagree.
@@ -1113,7 +1111,7 @@ this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outs
 (`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
 Status: active
-Exercised: not yet.
+Exercised: not yet - in-crate tests assert the reason field directly; nothing asserts that each distinguished wedge reason reaches an operator-visible surface, and the CLI that would render it is not in this tree.
 Guarantee: When the host distinguishes a wedge cause, that distinction is
 observable outside the process.
 Check: `reachable` - for each distinguished wedge reason, some operator-visible
@@ -1280,7 +1278,7 @@ them (`packages/plugin/src/shared/host-lifecycle/paths.ts`) is in this tree; the
 (`docs/properties/README.md:52`); reclassify in the wave that lands it. The
 TypeScript producer and mis-mapping findings below are source-repository evidence.
 Status: active - **premise corrected after portfolio evaluation**
-Exercised: not yet.
+Exercised: not yet - the TypeScript producer tests are in the source repository; nothing in this tree enumerates the declared ids against Rust producers, and the CLI and plugin surfaces are absent.
 Guarantee: Each reason id the release contract declares is emitted by the layer
 the remediation implies, and a condition that maps to one id is not reported under
 another.
@@ -1352,7 +1350,7 @@ Type: safety
 Reachability: default-production - the redaction guard and its reporting run on
 the default dispatch path (`crates/host-runtime/src/dispatch.rs:994-995`).
 Status: active
-Exercised: not yet.
+Exercised: not yet - no test installs the hook and drives it with a panic payload that fails to format, a poisoned lock, or a blocked writer to assert it neither panics nor blocks.
 Guarantee: Reporting a redacted callback panic never escalates into process abort
 or an indefinite stall.
 Check: `always` - the hook completes without panicking and without blocking, for
@@ -1386,7 +1384,7 @@ Reachability: default-production - both rejection arms are on the default
 connection path: the authentication return and the connection-permit
 `try_acquire_owned` failure (`crates/host-runtime/src/connection.rs:130-138`).
 Status: active
-Exercised: not yet.
+Exercised: not yet - no test triggers each rejection class and asserts an operator-visible record; the record itself finds there is no channel to carry one.
 Guarantee: A rejected connection produces some record an operator can see.
 Check: `reachable` - for each rejection class (authentication failure, connection
 capacity exhaustion, post-authentication drain refusal), some counter, log, or
@@ -6013,33 +6011,29 @@ here rather than edited into it.
 
 ## Reachability: client peer
 
-**All fourteen records are `default-production`, and no record here is
-`test-only`.** The label rests on four verified facts rather than on a blanket
-preamble assertion, per METHOD rule 4.
+**All fourteen records are `test-only` in this tree.** The source catalog labelled
+them `default-production` on four facts, and the first two still hold here:
 
 1. `Client::connect` is `pub` at `client.rs:306` and carries no `cfg` gate.
 2. It reaches the ring through `connect_info` (`:343`), then `start_ring_bridge`
    (`:378`), then `RingClientEndpoint::attach_with_descriptors` (`:1855`,
    defined `ring_transport.rs:636`). None is `cfg`-gated.
-3. Production callers exist outside this crate.
-   `crates/daemon/src/bin/eidnara-host.rs:468` and `:500` call
-   `Client::connect`, and that binary is described by its own manifest as "the
-   production lifecycle/serve executable" (`crates/daemon/Cargo.toml:18-19`).
-   `ManagedConnector::connect` (`crates/daemon/src/historian_producer.rs:693`)
-   calls it too, outside any test module, and
-   `docs/host-wire-protocol.md:808` names `HistorianProducer` as a
-   `host_runtime::Client` consumer.
+3. The production callers the source catalog cited, `crates/daemon/src/bin/eidnara-host.rs`
+   and `ManagedConnector::connect` in `crates/daemon/src/historian_producer.rs`, are
+   not in this tree: `crates/daemon` is scheduled for U4 (`docs/properties/README.md:52`),
+   and a workspace-wide search finds `Client::connect` only in `crates/host-runtime/tests/`
+   and benches. Public visibility without a shipped caller is `test-only` under
+   METHOD rule 4.
 4. The doc comment "Thread-confined peer endpoint for integration tests"
-   (`ring_transport.rs:626`) is therefore wrong about reachability, and
-   `RING_PROFILE = "host-test-ring-v1"` (`ring_transport.rs:31`) is a
-   misleading name rather than a gate. Sub-part 2b reached the same two verdicts
-   independently.
+   (`ring_transport.rs:626`) is therefore accurate about this tree's callers, and
+   `RING_PROFILE = "host-test-ring-v1"` (`ring_transport.rs:31`) is a name rather
+   than a gate. Sub-part 2b reached the same two verdicts independently. Every
+   record here reclassifies in the wave that lands a production caller.
 
-Two code points are production-*unreachable* inside this
-`default-production` surface, and both are typed `reachability` with
-`unreachable` semantics at the record rather than relabelled: `dispatch`'s
-catch-all at `:1557`, and - noted but not cataloged as its own record - the two
-`unreachable!()` arms at `:1440` and `:1457`.
+Two code points are production-*unreachable* inside this surface, and both are
+typed `reachability` with `unreachable` semantics at the record rather than
+relabelled: `dispatch`'s catch-all at `:1557`, and - noted but not cataloged as
+its own record - the two `unreachable!()` arms at `:1440` and `:1457`.
 
 ## Index
 
@@ -6094,7 +6088,7 @@ mean the client retains no diagnosis of its own death.
 ### client-a-a-retired-generation-forgets-why-it-retired
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test asserts what a caller arriving after retirement can
 learn about the cause
@@ -6132,7 +6126,7 @@ Open questions:
 ### client-a-a-clean-host-close-and-a-transport-failure-share-one-code
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test drives the bridge thread's four distinct break paths
 and compares the resulting caller-visible code
@@ -6187,7 +6181,7 @@ unconditionally, which is not the same as delivered.
 ### client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test observes the setup socket after a forced ring failure
 Guarantee: The client's setup-socket departure signal does not distinguish a
@@ -6244,7 +6238,7 @@ Open questions:
 ### client-a-a-close-completes-before-its-setup-goodbye-is-written
 
 Type: reachability
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - nothing constructs the ordering, but the thread's *exit* is
 observed in CI: `tests/shm_soak.rs:54-110` and
@@ -6324,7 +6318,7 @@ that a regression has something to violate.
 ### client-a-every-in-flight-request-is-settled-with-a-classified-send-outcome
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `dropped_unary_future_cleans_pending_and_possibly_sent_request`
 (`client.rs:3090`) and
@@ -6362,7 +6356,7 @@ Open questions: None.
 ### client-a-no-request-frame-carries-a-non-increasing-correlation
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `max_correlation_is_used_once_then_exhausted`
 (`client.rs:2328`) and
@@ -6414,7 +6408,7 @@ anything name the probe as the thing that failed.
 ### client-a-a-failed-pong-enqueue-retires-the-generation-as-a-local-fault
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `a_ping_at_any_valid_priority_is_answered_with_an_exact_flag_echo`
 (`client.rs:2754`) covers the success path, and
@@ -6471,7 +6465,7 @@ Open questions:
 ### client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget
 
 Type: liveness
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test stalls inbound delivery and measures Pong egress
 Guarantee: Once inbound delivery backpressures, an enqueued Pong waits on the
@@ -6524,7 +6518,7 @@ and one about what an entry means.
 ### client-a-live-route-handles-are-bounded-only-by-the-host
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test opens routes to exhaustion
 Guarantee: The client imposes no limit on concurrently live route handles, so the
@@ -6556,7 +6550,7 @@ Open questions:
 ### client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `a_duplicate_bind_terminal_never_closes_an_owned_route`
 (`client.rs:3587`) covers the unmatched-terminal case, not two successful opens
@@ -6613,7 +6607,7 @@ host-side fact remains open.
 ### client-a-host-shutdown-success-rests-only-on-a-json-echo
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test supplies a well-formed echo from a host that did not
 stop
@@ -6656,7 +6650,7 @@ Open questions:
 ### client-a-route-open-retries-treat-four-host-terminals-as-proof-of-no-bind
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test counts host-side binds across a retried `open_route`
 Guarantee: `open_route` retries after four specific host terminal codes on the
@@ -6746,7 +6740,7 @@ directions, and because this synthesis's correction above bears on both.
 ### client-a-a-host-originated-cancel-retires-the-generation
 
 Type: safety
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `inbound_validation_enforces_the_direct_profile_table`
 (`client.rs:2658`) exercises `validate_inbound` broadly; whether it asserts the
@@ -6801,7 +6795,7 @@ Open questions:
 ### client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production
 
 Type: reachability
-Reachability: default-production
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - reached only by the test module's 16 direct `dispatch` calls
 Guarantee: `dispatch`'s catch-all retirement arm is unreachable from the
@@ -10021,7 +10015,7 @@ Open questions: `CREDENTIAL_ROW_CAP_BYTES` is defined in `subprocess.rs` but not
 ### synapse-bundle-fingerprint-covers-every-artifact
 
 Type: safety
-Reachability: default-production - every Synapse bundle load recomputes and compares the fingerprint.
+Reachability: test-only - every bundle load through a composed `SynapseComponent` recomputes and compares the fingerprint (`load_bundle` is called only from `crates/host-runtime/src/synapse/mod.rs:1025`), but the component is not on `host_runtime::run`'s default path; an embedder composes it, and in this tree the only compositions are tests and `examples/synapse_host.rs:123`. The daemon that will compose it is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: yes - the committed tiny fixture's fingerprint is recomputed from its manifest; single-bit artifact changes are caught by each artifact's own digest at load.
 Guarantee: The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.
@@ -10134,7 +10128,7 @@ Reachability: test-only - every artifact fault in a composed `SynapseComponent` 
 Status: active
 Exercised: partial - missing, corrupt, extra, wrong-identity, and wrong-pooling artifacts disable the lane while the context module stays routable; a fault during inference itself is covered only by the deterministic engine.
 Guarantee: An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.
-Check: `always` - for every artifact fault, `activate` returns `Ok` with the lane disabled and a context request issued afterwards completes; the second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation.
+Check: `always` - for every artifact fault, `activate` returns `Ok` with the lane disabled, and a context request issued afterwards completes within the campaign's request deadline; the existing test bounds it with the 5 s harness `BUDGET` (`crates/host-runtime/tests/support/synapse.rs:22`, `:265`), and the host itself imposes no dispatch deadline (see [req-a-a-handler-outliving-every-host-deadline-is-reached](#req-a-a-handler-outliving-every-host-deadline-is-reached)), so the bound must come from the campaign. The second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation.
 Fault/timing angle: A host-fatal Synapse fault would take the product down for an optional lane.
 Required faults and enabling state: Each artifact fault class; an unconfigured component.
 Confidence: medium - [evidence](evidence/synapse-degrades-to-disabled-and-keeps-the-context-routable.md). `unconfigured_component_is_disabled_not_fatal`, `one_bit_changes_to_each_artifact_disable_the_lane`, `missing_artifact_disables_the_lane`, `wrong_ort_identity_disables_the_lane`, `corrupt_bundle_degrades_synapse_and_keeps_context_routable` (`crates/host-runtime/tests/synapse_bundle.rs`, `crates/host-runtime/tests/synapse_roundtrip.rs`).

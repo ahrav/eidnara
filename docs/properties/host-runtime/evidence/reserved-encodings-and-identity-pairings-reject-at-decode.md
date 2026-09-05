@@ -192,16 +192,73 @@ builds.
 
 ## Investigation log
 
-The lens recorded `Open questions: None.` for this record and the carry does not
-add one. Two things were resolved rather than opened, and both are recorded above
-rather than here: the two `tests/protocol_vectors.rs` citations were traced to a
-rename plus a move under `63c4d277`, and the in-file span was corrected by one
-line. Neither changed the property, the guarantee, the check semantics, or the
-impact.
+### Q: Do the two `tests/protocol_vectors.rs` checks the lens cited still exist, and at which lines?
+- Sources examined: `tests/protocol_vectors.rs` at `1c193ae0`, `793a973e`
+  and `e447c927`; the blob hashes of that file and of
+  `crates/host-runtime/src/wire.rs` at all three commits; commit `63c4d277`
+  ("refactor(shm): enforce ring-only architecture"); the doc comment, the
+  `struct Case { name, bytes }` declaration and the first `Case` of the table
+  printed from both versions of the renamed test. The lens itself recorded
+  `Open questions: None.` for this record, so this entry records a verification
+  the carry performed, not a question the lens left open.
+- Findings: `structural_corruption_closes_silently` at `:512` no longer
+  exists. It is renamed to `structural_corruption_is_rejected_before_dispatch`
+  at `:351` (`#[tokio::test]` at `:350`). The doc comment above it, the `Case`
+  struct and the `"unsupported version"` case are byte-identical across the
+  rename, so it is the same check under a new name.
+  `pure_header_frames_accept_any_valid_priority` keeps its name and moves from
+  `:656` to `:504` (`#[tokio::test]` at `:503`). One commit causes both moves:
+  `63c4d277` takes the file from 976 lines at `1c193ae0` to 762 at `e447c927`.
+  The file's blob is `21f03055` at `1c193ae0` and `793a973e` and `0cbd259e`
+  at `e447c927`. `wire.rs` is blob `fd0bb178` at all three commits, so the
+  subject did not move.
+- Missing evidence: none at carry time.
+- Conclusion: resolved with answer. Both checks exist at the new positions
+  recorded in the evidence trail. Neither the property, the guarantee, the
+  check semantics nor the impact changes.
 
-One observation is logged because it is a lead rather than a question. The
-existing tests all assert a specific `DecodeError` variant, which means they are
-already stronger than "rejects" - they pin *which* gate fired. That is the shape
-the sweep above should preserve, and it is the reason a masking regression on any
-of the four covered inputs would fail today. The gap is the other 65,532 pairs,
-not the oracle's strength.
+### Q: Is the lens's in-file span for `reject_unknown_frame_type_and_reserved_flag_encodings` correct?
+- Sources examined: `crates/host-runtime/src/wire.rs` at `e447c927`, lines
+  `:745-774`.
+- Findings: the lens wrote `:745-773`. `:773` is the `);` of the last
+  assertion and the closing brace of the function is `:774`. The span is short
+  by one line.
+- Missing evidence: none.
+- Conclusion: resolved with answer. The span is corrected to `:745-774` in
+  the evidence trail. The test's four inputs and its assertions are unchanged.
+
+### Q: Is the gap in existing coverage the oracle's strength or its input set?
+- Sources examined: the three in-file tests (`:745-774`, `:795-833`,
+  `:836-862`) and the `DecodeError` variants each one asserts.
+- Findings: every existing test asserts a specific `DecodeError` variant, not
+  just `Err(..)`. That pins which gate fired, which is stronger than "rejects".
+  A masking regression on any of the four covered inputs fails today, because
+  acceptance stops matching `Err(..)`. The uncovered set is the other 65,532
+  `(flags, type)` pairs, not the shape of the assertion.
+- Missing evidence: the exhaustive 256x256 sweep and the no-normalization
+  assertion described under "What a test must construct".
+- Conclusion: resolved with answer. The gap is input coverage. The sweep must
+  keep the variant-pinning shape of the existing tests rather than weaken to
+  `is_err()`.
+
+### Q: Do this record's citations still resolve against the current checkout?
+- Sources examined: `git cat-file -t` for `e447c927`, `63c4d277` and
+  `1c193ae0`; `git rev-parse HEAD`; `git hash-object` and `grep -n` over
+  `crates/host-runtime/src/wire.rs` and
+  `crates/host-runtime/tests/protocol_vectors.rs` at `HEAD`.
+- Findings: `HEAD` is `e6b944f`. None of `e447c927`, `63c4d277` or
+  `1c193ae0` is a valid object in this checkout, so the carry-time history
+  cannot be replayed here. `wire.rs` is blob `ee247eb3`, not `fd0bb178`. Its
+  decode gates start at `:325` (`UnknownFrameType`) and end at `:354-356`
+  (`ZeroEpochOnRoutedChannel`), and every gate still returns `Err`. The three
+  in-file tests are at `:712`, `:762` and `:801`. The file's two `#[cfg]`
+  attributes are at `:513` and `:613`. `tests/protocol_vectors.rs` is 765
+  lines; `structural_corruption_is_rejected_before_dispatch` is at `:362` and
+  `pure_header_frames_accept_any_valid_priority` at `:515`.
+- Missing evidence: the commit path from `e447c927` to `e6b944f`, which this
+  checkout does not contain. Without it the drift cannot be attributed to a
+  specific change.
+- Conclusion: unresolved, needs a citation refresh of the sections above
+  against `e6b944f`. The line numbers elsewhere in this record are carry-time
+  numbers and this log keeps them as written so the record stays internally
+  consistent until that refresh is done.

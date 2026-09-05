@@ -247,21 +247,72 @@ already demonstrates for the shutdown case.
 
 ## Investigation log
 
-The lens recorded `Open questions: None.` and the carry does not add one. Two
-things were verified rather than asked, and both are recorded above: the O17
-enumeration of nine uncontained and two contained positions was re-derived
-independently and matches exactly, and the `:1028-1060` span was repaired to
-`:1028-1049`.
+### Q: Does the O17 enumeration of nine uncontained and two contained positions hold?
+- Sources examined: every `self.primary.`, `self.secondary.`,
+  `self.tertiary.` and `catch_child_panic` occurrence in
+  `crates/host-runtime/src/composite.rs` at `e447c927`, each checked for a
+  wrapper; the file's `#[cfg]` attribute count by grep. The lens recorded
+  `Open questions: None.`, so this entry records a verification the carry
+  performed rather than a question the lens left open.
+- Findings: nine uncontained call positions (`install_connection_key`,
+  `manifest`, `resources`, `initialize`, `activate`, `bind`, `handle`,
+  `route_gone`, and the primary's `health` at `:312`) and two contained
+  categories covering five call sites (`health` for secondary and tertiary at
+  `:318` and `:321`; `shutdown` for all three children at `:374`, `:378` and
+  `:382`). The counts match O17 exactly. `composite.rs` has zero `#[cfg]`
+  attributes, so no position is conditional.
+- Missing evidence: none at carry time.
+- Conclusion: resolved with answer. The contained set is closed and the
+  re-derivation matches the lens by exhaustion over the file, not by sampling.
 
-One observation is logged as a lead rather than a question, because it is a
-finding about this catalog's method rather than about the code. The repaired span
-was wrong at the lens commit, not made wrong by the refactor. The triage that
-routed this record forward reasoned from blob identity - subject byte-identical,
-existing check byte-identical, therefore no refresh needed - and that inference is
-sound only for citations that were correct to begin with. Since the four wire
-records carried alongside these two produced six further repairs, five of them from
-changed files and one from a span that was always short, the pattern holds in both
-directions: **blob identity bounds which citations can have drifted, and bounds
-nothing about which were ever right.** A later pass carrying material from any
-superseded directory should re-verify spans against file length regardless of what
-the blob hashes say.
+### Q: Is the lens's span for `a_panicking_synapse_health_reports_failing_without_unwinding` correct?
+- Sources examined: `tests/composite_routing.rs` at `e447c927`, its line
+  count, and lines `:1028-1049`.
+- Findings: the lens cited `:1028-1060`. The file is 1,049 lines, so `:1060`
+  overruns the end by eleven. The test ends on the file's final line:
+  `:1040-1049` are the assertions, closing with
+  `Some("synapse health check panicked")` at `:1047`, `);` at `:1048` and `}`
+  at `:1049`.
+- Missing evidence: none.
+- Conclusion: resolved with answer. The corrected span is `:1028-1049` and it
+  is the only citation drift in either carried composite record.
+
+### Q: Why did the triage's blob-identity inference miss this span error?
+- Sources examined: the earlier triage's conclusion that "neither needs a
+  citation refresh"; the blob hash of `tests/composite_routing.rs` at
+  `1c193ae0`, `793a973e` and `e447c927`; the six repairs produced by the four
+  wire records carried alongside these two.
+- Findings: the file is blob `2201b830` at all three commits, so the triage's
+  premise is true. The span was wrong when the lens wrote it, not made wrong
+  by the refactor. Of the six wire-record repairs, five come from changed
+  files and one from a span that was always short. Blob identity bounds which
+  citations can have drifted and bounds nothing about which were ever right.
+- Missing evidence: none. This is a finding about the catalog's method, not
+  about the code.
+- Conclusion: resolved with answer. A later pass carrying material from any
+  superseded directory must re-verify spans against file length regardless of
+  what the blob hashes say.
+
+### Q: Do this record's citations still resolve against the current checkout?
+- Sources examined: `git cat-file -t` for `e447c927`, `1c193ae0` and
+  `793a973e`; `git rev-parse HEAD`; `git hash-object`, `wc -l` and `grep -n`
+  over `crates/host-runtime/src/composite.rs` and
+  `crates/host-runtime/tests/composite_routing.rs` at `HEAD`.
+- Findings: `HEAD` is `e6b944f`. None of `e447c927`, `1c193ae0` or
+  `793a973e` is a valid object in this checkout. `composite.rs` still has
+  zero `#[cfg]` attributes and still contains exactly five
+  `catch_child_panic` call sites and one `panic!`, but at different lines:
+  `catch_child_panic` is defined at `:148`, the primary's `health` is
+  unwrapped at `:283`, the secondary and tertiary `health` wrappers are at
+  `:289` and `:292`, the three `shutdown` wrappers are at `:334`, `:338` and
+  `:342`, and the aggregate `panic!` is at `:347`. `tests/composite_routing.rs`
+  is 1,035 lines and blob `7e7aaff6`, not `2201b830`. The five tests are at
+  `:840`, `:875`, `:907`, `:974` and `:1015`; the last ends at `:1035` with
+  `Some("synapse health check panicked")` at `:1033`.
+- Missing evidence: the commit path from `e447c927` to `e6b944f`, which this
+  checkout does not contain, so the drift cannot be attributed to a specific
+  change.
+- Conclusion: unresolved, needs a citation refresh of the sections above
+  against `e6b944f`. The nine-and-two count survives at `HEAD`; only the line
+  numbers move. This log keeps the carry-time numbers as written so the record
+  stays internally consistent until that refresh is done.
