@@ -158,3 +158,8 @@ way to reach any of this; today that file is not in the macOS command.
   cited above (`:132`, `:159-166`, `:169-176`) no longer exist; the
   40-character-name analysis describes the pre-#131 body and is superseded by
   the 28-character form.
+
+### Q: Does the U3 tree carry the Darwin path this record guards? (added 2026-09-05)
+
+- Checked: `rg -n 'create_macos_shm|shm_open|shm_unlink|target_os = "macos"' crates/shm-transport/src` returns nothing. `Mapping::create` (`crates/shm-transport/src/backend/ring.rs:397-398`) calls `create_linux_memfd` only. `validate_object` (`ring.rs:2874-2892`) computes `type_valid` from `S_IFREG` on every build. `compile_error!("shm-transport ring backend supports Linux only")` sits at `ring.rs:18-19`. `docs/shm-transport.md:5-7` and `:83` state Linux x64 glibc only, with no runtime selector or alternate backend.
+- Conclusion: no. The code location the `reachable` check named does not exist here, so the check has nothing to enter. The record is marked `invalidated` in the catalog; the source-tree line references in the trail above resolve against `host@bdf72f46a` and `e447c927`, not this tree.

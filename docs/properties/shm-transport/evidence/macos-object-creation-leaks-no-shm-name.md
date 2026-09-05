@@ -157,3 +157,8 @@ window.
   `ring.rs:2176-2219`, not `:1748-1783`; the window statement is `:2209`, not
   `:1774`/`:1779`; the crash variant spans `:2201-2209`; the cited `ci.yml`
   macOS step lines no longer exist.
+
+### Q: Does the U3 tree carry the Darwin path this record guards? (added 2026-09-05)
+
+- Checked: `rg -n 'create_macos_shm|shm_open|shm_unlink|target_os = "macos"' crates/shm-transport/src` returns nothing. `Mapping::create` (`crates/shm-transport/src/backend/ring.rs:397-398`) calls `create_linux_memfd` only. `validate_object` (`ring.rs:2874-2892`) computes `type_valid` from `S_IFREG` on every build. `compile_error!("shm-transport ring backend supports Linux only")` sits at `ring.rs:18-19`. `docs/shm-transport.md:5-7` and `:83` state Linux x64 glibc only, with no runtime selector or alternate backend.
+- Conclusion: no. There is no `shm_open`/`shm_unlink` window in this tree, and `memfd_create` objects are anonymous. The record is marked `invalidated` in the catalog; the source-tree line references in the trail above resolve against `host@bdf72f46a` and `e447c927`, not this tree.

@@ -70,7 +70,14 @@ A healthy report includes only bounded, aggregate data:
 - completed reclamation count;
 - observed exhaustion count.
 
-Client diagnostics use the same terminal-class set. Frame events retain only numeric header identity and byte length. Emission remains rate-limited to the configured per-second cap, and all string fields use fixed closed values or a 128-byte display bound.
+The terminal-class list above is the host report's vocabulary. The native client does not emit it as structured values. Its diagnostic surface at HEAD is:
+
+- Startup failures throw `NativeStartupError` with a `reason` from the closed set in `packages/shm-native/index.ts`: `missing_addon`, `unsupported_platform`, `missing_manifest`, `wrong_platform_payload`, `missing_checksum`, `checksum_mismatch`, `debug_build`, `wrong_platform_binary`, `capability_unavailable`. Only `missing_addon` is shared with the host list.
+- Setup failures cross N-API as generic errors with one of two fixed messages: `shared-memory identity mismatch` for an identity or authentication refusal, and `shared-memory setup failed` for every other setup, transfer, or deadline failure (`setup_error` in `packages/shm-native/src/lib.rs`).
+- Peer death is exposed as the `peerClosed()` boolean on the channel, not as an event or class.
+- Ring exhaustion surfaces as the fixed message `shared-memory ring is full`.
+
+A client that needs the host's five classes must map from these surfaces; the mapping is not provided. Frame events retain only numeric header identity and byte length. Emission remains rate-limited to the configured per-second cap, and all string fields use fixed closed values or a 128-byte display bound.
 
 Reports never include setup-socket paths, native handles, mapping descriptors, grants, activation tokens, authentication keys or proofs, payload bytes, mapped addresses, or provider error text. Peer-controlled text is either reduced to a closed class or redacted and length-bounded before rendering.
 

@@ -162,3 +162,8 @@ attributable to the missing checks and not to the test setup.
   at `:2165-2174`, the attach-side calls at `:335-336`, the create-side pair at
   `:769-770`; the pre-#131 line numbers in the trail above resolve against
   `e447c927`.
+
+### Q: Does the U3 tree carry the Darwin path this record guards? (added 2026-09-05)
+
+- Checked: `rg -n 'create_macos_shm|shm_open|shm_unlink|target_os = "macos"' crates/shm-transport/src` returns nothing. `Mapping::create` (`crates/shm-transport/src/backend/ring.rs:397-398`) calls `create_linux_memfd` only. `validate_object` (`ring.rs:2874-2892`) computes `type_valid` from `S_IFREG` on every build. `compile_error!("shm-transport ring backend supports Linux only")` sits at `ring.rs:18-19`. `docs/shm-transport.md:5-7` and `:83` state Linux x64 glibc only, with no runtime selector or alternate backend.
+- Conclusion: no. The platform-conditional weakening does not exist here; the Linux gate (`validate_seals` at `ring.rs:2895-2903`, then `validate_object`) runs on every attach and is exercised by `artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected` (`tests/ring.rs:300-381`). The record is marked `invalidated` in the catalog; the source-tree line references in the trail above resolve against `host@bdf72f46a` and `e447c927`, not this tree.

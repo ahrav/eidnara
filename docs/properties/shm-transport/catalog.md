@@ -149,11 +149,13 @@ removal changes that record's subject and is recorded there.
 
 ## Product context, and what it does to priority
 
-Shared memory here is explicit, test-only, and non-default. Host and client
-production registries are empty, no backend or target profile has qualified on a
-designated host, and TCP remains the production transport
-(`docs/shm-transport.md:5-7`). Two consequences run through every record
-below:
+When these records were written, shared memory was explicit, test-only, and
+non-default, and TCP was the production transport. At U3 the fixed sparse ring
+is the only application transport, there is no TCP path and no fallback, and a
+transport failure is terminal for the affected connection
+(`docs/shm-transport.md:5-7`). The latent framing and the per-record
+`Reaches production` column below predate that change. Two consequences ran
+through every record when they were written:
 
 1. Most of these properties are **latent** — they guard a path that no shipped
    configuration selects. That lowers urgency, not validity: the release gate
@@ -208,9 +210,9 @@ decide whether to ship the transport. A defect there is live today.
 | [identity-and-schema-rejection-is-one-contract](#identity-and-schema-rejection-is-one-contract) | safety | high | no |
 | [grant-reserved-bytes-are-rejected-unless-zero](#grant-reserved-bytes-are-rejected-unless-zero) | safety | high | no |
 | [fuzz-harness-encoding-tracks-the-production-descriptor](#fuzz-harness-encoding-tracks-the-production-descriptor) | safety | high | evidence |
-| [macos-object-creation-outcome-is-attributed](#macos-object-creation-outcome-is-attributed) | reachability | medium | no |
-| [attach-validation-is-not-platform-weakened](#attach-validation-is-not-platform-weakened) | safety | high | no |
-| [macos-object-creation-leaks-no-shm-name](#macos-object-creation-leaks-no-shm-name) | safety | medium | no |
+| [macos-object-creation-outcome-is-attributed](#macos-object-creation-outcome-is-attributed) | reachability | medium | n/a - invalidated |
+| [attach-validation-is-not-platform-weakened](#attach-validation-is-not-platform-weakened) | safety | high | n/a - invalidated |
+| [macos-object-creation-leaks-no-shm-name](#macos-object-creation-leaks-no-shm-name) | safety | medium | n/a - invalidated |
 | [layout-region-offsets-are-real-page-aligned](#layout-region-offsets-are-real-page-aligned) | safety | high | no |
 | [page-size-dependent-setup-runs-on-a-non-4096-page-host](#page-size-dependent-setup-runs-on-a-non-4096-page-host) | reachability | high | no |
 | [iceoryx-descriptor-rejection-is-terminal-or-declared](#iceoryx-descriptor-rejection-is-terminal-or-declared) | safety | high | n/a — invalidated |
@@ -1979,22 +1981,16 @@ other.
 ### macos-object-creation-outcome-is-attributed
 
 Type: reachability
-Reachability: default-production — label retained from the pre-#131 catalog
-and no longer supported at HEAD; the class is unresolved pending the Darwin
-question below. The evidence the label rested on is gone: PR #131 (merge
-`5d638e3e8`) deleted the Darwin npm packages (`packages/host-darwin-*`,
-removed in `55f47ac64`) and left `the source repository`ci.yml`workflow` with only
-`ubuntu-latest` jobs. What remains at HEAD is weaker than a coverage gap:
-`create_macos_shm` (`crates/shm-transport/src/backend/ring.rs:2176`) still
-exists under `cfg(target_os = "macos")`, but `Mapping::create`
-(`ring.rs:311-312`) calls `create_linux_memfd` unconditionally, so the function
-has no caller, and `ring.rs:1-2` raises `compile_error!("shm-transport ring
-backend supports Linux only")` on any non-Linux target, so the crate cannot
-compile where the cfg matches.
-Status: active
-Exercised: not yet — `create_macos_shm` has never executed under observation,
-and at HEAD it cannot: it has no call site, no macOS CI job exists, and the
-crate refuses to compile off Linux (`ring.rs:1-2`).
+Reachability: default-production - label retained from the source catalog and
+not supported at HEAD; the code location this record covers is absent from the
+U3 tree, so no reachability class applies. See Invalidated. The source-tree
+history: PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages
+(`packages/host-darwin-*`, removed in `55f47ac64`) and left the source
+repository's CI with only `ubuntu-latest` jobs, and `create_macos_shm` had
+already lost its caller there.
+Status: invalidated
+Exercised: not yet - `create_macos_shm` never executed under observation in the
+source tree, and the U3 tree does not contain it.
 Guarantee: On macOS the ring object-creation path is executed, and its outcome is
 attributed to a named step and error code rather than recorded as a bare variant.
 Check: `reachable` — assert `create_macos_shm` is entered on a macOS host and its
@@ -2033,38 +2029,36 @@ If the Darwin surface returns, the concern stands unchanged: fixing whatever
 failed silently activates the whole untested macOS path at once — creation
 without seals, and an attach whose type predicate is a constant `true` on
 Darwin (`ring.rs:2114-2115`).
+Invalidated: the U3 tree carries no Darwin path for this record to guard.
+`crates/shm-transport/src/backend/ring.rs` contains no `create_macos_shm`, no
+`shm_open` or `shm_unlink`, and no `cfg(target_os = "macos")`;
+`Mapping::create` (`ring.rs:397-398`) calls `create_linux_memfd` only;
+`validate_object` (`ring.rs:2874-2892`) checks `S_IFREG` unconditionally;
+`compile_error!("shm-transport ring backend supports Linux only")` at
+`ring.rs:18-19` refuses every non-Linux build; and `docs/shm-transport.md:5-7`
+and `:83` declare Linux x64 glibc the only supported platform with no
+alternate backend. There is no code left to hold or violate this property.
+What the record established is that the source tree's Darwin object-creation
+path was never executed under observation, and that restoring it would
+activate creation without seals and an unverified attach predicate at once.
 Open questions:
 
-- Which step fails, and with which errno? The pre-#131 doc claim of a macOS
-  `ObjectSetupFailed` is no longer in the tree, and `099a314d5` changed the
-  strongest candidate (name length). Needs one macOS run with a restored call
-  site. (needs human input)
-- Is the macOS ring intended to become functional, or is `ObjectSetupFailed` the
-  permanent state? If permanent, the dependent records below become invalidated
-  rather than latent. (needs human input)
-- Is Darwin still a supported release surface? PR #131 (merge `5d638e3e8`)
-  deleted the Darwin npm packages and the macOS CI jobs while the
-  `cfg(target_os = "macos")` code path remains at `ring.rs:2176`, uncalled and
-  behind the `ring.rs:1-2` compile error, and `docs/shm-transport.md:5`
-  states Linux-x64 glibc only. If not, this record and its two dependents
-  should be invalidated. (needs human input)
+- If a Darwin surface returns, reopen this record with a call site, a macOS
+  build, and a runner; the source-tree line references above resolve against
+  `host@bdf72f46a`, not this tree. (needs human input)
 
 ### attach-validation-is-not-platform-weakened
 
 Type: safety
-Reachability: default-production — label retained from the pre-#131 catalog
-and no longer supported at HEAD; the class is unresolved pending the Darwin
-question below. PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages
-(`packages/host-darwin-*`, removed in `55f47ac64`), left
-`the source repository`ci.yml`workflow` with only `ubuntu-latest` jobs, and added
-`compile_error!` at `crates/shm-transport/src/backend/ring.rs:1-2` for any
-non-Linux target, so no macOS binary of this crate can exist at HEAD. The
-platform-conditional validation text is still in the tree
-(`ring.rs:2109-2115`), which is what keeps this record active.
-Status: active
-Exercised: not yet — needs a macOS execution of `Mapping::attach`, which at
-HEAD is impossible: no macOS CI job exists and the crate refuses to compile off
-Linux (`ring.rs:1-2`).
+Reachability: default-production - label retained from the source catalog and
+not supported at HEAD; the platform-conditional weakening this record guards
+against is absent from the U3 tree, so no reachability class applies. See
+Invalidated. The Linux attach gate itself is live and unconditional:
+`Mapping::attach` (`ring.rs:420-425`) calls `validate_seals` then
+`validate_object` on every attach.
+Status: invalidated
+Exercised: not yet - the macOS execution of `Mapping::attach` this record
+needed never happened in the source tree, and the U3 tree has no macOS path.
 Guarantee: On every platform where attach is reachable, an admitted descriptor's
 object type is established and its size is immutable for the mapping's lifetime.
 Check: `always` — at every attach, the descriptor is refused unless its object
@@ -2113,38 +2107,39 @@ at HEAD the compensating property is that no such build exists — the crate
 compile-errors off Linux (`ring.rs:1-2`) and no macOS CI job or Darwin package
 remains. A descriptor whose size is reduced after `fstat` would be mapped
 `MAP_SHARED | PROT_READ | PROT_WRITE` at its validated length.
+Invalidated: the U3 tree carries no Darwin path for this record to guard.
+`crates/shm-transport/src/backend/ring.rs` contains no `create_macos_shm`, no
+`shm_open` or `shm_unlink`, and no `cfg(target_os = "macos")`;
+`Mapping::create` (`ring.rs:397-398`) calls `create_linux_memfd` only;
+`validate_object` (`ring.rs:2874-2892`) checks `S_IFREG` unconditionally;
+`compile_error!("shm-transport ring backend supports Linux only")` at
+`ring.rs:18-19` refuses every non-Linux build; and `docs/shm-transport.md:5-7`
+and `:83` declare Linux x64 glibc the only supported platform with no
+alternate backend. There is no code left to hold or violate this property.
+The `type_valid = true` carve-out this record tracked does not exist here:
+`validate_object` computes `type_valid` from `st_mode & S_IFMT == S_IFREG`
+on every build, and `validate_seals` (`ring.rs:2895-2903`) requires
+`F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL` on every attach. What the record
+established is that the source tree's Darwin build would have admitted a
+descriptor with a constant-true type predicate and no shrink immunity; the Linux
+gate it contrasted against is the one the U3 tree ships, exercised by
+`artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected`
+(`tests/ring.rs:300-381`).
 Open questions:
 
-- The former note that `b5dc778e` resolved the Darwin `st_mode` premise by
-  deletion is corrected: `6352f873f` re-added the carve-out in `#[cfg]` form
-  (`ring.rs:2114-2115`), so the unverified premise returns with any Darwin
-  build. (needs human input)
-- If a macOS descriptor-passing path is wired to the now-ungated `attachment()`,
-  what substitutes for `F_SEAL_SHRINK`? Darwin has no seals. (needs human input)
-- Is Darwin still a supported release surface? PR #131 (merge `5d638e3e8`)
-  deleted the Darwin npm packages and the macOS CI jobs while the
-  `cfg(target_os = "macos")` validation carve-out remains at
-  `ring.rs:2114-2115`, behind the `ring.rs:1-2` compile error. If not, this
-  record's weakening can never be live and the record should be invalidated
-  with that reason. (needs human input)
+- If a Darwin surface returns, what substitutes for `F_SEAL_SHRINK`? Darwin
+  has no seals. Reopen this record with that answer. (needs human input)
 
 ### macos-object-creation-leaks-no-shm-name
 
 Type: safety
-Reachability: default-production — label retained from the pre-#131 catalog
-and no longer supported at HEAD; the class is unresolved pending the Darwin
-question below. PR #131 (merge `5d638e3e8`) deleted the Darwin npm packages
-(`packages/host-darwin-*`, removed in `55f47ac64`) and left
-`the source repository`ci.yml`workflow` with only `ubuntu-latest` jobs. At HEAD
-`create_macos_shm` (`crates/shm-transport/src/backend/ring.rs:2176`) has no
-caller — `Mapping::create` (`ring.rs:311-312`) calls `create_linux_memfd`
-unconditionally — and `ring.rs:1-2` compile-errors on any non-Linux target, so
-the leak path is dead text unless a Darwin surface returns.
-Status: active
-Exercised: not yet — needs a failpoint on `shm_unlink`, or a crash between open
-and unlink, on macOS, plus an oracle over the Darwin shm namespace; at HEAD
-additionally blocked by the missing call site and the `ring.rs:1-2` compile
-error.
+Reachability: default-production - label retained from the source catalog and
+not supported at HEAD; the leak window this record covers is absent from the
+U3 tree, so no reachability class applies. See Invalidated.
+Status: invalidated
+Exercised: not yet - the `shm_unlink` failpoint and Darwin namespace oracle
+this record needed never existed in the source tree, and the U3 tree has no
+`shm_open` or `shm_unlink` call.
 Guarantee: A failed or interrupted macOS object creation leaves no name in the
 Darwin shared-memory namespace.
 Check: `always` — after any `create_macos_shm` invocation that does not return
@@ -2182,18 +2177,23 @@ exhaustion, after which `shm_open` with `O_EXCL` fails for unrelated reasons and
 reports the same `ObjectSetupFailed` from a different line, which would also
 corrupt the attribution the sibling record establishes. Linux is unaffected:
 `memfd_create` objects are anonymous.
+Invalidated: the U3 tree carries no Darwin path for this record to guard.
+`crates/shm-transport/src/backend/ring.rs` contains no `create_macos_shm`, no
+`shm_open` or `shm_unlink`, and no `cfg(target_os = "macos")`;
+`Mapping::create` (`ring.rs:397-398`) calls `create_linux_memfd` only;
+`compile_error!("shm-transport ring backend supports Linux only")` at
+`ring.rs:18-19` refuses every non-Linux build; and `docs/shm-transport.md:5-7`
+and `:83` declare Linux x64 glibc the only supported platform with no
+alternate backend. There is no code left to hold or violate this property. What
+the record established is that the source tree's `create_macos_shm` had a
+one-statement window between `shm_open` and `shm_unlink` in which a failure
+left a name in the Darwin namespace with no retained handle, and that
+`memfd_create` objects on Linux have no such window because they are anonymous.
 Open questions:
 
-- Can `shm_unlink` fail after a successful `O_EXCL` `shm_open` on Darwin? If
-  provably not, mark this record invalidated with that reason. (needs human
-  input)
-- Should `create_macos_shm` own an unwind matching `RuntimeDir`, or should the
-  name never be unlinked before `ftruncate`? (needs human input)
-- Is Darwin still a supported release surface? PR #131 (merge `5d638e3e8`)
-  deleted the Darwin npm packages and the macOS CI jobs while
-  `create_macos_shm` remains at `ring.rs:2176`, uncalled and behind the
-  `ring.rs:1-2` compile error. If not, the leak window can never open and this
-  record should be invalidated rather than left latent. (needs human input)
+- If a Darwin surface returns, should its object creation own an unwind matching
+  `RuntimeDir`, or never unlink the name before `ftruncate`? Reopen this
+  record with that answer. (needs human input)
 
 ### layout-region-offsets-are-real-page-aligned
 
@@ -2947,8 +2947,10 @@ one unaudited guard cluster, and revalidation is never negative-tested. The happ
 path runs on every `Ring::create` in the ring tests.
 Impact: low, for a specific reason: defeating the checks gains nothing, because no
 object is inside the directory on any supported platform. The reachable
-consequence of tampering is a refusal, so the candidate fails to prepare and the
-host falls back to TCP. The residual is teardown: `Drop` (`:373-377`) calls
+consequence of tampering is a refusal: `RingTransport::prepare` returns
+`RingUnavailable` and `connection.rs` abandons that connection with no
+alternate transport (`docs/shm-transport.md:7`), so the tampering is a
+per-connection denial rather than a downgrade. The residual is teardown: `Drop` (`:373-377`) calls
 `remove_dir` by path with no `validate()` first, so with the temporary root naming
 an attacker-writable directory lacking the sticky bit, they can substitute their
 own directory under our name and have our `Drop` remove theirs, a narrow same-user
