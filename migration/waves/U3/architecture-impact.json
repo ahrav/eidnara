@@ -106,7 +106,7 @@
       "iteration": 2,
       "analyzed": {
         "repo": "eidnara",
-        "commit": "d78ad2d3467ba2466030db083751a0b07a2616b6",
+        "commit": "e16e39ea37fd270062a7fd387acd595363ac06b5",
         "scope_hash": "87e35d19b514c0eea6c0494086e60b4219fbc6fed2ca3a1b3c0d5abea0198da4",
         "modules": [
           "crates/host-runtime",

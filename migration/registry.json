@@ -1076,6 +1076,106 @@
       "kind": "authored",
       "path": "migration/waves/U3/receipt.json",
       "rationale": "U3 receipt."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/addon-grant-decoding-is-the-shared-setup-envelope.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/addon-reservations-drop-before-the-ring.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/addon-scheduling-reaches-peer-eof-and-interrupted-wait.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/addon-scheduling-wakes-only-on-acknowledged-readiness.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/diagnostics-report-lifecycle-counts-in-a-fixed-shape.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/each-channel-wake-survives-a-shared-acknowledgement.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/quarantine-wakes-a-parked-waiter.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/raw-native-attach-rejects-hostile-descriptors-without-effects.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/readiness-redispatch-is-bounded-under-persistent-arm-failure.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/transport-debug-output-redacts-every-sentinel.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/shm-transport/evidence/trim-removes-only-dead-pages-below-the-write-cursor.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/evidence/tokenizer-bom-is-its-own-token.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/evidence/tokenizer-encoding-is-deterministic-across-calls-and-threads.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/evidence/tokenizer-encoding-is-total-over-valid-utf8.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/evidence/tokenizer-over-long-pieces-are-chunked-and-bounded.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/evidence/tokenizer-pattern-is-upstream-with-ecmascript-whitespace.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/evidence/tokenizer-vocabulary-is-embedded-and-complete.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/existing-checks.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/fault-map.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/tokenizer/portfolio-evaluation.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
     }
   ]
 }

@@ -9,7 +9,7 @@
       "catalog_commit": "39e8230371b15966a5767771daf001e44d191aac"
     }
   ],
-  "destination_commit": "d78ad2d3467ba2466030db083751a0b07a2616b6",
+  "destination_commit": "e16e39ea37fd270062a7fd387acd595363ac06b5",
   "touched_files": [
     "crates/host-runtime/benches/ipc_budget.rs",
     "crates/host-runtime/benches/support/atomic.rs",
@@ -134,18 +134,18 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
+        "exercised": "yes",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
+        "exercised": "yes",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/tests/ring.rs#quarantine_rejects_all_operations_and_reports_conservation",
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs#quarantine_survives_peer_clearing_shared_flag",
       "evidence_pointer": "docs/properties/shm-transport/evidence/quarantine-authority-survives-peer-writes.md"
     },
     {
@@ -159,18 +159,18 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "yes",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "yes",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs#commit_after_quarantine_is_refused_and_aborts",
       "evidence_pointer": "docs/properties/shm-transport/evidence/quarantine-gates-cover-every-storage-mutation.md"
     },
     {
@@ -183,18 +183,18 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
+        "exercised": "yes",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
+        "exercised": "yes",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/runtime.rs",
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs#attach_refuses_a_quarantined_ring",
       "evidence_pointer": "docs/properties/shm-transport/evidence/attach-refuses-a-quarantined-object.md"
     },
     {
@@ -371,13 +371,13 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
+        "exercised": "yes",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
+        "exercised": "yes",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
@@ -444,23 +444,24 @@
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/ring_transport.rs",
         "crates/host-runtime/src/runtime.rs",
+        "crates/shm-transport/src/backend/ring.rs",
         "crates/shm-transport/src/lease.rs",
         "crates/shm-transport/src/profile.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "partial",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "partial",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs#mismatched_release_identity_names_the_field_and_quarantines",
       "evidence_pointer": "docs/properties/shm-transport/evidence/release-failure-is-observable.md"
     },
     {
@@ -474,18 +475,18 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "partial",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "partial",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs#attach_refuses_a_mapping_whose_cursors_already_break_the_protocol",
       "evidence_pointer": "docs/properties/shm-transport/evidence/attach-reconciles-or-refuses-stale-shared-cursors.md"
     },
     {
@@ -631,18 +632,18 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "yes",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "yes",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs#lengthened_released_descriptor_cannot_reclaim_a_live_frame",
       "evidence_pointer": "docs/properties/shm-transport/evidence/reclaim-advance-bounded-by-the-producer-reservation.md"
     },
     {
@@ -682,13 +683,13 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
+        "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
+        "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
@@ -698,26 +699,13 @@
     },
     {
       "slug": "native-boundary-not-weaker-than-its-wrapper",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/runtime.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/host-runtime/src/runtime.rs",
-      "evidence_pointer": "docs/properties/shm-transport/evidence/native-boundary-not-weaker-than-its-wrapper.md"
+      "historical_evidence": "docs/properties/shm-transport/evidence/native-boundary-not-weaker-than-its-wrapper.md",
+      "unreachability_evidence": "the wrapper this record compared against does not exist in the U3 tree. `NativeChannel.attach` (`packages/shm-native/index.ts:537-540`) forwards the caller's descriptor to `native.attach` unchanged, so there is no TypeScript grant decoder, no wrapper error code, and nothing for the native boundary to be weaker than; the rejection set lives in the addon alone (`packages/shm-native/src/lib.rs:525`) and is pinned by the raw-descriptor suites in `packages/shm-native/tests/mechanism.ts` (`:401`, `:424`, `:446`, `:476`). The guarantee is vacuous against this tree. Its live content, that the directly-requirable `attach` rejects hostile descriptors with one bounded error and retains nothing, is carried by `raw-native-attach-rejects-hostile-descriptors-without-effects`; the direction-binding gap above is restated in that record's open questions."
     },
     {
       "slug": "operation-counters-are-observed-not-declared",
@@ -752,14 +740,14 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "partial",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
+        "exercised": "partial",
+        "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -768,26 +756,13 @@
     },
     {
       "slug": "traceability-pointers-resolve",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/shm-transport/src/backend/ring.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "yes",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "yes",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/shm-transport/src/backend/ring.rs",
-      "evidence_pointer": "docs/properties/shm-transport/evidence/traceability-pointers-resolve.md"
+      "historical_evidence": "docs/properties/shm-transport/evidence/traceability-pointers-resolve.md",
+      "unreachability_evidence": "the U3 tree has no `docs/evidence/` directory and no `shm-traceability-v1.json`; the release manifest it audited lives at `crates/shm-transport/benches/manifests/v1.json` but carries no traceability record. There is no artifact left for the pointer check to hold or fail against. What the record established is that the source tree's traceability record had two stale test citations, one load-bearing for three requirement rows, and that no validator existed for it. If a traceability artifact is re-derived against this tree, reopen the record against that file."
     },
     {
       "slug": "negative-tests-fail-for-their-stated-reason",
@@ -927,17 +902,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/tests/fuzz_corpus.rs#frame_descriptor_corpus_replays_without_panic",
+      "check_pointer": "crates/shm-transport/tests/fuzz_corpus.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/decoder-totality-over-arbitrary-bytes.md"
     },
     {
@@ -1049,73 +1024,34 @@
     },
     {
       "slug": "macos-object-creation-outcome-is-attributed",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/shm-transport/src/backend/ring.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/shm-transport/src/backend/ring.rs",
-      "evidence_pointer": "docs/properties/shm-transport/evidence/macos-object-creation-outcome-is-attributed.md"
+      "historical_evidence": "docs/properties/shm-transport/evidence/macos-object-creation-outcome-is-attributed.md",
+      "unreachability_evidence": "the U3 tree carries no Darwin path for this record to guard. `crates/shm-transport/src/backend/ring.rs` contains no `create_macos_shm`, no `shm_open` or `shm_unlink`, and no `cfg(target_os = \"macos\")`; `Mapping::create` (`ring.rs:397-398`) calls `create_linux_memfd` only; `validate_object` (`ring.rs:2874-2892`) checks `S_IFREG` unconditionally; `compile_error!(\"shm-transport ring backend supports Linux only\")` at `ring.rs:18-19` refuses every non-Linux build; and `docs/shm-transport.md:5-7` and `:96` declare Linux x64 glibc the only supported platform with no alternate backend. There is no code left to hold or violate this property. What the record established is that the source tree's Darwin object-creation path was never executed under observation, and that restoring it would activate creation without seals and an unverified attach predicate at once."
     },
     {
       "slug": "attach-validation-is-not-platform-weakened",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/shm-transport/src/backend/ring.rs",
         "crates/shm-transport/tests/ring.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "not-yet",
-        "check_status": "unaudited",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "unaudited",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/shm-transport/tests/ring.rs#artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected",
-      "evidence_pointer": "docs/properties/shm-transport/evidence/attach-validation-is-not-platform-weakened.md"
+      "historical_evidence": "docs/properties/shm-transport/evidence/attach-validation-is-not-platform-weakened.md",
+      "unreachability_evidence": "the U3 tree carries no Darwin path for this record to guard. `crates/shm-transport/src/backend/ring.rs` contains no `create_macos_shm`, no `shm_open` or `shm_unlink`, and no `cfg(target_os = \"macos\")`; `Mapping::create` (`ring.rs:397-398`) calls `create_linux_memfd` only; `validate_object` (`ring.rs:2874-2892`) checks `S_IFREG` unconditionally; `compile_error!(\"shm-transport ring backend supports Linux only\")` at `ring.rs:18-19` refuses every non-Linux build; and `docs/shm-transport.md:5-7` and `:96` declare Linux x64 glibc the only supported platform with no alternate backend. There is no code left to hold or violate this property. The `type_valid = true` carve-out this record tracked does not exist here: `validate_object` computes `type_valid` from `st_mode & S_IFMT == S_IFREG` on every build, and `validate_seals` (`ring.rs:2895-2903`) requires `F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL` on every attach. What the record established is that the source tree's Darwin build would have admitted a descriptor with a constant-true type predicate and no shrink immunity; the Linux gate it contrasted against is the one the U3 tree ships, exercised by `artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected` (`tests/ring.rs:300-381`)."
     },
     {
       "slug": "macos-object-creation-leaks-no-shm-name",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/shm-transport/src/backend/ring.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/shm-transport/src/backend/ring.rs",
-      "evidence_pointer": "docs/properties/shm-transport/evidence/macos-object-creation-leaks-no-shm-name.md"
+      "historical_evidence": "docs/properties/shm-transport/evidence/macos-object-creation-leaks-no-shm-name.md",
+      "unreachability_evidence": "the U3 tree carries no Darwin path for this record to guard. `crates/shm-transport/src/backend/ring.rs` contains no `create_macos_shm`, no `shm_open` or `shm_unlink`, and no `cfg(target_os = \"macos\")`; `Mapping::create` (`ring.rs:397-398`) calls `create_linux_memfd` only; `compile_error!(\"shm-transport ring backend supports Linux only\")` at `ring.rs:18-19` refuses every non-Linux build; and `docs/shm-transport.md:5-7` and `:96` declare Linux x64 glibc the only supported platform with no alternate backend. There is no code left to hold or violate this property. What the record established is that the source tree's `create_macos_shm` had a one-statement window between `shm_open` and `shm_unlink` in which a failure left a name in the Darwin namespace with no retained handle, and that `memfd_create` objects on Linux have no such window because they are anonymous."
     },
     {
       "slug": "layout-region-offsets-are-real-page-aligned",
@@ -1129,17 +1065,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/src/backend/ring.rs#residency_vector_tracks_runtime_page_size",
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/layout-region-offsets-are-real-page-aligned.md"
     },
     {
@@ -1155,17 +1091,17 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/shm-transport/src/backend/ring.rs#residency_vector_tracks_runtime_page_size",
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs",
       "evidence_pointer": "docs/properties/shm-transport/evidence/page-size-dependent-setup-runs-on-a-non-4096-page-host.md"
     },
     {
@@ -1329,28 +1265,15 @@
     },
     {
       "slug": "runtime-directory-authentication-is-a-precondition-not-a-container",
-      "classification": "carried-forward",
+      "classification": "invalidated",
       "relationship": "mapped",
       "files": [
         "crates/host-runtime/src/connection.rs",
         "crates/host-runtime/src/runtime.rs",
         "crates/shm-transport/src/backend/ring.rs"
       ],
-      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
-      "source_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "destination_status": {
-        "exercised": "not-yet",
-        "check_status": "none",
-        "portfolio_verdict": "not-evaluated",
-        "known_violation": false
-      },
-      "check_pointer": "crates/host-runtime/src/connection.rs",
-      "evidence_pointer": "docs/properties/shm-transport/evidence/runtime-directory-authentication-is-a-precondition-not-a-container.md"
+      "historical_evidence": "docs/properties/shm-transport/evidence/runtime-directory-authentication-is-a-precondition-not-a-container.md",
+      "unreachability_evidence": "the U3 tree has no runtime directory. `crates/shm-transport/src` contains no `RuntimeDir`, `Ring::create_in`, `validate`, or `remove_dir`; `Mapping::create` (`ring.rs:397-398`) takes only a length and creates an anonymous memfd through `create_linux_memfd` (`:2905`), so ring creation touches no filesystem path at all. There is no code left to hold or violate this property. What the record established is that the source tree's directory held no object on any platform, so its authentication guarded a belief rather than a container, and that its `Drop` removed by path without revalidating."
     },
     {
       "slug": "backpressure-converges-in-a-bounded-reclaim-window",
@@ -1510,7 +1433,7 @@
       "evidence_pointer": "docs/properties/shm-transport/evidence/duplex-overlap-is-reached.md"
     },
     {
-      "slug": "attach-validates-doorbell-eventfds",
+      "slug": "attach-validates-doorbell-sockets",
       "classification": "carried-forward",
       "relationship": "mapped",
       "files": [
@@ -1533,7 +1456,7 @@
         "known_violation": false
       },
       "check_pointer": "crates/shm-transport/src/backend/ring.rs#doorbell_attachment_requires_connected_unix_stream_socket",
-      "evidence_pointer": "docs/properties/shm-transport/evidence/attach-validates-doorbell-eventfds.md"
+      "evidence_pointer": "docs/properties/shm-transport/evidence/attach-validates-doorbell-sockets.md"
     },
     {
       "slug": "wake-published-during-readiness-callback-is-not-lost",
@@ -1698,7 +1621,7 @@
       "strategy_decision": "Golden-vector test against literals produced outside the crate (Python HMAC over the documented transcript), plus the host integration test whose oracle is a test-local HMAC; both regenerated once at U3 for the renamed domain and version strings.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/shm-transport/evidence/setup-proof-vectors-pin-the-shared-hmac-transcript.md",
-      "evidence_digest": "32f94f7dd11179a05fc4afa74c5f771311395eafec3fafe34343c8c8006d2dd5",
+      "evidence_digest": "cb416693ceadd4dd93ffcc7ed5860f692677d5e7bd727982ab5f489433a025b4",
       "check_pointer": "crates/shm-transport/src/setup_auth.rs#committed_vectors_pin_the_shared_construction",
       "check_hash": "750bf56c5b8dc571b3cd44edc58de5d6ece194d5dbce36db8ae8565abac5f4d5",
       "code_hash": "d6df083c845692eca134c2f499c103355c089946d965f586ffa7c695d288df59",
@@ -1707,7 +1630,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "32f94f7dd11179a05fc4afa74c5f771311395eafec3fafe34343c8c8006d2dd5",
+        "digest": "cb416693ceadd4dd93ffcc7ed5860f692677d5e7bd727982ab5f489433a025b4",
         "description": "U3 evidence record docs/properties/shm-transport/evidence/setup-proof-vectors-pin-the-shared-hmac-transcript.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -1729,7 +1652,7 @@
       "strategy_decision": "Example test spelling the id and every geometry literal, added at U3 for the renamed profile id; the addon package test states the same geometry independently.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
-      "evidence_digest": "4b074ef361a22a0991366d3b8dd336220bffcfdffc9345fb8dd557e33795f298",
+      "evidence_digest": "10b470fe03ad63ed17b29b49c9773a9343a4c468218581879ac0445085d21eb3",
       "check_pointer": "crates/shm-transport/tests/profile.rs#host_test_ring_profile_names_one_geometry",
       "check_hash": "ff14509c365bd1efc596abc99095bff7be617a945d99638232c7c23ebc47a1ed",
       "code_hash": "86ab14987e1389c83a13b1626ff239ecc86db9228f51466bdeec6a1762ffdbb8",
@@ -1738,7 +1661,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "4b074ef361a22a0991366d3b8dd336220bffcfdffc9345fb8dd557e33795f298",
+        "digest": "10b470fe03ad63ed17b29b49c9773a9343a4c468218581879ac0445085d21eb3",
         "description": "U3 evidence record docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -1850,13 +1773,13 @@
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
         "exercised": "not-yet",
-        "check_status": "unaudited",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -5383,7 +5306,7 @@
       "strategy_decision": "Golden-vector test against ids produced by the `ai-tokenizer` oracle; corpus texts naming the predecessor replaced and the golden regenerated once at U3.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/tokenizer/evidence/tokenizer-encoding-matches-the-independent-oracle.md",
-      "evidence_digest": "a076a04dba19aaa71d7311c0c603fa964461c155972b5476a067f2332ad9e365",
+      "evidence_digest": "b06a249113b92f804bcce058940432daee91e3bc7aaea44d54c8e5fc825bf80c",
       "check_pointer": "crates/tokenizer/tests/token_golden.rs#encode_ordinary_matches_ai_tokenizer_ids",
       "check_hash": "3b0bcdff94563942763dfb97d1d7d730cfce5451b18a16cb4505555253074a24",
       "code_hash": "ea0111223d24a3b71809dcd4e25a55d57b72a754d71e2272e31eb9bbcdb4df0b",
@@ -5392,7 +5315,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "a076a04dba19aaa71d7311c0c603fa964461c155972b5476a067f2332ad9e365",
+        "digest": "b06a249113b92f804bcce058940432daee91e3bc7aaea44d54c8e5fc825bf80c",
         "description": "U3 evidence record docs/properties/tokenizer/evidence/tokenizer-encoding-matches-the-independent-oracle.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5402,6 +5325,246 @@
       "relationship": "mapped",
       "files": [
         "crates/tokenizer/gen/gen-claude-vocab.ts",
+        "crates/tokenizer/src/lib.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/tokenizer/gen/gen-claude-vocab.ts",
+      "evidence_pointer": "docs/properties/tokenizer/catalog.md"
+    },
+    {
+      "slug": "diagnostics-report-lifecycle-counts-in-a-fixed-shape",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/host-runtime/src/connection.rs",
+        "crates/host-runtime/src/ring_transport.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/host-runtime/src/ring_transport.rs#diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts",
+      "evidence_pointer": "docs/properties/shm-transport/evidence/diagnostics-report-lifecycle-counts-in-a-fixed-shape.md"
+    },
+    {
+      "slug": "transport-debug-output-redacts-every-sentinel",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/shm-transport/src/lib.rs",
+        "crates/shm-transport/tests/contract.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/shm-transport/tests/contract.rs#debug_and_errors_redact_every_sentinel",
+      "evidence_pointer": "docs/properties/shm-transport/evidence/transport-debug-output-redacts-every-sentinel.md"
+    },
+    {
+      "slug": "raw-native-attach-rejects-hostile-descriptors-without-effects",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "packages/shm-native/index.ts",
+        "packages/shm-native/src/lib.rs",
+        "packages/shm-native/tests/mechanism.ts"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "packages/shm-native/src/lib.rs",
+      "evidence_pointer": "docs/properties/shm-transport/evidence/raw-native-attach-rejects-hostile-descriptors-without-effects.md"
+    },
+    {
+      "slug": "trim-removes-only-dead-pages-below-the-write-cursor",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/shm-transport/src/backend/ring.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "yes",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs#only_a_producer_handle_may_trim",
+      "evidence_pointer": "docs/properties/shm-transport/evidence/trim-removes-only-dead-pages-below-the-write-cursor.md"
+    },
+    {
+      "slug": "quarantine-wakes-a-parked-waiter",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/host-runtime/src/ring_transport.rs",
+        "crates/shm-transport/src/backend/ring.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/shm-transport/src/backend/ring.rs#quarantine_wakes_a_parked_peer",
+      "evidence_pointer": "docs/properties/shm-transport/evidence/quarantine-wakes-a-parked-waiter.md"
+    },
+    {
+      "slug": "readiness-redispatch-is-bounded-under-persistent-arm-failure",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/shm-transport/src/backend/ring.rs",
+        "packages/shm-native/index.ts",
+        "packages/shm-native/src/lib.rs",
+        "packages/shm-native/src/scheduling.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "packages/shm-native/index.ts",
+      "evidence_pointer": "docs/properties/shm-transport/evidence/readiness-redispatch-is-bounded-under-persistent-arm-failure.md"
+    },
+    {
+      "slug": "each-channel-wake-survives-a-shared-acknowledgement",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "packages/shm-native/src/lib.rs",
+        "packages/shm-native/tests/mechanism.ts"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "packages/shm-native/tests/mechanism.ts#one channel handler failure does not starve later channels",
+      "evidence_pointer": "docs/properties/shm-transport/evidence/each-channel-wake-survives-a-shared-acknowledgement.md"
+    },
+    {
+      "slug": "addon-scheduling-reaches-peer-eof-and-interrupted-wait",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "packages/shm-native/src/scheduling.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "packages/shm-native/src/scheduling.rs#setup_socket_eof_is_reactor_readiness",
+      "evidence_pointer": "docs/properties/shm-transport/evidence/addon-scheduling-reaches-peer-eof-and-interrupted-wait.md"
+    },
+    {
+      "slug": "tokenizer-over-long-pieces-are-chunked-and-bounded",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/tokenizer/src/lib.rs",
+        "crates/tokenizer/tests/token_golden.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/tokenizer/tests/token_golden.rs#over_long_piece_is_chunked_and_bounded",
+      "evidence_pointer": "docs/properties/tokenizer/evidence/tokenizer-over-long-pieces-are-chunked-and-bounded.md"
+    },
+    {
+      "slug": "tokenizer-pattern-is-upstream-with-ecmascript-whitespace",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
         "crates/tokenizer/src/lib.rs"
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
@@ -5417,8 +5580,78 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "check_pointer": "crates/tokenizer/gen/gen-claude-vocab.ts",
-      "evidence_pointer": "docs/properties/tokenizer/catalog.md"
+      "check_pointer": "crates/tokenizer/src/lib.rs#pattern_is_upstream_with_ecmascript_whitespace",
+      "evidence_pointer": "docs/properties/tokenizer/evidence/tokenizer-pattern-is-upstream-with-ecmascript-whitespace.md"
+    },
+    {
+      "slug": "tokenizer-bom-is-its-own-token",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/tokenizer/tests/token_golden.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/tokenizer/tests/token_golden.rs#bom_before_newline_is_preserved",
+      "evidence_pointer": "docs/properties/tokenizer/evidence/tokenizer-bom-is-its-own-token.md"
+    },
+    {
+      "slug": "tokenizer-encoding-is-deterministic-across-calls-and-threads",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/tokenizer/src/lib.rs",
+        "crates/tokenizer/tests/token_golden.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "partial",
+        "check_status": "unaudited",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/tokenizer/tests/token_golden.rs#deterministic_across_calls",
+      "evidence_pointer": "docs/properties/tokenizer/evidence/tokenizer-encoding-is-deterministic-across-calls-and-threads.md"
+    },
+    {
+      "slug": "tokenizer-encoding-is-total-over-valid-utf8",
+      "classification": "carried-forward",
+      "relationship": "mapped",
+      "files": [
+        "crates/tokenizer/src/lib.rs"
+      ],
+      "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
+      "source_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "destination_status": {
+        "exercised": "not-yet",
+        "check_status": "none",
+        "portfolio_verdict": "not-evaluated",
+        "known_violation": false
+      },
+      "check_pointer": "crates/tokenizer/src/lib.rs",
+      "evidence_pointer": "docs/properties/tokenizer/evidence/tokenizer-encoding-is-total-over-valid-utf8.md"
     }
   ]
 }
