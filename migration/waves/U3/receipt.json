@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "59e2b680f9e9c7adf18fa152681fb4588db70ab34738f0eeed8e40f5f7bc2617",
+      "destination_sha256": "13f9955aca8ddd6c27e3adf7e59be2bc4f477369c750e550c3f5050a892e0586",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "8d9be530e785c9180d490c713a8de364216c24b344f0b0485dfa9c2ef6d9fc6b",
+      "destination_sha256": "ff23d5a2406e7f2245b0486f5070571152faa66cd7e434f79fe5e280243c47f0",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
