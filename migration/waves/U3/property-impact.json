@@ -1650,19 +1650,19 @@
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
-      "strategy_decision": "Example test spelling the id and every geometry literal, added at U3 for the renamed profile id; the addon package test states the same geometry independently.",
+      "strategy_decision": "Example test spelling the id and every geometry literal (depth, lease bound, span bound, descriptor charge, arena charge), added at U3 for the renamed profile id; the addon package test states the same geometry independently.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
-      "evidence_digest": "cdc78f118cbf5967791e0865d2cad815713f8ed45c5c0cb4c290c4608578094a",
+      "evidence_digest": "876376077301ded4ce025d925fe05e5fe0d5d7514acf65237ca596dde053db9d",
       "check_pointer": "crates/shm-transport/tests/profile.rs#host_test_ring_profile_names_one_geometry",
-      "check_hash": "de3e01bdc657f4033bd7bd82746080645c6ebc4133ae03023fb98dc267d0a3d8",
-      "code_hash": "c760b178f47c442efbcd9ff234fcab90d19444fa83bac5dbd99b9a400ece2e9b",
+      "check_hash": "5199c55384b4bbac996ec101037f76cce1eac9aafe8d5edc849b77267510faff",
+      "code_hash": "85fa637079d3121fcac380578d1f0fc9704d3bc17589e33f6614de9ea44559b0",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "cdc78f118cbf5967791e0865d2cad815713f8ed45c5c0cb4c290c4608578094a",
+        "digest": "876376077301ded4ce025d925fe05e5fe0d5d7514acf65237ca596dde053db9d",
         "description": "U3 evidence record docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -4992,16 +4992,16 @@
       "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), a key-reordering test over the fixture text, a per-field mutation campaign, and an isolated launch-root test; regenerated once at U3 for the renamed schema id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "evidence_digest": "136f0bcaa912cfdd82eed8e00d550569f28709082260a27b8b3b535045cb14cf",
+      "evidence_digest": "f76d77e9dac6b6429393eaa085c3615b120fcb65d0bf1735017a80d852c3b87f",
       "check_pointer": "crates/host-runtime/tests/harness_closure.rs#canonical_manifest_digest_is_pinned",
-      "check_hash": "3b0dbfc7d7176683b1795d8888fb85c62269240e78f7d611f5f237795eaaeb6f",
-      "code_hash": "c2fa0fbc57350f32c0fe115d74c115e28ac62b6c4e7e8cea4a25f7f8b78d71e3",
+      "check_hash": "9883592c3622b5ef86d7b933ba3772ee5a9712f0eda55197773def83d4b407bf",
+      "code_hash": "bcbc97471d0f9ed45ff001cbda387d8083417259206c99e7421207fe468632a2",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "136f0bcaa912cfdd82eed8e00d550569f28709082260a27b8b3b535045cb14cf",
+        "digest": "f76d77e9dac6b6429393eaa085c3615b120fcb65d0bf1735017a80d852c3b87f",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },

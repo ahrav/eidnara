@@ -602,7 +602,7 @@
         "blob_sha": "b1fc8fc47b0e3bb421c28c24edf2567955ef3a17"
       },
       "destination": "crates/shm-transport/tests/profile.rs",
-      "destination_sha256": "de3e01bdc657f4033bd7bd82746080645c6ebc4133ae03023fb98dc267d0a3d8",
+      "destination_sha256": "5199c55384b4bbac996ec101037f76cce1eac9aafe8d5edc849b77267510faff",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -1455,7 +1455,7 @@
         "blob_sha": "0b0d2a7c5d21ca089157371e854cf7b7490d3b6b"
       },
       "destination": "crates/host-runtime/tests/harness_closure.rs",
-      "destination_sha256": "3b0dbfc7d7176683b1795d8888fb85c62269240e78f7d611f5f237795eaaeb6f",
+      "destination_sha256": "9883592c3622b5ef86d7b933ba3772ee5a9712f0eda55197773def83d4b407bf",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2088,7 +2088,7 @@
         "blob_sha": "33b65a1644e04373f5ed6e871c5c6e331fb34add"
       },
       "destination": "docs/properties/shm-transport/catalog.md",
-      "destination_sha256": "b3698536aee92a2e5e1e1d9f92704b11795eb4bc3cca51d59eac01a0ee610521",
+      "destination_sha256": "af665c501331a969c3a8fc1d5ccaae545d21096f59dd1b1a705af92d3be257ad",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2137,7 +2137,7 @@
     {
       "source": null,
       "destination": "docs/properties/shm-transport/index.json",
-      "destination_sha256": "b34cd1bf3c3a717beb76c8cacea235a2fc1073e9b52d708eeb7cfdb10efc54a8",
+      "destination_sha256": "cec292180f8011136be8436e5a4de8f4e5a4c8d098343b50f3b628f559b45f23",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3003,7 +3003,7 @@
     {
       "source": null,
       "destination": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
-      "destination_sha256": "cdc78f118cbf5967791e0865d2cad815713f8ed45c5c0cb4c290c4608578094a",
+      "destination_sha256": "876376077301ded4ce025d925fe05e5fe0d5d7514acf65237ca596dde053db9d",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4890,7 +4890,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "destination_sha256": "136f0bcaa912cfdd82eed8e00d550569f28709082260a27b8b3b535045cb14cf",
+      "destination_sha256": "f76d77e9dac6b6429393eaa085c3615b120fcb65d0bf1735017a80d852c3b87f",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "4c4d268542bdfae020020ffc5320d9d9f8e5d5df15396d3dfc1624d585ba6935",
+      "destination_sha256": "8b5b3a731ed2ecfce8b6459b6063494714ecb06eef69972d5629ef5c0633d461",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5644,7 +5644,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "864ead12051125763eb911a6cc458fbd24c916e29f01dd7893080a7ee0f03103",
+      "destination_sha256": "b07d8e7262065cd0d433306f1896242d6961fa3daddbc497f76c25c712e10699",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

@@ -4559,9 +4559,9 @@ Open questions: None.
 Type: safety
 Reachability: default-production - the host stamps `host-test-ring-v1` into every production grant.
 Status: active
-Exercised: yes - the id string, depth, lease bound, descriptor charge, and arena charge (134,217,728 bytes, two 64 MiB arenas) are all asserted against literals spelled in the test, so a geometry change under an unchanged id fails it.
-Guarantee: The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.
-Check: `always` - `host_test_ring_profile()` matches the literal id, depth, lease bound, descriptor charge, and a literal 64 MiB arena per direction.
+Exercised: yes - the id string, depth, lease bound, span bound, descriptor charge, and arena charge (134,217,728 bytes, two 64 MiB arenas) are all asserted against literals spelled in the test, so a geometry change under an unchanged id fails it.
+Guarantee: The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, a span bound of 2, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.
+Check: `always` - `host_test_ring_profile()` matches the literal id, depth, lease bound, span bound, descriptor charge, and a literal 64 MiB arena per direction.
 Fault/timing angle: A peer that echoes the id exercises whatever geometry the host built; if the id survived a geometry change the peer's bounds would be silently wrong.
 Required faults and enabling state: None; the check is a literal comparison.
 Confidence: high - [evidence](evidence/one-profile-id-names-one-ring-geometry-in-code.md). The id is a renamed identity, so the record is `core` for U3; the sibling record `one-profile-name-denotes-one-geometry` states the cross-peer half and keeps its source status.
