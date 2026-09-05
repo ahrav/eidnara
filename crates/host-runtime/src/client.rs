@@ -71,11 +71,14 @@ pub const CLIENT_QUEUED_BYTES: usize = MAX_BODY_LEN as usize + 1_048_576;
 /// A control-byte charge can fail only when the control channel is full; that condition retires the generation.
 pub const CLIENT_CONTROL_QUEUED_BYTES: usize = CLIENT_CONTROL_QUEUE_FRAMES * HEADER_LEN;
 /// Best-effort `Cancel` frames may hold at most this many of the reserved control slots.
-///
-/// The remainder stays available to `Pong` and `Goodbye`, so a burst of cancellations
-/// cannot exhaust the pool and let a host `Ping` retire an otherwise healthy generation.
 pub const CLIENT_CANCEL_QUEUE_FRAMES: usize = CLIENT_CONTROL_QUEUE_FRAMES / 2;
-const _: () = assert!(CLIENT_CANCEL_QUEUE_FRAMES < CLIENT_CONTROL_QUEUE_FRAMES);
+/// `Cancel` and `Goodbye` together may hold at most this many of the reserved control slots.
+///
+/// The remainder is reserved for `Pong`, so neither a burst of cancellations nor many
+/// concurrent route closes can let a host `Ping` retire an otherwise healthy generation.
+pub const CLIENT_CLEANUP_QUEUE_FRAMES: usize = CLIENT_CONTROL_QUEUE_FRAMES - 4;
+const _: () = assert!(CLIENT_CANCEL_QUEUE_FRAMES < CLIENT_CLEANUP_QUEUE_FRAMES);
+const _: () = assert!(CLIENT_CLEANUP_QUEUE_FRAMES < CLIENT_CONTROL_QUEUE_FRAMES);
 /// The data partition of `CLIENT_QUEUED_BYTES`; it still admits one maximum-sized request frame.
 pub const CLIENT_DATA_QUEUED_BYTES: usize = CLIENT_QUEUED_BYTES - CLIENT_CONTROL_QUEUED_BYTES;
 const _: () = assert!(CLIENT_DATA_QUEUED_BYTES >= MAX_BODY_LEN as usize + HEADER_LEN);
@@ -161,7 +164,7 @@ impl CallError {
     fn host_terminal(body: &[u8]) -> Option<Self> {
         // A repeated recognized member would let the last occurrence win silently, so it is
         // malformed; repeated unknown members are ignored like any other unknown member (§7.4).
-        if !error_body_recognized_keys_are_unique(body) {
+        if !recognized_keys_are_unique(body, &["code", "message", "retry_after_ms"]) {
             return None;
         }
         let value = serde_json::from_slice::<Value>(body).ok()?;
@@ -694,8 +697,15 @@ impl Client {
         struct WireStatus {
             op: String,
             health: String,
-            metrics: serde_json::Value,
+            metrics: WireMetrics,
             shared_memory: serde_json::Value,
+        }
+        /// §7.6: `metrics.components` is a required object; other members are passed through.
+        #[derive(serde::Deserialize)]
+        struct WireMetrics {
+            components: serde_json::Map<String, serde_json::Value>,
+            #[serde(flatten)]
+            rest: serde_json::Map<String, serde_json::Value>,
         }
 
         if self.inner.closed.load(Ordering::Acquire) {
@@ -741,9 +751,14 @@ impl Client {
             return Err(invalid_identity());
         }
         let health = HealthStatus::parse(&decoded.health).ok_or_else(invalid_identity)?;
+        let mut metrics = decoded.metrics.rest;
+        metrics.insert(
+            "components".to_owned(),
+            serde_json::Value::Object(decoded.metrics.components),
+        );
         Ok(HostStatusSnapshot {
             health,
-            metrics: decoded.metrics,
+            metrics: serde_json::Value::Object(metrics),
             shared_memory: decoded.shared_memory,
         })
     }
@@ -1445,11 +1460,11 @@ impl Inner {
                 "reserved control admission exhausted",
             )
         };
-        // `Cancel` admits only up to its own ceiling so liveness and close traffic keep headroom.
-        let limit = if ty == FrameType::Cancel {
-            CLIENT_CANCEL_QUEUE_FRAMES * HEADER_LEN
-        } else {
-            CLIENT_CONTROL_QUEUED_BYTES
+        // Cleanup traffic admits only up to its own ceilings; the remainder is `Pong`'s.
+        let limit = match ty {
+            FrameType::Cancel => CLIENT_CANCEL_QUEUE_FRAMES * HEADER_LEN,
+            FrameType::Goodbye => CLIENT_CLEANUP_QUEUE_FRAMES * HEADER_LEN,
+            _ => CLIENT_CONTROL_QUEUED_BYTES,
         };
         let charge = self
             .control_budget
@@ -1571,9 +1586,13 @@ impl Inner {
                                         // that lands before the insert must be remembered.
                                         if header.channel == 0
                                             && let Ok(handle) = parse_route_open(&body)
-                                            && !lock_unpoisoned(&self.binds)
-                                                .publishing
-                                                .insert(handle)
+                                            && {
+                                                // `routes` before `binds`, matching `open_route`.
+                                                let routes = lock_unpoisoned(&self.routes);
+                                                let mut binds = lock_unpoisoned(&self.binds);
+                                                routes.contains(&handle)
+                                                    || !binds.publishing.insert(handle)
+                                            }
                                         {
                                             // Two matched binds for one handle collapse into one
                                             // publication owner, so a `Goodbye` in this window could
@@ -3119,44 +3138,43 @@ fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec
     Ok(body)
 }
 
-/// Whether each of `code`, `message`, and `retry_after_ms` appears at most once at the top
-/// level of `body`. Nested objects are skipped; a body that is not an object fails the
-/// caller's shape check anyway.
-fn error_body_recognized_keys_are_unique(body: &[u8]) -> bool {
+/// Whether each key in `recognized` appears at most once at the top level of `body`.
+/// A repeated recognized member would let the last occurrence win silently; repeated
+/// unknown members are ignored like any other unknown member. Nested objects are skipped;
+/// a body that is not an object fails the caller's shape check anyway.
+fn recognized_keys_are_unique(body: &[u8], recognized: &[&str]) -> bool {
     use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
-    struct TopLevel;
-    impl<'de> Visitor<'de> for TopLevel {
+    struct TopLevel<'r>(&'r [&'r str]);
+    impl<'de> Visitor<'de> for TopLevel<'_> {
         type Value = bool;
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.write_str("a JSON object")
         }
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
-            let (mut code, mut message, mut retry) = (0u8, 0u8, 0u8);
+            let mut seen = vec![false; self.0.len()];
             while let Some(key) = map.next_key::<String>()? {
                 map.next_value::<IgnoredAny>()?;
-                let seen = match key.as_str() {
-                    "code" => &mut code,
-                    "message" => &mut message,
-                    "retry_after_ms" => &mut retry,
-                    _ => continue,
-                };
-                *seen += 1;
-                if *seen > 1 {
-                    return Ok(false);
+                if let Some(index) = self.0.iter().position(|name| *name == key) {
+                    if seen[index] {
+                        return Ok(false);
+                    }
+                    seen[index] = true;
                 }
             }
             Ok(true)
         }
     }
-    struct Seed;
-    impl<'de> DeserializeSeed<'de> for Seed {
+    struct Seed<'r>(&'r [&'r str]);
+    impl<'de> DeserializeSeed<'de> for Seed<'_> {
         type Value = bool;
         fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
-            deserializer.deserialize_map(TopLevel)
+            deserializer.deserialize_map(TopLevel(self.0))
         }
     }
     let mut deserializer = serde_json::Deserializer::from_slice(body);
-    Seed.deserialize(&mut deserializer).unwrap_or(false)
+    Seed(recognized)
+        .deserialize(&mut deserializer)
+        .unwrap_or(false)
 }
 
 fn names_route_open(body: &[u8]) -> bool {
@@ -3173,13 +3191,17 @@ fn is_tagged_control_body(body: &[u8]) -> bool {
 }
 
 fn parse_route_open(body: &[u8]) -> Result<RouteHandle, CallError> {
-    let value = serde_json::from_slice::<Value>(body).map_err(|_| {
+    let invalid = || {
         CallError::local(
             SendOutcome::Terminal,
             "invalid_route_response",
             "host returned an invalid route-open response",
         )
-    })?;
+    };
+    if !recognized_keys_are_unique(body, &["op", "route_channel", "route_epoch"]) {
+        return Err(invalid());
+    }
+    let value = serde_json::from_slice::<Value>(body).map_err(|_| invalid())?;
     if value.get("op").and_then(Value::as_str) != Some(OP_ROUTE_OPEN) {
         return Err(CallError::local(
             SendOutcome::Terminal,
@@ -4190,7 +4212,62 @@ mod tests {
         }
         assert_eq!(cancelled, CLIENT_CANCEL_QUEUE_FRAMES);
         assert_eq!(control_rx.len(), CLIENT_CANCEL_QUEUE_FRAMES);
-        // The rest of the pool still admits liveness traffic.
+        // Goodbyes fill the cleanup ceiling but not the Pong reserve.
+        for i in 0..(CLIENT_CLEANUP_QUEUE_FRAMES - CLIENT_CANCEL_QUEUE_FRAMES) {
+            inner
+                .send_control(
+                    FrameType::Goodbye,
+                    pure_header_flags(),
+                    FrameId::routed(
+                        RouteHandle {
+                            channel: 100 + i as u16,
+                            epoch: 1,
+                        },
+                        0,
+                    ),
+                    None,
+                )
+                .expect("Goodbye admits up to the cleanup ceiling");
+        }
+        assert!(
+            inner
+                .send_control(
+                    FrameType::Goodbye,
+                    pure_header_flags(),
+                    FrameId::routed(
+                        RouteHandle {
+                            channel: 200,
+                            epoch: 1
+                        },
+                        0
+                    ),
+                    None,
+                )
+                .is_err(),
+            "a Goodbye past the cleanup ceiling is refused"
+        );
+        assert!(
+            inner.retired.load(Ordering::Acquire),
+            "a refused Goodbye is fatal, as before"
+        );
+        // A fresh generation: the Pong reserve is untouchable by cleanup traffic.
+        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        for i in 0..CLIENT_CLEANUP_QUEUE_FRAMES {
+            inner
+                .send_control(
+                    FrameType::Goodbye,
+                    pure_header_flags(),
+                    FrameId::routed(
+                        RouteHandle {
+                            channel: 100 + i as u16,
+                            epoch: 1,
+                        },
+                        0,
+                    ),
+                    None,
+                )
+                .expect("Goodbye admits up to the cleanup ceiling");
+        }
         inner
             .send_control(
                 FrameType::Pong,
@@ -4198,9 +4275,68 @@ mod tests {
                 FrameId::control(9),
                 None,
             )
-            .expect("Pong admits beyond the Cancel ceiling");
+            .expect("Pong admits from its reserve");
         assert!(!inner.retired.load(Ordering::Acquire));
         inner.retire("test_done");
+    }
+
+    #[test]
+    fn a_route_open_response_with_duplicate_recognized_fields_is_invalid() {
+        assert!(
+            parse_route_open(
+                br#"{"op":"route.open","route_channel":9,"route_channel":8,"route_epoch":3}"#
+            )
+            .is_err()
+        );
+        assert!(
+            parse_route_open(
+                br#"{"op":"route.open","route_channel":9,"route_epoch":3,"x":1,"x":2}"#
+            )
+            .is_ok(),
+            "repeated unknown members are ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_matched_bind_for_a_live_route_retires() {
+        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+        let live = route(1);
+        assert!(lock_unpoisoned(&inner.routes).contains(&live));
+        let (tx, _rx) = oneshot::channel();
+        let (key, publish) = inner
+            .admit(
+                RouteHandle {
+                    channel: 0,
+                    epoch: 0,
+                },
+                Vec::new(),
+                false,
+                PendingKind::Unary(tx),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .expect("control request admitted");
+        assert!(bridge_claims(&publish));
+        drop(data_rx.recv().await);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "op": "route.open",
+            "route_channel": live.channel,
+            "route_epoch": live.epoch,
+        }))
+        .expect("body encodes");
+        inner.dispatch(
+            EnvelopeHeader {
+                len: u32::try_from(body.len()).expect("fits"),
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Response,
+                flags: response_flags(false, false),
+                channel: 0,
+                epoch: 0,
+                corr: key.corr,
+            },
+            body,
+            ByteCharge::none(),
+        );
+        assert!(inner.retired.load(Ordering::Acquire));
     }
 
     #[tokio::test]
