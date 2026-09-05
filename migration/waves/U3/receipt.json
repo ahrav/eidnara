@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "45cbad138daadda739d0c1500f47d8c338a579e0249d6743f5ef4b1353058e85",
+      "destination_sha256": "50709d87c91f2ca90417970a4e15d7cb52404682bf6a16e80da48547b9ec7d14",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "4d15a8087d11e2f5afcdc831d4dbd17abc5d2e2e5be73f9ecc97add80b42bc96",
+      "destination_sha256": "19b95a934ad4197d2bd30aa664b68534418a498305db924ad8515ebf2104c021",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -4846,7 +4846,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
-      "destination_sha256": "beb56db493a76f773db71a6102c7fb41462954bb13749b7b7365f8e3ee616020",
+      "destination_sha256": "5b5e8f08d9d489c1f2db94a471cd0ce8bd1166c64edc987bc12ab3ed6aee028f",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4857,7 +4857,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/data-root-resolves-under-the-managed-directory.md",
-      "destination_sha256": "09f59f26b48722fe24aad914ab9ccdab2cfd3fbdae4a8ba2da0e10e7f760b862",
+      "destination_sha256": "baacac0fda004abaf17be1ff8a7cefc0798132959bfb76a0b5923e1fa533a9d4",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4868,7 +4868,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/coordination-locks-live-beside-the-managed-subtree.md",
-      "destination_sha256": "98cc2907840f03b15c9d6618aae6d0332cb313a2d68abe9f9ece0fafeddcc87d",
+      "destination_sha256": "498bebf019cb8515aa190d573969f0fc18dc62208787906b56af10538daa9ebf",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4879,7 +4879,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md",
-      "destination_sha256": "80488a406ab4e90d9a1ad25229ac232061505537e0c362ad84869c9f0f96ab41",
+      "destination_sha256": "024438be0a5f62a6ddb31c326593de5e5c6ebf6fbaee8c1fbf2c12f4bd968f9b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4890,7 +4890,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "destination_sha256": "a19f0008d039f7675e010b6b09270a937141105a53dd3d70c6a5dd22b7d1c36c",
+      "destination_sha256": "c15c79aa880d292cc0607d1b5653931b4e6280ec5d6beaea9e0050f3a432b92e",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4901,7 +4901,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
-      "destination_sha256": "6f3a0e41f6a36b56241305fde45764ccbe29a2d672d0533a6ed61a78892ac3b6",
+      "destination_sha256": "b4b6cc8e29d58beb3b907d5e6eb642d13e5c16caefb0c796070962e469ab5d17",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4912,7 +4912,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "destination_sha256": "9148dae822e0519002063f159c2baca0ced6b494ab96170926f2fd2f2d229fcb",
+      "destination_sha256": "8f40f2dc3510037ff79e1b06e57eb23efeb0dd64f1592e0c809f8fd959fea5e2",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5468,6 +5468,39 @@
     },
     {
       "source": null,
+      "destination": "docs/properties/host-runtime/discovered-at-u3/existing-checks.md",
+      "destination_sha256": "48a53f83966a16a6db55ce8bbea2dd20935a9f11c689ab2ccbfc62988c997ba1",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/discovered-at-u3/fault-map.md",
+      "destination_sha256": "85848bce6bd18f8638e5f6616f3be012eac04806a45d62c845098f623aaaa829",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
+      "destination": "docs/properties/host-runtime/discovered-at-u3/portfolio-evaluation.md",
+      "destination_sha256": "3682327e58355f431e976804adcc05bcb361f4dfb9b98af2c513150cb5ee9001",
+      "transformation": "authored",
+      "class": "new-authored",
+      "review_evidence": {
+        "design_review": "migration/waves/U3/review-notes.md#doc-rigor-property-catalogs",
+        "negative_tests": "bun scripts/eidnara-migration/generate-property-index.ts <part> --check; bun run eidnara:check property-catalog; bun run eidnara:check property-impact migration/waves/U3/property-impact.json"
+      }
+    },
+    {
+      "source": null,
       "destination": "docs/properties/tokenizer/catalog.md",
       "destination_sha256": "38ae29fb7a1ade7cb1061769244948ebdb5f4d5e786ecde2d59f13db2a5ecf16",
       "transformation": "authored",
@@ -5600,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "8c2966206d5808b9d30282db9fbfd047d24152c9ce565240b9a8628857595f3b",
+      "destination_sha256": "86341991aadb874326ff221df83fadee9cf8ad91470f27be5c23e5f5f28e28e7",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5644,7 +5677,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "62a5e6764d319b9ff61acc9108a655831666d2294f1d6c867e1c30bc077871ee",
+      "destination_sha256": "50a79bd9bd27b185a593d39041ea33ab4006d421f7b461bfcca5a32a9de167ff",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5710,7 +5743,7 @@
     {
       "source": null,
       "destination": "migration/waves/U1/receipt.json",
-      "destination_sha256": "0b87ee14acda766b23aa68688906cd94b52a9fa0e2136f281a9d1817192d0a81",
+      "destination_sha256": "37f36512d2bd2ea64a0fbf5ae8fcd3d65f858bab2248797561971dd8fcf40c57",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5732,7 +5765,7 @@
     {
       "source": null,
       "destination": "migration/waves/U2/receipt.json",
-      "destination_sha256": "9d80874f86041583f2366a26bc64ebd4271149490ec8ec6dbb6152864e287a7a",
+      "destination_sha256": "26b4a2e9843d0cce639a28db206db34da32174a11c45c250abd055f9573742fc",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

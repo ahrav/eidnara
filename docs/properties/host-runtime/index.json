@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "45cbad138daadda739d0c1500f47d8c338a579e0249d6743f5ef4b1353058e85",
+  "source_sha256": "50709d87c91f2ca90417970a4e15d7cb52404682bf6a16e80da48547b9ec7d14",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -3673,8 +3673,8 @@
       "reachability_note": "every client and server handshake computes this proof.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "the crate-internal vector test and the independent `raw_client` oracle both pass on the regenerated vectors."
+        "state": "partial",
+        "note": "the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal; no test calls `compute_proof` and `raw_client::proof` against each other, so the equality in the Check is met through the literal rather than asserted directly."
       },
       "guarantee": "The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v1` and `eidnara-client-v1`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.",
       "check": {
@@ -3689,7 +3689,9 @@
       },
       "existing_check": "`committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction` and `proof_folds_every_input` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.",
       "impact": "A client that cannot authenticate, or a rogue listener that can.",
-      "open_questions": [],
+      "open_questions": [
+        "`docs/host-wire-protocol.md:213` and `:217` carry example proof bytes that match neither the code nor a recomputation, and `:220` names the daemon version differently from `:213`. Code and tests agree with each other; the document needs a fix. (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -3722,7 +3724,7 @@
       "slug": "coordination-locks-live-beside-the-managed-subtree",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "every incarnation takes the lifetime and transaction locks.",
+      "reachability_note": "every incarnation materialises both lock files (`crates/host-runtime/src/lifecycle.rs:78-83`, re-verified) and takes `lifetime.lock` through `LifetimeLock::acquire` (`:181`, reached from `InstanceGuard::acquire` at `instance.rs:231` and `runtime.rs:565`). `LifecycleTransactionLock::acquire_exclusive` (`:456`) has only test callers in this tree; the probe takes it shared (`:873`) and the daemon that takes it exclusively is scheduled for U4. The path guarantee therefore reaches production through the lifetime lock and the directory, not through an exclusive transaction lock.",
       "status": "active",
       "exercised": {
         "state": "yes",
@@ -3731,7 +3733,7 @@
       "guarantee": "The lifetime and transaction locks live at `<root>/.eidnara-coordination/{lifetime,transaction}.lock`, outside `<root>/eidnara`, so replacing the managed subtree neither moves nor splits the fence, and independent openers see one inode identity.",
       "check": {
         "semantics": "always",
-        "condition": "`LifecycleTransactionLock::acquire_exclusive` creates the lock at the literal path; the `(dev, ino)` of that file is identical before and after the managed subtree is renamed away."
+        "condition": "both lock files are created under the literal `<root>/.eidnara-coordination/` path on every incarnation, and the `(dev, ino)` of each is identical before and after the managed subtree is renamed away; the named test asserts this for `transaction.lock`, and `successive_incarnations_lock_the_same_coordination_inodes` for both."
       },
       "fault_timing": "A lock inside the replaceable subtree would let a replaced subtree admit a second incarnation.",
       "required_faults": "Managed-subtree replacement while a lock exists; two independent openers.",
@@ -3741,7 +3743,9 @@
       },
       "existing_check": "`independent_openers_see_one_stable_coordination_identity` (`crates/host-runtime/src/lifecycle.rs`), plus the replaced-subtree tests in the same module; audited at U3.",
       "impact": "Two live hosts, each believing it holds the fence.",
-      "open_questions": [],
+      "open_questions": [
+        "How does the cutover isolation probe treat `.eidnara-coordination`, which sits beside rather than inside the managed subtree it digests? See the evidence file. (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -3799,8 +3803,8 @@
     {
       "slug": "credential-fingerprint-derives-from-the-product-domain",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every provider credential row is fingerprinted before a harness spawns.",
+      "reachability": "test-only",
+      "reachability_note": "the fingerprint comparison runs only when a verifier is installed, and only `BrocaComponent::new_with_credentials` (`crates/host-runtime/src/broca/mod.rs:82`) installs one; its single caller is `tests/broca_protocol.rs:443`. `BrocaComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.",
       "status": "active",
       "exercised": {
         "state": "yes",
@@ -3873,7 +3877,9 @@
       },
       "existing_check": "The two tests named above; unaudited.",
       "impact": "Two model calls billed and two divergent transcripts for one prompt.",
-      "open_questions": [],
+      "open_questions": [
+        "The Guarantee states no bound, but dedup holds only while the session entry exists: after the 15-minute retention or the 256-session eviction an identical resend starts a second backend. Should the Guarantee say \"within retention\"? (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -3889,7 +3895,7 @@
       "guarantee": "Every run path returns its pending permits, task permits, and byte charges to the supervisor baseline, and host shutdown drains the supervisor to zero state.",
       "check": {
         "semantics": "always",
-        "condition": "after every terminal, the supervisor's permits and charges equal their starting values; after shutdown the state is empty."
+        "condition": "after every terminal, the supervisor's permits and charges equal their starting values; after shutdown the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or that count is surfaced to the caller as work that may still be running."
       },
       "fault_timing": "A leaked permit shrinks the admission pool until the host restarts.",
       "required_faults": "Each terminal path: success, error, cancel, detach, shutdown.",
@@ -3915,7 +3921,7 @@
       "guarantee": "Cancelling, deleting, or shutting down a run terminates the whole harness process group, escalating from SIGTERM to SIGKILL when the child ignores the first, and the orphan sweep kills only groups whose owner is dead.",
       "check": {
         "semantics": "always",
-        "condition": "no process of a reaped group survives the terminal, and the sweep never signals a group whose owner is alive; both are invariants over every terminal, so one `always` covers the conjunction."
+        "condition": "after every terminal, either no process of the reaped group survives, or `terminate_group` (`crates/host-runtime/src/broca/subprocess.rs:670`) has reported the group unresolved and the terminal carries `teardown_unconfirmed`; and the sweep never signals a group whose owner is alive. The disjunction is the code's own contract: the bound is four applications of `termination_grace` (`:679-691`), after which survival is reported rather than denied."
       },
       "fault_timing": "A grandchild that survives its parent keeps a credential in its environment.",
       "required_faults": "A child that ignores SIGTERM; a forked grandchild; a dead owner with a live group.",
@@ -3925,14 +3931,16 @@
       },
       "existing_check": "The checks named above; unaudited.",
       "impact": "Orphaned model processes holding credentials.",
-      "open_questions": [],
+      "open_questions": [
+        "`supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/broca_subprocess.rs:2659`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)"
+      ],
       "extra": {}
     },
     {
       "slug": "broca-child-environment-carries-only-the-provider-row",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every harness child receives the snapshot environment.",
+      "reachability": "test-only",
+      "reachability_note": "`EnvSnapshot::capture_from` (`crates/host-runtime/src/broca/subprocess.rs:97`) and `BrocaComponent::new_with_credentials` (`broca/mod.rs:82`) have no caller outside tests in this tree, and `OpenCodeBackend::new` and `PiBackend::new` have none at all; the spawn path is exercised by fixtures only. Reclassify when the daemon (U4) wires a real backend.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3951,7 +3959,9 @@
       },
       "existing_check": "The checks named above; unaudited.",
       "impact": "Credential exfiltration through a harness child.",
-      "open_questions": [],
+      "open_questions": [
+        "The Guarantee says the child receives the admitted snapshot; the code forwards only the provider row plus adapter-owned variables (`subprocess.rs:317` clears the environment). Should the Guarantee be narrowed to match, and `CREDENTIAL_ROW_CAP_BYTES` (`subprocess.rs:51`), which has no reader, be enforced or removed? (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -4109,7 +4119,9 @@
       },
       "existing_check": "`source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`); unaudited.",
       "impact": "Embeddings from an uncertified runtime under a certified identity.",
-      "open_questions": [],
+      "open_questions": [
+        "Whether `ort::init_from` loads from the given `/proc/self/fd/<n>` path and nothing else is unverified from this tree; it needs the `ort` source or a `/proc/self/maps` assertion. (needs human input)"
+      ],
       "extra": {}
     }
   ]

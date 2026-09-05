@@ -4869,7 +4869,7 @@
       "strategy_decision": "Golden-vector test with an independent oracle (`raw_client::proof`) plus a perturbation test that every field changes the digest; vectors regenerated once at U3.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md",
-      "evidence_digest": "beb56db493a76f773db71a6102c7fb41462954bb13749b7b7365f8e3ee616020",
+      "evidence_digest": "5b5e8f08d9d489c1f2db94a471cd0ce8bd1166c64edc987bc12ab3ed6aee028f",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#committed_auth_proof_vectors_pin_the_construction",
       "check_hash": "e17ea9c1b5faacdfacbd6e9ed3bfc43efd8db9b45349e94d32c9f6a6af703938",
       "code_hash": "3cff13bd2a32a56175810526e4beb1f88306625a1f01199df6a364ee9806e298",
@@ -4878,7 +4878,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "beb56db493a76f773db71a6102c7fb41462954bb13749b7b7365f8e3ee616020",
+        "digest": "5b5e8f08d9d489c1f2db94a471cd0ce8bd1166c64edc987bc12ab3ed6aee028f",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/host-proof-construction-matches-the-committed-vectors.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -4899,7 +4899,7 @@
       "strategy_decision": "Example test over explicit environment values covering absolute, relative, empty, and absent branches, with expected paths spelled as literals; the resolver was split at U3 so the test does not mutate process environment.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/data-root-resolves-under-the-managed-directory.md",
-      "evidence_digest": "09f59f26b48722fe24aad914ab9ccdab2cfd3fbdae4a8ba2da0e10e7f760b862",
+      "evidence_digest": "baacac0fda004abaf17be1ff8a7cefc0798132959bfb76a0b5923e1fa533a9d4",
       "check_pointer": "crates/host-runtime/src/instance.rs#default_root_follows_xdg_then_home",
       "check_hash": "2f15bc303313d97885dc27b9b3674877767701fe127c0d49875e3d5040c6768c",
       "code_hash": "e427d278ed5365b39fce4a7c638ea68d5f705357e784176cf96edff2a08f6c17",
@@ -4908,7 +4908,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "09f59f26b48722fe24aad914ab9ccdab2cfd3fbdae4a8ba2da0e10e7f760b862",
+        "digest": "baacac0fda004abaf17be1ff8a7cefc0798132959bfb76a0b5923e1fa533a9d4",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/data-root-resolves-under-the-managed-directory.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -4929,7 +4929,7 @@
       "strategy_decision": "Example test spelling the renamed lock path and asserting inode identity across a managed-subtree replacement.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/coordination-locks-live-beside-the-managed-subtree.md",
-      "evidence_digest": "98cc2907840f03b15c9d6618aae6d0332cb313a2d68abe9f9ece0fafeddcc87d",
+      "evidence_digest": "498bebf019cb8515aa190d573969f0fc18dc62208787906b56af10538daa9ebf",
       "check_pointer": "crates/host-runtime/src/lifecycle.rs#independent_openers_see_one_stable_coordination_identity",
       "check_hash": "174a863751cb73e25353ef3bce8898f9a3bbf4ed7c08b10376046daf421e5d32",
       "code_hash": "d6d78a2b0545db0761564ab57b403f54e464c8e816c2be54883f1d35a33f54aa",
@@ -4938,7 +4938,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "98cc2907840f03b15c9d6618aae6d0332cb313a2d68abe9f9ece0fafeddcc87d",
+        "digest": "498bebf019cb8515aa190d573969f0fc18dc62208787906b56af10538daa9ebf",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/coordination-locks-live-beside-the-managed-subtree.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -4961,7 +4961,7 @@
       "strategy_decision": "Golden-vector test: literal body length, the committed header decoded by the test-local codec and its length field compared with the body's own length, and the header re-encoded from its documented fields; regenerated once at U3 for the renamed module id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md",
-      "evidence_digest": "80488a406ab4e90d9a1ad25229ac232061505537e0c362ad84869c9f0f96ab41",
+      "evidence_digest": "024438be0a5f62a6ddb31c326593de5e5c6ebf6fbaee8c1fbf2c12f4bd968f9b",
       "check_pointer": "crates/host-runtime/tests/protocol_vectors.rs#canonical_route_open_body_is_167_bytes",
       "check_hash": "e17ea9c1b5faacdfacbd6e9ed3bfc43efd8db9b45349e94d32c9f6a6af703938",
       "code_hash": "33b75212177521607b4ae22310d3f91922f93a25e2cfc24445f4422d8c29d6db",
@@ -4970,7 +4970,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "80488a406ab4e90d9a1ad25229ac232061505537e0c362ad84869c9f0f96ab41",
+        "digest": "024438be0a5f62a6ddb31c326593de5e5c6ebf6fbaee8c1fbf2c12f4bd968f9b",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/canonical-route-open-declares-its-exact-body-length.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -4992,7 +4992,7 @@
       "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), regenerated once at U3 for the renamed schema id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "evidence_digest": "a19f0008d039f7675e010b6b09270a937141105a53dd3d70c6a5dd22b7d1c36c",
+      "evidence_digest": "c15c79aa880d292cc0607d1b5653931b4e6280ec5d6beaea9e0050f3a432b92e",
       "check_pointer": "crates/host-runtime/tests/harness_closure.rs#canonical_manifest_digest_is_pinned",
       "check_hash": "2bd84f3d243bae0189381226b67ec89b6fe9f1affd984f2698bc579bc17101e9",
       "code_hash": "33522d9f0e47aea6049b5c925ce929174dca199bae0b4743da481ab08687d5af",
@@ -5001,7 +5001,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "a19f0008d039f7675e010b6b09270a937141105a53dd3d70c6a5dd22b7d1c36c",
+        "digest": "c15c79aa880d292cc0607d1b5653931b4e6280ec5d6beaea9e0050f3a432b92e",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5022,7 +5022,7 @@
       "strategy_decision": "Golden-vector unit test against a digest produced outside the crate (Python HMAC derivation), regenerated once at U3 for the renamed domain; mirrors the check in the harness = false integration binary, which the checker cannot anchor into.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
-      "evidence_digest": "6f3a0e41f6a36b56241305fde45764ccbe29a2d672d0533a6ed61a78892ac3b6",
+      "evidence_digest": "b4b6cc8e29d58beb3b907d5e6eb642d13e5c16caefb0c796070962e469ab5d17",
       "check_pointer": "crates/host-runtime/src/broca/subprocess.rs#credential_fingerprint_matches_the_committed_vector",
       "check_hash": "ac4053e2c50f94914b764877bbc26757d4996c52590608af787225b08808df69",
       "code_hash": "ca1e12a1e319c9aa8e5bb7e198d5f6cf9e1e1014a369b96761f14359c403d76e",
@@ -5031,7 +5031,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "6f3a0e41f6a36b56241305fde45764ccbe29a2d672d0533a6ed61a78892ac3b6",
+        "digest": "b4b6cc8e29d58beb3b907d5e6eb642d13e5c16caefb0c796070962e469ab5d17",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5053,7 +5053,7 @@
       "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint) plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "evidence_digest": "9148dae822e0519002063f159c2baca0ced6b494ab96170926f2fd2f2d229fcb",
+      "evidence_digest": "8f40f2dc3510037ff79e1b06e57eb23efeb0dd64f1592e0c809f8fd959fea5e2",
       "check_pointer": "crates/host-runtime/tests/synapse_bundle.rs#the_committed_fixture_carries_its_canonical_fingerprint",
       "check_hash": "e8219707a8e980b66102e9e25131097261068f7f6a94ac8af705359285826820",
       "code_hash": "da53a5ad117797ad46a227538b68a603e539c2de9eba36a0a1d81f161a73a320",
@@ -5062,7 +5062,7 @@
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "9148dae822e0519002063f159c2baca0ced6b494ab96170926f2fd2f2d229fcb",
+        "digest": "8f40f2dc3510037ff79e1b06e57eb23efeb0dd64f1592e0c809f8fd959fea5e2",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },

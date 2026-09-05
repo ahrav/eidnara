@@ -1251,6 +1251,21 @@
       "kind": "authored",
       "path": "docs/properties/host-runtime/evidence/synapse-requests-are-validated-before-any-inference.md",
       "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/discovered-at-u3/existing-checks.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/discovered-at-u3/fault-map.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
+    },
+    {
+      "kind": "authored",
+      "path": "docs/properties/host-runtime/discovered-at-u3/portfolio-evaluation.md",
+      "rationale": "U3 authored file; see migration/waves/U3/review-notes.md."
     }
   ]
 }

@@ -9874,16 +9874,43 @@ rather than the configuration contract.
 
 ## Discovered at U3
 
-Records added when the crate entered this tree. Records marked `core` in `migration/waves/U3/property-impact.json` are
-the ones a renamed identity is an input to; the Broca and Synapse records cover code the source catalogs did not reach and
-enter at the status observed at discovery, with their existing checks named and unaudited.
+Records added when the crate entered this tree. The first seven cover renamed identities (proof vectors, data root,
+coordination locks, route-open body, closure digest, credential fingerprint, bundle fingerprint); the Broca and
+Synapse records cover code the source catalogs did not reach and enter at the status observed at discovery, with
+their existing checks named and unaudited. This set has its own per-part artifacts under
+[`discovered-at-u3/`](discovered-at-u3/): the check inventory
+[existing-checks.md](discovered-at-u3/existing-checks.md), the fault map
+[fault-map.md](discovered-at-u3/fault-map.md), and the independent
+[portfolio-evaluation.md](discovered-at-u3/portfolio-evaluation.md), whose refinements R1, R2, R3 and R7 are
+applied below and whose remaining findings are queued there.
+
+**Index.** 16 records, in discovery order.
+
+| Slug | Type | Confidence |
+| --- | --- | --- |
+| [host-proof-construction-matches-the-committed-vectors](#host-proof-construction-matches-the-committed-vectors) | safety | high |
+| [data-root-resolves-under-the-managed-directory](#data-root-resolves-under-the-managed-directory) | safety | high |
+| [coordination-locks-live-beside-the-managed-subtree](#coordination-locks-live-beside-the-managed-subtree) | safety | high |
+| [canonical-route-open-declares-its-exact-body-length](#canonical-route-open-declares-its-exact-body-length) | safety | high |
+| [harness-closure-manifest-digest-is-canonical](#harness-closure-manifest-digest-is-canonical) | safety | high |
+| [credential-fingerprint-derives-from-the-product-domain](#credential-fingerprint-derives-from-the-product-domain) | safety | high |
+| [synapse-bundle-fingerprint-covers-every-artifact](#synapse-bundle-fingerprint-covers-every-artifact) | safety | high |
+| [broca-identical-resends-converge-on-one-run](#broca-identical-resends-converge-on-one-run) | safety | medium |
+| [broca-permits-and-charges-return-to-baseline](#broca-permits-and-charges-return-to-baseline) | safety | medium |
+| [broca-children-are-reaped-as-a-process-group](#broca-children-are-reaped-as-a-process-group) | safety | medium |
+| [broca-child-environment-carries-only-the-provider-row](#broca-child-environment-carries-only-the-provider-row) | safety | medium |
+| [broca-protocol-shapes-are-closed](#broca-protocol-shapes-are-closed) | safety | medium |
+| [synapse-admission-boundaries-are-exact](#synapse-admission-boundaries-are-exact) | safety | medium |
+| [synapse-degrades-to-disabled-and-keeps-the-context-routable](#synapse-degrades-to-disabled-and-keeps-the-context-routable) | liveness | medium |
+| [synapse-requests-are-validated-before-any-inference](#synapse-requests-are-validated-before-any-inference) | safety | medium |
+| [synapse-inference-runs-through-a-sealed-runtime-image](#synapse-inference-runs-through-a-sealed-runtime-image) | safety | medium |
 
 ### host-proof-construction-matches-the-committed-vectors
 
 Type: safety
 Reachability: default-production - every client and server handshake computes this proof.
 Status: active
-Exercised: yes - the crate-internal vector test and the independent `raw_client` oracle both pass on the regenerated vectors.
+Exercised: partial - the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal; no test calls `compute_proof` and `raw_client::proof` against each other, so the equality in the Check is met through the literal rather than asserted directly.
 Guarantee: The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v1` and `eidnara-client-v1`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.
 Check: `always` - `compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every single-field perturbation the proof changes.
 Fault/timing angle: Only an external oracle detects a transcript change both sides apply.
@@ -9891,7 +9918,8 @@ Required faults and enabling state: The committed inputs and the test-local HMAC
 Confidence: high - [evidence](evidence/host-proof-construction-matches-the-committed-vectors.md).
 Existing check: `committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction` and `proof_folds_every_input` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.
 Impact: A client that cannot authenticate, or a rogue listener that can.
-Open questions: None.
+Open questions:
+- `docs/host-wire-protocol.md:213` and `:217` carry example proof bytes that match neither the code nor a recomputation, and `:220` names the daemon version differently from `:213`. Code and tests agree with each other; the document needs a fix. (needs human input)
 
 ### data-root-resolves-under-the-managed-directory
 
@@ -9911,17 +9939,18 @@ Open questions: None.
 ### coordination-locks-live-beside-the-managed-subtree
 
 Type: safety
-Reachability: default-production - every incarnation takes the lifetime and transaction locks.
+Reachability: default-production - every incarnation materialises both lock files (`crates/host-runtime/src/lifecycle.rs:78-83`, re-verified) and takes `lifetime.lock` through `LifetimeLock::acquire` (`:181`, reached from `InstanceGuard::acquire` at `instance.rs:231` and `runtime.rs:565`). `LifecycleTransactionLock::acquire_exclusive` (`:456`) has only test callers in this tree; the probe takes it shared (`:873`) and the daemon that takes it exclusively is scheduled for U4. The path guarantee therefore reaches production through the lifetime lock and the directory, not through an exclusive transaction lock.
 Status: active
 Exercised: yes - the lock path literal and the inode identity across a managed-subtree replacement are asserted.
 Guarantee: The lifetime and transaction locks live at `<root>/.eidnara-coordination/{lifetime,transaction}.lock`, outside `<root>/eidnara`, so replacing the managed subtree neither moves nor splits the fence, and independent openers see one inode identity.
-Check: `always` - `LifecycleTransactionLock::acquire_exclusive` creates the lock at the literal path; the `(dev, ino)` of that file is identical before and after the managed subtree is renamed away.
+Check: `always` - both lock files are created under the literal `<root>/.eidnara-coordination/` path on every incarnation, and the `(dev, ino)` of each is identical before and after the managed subtree is renamed away; the named test asserts this for `transaction.lock`, and `successive_incarnations_lock_the_same_coordination_inodes` for both.
 Fault/timing angle: A lock inside the replaceable subtree would let a replaced subtree admit a second incarnation.
 Required faults and enabling state: Managed-subtree replacement while a lock exists; two independent openers.
 Confidence: high - [evidence](evidence/coordination-locks-live-beside-the-managed-subtree.md). The directory name is a renamed identity at U3.
 Existing check: `independent_openers_see_one_stable_coordination_identity` (`crates/host-runtime/src/lifecycle.rs`), plus the replaced-subtree tests in the same module; audited at U3.
 Impact: Two live hosts, each believing it holds the fence.
-Open questions: None.
+Open questions:
+- How does the cutover isolation probe treat `.eidnara-coordination`, which sits beside rather than inside the managed subtree it digests? See the evidence file. (needs human input)
 
 ### canonical-route-open-declares-its-exact-body-length
 
@@ -9956,7 +9985,7 @@ Open questions: None.
 ### credential-fingerprint-derives-from-the-product-domain
 
 Type: safety
-Reachability: default-production - every provider credential row is fingerprinted before a harness spawns.
+Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `BrocaComponent::new_with_credentials` (`crates/host-runtime/src/broca/mod.rs:82`) installs one; its single caller is `tests/broca_protocol.rs:443`. `BrocaComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
 Status: active
 Exercised: yes - the committed vector is asserted, and an independent HMAC oracle reproduced it.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-broca-credential-v1"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
@@ -9996,7 +10025,8 @@ Required faults and enabling state: Concurrent identical sends; a differing rese
 Confidence: medium - [evidence](evidence/broca-identical-resends-converge-on-one-run.md). `identical_resend_dedups_and_any_byte_difference_conflicts`, `racing_identical_sends_converge_on_one_run_and_one_backend_start` (`crates/host-runtime/tests/broca_supervisor.rs`).
 Existing check: The two tests named above; unaudited.
 Impact: Two model calls billed and two divergent transcripts for one prompt.
-Open questions: None.
+Open questions:
+- The Guarantee states no bound, but dedup holds only while the session entry exists: after the 15-minute retention or the 256-session eviction an identical resend starts a second backend. Should the Guarantee say "within retention"? (needs human input)
 
 ### broca-permits-and-charges-return-to-baseline
 
@@ -10005,7 +10035,7 @@ Reachability: default-production - every run path releases what it took.
 Status: active
 Exercised: partial - success, failure, cancel, transport detach, and shutdown paths are covered in-process; a backend that never exits is covered only through the escalation timers.
 Guarantee: Every run path returns its pending permits, task permits, and byte charges to the supervisor baseline, and host shutdown drains the supervisor to zero state.
-Check: `always` - after every terminal, the supervisor's permits and charges equal their starting values; after shutdown the state is empty.
+Check: `always` - after every terminal, the supervisor's permits and charges equal their starting values; after shutdown the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or that count is surfaced to the caller as work that may still be running.
 Fault/timing angle: A leaked permit shrinks the admission pool until the host restarts.
 Required faults and enabling state: Each terminal path: success, error, cancel, detach, shutdown.
 Confidence: medium - [evidence](evidence/broca-permits-and-charges-return-to-baseline.md). `every_path_returns_permits_and_charges_to_baseline`, `host_shutdown_drains_the_supervisor_to_zero_state`, `transport_detach_paths_leave_the_run_untouched` (`crates/host-runtime/tests/broca_supervisor.rs`).
@@ -10020,18 +10050,19 @@ Reachability: default-production - every harness child runs in its own process g
 Status: active
 Exercised: partial - SIGTERM-then-SIGKILL reaping on cancel, delete, and shutdown is covered with real processes; the orphan sweep is covered for dead owners.
 Guarantee: Cancelling, deleting, or shutting down a run terminates the whole harness process group, escalating from SIGTERM to SIGKILL when the child ignores the first, and the orphan sweep kills only groups whose owner is dead.
-Check: `always` - no process of a reaped group survives the terminal, and the sweep never signals a group whose owner is alive; both are invariants over every terminal, so one `always` covers the conjunction.
+Check: `always` - after every terminal, either no process of the reaped group survives, or `terminate_group` (`crates/host-runtime/src/broca/subprocess.rs:670`) has reported the group unresolved and the terminal carries `teardown_unconfirmed`; and the sweep never signals a group whose owner is alive. The disjunction is the code's own contract: the bound is four applications of `termination_grace` (`:679-691`), after which survival is reported rather than denied.
 Fault/timing angle: A grandchild that survives its parent keeps a credential in its environment.
 Required faults and enabling state: A child that ignores SIGTERM; a forked grandchild; a dead owner with a live group.
 Confidence: medium - [evidence](evidence/broca-children-are-reaped-as-a-process-group.md). `cancel_reaps_group_with_sigterm_first`, `sigkill_escalation_when_term_ignored`, `supervisor_shutdown_reaps_group`, `group_registry_sweep_kills_only_dead_owner_groups` (`crates/host-runtime/tests/broca_subprocess.rs`, `harness = false` runner).
 Existing check: The checks named above; unaudited.
 Impact: Orphaned model processes holding credentials.
-Open questions: None.
+Open questions:
+- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/broca_subprocess.rs:2659`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
 
 ### broca-child-environment-carries-only-the-provider-row
 
 Type: safety
-Reachability: default-production - every harness child receives the snapshot environment.
+Reachability: test-only - `EnvSnapshot::capture_from` (`crates/host-runtime/src/broca/subprocess.rs:97`) and `BrocaComponent::new_with_credentials` (`broca/mod.rs:82`) have no caller outside tests in this tree, and `OpenCodeBackend::new` and `PiBackend::new` have none at all; the spawn path is exercised by fixtures only. Reclassify when the daemon (U4) wires a real backend.
 Status: active
 Exercised: partial - launch-identity stripping, per-entry overhead, ambient-credential exclusion, and the size caps are covered; the OpenCode and Pi argv contracts are covered by fixture executables.
 Guarantee: The child environment is the admitted snapshot with the launch identity stripped and exactly one provider credential row; ambient credentials are excluded and every entry is charged against the admission caps.
@@ -10041,7 +10072,8 @@ Required faults and enabling state: An environment with several provider credent
 Confidence: medium - [evidence](evidence/broca-child-environment-carries-only-the-provider-row.md). `env_snapshot_strips_launch_identity`, `env_snapshot_admission_charges_per_entry_overhead`, `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`), `credential_snapshot_must_match_before_backend_spawn` (`crates/host-runtime/tests/broca_protocol.rs`).
 Existing check: The checks named above; unaudited.
 Impact: Credential exfiltration through a harness child.
-Open questions: None.
+Open questions:
+- The Guarantee says the child receives the admitted snapshot; the code forwards only the provider row plus adapter-owned variables (`subprocess.rs:317` clears the environment). Should the Guarantee be narrowed to match, and `CREDENTIAL_ROW_CAP_BYTES` (`subprocess.rs:51`), which has no reader, be enforced or removed? (needs human input)
 
 ### broca-protocol-shapes-are-closed
 
@@ -10132,4 +10164,5 @@ Required faults and enabling state: A modified library on disk after certificati
 Confidence: medium - [evidence](evidence/synapse-inference-runs-through-a-sealed-runtime-image.md). `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`) observes the seals and the digest.
 Existing check: `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`); unaudited.
 Impact: Embeddings from an uncertified runtime under a certified identity.
-Open questions: None.
+Open questions:
+- Whether `ort::init_from` loads from the given `/proc/self/fd/<n>` path and nothing else is unverified from this tree; it needs the `ort` source or a `/proc/self/maps` assertion. (needs human input)
