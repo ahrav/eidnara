@@ -554,6 +554,34 @@ pub fn is_watching(channel_id: u32) -> bool {
     })
 }
 
+/// Whether a producer token is still registered. A wrapper asks this after a partial close so
+/// a token the sweep already consumed retires while one the sweep could not detach stays
+/// releasable. A busy or missing registry reads as not registered.
+#[napi]
+pub fn producer_registered(channel_id: u32, token: u32) -> bool {
+    REGISTRY.with(|registry| {
+        registry.try_borrow().is_ok_and(|registry| {
+            registry
+                .channels
+                .get(&channel_id)
+                .is_some_and(|channel| channel.producers.contains_key(&token))
+        })
+    })
+}
+
+/// Receive-lease counterpart of `producer_registered`.
+#[napi]
+pub fn lease_registered(channel_id: u32, token: u32) -> bool {
+    REGISTRY.with(|registry| {
+        registry.try_borrow().is_ok_and(|registry| {
+            registry
+                .channels
+                .get(&channel_id)
+                .is_some_and(|channel| channel.active.contains_key(&token))
+        })
+    })
+}
+
 #[napi]
 pub fn native_leak_diagnostics() -> u32 {
     napi_buffers::leak_diagnostics().min(u64::from(u32::MAX)) as u32
