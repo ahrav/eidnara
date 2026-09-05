@@ -11,7 +11,6 @@ use std::os::fd::BorrowedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use napi::bindgen_prelude::{AsyncTask, Buffer, FnArgs, Function, Object};
@@ -94,7 +93,6 @@ struct Channel {
 /// active on any thread is a concurrently duplicated descriptor on all of
 /// them.
 static ACTIVE_GRANTS: Mutex<BTreeSet<Vec<u8>>> = Mutex::new(BTreeSet::new());
-static NEXT_ENVIRONMENT: AtomicU64 = AtomicU64::new(1);
 
 struct GrantReservation {
     grants: [Vec<u8>; 2],
@@ -130,7 +128,6 @@ impl Drop for GrantReservation {
 
 #[derive(Default)]
 struct Registry {
-    environment_generation: u64,
     next_channel: u32,
     next_pending: u32,
     channels: HashMap<u32, Channel>,
@@ -439,7 +436,6 @@ fn ensure_cleanup(env: &Env, registry: &mut Registry) -> Result<()> {
     if registry.cleanup_registered {
         return Ok(());
     }
-    registry.environment_generation = NEXT_ENVIRONMENT.fetch_add(1, Ordering::Relaxed);
     let raw = env.raw() as usize;
     env.add_async_cleanup_hook(raw, cleanup_env)?;
     registry.cleanup_registered = true;
@@ -470,6 +466,16 @@ pub fn build_profile() -> &'static str {
 #[napi]
 pub fn build_target() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+#[napi]
+pub fn descriptor_schema_version() -> u32 {
+    u32::from(shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION)
+}
+
+#[napi]
+pub fn qualified_test_profile() -> &'static str {
+    PROFILE
 }
 
 #[napi]
@@ -1120,7 +1126,11 @@ pub fn watch(channel_id: u32, callback: Function<(), ()>) -> Result<()> {
         let mut registry = registry
             .try_borrow_mut()
             .map_err(|_| error("native channel is busy"))?;
-        if !registry.channels.contains_key(&channel_id) {
+        if registry
+            .channels
+            .get(&channel_id)
+            .is_none_or(|channel| channel.closed)
+        {
             return Err(error("native channel is closed"));
         }
         if registry.reactor.is_none() {
@@ -1143,21 +1153,29 @@ pub fn watch(channel_id: u32, callback: Function<(), ()>) -> Result<()> {
 #[napi]
 pub fn readiness_handled() -> bool {
     REGISTRY.with(|registry| {
-        let Ok(registry) = registry.try_borrow() else {
+        let Ok(mut registry) = registry.try_borrow_mut() else {
             return false;
         };
-        let Some(reactor) = registry.reactor.as_ref() else {
+        let Registry {
+            channels, reactor, ..
+        } = &mut *registry;
+        let Some(reactor) = reactor.as_mut() else {
             return false;
         };
         let mut redispatch = false;
-        for (channel_id, channel) in &registry.channels {
-            if !reactor.is_registered(*channel_id) {
+        for channel_id in reactor.take_ready() {
+            if !reactor.is_registered(channel_id) {
                 continue;
             }
-            redispatch |= channel.from_host.complete_data_wait().is_err();
-            match channel.from_host.arm_data_wait() {
-                Ok(true) => {}
-                Ok(false) | Err(_) => redispatch = true,
+            let Some(channel) = channels.get(&channel_id) else {
+                reactor.unregister(channel_id);
+                continue;
+            };
+            let completed = channel.from_host.complete_data_wait().is_ok();
+            match (completed, channel.from_host.arm_data_wait()) {
+                (true, Ok(true)) => {}
+                (true, Ok(false)) => redispatch = true,
+                (false, _) | (true, Err(_)) => reactor.unregister(channel_id),
             }
         }
         reactor.handled();
@@ -1182,6 +1200,9 @@ pub fn poll(
             .channels
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
+        if channel.closed {
+            return Err(error("native channel is closed"));
+        }
         let ring_ptr: *const Ring = channel.from_host.as_ref();
         // SAFETY: `from_host` is boxed, so moving `Channel` does not move the
         // ring. `active` is declared before `from_host`, so every stored lease
@@ -1240,7 +1261,7 @@ pub fn poll(
                 .arm_data_wait()
                 .map_err(|_| error("shared-memory receive failed"))?;
             if !should_block && let Some(reactor) = registry.reactor.as_ref() {
-                reactor.kick();
+                reactor.kick(channel_id);
             }
             Ok::<(), Error>(())
         })?;
@@ -1306,10 +1327,14 @@ pub fn peer_closed(channel_id: u32) -> Result<bool> {
             .channels
             .get(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
-        Ok(match channel.setup.as_ref() {
-            Some(stream) => setup::peer_closed(stream),
-            None => false,
-        })
+        // A quarantined consumer ring is also a dead peer: the doorbell drain saw the
+        // peer's end close, or the peer rewrote a slot under a live lease.
+        Ok(channel.from_host.is_quarantined()
+            || registry
+                .reactor
+                .as_ref()
+                .is_some_and(|reactor| reactor.peer_closed(channel_id))
+            || channel.setup.as_ref().is_some_and(setup::peer_closed))
     })
 }
 
@@ -1327,17 +1352,19 @@ pub fn close(env: &Env, channel_id: u32) -> Result<()> {
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
         let result = close_channel(env, channel);
-        // The entry is removed once no tracked alias remains, even if
-        // reference deletion or release reporting failed. A detach failure
-        // leaves its token or stranded alias behind, and the entry must then
-        // stay registered so the mapping outlives the still-attached JS
-        // views; a later close retries the detachment.
-        if channel.producers.is_empty() && channel.active.is_empty() && channel.stranded.is_empty()
-        {
-            registry.channels.remove(&channel_id);
-        }
-        result
+        finish_close(&mut registry, channel_id, result)
     })
+}
+
+fn finish_close(registry: &mut Registry, channel_id: u32, result: Result<()>) -> Result<()> {
+    let retained = registry.channels.get(&channel_id).is_some_and(|channel| {
+        !(channel.producers.is_empty() && channel.active.is_empty() && channel.stranded.is_empty())
+    });
+    if retained {
+        return result;
+    }
+    registry.channels.remove(&channel_id);
+    Ok(())
 }
 
 #[napi]
@@ -1354,12 +1381,6 @@ pub fn force_close(env: &Env, channel_id: u32) -> Result<()> {
             .get_mut(&channel_id)
             .ok_or_else(|| error("native channel is closed"))?;
         let result = quarantine_channel(env, channel);
-        // Same retention rule as close: only alias-free channels may drop
-        // their mapping.
-        if channel.producers.is_empty() && channel.active.is_empty() && channel.stranded.is_empty()
-        {
-            registry.channels.remove(&channel_id);
-        }
-        result
+        finish_close(&mut registry, channel_id, result)
     })
 }

@@ -11,7 +11,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { NativeChannel, probeCapabilities } from "../index.ts";
+import {
+    DESCRIPTOR_SCHEMA_VERSION,
+    NativeChannel,
+    nativeWireConstants,
+    probeCapabilities,
+    QUALIFIED_TEST_PROFILE,
+} from "../index.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "shm-native-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -33,6 +39,18 @@ describe("native mechanism gate", () => {
             expect(typeof result.reason).toBe("string");
             expect(result.reason?.length).toBeGreaterThan(0);
         }
+    });
+
+    test("exported wire constants match the addon", () => {
+        const constants = nativeWireConstants();
+        if (constants === null) {
+            if (process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1") {
+                throw new Error("claimed native addon is missing");
+            }
+            return;
+        }
+        expect(constants.descriptorSchemaVersion).toBe(DESCRIPTOR_SCHEMA_VERSION);
+        expect(constants.qualifiedTestProfile).toBe(QUALIFIED_TEST_PROFILE);
     });
 
     test("environment cleanup hook runs at runtime exit when addon loads", () => {
@@ -152,7 +170,7 @@ function testGrantHex(lane: number, incarnation: number): string {
 
 function validRawDescriptor(): Record<string, unknown> {
     return {
-        profile: "host-test-ring-v1",
+        profile: QUALIFIED_TEST_PROFILE,
         hostToPeerFd: 10,
         hostToPeerDataReadyFd: 11,
         hostToPeerCapacityReadyFd: 12,
@@ -165,6 +183,40 @@ function validRawDescriptor(): Record<string, unknown> {
 }
 
 describe("readiness dispatch", () => {
+    test("a dead peer ends dispatch for its channel and reports peerClosed", async () => {
+        if (!probeCapabilities().available) return;
+        const pair = NativeChannel.createTestPair();
+        let dispatches = 0;
+        let receiveErrors = 0;
+        pair.second.startReadiness(() => {
+            dispatches += 1;
+            try {
+                while (pair.second.drainOne((lease) => lease.release())) {}
+            } catch {
+                receiveErrors += 1;
+            }
+        });
+        try {
+            expect(pair.second.peerClosed()).toBe(false);
+            // Closing `pair.first` closes `pair.second`'s doorbell peer end.
+            pair.first.close();
+            const deadline = Date.now() + 1_000;
+            while (!pair.second.peerClosed() && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 1));
+            }
+            expect(pair.second.peerClosed()).toBe(true);
+            const settled = dispatches;
+            // No further dispatch arrives after peer closure while timers still run.
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            expect(dispatches).toBe(settled);
+            expect(receiveErrors).toBeGreaterThan(0);
+            expect(() => pair.second.drainOne(() => {})).toThrow(/receive failed/);
+        } finally {
+            pair.second.close();
+        }
+        expect(pair.second.peerClosed()).toBe(true);
+    });
+
     test("one channel handler failure does not starve later channels", async () => {
         if (!probeCapabilities().available) return;
         const first = NativeChannel.createTestPair();
@@ -207,6 +259,61 @@ describe("readiness dispatch", () => {
 
 describe("raw N-API descriptor boundary", () => {
     const DESCRIPTOR_ERROR = /invalid shared-memory descriptor/;
+
+    test("a dead peer leaves the reactor instead of redispatching forever", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        // Runs in a child so this process's shared reactor (which keeps its first callback)
+        // is not the one under test, and so a livelock surfaces as a timeout, not a hang.
+        const script = join(scratch, "dead-peer.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const pair = addon.createTestPair();\n` +
+                `let dispatches = 0;\n` +
+                `let receiveErrors = 0;\n` +
+                `const onReady = () => {\n` +
+                `  dispatches += 1;\n` +
+                `  try { while (addon.poll(pair.second, (token) => addon.release(pair.second, token))) {} }\n` +
+                `  catch { receiveErrors += 1; }\n` +
+                `  if (addon.readinessHandled()) queueMicrotask(onReady);\n` +
+                `};\n` +
+                `addon.watch(pair.second, onReady);\n` +
+                `const before = addon.peerClosed(pair.second);\n` +
+                `addon.close(pair.first);\n` +
+                `const deadline = Date.now() + 2000;\n` +
+                `while (!addon.peerClosed(pair.second) && Date.now() < deadline) {\n` +
+                `  await new Promise((resolve) => setTimeout(resolve, 1));\n` +
+                `}\n` +
+                `const settled = dispatches;\n` +
+                `await new Promise((resolve) => setTimeout(resolve, 100));\n` +
+                `console.log(JSON.stringify({ before, after: addon.peerClosed(pair.second), settled, dispatches, receiveErrors }));\n` +
+                `addon.close(pair.second);\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            before: boolean;
+            after: boolean;
+            settled: number;
+            dispatches: number;
+            receiveErrors: number;
+        };
+        expect(report.before).toBe(false);
+        expect(report.after).toBe(true);
+        expect(report.dispatches).toBe(report.settled);
+        expect(report.receiveErrors).toBeGreaterThan(0);
+    });
 
     test("readiness acknowledgement preserves a frame published during callback", async () => {
         const addon = loadRawAddon();

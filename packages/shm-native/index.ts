@@ -8,6 +8,19 @@ import { markAsUntransferable } from "node:worker_threads";
 export const QUALIFIED_TEST_PROFILE = "host-test-ring-v1";
 export const DESCRIPTOR_SCHEMA_VERSION = 3;
 
+/** The addon's own values for the two constants above, or `null` when it cannot load. */
+export function nativeWireConstants(): {
+    descriptorSchemaVersion: number;
+    qualifiedTestProfile: string;
+} | null {
+    const native = addon();
+    if (!native) return null;
+    return {
+        descriptorSchemaVersion: native.descriptorSchemaVersion(),
+        qualifiedTestProfile: native.qualifiedTestProfile(),
+    };
+}
+
 export interface NativeCapabilities {
     available: boolean;
     napiVersion: number | null;
@@ -69,6 +82,8 @@ interface NativeAddon {
     napiVersion(): number;
     buildProfile(): string;
     buildTarget(): string;
+    descriptorSchemaVersion(): number;
+    qualifiedTestProfile(): string;
     createExternalProbe(length: number): Uint8Array;
     detachArrayBuffer(buffer: ArrayBuffer): boolean;
     registerCleanupProbe(path: string): void;

@@ -8,6 +8,7 @@ import {
     type NativeDescriptor,
     type NativeReceiveLease,
     probeCapabilities,
+    QUALIFIED_TEST_PROFILE,
     setExternalViewCreationFailpoint,
 } from "../index.ts";
 
@@ -37,8 +38,8 @@ console.log(JSON.stringify({ runtime: process.release.name, ...result }));
 
 function runAttachBoundary(): void {
     const hostile: unknown[] = [
-        { profile: "host-test-ring-v1", hostToPeerFd: Number.NaN },
-        { profile: "host-test-ring-v1", hostToPeerFd: 2.5 },
+        { profile: QUALIFIED_TEST_PROFILE, hostToPeerFd: Number.NaN },
+        { profile: QUALIFIED_TEST_PROFILE, hostToPeerFd: 2.5 },
     ];
     for (const descriptor of hostile) {
         const refs = activeExternalRefs();

@@ -1,10 +1,14 @@
+use std::collections::BTreeSet;
 use std::io::{self, IoSliceMut, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, recvmsg};
+use rustix::net::{
+    AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags,
+    SocketAddrUnix, SocketFlags, SocketType, recvmsg, sockopt,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use shm_transport::backend::ring::RingGrant;
 use shm_transport::descriptor::SETUP_DESCRIPTOR_COUNT;
@@ -101,7 +105,7 @@ pub fn begin_connect(
         return Err(invalid());
     }
     let deadline = Instant::now().checked_add(timeout).ok_or_else(timed_out)?;
-    let mut stream = UnixStream::connect(path)?;
+    let mut stream = connect_until(path, deadline)?;
     authenticate(
         &mut stream,
         key,
@@ -130,6 +134,37 @@ pub fn begin_connect(
         activation_token: grant.activation_token,
         deadline,
     })
+}
+
+/// `UnixStream::connect` can block indefinitely when the listener's backlog is full: Linux
+/// parks a blocking `AF_UNIX` connect for the socket's `SO_SNDTIMEO`, which std never sets.
+/// Setting that timeout to the remaining budget before `connect(2)` makes the kernel enforce
+/// the deadline.
+fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(timed_out());
+    }
+    // The kernel rejects `tv_usec >= 1_000_000` and rustix rounds sub-microsecond nanos
+    // up, so a budget just under a whole second would fail with `EDOM` unless floored.
+    let remaining = Duration::from_micros(u64::try_from(remaining.as_micros()).unwrap_or(u64::MAX))
+        .max(Duration::from_micros(1));
+    let socket = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )?;
+    sockopt::set_socket_timeout(&socket, sockopt::Timeout::Send, Some(remaining))?;
+    let address = SocketAddrUnix::new(path)?;
+    loop {
+        match rustix::net::connect(&socket, &address) {
+            Ok(()) => return Ok(UnixStream::from(socket)),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::AGAIN) => return Err(timed_out()),
+            Err(errno) => return Err(errno.into()),
+        }
+    }
 }
 
 /// A ring alone cannot express peer death: a host that exits without a Goodbye frame leaves its rings looking merely idle, so the setup socket is the only liveness signal. `MSG_PEEK` keeps the probe side-effect free and repeatable.
@@ -292,6 +327,18 @@ fn receive_grant(
     }
     if descriptors.len() != SETUP_DESCRIPTOR_COUNT {
         return Err(invalid());
+    }
+    // `SCM_RIGHTS` installs a fresh fd per slot even when two slots name one inode.
+    let mut identities = BTreeSet::new();
+    for descriptor in descriptors
+        .iter()
+        .map(OwnedFd::as_fd)
+        .chain([stream.as_fd()])
+    {
+        let stat = rustix::fs::fstat(descriptor)?;
+        if !identities.insert((stat.st_dev, stat.st_ino)) {
+            return Err(invalid());
+        }
     }
     let descriptors = descriptors.try_into().map_err(|_| invalid())?;
     let message: GrantMessage =
@@ -487,5 +534,67 @@ mod tests {
             super::peer_closed(&client),
             "dropping the host end must surface as closed"
         );
+    }
+
+    #[test]
+    fn connect_honors_the_deadline_when_the_backlog_is_full() {
+        use std::os::unix::net::UnixListener;
+        use std::time::{Duration, Instant};
+
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+
+        let dir = std::env::temp_dir().join(format!("shm-native-connect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("setup.sock");
+        // A listener that never accepts; fill its backlog with non-blocking connects,
+        // which return `EAGAIN` once the queue is full instead of parking.
+        let listener = UnixListener::bind(&path).expect("listener");
+        let address = SocketAddrUnix::new(&path).expect("address");
+        let mut pending = Vec::new();
+        loop {
+            let socket = rustix::net::socket_with(
+                AddressFamily::UNIX,
+                SocketType::STREAM,
+                SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+                None,
+            )
+            .expect("probe socket");
+            match rustix::net::connect(&socket, &address) {
+                Ok(()) => pending.push(socket),
+                Err(rustix::io::Errno::AGAIN) => break,
+                Err(errno) => panic!("unexpected connect error: {errno}"),
+            }
+            assert!(pending.len() <= 65_536, "backlog never filled");
+        }
+
+        let started = Instant::now();
+        let result = super::connect_until(&path, started + Duration::from_millis(200));
+        let elapsed = started.elapsed();
+        drop(pending);
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let error = result.expect_err("full backlog must not connect");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect blocked past the deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn connect_succeeds_against_an_accepting_listener() {
+        use std::os::unix::net::UnixListener;
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::temp_dir().join(format!("shm-native-accept-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("setup.sock");
+        let listener = UnixListener::bind(&path).expect("listener");
+        let stream =
+            super::connect_until(&path, Instant::now() + Duration::from_secs(1)).expect("connect");
+        let (accepted, _) = listener.accept().expect("accept");
+        drop((stream, accepted, listener));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
