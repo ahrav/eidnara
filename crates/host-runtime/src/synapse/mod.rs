@@ -637,35 +637,40 @@ impl SynapseComponent {
         {
             return expired_query();
         }
-        // The CPU lane is idle once the verdict arrives, so the handler's admission slot is released before response reservation can wait on egress; the worker's copy still covers a native call that outlives its receiver.
-        drop(handler_query_permit);
         match result {
-            Ok(vectors) => match vectors.first() {
-                Some(vector) => {
-                    let items = [protocol::VectorItemView {
-                        id: "query",
-                        content_sha256: &content_sha256,
-                        vector,
-                    }];
-                    // Output reservation can wait on egress, so the deadline covers response construction too; dropping the future releases any reservation it holds.
-                    match tokio::time::timeout_at(
-                        deadline,
-                        respond_vectors(ctx, &lane.lane, &items, true, None),
-                    )
-                    .await
-                    {
-                        Ok(outcome) => outcome,
-                        Err(_) => expired_query(),
+            Ok(vectors) => {
+                // One query yields exactly one row; any other count is a cardinality violation that quarantines the lane, as the batch worker does for a mismatched item count.
+                let [vector] = vectors.as_slice() else {
+                    let reason =
+                        format!("inference returned {} vectors for one query", vectors.len());
+                    mark_failing(&self.inner, reason.clone());
+                    return app_error("artifact_invalid", &reason);
+                };
+                // The CPU lane is idle once the verdict arrives, so the handler's admission slot can be released before response reservation waits on egress. The returned vector then lives outside the slot's bound, so it is charged to the resident pool first; when that charge is unavailable the slot stays held as the bound instead. The worker's copy still covers a native call that outlives its receiver.
+                let vector_bytes = vector.len().saturating_mul(std::mem::size_of::<f32>());
+                let _vector_charge = match ctx.try_reserve_resident(vector_bytes) {
+                    Some(charge) => {
+                        drop(handler_query_permit);
+                        Some(charge)
                     }
+                    None => None,
+                };
+                let items = [protocol::VectorItemView {
+                    id: "query",
+                    content_sha256: &content_sha256,
+                    vector,
+                }];
+                // Output reservation can wait on egress, so the deadline covers response construction too; dropping the future releases any reservation it holds.
+                match tokio::time::timeout_at(
+                    deadline,
+                    respond_vectors(ctx, &lane.lane, &items, true, None),
+                )
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => expired_query(),
                 }
-                None => {
-                    mark_failing(
-                        &self.inner,
-                        "inference returned no vector for one query".to_owned(),
-                    );
-                    app_error("artifact_invalid", "inference returned no vector")
-                }
-            },
+            }
             Err(QueryFault::Cancelled) => app_error("cancelled", "the host is shutting down"),
             Err(QueryFault::Expired) => expired_query(),
             Err(QueryFault::Engine(InferenceError::Input(reason))) => {

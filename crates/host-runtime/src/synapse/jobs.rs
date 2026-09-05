@@ -806,31 +806,35 @@ impl JobTable {
             if live.saturating_add(floor) <= cap {
                 return true;
             }
-            // Live bytes above the retained total belong to evicted jobs whose pages are still being served; eviction cannot lower them.
-            let unevictable = live.saturating_sub(jobs.retained_result_bytes);
-            if unevictable.saturating_add(floor) > cap {
+            // Only a ready job whose lease no served page shares frees bytes when evicted; a page-leased job would be lost for nothing.
+            let releasable = jobs
+                .by_seq
+                .values()
+                .filter(|job| job.is_completed() && Self::lease_is_sole(job))
+                .fold(0u64, |total, job| total.saturating_add(job.result_bytes));
+            if live.saturating_sub(releasable).saturating_add(floor) > cap {
                 return false;
             }
             let victim = jobs
                 .by_seq
                 .values()
-                .filter(|job| job.is_completed())
+                .filter(|job| job.is_completed() && Self::lease_is_sole(job))
                 .min_by_key(|job| job.retention_rank())
                 .map(|job| job.seq);
             let Some(seq) = victim else {
                 return false;
             };
             let job = Self::remove(jobs, seq);
-            if let Some(Job {
-                state: JobState::Ready { lease, .. },
-                result_bytes,
-                ..
-            }) = &job
-                && Arc::strong_count(lease) == 1
-            {
-                releasing = releasing.saturating_add(*result_bytes);
-            }
+            releasing = releasing.saturating_add(job.as_ref().map_or(0, |job| job.result_bytes));
             released.job(job);
+        }
+    }
+
+    /// A ready job whose lease has no other holder releases its bytes on eviction; a page mid-response holds a clone and keeps them live.
+    fn lease_is_sole(job: &Job) -> bool {
+        match &job.state {
+            JobState::Ready { lease, .. } => Arc::strong_count(lease) == 1,
+            _ => true,
         }
     }
 
@@ -1338,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn a_served_page_keeps_its_result_bytes_live_past_eviction() {
+    fn a_page_leased_result_is_not_evicted_while_its_page_is_served() {
         let dimensions = 2;
         let one_result =
             result_bytes(1, dimensions, 1 + CONTENT_SHA256_BYTES).expect("small result size");
@@ -1362,23 +1366,29 @@ mod tests {
             panic!("the result is served");
         };
 
-        // Eviction removes the job, but the served page still holds its vectors, so the bytes stay live and admission is full.
+        // The served page holds the job's vectors, so evicting the job could not free its bytes: admission is full and the job stays retained for its reader.
         assert!(matches!(
             jobs.admit_uncharged_for_tests("second".to_owned(), item("b"), dimensions),
             AdmitOutcome::Full
         ));
         assert!(matches!(
             jobs.poll(&first_id, "first", None),
-            PollOutcome::Restarted
+            PollOutcome::Page(_)
         ));
         assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), one_result);
 
+        // Once the page is gone the job is an ordinary eviction candidate again.
         drop(page);
-        assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), one_result);
         assert!(matches!(
             jobs.admit_uncharged_for_tests("second".to_owned(), item("b"), dimensions),
             AdmitOutcome::Admitted { .. }
         ));
+        assert!(matches!(
+            jobs.poll(&first_id, "first", None),
+            PollOutcome::Restarted
+        ));
+        assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), 0);
     }
 
     #[test]
