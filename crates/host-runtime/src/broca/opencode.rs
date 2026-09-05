@@ -163,8 +163,10 @@ async fn run_opencode(
     // Resolution opens and stats the node, so it runs on the blocking pool rather than on a runtime worker.
     let closure = Arc::clone(&runtime.closure);
     let executable = runtime.executable_node.clone();
+    // The whole closure is re-verified immediately before launch and the executable resolved from that fresh handle; see `ValidatedHarnessClosure::revalidate`. commentlint: allow(JUDGE)
     let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
-        closure.resolve_node_descriptor(&executable).ok()
+        let fresh = closure.revalidate().ok()?;
+        fresh.resolve_node_descriptor(&executable).ok()
     }));
     // An abandoned resolution only reads the closure store, so it leaves no residue. commentlint: allow(JUDGE)
     let executable_node = match subprocess::race_setup(&cancel, setup_deadline, &mut resolve).await

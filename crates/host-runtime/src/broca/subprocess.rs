@@ -1987,7 +1987,8 @@ pub mod group_registry {
     }
 
     /// Membership plus identity: a member must share `owner_sid`, must have started at or after the recorded leader, and must carry the recorded [`GROUP_NONCE_ENV`] in its environment. commentlint: allow(JUDGE)
-    /// The nonce is the non-reusable fence: a group that recycled the numeric pgid — even inside the owner's still-live session — never inherited it, whereas every descendant of the recorded leader did. commentlint: allow(JUDGE)
+    /// The nonce is the non-reusable fence: a group that recycled the numeric pgid — even inside the owner's still-live session — never inherited it, whereas every descendant of the recorded leader did unless the harness scrubbed its environment. commentlint: allow(JUDGE)
+    /// A stat-matching member without the nonce is therefore indeterminate: the sweep fails closed, retaining the record, rather than signaling a possible stranger or releasing a possible descendant. commentlint: allow(JUDGE)
     /// An unreadable environment on a stat-matching candidate fails the sweep closed, retaining the record; the stat checks run first so foreign processes are never probed. commentlint: allow(JUDGE)
     fn group_has_verified_descendants(
         pgid: i32,
@@ -2015,7 +2016,12 @@ pub mod group_registry {
                     // A candidate that passes every stat check is almost certainly this run's; an unreadable environment leaves its identity indeterminate, so the sweep fails closed and retains the record rather than releasing a group that may still be running provider work. commentlint: allow(JUDGE)
                     match environ_has_entry(pid, marker.as_bytes()) {
                         Ok(true) => return Ok(true),
-                        Ok(false) => {}
+                        // A descendant launched with a scrubbed environment omits the nonce yet still belongs to the run; a stranger that recycled the pgid is indistinguishable from it here, so the sweep neither signals nor retires and fails closed instead. commentlint: allow(JUDGE)
+                        Ok(false) => {
+                            return Err(io::Error::other(
+                                "a leaderless group's member could not be attributed to its record",
+                            ));
+                        }
                         Err(err) if pid_vanished(&err) => {}
                         Err(err) => {
                             return Err(io::Error::other(format!(

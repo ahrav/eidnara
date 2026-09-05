@@ -273,7 +273,9 @@ async fn run_pi(
     let interpreter_node = descriptor.interpreter_node.clone();
     let entrypoint_node = descriptor.entrypoint_node.clone();
     let extension_nodes = descriptor.provider_extension_nodes.clone();
+    // The whole closure is re-verified immediately before launch and every node resolved from that fresh handle; see `ValidatedHarnessClosure::revalidate`. commentlint: allow(JUDGE)
     let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
+        let closure = closure.revalidate().ok()?;
         let interpreter = closure.resolve_node_descriptor(&interpreter_node).ok()?;
         let entrypoint = closure.resolve_node_descriptor(&entrypoint_node).ok()?;
         let mut extensions = Vec::with_capacity(extension_nodes.len());
@@ -585,9 +587,10 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
             | "queue_update"
             | "session_info_changed"
             | "thinking_level_changed" => {}
-            // `message_start`, `auto_retry_start`, and `auto_retry_end` clear `provisional`; without a later terminal, parsing returns a missing-terminal error rather than a superseded result.
+            // Resumed lifecycle output invalidates every stored decision: without a later terminal, parsing returns a missing-terminal error rather than an answer the transcript itself moved past. commentlint: allow(JUDGE)
             "message_start" | "auto_retry_start" | "auto_retry_end" => {
                 provisional = None;
+                agent_end_final = None;
             }
             "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
                 return Err(format!(

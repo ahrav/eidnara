@@ -3495,9 +3495,10 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    // A leaderless group whose members lack the recorded nonce is not provably this run's.
-    // Such a group models an unrelated same-session group that recycled the numeric pgid; the
-    // sweep must leave it alone and retire the record instead of signaling it.
+    // A leaderless group whose members lack the recorded nonce is neither provably this run's
+    // nor provably a stranger's: it models both an unrelated same-session group that recycled
+    // the numeric pgid and a descendant launched with a scrubbed environment. The sweep must
+    // neither signal it nor retire its record; it fails closed until the ambiguity clears.
     let mut stranger = std::process::Command::new("/bin/sh");
     stranger.args(["-c", "sleep 30 & echo $!; sleep 2"]);
     stranger.process_group(0);
@@ -3525,7 +3526,23 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
         stranger.wait().expect("stranger exits").success(),
         "stranger shell must exit cleanly"
     );
-    sweep_orphaned_groups(&state_root()).expect("sweep completes");
+    let stranger_record = fs::read_dir(state_root().path())
+        .expect("read registry")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("{}-", stranger.id())))
+        })
+        .expect("stranger record exists");
+    assert!(
+        sweep_orphaned_groups(&state_root()).is_err(),
+        "an unattributable leaderless member must fail the sweep closed"
+    );
+    assert!(
+        stranger_record.exists(),
+        "the sweep must retain the record while attribution is indeterminate"
+    );
     let alive = fs::read_to_string(format!("/proc/{stranger_child}/stat"))
         .ok()
         .and_then(|stat| {
@@ -3537,9 +3554,27 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
         alive,
         "the sweep must not signal a leaderless group whose members lack the recorded nonce"
     );
+    // Once the ambiguous member is gone the group is provably empty and the record retires.
     let _ = rustix::process::kill_process(
         rustix::process::Pid::from_raw(stranger_child).expect("pid"),
         rustix::process::Signal::KILL,
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(format!("/proc/{stranger_child}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_ascii_whitespace().next().map(str::to_owned))
+        })
+        .is_some_and(|state| state != "Z")
+    {
+        assert!(Instant::now() < deadline, "stranger child did not die");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    sweep_orphaned_groups(&state_root()).expect("sweep completes once the group is empty");
+    assert!(
+        !stranger_record.exists(),
+        "an empty leaderless group's record retires"
     );
 }
 

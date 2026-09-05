@@ -156,6 +156,13 @@ impl ValidatedHarnessClosure {
     ///
     /// `closure_path` must still identify the verified inode; pathname-based consumers such as
     /// the macOS `module_path` could otherwise launch a replacement.
+    /// Re-verifies the whole closure — every node's mode, link count, size, and hash — and returns a fresh handle pinned to the re-verified tree. commentlint: allow(JUDGE)
+    ///
+    /// `resolve_node_descriptor` re-hashes only the object it opens, but a Node entrypoint loads its transitive dependencies by pathname, and retained files stay owner-writable. Launching from a handle obtained immediately before spawn narrows the window in which a same-UID writer can alter a dependency from "since startup" to the launch itself. commentlint: allow(JUDGE)
+    pub fn revalidate(&self) -> Result<ValidatedHarnessClosure, HarnessClosureError> {
+        HarnessClosureStore::open(&self.root)?.validate(&self.digest)
+    }
+
     pub fn resolve_node_descriptor(
         &self,
         node_path: &str,
