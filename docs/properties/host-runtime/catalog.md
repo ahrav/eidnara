@@ -623,7 +623,7 @@ Status: active
 Exercised: not yet - no test drives a generation into the rendezvous with draining set, exhausts the drain window during route-settle, and asserts that the sequence returns inside the forced-exit bound with a non-graceful result.
 Guarantee: A generation that observes draining while tearing down proceeds past the shutdown rendezvous, or the host declares that it did not, within the forced-exit bound `run` already carries.
 Check: `always-or-unreached` - within `shutdown_deadline + 3 * lifecycle_callback_deadline`
-plus the two internally bounded `force_close_all_routes` calls (30 s each) after the shutdown token cancels, the shutdown sequence has
+plus up to `2 * lifecycle_callback_deadline` for each of the two `force_close_all_routes` calls (the tracker wait at `dispatch.rs:1299` and then `run_route_gone` at `:1162-1166`, both under the configured deadline), so `shutdown_deadline + 7 * lifecycle_callback_deadline` in total, after the shutdown token cancels, the shutdown sequence has
 returned, no task is parked at the rendezvous, and if the drain timed out the
 return value is non-graceful and names it. The bound is the forced-exit figure in
 [rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline](#rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline);
@@ -781,9 +781,7 @@ Exercised: yes - four in-crate latch tests plus three integration tests, and
 the integration file runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`).
 Guarantee: Across any number of concurrent and repeated shutdown requests, the
 latch commits and the shutdown token is cancelled at most once per incarnation.
-Check: `always` - drive concurrent and pipelined requests, some on generations
-that retire mid-flight; assert the commit executes once, each requester receives
-exactly one correlated response or none, and none receives two.
+Check: `always` - drive concurrent and pipelined requests, some on generations that retire mid-flight; assert the commit executes exactly once when at least one committing response's write callback is acknowledged, and zero times when every owner generation retires before its response is written (each dropped `CommitOnAck` reopens the latch); assert each requester receives exactly one correlated response or none, and none receives two.
 Fault/timing angle: the exclusion rests on the commit hook being moved into the
 frame's written callback, so it either fires or is dropped, never both. The subtle
 part is that commit is unconditional while reopen is guarded, so a late reopen
@@ -2363,7 +2361,12 @@ assert it returns `Ok(false)` and leaves both names as they were. Run the
 assertion for an empty occupant and a nonempty occupant, on both the flagged
 Linux path and the portable path, forcing the portable path either by a
 filesystem that rejects `renameat2` flags or by extracting the fallback so it
-can be called directly. `always` because the caller's contract at
+can be called directly. On the portable path also close the check-then-act
+window: with a failpoint between the `statat` that reports `NOENT`
+(`generation.rs:1062-1064`) and the plain `renameat` (`:1067`), create the target,
+as an empty directory and as a file, while the call is parked, and assert the
+rename does not replace it; pre-planting the target alone tests occupancy before
+the window and cannot fail on the race the guarantee forbids. `always` because the caller's contract at
 `generation.rs:744` is unconditional, so an occupied target that gets
 replaced is a violation rather than a tolerated case.
 Fault/timing angle: this is a check-then-act window that is dead on one
@@ -3529,7 +3532,11 @@ the stop is forwarded on its `Ok(true)` pass and counts toward `N`. The first
 empty observation returns `Ok(false)` and reaches the `read_cancel` check
 (`:397`), which takes the `inbound` sender (`:398`) and sends `Cancelled`
 (`:400`). Second, nothing is forwarded on the inbound channel after `Cancelled`
-is sent. `always` rather than `sometimes`
+is sent. Third, because the guarantee holds only while the connection task
+drains the inbound channel, the campaign keeps that drain running and asserts
+that the `Cancelled` send (`:400`) completes and the thread exits within the
+campaign's bounded wait; the send itself carries no deadline, so with the drain
+stopped the record makes no exit claim and the check does not run. `always` rather than `sometimes`
 because the assertion is a bound that must hold every time the window closes,
 not a state to reach.
 **Re-derived 2026-08-31 against the eventfd transport (PR #131), which removed
@@ -9145,11 +9152,12 @@ Exercised: partial - `config.rs:503`, `:551`, `:565`, `:577`, `:604`, `:637`,
 `:647` cover rejection for individual keys; no test asserts that no path clamps
 Guarantee: An out-of-range limit or duration is rejected with an error naming the
 offending key, never clamped to a bound the caller cannot observe.
-Check: `always` - for every field of `HostLimits`, `HostTiming`, and
-`LivenessPolicy`, set it one step outside its bound and assert `validate` returns
-`Err` whose `Display` names that field, and that no accepted `HostConfig` differs
-from the submitted one in any field. `always` because it must hold on every
-validation.
+Check: `always` - for every numeric limit and duration field of `HostLimits`,
+`HostTiming`, and `LivenessPolicy`, set it one step outside its bound and assert
+`validate` returns `Err` whose `Display` names that field; and for every field
+including the boolean `invalidate_on_missed`, which has no out-of-range value,
+assert that no accepted `HostConfig` differs from the submitted one in any field.
+`always` because it must hold on every validation.
 Fault/timing angle: none.
 Required faults and enabling state: none. Pure function of a constructed
 `HostConfig`.
@@ -9305,8 +9313,10 @@ return, assert elapsed time is at most:
   `:1067`, which pays the drain (`:1006`, `:1037`), the doubled chain (`:1053`,
   `:1054`), **and** the handler callback (`:1066`, bounded at `:1098`).
 Each bound also admits the two `force_close_all_routes` calls at `:1042` and
-`:1050`, which no `timeout` wraps and which are internally bounded at 30 s
-(`dispatch.rs:1299`) plus 30 s in `run_route_gone`; an oracle should either
+`:1050`, which no `timeout` wraps and which are each internally bounded at
+`lifecycle_callback_deadline` for the tracker wait (`dispatch.rs:1299`) plus
+another `lifecycle_callback_deadline` in `run_route_gone` (`:1162-1166`), so up
+to `2 * lifecycle_callback_deadline` per call and `4 *` across both; an oracle should either
 measure them separately or state that its bound is the sum plus those.
 `always` because each bound must hold on every shutdown that takes its exit, and
 the bounds are in the units the code bounds.
@@ -9508,7 +9518,7 @@ Exercised: not yet - nothing enumerates the fields against their consumers
 Guarantee: Every field an embedder can set on `HostConfig`, `HostLimits`,
 `HostTiming`, `LivenessPolicy`, or `HostInit` reaches at least one consumer, so
 setting it changes some observable host behaviour.
-Check: `always` - for each public configuration field, two host executions that differ only in that field produce the documented observable difference for its family: a limit field moves the admission boundary at which a request or connection is rejected, a timing field moves the instant at which the corresponding deadline fires under paused time, a liveness field changes the probe cadence or the retirement decision, and an init field changes the published value the client reads. A read site outside `config.rs` and outside a `Debug` implementation is a necessary screen, not the check: a field that is read and ignored fails. `always` because it is a property of the surface, evaluated once per field.
+Check: `always` - for each public configuration field, two host executions that differ only in that field produce the documented observable difference for its family: a limit field moves the admission boundary at which a request or connection is rejected, a timing field moves the instant at which the corresponding deadline fires under paused time, a liveness field changes the probe cadence or the retirement decision, and an init field arrives unchanged in the `HostInit` passed to `HostHandler::initialize` (`handler.rs:532`), asserted at the handler rather than through client-visible behaviour, because the host does not publish `host_capabilities` or `storage` and a conforming handler may ignore them. A read site outside `config.rs` and outside a `Debug` implementation is a necessary screen, not the check: a field that is read and ignored fails. `always` because it is a property of the surface, evaluated once per field.
 Fault/timing angle: none. This is a static property of the wiring.
 Required faults and enabling state: none. The check is an enumeration, best
 expressed as a test that names each field and its consumer, or as a review gate.
@@ -9933,7 +9943,7 @@ Reachability: test-only - every bundle load through a composed `SynapseComponent
 Status: active
 Exercised: yes - the committed tiny fixture's fingerprint is recomputed from its manifest and pinned as a literal; each artifact hash and each embedding-space scalar is changed alone and shown to move the fingerprint; single-bit artifact changes are caught by each artifact's own digest at load.
 Guarantee: The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.
-Check: `always` - `canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load; and for every field the guarantee names (the model hash, each external-initializer hash, each of the four tokenizer artifact hashes, pooling, quantization, output selection, dimension, and the embedding-space scalars), perturbing that field alone in the manifest changes `canonical_fingerprint`, so no verified input is absent from the pre-image. `always` because the pre-image is a pure function of the manifest.
+Check: `always` - `canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load; and for every field the guarantee names (the model hash, each external-initializer hash and each external-initializer name, since the pre-image binds `name.len():name:sha256` per initializer at `crates/host-runtime/src/synapse/bundle.rs:585-594`, plus the name-to-hash pairing, so swapping two names while keeping every hash also changes the fingerprint; each of the four tokenizer artifact hashes, pooling, quantization, output selection, dimension, and the embedding-space scalars), perturbing that field alone in the manifest changes `canonical_fingerprint`, so no verified input is absent from the pre-image. `always` because the pre-image is a pure function of the manifest.
 Fault/timing angle: A fingerprint that omitted an artifact would let a swapped artifact change embedding bytes under an unchanged identity.
 Required faults and enabling state: The committed fixture and its generator's independent fingerprint function.
 Confidence: high - [evidence](evidence/synapse-bundle-fingerprint-covers-every-artifact.md). The pre-image's first line is a renamed identity; the fixture manifest's fingerprint was regenerated once with the generator's Python `canonical_fingerprint`, which also reproduced the predecessor value from the predecessor line.
@@ -9963,7 +9973,7 @@ Reachability: test-only - every run path of a composed `BrocaComponent` releases
 Status: active
 Exercised: partial - success, failure, cancel, transport detach, and shutdown paths are covered in-process; a backend that never exits is covered only through the escalation timers.
 Guarantee: Every run path returns its pending permits, task permits, and byte charges to the supervisor baseline, and host shutdown drains the supervisor to zero state; when an uncooperative backend outlives the termination grace, shutdown reports the unresolved count to the caller instead of claiming zero state.
-Check: `always` - after every terminal, the supervisor's permits and charges equal their starting values; after shutdown, either the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or the count is nonzero and exactly equals the number of backends still unreaped, with no permit, charge, or run state retained beyond those; a zero count with retained state, or a nonzero count that is not surfaced to the caller, fails the check.
+Check: `always` - after every terminal, the supervisor's pending permits and task permits equal their starting values and `finish` (`crates/host-runtime/src/broca/supervisor.rs:938`) has released the run's excess bytes, while the retained session's base charge and replay frames are still held for `terminal_retention`; the full byte-budget baseline is required only once `remove_session` (`:1059`) has removed that entry by expiry, cap eviction, deletion, or shutdown; after shutdown, either the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or the count is nonzero and exactly equals the number of backends still unreaped, with no permit, charge, or run state retained beyond those; a zero count with retained state, or a nonzero count that is not surfaced to the caller, fails the check.
 Fault/timing angle: A leaked permit shrinks the admission pool until the host restarts.
 Required faults and enabling state: Each terminal path: success, error, cancel, detach, shutdown.
 Confidence: medium - [evidence](evidence/broca-permits-and-charges-return-to-baseline.md). `every_path_returns_permits_and_charges_to_baseline`, `host_shutdown_drains_the_supervisor_to_zero_state`, `transport_detach_paths_leave_the_run_untouched` (`crates/host-runtime/tests/broca_supervisor.rs`).
@@ -10057,7 +10067,7 @@ Reachability: test-only - every artifact fault in a composed `SynapseComponent` 
 Status: active
 Exercised: partial - missing, corrupt, extra, wrong-identity, and wrong-pooling artifacts disable the lane while the context module stays routable; a fault during inference itself is covered only by the deterministic engine.
 Guarantee: An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.
-Check: `always` - for every artifact fault, `activate` returns `Ok` with the lane disabled, a bind to the disabled lane is refused with exactly `artifact_invalid` (`crates/host-runtime/tests/synapse_bundle.rs:241`, `tests/synapse_roundtrip.rs:93`), and a context request issued afterwards completes within the campaign's request deadline; the existing test bounds it with the 5 s harness `BUDGET` (`crates/host-runtime/tests/support/synapse.rs:22`, `:265`), and the host itself imposes no dispatch deadline (see [req-a-a-handler-outliving-every-host-deadline-is-reached](#req-a-a-handler-outliving-every-host-deadline-is-reached)), so the bound must come from the campaign. The second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation.
+Check: `always` - for the unconfigured component (`SynapseComponent::new(None)`, as built at `crates/host-runtime/tests/synapse_bundle.rs:227`) and for every artifact fault, `activate` returns `Ok` with the lane disabled, a bind to the disabled lane is refused with exactly `artifact_invalid` (`crates/host-runtime/tests/synapse_bundle.rs:241`, `tests/synapse_roundtrip.rs:93`), and a context request issued afterwards completes within the campaign's request deadline; the existing test bounds it with the 5 s harness `BUDGET` (`crates/host-runtime/tests/support/synapse.rs:22`, `:265`), and the host itself imposes no dispatch deadline (see [req-a-a-handler-outliving-every-host-deadline-is-reached](#req-a-a-handler-outliving-every-host-deadline-is-reached)), so the bound must come from the campaign. The second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation.
 Fault/timing angle: A host-fatal Synapse fault would take the product down for an optional lane.
 Required faults and enabling state: Each artifact fault class; an unconfigured component.
 Confidence: medium - [evidence](evidence/synapse-degrades-to-disabled-and-keeps-the-context-routable.md). `unconfigured_component_is_disabled_not_fatal`, `one_bit_changes_to_each_artifact_disable_the_lane`, `missing_artifact_disables_the_lane`, `wrong_ort_identity_disables_the_lane`, `corrupt_bundle_degrades_synapse_and_keeps_context_routable` (`crates/host-runtime/tests/synapse_bundle.rs`, `crates/host-runtime/tests/synapse_roundtrip.rs`).
@@ -10087,7 +10097,7 @@ Reachability: test-only - every inference in a composed `SynapseComponent` loads
 Status: active
 Exercised: partial - `source_replacement_cannot_change_verified_loader_bytes` asserts the seals, rejected writes, replacement resistance, and the digest on the memfd path; the full load into ONNX Runtime is exercised only where the runtime library is present.
 Guarantee: The ONNX Runtime library is loaded from a sealed memfd named `host-onnxruntime` whose bytes were certified with the bundle, so a library swapped on disk after certification cannot reach inference.
-Check: `always` - the loaded image's digest equals the certified digest, and the memfd carries the shrink, grow, write, and seal seals (`F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL`, as applied at `crates/host-runtime/src/synapse/inference.rs:152-159`), so the image can neither be modified, grown, truncated, nor unsealed after certification; both are invariants over every load, so one `always` covers the conjunction.
+Check: `always` - the loaded image's digest equals the certified digest, and the memfd carries the shrink, grow, write, and seal seals (`F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL`, as applied at `crates/host-runtime/src/synapse/inference.rs:152-159`), so the image can neither be modified, grown, truncated, nor unsealed after certification; and the ONNX Runtime object actually mapped into the process is that memfd, asserted by matching the `host-onnxruntime` memfd entry in `/proc/self/maps` against the loaded library's mapping, so a loader that seals one image and initialises from a filesystem path fails the check; all three are invariants over every load, so one `always` covers the conjunction.
 Fault/timing angle: A library swapped between certification and load changes every embedding.
 Required faults and enabling state: A modified library on disk after certification; a memfd without seals.
 Confidence: medium - [evidence](evidence/synapse-inference-runs-through-a-sealed-runtime-image.md). `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`) observes the seals and the digest.
