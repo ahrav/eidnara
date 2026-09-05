@@ -1,8 +1,23 @@
 # at-most-one-registered-generation-per-connection
 
-Verified at `1c193ae0`. The catalog cites `d90e7811`; HEAD moved to the merge
-commit `1c193ae0` and `git diff d90e7811 HEAD` is empty for `connection.rs`,
-`dispatch.rs`, `runtime.rs`, and `tests/lifecycle.rs`.
+## Current mechanism
+
+The mandatory-ring refactor removed candidate promotion: `run_connection` now
+creates one generation at `connection.rs:175` and serves it at `:192`, and the
+sole registration block is `connection.rs:252-260` (lock at `:254`, draining
+refusal at `:256`, `discard_unregistered_generation` at `:257`, insert at
+`:260`). With one generation per socket the exclusion half of this record is
+structural, and the live obligation is the refusal-with-no-Goodbye window at
+`:256-258`, which the construction below targets.
+
+## Pre-refactor analysis (historical)
+
+Everything from here to "What a test must construct" was written against the
+two-generation bootstrap-to-promoted layout and its line numbers
+(`connection.rs:276-289`, `:345`, `:198-216`; `tests/lifecycle.rs:1722`). It is
+kept as provenance for how the record was discovered; none of its scheduling
+points or promotion-named markers exists in the current tree, and a campaign
+must not instrument them.
 
 ## Discovery trigger
 

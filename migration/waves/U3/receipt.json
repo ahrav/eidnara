@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "6aad52d74ddf3cc4df0fd07c3c883b9cb09623382cb33ae379f2cc19d0e2dfd0",
+      "destination_sha256": "2a4de610dd3cdd363f0f57d3df3b38b315a859b0c65ecf3008b9bb10cc062160",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "d01d0b049d7822ad7a54f2d006d70a662c71c469377e1ea3bf9c020b89f652ee",
+      "destination_sha256": "631fb5cdc96254c5dde88e256d27fdf84e37fe9e58090ddf37667931e09fe480",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3302,7 +3302,7 @@
         "blob_sha": "52faadd08f0bdf1743e868d9149206e3ad2f4dee"
       },
       "destination": "docs/properties/host-runtime/evidence/at-most-one-registered-generation-per-connection.md",
-      "destination_sha256": "c9918973b9296061eddfa73fe2abd4a1bd409a38dc9a6a6086a61cc62ebcc84c",
+      "destination_sha256": "fb0b45d99b158af9ba81d3e77d45567cd8e6d14cfe06ae89a0ac35c9bf6ae285",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3627,7 +3627,7 @@
         "blob_sha": "d5c73a5c61d32320e942b01adb1dd125c0fb3969"
       },
       "destination": "docs/properties/host-runtime/evidence/ping-and-consumer-correlations-cannot-cross-settle.md",
-      "destination_sha256": "69c67dc0cb27be3180a21eb3903b758e1f965d1c8680923dc7af496d0062cf70",
+      "destination_sha256": "3729c8d388b092d8000cfc15f4a23c5303dbde76f8d0cc04124fd3d603eb651e",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5043,7 +5043,7 @@
         "blob_sha": "e10a67029bd7dafa966a4b3220e4048d25dd9f9a"
       },
       "destination": "docs/properties/host-runtime/ring-datapath/_lenses/lens-a-ring-datapath.md",
-      "destination_sha256": "d7ff87a14467a1ac923f1043e42474721e6cce589ff59f0dbb42a3b09e270b32",
+      "destination_sha256": "d44f22a888d9d3147269ed4bfc01248ce9ab82039936fc3cfdd610d214d7e4fc",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5251,7 +5251,7 @@
         "blob_sha": "59f784b1f8eef6fea97ec28433449774cc9ac26c"
       },
       "destination": "docs/properties/host-runtime/request-path/_lenses/lens-b-claims-and-checks.md",
-      "destination_sha256": "1fe2bd2d2eb7c4cb2352fe81ace8a8e9b5be9b48fe17bae75d1ea3342b524a61",
+      "destination_sha256": "64a3cd6e8921be09b51820d68551dcbafb0f601cf9f1f01f3e016283cc3b75e7",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5316,7 +5316,7 @@
         "blob_sha": "6ed358df24841f76ec52e17202fa3a8f0784e702"
       },
       "destination": "docs/properties/host-runtime/runtime-config/_lenses/lens-b-claims-and-checks.md",
-      "destination_sha256": "d9c3734db9ed2c2e12dd3d06df3da1782cc8ae287a597e7af4d677ae06499854",
+      "destination_sha256": "19a78e9958b2fc702e4d18959e516f93226da8949b7212dcec28e5ca702aa4e3",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {

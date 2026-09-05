@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "6aad52d74ddf3cc4df0fd07c3c883b9cb09623382cb33ae379f2cc19d0e2dfd0",
+  "source_sha256": "2a4de610dd3cdd363f0f57d3df3b38b315a859b0c65ecf3008b9bb10cc062160",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -363,7 +363,7 @@
       "status": "active",
       "exercised": {
         "state": "not-yet",
-        "note": "not yet for the forced path."
+        "note": "no test parks a writer on a stalled peer and runs the forced shutdown path; the existing frame-channel stalled-writer coverage does not reach `abort_all`."
       },
       "guarantee": "Forced shutdown terminates every connection writer task.",
       "check": {
@@ -2737,7 +2737,7 @@
       "required_faults": "Bounded fault-free window, per METHOD's liveness rule. Stall `ring_reader_loop` so the 256-slot inbound channel (`:1850`) fills, enqueue a Pong, release the stall, then poll until the write completes within an explicit bound of one frame deadline.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget.md). Verified the bridge is the single completion producer, that `writer_loop` awaits it before dequeuing the next frame, and that `RingClientEndpoint::send`'s own bound is a hardcoded 2 s (`ring_transport.rs:663-667`) that ignores the frame deadline."
+        "evidence": "[evidence](evidence/client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget.md). Verified the bridge is the single completion producer, that `writer_loop` awaits it before dequeuing the next frame, and that `RingClientEndpoint::send` takes the caller's absolute deadline (`ring_transport.rs:687-695`), which `client.rs:1851` passes through unchanged from the queued frame, so there is no independent ring reservation bound; the source catalog's hardcoded 2 s claim described an earlier layout."
       },
       "existing_check": "`data_saturation_never_starves_a_control_frame` (`:3225`) covers queue-slot starvation, which is a different mechanism; status `unaudited`.",
       "impact": "Whether the host retires the generation first depends on its probe interval against 30 seconds. If the probe is shorter, an inbound stall presents to the operator as a liveness failure rather than as backpressure.",
@@ -3224,7 +3224,7 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "`tests/lifecycle.rs:570` (re-located at HEAD) `shutdown_refuses_new_routes_and_new_routed_work` asserts both codes against one draining host, and `lifecycle` is CI-executed on Linux (`ci.yml:168-169`); `ci.yml` has no macOS jobs after PR #131 (merge `5d638e3e8`)"
+        "note": "`tests/lifecycle.rs:582` (re-located at HEAD) `shutdown_refuses_new_routes_and_new_routed_work` asserts both codes against one draining host, and `lifecycle` runs in CI on Linux through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`); `ci.yml` has no macOS jobs after PR #131 (merge `5d638e3e8`)"
       },
       "guarantee": "The shutdown admission fence is one condition evaluated at two call sites, and the two sites answer with different error codes carrying different client retry rules.",
       "check": {
@@ -3237,7 +3237,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes.md). Both call sites read; protocol §10.2's two retry rows compared."
       },
-      "existing_check": "**corrected during disposition from \"none\".** `tests/lifecycle.rs:570-651` `shutdown_refuses_new_routes_and_new_routed_work` asserts this property exactly and in the record's own shape: it holds a drain open with a parked handler (`:584-600`), spawns the shutdown (`:605`), waits for the publication to be unlinked (`:608-615`), then sends a `route.open` and asserts `open_error.error_code() == \"target_unavailable\"` (`:620-632`) and sends a routed request on the still-live route and asserts `request_error.error_code() == \"server_busy\"` (`:634-651`). Both codes, one draining host, one test. Status `unaudited`. **In CI**, unlike every other check this catalog cites: `ci.yml:168-169` runs `--test client --test lifecycle` on Linux. The former macOS run of the same pair was removed by PR #131 (merge `5d638e3e8`), which left `ci.yml` Linux-only.",
+      "existing_check": "**corrected during disposition from \"none\".** `tests/lifecycle.rs:582-663` `shutdown_refuses_new_routes_and_new_routed_work` asserts this property exactly and in the record's own shape: it holds a drain open with a parked handler (`:584-600`), spawns the shutdown (`:605`), waits for the publication to be unlinked (`:608-615`), then sends a `route.open` and asserts `open_error.error_code() == \"target_unavailable\"` (`:620-632`) and sends a routed request on the still-live route and asserts `request_error.error_code() == \"server_busy\"` (`:634-651`). Both codes, one draining host, one test. Status `unaudited`. **In CI**, unlike every other check this catalog cites: `ci.yml:118`, `:126` runs `--test client --test lifecycle` on Linux. The former macOS run of the same pair was removed by PR #131 (merge `5d638e3e8`), which left `ci.yml` Linux-only.",
       "impact": "Protocol §10.2 tells a client to retry `target_unavailable` \"with new correlation under bounded route deadline\" and `server_busy` \"with backoff\". A draining host therefore invites un-backed-off `route.open` retries from exactly the clients it is trying to shed, while backing off their routed traffic. The divergence is not merely unchecked, it is **pinned by a CI-executed test**, so it is current intended behaviour unless someone changes both the code and that test.",
       "open_questions": [
         "Which code does the protocol intend for a `route.open` during shutdown? §12 step 1 names `server_busy` for routed requests and is silent on `route.open`; §8.3 reserves `target_unavailable` for route admission failures such as channel exhaustion, which shutdown is not. (needs human input)"
@@ -3476,10 +3476,10 @@
       "guarantee": "The host's total pre-service budget for one accepted socket is a stated function of the configured deadlines, and the specification's coupling warning accounts for every stage that consumes one.",
       "check": {
         "semantics": "always",
-        "condition": "measure wall-clock from `run_connection` entry (`connection.rs:86`) to the return of `activate_server` (`:155-165`) on a peer that stalls maximally at each stage, and assert the total is at most `auth_deadline + 2 * transport_setup_deadline`. `always` because the bound must hold on every accepted socket."
+        "condition": "measure wall-clock from `run_connection` entry (`connection.rs:86`) to the return of `activate_server` (`:155-165`) on a peer that stalls maximally at each stage it controls, plus an injected barrier or slowness seam inside `ring.prepare`, which runs in `spawn_blocking` at `connection.rs:116-125` before any descriptor exchange and cannot be stalled by the peer; without that seam the first `transport_setup_deadline` is never spent and a removed or extended prepare timeout passes unnoticed. Assert the total is at most `auth_deadline + 2 * transport_setup_deadline`. `always` because the bound must hold on every accepted socket."
       },
       "fault_timing": "three serial windows: `auth_deadline` at `:125`, `transport_setup_deadline` at `:158` for `prepare`, and `transport_setup_deadline` again at `:177` for `activate_server`. At defaults that is 6 s against a documented client budget of 2 s.",
-      "required_faults": "a peer that stalls inside authentication, then inside descriptor transfer. 2c's `fault-map.md:52` describes the fixture and notes it does not exist.",
+      "required_faults": "a peer that stalls inside authentication, then inside descriptor transfer, and a deterministic delay seam in `ring.prepare` (the same seam [setup-a-an-abandoned-setup-strands-no-ring-charge](#setup-a-an-abandoned-setup-strands-no-ring-charge) needs for its fourth exit). 2c's `fault-map.md:52` describes the fixture and notes it does not exist.",
       "confidence": {
         "level": "high",
         "evidence": "[evidence](evidence/rt-a-the-serial-setup-budget-triples-the-configured-transport-deadline.md). Verified all three sites and confirmed `HostConfig::validate` performs no cross-field check."
@@ -3793,8 +3793,8 @@
       "reachability_note": "every incarnation materialises both lock files (`crates/host-runtime/src/lifecycle.rs:78-83`, re-verified) and takes `lifetime.lock` through `LifetimeLock::acquire` (`:181`, reached from `InstanceGuard::acquire` at `instance.rs:231` and `runtime.rs:565`). `LifecycleTransactionLock::acquire_exclusive` (`:456`) has only test callers in this tree; the probe takes it shared (`:873`) and the daemon that takes it exclusively is scheduled for U4. The path guarantee therefore reaches production through the lifetime lock and the directory, not through an exclusive transaction lock.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "the lock path literal and the inode identity across a managed-subtree replacement are asserted."
+        "state": "partial",
+        "note": "the transaction lock path literal and the inode identity across a managed-subtree replacement are asserted, but the `lifetime.lock` half of the literal-path check is derived from the crate's own `COORDINATION_DIR_NAME` and `LIFETIME_LOCK_NAME` constants (`tests/lifecycle.rs:1802-1805`), so a change to either constant moves the oracle with it; the evidence names the missing test that spells the lifetime path independently."
       },
       "guarantee": "The lifetime and transaction locks live at `<root>/.eidnara-coordination/{lifetime,transaction}.lock`, outside `<root>/eidnara`, so replacing the managed subtree neither moves nor splits the fence, and independent openers see one inode identity.",
       "check": {

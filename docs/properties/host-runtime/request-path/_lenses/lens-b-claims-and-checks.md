@@ -338,7 +338,7 @@ is 121 claim-bearing checks, and the number CI executes is zero. Whether the
 two jobs that do name binaries are required status checks for merge is
 repository settings and is not verifiable from this tree, carried forward
 unresolved from
-[../../part-2-rescope/scope-map-and-risk-ranking.md:750-752](../../part-2-rescope/scope-map-and-risk-ranking.md).
+`part-2-rescope/scope-map-and-risk-ranking.md:750-752` (a source-tree artifact that was not migrated into this repository).
 
 One inventory note for a later pass: `tests/broca_subprocess.rs` is 3,220 lines
 and a grep for `#[test]` or `#[tokio::test]` returns **zero**, so it is either

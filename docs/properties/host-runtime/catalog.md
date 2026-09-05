@@ -594,7 +594,7 @@ the shipped frame channel (`crates/host-runtime/src/connection.rs:147-148`) and
 spawns the endpoint task into the host tracker (`:190`); the forced sweep is
 part of the ordinary shutdown path.
 Status: active
-Exercised: not yet for the forced path.
+Exercised: not yet - no test parks a writer on a stalled peer and runs the forced shutdown path; the existing frame-channel stalled-writer coverage does not reach `abort_all`.
 Guarantee: Forced shutdown terminates every connection writer task.
 Check: `always` - park a writer on a stalled peer, run the forced path, and assert the host tracker's wait completes, that the endpoint's own completion signal fires (`done_tx` at `ring_transport.rs:229`, awaited by the tracked proxy at `:284`) and the endpoint thread has exited, and that the ring's permits and charges are released; tracker quiescence alone proves only that tracked handles are gone, which an untracked writer or an aborted proxy also satisfies.
 Fault/timing angle: the writer is spawned with the tracker's own `spawn`, not the
@@ -6504,9 +6504,11 @@ fills, enqueue a Pong, release the stall, then poll until the write completes
 within an explicit bound of one frame deadline.
 Confidence: high - [evidence](evidence/client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget.md).
 Verified the bridge is the single completion producer, that `writer_loop` awaits
-it before dequeuing the next frame, and that `RingClientEndpoint::send`'s own
-bound is a hardcoded 2 s (`ring_transport.rs:663-667`) that ignores the frame
-deadline.
+it before dequeuing the next frame, and that `RingClientEndpoint::send` takes the
+caller's absolute deadline (`ring_transport.rs:687-695`), which `client.rs:1851`
+passes through unchanged from the queued frame, so there is no independent ring
+reservation bound; the source catalog's hardcoded 2 s claim described an earlier
+layout.
 Existing check: `data_saturation_never_starves_a_control_frame` (`:3225`) covers
 queue-slot starvation, which is a different mechanism; status `unaudited`.
 Impact: Whether the host retires the generation first depends on its probe
@@ -7223,7 +7225,7 @@ provenance; they are not coverage gaps here.
 
 **Provenance of the "one CI-executed check" correction.** The source catalog
 recorded that exactly one record in this sub-part was asserted by a CI-named
-binary: `tests/lifecycle.rs:570-651`
+binary: `tests/lifecycle.rs:582-663`
 `shutdown_refuses_new_routes_and_new_routed_work`, which drives a `route.open`
 and a routed request into one draining host and asserts `target_unavailable`
 and `server_busy`, covering
@@ -7981,9 +7983,10 @@ no, which the routed and control chains do differently at every level.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `tests/lifecycle.rs:570` (re-located at HEAD)
+Exercised: yes - `tests/lifecycle.rs:582` (re-located at HEAD)
 `shutdown_refuses_new_routes_and_new_routed_work` asserts both codes against one
-draining host, and `lifecycle` is CI-executed on Linux (`ci.yml:168-169`);
+draining host, and `lifecycle` runs in CI on Linux through
+`cargo test --workspace --all-targets` (`ci.yml:118`, `:126`);
 `ci.yml` has no macOS jobs after PR #131 (merge `5d638e3e8`)
 Guarantee: The shutdown admission fence is one condition evaluated at two call
 sites, and the two sites answer with different error codes carrying different
@@ -8003,7 +8006,7 @@ external shutdown signal, with a client pipelining both a routed request and a
 Confidence: high - [evidence](evidence/req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes.md).
 Both call sites read; protocol §10.2's two retry rows compared.
 Existing check: **corrected during disposition from "none".**
-`tests/lifecycle.rs:570-651` `shutdown_refuses_new_routes_and_new_routed_work`
+`tests/lifecycle.rs:582-663` `shutdown_refuses_new_routes_and_new_routed_work`
 asserts this property exactly and in the record's own shape: it holds a drain open
 with a parked handler (`:584-600`), spawns the shutdown (`:605`), waits for the
 publication to be unlinked (`:608-615`), then sends a `route.open` and asserts
@@ -8011,7 +8014,7 @@ publication to be unlinked (`:608-615`), then sends a `route.open` and asserts
 request on the still-live route and asserts
 `request_error.error_code() == "server_busy"` (`:634-651`). Both codes, one
 draining host, one test. Status `unaudited`. **In CI**, unlike every other check
-this catalog cites: `ci.yml:168-169` runs `--test client --test lifecycle` on
+this catalog cites: `ci.yml:118`, `:126` runs `--test client --test lifecycle` on
 Linux. The former macOS run of the same pair was removed by PR #131 (merge
 `5d638e3e8`), which left `ci.yml` Linux-only.
 Impact: Protocol §10.2 tells a client to retry `target_unavailable` "with new
@@ -9343,7 +9346,11 @@ stated function of the configured deadlines, and the specification's coupling
 warning accounts for every stage that consumes one.
 Check: `always` - measure wall-clock from `run_connection` entry
 (`connection.rs:86`) to the return of `activate_server` (`:155-165`) on a peer that
-stalls maximally at each stage, and assert the total is at most
+stalls maximally at each stage it controls, plus an injected barrier or slowness
+seam inside `ring.prepare`, which runs in `spawn_blocking` at `connection.rs:116-125`
+before any descriptor exchange and cannot be stalled by the peer; without that seam
+the first `transport_setup_deadline` is never spent and a removed or extended
+prepare timeout passes unnoticed. Assert the total is at most
 `auth_deadline + 2 * transport_setup_deadline`. `always` because the bound must
 hold on every accepted socket.
 Fault/timing angle: three serial windows: `auth_deadline` at `:125`,
@@ -9351,7 +9358,9 @@ Fault/timing angle: three serial windows: `auth_deadline` at `:125`,
 `transport_setup_deadline` again at `:177` for `activate_server`. At defaults
 that is 6 s against a documented client budget of 2 s.
 Required faults and enabling state: a peer that stalls inside authentication,
-then inside descriptor transfer. 2c's `fault-map.md:52` describes the fixture and
+then inside descriptor transfer, and a deterministic delay seam in `ring.prepare`
+(the same seam [setup-a-an-abandoned-setup-strands-no-ring-charge](#setup-a-an-abandoned-setup-strands-no-ring-charge)
+needs for its fourth exit). 2c's `fault-map.md:52` describes the fixture and
 notes it does not exist.
 Confidence: high - [evidence](evidence/rt-a-the-serial-setup-budget-triples-the-configured-transport-deadline.md).
 Verified all three sites and confirmed `HostConfig::validate` performs no
@@ -9962,7 +9971,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every incarnation materialises both lock files (`crates/host-runtime/src/lifecycle.rs:78-83`, re-verified) and takes `lifetime.lock` through `LifetimeLock::acquire` (`:181`, reached from `InstanceGuard::acquire` at `instance.rs:231` and `runtime.rs:565`). `LifecycleTransactionLock::acquire_exclusive` (`:456`) has only test callers in this tree; the probe takes it shared (`:873`) and the daemon that takes it exclusively is scheduled for U4. The path guarantee therefore reaches production through the lifetime lock and the directory, not through an exclusive transaction lock.
 Status: active
-Exercised: yes - the lock path literal and the inode identity across a managed-subtree replacement are asserted.
+Exercised: partial - the transaction lock path literal and the inode identity across a managed-subtree replacement are asserted, but the `lifetime.lock` half of the literal-path check is derived from the crate's own `COORDINATION_DIR_NAME` and `LIFETIME_LOCK_NAME` constants (`tests/lifecycle.rs:1802-1805`), so a change to either constant moves the oracle with it; the evidence names the missing test that spells the lifetime path independently.
 Guarantee: The lifetime and transaction locks live at `<root>/.eidnara-coordination/{lifetime,transaction}.lock`, outside `<root>/eidnara`, so replacing the managed subtree neither moves nor splits the fence, and independent openers see one inode identity.
 Check: `always` - both lock files are created under the literal `<root>/.eidnara-coordination/` path on every incarnation, and the `(dev, ino)` of each is identical before and after the managed subtree is renamed away; the named test asserts this for `transaction.lock`, and `successive_incarnations_lock_the_same_coordination_inodes` for both.
 Fault/timing angle: A lock inside the replaceable subtree would let a replaced subtree admit a second incarnation.
