@@ -1,11 +1,11 @@
 # Portfolio evaluation
 
-Provenance: `primitives@89abb40`. This is the source portfolio evaluation for
+Provenance: the shared-crate source repository at `89abb40`. This is the source portfolio evaluation for
 the lease and fence records, carried forward verbatim in substance. The fresh
 evaluation over this wave's `core` subset is in the per-record evidence
 files.
 PostgreSQL statements describe the PostgreSQL backend in the source
-(`primitives@89abb40`), which is not carried.
+(source at `89abb40`), which is not carried.
 
 Fresh-context evaluation ran after the initial 22-record catalog was written. It compared harness fit, coverage balance, implementability, and wildcard framing against source, then was restamped against `fa975843afd4b3122288149968ea5d6ff46322b3`.
 

@@ -55,7 +55,7 @@ No production `assert!`, `debug_assert!`, `panic!`, or equivalent invariant batt
 
 These are outside the target crate but explicitly exercise or consume its contract.
 
-The PostgreSQL backend in the source (`primitives@89abb40`) is not carried. Its rows stay as source provenance: the location is the source repository and commit only; docs cite no paths into the source tree.
+The PostgreSQL backend in the shared-crate source repository at `89abb40` is not carried. Its rows stay as source provenance: the location is the source repository and commit only; docs cite no paths into the source tree.
 
 | Test | Location | Claim | Status |
 |---|---|---|---|
@@ -132,22 +132,22 @@ The PostgreSQL backend in the source (`primitives@89abb40`) is not carried. Its 
 | `store_error_source_preserves_the_underlying_errno` | `crates/storage/src/lib.rs:3069-3094` | `StoreError::source` reaches the `io::Error` and its errno through `Io` and through `Lease(LeaseError::Io)`. | audited (U2) |
 | `dangling_symlink_at_the_database_path_is_refused_without_creating_the_target` | `crates/storage/src/lib.rs:2530-2549` | A dangling symlink at the database path is refused with `ELOOP` and its target is never created. | audited (U2) |
 | `a_read_callback_cannot_checkpoint_the_wal` | `crates/storage/src/lib.rs:2551-2567` | `PRAGMA wal_checkpoint` is denied inside a read callback while a pragma read still succeeds. | audited (U2) |
-| `open_migrate_and_single_writer` | `primitives@89abb40` | Live PostgreSQL covers migration and session exclusion. Requires a live PostgreSQL DSN from the environment; the source CI has a required live job. | unaudited |
-| `read_only_callback_rejects_mutation_without_rows` | `primitives@89abb40` | Read-only mutation reports SQLSTATE `25006` and leaves rows unchanged. | unaudited |
-| `open_verifies_the_stored_epoch_matches_the_issued_one` | `primitives@89abb40` | Open re-reads the committed lease row and requires it to carry the epoch it issued. | unaudited |
-| `a_suppressed_epoch_increment_is_rejected` | `primitives@89abb40` | Issuing an epoch that did not advance past the stored row is rejected. | unaudited |
-| `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` | `primitives@89abb40` | A fenced callback that deletes or lowers its own lease row is rejected and rolled back. | unaudited |
-| `a_callback_that_ends_the_transaction_is_rejected` | `primitives@89abb40` | A fenced callback or migration that sends `COMMIT` is rejected instead of reporting success. | unaudited |
-| `a_read_callback_cannot_escape_read_only_mode` | `primitives@89abb40` | A read callback that sends `COMMIT` or `SET TRANSACTION READ WRITE` is rejected; only the autocommitted write survives. | unaudited |
-| `a_regressed_positive_epoch_fails_closed` | `primitives@89abb40` | A stored epoch below the one stamped at open fails closed for the holder and for a superseded writer above it. | unaudited |
-| `a_negative_epoch_fails_closed` | `primitives@89abb40` | The lease table rejects a negative epoch, and a negative epoch reaching the fence returns `FenceCorrupt`. | unaudited |
-| `unfenced_callback_runs_statements_a_transaction_forbids` | `primitives@89abb40` | `VACUUM` reports SQLSTATE `25001` inside a fenced transaction and succeeds through the autocommit callback. | unaudited |
-| `fenced_callback_error_rolls_back_rows` | `primitives@89abb40` | Callback failure rolls back domain rows. | unaudited |
-| `repeated_fenced_writes_at_current_epoch_succeed` | `primitives@89abb40` | Repeated writes at the current lease epoch succeed. | unaudited |
-| `superseded_writer_is_rejected_after_reopen` | `primitives@89abb40` | Synthetic stale callback is rejected after reopen. | unaudited |
-| `superseded_writer_cannot_migrate` | `primitives@89abb40` | Synthetic stale migration is fenced before its schema SQL executes. | unaudited |
-| `independent_namespace_chains` | `primitives@89abb40` | Independent migrations both apply. | unaudited |
-| `advisory_key_derivation_is_stable` | `primitives@89abb40` | Pins one advisory bigint derived through public `LeaseKey::identity` and `fnv1a`. | unaudited |
+| `open_migrate_and_single_writer` | source at `89abb40` | Live PostgreSQL covers migration and session exclusion. Requires a live PostgreSQL DSN from the environment; the source CI has a required live job. | unaudited |
+| `read_only_callback_rejects_mutation_without_rows` | source at `89abb40` | Read-only mutation reports SQLSTATE `25006` and leaves rows unchanged. | unaudited |
+| `open_verifies_the_stored_epoch_matches_the_issued_one` | source at `89abb40` | Open re-reads the committed lease row and requires it to carry the epoch it issued. | unaudited |
+| `a_suppressed_epoch_increment_is_rejected` | source at `89abb40` | Issuing an epoch that did not advance past the stored row is rejected. | unaudited |
+| `a_callback_cannot_damage_the_lease_row_it_is_fenced_against` | source at `89abb40` | A fenced callback that deletes or lowers its own lease row is rejected and rolled back. | unaudited |
+| `a_callback_that_ends_the_transaction_is_rejected` | source at `89abb40` | A fenced callback or migration that sends `COMMIT` is rejected instead of reporting success. | unaudited |
+| `a_read_callback_cannot_escape_read_only_mode` | source at `89abb40` | A read callback that sends `COMMIT` or `SET TRANSACTION READ WRITE` is rejected; only the autocommitted write survives. | unaudited |
+| `a_regressed_positive_epoch_fails_closed` | source at `89abb40` | A stored epoch below the one stamped at open fails closed for the holder and for a superseded writer above it. | unaudited |
+| `a_negative_epoch_fails_closed` | source at `89abb40` | The lease table rejects a negative epoch, and a negative epoch reaching the fence returns `FenceCorrupt`. | unaudited |
+| `unfenced_callback_runs_statements_a_transaction_forbids` | source at `89abb40` | `VACUUM` reports SQLSTATE `25001` inside a fenced transaction and succeeds through the autocommit callback. | unaudited |
+| `fenced_callback_error_rolls_back_rows` | source at `89abb40` | Callback failure rolls back domain rows. | unaudited |
+| `repeated_fenced_writes_at_current_epoch_succeed` | source at `89abb40` | Repeated writes at the current lease epoch succeed. | unaudited |
+| `superseded_writer_is_rejected_after_reopen` | source at `89abb40` | Synthetic stale callback is rejected after reopen. | unaudited |
+| `superseded_writer_cannot_migrate` | source at `89abb40` | Synthetic stale migration is fenced before its schema SQL executes. | unaudited |
+| `independent_namespace_chains` | source at `89abb40` | Independent migrations both apply. | unaudited |
+| `advisory_key_derivation_is_stable` | source at `89abb40` | Pins one advisory bigint derived through public `LeaseKey::identity` and `fnv1a`. | unaudited |
 
 The handover checks use synthetic stores that bypass real lease acquisition. They check fence logic against real database transactions, not an end-to-end retained-connection handover.
 

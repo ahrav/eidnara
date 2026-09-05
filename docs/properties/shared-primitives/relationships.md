@@ -1,9 +1,9 @@
 # Relationship map
 
-Provenance: `primitives@89abb40`, extended at U2 with the records discovered for
+Provenance: the shared-crate source repository at `89abb40`, extended at U2 with the records discovered for
 `cache-stability`, `storage-types`, and the non-lease behavior of `storage`.
 The PostgreSQL backend named below is the one in the source
-(`primitives@89abb40`) and is not carried; its mechanisms stay listed so the
+(source at `89abb40`) and is not carried; its mechanisms stay listed so the
 SQLite-side records keep their context.
 
 ## Shared mechanisms

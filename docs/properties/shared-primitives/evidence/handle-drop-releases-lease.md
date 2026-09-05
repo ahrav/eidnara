@@ -6,7 +6,7 @@
 - **Failure scenario:** the best-effort explicit `File::unlock` call fails and descriptor close also does not release the lock promptly; a successor remains blocked.
 - **Timing window:** last-handle drop while a competitor that has observed `Held` continues retrying.
 - **Instrumentation:** retry-attempt timestamps, explicit last-handle event, and scheduler-fairness assumption.
-- **Open-question log:** in the source (`primitives@89abb40`), the workspace and crate manifests declare MSRV 1.89, the release in which these standard-library file-locking APIs stabilized, while the source CI installs only the moving stable toolchain, so compatibility with the declared MSRV is unverified there. The U2 update below records this workspace's state.
+- **Open-question log:** in the shared-crate source repository at `89abb40`, the workspace and crate manifests declare MSRV 1.89, the release in which these standard-library file-locking APIs stabilized, while the source CI installs only the moving stable toolchain, so compatibility with the declared MSRV is unverified there. The U2 update below records this workspace's state.
 
 ## U2 update
 

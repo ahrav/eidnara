@@ -2,14 +2,14 @@
 
 - **Discovery:** version-compatibility and protocol passes.
 - **Primary evidence:** public `LeaseKey::identity`, `fnv1a`, and `fnv1a_hex` form the compatibility contract; private `FileLeaseStore::lease_path` appends the `.lease` suffix.
-- **Cross-crate evidence:** PostgreSQL imports public `fnv1a` and hashes public `LeaseKey::identity` in `advisory_key` (`primitives@89abb40`).
-- **Existing evidence:** `identity_hash_derivation_is_stable` provides golden identity/hash coverage, and the source's PostgreSQL backend (`primitives@89abb40`) pins the resulting advisory key in `advisory_key_derivation_is_stable`.
+- **Cross-crate evidence:** PostgreSQL imports public `fnv1a` and hashes public `LeaseKey::identity` in `advisory_key` (the shared-crate source repository at `89abb40`).
+- **Existing evidence:** `identity_hash_derivation_is_stable` provides golden identity/hash coverage, and the PostgreSQL backend in the shared-crate source repository at `89abb40` pins the resulting advisory key in `advisory_key_derivation_is_stable`.
 - **Residual gaps:** no automated SemVer gate, mixed-version overlap test, full-filename golden, or adversarial vectors.
 - **Failure scenario:** rolling restart or rollback overlaps binaries using different separators, field order, normalization, hash, or suffix.
 - **Timing window:** from first new-version acquisition until every old process is gone.
 - **Instrumentation:** artifact-version and derived-path observations remain missing.
 - **Residual risk:** one edit to the shared identity or FNV-1a derivation can remap both file and PostgreSQL lock domains.
-- **Open-question log:** mixed-version overlap policy is not documented. The versioning rule is stated in the source README (`primitives@89abb40`); `crates/lease/Cargo.toml:3` records version `0.3.0`, with no path-derivation change since `0.2.0`.
+- **Open-question log:** mixed-version overlap policy is not documented. The versioning rule is stated in the README of the shared-crate source repository at `89abb40`; `crates/lease/Cargo.toml:3` records version `0.3.0`, with no path-derivation change since `0.2.0`.
 
 ## U2 audit
 

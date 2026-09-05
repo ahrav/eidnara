@@ -60,4 +60,4 @@ table-wins.
 
 ## Provenance
 
-Adapted from the lease-store density note at `primitives@89abb409b8c71b03146eedb5bf64cd964f2a92c0`. The measurement and decision are dated 2026-08-14. The layout it describes is the `lease` crate in this workspace; the repack stays parked until the deployment owner re-measures the trigger and the external consumers coordinate the layout change.
+Adapted from the lease-store density note in the shared-crate source repository at `89abb409b8c71b03146eedb5bf64cd964f2a92c0`. The measurement and decision are dated 2026-08-14. The layout it describes is the `lease` crate in this workspace; the repack stays parked until the deployment owner re-measures the trigger and the external consumers coordinate the layout change.
