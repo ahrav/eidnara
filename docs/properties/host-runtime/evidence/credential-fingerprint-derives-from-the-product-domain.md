@@ -119,7 +119,12 @@ prefix, one byte), the longest admitted value, a multibyte value
 and character counting, and two non-UTF-8 values (`0x80`, `0x81`) that a
 lossy conversion maps to the same replacement character. The transcript
 carries the raw OS bytes of the name and value, so the two raw values
-fingerprint apart. It asserts every distinct
+fingerprint apart. `canonical_row_boundaries_separate_adjacent_fields` encodes
+five pairs of rows that hold the same bytes split differently across adjacent
+fields (harness/canonical, canonical/name, name/value, an empty name, an
+empty harness) through the pure documented encoder, which is the only path
+that can reach the empty and unsupported fields `credential_fingerprint`
+refuses. It asserts every distinct
 `(key, harness, canonical provider, variable, value)` row yields a distinct
 fingerprint, that an empty value is refused as `CredentialMissing`, and that
 a value over `CREDENTIAL_VALUE_CAP_BYTES` is refused as

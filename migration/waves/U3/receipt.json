@@ -1234,7 +1234,7 @@
         "blob_sha": "978fbe6f682f1990b6352dd8d7d039a0b636966a"
       },
       "destination": "crates/host-runtime/src/broca/subprocess.rs",
-      "destination_sha256": "f3f8311af3de4ef745f779d4485a39dfde770af15e60eba331a05ebea987adcc",
+      "destination_sha256": "bddd798a30f1094f58cfdd02acf49d61d547c14c2db6747a050bdec6fdaf1c3b",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -1273,7 +1273,7 @@
         "blob_sha": "1939312fa200dbef74d836b3718b501b12dcd135"
       },
       "destination": "crates/host-runtime/src/synapse/bundle.rs",
-      "destination_sha256": "0cace692f9ac1c6117f254c53d1d155578fe88dafedb18e4db60713077fd50e5",
+      "destination_sha256": "2305009aedea20a9ba75a163765d348d34045350bdf5a545b11801c7dcccfe51",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -1455,7 +1455,7 @@
         "blob_sha": "0b0d2a7c5d21ca089157371e854cf7b7490d3b6b"
       },
       "destination": "crates/host-runtime/tests/harness_closure.rs",
-      "destination_sha256": "7c7797437b7b5cdd0872f09099b455152317a235a86d77e0cffaf3532c4ade13",
+      "destination_sha256": "9b48fd53f5812e2fbe809ce98ecae19234f16abfe8ddfd911a3e60c32c796d81",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "f93b0322a78a816914cab392882593e81872d29c5b6f8872c05f79c20cc8696e",
+      "destination_sha256": "b3d85b1fbe2522fdcf36504a94d85461d55a774d19356aa30e8c71bdacb18221",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "941369c24361ed91902f6b32f6627a8d945e35982d494bcb1ee9e5fc22e45b6f",
+      "destination_sha256": "2a324fe0d263c5b98bbd0cf6c4fb021776ed907fda367d529a1d11fabd77cd95",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -4890,7 +4890,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "destination_sha256": "bb8677a1660a42bd0b97ea2d6e1cccbb84ad40bdb082c2c32be553ae0a69596e",
+      "destination_sha256": "793d20e136b4b8513e33ca0de0c7966d55382c4bc7739e9698754f0c59d90c9a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4901,7 +4901,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
-      "destination_sha256": "09110eca57cb1ccbcece9019adcf87dfda204cc52a257716e5d22cf1052f1dcd",
+      "destination_sha256": "5d35e5f70c268b8f5429447e902303e48a63bda90984824a229a29f298bccaf2",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -4912,7 +4912,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "destination_sha256": "ddf61527879c38ad8c6ad57a8fdb405e5bb2dc6889ae1256c57dbc380425523f",
+      "destination_sha256": "f9443f3711f25460a6106a1f3b2462fe610b41cac6ed8c68a02a78dcfbf2d69a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "0b68a82f4cf734ffb1071dcbe1187a3c8d3b88b93f63ed78f072db2c0ced2b57",
+      "destination_sha256": "a3dcc63648ffb783c261ea5bcfdad0c55aea9004b5d3b4cb278a3533ca37a53b",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5644,7 +5644,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "384cea051e179cf3930ac74182ab88aafb091cd8f73c768b8957ac71fada8241",
+      "destination_sha256": "13f577abbf9f66ce972eddc3e0396c4b0d20986215c3b50fe1ec78e7f9b9c067",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

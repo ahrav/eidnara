@@ -116,7 +116,9 @@ the function against its Python mirror:
   (the `#[cfg(test)]` module of `bundle.rs`) changes each artifact `sha256`
   of the test manifest alone (`model_file`, both `external_initializers`, the
   four tokenizer artifacts, `corpus`), each external-initializer `name`
-  alone, and each embedding-space scalar alone
+  alone (one rename to `wëights.bin`, whose byte length differs from its
+  character count, so a character-counted length prefix diverges), and each
+  embedding-space scalar alone
   (`pooling`, `quantization`, each `output` selector form and the numeric
   `output.index` value under an unchanged tag, `max_tokens`, `dims`,
   `table_epoch`), and asserts `canonical_fingerprint` changes and

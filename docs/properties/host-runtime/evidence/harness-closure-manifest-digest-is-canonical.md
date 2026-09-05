@@ -114,7 +114,9 @@ The record's check has three parts, each with a test in
 - `manifest_digest_matches_an_external_canonicalization_of_the_fixture_text`
   reproduces the digest from the fixture's JSON text with a test-local key
   sort, independent of the crate's `Serialize` impl, and counts each node
-  path in the canonical text. The validator requires every node to be
+  path in the canonical text; it also edits the harness to `pï` and asserts
+  the canonical form carries the identifier's UTF-8 bytes rather than a `\u`
+  escape, with the digest following the same edit. The validator requires every node to be
   referenced by a launch root, an extension, or a dependency edge, so no
   in-crate mutation can move a node path alone; the external comparison is
   what catches a canonical form that dropped one.

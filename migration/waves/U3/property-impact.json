@@ -4992,16 +4992,16 @@
       "strategy_decision": "Golden-vector test against a digest produced outside the crate (Python canonical JSON), a key-reordering test over the fixture text, a per-field mutation campaign, and an isolated launch-root test; regenerated once at U3 for the renamed schema id.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md",
-      "evidence_digest": "bb8677a1660a42bd0b97ea2d6e1cccbb84ad40bdb082c2c32be553ae0a69596e",
+      "evidence_digest": "793d20e136b4b8513e33ca0de0c7966d55382c4bc7739e9698754f0c59d90c9a",
       "check_pointer": "crates/host-runtime/tests/harness_closure.rs#canonical_manifest_digest_is_pinned",
-      "check_hash": "7c7797437b7b5cdd0872f09099b455152317a235a86d77e0cffaf3532c4ade13",
-      "code_hash": "c906084aad9e52b5fd480b7d0f2c3454af3bf0731424fa302eda42d76d7dc92b",
+      "check_hash": "9b48fd53f5812e2fbe809ce98ecae19234f16abfe8ddfd911a3e60c32c796d81",
+      "code_hash": "48d0e25688d555cddf69b71e5447e8a2670e85f6cf91b1ba07bf3b564e1ffdfe",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "bb8677a1660a42bd0b97ea2d6e1cccbb84ad40bdb082c2c32be553ae0a69596e",
+        "digest": "793d20e136b4b8513e33ca0de0c7966d55382c4bc7739e9698754f0c59d90c9a",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/harness-closure-manifest-digest-is-canonical.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5022,16 +5022,16 @@
       "strategy_decision": "Golden-vector unit test against a digest produced outside the crate (Python HMAC derivation) plus a campaign comparing generated rows with an in-test implementation of the documented derivation; regenerated once at U3 for the renamed domain; mirrors the check in the harness = false integration binary, which the checker cannot anchor into.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md",
-      "evidence_digest": "09110eca57cb1ccbcece9019adcf87dfda204cc52a257716e5d22cf1052f1dcd",
+      "evidence_digest": "5d35e5f70c268b8f5429447e902303e48a63bda90984824a229a29f298bccaf2",
       "check_pointer": "crates/host-runtime/src/broca/subprocess.rs#credential_fingerprint_matches_the_committed_vector",
-      "check_hash": "f3f8311af3de4ef745f779d4485a39dfde770af15e60eba331a05ebea987adcc",
-      "code_hash": "3adc385c89fed40ddc16c23563e0a0dfe257db329f27421d0e3f82b512b911fb",
+      "check_hash": "bddd798a30f1094f58cfdd02acf49d61d547c14c2db6747a050bdec6fdaf1c3b",
+      "code_hash": "0605ec223d732bf3efb063a7e3d649d233555dc4e5dc60939fcd9c018fb57ea6",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "09110eca57cb1ccbcece9019adcf87dfda204cc52a257716e5d22cf1052f1dcd",
+        "digest": "5d35e5f70c268b8f5429447e902303e48a63bda90984824a229a29f298bccaf2",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/credential-fingerprint-derives-from-the-product-domain.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
@@ -5053,16 +5053,16 @@
       "strategy_decision": "Fixture recomputation with an independent implementation (the generator's Python fingerprint), the committed fingerprint pinned as a literal, a structural test that changes each artifact hash and each embedding-space scalar alone and asserts the fingerprint moves, plus one-bit artifact perturbation tests; fixture fingerprint regenerated once at U3 for the renamed pre-image line.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md",
-      "evidence_digest": "ddf61527879c38ad8c6ad57a8fdb405e5bb2dc6889ae1256c57dbc380425523f",
+      "evidence_digest": "f9443f3711f25460a6106a1f3b2462fe610b41cac6ed8c68a02a78dcfbf2d69a",
       "check_pointer": "crates/host-runtime/tests/synapse_bundle.rs#the_committed_fixture_carries_its_canonical_fingerprint",
       "check_hash": "2bd1119b04d575d60614e2e51fd6ca2e8b256dc8f5a27d17fb8e47cb428f9e88",
-      "code_hash": "12e0efb343aa20f431719ccc9cb58204b809cbebd6b14aac80682d14027e9817",
+      "code_hash": "14d6093ec82e2396a0012000a9afc14d894d6af9e3372445cc89b1130457e52c",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "ddf61527879c38ad8c6ad57a8fdb405e5bb2dc6889ae1256c57dbc380425523f",
+        "digest": "f9443f3711f25460a6106a1f3b2462fe610b41cac6ed8c68a02a78dcfbf2d69a",
         "description": "U3 evidence record docs/properties/host-runtime/evidence/synapse-bundle-fingerprint-covers-every-artifact.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },
