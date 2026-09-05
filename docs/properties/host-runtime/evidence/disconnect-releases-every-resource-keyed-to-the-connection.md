@@ -98,16 +98,20 @@ record's uncancelled root are two consequences of one return.
 
 ## What a test must construct
 
-A committed shutdown landing between the candidate's commit completion and the
-promoted generation's registration (fault class H1). Concretely: the `FakeProvider`
-harness from `tests/lifecycle.rs:1722`, driven through a *successful* activate and
-commit; a scheduling point after `connection.rs:1186` stores the receiver and
-before `:285` reads `draining`; `host.shutdown` committed while the task is held
-there; then release. The oracle must be per-resource, and asserted directly rather
+A committed shutdown landing between setup completion and the generation's
+registration (fault class H1). The promotion harness this evidence once named
+(`FakeProvider`, `transport_negotiation.rs`) is gone with the mandatory-ring
+refactor; `run_connection` now creates one generation at `connection.rs:175` and
+the live window is the drain check at `:256-260`. Concretely: a scheduling point
+after `new_generation` returns (`:175`) and before `serve_generation` takes the
+`connections` lock at `:254`; `host.shutdown` committed while the task is held
+there; then release, so `:256` refuses registration and returns at `:258`. The oracle must be per-resource, and asserted directly rather
 than through a shutdown that completes:
 
-- `handoff.root.is_cancelled()` after the connection task ends - this is the
-  assertion that fails today.
+- `generation.token.is_cancelled()` after the connection task ends, with the
+  generation being the single one `:175` created - this is the assertion that
+  fails today, because `discard_unregistered_generation` at `:257` is the only
+  cleanup that exit performs.
 - A provider-side witness that does not depend on the root: for the fake provider,
   a flag set in its release path, asserted set.
 - Both permits returned: assert `handshake_permits` and `connection_permits`

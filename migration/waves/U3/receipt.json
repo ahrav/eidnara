@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "1da8f94d6064479efdb153b04804081d3e325e5c77ef6d42f8513d737911b91c",
+      "destination_sha256": "768a34f2dbf9181b4bcc9c3a55a3e9de9fc43ced1cceb51f1f483208861d00a2",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "048fc25cafc9c3990843d23f5c15d05cff980f692623684f85de45bd1f5f2582",
+      "destination_sha256": "c45e7b25df0add9688f14c8bf09cb93146c9c2a15b2022c02a97c6e9e6d57d9b",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3172,7 +3172,7 @@
         "blob_sha": "74c0ad67c56228d2346abc9315078dbbb53a8309"
       },
       "destination": "docs/properties/host-runtime/evidence/a-cancelled-emission-releases-every-permit-it-held.md",
-      "destination_sha256": "b34e31cf5a57e332311d46764a4d6ed70f35f9e6ce1dcd987e74df7c3c2f0fe7",
+      "destination_sha256": "f2dbbd1305a8fa7776762758f408dbb0d76a703c55490e8d6c7265c24849b16d",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3380,7 +3380,7 @@
         "blob_sha": "5533b2bc4352c949db334e10a8da32a676211bda"
       },
       "destination": "docs/properties/host-runtime/evidence/disconnect-releases-every-resource-keyed-to-the-connection.md",
-      "destination_sha256": "f0d91ee195c6338acf0898367d7d277125b1610854b717456f1360519f0dae05",
+      "destination_sha256": "b18acb5f6c29648b54e66c2793ddd1c3b5e1694f2723dfde7782dbff237e224e",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3445,7 +3445,7 @@
         "blob_sha": "02b2e48fa6d57df00a297c4f4d2cb3173d09f50b"
       },
       "destination": "docs/properties/host-runtime/evidence/generation-id-strictly-increases-and-is-never-reused.md",
-      "destination_sha256": "0f8c40849f5fea215568f01520f003d112dd2a98fe9880341c184ffe75c82f69",
+      "destination_sha256": "d75958e1c006b795686c337a69cec90cf20867f28badc56c499f6384aff06408",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -3822,7 +3822,7 @@
         "blob_sha": "9b30d31d60c9f8033900ff4c2f0c21ee02faf15a"
       },
       "destination": "docs/properties/host-runtime/evidence/the-largest-lifecycle-proof-runs-in-ci.md",
-      "destination_sha256": "d20f8564e0eac780b75c8caf320350dcd2f96b6e4d88e9a410e7e2a68820ae54",
+      "destination_sha256": "9954ff16494e330a4a4fff484b546084d4b2d2313cc90df2607558f0ccee6337",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {

@@ -1,8 +1,10 @@
 # generation-id-strictly-increases-and-is-never-reused
 
-Verified at `1c193ae0`. The catalog cites `d90e7811`; HEAD has since moved to the
-merge commit `1c193ae0`, and `git diff d90e7811 HEAD` is empty for every file
-cited below, so every line number here is valid for both.
+Re-verified against the current tree: the mint is `connection.rs:219`, the
+initializer is `runtime.rs:788`, and the promotion path this file once described
+no longer exists, so there is one mint site per connection. Line references below
+are updated to the current layout; the investigation log keeps the pre-refactor
+numbers it was written against.
 
 ## Discovery trigger
 
@@ -10,28 +12,26 @@ The generation id is not just a label. It is the ownership key two registries
 arbitrate on: `shared.connections` is keyed by it, and the route registry decides
 whether a close request is legitimate by comparing it. Both treat "same id" as
 "same generation" with no secondary witness, so a repeated id is indistinguishable
-from the original owner. A socket that negotiates a non-TCP transport mints *two*
-ids, which makes the per-socket count non-obvious.
+from the original owner. Every connection mints exactly one id, at `new_generation`.
 
 ## Evidence trail
 
-- `connection.rs:238-258` `new_generation` - the only constructor of
-  `GenerationCore`. `:245` is the whole minting rule:
+- `connection.rs:212-235` `new_generation` - the only constructor of
+  `GenerationCore`. `:219` is the whole minting rule:
   `id: shared.gen_counter.fetch_add(1, Ordering::SeqCst),`. One `fetch_add`, no
   read-then-write, so concurrent accepts cannot collide.
-- `runtime.rs:136` declares `pub gen_counter: AtomicU64`; `runtime.rs:898`
+- `runtime.rs` declares `pub gen_counter: AtomicU64` on `HostShared`; `runtime.rs:788`
   initializes it as `AtomicU64::new(1)`, per `HostShared`, so the counter's
   lifetime is one host incarnation. Repo-wide `grep -rn gen_counter crates/`
   returns exactly these three lines - one declaration, one initializer, one use.
   This confirms the catalog's "exactly two references" claim.
-- `connection.rs:188` and `connection.rs:211` are the two `new_generation` call
-  sites: the bootstrap channel, and the promoted candidate after a committed
-  grant. Both are on one `run_connection` stack, so a granted socket consumes two
-  consecutive ids. **Correction:** the catalog's Group A prose puts the promote
+- `connection.rs:175` is the single `new_generation` call site in
+  `run_connection`; the candidate-promotion second site was removed with the
+  mandatory-ring refactor, so a socket consumes one id. **Correction:** the catalog's Group A prose puts the promote
   and reap block at "~198-235"; the promoted mint is at `:211`, inside `match
   promoted` at `:207-235`, and `let Some(handoff) = handoff else` is at `:198`.
 - `runtime.rs:137` `pub connections: Mutex<HashMap<u64, Arc<GenerationCore>>>` -
-  the id is the map key. Insert is `connection.rs:288`; the only removal is
+  the id is the map key. Insert is `connection.rs:260`; the only removal is
   `dispatch.rs:1386-1390` inside `close_generation`. A duplicate key would make
   the insert an overwrite, silently dropping the earlier `Arc` from the registry
   while its task still runs.
@@ -71,7 +71,7 @@ ids through `:245`:
 `fetch_add(1, SeqCst)` at `:245` is a single atomic, so there is no window in the
 mint itself; the property's exposure is structural rather than temporal. The
 guarantee is scoped to one incarnation because the counter is reinitialized to 1
-at `runtime.rs:898` - id `1` recurs across incarnations by design, which is why
+at `runtime.rs:788` - id `1` recurs across incarnations by design, which is why
 the daemon incarnation is separately fenced (Group E) rather than covered here.
 Uniqueness across an incarnation depends on the `u64` not wrapping, which
 `fetch_add` would do silently; at any plausible accept rate that bound is not
