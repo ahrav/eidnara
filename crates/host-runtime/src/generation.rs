@@ -447,7 +447,7 @@ impl GenerationStore {
             Err(_) => return Err(invalid("current profile failed security checks")),
         };
         let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("current profile stat failed"))?;
-        if !is_secure_regular(&stat) {
+        if !is_secure_regular(&stat) || mode_bits(&stat) & 0o7777 != 0o600 {
             return Err(invalid("current profile failed security checks"));
         }
         // An oversized profile cannot be decoded to learn its schema, so it is quarantined rather
@@ -493,7 +493,8 @@ impl GenerationStore {
         let manifest_fd = open_rel_file(dir, GENERATION_MANIFEST_NAME)
             .ok_or_else(|| invalid("generation manifest is missing"))?;
         let stat = rustix::fs::fstat(&manifest_fd).map_err(|_| invalid("manifest stat failed"))?;
-        if !is_secure_regular(&stat) {
+        // Payload files and directories require exact modes; the manifest is held to the same rule.
+        if !is_secure_regular(&stat) || mode_bits(&stat) & 0o7777 != 0o600 {
             return Err(invalid("generation manifest failed security checks"));
         }
         // Oversized manifests are preserved and never exchange-repaired, matching `is_quarantined_schema`.
@@ -1048,8 +1049,10 @@ fn remove_tree(parent: &OwnedFd, name: &str) -> Result<(), GenerationError> {
 }
 
 fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> Result<(), GenerationError> {
-    crate::store_fs::exchange_dirs(dir, a, b)
-        .map_err(|_| invalid("atomic digest-target exchange failed"))
+    crate::store_fs::exchange_dirs(dir, a, b).map_err(|e| match e {
+        rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => GenerationError::InsufficientStorage,
+        _ => invalid("atomic digest-target exchange failed"),
+    })
 }
 
 /// A lifecycle root is an owned directory whose ancestry cannot be replaced under the process.
@@ -1369,6 +1372,24 @@ mod tests {
         ));
         std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o700))
             .expect("restore root dir mode");
+
+        let manifest_path = gen_dir.join(GENERATION_MANIFEST_NAME);
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o700))
+            .expect("manifest mode");
+        assert!(
+            matches!(
+                store.validate(&digest),
+                Err(GenerationError::NativePayloadInvalid {
+                    detail: "generation manifest failed security checks"
+                })
+            ),
+            "an owner-only manifest mode other than 0600 must not validate"
+        );
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restore manifest mode");
+        store
+            .validate(&digest)
+            .expect("generation validates again with the manifest mode restored");
 
         // Loose mode.
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");

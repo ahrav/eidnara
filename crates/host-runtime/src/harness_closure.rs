@@ -118,6 +118,7 @@ pub struct ClosureCandidate {
 pub struct ValidatedHarnessClosure {
     digest: String,
     manifest: ClosureManifest,
+    root: PathBuf,
     path: PathBuf,
     files_fd: OwnedFd,
 }
@@ -170,7 +171,17 @@ impl ValidatedHarnessClosure {
         verify_node_file(&fd, node)?;
         let closure_path = self.path.join(FILES_NAME).join(node_path);
         let verified = rustix::fs::fstat(&fd).map_err(|_| invalid("closure node stat failed"))?;
-        let by_name = rustix::fs::statat(CWD, &closure_path, AtFlags::SYMLINK_NOFOLLOW)
+        // Re-resolving through the store root one component at a time avoids `ENAMETOOLONG`
+        // on a single joined pathname.
+        let by_name = openat(CWD, &self.root, HARDENED_DIR_FLAGS, Mode::empty())
+            .and_then(|root| {
+                open_rel_nofollow(
+                    &root,
+                    &format!("{}/{FILES_NAME}/{node_path}", self.digest),
+                    false,
+                )
+            })
+            .and_then(|fd| rustix::fs::fstat(&fd))
             .map_err(|_| invalid("closure pathname no longer names the validated node"))?;
         #[allow(clippy::unnecessary_cast)]
         let same_inode = verified.st_dev as u64 == by_name.st_dev as u64
@@ -714,6 +725,7 @@ impl HarnessClosureStore {
         Ok(ValidatedHarnessClosure {
             digest: digest.to_owned(),
             manifest,
+            root: self.root.clone(),
             path: self.root.join(digest),
             files_fd,
         })
