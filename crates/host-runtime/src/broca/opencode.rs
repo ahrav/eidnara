@@ -130,7 +130,7 @@ fn inline_config(request: &BackendRequest) -> String {
 
 async fn run_opencode(
     runtime: OpenCodeRuntime,
-    limits: SubprocessLimits,
+    mut limits: SubprocessLimits,
     env: EnvSnapshot,
     state_root: StateRoot,
     request: BackendRequest,
@@ -190,13 +190,7 @@ async fn run_opencode(
             // The in-flight creation gets a grace period to return its directory for cleanup.
             // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort. commentlint: allow(JUDGE)
             let cleanup = match tokio::time::timeout(limits.termination_grace, &mut create).await {
-                Ok(Ok(dir)) => {
-                    match tokio::time::timeout(limits.termination_grace, dir.cleanup_async()).await
-                    {
-                        Ok(cleanup) => cleanup,
-                        Err(_) => Err(subprocess::cleanup_unproven()),
-                    }
-                }
+                Ok(Ok(dir)) => subprocess::bounded_cleanup(dir, limits.termination_grace).await,
                 Ok(Err(_)) => Ok(()),
                 Err(_) => Err(subprocess::cleanup_unproven()),
             };
@@ -206,6 +200,15 @@ async fn run_opencode(
             );
         }
     };
+    // The subprocess receives only the budget remaining after setup, so setup plus execution stay within one `run_timeout`. commentlint: allow(JUDGE)
+    let remaining = setup_deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return subprocess::merge_cleanup(
+            subprocess::budget_exhausted_failure(Harness::OpenCode),
+            subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+        );
+    }
+    limits.run_timeout = remaining;
 
     let args = vec![
         OsString::from("run"),
@@ -252,14 +255,14 @@ async fn run_opencode(
         Err(err) => {
             return subprocess::merge_cleanup(
                 subprocess::spawn_failure(Harness::OpenCode, &err),
-                dir.cleanup_async().await,
+                subprocess::bounded_cleanup(dir, limits.termination_grace).await,
             );
         }
     };
 
     // `finalize` trusts a transcript only after a clean end and maps every abnormal end to one canonical failure regardless of printed output.
     let parsed = subprocess::parse_clean_transcript(&result, &events, parse_opencode_transcript);
-    let cleanup = dir.cleanup_async().await;
+    let cleanup = subprocess::bounded_cleanup(dir, limits.termination_grace).await;
     subprocess::finalize(Harness::OpenCode, &result, parsed, &limits, cleanup)
 }
 

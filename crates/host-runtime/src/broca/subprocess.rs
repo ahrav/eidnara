@@ -468,19 +468,19 @@ pub async fn run(
         let mut spawn_reply = Some(spawn_reply);
         // The child reports its pid immediately after `fork`, so this wait is bounded by process startup rather than the registry filesystem. commentlint: allow(JUDGE)
         // The timeout bounds pid reporting; the abort flag makes a still-queued job's registrar withhold the exec barrier when it runs. commentlint: allow(JUDGE)
-        let group_gone =
-            match tokio::time::timeout(limits.termination_grace, &mut pid_reported).await {
-                // A reported pid names the group: teardown is proven by the kill plus member disappearance. commentlint: allow(JUDGE)
-                Ok(Ok(pid)) => {
-                    let group = rustix::process::Pid::from_raw(pid);
-                    let signalled = kill_group(group, rustix::process::Signal::KILL).is_ok();
-                    signalled && wait_other_members_gone(group, limits.termination_grace).await
-                }
-                // A closed channel means the child died before completing its pid report, so it never passed the barrier or forked; reaping the settled spawn reply proves the leader gone. commentlint: allow(JUDGE)
-                Ok(Err(_)) => {
-                    let reply = spawn_reply
-                        .take()
-                        .expect("the abort path consumes the reply once");
+        let group_gone = match tokio::time::timeout(limits.termination_grace, &mut pid_reported)
+            .await
+        {
+            // The reported PID identifies the group; killing it and waiting for members covers helpers, and reaping the settled spawn reply proves the leader itself exited — a queued SIGKILL alone does not. commentlint: allow(JUDGE)
+            Ok(Ok(pid)) => {
+                let group = rustix::process::Pid::from_raw(pid);
+                let signalled = kill_group(group, rustix::process::Signal::KILL).is_ok();
+                // The unreaped leader pins the pgid during the member scan, so the reap comes after. commentlint: allow(JUDGE)
+                let members_gone = wait_other_members_gone(group, limits.termination_grace).await;
+                let reply = spawn_reply
+                    .take()
+                    .expect("the abort path consumes the reply once");
+                let leader_reaped =
                     match tokio::time::timeout(limits.termination_grace, reply).await {
                         Ok(Ok(Ok(mut child))) => {
                             tokio::time::timeout(limits.termination_grace, child.wait())
@@ -490,11 +490,28 @@ pub async fn run(
                         // A spawn error means std already reaped the failed child.
                         Ok(Ok(Err(_))) => true,
                         _ => false,
+                    };
+                signalled && members_gone && leader_reaped
+            }
+            // A closed channel means the child died before completing its pid report, so it never passed the barrier or forked; reaping the settled spawn reply proves the leader gone. commentlint: allow(JUDGE)
+            Ok(Err(_)) => {
+                let reply = spawn_reply
+                    .take()
+                    .expect("the abort path consumes the reply once");
+                match tokio::time::timeout(limits.termination_grace, reply).await {
+                    Ok(Ok(Ok(mut child))) => {
+                        tokio::time::timeout(limits.termination_grace, child.wait())
+                            .await
+                            .is_ok_and(|waited| waited.is_ok())
                     }
+                    // A spawn error means std already reaped the failed child.
+                    Ok(Ok(Err(_))) => true,
+                    _ => false,
                 }
-                // Without a pid the child cannot be identified, so teardown stays unproven. commentlint: allow(JUDGE)
-                Err(_) => false,
-            };
+            }
+            // Without a pid the child cannot be identified, so teardown stays unproven. commentlint: allow(JUDGE)
+            Err(_) => false,
+        };
         let mut registrar = registrar;
         // A registrar that settles within the grace yields an exact record verdict; one still
         // stalled has an unknown record fate, so the run conservatively reports the record
@@ -502,12 +519,9 @@ pub async fn run(
         let record_retained =
             match tokio::time::timeout(limits.termination_grace, &mut registrar).await {
                 Ok(joined) => match joined.ok().flatten() {
-                    Some(record) if group_gone => tokio::time::timeout(
-                        limits.termination_grace,
-                        remove_record_off_runtime(record),
-                    )
-                    .await
-                    .unwrap_or(true),
+                    Some(record) if group_gone => {
+                        remove_record_bounded(record, limits.termination_grace).await
+                    }
                     // An unproven teardown intentionally retains the record for a successor sweep, matching the drain-loop paths. commentlint: allow(JUDGE)
                     _ => false,
                 },
@@ -550,7 +564,7 @@ pub async fn run(
         Err(err) => {
             // A record published before an `exec` failure covers an empty group (the child exited without executing harness code), so only the record needs removing. commentlint: allow(JUDGE)
             if let Some(record) = group_record
-                && remove_record_off_runtime(record).await
+                && remove_record_bounded(record, limits.termination_grace).await
             {
                 return Err(io::Error::other(SpawnRecordRetained { kind: err.kind() }));
             }
@@ -596,7 +610,7 @@ pub async fn run(
             .is_ok();
         let mut record_retained = false;
         if group_gone && let Some(record) = group_record.take() {
-            record_retained = remove_record_off_runtime(record).await;
+            record_retained = remove_record_bounded(record, limits.termination_grace).await;
         }
         return Ok(SubprocessResult {
             stdout: Vec::new(),
@@ -768,7 +782,7 @@ pub async fn run(
     let mut record_retained = false;
     let end = if group_gone {
         if let Some(record) = group_record.take() {
-            record_retained = remove_record_off_runtime(record).await;
+            record_retained = remove_record_bounded(record, limits.termination_grace).await;
         }
         end
     } else {
@@ -881,6 +895,24 @@ async fn remove_record_off_runtime(record: group_registry::GroupRecord) -> bool 
     !matches!(off_runtime(move || record.remove()).await, Ok(Ok(())))
 }
 
+/// Bounds record removal so a stalled registry cannot wedge the caller past the grace; expiry counts as retained because the removal was not proven. commentlint: allow(JUDGE)
+async fn remove_record_bounded(record: group_registry::GroupRecord, grace: Duration) -> bool {
+    tokio::time::timeout(grace, remove_record_off_runtime(record))
+        .await
+        .unwrap_or(true)
+}
+
+/// Bounds private-directory cleanup so a stalled filesystem cannot wedge the caller past the grace; expiry reports unproven cleanup rather than claiming the files are gone. commentlint: allow(JUDGE)
+pub(crate) async fn bounded_cleanup(
+    dir: PrivateDir,
+    grace: Duration,
+) -> Result<(), CleanupFailure> {
+    match tokio::time::timeout(grace, dir.cleanup_async()).await {
+        Ok(cleanup) => cleanup,
+        Err(_) => Err(cleanup_unproven()),
+    }
+}
+
 /// Runs a synchronous `/proc` or filesystem step on the blocking pool so it never stalls a runtime worker.
 /// A cancelled or panicked blocking task reads as an unknown answer.
 pub(crate) async fn off_runtime<T: Send + 'static>(
@@ -948,15 +980,30 @@ fn next_member_poll(current: Duration) -> Duration {
 
 /// Callers must keep the leader unreaped so its zombie prevents pgid recycling during the poll.
 /// Return `false` on deadline expiry; scan failures leave teardown unproven and continue polling.
+/// Each scan is raced against the remaining budget: a stalled `/proc` walk or a saturated
+/// blocking pool must not extend the advertised bound, so expiry mid-scan reads as unproven. commentlint: allow(JUDGE)
 async fn wait_other_members_gone(group: Option<rustix::process::Pid>, budget: Duration) -> bool {
     let Some(pid) = group else { return true };
     let pgid = pid.as_raw_nonzero().get();
     let deadline = tokio::time::Instant::now() + budget;
     let mut poll = MEMBER_POLL_MIN;
     loop {
-        let empty = off_runtime(move || group_registry::group_has_other_members(pgid)).await;
-        if matches!(empty, Ok(Ok(false))) {
-            return true;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let empty = tokio::time::timeout(
+            remaining,
+            off_runtime(move || group_registry::group_has_other_members(pgid)),
+        )
+        .await;
+        match empty {
+            Ok(scan) => {
+                if matches!(scan, Ok(Ok(false))) {
+                    return true;
+                }
+            }
+            Err(_) => return false,
         }
         if tokio::time::Instant::now() >= deadline {
             return false;
