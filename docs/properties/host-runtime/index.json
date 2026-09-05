@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "f8d7431055f2b4b2e41c46bcbb0b232175c428ee47bfd27331b6d677aa6a974a",
+  "source_sha256": "d7ea3d1292afffc589586171cc3dfb21f69d7f289ae5b7a261b0a327d8e96f21",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -251,7 +251,7 @@
       "slug": "ping-and-consumer-correlations-cannot-cross-settle",
       "type": "safety",
       "reachability": "explicit-config-only",
-      "reachability_note": "the liveness loop is spawned only when a policy is configured (`crates/host-runtime/src/connection.rs:279`), `HostConfig::default` leaves `liveness: None` (`crates/host-runtime/src/config.rs:294`), and the production binary builds its config from that default without overriding it (`crates/daemon/src/bin/eidnara_host/serve.rs:582-593`).",
+      "reachability_note": "the liveness loop is spawned only when a policy is configured (`crates/host-runtime/src/connection.rs:279`), `HostConfig::default` leaves `liveness: None` (`crates/host-runtime/src/config.rs:236`, re-verified), and no in-tree caller of `run`, in `crates/host-runtime/examples/` or the bench, sets `liveness`; the daemon that will build the production config is scheduled for U4 (`docs/properties/README.md:52`).",
       "status": "active",
       "exercised": {
         "state": "yes",
@@ -277,7 +277,7 @@
       "slug": "pong-preanswer-rejected-in-every-mutex-order",
       "type": "safety",
       "reachability": "explicit-config-only",
-      "reachability_note": "the liveness loop is spawned only when a policy is configured (`crates/host-runtime/src/connection.rs:279`), `HostConfig::default` leaves `liveness: None` (`crates/host-runtime/src/config.rs:294`), and the production binary builds its config from that default without overriding it (`crates/daemon/src/bin/eidnara_host/serve.rs:582-593`).",
+      "reachability_note": "the liveness loop is spawned only when a policy is configured (`crates/host-runtime/src/connection.rs:279`), `HostConfig::default` leaves `liveness: None` (`crates/host-runtime/src/config.rs:236`, re-verified), and no in-tree caller of `run`, in `crates/host-runtime/examples/` or the bench, sets `liveness`; the daemon that will build the production config is scheduled for U4 (`docs/properties/README.md:52`).",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -305,7 +305,7 @@
       "slug": "host-ping-correlation-exhaustion-retires-the-generation",
       "type": "safety",
       "reachability": "explicit-config-only",
-      "reachability_note": "the egress half that carries the gap, the host's ping allocator, runs only under a configured policy (`crates/host-runtime/src/connection.rs:279`), and `HostConfig::default` leaves `liveness: None` (`crates/host-runtime/src/config.rs:294`) which the production binary does not override (`crates/daemon/src/bin/eidnara_host/serve.rs:582-593`). The enforced ingress watermark half is default-production (`crates/host-runtime/src/connection.rs:381`).",
+      "reachability_note": "the egress half that carries the gap, the host's ping allocator, runs only under a configured policy (`crates/host-runtime/src/connection.rs:279`), and `HostConfig::default` leaves `liveness: None` (`crates/host-runtime/src/config.rs:236`, re-verified), which no in-tree caller of `run` overrides; the daemon that will build the production config is scheduled for U4 (`docs/properties/README.md:52`). The enforced ingress watermark half is default-production (`crates/host-runtime/src/connection.rs:381`).",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -493,7 +493,7 @@
       "slug": "no-writer-hook-panic-poisons-a-generation-lock",
       "type": "safety",
       "reachability": "explicit-config-only",
-      "reachability_note": "the liveness loop is spawned only when a policy is configured (`crates/host-runtime/src/connection.rs:279`), `HostConfig::default` leaves `liveness: None` (`crates/host-runtime/src/config.rs:294`), and the production binary builds its config from that default without overriding it (`crates/daemon/src/bin/eidnara_host/serve.rs:582-593`).",
+      "reachability_note": "the liveness loop is spawned only when a policy is configured (`crates/host-runtime/src/connection.rs:279`), `HostConfig::default` leaves `liveness: None` (`crates/host-runtime/src/config.rs:236`, re-verified), and no in-tree caller of `run`, in `crates/host-runtime/examples/` or the bench, sets `liveness`; the daemon that will build the production config is scheduled for U4 (`docs/properties/README.md:52`).",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -657,10 +657,10 @@
         "state": "partial",
         "note": "the success path only."
       },
-      "guarantee": "When an incarnation removes its publication, the on-disk record already reads stopping, so an orderly stop never classifies wedged.",
+      "guarantee": "When an incarnation removes its publication, the on-disk record already reads stopping, so an orderly stop never classifies wedged; if the stopping write fails, the publication is not removed until the failure has been surfaced.",
       "check": {
         "semantics": "always",
-        "condition": "fault-inject the phase write, run each teardown path, and assert either the publication survives until the phase is demoted, or the verdict is not wedged, or the failure is surfaced."
+        "condition": "fault-inject the phase write, run each teardown path, and assert that the publication survives until the phase is demoted, or that the write failure is surfaced (returned or logged) before the removal; a removal after a silently failed demotion fails the check. This is a predicted violation at HEAD: `begin_stopping` (`crates/host-runtime/src/lifecycle.rs:383-386`, re-verified) discards the write result with `let _ =` and removes the publication unconditionally, so a failed demotion is neither ordered nor surfaced."
       },
       "fault_timing": "the ordering inside the demotion function is correct and all five teardown paths route through it. The gap is that the phase write's error is discarded and teardown proceeds regardless. The in-code justification, that a stale phase ages to wedged honestly, covers a *successful* write followed by a hang, not a *failed* write, which produces an immediate wedged for a clean stop.",
       "required_faults": "a storage or permission failure on the runtime directory at teardown, with a publication still present.",
@@ -880,7 +880,7 @@
       "guarantee": "The size above which persisted state is unreadable and therefore quarantined is one value across the lifecycle record and the generation manifest.",
       "check": {
         "semantics": "always",
-        "condition": "the two caps are equal, or the comment claiming they match is removed and each threshold is separately justified."
+        "condition": "the lifecycle-record cap and the generation-manifest cap (`MAX_MANIFEST_BYTES`, `generation.rs:46`, 1 MiB) are the same value. This is a predicted violation at HEAD, where the two thresholds differ (64 KiB against 1 MiB) while the source comment claims they match; accepting distinct caps requires revising or invalidating this guarantee, not passing the check."
       },
       "fault_timing": "forward compatibility. Verified: the evidence cap is 65,536 bytes and the manifest cap is 1,048,576 bytes, sixteen times apart, while the manifest constant is documented as \"matching the lifecycle evidence cap\". A future release writing a 100 KiB record is quarantined by this release; a 100 KiB manifest is not. A maintainer adjusting one cap on the comment's authority moves only one threshold.",
       "required_faults": "none.",
@@ -890,12 +890,14 @@
       },
       "existing_check": "none.",
       "impact": "the two forward-compatibility thresholds that must agree do not, and the code says they do.",
-      "open_questions": [],
+      "open_questions": [
+        "Should the two caps be unified, or should the guarantee be invalidated and each threshold documented on its own? Until decided, the check fails. (needs human input)"
+      ],
       "extra": {}
     },
     {
       "slug": "every-declared-cli-reason-id-has-a-producer",
-      "type": "reachability",
+      "type": "safety",
       "reachability": "test-only",
       "reachability_note": "neither the CLI binary that emits the reason ids (`crates/daemon/src/bin/eidnara-host.rs`) nor the plugin surface that consumes them (`packages/plugin/src/shared/host-lifecycle/paths.ts`) is in this tree; the `packages/` directory holds only `shm-native`. The daemon is scheduled for U4 (`docs/properties/README.md:52`); reclassify in the wave that lands it. The TypeScript producer and mis-mapping findings below are source-repository evidence.",
       "status": "active",
@@ -905,8 +907,8 @@
       },
       "guarantee": "Each reason id the release contract declares is emitted by the layer the remediation implies, and a condition that maps to one id is not reported under another.",
       "check": {
-        "semantics": "reachable",
-        "condition": "for each declared id, at least one site can produce it, and the producing layer matches the remediation's audience."
+        "semantics": "always",
+        "condition": "for every classified failure condition in the Rust layer, the reason id it produces is the one the release contract declares for that condition, and each declared id has at least one producer in the layer the remediation implies. The first clause is a predicted violation at HEAD for the filesystem conditions named below: an atomic exchange unsupported on the volume, a filesystem without the rename flags, and a cross-device rename all map to the payload-invalid result rather than `unsupported_filesystem`. `always` because the mapping must hold for every condition, not once per vocabulary entry."
       },
       "fault_timing": "no timing angle. An earlier revision of this record claimed `unsupported_filesystem` has **no** producer anywhere in the workspace. That is false and is corrected here: it is produced in TypeScript, by the managed-policy path preflight (`packages/plugin/src/shared/host-lifecycle/paths.ts:157`), with its own passing tests. What remains true, and is the real finding, is narrower: the **Rust** conditions that ought to yield it - an atomic exchange unsupported on the volume, a filesystem without the rename flags, a cross-device rename - all map to the payload-invalid error instead, so a user whose filesystem cannot support the operation is told to reinstall the payload. The declared id exists and is reachable; the native classification does not use it.",
       "required_faults": "a data root on a filesystem lacking atomic same-filesystem exchange, with a corrupt unprotected occupant at the digest name so promotion reaches the exchange.",
@@ -1649,7 +1651,7 @@
       "guarantee": "An outbound publication failure is reported to the connection engine with a close cause distinct from a clean peer EOF, so a host-side transport fault is never attributed to the peer.",
       "check": {
         "semantics": "always",
-        "condition": "whenever `publish_one` returns `Err`, the cause delivered on the inbound channel is not `ReadClose::CleanEof`. `always` fits because the close disposition is a total function of the cause (Part 2a, `close-disposition-is-a-total-function-of-the-read-exit-cause`) and a misclassified cause silently selects the wrong teardown every time it occurs."
+        "condition": "whenever `publish_one` returns `Err`, the cause delivered on the inbound channel is not `ReadClose::CleanEof`, and the connection's final disposition or operator-visible classification distinguishes the host-side transport fault from a peer close. The second clause is a predicted violation at HEAD: `read_loop` folds `Err(ReadClose::Corrupt(_))` into the same `ReadExit::Peer` arm as `CleanEof` (`crates/host-runtime/src/connection.rs:362-365`, re-verified), so the intermediate enum distinguishes the cause and the disposition does not. `always` fits because the close disposition is a total function of the cause (Part 2a, `close-disposition-is-a-total-function-of-the-read-exit-cause`) and a misclassified cause silently selects the wrong teardown every time it occurs."
       },
       "fault_timing": "no interleaving is needed; the misreport is the straight-line behaviour. `run_endpoint:479-484` cancels `queue.retired` and `root` and returns without sending on `inbound`. Dropping the sender closes the channel, and `ShmReceiver::recv` maps a closed channel to `Err(ReadClose::CleanEof)` (`:354`), which `connection.rs:401-404` maps to `ReadExit::Peer` - a silent retirement with no terminals and no Goodbye (`connection.rs:309-315`). The one exception is a publish failure raised from inside the charge wait, which does return a distinguishable cause, `ReadClose::Corrupt(\"shared-memory publish failed\")` (`:535-537`). So the same fault classifies two different ways depending on which loop observed it.",
       "required_faults": "an outbound publish failure. Four mechanisms reach it: reservation deadline expiry under a full host-to-peer ring (`reserve_until`, `ring.rs:980`, deadline exits at `:989`, `:1005`, `:1024`, `:1044`), a wire-header/length disagreement rejected by `commit_reservation` (`ring.rs:1577-1593`), a panic in the direct serializer caught at `:584-587`, and `ReservationWriter` exhaustion (`:635-643`). The cheapest to construct is a peer that attaches and then never receives, filling the host-to-peer ring until `reserve_until` hits its deadline.",
@@ -2032,7 +2034,7 @@
       "guarantee": "For every argument tuple the production encoders accept, the emitted bytes decode successfully and pass inbound validation on a conforming peer.",
       "check": {
         "semantics": "always",
-        "condition": "for arbitrary `(ty, flags, id, body)`, either `encode_owned_frame` returns `Err`, or `decode_header` on its output returns `Ok` and the result satisfies the pure-header, Sheddable, channel-and-epoch, and reserved-bit rules. `always` because it must hold on every emission, and the forbidden state - a frame the local decoder would reject - has no detection point on the emitting side."
+        "condition": "for arbitrary `(ty, flags, id, body)`, and for each production encoder, `encode_owned_frame` (`wire.rs:543`, re-verified) and `encode_split_frame` (`:578`) with bodies below, at, and above the split threshold, either the encoder returns `Err`, or `decode_header` on its output returns `Ok` and the result satisfies the pure-header, Sheddable, channel-and-epoch, and reserved-bit rules. `always` because it must hold on every emission, and the forbidden state - a frame the local decoder would reject - has no detection point on the emitting side."
       },
       "fault_timing": "none; this is a static contract gap. Four concrete holes, all re-verified at carry time and all reachable from the crate's public surface (O7): `Flags(0b1100_0000)` sets reserved bits, which [wire.rs:323] rejects; `Flags(0b0000_0110)` sets reserved priority, which [wire.rs:326] rejects; `encode_owned_frame(FrameType::Ping, .., body)` with a nonempty body emits `len != 0` on a pure-header type, since `Ping` is in `is_pure_header`'s set [wire.rs:86-88] and `encode_owned_frame` [wire.rs:571-602] tests only `body.len() > MAX_BODY_LEN` at [:577], which [wire.rs:340] rejects; and `FrameId::routed` [wire.rs:525-531] copies `RouteHandle`'s channel and epoch without checking that a nonzero channel carries a nonzero epoch, which [wire.rs:352] rejects.",
       "required_faults": "none beyond a caller passing an out-of-contract value. For the `FrameId::routed` hole specifically, a `RouteHandle` with a nonzero channel and epoch 0. **The lens left whether the route allocator can mint one open, and it is resolved here: it cannot.** `RouteRegistry::reserve` (`routing.rs:113-156`) skips channel 0 with `if candidate != 0` at `:123`, initializes a fresh slot with `last_epoch: 0` at `:125`, and mints `epoch = slot.last_epoch + 1` at `:129-130`, so the least epoch it can produce is 1 and the least channel is 1. That is pinned by `reserved_channels_are_nonzero_distinct_and_start_at_epoch_one` (`routing.rs:512`), whose asserts at `:522-526` require both channels nonzero and both epochs equal to 1. So the enabling state is a **hand-constructed** `RouteHandle`, which the public fields at `handler.rs:36-40` permit. Hand-building a handle the allocator would never mint is already established practice in-tree, though not with epoch 0: `routing.rs:715-718` builds a stale-epoch handle and `:750-753` builds `epoch: handle.epoch + 1`, both to drive registry rejection paths.",
@@ -2731,7 +2733,7 @@
       "guarantee": "Once inbound delivery backpressures, an enqueued Pong waits on the same bridge thread that is parked delivering inbound frames, and the client tolerates that for the full 30-second frame deadline before reacting.",
       "check": {
         "semantics": "always",
-        "condition": "with the inbound channel full and the bridge parked in `read_tx.blocking_send` (`client.rs:1905`), a control frame enqueued at `:1283` is not written until either the bridge resumes or `timeout_at(frame.deadline, completed_rx)` (`:2031`) expires, where `frame.deadline` is `now + CLIENT_FRAME_TIMEOUT` (`:1281`, 30 s per `:45`). State the bound in the unit the code bounds: one frame deadline, not \"eventually\". `always` because the dependency holds on every control write once the precondition is met."
+        "condition": "with the inbound channel full and the bridge parked in `read_tx.blocking_send` (`client.rs:1905`), a control frame enqueued at `:1283` is not written until the bridge resumes or `timeout_at(frame.deadline, completed_rx)` (`:2031`) expires, where `frame.deadline` is `now + CLIENT_FRAME_TIMEOUT` (`:1281`, 30 s per `:45`); and then exactly one terminal outcome follows: if the bridge resumes before the deadline, the Pong's write completes within that same frame deadline with the generation still live, and if the stall outlasts the deadline, the client retires the generation with `write_failed` (`:2025`, `:2034`). The bound is one frame deadline in the unit the code bounds, not \"eventually\". `always` because the dependency and its terminal outcome hold on every control write once the precondition is met."
       },
       "fault_timing": "The bridge thread is the sole producer of write completions (`:1872`) and the sole consumer of the write channel, so any inbound stall is also an egress stall. This is the client-side mirror of Part 2b's `ring-a-ingress-wait-holds-a-lease-while-servicing-egress`.",
       "required_faults": "Bounded fault-free window, per METHOD's liveness rule. Stall `ring_reader_loop` so the 256-slot inbound channel (`:1850`) fills, enqueue a Pong, release the stall, then poll until the write completes within an explicit bound of one frame deadline.",
@@ -3499,7 +3501,7 @@
         "state": "partial",
         "note": "`tests/lifecycle.rs:714-715` sets both `lifecycle_callback_deadline` and `shutdown_deadline`, so the forced path is reachable; no assertion bounds the total"
       },
-      "guarantee": "`run` returns within a stated function of the configured deadlines, that function is stated per exit rather than as one figure, and it is documented wherever `shutdown_deadline` is described.",
+      "guarantee": "Given handler callbacks that yield to the runtime (cooperatively cancellable), `run` returns within a stated function of the configured deadlines; that function is stated per exit rather than as one figure, and it is documented wherever `shutdown_deadline` is described. A callback that blocks its worker thread without yielding is outside this guarantee, because no `tokio::time::timeout` can preempt it; the bound for that case is external to the host.",
       "check": {
         "semantics": "always",
         "condition": ", per exit, because `shutdown_sequence` has three and they do different amounts of work. From the shutdown token's cancellation to `run`'s return, assert elapsed time is at most: - `shutdown_deadline + lifecycle_callback_deadline` on the graceful exit at `runtime.rs:1069`, where the drain or the tracker wait finished inside `deadline` and `run_handler_shutdown` then ran under its own budget (`:1098`); - `shutdown_deadline + 2 * lifecycle_callback_deadline` on the fatal-latch exit at `:1064`, which is the *only* exit that never calls `run_handler_shutdown` (`:1060-1064` returns before `:1066`); - `shutdown_deadline + 3 * lifecycle_callback_deadline` on the forced exit at `:1067`, which pays the drain (`:1006`, `:1037`), the doubled chain (`:1053`, `:1054`), **and** the handler callback (`:1066`, bounded at `:1098`). Each bound also admits the two `force_close_all_routes` calls at `:1042` and `:1050`, which no `timeout` wraps and which are internally bounded at 30 s (`dispatch.rs:1299`) plus 30 s in `run_route_gone`; an oracle should either measure them separately or state that its bound is the sum plus those. `always` because each bound must hold on every shutdown that takes its exit, and the bounds are in the units the code bounds. **Every bound above is conditional, and the condition is not a detail.** These are `tokio::time::timeout` and `timeout_at` budgets over awaited futures, and a timeout cannot preempt a future that never yields. A handler whose `shutdown()` blocks its worker thread instead of awaiting is not interrupted by `:1098`; the function's own doc comment at `:1082-1084` states that the callback \"is never aborted\" and that an overrun \"trips the fatal latch and returns non-graceful while the still-tracked task keeps running\". The same holds for both `tracker.wait()` calls. So the check is `elapsed <= bound` **given cooperatively cancellable callbacks**, and an oracle must construct a yielding slow callback, not a blocking one, or it will time out rather than fail an assertion. A non-yielding callback defeats every finite ceiling here, which is why the previous single-figure framing was not merely imprecise but the wrong shape."
@@ -3907,7 +3909,7 @@
       "guarantee": "The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.",
       "check": {
         "semantics": "always",
-        "condition": "`canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load."
+        "condition": "`canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load; and for every field the guarantee names (the model hash, each external-initializer hash, each of the four tokenizer artifact hashes, pooling, quantization, output selection, dimension, and the embedding-space scalars), perturbing that field alone in the manifest changes `canonical_fingerprint`, so no verified input is absent from the pre-image. `always` because the pre-image is a pure function of the manifest."
       },
       "fault_timing": "A fingerprint that omitted an artifact would let a swapped artifact change embedding bytes under an unchanged identity.",
       "required_faults": "The committed fixture and its generator's independent fingerprint function.",
@@ -3933,7 +3935,7 @@
       "guarantee": "While a session entry is retained, byte-identical resends of `session.send` converge on one backend run and a differing body for the same key is rejected as a conflict. Retention ends when `TERMINAL_RETENTION` (15 minutes, `crates/host-runtime/src/broca/config.rs:126`) expires or `enforce_terminal_cap` evicts the entry beyond `MAX_TERMINAL_SESSIONS` (256, `:122`); a resend after that legitimately starts a new run.",
       "check": {
         "semantics": "always",
-        "condition": "within the retention of a session entry, `runs_started <= 1` per identical send key and a differing body returns the conflict terminal; the campaign reads `terminal_retention` and the cap from the supervisor limits and stops counting a key once `sweep_for` or `enforce_terminal_cap` (`supervisor.rs:1085`, `:1005`) has removed it."
+        "condition": "within the retention of a session entry, `runs_started <= 1` per identical send key and a differing body returns the conflict terminal; the campaign reads `terminal_retention` and the cap from the supervisor limits and stops counting a key only once `sweep_for` or `enforce_terminal_cap` (`supervisor.rs:1085`, `:1005`) has removed it; and a session entry is present until `terminal_retention` has elapsed since its terminal or the cap has been exceeded, so a removal before either condition holds fails the check rather than ending the count."
       },
       "fault_timing": "Two harness clients retry the same prompt concurrently.",
       "required_faults": "Concurrent identical sends; a differing resend under the same key.",
