@@ -127,9 +127,9 @@ control channel and the test would still pass.
   `from_vars` stripping is defence in depth behind `provider_row`. The
   `Check` line ("exactly the selected provider variable") matches the code.
 - Missing evidence: none for the mechanism.
-- Conclusion: resolved with answer: the child environment is strictly smaller
-  than the record's `Guarantee` sentence implies. The record's wording should
-  be tightened; the code is the stricter side.
+- Conclusion: resolved with answer: the child environment is the provider row
+  plus adapter-owned variables, and the record's `Guarantee` now says exactly
+  that; the code and the record agree.
 
 ### Q: Is there an in-tree production caller that captures the real environment?
 
@@ -142,6 +142,6 @@ control channel and the test would still pass.
   `mod.rs:223-235`.
 - Missing evidence: the daemon wiring that constructs the snapshot from the
   process environment and chooses between `new` and `new_with_credentials`.
-- Conclusion: needs human input. The record is labelled `default-production`;
-  in this checkout the aggregate cap and the verifier are reached only from
-  tests, and the wiring that decides the production path is out of tree.
+- Conclusion: resolved with answer: the record is `test-only`. In this checkout
+  the aggregate cap and the verifier are reached only from tests, and the daemon
+  wiring that would decide the production path is scheduled for U4.

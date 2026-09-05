@@ -2287,10 +2287,10 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - the Linux arm has one test through `promote_temp`
+Exercised: partial - the Linux arm is covered by one test through `promote_temp`
 (`same_digest_corrupt_target_is_repaired_only_by_validated_exchange`,
-`generation.rs:1526`, re-located at HEAD), and the macOS arm has never executed
-under observation; after PR #131 (merge `5d638e3e8`) `ci.yml` has no macOS job,
+`generation.rs:1526`, re-located at HEAD); the macOS arm and the non-Linux
+non-macOS stub have never executed under observation; after PR #131 (merge `5d638e3e8`) `ci.yml` has no macOS job,
 so no CI executor for that arm exists.
 Guarantee: Wherever the digest-target exchange runs, the two names are swapped
 atomically inside one directory, or an error is returned and neither name is
@@ -5168,7 +5168,8 @@ nothing asserts that the host tore the setup down or when.
 Guarantee: A peer that authenticates and then stalls anywhere in the post-grant
 setup exchange has its connection torn down, and its handshake and connection
 permits and ring charge released, refused within one `transport_setup_deadline` of the
-grant send and released by the time the endpoint thread the refusal cancels has exited.
+grant send; the permits and charge are released once the endpoint thread the
+refusal cancels has exited, which the code does not bound in time.
 Check: `always` - evaluated at the close of an explicit bounded window. Drive a
 peer that authenticates and then stalls at each post-grant I/O position in turn:
 before the `Activate` message, mid-length-prefix, after `Activate` (so the host
@@ -5178,14 +5179,18 @@ activity**, which is what makes the window fault-free; then assert two bounds in
 sequence: `activate_server` returns its timeout by `transport_setup_deadline`
 measured from the deadline anchor, and the teardown that follows it, the discard
 and cancel at `connection.rs:166-169` and the ring-charge release the endpoint
-thread performs at `ring_transport.rs:273-274`, completes by the endpoint thread's exit, observed by awaiting the
-endpoint's completion signal (`done_rx`, awaited by the tracked io task at
-`ring_transport.rs:284`) rather than a wall-clock duration, since no
-`lifecycle_callback_deadline` or join timeout wraps the endpoint task and a
-duration bound would fail on scheduling alone; the release is unconditional once
-the thread exits (`admission.release()`, `:273-274`). The refusal cannot precede
-the deadline it waits for, so requiring release at that same instant would fail a
-compliant path. The bound is stated
+thread performs at `ring_transport.rs:273-274`, is asserted as a separate safety clause at task quiescence, not as part of
+this liveness bound: after the endpoint's completion signal (`done_rx`, awaited
+by the tracked io task at `ring_transport.rs:284`) has resolved, the handshake
+and connection permits and the ring charge are back at baseline
+(`admission.release()` is unconditional on exit, `:273-274`). No
+`lifecycle_callback_deadline` or join timeout wraps the endpoint task, so the
+code enforces no wall-clock bound on that exit and this record claims none; a
+campaign that awaits `done_rx` without its own cap can hang rather than refute,
+so the harness applies a fixed campaign timeout to that await and reports a hit as
+"cleanup not observed", which is inconclusive for the liveness clause and a
+failure only for the release clause if resources are still held when the endpoint
+has in fact exited. The bound is stated
 in the unit the code bounds, a **single absolute deadline**:
 `activate_server` computes `deadline = Instant::now() + timeout` **once**
 (`setup_socket.rs:244-246`) and threads that same `Instant` through every
@@ -9130,7 +9135,7 @@ joint postcondition at the construction site is unasserted
 Guarantee: If `run` reaches `HostShared` construction, every permit count and
 byte quantity it computes is non-negative, within `Semaphore::MAX_PERMITS`, and
 leaves at least one maximum request body of ingress headroom.
-Check: `always` - at `HostShared` construction (`runtime.rs:748`, re-verified; the source catalog cited `:882`; the `Semaphore::new` calls span `:771-780`, and `connection_permits` at `:780` from `max_connections` is in the enumeration alongside the five counts derived from reservations), assert `max_pending_requests > reservations.pending`, `max_handler_tasks > reservations.tasks`, `general_task_holds < max_handler_tasks - reservations.tasks`, `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog_resident + retained_bytes`, and, for every count passed to `Semaphore::new` at `:771-779` (pending, task, reserved pending, reserved task, handshake), that the count is at most `Semaphore::MAX_PERMITS`, and for every quantity passed to `ByteBudget::new` at `:762-770` that it is within the budget type's range. `always` rather than `always-or-unreached` because this construction is on every successful startup path with no condition, per the map above.
+Check: `always` - at `HostShared` construction (`runtime.rs:748`, re-verified; the source catalog cited `:882`; the `Semaphore::new` calls span `:771-780`, and `connection_permits` at `:780` from `max_connections` is in the enumeration alongside the five counts derived from reservations), assert `max_pending_requests > reservations.pending`, `max_handler_tasks > reservations.tasks`, `general_task_holds < max_handler_tasks - reservations.tasks`, `max_resident_bytes >= MIN_RESIDENT_BYTES + catalog_resident + retained_bytes`, and, for every count passed to `Semaphore::new` at `:771-780` (pending, task, reserved pending, reserved task, handshake, and connection from `max_connections`), that the count is at most `Semaphore::MAX_PERMITS`, and for every quantity passed to `ByteBudget::new` at `:762-770` that it is within the budget type's range. `always` rather than `always-or-unreached` because this construction is on every successful startup path with no condition, per the map above.
 Fault/timing angle: none. Startup is single-threaded here and the inputs are
 fixed by the time the gates run.
 Required faults and enabling state: a handler whose `resource_declarations` sum
@@ -9968,7 +9973,7 @@ Open questions: None.
 Type: safety
 Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `BrocaComponent::new_with_credentials` (`crates/host-runtime/src/broca/mod.rs:82`) installs one; its single caller is `tests/broca_protocol.rs:443`. `BrocaComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
 Status: active
-Exercised: yes - the committed vector is asserted, and an independent HMAC oracle reproduced it.
+Exercised: partial - the committed vector is asserted and an independent HMAC oracle reproduced it, and the zero-key negative, provider selection, caps, and host-level accept/reject are covered; the comparison against an independent implementation over generated admissible rows and field-boundary perturbations that the check requires does not exist, so a mis-encoding of any non-fixture row would pass the current suite.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-broca-credential-v1"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
 Check: `always` - for the documented row, `credential_fingerprint(key, harness, provider) == committed literal`; for every generated `(key, harness, provider name, value)` row in a campaign that `provider_row` admits (a supported harness and provider under the closed `canonical_provider` mapping and a nonempty value; an empty value returns `CredentialMissing` at `subprocess.rs:151-174` before any fingerprint exists), `credential_fingerprint` equals an independent implementation of the documented derivation (`HMAC(derive(key, "eidnara-broca-credential-v1"), canonical_row)` with length-prefixed fields), including admissible rows that differ only by moving one byte across a field boundary, which must yield distinct fingerprints; boundary cases that leave a field empty or name an unsupported harness or provider are asserted against a pure canonical encoder of the documented row, not against `credential_fingerprint`, which rejects them before canonicalization; and the per-value size cap rejects before fingerprinting. `always` because the derivation is a pure function evaluated on every row.
 Fault/timing angle: A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.
@@ -9983,7 +9988,7 @@ Open questions: `CREDENTIAL_ROW_CAP_BYTES` is defined in `subprocess.rs` but not
 Type: safety
 Reachability: test-only - every bundle load through a composed `SynapseComponent` recomputes and compares the fingerprint (`load_bundle` is called only from `crates/host-runtime/src/synapse/mod.rs:1025`), but the component is not on `host_runtime::run`'s default path; an embedder composes it, and in this tree the only compositions are tests and `examples/synapse_host.rs:123`. The daemon that will compose it is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
-Exercised: yes - the committed tiny fixture's fingerprint is recomputed from its manifest; single-bit artifact changes are caught by each artifact's own digest at load.
+Exercised: partial - the committed tiny fixture's fingerprint is recomputed from its manifest, the stale fingerprint and table-epoch cases are covered, and `fingerprint_binds_initializer_names_to_their_hashes` covers the name pairing; the single-bit artifact test is rejected by each artifact's own digest before the fingerprint comparison, and no test perturbs pooling, quantization, output selection, the tokenizer hashes, dimensions, or the other scalars, so dropping one of those from `canonical_fingerprint` would pass the current suite.
 Guarantee: The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.
 Check: `always` - `canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load; and for every field the guarantee names (the model hash, each external-initializer hash and each external-initializer name, since the pre-image binds `name.len():name:sha256` per initializer at `crates/host-runtime/src/synapse/bundle.rs:585-594`, plus the name-to-hash pairing, so swapping two names while keeping every hash also changes the fingerprint; each of the four tokenizer artifact hashes, pooling, quantization, output selection, dimension, and the embedding-space scalars), perturbing that field alone in the manifest changes `canonical_fingerprint`, so no verified input is absent from the pre-image. `always` because the pre-image is a pure function of the manifest.
 Fault/timing angle: A fingerprint that omitted an artifact would let a swapped artifact change embedding bytes under an unchanged identity.
@@ -10054,7 +10059,7 @@ Existing check: The checks named above; unaudited.
 Impact: Credential exfiltration through a harness child.
 Open questions:
 - `EnvSnapshot::from_vars` (`subprocess.rs:122`) is public and skips the aggregate-byte and per-entry-overhead accounting that `capture_from` applies before calling it (`:98`); an embedder that passes a `from_vars` snapshot to `new_with_credentials` retains an unbounded ambient snapshot. The selected provider value is still capped at spawn. Gap: either make `from_vars` private or account in it. (needs human input)
-- The Guarantee says the child receives the admitted snapshot; the code forwards only the provider row plus adapter-owned variables (`subprocess.rs:317` clears the environment). Should the Guarantee be narrowed to match, and `CREDENTIAL_ROW_CAP_BYTES` (`subprocess.rs:51`), which has no reader, be enforced or removed? (needs human input)
+- `CREDENTIAL_ROW_CAP_BYTES` (`subprocess.rs:51`) has no reader: should it be enforced on the selected row or removed? (needs human input)
 
 ### broca-protocol-shapes-are-closed
 
