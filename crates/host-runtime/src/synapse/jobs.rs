@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -64,6 +65,27 @@ pub struct ResultPage {
     pub next_cursor: Option<String>,
     /// The boundary `next_cursor` names. The caller passes it to [`JobTable::mark_cursor_issued`] once the response carrying the cursor exists, so a poll whose response fails does not make that boundary acceptable.
     pub next_boundary: Option<usize>,
+    /// Keeps the job's result bytes counted as live while this page holds its vectors, so an eviction during response construction cannot free capacity the vectors still occupy.
+    pub lease: Arc<ResultLease>,
+}
+
+/// One completed job's result bytes, counted in the table's live total for as long as any holder (the job or a served page) keeps the vectors alive.
+pub struct ResultLease {
+    bytes: u64,
+    live: Arc<AtomicU64>,
+}
+
+impl ResultLease {
+    fn new(bytes: u64, live: Arc<AtomicU64>) -> Self {
+        live.fetch_add(bytes, Ordering::Relaxed);
+        Self { bytes, live }
+    }
+}
+
+impl Drop for ResultLease {
+    fn drop(&mut self) {
+        self.live.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
 }
 
 enum JobState {
@@ -74,6 +96,8 @@ enum JobState {
     Ready {
         vectors: Vec<Arc<[f32]>>,
         boundaries: Vec<usize>,
+        /// Dropped with the job on eviction; pages served from the job hold clones, so the live total falls only when the last holder goes.
+        lease: Arc<ResultLease>,
         /// Highest page boundary whose `next_cursor` reached a built response.
         /// Cursors are issued in page order, so every issued boundary is at most this value; a boundary above it is never-issued and must be rejected even though it is a legal page start.
         issued_through: usize,
@@ -169,6 +193,8 @@ pub struct JobTable {
     limits: SynapseLimits,
     incarnation: String,
     inner: std::sync::Mutex<Jobs>,
+    /// Result bytes still alive anywhere: retained by a job or held by a page being served. `Jobs::retained_result_bytes` counts only retained jobs and drives eviction; this total is what admission measures against the cap.
+    live_result_bytes: Arc<AtomicU64>,
 }
 
 /// The serialized JSON string contains `s`'s escaped form, excluding its delimiting quotes.
@@ -302,6 +328,7 @@ impl JobTable {
         Self {
             limits,
             incarnation: nonce.iter().map(|b| format!("{b:02x}")).collect(),
+            live_result_bytes: Arc::new(AtomicU64::new(0)),
             inner: std::sync::Mutex::new(Jobs {
                 by_key: HashMap::new(),
                 by_seq: HashMap::new(),
@@ -501,6 +528,10 @@ impl JobTable {
         job.state = JobState::Ready {
             vectors,
             boundaries,
+            lease: Arc::new(ResultLease::new(
+                result_bytes,
+                Arc::clone(&self.live_result_bytes),
+            )),
             issued_through: 0,
         };
         job.result_bytes = result_bytes;
@@ -573,6 +604,7 @@ impl JobTable {
             JobState::Ready {
                 vectors,
                 boundaries,
+                lease,
                 issued_through,
             } => {
                 let offset = match cursor {
@@ -604,6 +636,7 @@ impl JobTable {
                     done,
                     next_cursor,
                     next_boundary: (!done).then_some(next_boundary),
+                    lease: Arc::clone(lease),
                 })
             }
         }
@@ -747,27 +780,36 @@ impl JobTable {
         }
     }
 
-    /// Evicts completed jobs, oldest by [`Job::retention_rank`] first, until `result_bytes` fits beside the retained results and every queued or running job's reservation.
-    /// Returns `false` when nothing evictable remains and the in-flight reservations alone leave no room; the caller reports that as admission being full.
+    /// Evicts completed jobs, oldest by [`Job::retention_rank`] first, until `result_bytes` fits beside every live result and every queued or running job's reservation.
+    /// Bytes that eviction cannot free are checked first: in-flight reservations, the new result, and vectors of already-evicted jobs that a served page still holds. When those alone exceed the cap, nothing is evicted and the caller reports admission as full.
     fn reserve_result_bytes(
         &self,
         jobs: &mut Jobs,
         result_bytes: u64,
         released: &mut Released,
     ) -> bool {
+        let cap = self.limits.max_retained_result_bytes;
+        let in_flight: u64 = jobs
+            .by_seq
+            .values()
+            .filter(|job| !job.is_completed())
+            .map(|job| job.reserved_result_bytes)
+            .fold(0, u64::saturating_add);
+        let floor = in_flight.saturating_add(result_bytes);
+        // Victims move into `released` and drop after the table lock, so their bytes are subtracted here by hand until then.
+        let mut releasing = 0u64;
         loop {
-            let in_flight: u64 = jobs
-                .by_seq
-                .values()
-                .filter(|job| !job.is_completed())
-                .map(|job| job.reserved_result_bytes)
-                .fold(0, u64::saturating_add);
-            let needed = jobs
-                .retained_result_bytes
-                .saturating_add(in_flight)
-                .saturating_add(result_bytes);
-            if needed <= self.limits.max_retained_result_bytes {
+            let live = self
+                .live_result_bytes
+                .load(Ordering::Relaxed)
+                .saturating_sub(releasing);
+            if live.saturating_add(floor) <= cap {
                 return true;
+            }
+            // Live bytes above the retained total belong to evicted jobs whose pages are still being served; eviction cannot lower them.
+            let unevictable = live.saturating_sub(jobs.retained_result_bytes);
+            if unevictable.saturating_add(floor) > cap {
+                return false;
             }
             let victim = jobs
                 .by_seq
@@ -778,7 +820,17 @@ impl JobTable {
             let Some(seq) = victim else {
                 return false;
             };
-            released.job(Self::remove(jobs, seq));
+            let job = Self::remove(jobs, seq);
+            if let Some(Job {
+                state: JobState::Ready { lease, .. },
+                result_bytes,
+                ..
+            }) = &job
+                && Arc::strong_count(lease) == 1
+            {
+                releasing = releasing.saturating_add(*result_bytes);
+            }
+            released.job(job);
         }
     }
 
@@ -1283,6 +1335,92 @@ mod tests {
         jobs.start(second).expect("second job starts");
         jobs.publish_ready(second, vec![vec![0.5; dimensions]]);
         assert_eq!(jobs.lock_jobs().retained_result_bytes, one_result);
+    }
+
+    #[test]
+    fn a_served_page_keeps_its_result_bytes_live_past_eviction() {
+        let dimensions = 2;
+        let one_result =
+            result_bytes(1, dimensions, 1 + CONTENT_SHA256_BYTES).expect("small result size");
+        let limits = SynapseLimits {
+            max_retained_result_bytes: one_result,
+            ..SynapseLimits::default()
+        };
+        let jobs = JobTable::new(limits);
+        let item = |id: &str| vec![charged_item(id, "alpha")];
+
+        let AdmitOutcome::Admitted {
+            job_id: first_id,
+            seq: first,
+        } = jobs.admit_uncharged_for_tests("first".to_owned(), item("a"), dimensions)
+        else {
+            panic!("first job is admitted");
+        };
+        jobs.start(first).expect("first job starts");
+        jobs.publish_ready(first, vec![vec![0.5; dimensions]]);
+        let PollOutcome::Page(page) = jobs.poll(&first_id, "first", None) else {
+            panic!("the result is served");
+        };
+
+        // Eviction removes the job, but the served page still holds its vectors, so the bytes stay live and admission is full.
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("second".to_owned(), item("b"), dimensions),
+            AdmitOutcome::Full
+        ));
+        assert!(matches!(
+            jobs.poll(&first_id, "first", None),
+            PollOutcome::Restarted
+        ));
+        assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), one_result);
+
+        drop(page);
+        assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("second".to_owned(), item("b"), dimensions),
+            AdmitOutcome::Admitted { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unsatisfiable_result_reservation_evicts_nothing() {
+        let dimensions = 2;
+        let two_results =
+            result_bytes(2, dimensions, 2 * (1 + CONTENT_SHA256_BYTES)).expect("two-item size");
+        let limits = SynapseLimits {
+            max_retained_result_bytes: two_results,
+            ..SynapseLimits::default()
+        };
+        let jobs = JobTable::new(limits);
+        let item = |id: &str| vec![charged_item(id, "alpha")];
+
+        // One retained result and one in-flight reservation share the cap.
+        let AdmitOutcome::Admitted {
+            job_id: retained_id,
+            seq: retained,
+        } = jobs.admit_uncharged_for_tests("retained".to_owned(), item("a"), dimensions)
+        else {
+            panic!("retained job is admitted");
+        };
+        jobs.start(retained).expect("retained job starts");
+        jobs.publish_ready(retained, vec![vec![0.5; dimensions]]);
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("running".to_owned(), item("b"), dimensions),
+            AdmitOutcome::Admitted { .. }
+        ));
+
+        // A two-item request cannot fit beside the in-flight reservation even with the cap emptied, so the retained result survives the rejection.
+        let two_items = vec![charged_item("c", "gamma"), charged_item("d", "delta")];
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("large".to_owned(), two_items, dimensions),
+            AdmitOutcome::Full
+        ));
+        assert!(
+            matches!(
+                jobs.poll(&retained_id, "retained", None),
+                PollOutcome::Page(_)
+            ),
+            "a rejection that eviction could not have satisfied leaves retained results alone"
+        );
     }
 
     #[test]

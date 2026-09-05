@@ -161,6 +161,8 @@ pub struct Corpus {
 pub struct VerifiedBundle {
     pub manifest: BundleManifest,
     pub max_text_bytes: usize,
+    /// Rows in the multi-row certification call: at least two whenever the host admits multi-item batches, at most the recommended batch, never above `max_batch_items`.
+    pub certification_rows: usize,
     pub onnx: Vec<u8>,
     pub initializers: Vec<(String, Vec<u8>)>,
     pub tokenizer_file: Vec<u8>,
@@ -275,9 +277,14 @@ pub fn load_bundle(
         )));
     }
 
+    let certification_rows = (manifest.recommended_batch.rows as usize)
+        .max(2)
+        .min(limits.max_batch_items)
+        .max(1);
     Ok(VerifiedBundle {
         manifest,
         max_text_bytes: limits.max_text_bytes,
+        certification_rows,
         onnx,
         initializers,
         tokenizer_file,

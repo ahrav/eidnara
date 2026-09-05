@@ -222,6 +222,7 @@ impl Backend {
         let VerifiedBundle {
             manifest,
             max_text_bytes: _,
+            certification_rows,
             onnx,
             initializers,
             tokenizer_file,
@@ -297,8 +298,7 @@ impl Backend {
             zero_token_inputs_possible,
         };
         backend.structural_probe()?;
-        // `validate_serving_limits` has already bounded the recommended rows by the host's batch cap, so the multi-row certification call never exceeds a batch the lane can serve.
-        backend.certify(&corpus, manifest.recommended_batch.rows as usize)?;
+        backend.certify(&corpus, certification_rows)?;
         Ok(backend)
     }
 
@@ -389,12 +389,20 @@ impl Backend {
     /// certify uses a corpus that detects incorrect output selection, pooling, and truncation.
     /// certify rejects structurally healthy models with semantically incorrect output.
     /// load rejects semantically wrong models before returning a backend that can serve vectors.
-    /// `batch_rows` bounds the multi-row check to the manifest's recommended batch, which serving limits cap at `max_batch_items`; the corpus itself may hold more items than any routed request.
+    /// `batch_rows` is the size of the multi-row check, sized by `load_bundle` from the recommended batch and the host's batch cap; the corpus itself may hold more items than any routed request.
     fn certify(&self, corpus: &Corpus, batch_rows: usize) -> Result<(), InferenceError> {
+        // Componentwise drift alone cannot certify a unit vector: at high dimensions two orthogonal unit vectors can differ by less than the tolerance in every component, so the cosine similarity must also stay within the tolerance of 1.
         let matches = |got: &[f32], item: &CorpusItem| {
-            got.iter()
+            let componentwise = got
+                .iter()
                 .zip(&item.expected)
-                .all(|(g, e)| (g - e).abs() <= corpus.tolerance)
+                .all(|(g, e)| (g - e).abs() <= corpus.tolerance);
+            let cosine: f64 = got
+                .iter()
+                .zip(&item.expected)
+                .map(|(g, e)| f64::from(*g) * f64::from(*e))
+                .sum();
+            componentwise && cosine >= 1.0 - f64::from(corpus.tolerance)
         };
         for item in &corpus.items {
             let got = self.embed(&[item.text.as_str()])?;
@@ -404,12 +412,17 @@ impl Backend {
                 ));
             }
         }
-        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so a representative multi-row call is certified too, with every row attributed to its item.
-        let batch = &corpus.items[..corpus.items.len().min(batch_rows.max(1))];
+        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so a multi-row call is certified too, with every row attributed to its item. Rows cycle through the corpus so a one-item corpus still yields a real multi-row batch.
+        let batch: Vec<&CorpusItem> = (0..batch_rows.max(1))
+            .map(|row| &corpus.items[row % corpus.items.len()])
+            .collect();
         let texts: Vec<&str> = batch.iter().map(|item| item.text.as_str()).collect();
         let rows = self.embed(&texts)?;
         if rows.len() != batch.len()
-            || !rows.iter().zip(batch).all(|(row, item)| matches(row, item))
+            || !rows
+                .iter()
+                .zip(&batch)
+                .all(|(row, item)| matches(row, item))
         {
             return Err(InferenceError::Artifact(
                 "multi-row semantic certification failed".to_owned(),
