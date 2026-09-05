@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shm-transport",
   "source": "catalog.md",
-  "source_sha256": "d9497819c22c1b763900caa36d7b33a0827914ab946e3c17a9fc55540082a0cf",
+  "source_sha256": "3ee786e2787eaebbfd399a5e8934de28784e3fc857cf74af0ce3fdb5ae808d08",
   "records": [
     {
       "slug": "quarantine-authority-survives-peer-writes",
@@ -67,8 +67,8 @@
       "reachability_note": "every attach of transferred descriptors goes through `Ring::attach` (`crates/shm-transport/src/backend/ring.rs:969`), on the host (`crates/host-runtime/src/connection.rs:116-117`) and in the shipped addon; the source tree's `ShmFrameChannel` in `packages/plugin` is not in this tree.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "`attach_refuses_a_quarantined_ring` (`ring.rs:3715-3719`) takes an attachment, quarantines the ring, and asserts `attach()` returns `RingError::Quarantined`. The addon-side half (no channel id issued, no grant claim consumed) is not asserted."
+        "state": "partial",
+        "note": "`attach_refuses_a_quarantined_ring` (`ring.rs:3715-3719`) takes an attachment, quarantines the ring, and asserts `attach()` returns `RingError::Quarantined`. The addon-side half (no channel id issued, no grant claim consumed, no partial registry state) is asserted by nothing; a raw-addon test that snapshots `ACTIVE_GRANTS` and the channel table around a rejected attach is the missing case."
       },
       "guarantee": "Attaching to a shared object whose lifecycle page is quarantined fails at attach, before a channel id is issued or a process-wide grant claim is consumed.",
       "check": {
@@ -894,10 +894,10 @@
         "state": "partial",
         "note": "`diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts` (`ring_transport.rs:862-901`) calls the three `record_*` methods directly (`:865-867`) and asserts `state`, `error_class`, three `artifact` keys, one of the `bounds` fields (`arena_bytes`, `:881`), one `accounting` field per side (`:882-883`), and the four counts, so it pins the counter-to-key mapping and part of the shape; it does not assert that no key outside the closed set is present, and no test drives a real activation, peer death, or reclamation through `connection.rs` and reads the count back."
       },
-      "guarantee": "The status report is a closed JSON shape: `state`, `error_class`, `artifact` (profile identity), `bounds` (the admitted limits), `accounting` (`active` and `quarantined` charges), and monotonic `activation.completed`, `peer_death.observed`, `reclamation.completed`, and `exhaustion.observed` counts, each of which increments exactly once per corresponding lifecycle event and never decrements.",
+      "guarantee": "The status report is a closed JSON shape: `state`, `error_class`, `artifact` (profile identity), `bounds` (the admitted limits), `accounting` (`active` and `quarantined` charges), and monotonic `activation.completed`, `peer_death.observed`, `reclamation.completed`, and `exhaustion.observed` counts, each of which increments exactly once per corresponding lifecycle event and never decrements. `error_class` is `null` while `state` is `healthy` and otherwise one of the five documented class names (`missing_addon`, `identity_mismatch`, `setup_failure`, `peer_death`, `resource_exhaustion`; `docs/shm-transport.md:57-61`); at HEAD the only value the host emits is `setup_failure`, paired with `state: terminal` when accounting is unavailable (`ring_transport.rs:171-175`).",
       "check": {
         "semantics": "always",
-        "condition": "drive one activation, one observed peer death, and one reclamation through the connection path (`connection.rs:172`, `:185`, `:193`) rather than by calling `record_*`, then read the report: `1` under each of those keys and `0` under `exhaustion.observed`; `bounds` equal to the admitted limits; the key set equal to the closed set and nothing else; and every count non-decreasing across successive reports on the same transport. Calling `record_*` directly, as the existing test does, cannot witness the \"exactly once per lifecycle event\" half of the guarantee."
+        "condition": "drive one activation, one observed peer death, and one reclamation through the connection path (`connection.rs:172`, `:185`, `:193`) rather than by calling `record_*`, then read the report: `1` under each of those keys and `0` under `exhaustion.observed`; `bounds` equal to the admitted limits; the key set equal to the closed set and nothing else; `error_class` either `null` or a member of the five-name vocabulary, and `setup_failure` exactly when `state` is `terminal`; and every count non-decreasing across successive reports on the same transport. Calling `record_*` directly, as the existing test does, cannot witness the \"exactly once per lifecycle event\" half of the guarantee."
       },
       "fault_timing": "the counters are `AtomicU64` with `Relaxed` increments (`:195-221`) read with `Acquire` at report time (`:187-190`), so a report concurrent with an event may lag by one but can never go backwards; the hazard is a lifecycle path that forgets its `record_*` call, which no test detects because the only test increments the counters itself.",
       "required_faults": "a connection that activates, then loses its peer (F1 or F4), then reclaims; a status request after each step.",
@@ -906,7 +906,7 @@
         "evidence": "[evidence](evidence/diagnostics-report-lifecycle-counts-in-a-fixed-shape.md). The report builder, the four increment sites, the `HostStatus` caller, and the test were read directly."
       },
       "existing_check": "the test named above, unaudited; `docs/shm-transport.md:71` documents the same surface.",
-      "impact": "five records in this catalog say \"no counter fires\" for a failure they describe; this report is the one surface where a peer death or a reclamation that did happen is countable, so it is the oracle those records should use, and a missed `record_*` call turns a real event back into silence.",
+      "impact": "five records in this catalog say \"no counter fires\" for a failure they describe; this report is the one surface where a peer death or a reclamation that did happen is countable, so it is the oracle those records should use, and a missed `record_*` call turns a real event back into silence. The class vocabulary is a compatibility contract for whoever renders the report: a renamed or invented class value satisfies the shape check and breaks that consumer, which is why the closed set is part of the guarantee.",
       "open_questions": [
         "Should a host-level test drive the three events through `connection.rs` rather than calling `record_*` directly, so the wiring at `:172`, `:185`, and `:193` is pinned? (needs human input)"
       ],
@@ -941,6 +941,34 @@
       "extra": {}
     },
     {
+      "slug": "packaged-addon-load-verifies-manifest-and-checksum",
+      "type": "safety",
+      "reachability": "default-production",
+      "reachability_note": "a client that installs the platform package loads the addon through `packageAddonPath` (`packages/shm-native/index.ts:153-190`), which `requireAddon` (`:196-201`) reaches whenever no `shm_native.node` sits beside `index.ts`; that is every clean install, and the only path a shipped client takes.",
+      "status": "active",
+      "exercised": {
+        "state": "not-yet",
+        "note": "no test in `packages/shm-native/tests` exercises `packageAddonPath`, and the native CI step (`.github/workflows/ci.yml:148-155`) runs `build:native` first, which places `shm_native.node` beside `index.ts` so `requireAddon` takes the local path and reads no manifest and no checksum. The manifest, checksum, and package-name checks have never executed under observation."
+      },
+      "guarantee": "Loading the addon from the platform package refuses to load a binary whose provenance is not established: a missing package directory or payload is `missing_addon` (`:159`, `:184`); an unreadable or unparsable `payload-manifest.json` is `missing_manifest` (`:170`); a manifest naming another package or target is `wrong_platform_payload` (`:173-177`); a manifest without a 64-hex-digit SHA-256 entry for the payload is `missing_checksum` (`:178-181`); a payload whose SHA-256 differs from the entry is `checksum_mismatch` (`:186-188`); and only then is the path handed to `createRequire`, after which a non-release build is `debug_build` (`:203-205`) and a binary for another target is `wrong_platform_binary` (`:206-208`). Each refusal is a `NativeStartupError` with a closed reason, and none loads code.",
+      "check": {
+        "semantics": "always",
+        "condition": "against a staged platform package directory with no local `shm_native.node` beside `index.ts`, each of the six fault shapes (absent payload, absent or malformed manifest, wrong package or target, absent or malformed checksum entry, altered payload bytes, debug or wrong-target binary) produces exactly its named `NativeStartupError` reason and no addon is loaded; the unaltered package loads and `probeCapabilities` reports available."
+      },
+      "fault_timing": "not a race. The hazard is that the verified path is never the tested path: every in-tree run has a local `shm_native.node`, so a regression in any of the six checks, or in the order that puts the checksum before `createRequire`, passes CI and every catalog gate. The local-path exception itself is trusted by location, as `docs/shm-transport.md:96` says.",
+      "required_faults": "a staged `@eidnara/host-linux-x64-gnu` package directory and the absence of a local `shm_native.node`; then one mutation per fault shape.",
+      "confidence": {
+        "level": "high",
+        "evidence": "[evidence](evidence/packaged-addon-load-verifies-manifest-and-checksum.md). `packageAddonPath`, `requireAddon`, the reason union, the CI step, and the test directory were read directly."
+      },
+      "existing_check": "none. `docs/shm-transport.md:98` states the clean-install gate as a requirement this tree does not implement.",
+      "impact": "a release can ship a missing, mismatched, or tampered payload while every repository and catalog gate passes; the integrity check exists in code and has no witness.",
+      "open_questions": [
+        "Should the clean-install gate be a CI job that installs the platform package into an empty prefix, or a unit test that stages a package directory and redirects `packageAddonPath`? The record accepts either; the doc names the first. (needs human input)"
+      ],
+      "extra": {}
+    },
+    {
       "slug": "decoder-totality-over-arbitrary-bytes",
       "type": "safety",
       "reachability": "default-production",
@@ -948,7 +976,7 @@
       "status": "active",
       "exercised": {
         "state": "not-yet",
-        "note": "the only totality evidence sweeps ten lengths and two fill bytes; no exhaustive-length sweep, no structured mutation of an accepted seed, and no allocation oracle exist."
+        "note": "this tree's only totality evidence is the committed-seed replays in `tests/fuzz_corpus.rs` (`:75`, `:80`, `:85`), one accepted seed per decoder; the source tree's ten-length, two-fill sweep does not exist here, and no exhaustive-length sweep, structured mutation of an accepted seed, or allocation oracle exists."
       },
       "guarantee": "For every byte sequence, each decoder returns either a value satisfying its accept-postcondition or an error; no input panics, drives an unbounded allocation, or yields a partially checked value.",
       "check": {
@@ -1525,8 +1553,8 @@
       "reachability_note": "the addon is the shipped client and its `attach` (`packages/shm-native/src/lib.rs:525`) is the only descriptor validator; `NativeChannel.attach` (`packages/shm-native/index.ts:537-540`) forwards the caller's object unchanged, and the addon is directly requirable without the wrapper.",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "six suites in `packages/shm-native/tests/mechanism.ts` drive the raw addon: non-object and structurally hostile arguments (`:401`), every unsafe numeric representation before narrowing (`:424`), malformed, non-ASCII, and aliased grant text (`:446`), accessor objects and proxies (`:476`), a wrong profile refused before any attachment effect (`:509`), and a well-formed but unresolvable descriptor (`:519`). Each goes through `expectRejectedWithoutEffects` (`:387`), which asserts the error pattern and that `activeChannelCount`, `activeExternalRefCount`, and `nativeLeakDiagnostics` are unchanged afterwards. Every suite returns with zero assertions when `loadRawAddon()` finds no addon or the platform is neither Linux nor Darwin (`:403`, `:426`, and each sibling), so the label depends on a built addon; enabling situation `shm_raw_addon_loaded`."
+        "state": "partial",
+        "note": "six suites in `packages/shm-native/tests/mechanism.ts` drive the raw addon: non-object and structurally hostile arguments (`:401`), every unsafe numeric representation before narrowing (`:424`), malformed, non-ASCII, and aliased grant text (`:446`), accessor objects and proxies (`:476`), a wrong profile refused before any attachment effect (`:509`), and a well-formed but unresolvable descriptor (`:519`). Each goes through `expectRejectedWithoutEffects` (`:387`), which asserts the error pattern and that `activeChannelCount`, `activeExternalRefCount`, and `nativeLeakDiagnostics` are unchanged afterwards. The no-effects half is exact in all six. The message half is not: the helper matches with `toThrow(pattern)` against the unanchored regex `/invalid shared-memory descriptor/` (`:209`), so the four shape suites accept any message that contains that text, and only the accessor branch (`:476-500`) asserts exact equality of the message; the wrong-profile and unresolvable suites match their own messages the same way (`:515`, `:525`). Every suite returns with zero assertions when `loadRawAddon()` finds no addon or the platform is neither Linux nor Darwin (`:403`, `:426`, and each sibling), so the label depends on a built addon; enabling situation `shm_raw_addon_loaded`."
       },
       "guarantee": "A descriptor that is not a plain object, carries a field in an unsafe numeric representation, carries malformed or aliased grant text, or observes its own reads through accessors or a proxy is rejected by the raw native `attach` with the single fixed message `invalid shared-memory descriptor` (`DESCRIPTOR_ERROR`, `lib.rs:32`; `descriptor_error`, `:150`); a descriptor naming a profile the addon does not have is rejected with `shared-memory profile is unavailable` (`:539`) and a well-formed descriptor whose handles do not resolve with `shared-memory attachment failed` (`:689`, `:694`); and in all six cases the rejection retains no channel, external reference, or native allocation.",
       "check": {
@@ -1725,8 +1753,8 @@
       "reachability_note": "the ring transport is built unconditionally (`crates/host-runtime/src/runtime.rs:742-744`), every accepted connection prepares a duplex ring (`crates/host-runtime/src/connection.rs:117`), and every attach of transferred descriptors goes through `Ring::attach`, which routes both doorbell slots through this gate (`crates/shm-transport/src/backend/ring.rs:1006`).",
       "status": "active",
       "exercised": {
-        "state": "yes",
-        "note": "`doorbell_attachment_requires_connected_unix_stream_socket` (`ring.rs:3021-3059`) rejects a regular file, an eventfd, and an unconnected `AF_UNIX` stream socket, and accepts the peer end of a created doorbell. The positive arm in a full attach is every cross-process attach (`ring_child_exchange`, `tests/ring.rs:537-566`). No test substitutes a bad doorbell into a full `Ring::attach` call, so the ordering claim (mapping validated first, no partial state on rejection) is untested."
+        "state": "partial",
+        "note": "`doorbell_attachment_requires_connected_unix_stream_socket` (`ring.rs:3021-3059`) rejects a regular file, an eventfd, and an unconnected `AF_UNIX` stream socket, and accepts the peer end of a created doorbell, but it calls `Doorbell::from_fd` directly. The positive arm in a full attach is every cross-process attach (`ring_child_exchange`, `tests/ring.rs:537-566`), with valid doorbells only. No test substitutes a bad doorbell into a full `Ring::attach` call, so the gate's call site, the slot it validates, and the ordering claim (mapping validated first, no partial state on rejection) are untested; `fault-map.md` already classifies the record as partial for that reason."
       },
       "guarantee": "`Ring::attach` accepts a doorbell descriptor only when it is a connected `AF_UNIX` stream socket, and rejects anything else as `DoorbellFailed` before the ring is usable. The gate does not inspect `O_NONBLOCK`, and does not need to: each socketpair end is its own open file description and every doorbell operation passes `MSG_DONTWAIT`, so a peer cannot make the local end block by mutating flags on its own end.",
       "check": {
