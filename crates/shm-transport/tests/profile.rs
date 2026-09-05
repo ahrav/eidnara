@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use shm_transport::backend::ring::{Ring, RingError};
 use shm_transport::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, HardwareProfileId, TransportDescriptor,
 };
@@ -205,11 +206,17 @@ fn host_test_ring_profile_names_one_geometry() {
     assert_eq!(profile.descriptor_depth(), 8);
     assert_eq!(profile.max_leases(), 8);
     // `Ring::create` refuses a profile that allows fewer spans than a wrapping reservation
-    // needs, so the span bound is part of the geometry the id promises.
+    // needs, so the span bound is part of the geometry the id promises. The refusal is
+    // shown on a one-span profile of the same depth and arena.
     assert_eq!(profile.max_spans(), 2);
     assert_eq!(profile.charges().spans_per_frame, 2);
-    // `Ring::create` reads the per-direction arena size from the profile; the literal
-    // keeps this assertion independent of `MIN_ARENA_BYTES`.
+    assert_eq!(
+        Ring::create(&span_profile(1), 0).err(),
+        Some(RingError::ProfileMismatch)
+    );
+    // `Ring::create` reads the per-direction arena size from the profile. The literal is a
+    // pinned snapshot of the geometry: a change to `MIN_ARENA_BYTES` fails here rather
+    // than moving the id's meaning silently.
     assert_eq!(profile.arena_bytes(), 67_108_864);
     // One arena per logical direction is what one connection charges: two 64 MiB arenas.
     assert_eq!(profile.charges().arena_bytes, 134_217_728);

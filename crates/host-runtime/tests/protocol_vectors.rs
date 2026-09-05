@@ -237,109 +237,59 @@ fn production_proof_matches_the_oracle_across_perturbed_tuples() {
     let server_nonce: [u8; 32] = server_nonce.try_into().expect("server nonce length");
     let daemon_id: [u8; 16] = daemon_id.try_into().expect("daemon id length");
 
-    // The baseline version is covered by the baseline tuple; these vary the version's
-    // bytes and its length prefix.
-    // The multibyte version has a byte length (19) that differs from its character count
-    // (18), so a length prefix counted in characters diverges from the oracle.
-    let multibyte = "eidnara-h\u{f6}st/0.1.0";
-    assert_eq!(multibyte.len(), 19);
-    assert_eq!(multibyte.chars().count(), 18);
-    let versions = [
-        "eidnara-host/0.1.1",
-        "e",
-        "eidnara-host/10.100.1000-rc.1+build.12345678901234567890",
-        multibyte,
+    // The version mutations vary the version's bytes and its length prefix. The multibyte
+    // version has a byte length (19) that differs from its character count (18), so a
+    // length prefix counted in characters diverges from the oracle.
+    const MULTIBYTE_VERSION: &str = "eidnara-h\u{f6}st/0.1.0";
+    assert_eq!(MULTIBYTE_VERSION.len(), 19);
+    assert_eq!(MULTIBYTE_VERSION.chars().count(), 18);
+    // Each entry perturbs one input of the baseline tuple and nothing else. Every array
+    // flips its first, middle, and last byte; the daemon id is 16 bytes, so its flips are
+    // its own. A short key and a long key exercise HMAC's key padding and key hashing paths.
+    type Tuple = (Vec<u8>, [u8; 32], [u8; 32], &'static str, [u8; 16]);
+    type Mutation = (&'static str, fn(&mut Tuple));
+    let mutations: [Mutation; 18] = [
+        ("key[0]", |t| t.0[0] ^= 0xff),
+        ("key[15]", |t| t.0[15] ^= 0xff),
+        ("key[31]", |t| t.0[31] ^= 0xff),
+        ("client_nonce[0]", |t| t.1[0] ^= 0xff),
+        ("client_nonce[15]", |t| t.1[15] ^= 0xff),
+        ("client_nonce[31]", |t| t.1[31] ^= 0xff),
+        ("server_nonce[0]", |t| t.2[0] ^= 0xff),
+        ("server_nonce[15]", |t| t.2[15] ^= 0xff),
+        ("server_nonce[31]", |t| t.2[31] ^= 0xff),
+        ("daemon_id[0]", |t| t.4[0] ^= 0xff),
+        ("daemon_id[7]", |t| t.4[7] ^= 0xff),
+        ("daemon_id[15]", |t| t.4[15] ^= 0xff),
+        ("daemon_ver \"eidnara-host/0.1.1\"", |t| {
+            t.3 = "eidnara-host/0.1.1"
+        }),
+        ("daemon_ver \"e\"", |t| t.3 = "e"),
+        (
+            "daemon_ver (long)",
+            |t| t.3 = "eidnara-host/10.100.1000-rc.1+build.12345678901234567890",
+        ),
+        ("daemon_ver (multibyte)", |t| t.3 = MULTIBYTE_VERSION),
+        ("short key", |t| t.0 = vec![0x42]),
+        ("long key", |t| t.0 = (0u8..=255).collect()),
     ];
-    type Tuple = (String, Vec<u8>, [u8; 32], [u8; 32], &'static str, [u8; 16]);
-    let mut tuples: Vec<Tuple> = Vec::new();
-    tuples.push((
-        "baseline".to_owned(),
-        key.clone(),
+    let baseline: Tuple = (
+        key,
         client_nonce,
         server_nonce,
         VECTOR_DAEMON_VER,
         daemon_id,
-    ));
-    for flip in [0usize, 15, 31] {
-        let mut other_key = key.clone();
-        other_key[flip] ^= 0xff;
-        tuples.push((
-            format!("key[{flip}]"),
-            other_key,
-            client_nonce,
-            server_nonce,
-            VECTOR_DAEMON_VER,
-            daemon_id,
-        ));
-        let mut other_client = client_nonce;
-        other_client[flip] ^= 0xff;
-        tuples.push((
-            format!("client_nonce[{flip}]"),
-            key.clone(),
-            other_client,
-            server_nonce,
-            VECTOR_DAEMON_VER,
-            daemon_id,
-        ));
-        let mut other_server = server_nonce;
-        other_server[flip] ^= 0xff;
-        tuples.push((
-            format!("server_nonce[{flip}]"),
-            key.clone(),
-            client_nonce,
-            other_server,
-            VECTOR_DAEMON_VER,
-            daemon_id,
-        ));
-        // The daemon id is 16 bytes, so its flips stop at the last index.
-        let daemon_flip = flip.min(15);
-        let mut other_daemon = daemon_id;
-        other_daemon[daemon_flip] ^= 0xff;
-        if flip == 31 {
-            other_daemon[7] ^= 0xff;
-        }
-        tuples.push((
-            format!(
-                "daemon_id[{daemon_flip}{}]",
-                if flip == 31 { ",7" } else { "" }
-            ),
-            key.clone(),
-            client_nonce,
-            server_nonce,
-            VECTOR_DAEMON_VER,
-            other_daemon,
-        ));
+    );
+    let mut tuples: Vec<(&'static str, Tuple)> = vec![("baseline", baseline.clone())];
+    for (label, mutate) in mutations {
+        let mut tuple = baseline.clone();
+        mutate(&mut tuple);
+        assert_ne!(tuple, baseline, "{label} must change the tuple");
+        tuples.push((label, tuple));
     }
-    for version in versions {
-        tuples.push((
-            format!("daemon_ver {version:?}"),
-            key.clone(),
-            client_nonce,
-            server_nonce,
-            version,
-            daemon_id,
-        ));
-    }
-    // A short key and a long key exercise HMAC's key padding and key hashing paths.
-    tuples.push((
-        "short key".to_owned(),
-        vec![0x42],
-        client_nonce,
-        server_nonce,
-        VECTOR_DAEMON_VER,
-        daemon_id,
-    ));
-    tuples.push((
-        "long key".to_owned(),
-        (0u8..=255).collect(),
-        client_nonce,
-        server_nonce,
-        VECTOR_DAEMON_VER,
-        daemon_id,
-    ));
 
     let mut seen = std::collections::BTreeSet::new();
-    for (label, key, client_nonce, server_nonce, daemon_ver, daemon_id) in &tuples {
+    for (label, (key, client_nonce, server_nonce, daemon_ver, daemon_id)) in &tuples {
         for (domain_label, domain, domain_bytes) in [
             ("server", host_runtime::SERVER_PROOF_DOMAIN, SERVER_DOMAIN),
             ("client", host_runtime::CLIENT_AUTH_DOMAIN, CLIENT_DOMAIN),
@@ -373,11 +323,13 @@ fn production_proof_matches_the_oracle_across_perturbed_tuples() {
     }
 }
 
+/// The committed `route.open` control header: length 167, version 2, request,
+/// Interactive/Normal, channel 0, epoch 0, correlation 1.
+const ROUTE_OPEN_CONTROL_HEADER_HEX: &str = "a70000000200020000000000000100000000000000";
+
 #[test]
 fn committed_header_vectors_decode_to_their_documented_fields() {
-    // `route.open` uses control header values: length 167, Interactive/Normal, channel 0, and epoch 0.
-    // correlation 1.
-    let control = hex_to_bytes("a70000000200020000000000000100000000000000");
+    let control = hex_to_bytes(ROUTE_OPEN_CONTROL_HEADER_HEX);
     assert_eq!(control.len(), HEADER_LEN);
     let decoded = raw_client::decode_header(&control);
     assert_eq!(decoded.len, 167);
@@ -422,7 +374,7 @@ fn canonical_route_open_body_is_167_bytes() {
     );
     // The header fixture must encode `canonical.len()`; decoding it with the test-local
     // decoder fails if `canonical` changes without re-encoding the header.
-    let control = hex_to_bytes("a70000000200020000000000000100000000000000");
+    let control = hex_to_bytes(ROUTE_OPEN_CONTROL_HEADER_HEX);
     assert_eq!(
         raw_client::decode_header(&control).len as usize,
         canonical.len(),
