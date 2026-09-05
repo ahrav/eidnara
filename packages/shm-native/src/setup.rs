@@ -411,9 +411,11 @@ fn same_open_file(first: BorrowedFd<'_>, second: BorrowedFd<'_>) -> io::Result<O
             second.as_raw_fd(),
         )
     };
+    // kcmp(2) returns 0 for one open file description and 1, 2, or 3 for distinct ones (the
+    // latter when no ordering is available); only -1 carries an errno.
     match ordering {
         0 => Ok(Some(true)),
-        1 | 2 => Ok(Some(false)),
+        1..=3 => Ok(Some(false)),
         _ => {
             let error = io::Error::last_os_error();
             match error.raw_os_error() {

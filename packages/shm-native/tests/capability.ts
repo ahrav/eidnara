@@ -11,9 +11,19 @@ assert.equal(supportsNativePlatform("darwin", "x64"), false);
 assert.equal(supportsNativePlatform("darwin", "arm64"), false);
 assert.equal(activeNativeChannels(), 0);
 const capability = probeCapabilities();
+const claimedTarget = process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1";
+// A claimed target must at least load its addon on every runtime. Full availability is a
+// separate question: Bun 1.3.14 has no `markAsUntransferable`, so the probe stops there.
+if (claimedTarget) {
+        assert.notEqual(
+                capability.reason,
+                "addon_unavailable",
+                `claimed native target failed to load its addon: ${capability.reason}`,
+        );
+}
 if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
         assert.equal(capability.available, false);
-        if (process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1") {
+        if (claimedTarget) {
                 assert.equal(capability.reason, "node_detachment_unavailable");
         } else {
                 assert.ok(
