@@ -6,6 +6,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::unix::ffi::OsStringExt;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use rustix::fd::OwnedFd;
@@ -14,7 +15,10 @@ use sha2::Digest;
 
 use crate::file_mode::raw_mode;
 pub(crate) use crate::instance::HARDENED_DIR_FLAGS;
-use crate::instance::{S_IFDIR, S_IFMT, hex, mode_bits, owner_uid, write_all_fd};
+use crate::instance::{
+    S_IFDIR, S_IFMT, hex, mode_bits, open_secure_dir_existing, owner_uid, stat_identity,
+    write_all_fd,
+};
 
 /// Sweeps treat a temp whose mtime is older than this as abandoned.
 pub(crate) const STALE_TEMP_AFTER: Duration = Duration::from_secs(600);
@@ -84,6 +88,19 @@ pub(crate) fn same_snapshot(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -
             && left.st_ctime == right.st_ctime
             && left.st_ctime_nsec == right.st_ctime_nsec
     }
+}
+
+/// `Ok(true)` when the directory `path` currently names is the same inode as `retained`.
+/// A mutator writing through a pinned descriptor must confirm that `path` still resolves to `retained` before reporting success; otherwise writes landed in a detached tree.
+pub(crate) fn path_names_descriptor(path: &Path, retained: &OwnedFd) -> rustix::io::Result<bool> {
+    let by_name = match open_secure_dir_existing(path) {
+        Ok(Some(fd)) => fd,
+        Ok(None) => return Ok(false),
+        Err(_) => return Ok(false),
+    };
+    let named = rustix::fs::fstat(&by_name)?;
+    let pinned = rustix::fs::fstat(retained)?;
+    Ok(stat_identity(&named) == stat_identity(&pinned))
 }
 
 /// Atomically swaps the entries `a` and `b` under `dir`; both must exist.

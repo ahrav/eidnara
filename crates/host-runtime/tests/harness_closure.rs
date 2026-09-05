@@ -680,6 +680,54 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
     );
 }
 
+/// Writes through `root_fd` land in a detached tree after the store root is renamed and replaced, so `materialize` and `prune` must fail rather than report success.
+#[test]
+fn a_replaced_store_root_fails_materialize_and_prune() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("first materialize");
+
+    let detached = temp.path().join("closures-detached");
+    std::fs::rename(&store_root, &detached).expect("detach the store root");
+    std::fs::create_dir(&store_root).expect("replacement root");
+    std::fs::set_permissions(&store_root, std::fs::Permissions::from_mode(0o700)).expect("mode");
+
+    let mut second = candidate.clone();
+    second.manifest.version = "0.80.3".to_owned();
+    assert_eq!(
+        store
+            .materialize(&second, &BTreeSet::new())
+            .err()
+            .map(|error| error.detail()),
+        Some("closure store was replaced under the mutator")
+    );
+    assert_eq!(
+        store
+            .materialize(&candidate, &BTreeSet::new())
+            .err()
+            .map(|error| error.detail()),
+        Some("closure store was replaced under the mutator"),
+        "an already-valid occupant in the detached tree is not a success either"
+    );
+    assert_eq!(
+        store
+            .prune(&BTreeSet::new())
+            .expect_err("prune must not report success into a detached tree")
+            .detail(),
+        "closure store was replaced under the mutator"
+    );
+    assert!(
+        std::fs::read_dir(&store_root)
+            .expect("read replacement root")
+            .next()
+            .is_none(),
+        "nothing was written into the replacement root"
+    );
+}
+
 /// Opening an existing owned store root repairs mode `0o755` to `0o700` instead of refusing the store.
 #[test]
 fn an_existing_owned_store_root_is_repaired_to_owner_only() {

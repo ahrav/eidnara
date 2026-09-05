@@ -33,8 +33,8 @@ use crate::instance::{
 use crate::lifecycle::{is_canonical_payload_digest, lifecycle_dir_path};
 use crate::store_fs::{
     HARDENED_DIR_FLAGS, hash_copy, is_stale_mtime, is_temp_name, open_created_dir,
-    open_or_create_parents, open_rel_nofollow, read_dir_names, read_dir_names_partitioned,
-    rename_no_replace, same_snapshot,
+    open_or_create_parents, open_rel_nofollow, path_names_descriptor, read_dir_names,
+    read_dir_names_partitioned, rename_no_replace, same_snapshot,
 };
 
 pub const GENERATIONS_DIR_NAME: &str = "generations";
@@ -522,6 +522,8 @@ impl GenerationStore {
             return Err(invalid("manifest files are not sorted by path"));
         }
         for entry in &manifest.files {
+            // The same path rules the stager enforces bound length and depth before the walk.
+            validate_rel_path(&entry.path)?;
             if !expected.insert(entry.path.clone()) {
                 return Err(invalid("manifest lists a duplicate path"));
             }
@@ -573,6 +575,7 @@ impl GenerationStore {
         if self.read_current()? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
         }
+        self.verify_named_identity()?;
         // The preflight records each source's absolute path and inode snapshot; the copy reopens by that path and rejects a changed snapshot, so only one descriptor is open at a time.
         let mut preflighted = Vec::with_capacity(sources.len());
         let mut sizes = Vec::with_capacity(sources.len());
@@ -605,7 +608,22 @@ impl GenerationStore {
             return Err(err);
         }
         self.replace_profile(&digest)?;
+        self.verify_named_identity()?;
         Ok(digest)
+    }
+
+    /// The named `lifecycle` and `generations` directories must still resolve to the retained
+    /// descriptors; a store renamed and replaced after `open` holds only detached writes.
+    fn verify_named_identity(&self) -> Result<(), GenerationError> {
+        let root_ok = path_names_descriptor(&self.root, &self.root_fd)
+            .map_err(|_| invalid("lifecycle root identity check failed"))?;
+        let generations_ok =
+            path_names_descriptor(&self.root.join(GENERATIONS_DIR_NAME), &self.generations_fd)
+                .map_err(|_| invalid("generations directory identity check failed"))?;
+        if !root_ok || !generations_ok {
+            return Err(invalid("lifecycle store was replaced under the mutator"));
+        }
+        Ok(())
     }
 
     fn create_staging_temp(&self) -> Result<(String, OwnedFd), GenerationError> {
@@ -880,6 +898,7 @@ impl GenerationStore {
         if report.removed_profile_temps > 0 {
             fsync(&self.root_fd).map_err(|_| invalid("lifecycle root fsync failed"))?;
         }
+        self.verify_named_identity()?;
         match first_error {
             Some(err) => Err(err),
             None => Ok(report),
@@ -1238,6 +1257,48 @@ mod tests {
 
         let again = stage_default(&store, src.path());
         assert_eq!(again, digest);
+    }
+
+    /// Writes through pinned descriptors land in a detached tree once `lifecycle` is renamed
+    /// and replaced, so mutators must fail rather than report success.
+    #[test]
+    fn a_replaced_lifecycle_tree_fails_the_mutation_rather_than_reporting_success() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+
+        let lifecycle = store.root().to_path_buf();
+        let detached = lifecycle.with_file_name("lifecycle-detached");
+        std::fs::rename(&lifecycle, &detached).expect("detach the lifecycle tree");
+        std::fs::create_dir_all(lifecycle.join(GENERATIONS_DIR_NAME)).expect("replacement tree");
+        for dir in [&lifecycle, &lifecycle.join(GENERATIONS_DIR_NAME)] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+
+        let successor = vec![SourceSpec {
+            rel_path: "bin/eidnara-host".to_owned(),
+            source: write_source(src.path(), "launcher-next", b"#next-binary"),
+            executable: true,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        assert!(matches!(
+            store.stage_and_promote(&successor, &meta(), &BTreeSet::new()),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "lifecycle store was replaced under the mutator"
+            })
+        ));
+        assert!(matches!(
+            store.prune(&BTreeSet::new()),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "lifecycle store was replaced under the mutator"
+            })
+        ));
+        assert!(
+            !lifecycle.join(CURRENT_PROFILE_NAME).exists(),
+            "the replacement tree gained no profile"
+        );
     }
 
     #[cfg(target_os = "linux")]

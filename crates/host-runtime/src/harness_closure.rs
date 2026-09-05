@@ -25,8 +25,8 @@ use crate::lifecycle::is_canonical_payload_digest;
 use crate::store_fs::{
     HARDENED_DIR_FLAGS, create_owned_dir, exchange_dirs, hash_copy, is_stale_mtime, is_temp_name,
     open_created_dir, open_dir_for_removal, open_or_create_parents, open_rel_nofollow,
-    read_dir_names, read_dir_names_partitioned, remove_tree, rename_no_replace, same_snapshot,
-    write_new_file,
+    path_names_descriptor, read_dir_names, read_dir_names_partitioned, remove_tree,
+    rename_no_replace, same_snapshot, write_new_file,
 };
 
 const MANIFEST_NAME: &str = "manifest.json";
@@ -618,6 +618,10 @@ impl HarnessClosureStore {
         validate_source_root_set(candidate)?;
         let digest = manifest_digest(&candidate.manifest)?;
         if let Ok(validated) = self.validate(&digest) {
+            // A prior run may have crashed between its rename and the root fsync, so the
+            // occupant's dirent is made durable before it is reported as materialized.
+            fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))?;
+            self.verify_named_identity()?;
             return Ok(validated);
         }
 
@@ -631,7 +635,18 @@ impl HarnessClosureStore {
         let _ = remove_tree(&self.root_fd, &temp_name);
         promoted?;
         fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))?;
+        self.verify_named_identity()?;
         self.validate(&digest)
+    }
+
+    /// The named store root must still resolve to `root_fd`; a root renamed and replaced after
+    /// `open` holds only detached writes.
+    fn verify_named_identity(&self) -> Result<(), HarnessClosureError> {
+        match path_names_descriptor(&self.root, &self.root_fd) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(invalid("closure store was replaced under the mutator")),
+            Err(_) => Err(invalid("closure store identity check failed")),
+        }
     }
 
     /// Moves the staged temp to `digest`. A valid occupant wins and the temp is left for the
@@ -686,6 +701,7 @@ impl HarnessClosureStore {
             }
         }
         fsync(&self.root_fd).map_err(|_| invalid("closure store fsync failed"))?;
+        self.verify_named_identity()?;
         first_error.map_or(Ok(()), Err)
     }
 
