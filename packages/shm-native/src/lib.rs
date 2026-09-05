@@ -1064,6 +1064,12 @@ pub fn produce(
         reservation
             .advance(written)
             .map_err(|_| error("producer overflow"))?;
+        // Header semantics are checked with the predicate `commit` applies before the
+        // publication hook runs, so application bookkeeping never records a frame that
+        // `commit` then rejects.
+        let written_len = u64::try_from(written).map_err(|_| error("producer overflow"))?;
+        check_wire_header(&header, written_len)
+            .map_err(|_| error("wire header does not describe the committed body"))?;
         before_publish.call(())?;
         reservation
             .commit(written)

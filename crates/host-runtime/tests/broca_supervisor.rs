@@ -267,7 +267,6 @@ async fn status_reports_exact_states_without_aliases() {
     .await;
 
     // Unknown, foreign-incarnation, and alias-shaped IDs return `missing` and never match a live run.
-    // Unknown, foreign-incarnation, and alias-shaped IDs return `missing` and never match a live run.
     for id in ["", "unknown", "broca-deadbeef00-1", "run-1", "active"] {
         assert_eq!(
             supervisor.status(&key("s-run"), id),
@@ -290,7 +289,6 @@ async fn status_and_cancel_are_scoped_to_the_bound_session() {
     until(|| backend.starts() == 1, "victim run starts").await;
     assert_eq!(supervisor.status(&key("s-victim"), &victim), Ok("running"));
 
-    // Different sessions in the same project and sessions in other projects return `missing`.
     // Different sessions in the same project and sessions in other projects return `missing`.
     assert_eq!(
         supervisor.status(&key("s-attacker"), &victim),
@@ -483,7 +481,6 @@ async fn thirty_two_blocked_commands_admit_and_command_33_fails_fast() {
     }
     assert_eq!(supervisor.metrics().free_command_permits, 32);
     // After committing a cancellation terminal, the run ignores the backend's late completion.
-    // After committing a cancellation terminal, the run ignores the backend's late completion.
     assert_eq!(supervisor.status(&key("s1"), &run_id), Ok("cancelled"));
 }
 
@@ -526,7 +523,6 @@ async fn thirty_two_runs_queue_behind_eight_backends_and_run_33_fails_without_st
         .await;
     }
     // Reaping a backend restores its permit, and reaching a terminal state releases its active-run slot.
-    // run slot.
     assert_eq!(supervisor.metrics().free_backend_permits, 8);
     assert_eq!(supervisor.metrics().free_run_slots, 32);
     assert_eq!(backend.starts(), 32);
@@ -1044,7 +1040,6 @@ async fn terminal_cap_never_evicts_a_run_awaiting_teardown() {
         tokio::spawn(async move { supervisor.delete(&key("s-del")).await })
     };
     // `wait_work_done` must retain the terminal run while `delete` waits, even if another session reaches the terminal cap.
-    // would race.
     until(
         || supervisor.status(&key("s-del"), &run_a) == Ok("cancelled"),
         "delete commits the cancellation terminal",
@@ -1190,7 +1185,6 @@ async fn replay_overflow_commits_one_failed_terminal_and_stops_growth() {
     );
 
     // Deleting the session and expiring its tombstone must restore the retained-byte budget to its construction baseline.
-    // baseline.
     supervisor.delete(&key("s1")).await.expect("delete settles");
     tokio::time::advance(TERMINAL_RETENTION).await;
     // Commands sweep expired entries before status checks.
@@ -1348,7 +1342,6 @@ async fn transport_detach_paths_leave_the_run_untouched() {
         .to_owned();
 
     // When the host cancels the handler task, the handler's waiter detaches and its stream settles without a run terminal.
-    // The handler's waiter detaches, and the subscription stream settles without a run terminal.
     let (sub_ch, sub_ep) = open_broca_route(&mut client, "opencode", "s1").await;
     let corr = send_call(
         &mut client,
@@ -1412,7 +1405,7 @@ async fn transport_detach_paths_leave_the_run_untouched() {
         .await
         .expect("the goodbye'd subscription settles");
 
-    // drops entirely.
+    // A subscriber whose connection drops entirely (no Goodbye) detaches the same way: its waiter is released without cancelling the run.
     {
         let mut doomed = host.client().await;
         let (lost_ch, lost_ep) = open_broca_route(&mut doomed, "opencode", "s1").await;

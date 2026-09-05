@@ -31,6 +31,14 @@
   "optionalDependencies": {
     "@eidnara/host-linux-x64-gnu": "0.38.0"
   },
+  "peerDependencies": {
+    "@types/node": ">=22.20.0"
+  },
+  "peerDependenciesMeta": {
+    "@types/node": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.20.0",
     "typescript": "^5.8.0"

@@ -74,7 +74,9 @@ describe("native mechanism gate", () => {
         );
         const child = spawnSync(process.execPath, [script], {
             encoding: "utf8",
+            timeout: 10_000,
         });
+        expect(child.signal).toBeNull();
         expect(child.stderr).toBe("");
         expect(child.status).toBe(0);
         expect(readFileSync(marker, "utf8")).toBe("clean");
@@ -695,6 +697,36 @@ describe("raw N-API descriptor boundary", () => {
             addon.close(released.second);
             addon.close(held.first);
             addon.close(held.second);
+        }
+    });
+
+    test("a header that disagrees with the body is refused before beforePublish runs", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const header = new Uint8Array(21);
+        const view = new DataView(header.buffer);
+        // Declared length 2, but the fill writes 1 byte.
+        view.setUint32(0, 2, true);
+        view.setUint8(4, 2);
+        view.setUint8(5, 3);
+        view.setUint16(7, 1, true);
+        view.setUint32(9, 1, true);
+        view.setBigUint64(13, 1n, true);
+        const pair = addon.createTestPair();
+        try {
+            let published = 0;
+            expect(() =>
+                addon.produce(pair.first, header, 2, 0, (segments) => {
+                    segments[0]![0] = 1;
+                    return 1;
+                }, () => { published += 1; }),
+            ).toThrow(/wire header does not describe the committed body/);
+            // Application bookkeeping must not advance for a frame that never published.
+            expect(published).toBe(0);
+            expect(addon.poll(pair.second, () => {})).toBe(false);
+        } finally {
+            addon.close(pair.first);
+            addon.close(pair.second);
         }
     });
 

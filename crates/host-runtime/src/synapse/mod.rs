@@ -41,6 +41,7 @@ pub struct SynapseLimits {
     pub max_queued_jobs: usize,
     pub max_queued_request_bytes: u64,
     pub max_retained_jobs: usize,
+    /// Retained result vectors are declared to the host as `retained_resident_bytes`, so `HostLimits::max_resident_bytes` must leave room for this cap above the resident floor.
     pub max_retained_result_bytes: u64,
     pub max_batch_items: usize,
     pub max_batch_text_bytes: usize,
@@ -56,11 +57,13 @@ impl SynapseLimits {
     /// `per_waiter_charge_bound` bounds resident memory retained by one admitted query while it waits for or uses the CPU lane.
     /// JSON decoding can retain twice the decoded text length as `String` capacity.
     /// The handler retains response scratch until it encodes the terminal response.
+    /// A completed query keeps its returned vector (at most `MAX_DIMS` components) while its permit is held, so the bound covers one maximal vector too.
     pub fn per_waiter_charge_bound(&self) -> Option<u64> {
         u64::try_from(self.max_text_bytes)
             .ok()?
             .checked_mul(2)?
-            .checked_add(RESPONSE_SCRATCH_BYTES as u64)
+            .checked_add(RESPONSE_SCRATCH_BYTES as u64)?
+            .checked_add(bundle::MAX_DIMS.checked_mul(std::mem::size_of::<f32>() as u64)?)
     }
 
     /// `query_admission_permits` returns permits for one running query plus every allowed waiter.
@@ -291,6 +294,7 @@ impl SynapseComponent {
         engine: Arc<dyn EmbeddingEngine>,
         limits: SynapseLimits,
     ) -> Result<Self, bundle::BundleError> {
+        bundle::validate_lane_identity(&lane)?;
         bundle::validate_serving_limits(lane.dims, lane.recommended_rows as usize, &limits)?;
         // `validate_serving_limits` rejects permit-count overflow.
         // Validated limits always have a permit count.
@@ -338,6 +342,32 @@ impl SynapseComponent {
     /// `Invariant` errors mark the lane failing before returning, so later callers cannot obtain vectors from a suspect backend.
     /// The lane is read under one lock acquisition so a concurrent `activate` cannot change the state between the readiness check and the reason lookup.
     pub fn embed_blocking(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+        // The synchronous path admits only what a routed batch could: the same item count, per-text, and aggregate byte bounds the lane was validated and certified against.
+        let limits = &self.inner.limits;
+        if texts.is_empty() || texts.len() > limits.max_batch_items {
+            return Err(InferenceError::Input(format!(
+                "text count {} is outside 1..={}",
+                texts.len(),
+                limits.max_batch_items
+            )));
+        }
+        let mut total_bytes = 0usize;
+        for text in texts {
+            if text.is_empty() || text.len() > limits.max_text_bytes {
+                return Err(InferenceError::Input(format!(
+                    "text length {} is outside 1..={}",
+                    text.len(),
+                    limits.max_text_bytes
+                )));
+            }
+            total_bytes = total_bytes.saturating_add(text.len());
+        }
+        if total_bytes > limits.max_batch_text_bytes {
+            return Err(InferenceError::Input(format!(
+                "aggregate text {total_bytes} bytes exceeds {}",
+                limits.max_batch_text_bytes
+            )));
+        }
         let lane = {
             let state = self.inner.lock_state();
             match &*state {
@@ -359,14 +389,32 @@ impl SynapseComponent {
         if let Some(reason) = lane_failure_reason(&self.inner) {
             return Err(InferenceError::Artifact(reason));
         }
-        embed_via(&self.inner, &lane, texts)
+        // A panicking backend is quarantined the same way the routed workers quarantine a panicked blocking task; the caller sees the same `Invariant` instead of an unwind that leaves the lane `Ready`.
+        let joined =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lane.backend.embed(texts)))
+                .map_err(|_| PanickedBackend);
+        let vectors = settle_inference(&self.inner, joined)?;
+        check_engine_vectors(&self.inner, lane.lane.dims, texts.len(), &vectors)
+            .map_err(InferenceError::Invariant)?;
+        Ok(vectors)
     }
 }
 
-fn mark_failing(inner: &SynapseInner, reason: String) {
+/// The reason is retained uncharged for the component lifetime and cloned into status and error paths, so it is bounded to the shared diagnostic cap.
+/// A lane disabled at runtime by an artifact fault can still have workers in flight; an invariant failure or panic from one of them must surface as `Failing`, so both `Ready` and `Disabled` transition.
+fn mark_failing(inner: &SynapseInner, mut reason: String) {
+    protocol::bound_diagnostic(&mut reason);
+    let mut state = inner.lock_state();
+    if matches!(&*state, LaneState::Ready(_) | LaneState::Disabled { .. }) {
+        *state = LaneState::Failing { reason };
+    }
+}
+
+fn mark_disabled(inner: &SynapseInner, mut reason: String) {
+    protocol::bound_diagnostic(&mut reason);
     let mut state = inner.lock_state();
     if matches!(&*state, LaneState::Ready(_)) {
-        *state = LaneState::Failing { reason };
+        *state = LaneState::Disabled { reason };
     }
 }
 
@@ -387,27 +435,67 @@ const BUSY_REASON: &str = "the synapse lane is busy";
 
 const SHUT_DOWN_REASON: &str = "the synapse lane is shut down";
 
-fn embed_via(
+/// Engines supplied through `ready_with_engine` bypass `Backend`'s own output checks, so the served-vector contract is enforced here for every engine: one row per input text, each with `dims` finite unit-norm components. A violation quarantines the lane like any other invariant failure.
+fn check_engine_vectors(
     inner: &SynapseInner,
-    lane: &ReadyLane,
-    texts: &[&str],
-) -> Result<Vec<Vec<f32>>, InferenceError> {
-    settle_inference(inner, Ok(lane.backend.embed(texts)))
+    dims: usize,
+    expected_rows: usize,
+    vectors: &[Vec<f32>],
+) -> Result<(), String> {
+    let violation = if vectors.len() != expected_rows {
+        Some(format!(
+            "inference returned {} vectors for {expected_rows} texts",
+            vectors.len()
+        ))
+    } else {
+        vectors
+            .iter()
+            .find_map(|vector| inference::validate_unit_vector(dims, vector).err())
+    };
+    if let Some(reason) = violation {
+        mark_failing(inner, reason.clone());
+        return Err(reason);
+    }
+    Ok(())
 }
 
-/// `Invariant` failures and panicked blocking tasks mark the lane failing before any sink receives the error, preventing later callers from receiving vectors from a suspect backend.
+/// A backend panic caught on the synchronous path; it settles like a panicked blocking task.
+struct PanickedBackend;
+
+impl From<tokio::task::JoinError> for PanickedBackend {
+    fn from(_: tokio::task::JoinError) -> Self {
+        Self
+    }
+}
+
+/// `Invariant` failures and panicked backends mark the lane failing before any sink receives the error, preventing later callers from receiving vectors from a suspect backend.
 fn settle_inference(
     inner: &SynapseInner,
-    joined: Result<Result<Vec<Vec<f32>>, InferenceError>, tokio::task::JoinError>,
+    joined: Result<Result<Vec<Vec<f32>>, InferenceError>, impl Into<PanickedBackend>>,
 ) -> Result<Vec<Vec<f32>>, InferenceError> {
     match joined {
         Ok(Ok(vectors)) => Ok(vectors),
-        Ok(Err(InferenceError::Invariant(reason))) => {
+        // Reasons are bounded once here so the retained state and the propagated error carry the same capped text; an oversized error would otherwise be downgraded to `internal_error` at the terminal.
+        Ok(Err(InferenceError::Invariant(mut reason))) => {
+            protocol::bound_diagnostic(&mut reason);
             mark_failing(inner, reason.clone());
             Err(InferenceError::Invariant(reason))
         }
-        Ok(Err(other)) => Err(other),
-        Err(_join) => {
+        // A runtime artifact fault means the backend declared its artifact unusable, so the lane is disabled rather than left serving it.
+        Ok(Err(InferenceError::Artifact(mut reason))) => {
+            protocol::bound_diagnostic(&mut reason);
+            mark_disabled(inner, reason.clone());
+            Err(InferenceError::Artifact(reason))
+        }
+        Ok(Err(InferenceError::Input(mut reason))) => {
+            protocol::bound_diagnostic(&mut reason);
+            Err(InferenceError::Input(reason))
+        }
+        Ok(Err(InferenceError::Execution(mut reason))) => {
+            protocol::bound_diagnostic(&mut reason);
+            Err(InferenceError::Execution(reason))
+        }
+        Err(_panicked) => {
             let reason = "inference task panicked".to_owned();
             mark_failing(inner, reason.clone());
             Err(InferenceError::Invariant(reason))
@@ -415,9 +503,11 @@ fn settle_inference(
     }
 }
 
-/// A distinct error wrapper prevents an engine from spoofing cancellation.
+/// A distinct error wrapper prevents an engine from spoofing cancellation or expiry.
 enum QueryFault {
     Cancelled,
+    /// The deadline passed before the worker held the CPU permit, so no engine call was made.
+    Expired,
     Engine(InferenceError),
 }
 
@@ -540,14 +630,28 @@ async fn respond_vectors(
 }
 
 impl SynapseComponent {
+    /// `received_at` is the handler-entry instant, so the deadline covers preflight, reservation, and decoding rather than restarting after them.
     async fn handle_query(
         &self,
         ctx: &RequestCtx,
         lane: Arc<ReadyLane>,
         text: String,
         deadline_ms: Option<u64>,
+        received_at: tokio::time::Instant,
         text_charge: crate::wire::ByteCharge,
     ) -> RequestOutcome {
+        let deadline = received_at
+            + std::time::Duration::from_millis(
+                deadline_ms.unwrap_or(protocol::DEFAULT_DEADLINE_MS),
+            );
+        // Cancellation outranks expiry on every path: a query whose deadline passed while the host began shutting down reports `cancelled`, which clients retry as a transport-class failure.
+        if self.inner.closing.is_cancelled() {
+            return app_error("cancelled", "the host is shutting down");
+        }
+        // A query that spent its deadline on parsing is reported expired here, before it takes an admission slot or spawns a worker, and before saturation could misreport it as `queue_full`.
+        if tokio::time::Instant::now() >= deadline {
+            return expired_query();
+        }
         // Shutdown closes `query_admission` before it drains the tracker, so a closed semaphore reports cancellation rather than overload.
         let query_permit = match Arc::clone(&self.inner.query_admission).try_acquire_owned() {
             Ok(permit) => permit,
@@ -565,10 +669,6 @@ impl SynapseComponent {
         // The handler's copy of the admission permit is released once the verdict arrives; the worker's copy remains held through native calls that can outlive request deadlines.
         let handler_query_permit = Arc::new(query_permit);
         let worker_query_permit = Arc::clone(&handler_query_permit);
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_millis(
-                deadline_ms.unwrap_or(protocol::DEFAULT_DEADLINE_MS),
-            );
         let content_sha256 = protocol::sha256_hex(text.as_bytes());
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<Vec<f32>>, QueryFault>>();
         let inner = Arc::clone(&self.inner);
@@ -595,6 +695,11 @@ impl SynapseComponent {
                 ))));
                 return;
             };
+            // The handler drops its receiver at the deadline, but a handler still hashing or descheduled has not dropped it yet; this check keeps an expired query from consuming the serialized lane.
+            if tokio::time::Instant::now() >= deadline {
+                let _ = tx.send(Err(QueryFault::Expired));
+                return;
+            }
             // A predecessor's invariant failure can mark the serialized lane while a query waits for the permit.
             // The failing-lane branch reports the lane's existing fault rather than creating a new one.
             if let Some(reason) = lane_failure_reason(&inner) {
@@ -605,7 +710,14 @@ impl SynapseComponent {
             let joined =
                 tokio::task::spawn_blocking(move || lane_blocking.backend.embed(&[text.as_str()]))
                     .await;
-            let result = settle_inference(&inner, joined).map_err(QueryFault::Engine);
+            // The vector contract is checked here, while the permit is still held, so a malformed engine result quarantines the lane even when the handler has already expired or been cancelled and no later worker can slip past `lane_failure_reason` first.
+            let result = settle_inference(&inner, joined)
+                .and_then(|vectors| {
+                    check_engine_vectors(&inner, lane_task.lane.dims, 1, &vectors)
+                        .map(|()| vectors)
+                        .map_err(InferenceError::Invariant)
+                })
+                .map_err(QueryFault::Engine);
             let _ = tx.send(result);
         });
 
@@ -624,29 +736,44 @@ impl SynapseComponent {
         {
             return expired_query();
         }
-        // The CPU lane is idle once the verdict arrives, so the handler's admission slot is released before response reservation can wait on egress; the worker's copy still covers a native call that outlives its receiver.
-        drop(handler_query_permit);
         match result {
-            Ok(vectors) => match vectors.first() {
-                Some(vector) => {
-                    let items = [protocol::VectorItemView {
-                        id: "query",
-                        content_sha256: &content_sha256,
-                        vector,
-                    }];
-                    respond_vectors(ctx, &lane.lane, &items, true, None).await
+            Ok(vectors) => {
+                // The worker already enforced one valid row; an empty verdict here is a host task fault, not an engine fault.
+                let Some(vector) = vectors.first() else {
+                    return app_error("internal_error", "the inference verdict carried no vector");
+                };
+                // The CPU lane is idle once the verdict arrives, so the handler's admission slot can be released before response reservation waits on egress. The returned vector then lives outside the slot's bound, so it is charged to the resident pool first; when that charge is unavailable the slot stays held as the bound instead. The worker's copy still covers a native call that outlives its receiver.
+                let vector_bytes = vector.len().saturating_mul(std::mem::size_of::<f32>());
+                let _vector_charge = match ctx.try_reserve_resident(vector_bytes) {
+                    Some(charge) => {
+                        drop(handler_query_permit);
+                        Some(charge)
+                    }
+                    None => None,
+                };
+                let items = [protocol::VectorItemView {
+                    id: "query",
+                    content_sha256: &content_sha256,
+                    vector,
+                }];
+                // Output reservation can wait on egress, so the deadline covers response construction too; dropping the future releases any reservation it holds.
+                match tokio::time::timeout_at(
+                    deadline,
+                    respond_vectors(ctx, &lane.lane, &items, true, None),
+                )
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => expired_query(),
                 }
-                None => {
-                    mark_failing(
-                        &self.inner,
-                        "inference returned no vector for one query".to_owned(),
-                    );
-                    app_error("artifact_invalid", "inference returned no vector")
-                }
-            },
+            }
             Err(QueryFault::Cancelled) => app_error("cancelled", "the host is shutting down"),
+            Err(QueryFault::Expired) => expired_query(),
             Err(QueryFault::Engine(InferenceError::Input(reason))) => {
                 app_error("schema_violation", &reason)
+            }
+            Err(QueryFault::Engine(InferenceError::Execution(reason))) => {
+                app_error("internal_error", &reason)
             }
             Err(QueryFault::Engine(InferenceError::Artifact(reason)))
             | Err(QueryFault::Engine(InferenceError::Invariant(reason))) => {
@@ -664,18 +791,14 @@ impl SynapseComponent {
         items: Vec<jobs::BatchItem>,
         mut charge: crate::wire::ByteCharge,
     ) -> RequestOutcome {
-        if request_key != canonical_key {
-            return app_error(
-                "schema_violation",
-                "request_key does not match the canonical payload",
-            );
-        }
         let retry_after_ms = self.inner.limits.retry_after_ms;
-        match self
-            .inner
-            .jobs
-            .admit_charged(request_key.clone(), items, lane.lane.dims, &mut charge)
-        {
+        match self.inner.jobs.admit_charged(
+            request_key.clone(),
+            &canonical_key,
+            items,
+            lane.lane.dims,
+            &mut charge,
+        ) {
             AdmitOutcome::Existing(descriptor) => {
                 respond(
                     ctx,
@@ -691,6 +814,10 @@ impl SynapseComponent {
             AdmitOutcome::Conflict => app_error(
                 "idempotency_conflict",
                 "the request_key is retained with a different payload",
+            ),
+            AdmitOutcome::KeyMismatch => app_error(
+                "schema_violation",
+                "request_key does not match the canonical payload",
             ),
             AdmitOutcome::Full => RequestOutcome::error_retry_after(
                 "queue_full",
@@ -737,17 +864,33 @@ impl SynapseComponent {
                 armed: true,
             };
             let lane_blocking = Arc::clone(&lane);
+            let item_count = items.len();
             let joined = tokio::task::spawn_blocking(move || {
                 let texts: Vec<&str> = items.iter().map(|item| item.text.as_str()).collect();
                 lane_blocking.backend.embed(&texts)
             })
             .await;
             match settle_inference(&inner, joined) {
-                Ok(vectors) => inner.jobs.publish_ready(seq, vectors),
+                Ok(vectors) => {
+                    match check_engine_vectors(&inner, lane.lane.dims, item_count, &vectors) {
+                        Ok(()) => inner.jobs.publish_ready(seq, vectors),
+                        Err(reason) => {
+                            inner
+                                .jobs
+                                .publish_failed(seq, "artifact_invalid".to_owned(), reason);
+                        }
+                    }
+                }
                 Err(InferenceError::Input(reason)) => {
                     inner
                         .jobs
                         .publish_failed(seq, "schema_violation".to_owned(), reason);
+                }
+                // A native execution fault is a retryable job failure; the identical resubmission replaces it.
+                Err(InferenceError::Execution(reason)) => {
+                    inner
+                        .jobs
+                        .publish_failed(seq, "internal_error".to_owned(), reason);
                 }
                 Err(InferenceError::Artifact(reason)) | Err(InferenceError::Invariant(reason)) => {
                     inner
@@ -860,6 +1003,8 @@ impl CompositeComponent for SynapseComponent {
         crate::handler::ResourceDeclaration {
             // The declared hold bound is the permit count so the startup starvation guard sees exactly the queries that can park.
             general_task_hold_bound: self.inner.limits.query_admission_permits().unwrap_or(1),
+            // Retained result vectors live outside every `ByteCharge`; declaring their cap makes the runtime subtract it from ingress so a full retention set and a full ingress pool cannot coexist above `max_resident_bytes`.
+            retained_resident_bytes: self.inner.limits.max_retained_result_bytes,
             ..Default::default()
         }
     }
@@ -879,6 +1024,8 @@ impl CompositeComponent for SynapseComponent {
     }
 
     async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
+        // A request-scoped deadline runs from here so a large body cannot buy itself a fresh deadline after parsing.
+        let received_at = tokio::time::Instant::now();
         let Some(lane) = self.ready_lane() else {
             return app_error("artifact_invalid", "the synapse lane is unavailable");
         };
@@ -938,7 +1085,7 @@ impl CompositeComponent for SynapseComponent {
             Request::EmbedQuery { text, deadline_ms } => {
                 let text_charge = charge.split_or_take(text.capacity());
                 let _handler_charge = charge;
-                self.handle_query(&ctx, lane, text, deadline_ms, text_charge)
+                self.handle_query(&ctx, lane, text, deadline_ms, received_at, text_charge)
                     .await
             }
             Request::EmbedBatch {
@@ -997,6 +1144,7 @@ impl CompositeComponent for SynapseComponent {
     /// Shutdown closes admission and cancels queued wrappers before joining every started native call through its incarnation.
     /// Shutdown never aborts a started native call.
     /// The lane ends `Disabled` so a late `bind`, `health`, or `embed_blocking` observes the shutdown instead of a ready lane whose admission is closed.
+    /// `embed_blocking` calls are not tracked, so shutdown joins them through the CPU permit: an in-flight blocking call holds that permit until it returns, and the terminal state is written while shutdown holds it, so a call that read `Ready` earlier observes `Disabled` when it rechecks after acquiring the permit, and a joined call that failed cannot overwrite the shutdown state.
     async fn shutdown(&self) -> Result<(), crate::composite::ShutdownError> {
         self.inner.closing.cancel();
         self.inner.jobs.close_admission();
@@ -1005,9 +1153,12 @@ impl CompositeComponent for SynapseComponent {
         self.inner.tracker.close();
         self.inner.tracker.wait().await;
         self.inner.jobs.clear();
+        // Taking the permit joins an in-flight `embed_blocking` call; its own failure transition settles before the shutdown state is written.
+        let permit = self.inner.cpu.acquire().await;
         *self.inner.lock_state() = LaneState::Disabled {
             reason: SHUT_DOWN_REASON.to_owned(),
         };
+        drop(permit);
         Ok(())
     }
 }
@@ -1083,9 +1234,9 @@ fn lane_state_after_load(loaded: Result<ReadyLane, InferenceError>) -> LaneState
     match loaded {
         Ok(lane) => LaneState::Ready(Arc::new(lane)),
         Err(InferenceError::Invariant(reason)) => LaneState::Failing { reason },
-        Err(InferenceError::Artifact(reason)) | Err(InferenceError::Input(reason)) => {
-            LaneState::Disabled { reason }
-        }
+        Err(InferenceError::Artifact(reason))
+        | Err(InferenceError::Input(reason))
+        | Err(InferenceError::Execution(reason)) => LaneState::Disabled { reason },
     }
 }
 
@@ -1104,7 +1255,8 @@ mod tests {
     fn lane() -> LaneInfo {
         LaneInfo {
             model: "m".to_owned(),
-            fingerprint: "f".to_owned(),
+            fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
             table_epoch: 1,
             dims: 1,
             execution_provider: "cpu",

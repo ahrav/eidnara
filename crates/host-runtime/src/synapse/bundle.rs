@@ -16,6 +16,8 @@ const MAX_EXTERNAL_INITIALIZERS: usize = 16;
 const MAX_ARTIFACT_NAME_BYTES: usize = 255;
 const MAX_PROVENANCE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_MODEL_NAME_BYTES: usize = 128;
+/// Served vectors and corpus expectations are unit-normalized; an L2 norm farther than this from 1.0 is an invariant failure on output and a rejected corpus on input.
+pub(crate) const UNIT_NORM_TOLERANCE: f64 = 1e-3;
 pub(crate) const MAX_DIMS: u64 = 16_384;
 const MAX_MAX_TOKENS: u64 = 1_048_576;
 /// `MAX_TABLE_EPOCH` prevents TypeScript JSON-number rounding from changing `table_epoch`.
@@ -159,6 +161,10 @@ pub struct Corpus {
 pub struct VerifiedBundle {
     pub manifest: BundleManifest,
     pub max_text_bytes: usize,
+    /// The aggregate text a routed batch may carry; certification batches stay within it.
+    pub max_batch_text_bytes: usize,
+    /// Rows in the multi-row certification call: the largest batch the host admits, so a graph that misbehaves only at sizes above the recommended batch fails certification instead of an ordinary request.
+    pub certification_rows: usize,
     pub onnx: Vec<u8>,
     pub initializers: Vec<(String, Vec<u8>)>,
     pub tokenizer_file: Vec<u8>,
@@ -205,7 +211,6 @@ pub fn load_bundle(
         manifest.recommended_batch.rows as usize,
         limits,
     )?;
-
     let mut listed: Vec<&ArtifactRef> = vec![&manifest.model_file, &manifest.corpus];
     listed.extend(manifest.external_initializers.iter());
     listed.extend(manifest.tokenizer.all());
@@ -273,9 +278,23 @@ pub fn load_bundle(
         )));
     }
 
+    let certification_rows = limits.max_batch_items.max(1);
+    // Every admitted position is certified with the shortest mismatching pair repeated across the batch, so that pair must fit `certification_rows` rows under the aggregate text cap; a corpus without one cannot certify the lane it ships with.
+    let per_row_budget = limits.max_batch_text_bytes / certification_rows;
+    let certifiable = shortest_mismatching_pair(&corpus)
+        .is_some_and(|(a, b)| a.text.len().max(b.text.len()) <= per_row_budget);
+    if !certifiable {
+        return Err(err(format!(
+            "corpus needs two items with differing expected vectors whose texts are at most \
+             {per_row_budget} bytes each, so a {certification_rows}-row certification batch fits \
+             max_batch_text_bytes"
+        )));
+    }
     Ok(VerifiedBundle {
         manifest,
         max_text_bytes: limits.max_text_bytes,
+        max_batch_text_bytes: limits.max_batch_text_bytes,
+        certification_rows,
         onnx,
         initializers,
         tokenizer_file,
@@ -291,6 +310,37 @@ fn parse_manifest(bytes: &[u8]) -> Result<BundleManifest, BundleError> {
     let value = crate::control::strict_json::parse(bytes)
         .map_err(|_| err("manifest is not strict JSON"))?;
     serde_json::from_value(value).map_err(|_| err("manifest schema invalid"))
+}
+
+/// The catalog-facing lane identity every published lane must satisfy, whether it comes from a manifest or from `ready_with_engine`.
+/// These bounds also size the wire reservations: the model name and fingerprint lengths feed the vector-body reservation and the provenance cap bounds the `models.list` body.
+pub(crate) fn validate_lane_identity(lane: &super::LaneInfo) -> Result<(), BundleError> {
+    if lane.model.is_empty() || lane.model.len() > MAX_MODEL_NAME_BYTES {
+        return Err(err("model name out of bounds"));
+    }
+    // The lane is CPU-only; the fixed provider string also bounds that field of the cached `models.list` body.
+    if lane.execution_provider != "cpu" {
+        return Err(err("execution provider must be cpu"));
+    }
+    validate_sha256_hex(&lane.fingerprint).map_err(err)?;
+    if lane.dims == 0 || lane.dims as u64 > MAX_DIMS {
+        return Err(err("dims out of bounds"));
+    }
+    if lane.max_tokens == 0 || u64::from(lane.max_tokens) > MAX_MAX_TOKENS {
+        return Err(err("max_tokens out of bounds"));
+    }
+    if lane.table_epoch > MAX_TABLE_EPOCH {
+        return Err(err("table_epoch out of bounds"));
+    }
+    if lane.recommended_rows == 0 || lane.recommended_token_budget == 0 {
+        return Err(err("recommended batch policy must be nonzero"));
+    }
+    let provenance_bytes =
+        serde_json::to_vec(&lane.provenance).map_err(|_| err("provenance serialization failed"))?;
+    if provenance_bytes.len() > MAX_PROVENANCE_BYTES {
+        return Err(err("provenance too large"));
+    }
+    Ok(())
 }
 
 fn validate_manifest(manifest: &BundleManifest) -> Result<(), BundleError> {
@@ -849,15 +899,76 @@ fn parse_corpus(bytes: &[u8], dims: usize) -> Result<Corpus, BundleError> {
         if item.expected.len() != dims || item.expected.iter().any(|v| !v.is_finite()) {
             return Err(err("corpus expected vector invalid"));
         }
+        // A non-unit expectation cannot certify a unit-normalized output: at high dimensions an all-zero vector matches any dense unit vector elementwise within a loose tolerance.
+        let norm = item
+            .expected
+            .iter()
+            .map(|v| f64::from(*v).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        if (norm - 1.0).abs() > UNIT_NORM_TOLERANCE {
+            return Err(err("corpus expected vector is not unit-normalized"));
+        }
         items.push(CorpusItem {
             text: item.text,
             expected: item.expected,
         });
     }
+    // Multi-row certification detects a row-permuting graph only when the batch holds two rows with different expectations; identical expectations would pass in any order.
+    let distinct_pair_exists = items.iter().enumerate().any(|(index, first)| {
+        items[index + 1..]
+            .iter()
+            .any(|second| certification_mismatch(&first.expected, &second.expected, raw.tolerance))
+    });
+    if !distinct_pair_exists {
+        return Err(err(
+            "corpus needs two items whose expected vectors differ beyond the tolerance",
+        ));
+    }
     Ok(Corpus {
         tolerance: raw.tolerance,
         items,
     })
+}
+
+/// The mismatching pair with the smallest longer text, so labeled batches fit the most rows under the aggregate cap.
+pub(crate) fn shortest_mismatching_pair(corpus: &Corpus) -> Option<(&CorpusItem, &CorpusItem)> {
+    let mut best: Option<(&CorpusItem, &CorpusItem)> = None;
+    for (index, first) in corpus.items.iter().enumerate() {
+        for second in &corpus.items[index + 1..] {
+            if !certification_mismatch(&first.expected, &second.expected, corpus.tolerance) {
+                continue;
+            }
+            let longer = first.text.len().max(second.text.len());
+            if best.is_none_or(|(a, b)| longer < a.text.len().max(b.text.len())) {
+                best = Some((first, second));
+            }
+        }
+    }
+    best
+}
+
+/// The certification criterion: two unit vectors match when every component is within `tolerance` and their cosine similarity is within `tolerance` of 1.
+/// Componentwise drift alone admits orthogonal unit vectors at high dimensions, and cosine alone admits a few large single-component errors, so both must hold.
+/// The cosine is normalized by both norms because each side may sit up to `UNIT_NORM_TOLERANCE` from 1.
+/// The same criterion decides whether two corpus expectations are distinct enough to detect a row permutation.
+pub(crate) fn certification_mismatch(got: &[f32], expected: &[f32], tolerance: f32) -> bool {
+    if got.len() != expected.len() {
+        return true;
+    }
+    let componentwise_drift = got
+        .iter()
+        .zip(expected)
+        .any(|(g, e)| (g - e).abs() > tolerance);
+    let (dot, got_sq, expected_sq) =
+        got.iter()
+            .zip(expected)
+            .fold((0.0f64, 0.0f64, 0.0f64), |(dot, g_sq, e_sq), (g, e)| {
+                let (g, e) = (f64::from(*g), f64::from(*e));
+                (dot + g * e, g_sq + g * g, e_sq + e * e)
+            });
+    let cosine = dot / (got_sq.sqrt() * expected_sq.sqrt());
+    componentwise_drift || cosine < 1.0 - f64::from(tolerance)
 }
 
 #[cfg(test)]

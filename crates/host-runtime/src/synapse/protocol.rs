@@ -13,7 +13,7 @@ use crate::control::check_string;
 pub(crate) const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// `MAX_BODY_DEPTH` permits structural depth 8 and rejects depth 9.
 const MAX_BODY_DEPTH: usize = 8;
-const MAX_DIAGNOSTIC_BYTES: usize = 512;
+pub(crate) const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub(crate) const MAX_JOB_ID_BYTES: usize = 128;
 pub(crate) const MAX_CURSOR_BYTES: usize = 128;
 pub(crate) const MAX_DEADLINE_MS: u64 = 3_600_000;
@@ -26,17 +26,22 @@ pub struct RequestError {
     pub message: String,
 }
 
-pub(crate) fn schema(message: impl Into<String>) -> RequestError {
-    let mut message = message.into();
+/// Caps a diagnostic at `MAX_DIAGNOSTIC_BYTES` on a char boundary and releases excess capacity, so a retained or emitted message never holds more resident bytes than the wire may carry.
+pub(crate) fn bound_diagnostic(message: &mut String) {
     if message.len() > MAX_DIAGNOSTIC_BYTES {
         let mut end = MAX_DIAGNOSTIC_BYTES;
         while !message.is_char_boundary(end) {
             end -= 1;
         }
         message.truncate(end);
-        // Truncation alone keeps the original capacity allocated.
-        message.shrink_to_fit();
     }
+    // A short message can arrive in an oversized allocation, and a retained job keeps whatever capacity the string carries; the shrink is unconditional.
+    message.shrink_to_fit();
+}
+
+pub(crate) fn schema(message: impl Into<String>) -> RequestError {
+    let mut message = message.into();
+    bound_diagnostic(&mut message);
     RequestError {
         code: "schema_violation",
         message,
@@ -294,8 +299,17 @@ struct ResultParams<'a> {
     job_id: Cow<'a, str>,
     #[serde(borrow)]
     request_key: Cow<'a, str>,
-    #[serde(default)]
+    /// Required but nullable: the first page sends an explicit `null`, later pages the issued cursor. An omitted field is a malformed request, not a first-page replay.
+    #[serde(borrow, deserialize_with = "required_nullable")]
     cursor: Option<Cow<'a, str>>,
+}
+
+/// A `deserialize_with` field without `default` must be present; this keeps `Option` semantics for an explicit `null` while rejecting omission.
+fn required_nullable<'de, D>(deserializer: D) -> Result<Option<Cow<'de, str>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer)
 }
 
 /// The request decoder classifies malformed JSON and typed-deserialization failures as `schema_violation`.
@@ -1607,6 +1621,35 @@ mod tests {
             let error = parse_request_unreserved(&body, false, &lane, &limits).expect_err(case);
             assert_eq!(error.code, "schema_violation", "{case}: {}", error.message);
         }
+    }
+
+    #[test]
+    fn the_result_cursor_is_required_but_nullable() {
+        let limits = SynapseLimits::default();
+        let lane = lane();
+        let key = "a".repeat(64);
+        let with_cursor = |cursor: &str| {
+            format!(
+                concat!(
+                    "{{\"method\":\"embed.result\",\"params\":{{",
+                    "\"model\":\"{}\",\"required_fingerprint\":\"{}\",",
+                    "\"required_epoch\":{},\"allow_equivalent\":false,",
+                    "\"accept_declared\":false,\"job_id\":\"0123456789abcdef-7\",",
+                    "\"request_key\":\"{}\"{}}}}}"
+                ),
+                lane.model, lane.fingerprint, lane.table_epoch, key, cursor
+            )
+            .into_bytes()
+        };
+        match parse_request_unreserved(&with_cursor(",\"cursor\":null"), false, &lane, &limits)
+            .expect("an explicit null cursor is the first page")
+        {
+            Request::EmbedResult { cursor, .. } => assert_eq!(cursor, None),
+            _ => panic!("result request expected"),
+        }
+        let error = parse_request_unreserved(&with_cursor(""), false, &lane, &limits)
+            .expect_err("an omitted cursor is malformed");
+        assert_eq!(error.code, "schema_violation");
     }
 
     #[test]

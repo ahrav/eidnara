@@ -11,8 +11,8 @@ use std::time::Duration;
 use host_runtime::synapse::{SynapseComponent, SynapseConfig, SynapseLimits};
 use host_runtime::{
     BindOutcome, CancellationToken, CompositeComponent, HealthReport, HostConfig, HostInit,
-    InitError, ManifestSnapshot, PrimaryComponent, RequestCtx, RequestOutcome, RouteHandle,
-    RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
+    HostLimits, InitError, ManifestSnapshot, PrimaryComponent, RequestCtx, RequestOutcome,
+    RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
 };
 
 struct EchoPrimary;
@@ -139,9 +139,16 @@ async fn main() {
     let composite = StaticComposite::new(EchoPrimary, synapse, PlaceholderBroca)
         .expect("composite module IDs are distinct");
 
+    // The lane declares its retained-result cap as retained resident bytes, so the host budget must cover it above the floor plus one inbound body.
     let config = HostConfig {
         data_dir: Some(data_dir.clone()),
         daemon_ver: "eidnara-host/synapse-smoke".to_owned(),
+        limits: HostLimits {
+            max_resident_bytes: host_runtime::config::MIN_RESIDENT_BYTES
+                + u64::from(host_runtime::MAX_FRAME_BODY_LEN)
+                + SynapseLimits::default().max_retained_result_bytes,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let publication = data_dir

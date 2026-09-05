@@ -25,12 +25,12 @@ use host_runtime::synapse::{
 };
 use host_runtime::{
     BindOutcome, CancellationToken, CompositeComponent, HealthReport, HostConfig, HostInit,
-    InitError, ManifestSnapshot, PrimaryComponent, RequestCtx, RequestOutcome, RouteHandle,
-    RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
+    HostLimits, InitError, ManifestSnapshot, PrimaryComponent, RequestCtx, RequestOutcome,
+    RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
 };
 use perf_measurement::{
-    AttemptDisposition, AttemptRecord, DeterministicRng, LatencySummary, LogicalDisposition,
-    LogicalRecord, ServiceSample, SynapseMethod, SynapseVariant, WindowClass,
+    AttemptDisposition, AttemptRecord, DeterministicRng, LogicalDisposition, LogicalRecord,
+    ServiceSample, SynapseMethod, SynapseVariant, WindowClass,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -367,7 +367,12 @@ struct HostThread {
 }
 
 impl HostThread {
-    fn start(component: SynapseComponent, data_dir: std::path::PathBuf) -> Result<Self, String> {
+    /// `retained_result_bytes` is the lane's declared retention cap; the host budget must cover it above the resident floor plus one inbound body or startup refuses the composite.
+    fn start(
+        component: SynapseComponent,
+        data_dir: std::path::PathBuf,
+        retained_result_bytes: u64,
+    ) -> Result<Self, String> {
         let composite = StaticComposite::new(PerfPrimary, component, PlaceholderBroca)
             .map_err(|error| format!("compose host: {error}"))?;
         let shutdown = CancellationToken::new();
@@ -388,6 +393,12 @@ impl HostThread {
                                 HostConfig {
                                     data_dir: Some(data_dir),
                                     daemon_ver: "eidnara-host/synapse-perf".to_owned(),
+                                    limits: HostLimits {
+                                        max_resident_bytes: host_runtime::config::MIN_RESIDENT_BYTES
+                                            + u64::from(host_runtime::MAX_FRAME_BODY_LEN)
+                                            + retained_result_bytes,
+                                        ..Default::default()
+                                    },
                                     ..Default::default()
                                 },
                                 run_shutdown,
@@ -653,12 +664,17 @@ async fn read_terminals(
             }
             continue;
         }
-        if frame.ver != raw_client::WIRE_VERSION
+        // Only `Response` and `Error` may settle a pending call; any other type is a protocol violation that invalidates the run rather than evidence.
+        if !matches!(frame.ty, raw_client::TY_RESPONSE | raw_client::TY_ERROR)
+            || frame.ver != raw_client::WIRE_VERSION
             || frame.channel != wire.channel
             || frame.epoch != wire.epoch
             || frame.flags != raw_client::FLAGS_RESPONSE_TEXT_LAST
         {
-            return Err("terminal frame violates route or flag contract".to_owned());
+            return Err(format!(
+                "terminal frame violates the type, route, or flag contract (type {})",
+                frame.ty
+            ));
         }
         let sender = wire.pending.lock().await.remove(&frame.corr);
         let Some(sender) = sender else {
@@ -957,10 +973,17 @@ async fn execute_query(
                 0,
             ));
         }
+        // A variant that consumes the host's retry hint measures that hint; a `queue_full` without an unsigned `retry_after_ms` invalidates the repetition rather than falling back to a harness default.
+        let served_hint_ms = json["retry_after_ms"].as_u64();
+        if ctx.opts.variant.uses_served_query_hint() && served_hint_ms.is_none() {
+            return Err(format!(
+                "queue_full response omitted retry_after_ms while the variant consumes it: {json}"
+            ));
+        }
         let delay = Duration::from_secs_f64(
             ctx.opts
                 .variant
-                .query_retry_delay_ms(json["retry_after_ms"].as_u64(), &mut rng)
+                .query_retry_delay_ms(served_hint_ms, &mut rng)
                 / 1_000.0,
         );
         if Instant::now() + delay >= deadline {
@@ -1030,7 +1053,7 @@ async fn execute_batch(
     // Each resubmission receives a fresh `callWithRetry` budget.
     'logical: loop {
         let mut submit_attempts = 0u32;
-        let (job_id, served_poll_cap) = loop {
+        let (job_id, _descriptor_retry_after_ms) = loop {
             // The retry loop checks the deadline before each attempt because a retry sleep can wake after the deadline.
             // `RoutedWire::call` returns `ExpiredBeforeSend` without starting a frame when `deadline` has expired.
             // An expired submission returns `ExpiredBeforeSend` without writing a frame.
@@ -1092,12 +1115,7 @@ async fn execute_batch(
             };
             first_send.get_or_insert(reply.sent_ns);
             if reply.frame.ty == raw_client::TY_RESPONSE {
-                let result = &json["result"];
-                let job_id = result["job_id"]
-                    .as_str()
-                    .ok_or_else(|| format!("batch descriptor omitted job_id: {json}"))?
-                    .to_owned();
-                break (job_id, result["retry_after_ms"].as_u64().unwrap_or(50));
+                break validate_batch_descriptor(&json, &request_key)?;
             }
             let code = json["code"].as_str().unwrap_or("unparsable");
             if code == "module_restarted" {
@@ -1132,7 +1150,10 @@ async fn execute_batch(
                     polls,
                 ));
             }
-            let base = json["retry_after_ms"].as_u64().unwrap_or(100);
+            // Batch admission rejections carry the configured hint; a missing one is a host regression that invalidates the repetition rather than a default to fill in.
+            let base = json["retry_after_ms"].as_u64().ok_or_else(|| {
+                format!("queue_full batch rejection omitted retry_after_ms: {json}")
+            })?;
             let delay = Duration::from_secs_f64(rng.retry_delay_ms(base) / 1_000.0);
             if Instant::now() + delay >= deadline {
                 return Ok(terminal_record(
@@ -1202,7 +1223,16 @@ async fn execute_batch(
                         if !retryable || poll_attempt >= attempt_cap {
                             break (reply, json);
                         }
-                        let base = json["retry_after_ms"].as_u64().unwrap_or(100);
+                        // A `queue_full` poll rejection carries the configured hint; the host's `timeout` error carries none, so that retry uses the harness cadence.
+                        let base = match (code, json["retry_after_ms"].as_u64()) {
+                            (Some("queue_full"), Some(hint)) => hint,
+                            (Some("queue_full"), None) => {
+                                return Err(format!(
+                                    "queue_full result rejection omitted retry_after_ms: {json}"
+                                ));
+                            }
+                            _ => 100,
+                        };
                         let delay = Duration::from_secs_f64(rng.retry_delay_ms(base) / 1_000.0);
                         if Instant::now() + delay >= deadline {
                             break (reply, json);
@@ -1284,7 +1314,17 @@ async fn execute_batch(
             }
             let result = &json["result"];
             if let Some(vectors) = result["vectors"].as_array() {
-                validate_batch_page(&json, &expected_items)?;
+                validate_batch_page(&json, &expected_items, shape.page_vectors())?;
+                // A page is either a nonempty final page (`done:true`, no cursor) or a nonempty continuation (`done:false`, string cursor); anything else, including an empty terminating page that would add a spurious poll, is a malformed envelope, not evidence.
+                let final_page = result["done"] == true
+                    && result.get("next_cursor").is_none()
+                    && !vectors.is_empty();
+                let continuation = result["done"] == false
+                    && !vectors.is_empty()
+                    && result["next_cursor"].is_string();
+                if !final_page && !continuation {
+                    return Err(format!("malformed vector page envelope: {json}"));
+                }
                 for vector in vectors {
                     collected.push(
                         vector["id"]
@@ -1334,7 +1374,7 @@ async fn execute_batch(
                 }
                 continue;
             }
-            let served_delay = result["retry_after_ms"].as_u64().unwrap_or(served_poll_cap);
+            let served_delay = validate_pending_envelope(&json, &job_id)?;
             let delay_ms = ctx
                 .opts
                 .variant
@@ -1358,6 +1398,50 @@ async fn execute_batch(
             }
         }
     }
+}
+
+/// A descriptor that is not attributed to the submitted batch, or whose shape the host never emits, is a protocol regression rather than a job to poll.
+/// An idempotent replay after a lost response can return the same job already `ready` or `failed`; both are valid descriptors, and polling reports the outcome.
+/// Returns the job ID and the advertised `retry_after_ms`; the host must state its retry policy, so a missing or mistyped value is a harness error rather than a default.
+fn validate_batch_descriptor(
+    json: &serde_json::Value,
+    request_key: &str,
+) -> Result<(String, u64), String> {
+    let result = &json["result"];
+    let job_id = result["job_id"]
+        .as_str()
+        .ok_or_else(|| format!("batch descriptor omitted job_id: {json}"))?;
+    let retry_after_ms = result["retry_after_ms"]
+        .as_u64()
+        .ok_or_else(|| format!("batch descriptor omitted retry_after_ms: {json}"))?;
+    if result["request_key"] != request_key
+        || result["done"] != false
+        || !matches!(
+            result["status"].as_str(),
+            Some("queued" | "running" | "ready" | "failed")
+        )
+    {
+        return Err(format!(
+            "batch descriptor is not a descriptor for this batch: {json}"
+        ));
+    }
+    Ok((job_id.to_owned(), retry_after_ms))
+}
+
+/// A pending result envelope must name the polled job, carry a pending status, and state `retry_after_ms`; a page later accepted after a malformed envelope would record a completed request on corrupt evidence.
+fn validate_pending_envelope(json: &serde_json::Value, job_id: &str) -> Result<u64, String> {
+    let result = &json["result"];
+    if result["job_id"] != job_id
+        || result["done"] != false
+        || !matches!(result["status"].as_str(), Some("queued" | "running"))
+    {
+        return Err(format!(
+            "pending result envelope is malformed for job {job_id}: {json}"
+        ));
+    }
+    result["retry_after_ms"]
+        .as_u64()
+        .ok_or_else(|| format!("pending result envelope omitted retry_after_ms: {json}"))
 }
 
 /// The delayed engine returns this vector for every text; a completed request must carry exactly it.
@@ -1388,7 +1472,9 @@ fn validate_vectors(json: &serde_json::Value, expected: usize) -> Result<(), Str
     let vectors = result["vectors"]
         .as_array()
         .ok_or_else(|| format!("response omitted vectors: {json}"))?;
+    // A query response is always final, so a cursor on it is a paging regression rather than a completed request.
     if result["done"] != true
+        || result.get("next_cursor").is_some()
         || result["model"] != MODEL
         || result["fingerprint"] != FINGERPRINT
         || result["table_epoch"] != 1
@@ -1416,6 +1502,7 @@ fn validate_vectors(json: &serde_json::Value, expected: usize) -> Result<(), Str
 fn validate_batch_page(
     json: &serde_json::Value,
     expected: &std::collections::BTreeMap<&str, &str>,
+    max_page_vectors: usize,
 ) -> Result<(), String> {
     let result = &json["result"];
     if result["model"] != MODEL
@@ -1430,6 +1517,13 @@ fn validate_batch_page(
     let vectors = result["vectors"]
         .as_array()
         .ok_or_else(|| format!("batch page omitted vectors: {json}"))?;
+    // A page above the configured bound means the host ignored `max_page_vectors`, which would understate the poll count.
+    if vectors.len() > max_page_vectors {
+        return Err(format!(
+            "batch page carries {} vectors above the {max_page_vectors}-vector bound: {json}",
+            vectors.len()
+        ));
+    }
     for item in vectors {
         let id = item["id"]
             .as_str()
@@ -1744,10 +1838,35 @@ struct Summary {
     fatal_errors: Vec<String>,
 }
 
-/// `GatedLatency` publishes each tail quantile only when the sample count and censoring support it.
+/// One request's latency observation: either a completed duration, or a right-censored duration (the request was still open when observation stopped).
+#[derive(Debug, Clone, Copy)]
+struct Observation {
+    duration_ns: u64,
+    completed: bool,
+}
+
+impl Observation {
+    fn completed(duration_ns: u64) -> Self {
+        Self {
+            duration_ns,
+            completed: true,
+        }
+    }
+
+    fn censored(duration_ns: u64) -> Self {
+        Self {
+            duration_ns,
+            completed: false,
+        }
+    }
+}
+
+/// `GatedLatency` publishes each quantile of the offered population with a Kaplan-Meier estimate over completed and right-censored observations.
 ///
-/// A quantile below its sample floor rests on too few observations above it.
-/// A quantile `q` is also suppressed when `censored_per_mille` exceeds `1000 * (1 - q)`: the censored mass could occupy the entire tail above `q`, so the observed value is not identifiable.
+/// A censored request is known only to have taken at least its observed duration: a timed-out request at least its deadline, a request open at the window end at least the time it had. Placing every censored request above every completed one would misstate a request censored after microseconds, so each censored observation leaves the risk set at its own duration instead.
+/// The quantile `q` is the first completed duration at which the estimated cumulative probability reaches `q`; when the censored mass keeps the estimate below `q`, the value is not identifiable and is suppressed.
+/// A tail quantile with fewer than 30 completed observations beyond it rests on too little support and is suppressed as well, whether the shortfall comes from a small sample or from censoring that consumed the tail.
+/// `max_ns` is the longest observed duration, completed or censored, and so a lower bound on the slowest request.
 #[derive(Debug, PartialEq, serde::Serialize)]
 struct GatedLatency {
     count: u64,
@@ -1760,53 +1879,105 @@ struct GatedLatency {
 }
 
 impl GatedLatency {
-    fn from_unsorted(samples: Vec<u64>, censored_per_mille: f64) -> Option<Self> {
-        let base = LatencySummary::from_unsorted(samples)?;
-        let gate = |value: Option<u64>, quantile_per_mille: u64| {
-            let identifiable = censored_per_mille <= (1_000 - quantile_per_mille) as f64;
-            (identifiable && perf_measurement::quantile_publishable(base.count, quantile_per_mille))
-                .then_some(value)
-                .flatten()
+    fn from_observations(mut observations: Vec<Observation>) -> Option<Self> {
+        // Ties resolve events before censorings, so a request censored at exactly a completed duration still counts as at risk for that event.
+        observations.sort_by_key(|observation| (observation.duration_ns, !observation.completed));
+        let count = observations.iter().filter(|o| o.completed).count() as u64;
+        if count == 0 {
+            return None;
+        }
+        // The maximum is a lower bound on the slowest request: a censored request lasted at least its observed duration, so it counts here even though it never completed.
+        let max_ns = observations.iter().map(|o| o.duration_ns).max()?;
+        // Returns the estimate and how many completed observations lie beyond the event that produced it.
+        let quantile = |quantile_per_mille: u64| -> Option<(u64, u64)> {
+            let target = quantile_per_mille as f64 / 1_000.0;
+            let mut survival = 1.0f64;
+            let mut events = 0u64;
+            for (index, observation) in observations.iter().enumerate() {
+                if !observation.completed {
+                    continue;
+                }
+                events += 1;
+                let at_risk = (observations.len() - index) as f64;
+                survival *= 1.0 - 1.0 / at_risk;
+                // Floating-point slack resolves toward publication, matching exact arithmetic at `F == q`.
+                if 1.0 - survival + 1e-9 >= target {
+                    return Some((observation.duration_ns, count - events));
+                }
+            }
+            None
+        };
+        // A tail estimate needs `TAIL_SAMPLE_FLOOR / 1000` completed observations beyond it; that is the support the sample floor provides without censoring, and it holds when censoring has consumed the tail as well.
+        let tail_support = perf_measurement::TAIL_SAMPLE_FLOOR / 1_000;
+        let tail = |quantile_per_mille: u64| {
+            quantile(quantile_per_mille)
+                .filter(|(_, beyond)| *beyond >= tail_support)
+                .map(|(duration, _)| duration)
         };
         Some(Self {
-            count: base.count,
-            p50_ns: base.p50_ns,
-            p90_ns: base.p90_ns,
-            p95_ns: base.p95_ns,
-            p99_ns: gate(Some(base.p99_ns), 990),
-            p999_ns: gate(base.p999_ns, 999),
-            max_ns: base.max_ns,
+            count,
+            p50_ns: quantile(500)?.0,
+            p90_ns: quantile(900)?.0,
+            p95_ns: quantile(950)?.0,
+            p99_ns: tail(990),
+            p999_ns: tail(999),
+            max_ns,
         })
+    }
+
+    /// Fully observed samples: every observation completed.
+    fn from_completed(samples: Vec<u64>) -> Option<Self> {
+        Self::from_observations(samples.into_iter().map(Observation::completed).collect())
     }
 }
 
-fn attempt_latency_by_method(
-    attempts: &[AttemptRecord],
-    censored_per_mille: f64,
-) -> BTreeMap<&'static str, GatedLatency> {
-    let mut samples: BTreeMap<&'static str, Vec<u64>> = BTreeMap::new();
+/// Each method's censoring comes from its own attempts: an attempt that timed out (by disposition or by code) is censored at its deadline, every other terminal attempt is a completed observation, so a method whose attempts all settled carries no censoring from another phase.
+fn attempt_latency_by_method(attempts: &[AttemptRecord]) -> BTreeMap<&'static str, GatedLatency> {
+    let mut observations: BTreeMap<&'static str, Vec<Observation>> = BTreeMap::new();
     for attempt in attempts {
-        samples
+        // Result polls keep the `Poll` disposition whatever their outcome, so a poll that hit the caller's or the host's deadline is recognized by its code.
+        let timed_out = attempt.disposition == AttemptDisposition::Timeout
+            || matches!(
+                attempt.code.as_deref(),
+                Some("timeout" | perf_measurement::ATTEMPT_TIMEOUT_CODE)
+            );
+        let observation = if timed_out {
+            Observation::censored(attempt.latency_ns)
+        } else {
+            Observation::completed(attempt.latency_ns)
+        };
+        observations
             .entry(attempt.method.wire_name())
             .or_default()
-            .push(attempt.latency_ns);
+            .push(observation);
     }
-    samples
+    observations
         .into_iter()
-        .filter_map(|(method, latencies)| {
-            GatedLatency::from_unsorted(latencies, censored_per_mille).map(|gated| (method, gated))
+        .filter_map(|(method, observations)| {
+            GatedLatency::from_observations(observations).map(|gated| (method, gated))
         })
         .collect()
 }
 
-fn logical_latency(records: &[LogicalRecord], censored_per_mille: f64) -> Option<GatedLatency> {
-    GatedLatency::from_unsorted(
+/// Completed requests are events; a timed-out request is censored at its deadline and a request still open at the window end is censored at the time it had before `window.end_ns`. Rejected requests carry no service latency and are excluded.
+fn logical_latency(
+    records: &[LogicalRecord],
+    window: &perf_measurement::HoldWindow,
+) -> Option<GatedLatency> {
+    GatedLatency::from_observations(
         records
             .iter()
-            .filter(|request| request.disposition == LogicalDisposition::Completed)
-            .map(|request| request.latency_ns)
+            .filter_map(|request| match request.disposition {
+                LogicalDisposition::Completed => Some(Observation::completed(request.latency_ns)),
+                LogicalDisposition::TimedOut => Some(Observation::censored(request.latency_ns)),
+                LogicalDisposition::InFlight => {
+                    Some(Observation::censored(window.end_ns.saturating_sub(
+                        perf_measurement::HoldWindow::opened_ns(request),
+                    )))
+                }
+                LogicalDisposition::Rejected => None,
+            })
             .collect(),
-        censored_per_mille,
     )
 }
 
@@ -1893,9 +2064,14 @@ async fn run(
     if let Arm::Batch(shape) = opts.arm {
         limits.max_page_vectors = shape.page_vectors();
     }
+    let retained_result_bytes = limits.max_retained_result_bytes;
     let component = SynapseComponent::ready_with_engine(lane(), engine, limits)
         .map_err(|error| format!("validate Synapse limits: {error}"))?;
-    let host = HostThread::start(component, data_root.path().to_path_buf())?;
+    let host = HostThread::start(
+        component,
+        data_root.path().to_path_buf(),
+        retained_result_bytes,
+    )?;
     let publication = data_root
         .path()
         .join("eidnara")
@@ -1945,8 +2121,8 @@ async fn run(
     } else {
         censored as f64 * 1_000.0 / ledger.offered as f64
     };
-    let attempt_latency = attempt_latency_by_method(&attempt_estimates, censored_per_mille);
-    let logical_latency = logical_latency(&logical_estimates, censored_per_mille);
+    let attempt_latency = attempt_latency_by_method(&attempt_estimates);
+    let logical_latency = logical_latency(&logical_estimates, &window);
     let latency_residual_ns = SignedSummary::from_unsorted(
         attempt_estimates
             .iter()
@@ -1968,6 +2144,11 @@ async fn run(
             .map(|request| request.polls)
             .collect(),
     );
+    let writer_wait_max_ns = ctx.wire.writer_wait_max_ns();
+    let overdeadline_writes = ctx.wire.overdeadline_writes();
+    drop(ctx);
+    // Shutdown joins every started native call, so a call that outlived its caller's deadline has appended its sample before the snapshot below; snapshotting first would drop the longest service observations.
+    host.shutdown()?;
     let mut service_samples = service.lock().expect("service samples").clone();
     for sample in &mut service_samples {
         sample.window = window.classify(sample.started_ns);
@@ -1977,7 +2158,8 @@ async fn run(
         .filter(|sample| sample.window.is_measured())
         .map(|sample| sample.service_ns)
         .collect();
-    let service_time = GatedLatency::from_unsorted(service_measured.clone(), censored_per_mille);
+    // Shutdown drained every started native call before the snapshot, so every service observation completed.
+    let service_time = GatedLatency::from_completed(service_measured.clone());
     let service_time_mean_ns = mean(&service_measured);
     let service_time_cv = coefficient_of_variation(&service_measured);
     let summary = Summary {
@@ -2003,7 +2185,7 @@ async fn run(
         service_measured_samples: service_measured.len() as u64,
         service_excluded_samples: (service_samples.len() - service_measured.len()) as u64,
         send_lag_max_ns,
-        writer_wait_max_ns: ctx.wire.writer_wait_max_ns(),
+        writer_wait_max_ns,
         missed_slots,
         hold_window_start_ns: window.start_ns,
         warmup_end_ns: window.warmup_end_ns,
@@ -2033,11 +2215,9 @@ async fn run(
         task_window_start_ns: task_window.as_ref().map(|window| window.observed_start_ns),
         task_window_end_ns: task_window.as_ref().map(|window| window.observed_end_ns),
         connection_loss_errors,
-        overdeadline_writes: ctx.wire.overdeadline_writes(),
+        overdeadline_writes,
         fatal_errors,
     };
-    drop(ctx);
-    host.shutdown()?;
     Ok((logical, attempts, service_samples, summary))
 }
 
@@ -2236,18 +2416,27 @@ mod tests {
 
     #[test]
     fn logical_latency_counts_only_completed_requests() {
+        let window = perf_measurement::HoldWindow {
+            start_ns: 0,
+            warmup_end_ns: 0,
+            end_ns: 1_000_000,
+        };
         let mut records = vec![
             logical(1, LogicalDisposition::Completed),
             logical(2, LogicalDisposition::Completed),
             logical(3, LogicalDisposition::Rejected),
-            logical(4, LogicalDisposition::TimedOut),
-            logical(5, LogicalDisposition::InFlight),
         ];
+        // A rejection carries no service latency and neither counts nor censors.
         records[2].latency_ns = 1_000;
-        let summary = logical_latency(&records, 0.0).expect("two completed samples");
+        let summary = logical_latency(&records, &window).expect("two completed samples");
         assert_eq!(summary.count, 2);
         assert_eq!(summary.max_ns, 1);
-        assert!(logical_latency(&records[2..], 0.0).is_none());
+        assert!(logical_latency(&records[2..], &window).is_none());
+
+        // Two censored requests beside two completed ones leave the upper half unidentifiable, so no summary is published.
+        records.push(logical(4, LogicalDisposition::TimedOut));
+        records.push(logical(5, LogicalDisposition::InFlight));
+        assert!(logical_latency(&records, &window).is_none());
     }
 
     #[test]
@@ -2273,7 +2462,7 @@ mod tests {
             attempt(2, SynapseMethod::Result, 10),
             attempt(3, SynapseMethod::Result, 30),
         ];
-        let by_method = attempt_latency_by_method(&attempts, 0.0);
+        let by_method = attempt_latency_by_method(&attempts);
         assert_eq!(
             by_method.keys().copied().collect::<Vec<_>>(),
             ["embed.batch", "embed.result"]
@@ -2281,7 +2470,24 @@ mod tests {
         assert_eq!(by_method["embed.batch"].count, 1);
         assert_eq!(by_method["embed.result"].count, 2);
         assert_eq!(by_method["embed.result"].max_ns, 30);
-        assert!(attempt_latency_by_method(&[], 0.0).is_empty());
+        assert!(attempt_latency_by_method(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_censored_observation_leaves_the_risk_set_at_its_own_duration() {
+        // Ten completed at 1..=10 and one request censored at 5: it is at risk for the first five events only, so the
+        // estimate rises faster after it leaves and the median moves from 5 to 6.
+        let mut observations: Vec<Observation> = (1..=10).map(Observation::completed).collect();
+        let uncensored = GatedLatency::from_observations(observations.clone()).unwrap();
+        assert_eq!(uncensored.p50_ns, 5);
+        observations.push(Observation::censored(5));
+        let censored = GatedLatency::from_observations(observations).unwrap();
+        assert_eq!(censored.count, 10);
+        assert_eq!(censored.p50_ns, 6);
+        // A request censored after microseconds barely moves the estimate, unlike placing it above every completed sample.
+        let mut early: Vec<Observation> = (1..=10).map(Observation::completed).collect();
+        early.push(Observation::censored(0));
+        assert_eq!(GatedLatency::from_observations(early).unwrap().p50_ns, 5);
     }
 
     #[test]
@@ -2291,28 +2497,41 @@ mod tests {
         assert_eq!(p99_floor, 3_000);
         assert_eq!(p999_floor, perf_measurement::TAIL_SAMPLE_FLOOR);
 
-        let below = GatedLatency::from_unsorted((1..p99_floor).collect(), 0.0).unwrap();
+        let below = GatedLatency::from_completed((1..p99_floor).collect()).unwrap();
         assert_eq!(below.p99_ns, None);
         assert_eq!(below.p999_ns, None);
         assert_eq!(below.p50_ns, 1_500);
 
-        let p99_only = GatedLatency::from_unsorted((1..=p99_floor).collect(), 0.0).unwrap();
+        let p99_only = GatedLatency::from_completed((1..=p99_floor).collect()).unwrap();
         assert_eq!(p99_only.p99_ns, Some(2_970));
         assert_eq!(p99_only.p999_ns, None);
 
-        let full = GatedLatency::from_unsorted((1..=p999_floor).collect(), 0.0).unwrap();
+        let full = GatedLatency::from_completed((1..=p999_floor).collect()).unwrap();
         assert!(full.p99_ns.is_some());
         assert!(full.p999_ns.is_some());
 
-        // Censoring above 1 per mille hides p99.9; above 10 per mille it hides p99 as well.
-        let p999_censored = GatedLatency::from_unsorted((1..=p999_floor).collect(), 1.5).unwrap();
+        // Requests censored beyond every completed duration cap the estimate at the completed fraction: more than
+        // 1 per mille hides p99.9 and more than 10 per mille hides p99. At exactly 10 per mille the p99 estimate exists but
+        // sits on the largest completion with nothing beyond it, so it lacks tail support and stays unpublished; 8 per mille
+        // leaves enough completed observations beyond the estimate to publish.
+        let with_late_censoring = |per_mille_tenths: u64| {
+            let completed = p999_floor;
+            let censored = completed * per_mille_tenths / (10_000 - per_mille_tenths);
+            let mut observations: Vec<Observation> =
+                (1..=completed).map(Observation::completed).collect();
+            observations.extend((0..censored).map(|_| Observation::censored(completed + 1)));
+            GatedLatency::from_observations(observations).unwrap()
+        };
+        let p999_censored = with_late_censoring(15);
         assert!(p999_censored.p99_ns.is_some());
         assert_eq!(p999_censored.p999_ns, None);
-        let p99_censored = GatedLatency::from_unsorted((1..=p999_floor).collect(), 10.5).unwrap();
+        let p99_censored = with_late_censoring(105);
         assert_eq!(p99_censored.p99_ns, None);
         assert_eq!(p99_censored.p999_ns, None);
-        let at_boundary = GatedLatency::from_unsorted((1..=p999_floor).collect(), 10.0).unwrap();
-        assert!(at_boundary.p99_ns.is_some());
+        let at_boundary = with_late_censoring(100);
+        assert_eq!(at_boundary.p99_ns, None);
+        let supported = with_late_censoring(80);
+        assert!(supported.p99_ns.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

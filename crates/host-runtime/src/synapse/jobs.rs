@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -30,6 +31,8 @@ pub enum AdmitOutcome {
     Existing(JobDescriptor),
     /// Same retained key with a conflicting payload.
     Conflict,
+    /// Key not retained and not the canonical key of its payload.
+    KeyMismatch,
     /// New job admitted; the caller must start exactly one worker for it.
     Admitted { job_id: String, seq: u64 },
     /// Admission capacity is exhausted and nothing evictable remains.
@@ -62,6 +65,27 @@ pub struct ResultPage {
     pub vectors: Vec<(String, String, Arc<[f32]>)>,
     pub done: bool,
     pub next_cursor: Option<String>,
+    /// Keeps the job's result bytes counted as live while this page holds its vectors, so an eviction during response construction cannot free capacity the vectors still occupy.
+    pub lease: Arc<ResultLease>,
+}
+
+/// One completed job's result bytes, counted in the table's live total for as long as any holder (the job or a served page) keeps the vectors alive.
+pub struct ResultLease {
+    bytes: u64,
+    live: Arc<AtomicU64>,
+}
+
+impl ResultLease {
+    fn new(bytes: u64, live: Arc<AtomicU64>) -> Self {
+        live.fetch_add(bytes, Ordering::Relaxed);
+        Self { bytes, live }
+    }
+}
+
+impl Drop for ResultLease {
+    fn drop(&mut self) {
+        self.live.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
 }
 
 enum JobState {
@@ -72,9 +96,8 @@ enum JobState {
     Ready {
         vectors: Vec<Arc<[f32]>>,
         boundaries: Vec<usize>,
-        /// Highest page boundary this job has returned as a `next_cursor`.
-        /// Cursors are issued in page order, so every issued boundary is at most this value; a boundary above it is never-issued and must be rejected even though it is a legal page start.
-        issued_through: usize,
+        /// Dropped with the job on eviction; pages served from the job hold clones, so the live total falls only when the last holder goes.
+        lease: Arc<ResultLease>,
     },
     Failed {
         code: String,
@@ -166,7 +189,11 @@ impl Jobs {
 pub struct JobTable {
     limits: SynapseLimits,
     incarnation: String,
+    /// Keys the authenticator in every issued cursor. A client can hold a valid cursor only by receiving it from this table, so a never-issued boundary cannot be fabricated even though its position is predictable.
+    cursor_key: [u8; 32],
     inner: std::sync::Mutex<Jobs>,
+    /// Result bytes still alive anywhere: retained by a job or held by a page being served. `Jobs::retained_result_bytes` counts only retained jobs and drives eviction; this total is what admission measures against the cap.
+    live_result_bytes: Arc<AtomicU64>,
 }
 
 /// The serialized JSON string contains `s`'s escaped form, excluding its delimiting quotes.
@@ -297,9 +324,13 @@ impl JobTable {
         let mut nonce = [0u8; 8];
         // The incarnation fence must be unpredictable across restarts so stale job IDs cannot name live jobs.
         getrandom::getrandom(&mut nonce).expect("OS entropy for the job incarnation");
+        let mut cursor_key = [0u8; 32];
+        getrandom::getrandom(&mut cursor_key).expect("OS entropy for the cursor key");
         Self {
             limits,
             incarnation: nonce.iter().map(|b| format!("{b:02x}")).collect(),
+            cursor_key,
+            live_result_bytes: Arc::new(AtomicU64::new(0)),
             inner: std::sync::Mutex::new(Jobs {
                 by_key: HashMap::new(),
                 by_seq: HashMap::new(),
@@ -341,13 +372,22 @@ impl JobTable {
         items: Vec<BatchItem>,
         dimensions: usize,
     ) -> AdmitOutcome {
-        self.admit_charged(key, items, dimensions, &mut ByteCharge::none())
+        let canonical_key = key.clone();
+        self.admit_charged(
+            key,
+            &canonical_key,
+            items,
+            dimensions,
+            &mut ByteCharge::none(),
+        )
     }
 
     /// `admit_charged` transfers `charge` only when it returns `Admitted`; all other outcomes leave it with the caller.
+    /// A retained `key` is classified against its retained payload before `canonical_key` is consulted, under the same lock, so reuse of a retained key with a changed payload is `Conflict` rather than a fresh-key mismatch.
     pub(crate) fn admit_charged(
         &self,
         key: String,
+        canonical_key: &str,
         items: Vec<BatchItem>,
         dimensions: usize,
         charge: &mut ByteCharge,
@@ -383,6 +423,8 @@ impl JobTable {
                     });
                 }
             }
+        } else if key != canonical_key {
+            return AdmitOutcome::KeyMismatch;
         }
 
         let Some(result_bytes) = result_bytes else {
@@ -402,6 +444,11 @@ impl JobTable {
                 > self.limits.max_queued_request_bytes
         {
             // Queued and running jobs are never evicted; a full admission class rejects new work.
+            return AdmitOutcome::Full;
+        }
+
+        // Result capacity is reserved here, before inference allocates the vectors, so retained bytes plus every in-flight reservation stay within the cap the lane declares to the host; publishing a result can then never overshoot it.
+        if !self.reserve_result_bytes(&mut jobs, result_bytes, &mut released) {
             return AdmitOutcome::Full;
         }
 
@@ -494,7 +541,10 @@ impl JobTable {
         job.state = JobState::Ready {
             vectors,
             boundaries,
-            issued_through: 0,
+            lease: Arc::new(ResultLease::new(
+                result_bytes,
+                Arc::clone(&self.live_result_bytes),
+            )),
         };
         job.result_bytes = result_bytes;
         job.completed_at = Some(Instant::now());
@@ -531,6 +581,9 @@ impl JobTable {
         }
         let text_bytes = job.text_bytes;
         job.text_bytes = 0;
+        // The failure message is retained uncharged for the retention window, so it is bounded to the diagnostic cap the wire enforces anyway.
+        let mut message = message;
+        super::protocol::bound_diagnostic(&mut message);
         job.state = JobState::Failed { code, message };
         job.completed_at = Some(Instant::now());
         // Failure drops queued items and worker-owned texts.
@@ -555,7 +608,11 @@ impl JobTable {
         if job.key != key {
             return PollOutcome::KeyMismatch;
         }
-        match &mut job.state {
+        // Only a ready job has ever issued a cursor, so any cursor on a queued, running, or failed job is never-issued.
+        if cursor.is_some() && !matches!(job.state, JobState::Ready { .. }) {
+            return PollOutcome::BadCursor;
+        }
+        match &job.state {
             JobState::Queued { .. } | JobState::Running => PollOutcome::Pending {
                 status: job.status(),
             },
@@ -566,16 +623,14 @@ impl JobTable {
             JobState::Ready {
                 vectors,
                 boundaries,
-                issued_through,
+                lease,
             } => {
                 let offset = match cursor {
                     None => 0,
-                    Some(cursor) => {
-                        match self.parse_cursor(cursor, seq, boundaries, *issued_through) {
-                            Some(offset) => offset,
-                            None => return PollOutcome::BadCursor,
-                        }
-                    }
+                    Some(cursor) => match self.parse_cursor(cursor, seq, boundaries) {
+                        Some(offset) => offset,
+                        None => return PollOutcome::BadCursor,
+                    },
                 };
                 let next_boundary = boundaries
                     .iter()
@@ -589,38 +644,55 @@ impl JobTable {
                     })
                     .collect();
                 let done = next_boundary >= vectors.len();
-                let next_cursor = (!done).then(|| {
-                    // The cursor is issued once the page carrying it is served, so a replayed page re-issues the same boundary.
-                    *issued_through = (*issued_through).max(next_boundary);
-                    format!("{}:{next_boundary}", self.job_id(seq))
-                });
+                let next_cursor = (!done).then(|| self.cursor(seq, next_boundary));
                 // A served page marks the job as in use so retention prefers evicting jobs nobody is reading.
                 job.last_polled_at = Some(Instant::now());
                 PollOutcome::Page(ResultPage {
                     vectors: page,
                     done,
                     next_cursor,
+                    lease: Arc::clone(lease),
                 })
             }
         }
     }
 
-    /// Accept a cursor only when it names this job and its offset is a page boundary already issued as a `next_cursor`; allow previously served pages to be retried after a lost response.
-    /// A boundary above `issued_through` is a legal page start the caller has never been handed, so accepting it would let a client skip pages the protocol defines as opaque and never-issued.
-    /// The offset uses the same canonical-decimal rule as the job sequence so a never-issued spelling such as `+16` or `0016` is rejected.
-    fn parse_cursor(
-        &self,
-        cursor: &str,
-        seq: u64,
-        boundaries: &[usize],
-        issued_through: usize,
-    ) -> Option<usize> {
-        let (job_id, offset) = cursor.rsplit_once(':')?;
+    /// Cursors are `<job_id>:<boundary>:<authenticator>`. The authenticator is a keyed digest over the job and boundary, so only a cursor this table issued verifies; a client cannot name a legal page it has never been handed, and every issued cursor, including one whose response was lost, replays its page.
+    fn cursor(&self, seq: u64, boundary: usize) -> String {
+        format!(
+            "{}:{boundary}:{}",
+            self.job_id(seq),
+            self.cursor_authenticator(seq, boundary)
+        )
+    }
+
+    fn cursor_authenticator(&self, seq: u64, boundary: usize) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.cursor_key);
+        hasher.update(seq.to_le_bytes());
+        hasher.update((boundary as u64).to_le_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// Accepts a cursor only when it names this job, its boundary is a page start, and its authenticator matches the one this table issues for that boundary.
+    /// The boundary uses the same canonical-decimal rule as the job sequence so a never-issued spelling such as `+16` or `0016` is rejected.
+    fn parse_cursor(&self, cursor: &str, seq: u64, boundaries: &[usize]) -> Option<usize> {
+        let (rest, authenticator) = cursor.rsplit_once(':')?;
+        let (job_id, offset) = rest.rsplit_once(':')?;
         if self.parse_job_id(job_id) != Some(seq) {
             return None;
         }
         let offset = usize::try_from(parse_canonical_decimal(offset)?).ok()?;
-        (offset <= issued_through && boundaries.contains(&offset)).then_some(offset)
+        // Constant-time comparison keeps a forged authenticator from being refined byte by byte through timing.
+        let expected = self.cursor_authenticator(seq, offset);
+        let authentic: bool =
+            subtle::ConstantTimeEq::ct_eq(authenticator.as_bytes(), expected.as_bytes()).into();
+        (boundaries.contains(&offset) && authentic).then_some(offset)
     }
 
     /// `MAX_F32_JSON_BYTES` is the longest `serde_json` encoding of a finite `f32`, e.g. `-0.0000010000001`.
@@ -726,6 +798,68 @@ impl JobTable {
         }
     }
 
+    /// Evicts completed jobs, oldest by [`Job::retention_rank`] first, until `result_bytes` fits beside every live result and every queued or running job's reservation.
+    /// Bytes that eviction cannot free are checked first: in-flight reservations, the new result, and vectors of already-evicted jobs that a served page still holds. When those alone exceed the cap, nothing is evicted and the caller reports admission as full.
+    fn reserve_result_bytes(
+        &self,
+        jobs: &mut Jobs,
+        result_bytes: u64,
+        released: &mut Released,
+    ) -> bool {
+        let cap = self.limits.max_retained_result_bytes;
+        let in_flight: u64 = jobs
+            .by_seq
+            .values()
+            .filter(|job| !job.is_completed())
+            .map(|job| job.reserved_result_bytes)
+            .fold(0, u64::saturating_add);
+        let floor = in_flight.saturating_add(result_bytes);
+        // Jobs already swept or evicted into `released` drop after the table lock, so their still-counted bytes are subtracted here by hand until then.
+        let mut releasing = released
+            .jobs
+            .iter()
+            .filter(|job| Self::eviction_frees_bytes(job))
+            .fold(0u64, |total, job| total.saturating_add(job.result_bytes));
+        loop {
+            let live = self
+                .live_result_bytes
+                .load(Ordering::Relaxed)
+                .saturating_sub(releasing);
+            if live.saturating_add(floor) <= cap {
+                return true;
+            }
+            // Only a ready job whose lease no served page shares frees bytes when evicted; a page-leased job or a zero-byte failure record would be lost for nothing.
+            let releasable = jobs
+                .by_seq
+                .values()
+                .filter(|job| Self::eviction_frees_bytes(job))
+                .fold(0u64, |total, job| total.saturating_add(job.result_bytes));
+            if live.saturating_sub(releasable).saturating_add(floor) > cap {
+                return false;
+            }
+            let victim = jobs
+                .by_seq
+                .values()
+                .filter(|job| Self::eviction_frees_bytes(job))
+                .min_by_key(|job| job.retention_rank())
+                .map(|job| job.seq);
+            let Some(seq) = victim else {
+                return false;
+            };
+            let job = Self::remove(jobs, seq);
+            releasing = releasing.saturating_add(job.as_ref().map_or(0, |job| job.result_bytes));
+            released.job(job);
+        }
+    }
+
+    /// A ready job with result bytes whose lease has no other holder releases those bytes on eviction; a page mid-response holds a clone and keeps them live, and a failed job holds none.
+    fn eviction_frees_bytes(job: &Job) -> bool {
+        match &job.state {
+            JobState::Ready { lease, .. } => job.result_bytes > 0 && Arc::strong_count(lease) == 1,
+            _ => false,
+        }
+    }
+
     fn remove(jobs: &mut Jobs, seq: u64) -> Option<Job> {
         let job = jobs.by_seq.remove(&seq)?;
         jobs.release_bytes(job.text_bytes, job.result_bytes);
@@ -796,7 +930,7 @@ mod tests {
 
         let mut candidate = budget.try_charge(job_bytes + 500).expect("candidate");
         let AdmitOutcome::Admitted { seq, .. } =
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut candidate)
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut candidate)
         else {
             panic!("admitted");
         };
@@ -837,14 +971,14 @@ mod tests {
 
         let mut first = budget.try_charge(job_bytes).expect("first");
         let AdmitOutcome::Admitted { .. } =
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut first)
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut first)
         else {
             panic!("admitted");
         };
 
         let mut replay = budget.try_charge(job_bytes).expect("replay");
         assert!(matches!(
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut replay),
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut replay),
             AdmitOutcome::Existing(_)
         ));
         assert_eq!(
@@ -854,11 +988,23 @@ mod tests {
         );
         drop(replay);
 
+        // A changed payload carries a different canonical key; the retained key still classifies it as a conflict rather than as a fresh-key mismatch.
         let other = vec![charged_item("b", "different")];
+        let other_canonical = "o".repeat(64);
         let mut conflict = budget.try_charge(1_000).expect("conflict");
         assert!(matches!(
-            jobs.admit_charged(key.clone(), other, 4, &mut conflict),
+            jobs.admit_charged(
+                key.clone(),
+                &other_canonical,
+                other.clone(),
+                4,
+                &mut conflict
+            ),
             AdmitOutcome::Conflict
+        ));
+        assert!(matches!(
+            jobs.admit_charged("f".repeat(64), &other_canonical, other, 4, &mut conflict),
+            AdmitOutcome::KeyMismatch
         ));
         assert_eq!(
             conflict.bytes(),
@@ -872,6 +1018,7 @@ mod tests {
         assert!(matches!(
             jobs.admit_charged(
                 "x".repeat(64),
+                &"x".repeat(64),
                 vec![charged_item("c", "gamma")],
                 4,
                 &mut closed
@@ -901,7 +1048,8 @@ mod tests {
         let admit = |key: String, items: Vec<BatchItem>| {
             let bytes = job_input_bytes(&key, &items);
             let mut charge = budget.try_charge(bytes).expect("charge");
-            let AdmitOutcome::Admitted { seq, .. } = jobs.admit_charged(key, items, 4, &mut charge)
+            let AdmitOutcome::Admitted { seq, .. } =
+                jobs.admit_charged(key.clone(), &key, items, 4, &mut charge)
             else {
                 panic!("admitted");
             };
@@ -955,7 +1103,8 @@ mod tests {
         let mut charge = budget
             .try_charge(job_input_bytes(&key, &items))
             .expect("charge");
-        let AdmitOutcome::Admitted { seq, .. } = jobs.admit_charged(key, items, 4, &mut charge)
+        let AdmitOutcome::Admitted { seq, .. } =
+            jobs.admit_charged(key.clone(), &key, items, 4, &mut charge)
         else {
             panic!("admitted");
         };
@@ -981,7 +1130,7 @@ mod tests {
 
         let mut first = budget.try_charge(job_bytes).expect("charge");
         let AdmitOutcome::Admitted { seq, .. } =
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut first)
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut first)
         else {
             panic!("admitted");
         };
@@ -989,7 +1138,7 @@ mod tests {
 
         let mut rejected = budget.try_charge(job_bytes).expect("rejected charge");
         assert!(matches!(
-            jobs.admit_charged(key.clone(), items.clone(), usize::MAX, &mut rejected),
+            jobs.admit_charged(key.clone(), &key, items.clone(), usize::MAX, &mut rejected),
             AdmitOutcome::ResultTooLarge
         ));
         drop(rejected);
@@ -1000,7 +1149,7 @@ mod tests {
 
         let mut second = budget.try_charge(job_bytes).expect("recharge");
         let AdmitOutcome::Admitted { seq: retry_seq, .. } =
-            jobs.admit_charged(key.clone(), items.clone(), 4, &mut second)
+            jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut second)
         else {
             panic!("retry admitted");
         };
@@ -1020,7 +1169,7 @@ mod tests {
         let mut third = budget.try_charge(job_bytes).expect("third charge");
         assert!(
             matches!(
-                jobs.admit_charged(key.clone(), items.clone(), 4, &mut third),
+                jobs.admit_charged(key.clone(), &key, items.clone(), 4, &mut third),
                 AdmitOutcome::Existing(descriptor) if descriptor.status == "failed"
             ),
             "a permanent failure replays rather than re-running"
@@ -1182,7 +1331,147 @@ mod tests {
     }
 
     #[test]
-    fn a_page_boundary_is_a_valid_cursor_only_after_it_was_issued() {
+    fn admission_reserves_result_capacity_before_inference_allocates_it() {
+        let dimensions = 2;
+        let one_result =
+            result_bytes(1, dimensions, 1 + CONTENT_SHA256_BYTES).expect("small result size");
+        let limits = SynapseLimits {
+            max_retained_result_bytes: one_result,
+            ..SynapseLimits::default()
+        };
+        let jobs = JobTable::new(limits);
+        let item = |id: &str| vec![charged_item(id, "alpha")];
+
+        let AdmitOutcome::Admitted {
+            job_id: first_id,
+            seq: first,
+        } = jobs.admit_uncharged_for_tests("first".to_owned(), item("a"), dimensions)
+        else {
+            panic!("first job is admitted");
+        };
+        jobs.start(first).expect("first job starts");
+        jobs.publish_ready(first, vec![vec![0.5; dimensions]]);
+        assert!(matches!(
+            jobs.poll(&first_id, "first", None),
+            PollOutcome::Page(_)
+        ));
+
+        // The retained result fills the cap, so admitting a second job evicts it before any inference runs.
+        let AdmitOutcome::Admitted { seq: second, .. } =
+            jobs.admit_uncharged_for_tests("second".to_owned(), item("b"), dimensions)
+        else {
+            panic!("second job is admitted by evicting the retained result");
+        };
+        assert!(
+            matches!(jobs.poll(&first_id, "first", None), PollOutcome::Restarted),
+            "the retained result was evicted at admission"
+        );
+        assert_eq!(jobs.lock_jobs().retained_result_bytes, 0);
+
+        // With the cap held by an in-flight reservation and nothing completed to evict, admission is full.
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("third".to_owned(), item("c"), dimensions),
+            AdmitOutcome::Full
+        ));
+        jobs.start(second).expect("second job starts");
+        jobs.publish_ready(second, vec![vec![0.5; dimensions]]);
+        assert_eq!(jobs.lock_jobs().retained_result_bytes, one_result);
+    }
+
+    #[test]
+    fn a_page_leased_result_is_not_evicted_while_its_page_is_served() {
+        let dimensions = 2;
+        let one_result =
+            result_bytes(1, dimensions, 1 + CONTENT_SHA256_BYTES).expect("small result size");
+        let limits = SynapseLimits {
+            max_retained_result_bytes: one_result,
+            ..SynapseLimits::default()
+        };
+        let jobs = JobTable::new(limits);
+        let item = |id: &str| vec![charged_item(id, "alpha")];
+
+        let AdmitOutcome::Admitted {
+            job_id: first_id,
+            seq: first,
+        } = jobs.admit_uncharged_for_tests("first".to_owned(), item("a"), dimensions)
+        else {
+            panic!("first job is admitted");
+        };
+        jobs.start(first).expect("first job starts");
+        jobs.publish_ready(first, vec![vec![0.5; dimensions]]);
+        let PollOutcome::Page(page) = jobs.poll(&first_id, "first", None) else {
+            panic!("the result is served");
+        };
+
+        // The served page holds the job's vectors, so evicting the job could not free its bytes: admission is full and the job stays retained for its reader.
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("second".to_owned(), item("b"), dimensions),
+            AdmitOutcome::Full
+        ));
+        assert!(matches!(
+            jobs.poll(&first_id, "first", None),
+            PollOutcome::Page(_)
+        ));
+        assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), one_result);
+
+        // Once the page is gone the job is an ordinary eviction candidate again.
+        drop(page);
+        assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), one_result);
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("second".to_owned(), item("b"), dimensions),
+            AdmitOutcome::Admitted { .. }
+        ));
+        assert!(matches!(
+            jobs.poll(&first_id, "first", None),
+            PollOutcome::Restarted
+        ));
+        assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn an_unsatisfiable_result_reservation_evicts_nothing() {
+        let dimensions = 2;
+        let two_results =
+            result_bytes(2, dimensions, 2 * (1 + CONTENT_SHA256_BYTES)).expect("two-item size");
+        let limits = SynapseLimits {
+            max_retained_result_bytes: two_results,
+            ..SynapseLimits::default()
+        };
+        let jobs = JobTable::new(limits);
+        let item = |id: &str| vec![charged_item(id, "alpha")];
+
+        // One retained result and one in-flight reservation share the cap.
+        let AdmitOutcome::Admitted {
+            job_id: retained_id,
+            seq: retained,
+        } = jobs.admit_uncharged_for_tests("retained".to_owned(), item("a"), dimensions)
+        else {
+            panic!("retained job is admitted");
+        };
+        jobs.start(retained).expect("retained job starts");
+        jobs.publish_ready(retained, vec![vec![0.5; dimensions]]);
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("running".to_owned(), item("b"), dimensions),
+            AdmitOutcome::Admitted { .. }
+        ));
+
+        // A two-item request cannot fit beside the in-flight reservation even with the cap emptied, so the retained result survives the rejection.
+        let two_items = vec![charged_item("c", "gamma"), charged_item("d", "delta")];
+        assert!(matches!(
+            jobs.admit_uncharged_for_tests("large".to_owned(), two_items, dimensions),
+            AdmitOutcome::Full
+        ));
+        assert!(
+            matches!(
+                jobs.poll(&retained_id, "retained", None),
+                PollOutcome::Page(_)
+            ),
+            "a rejection that eviction could not have satisfied leaves retained results alone"
+        );
+    }
+
+    #[test]
+    fn only_cursors_the_table_issued_resolve() {
         let limits = SynapseLimits {
             max_page_vectors: 1,
             ..SynapseLimits::default()
@@ -1201,33 +1490,47 @@ mod tests {
         jobs.start(seq).expect("paged job starts");
         jobs.publish_ready(seq, vec![vec![1.0], vec![1.0], vec![1.0]]);
 
-        // Boundaries 1 and 2 are legal page starts, but neither has been issued yet.
-        for unissued in [1, 2] {
+        // Boundaries 1 and 2 are legal page starts, but a client cannot name them without the table's authenticator.
+        for fabricated in [
+            format!("{job_id}:1"),
+            format!("{job_id}:2"),
+            format!("{job_id}:1:{}", "0".repeat(32)),
+            format!("{job_id}:2:{}", "f".repeat(32)),
+        ] {
             assert!(
                 matches!(
-                    jobs.poll(&job_id, "paged", Some(&format!("{job_id}:{unissued}"))),
+                    jobs.poll(&job_id, "paged", Some(&fabricated)),
                     PollOutcome::BadCursor
                 ),
-                "boundary {unissued} was never issued"
+                "fabricated cursor {fabricated} must not resolve"
             );
         }
 
         let PollOutcome::Page(first) = jobs.poll(&job_id, "paged", None) else {
             panic!("the first page is served from a null cursor");
         };
-        let second_cursor = first.next_cursor.expect("the first page issues a cursor");
-        assert_eq!(second_cursor, format!("{job_id}:1"));
+        let second_cursor = first.next_cursor.expect("the first page carries a cursor");
+        assert!(second_cursor.starts_with(&format!("{job_id}:1:")));
+        assert!(second_cursor.len() <= super::super::protocol::MAX_CURSOR_BYTES);
 
-        // The issued boundary resolves; the one after it is still unissued.
+        // An issued cursor's authenticator is bound to its boundary, so moving it to another boundary fails.
+        let authenticator = second_cursor.rsplit(':').next().expect("authenticator");
         assert!(matches!(
-            jobs.poll(&job_id, "paged", Some(&format!("{job_id}:2"))),
+            jobs.poll(
+                &job_id,
+                "paged",
+                Some(&format!("{job_id}:2:{authenticator}"))
+            ),
             PollOutcome::BadCursor
         ));
+
         let PollOutcome::Page(second) = jobs.poll(&job_id, "paged", Some(&second_cursor)) else {
             panic!("an issued cursor serves its page");
         };
         assert_eq!(second.vectors[0].0, "b");
-        let third_cursor = second.next_cursor.expect("the second page issues a cursor");
+        let third_cursor = second
+            .next_cursor
+            .expect("the second page carries a cursor");
 
         // Replaying an earlier issued cursor stays valid after later pages were served.
         assert!(matches!(

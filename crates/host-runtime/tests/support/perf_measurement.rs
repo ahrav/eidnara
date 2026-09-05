@@ -187,7 +187,8 @@ pub fn tail_publishable(successful_observations: u64) -> bool {
 /// `quantile_per_mille` is the quantile scaled by 1,000 (`999` for p99.9, `990` for p99) and must be below 1,000.
 pub fn quantile_sample_floor(quantile_per_mille: u64) -> u64 {
     assert!(quantile_per_mille < 1_000, "quantile must be below 1.0");
-    TAIL_SAMPLE_FLOOR / (1_000 - quantile_per_mille)
+    // Rounding up preserves the tail-sample floor when the quantile distance does not divide it evenly.
+    TAIL_SAMPLE_FLOOR.div_ceil(1_000 - quantile_per_mille)
 }
 
 pub fn quantile_publishable(observations: u64, quantile_per_mille: u64) -> bool {

@@ -53,6 +53,16 @@ export default function (pi) {
 			"max_tokens",
 			"maxOutputTokens",
 		].filter((name) => name in payload);
+		// A present but non-object generationConfig would be copied through unowned; the hook
+		// refuses rather than forward a generation-control field it cannot cap.
+		if (
+			"generationConfig" in payload &&
+			!isPlainObject(payload.generationConfig)
+		) {
+			throw new Error(
+				"broca payload hook: unsupported generationConfig shape",
+			);
+		}
 		const generationConfig = isPlainObject(payload.generationConfig)
 			? payload.generationConfig
 			: null;

@@ -144,13 +144,13 @@ async fn expect_limits_fail_startup(
 #[tokio::test(start_paused = true)]
 async fn waiting_query_memory_bound_rejects_both_construction_paths() {
     // At default limits, K=4 is the largest feasible waiter count.
-    // Available scratch after retained metadata is 182,519,040 bytes.
-    // Each waiter slot consumes 2 * max_text_bytes + 256 = 2,097,408 bytes.
+    // Available scratch after retained metadata is 182,781,184 bytes.
+    // Each waiter slot consumes 2 * max_text_bytes + 256 + 65,536 = 2,162,944 bytes.
     // Queued text consumes max_queued_request_bytes = 67,108,864 bytes.
     // Queued metadata consumes 64 jobs * (2*64 + 64 * 960) = 3,940,352 bytes.
     // Worst-case parsing consumes 3 * 32 MiB + 64 * 640 + 4096 = 100,708,352 bytes.
-    // K = 4 consumes 182,244,608 bytes, within the 182,519,040-byte scratch bound.
-    // K = 5 consumes 184,342,016 bytes, exceeding the 182,519,040-byte scratch bound.
+    // K = 4 consumes 182,572,288 bytes, within the 182,781,184-byte scratch bound.
+    // K = 5 consumes 184,735,232 bytes, exceeding the 182,781,184-byte scratch bound.
     const BOUNDARY: usize = 4;
 
     // K=4, the largest feasible value, constructs on both paths.

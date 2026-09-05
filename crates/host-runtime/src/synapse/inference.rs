@@ -10,12 +10,10 @@ use fastembed::{
     UserDefinedEmbeddingModel,
 };
 
-use super::bundle::{Corpus, SelectedOutput, VerifiedBundle};
+use super::bundle::{Corpus, CorpusItem, SelectedOutput, VerifiedBundle};
 #[cfg(target_os = "linux")]
 use super::bundle::{OpenRegularFileError, open_regular_file, validate_sha256_hex};
 
-/// `NORM_TOLERANCE` permits a returned vector's L2 norm to differ from 1.0 by at most 1e-3; larger deviations are invariant failures.
-const NORM_TOLERANCE: f64 = 1e-3;
 /// CPU ONNX Runtime contains executable code and static runtime tables, not model weights.
 /// The 512 MiB limit bounds the verification source buffer and sealed memfd copy to 1 GiB.
 const MAX_ORT_LIBRARY_BYTES: u64 = 512 * 1024 * 1024;
@@ -27,12 +25,14 @@ pub struct OrtIdentity {
     pub sha256: String,
 }
 
-/// `Input` errors reject the affected request; a native inference failure over one page is `Input` because the model stays usable for other pages.
+/// `Input` errors reject the affected request as a caller fault: tokenization failures and zero-token texts.
+/// `Execution` errors are native runtime failures over one call (ORT session or tensor faults); the model stays usable, so the request is retryable and the lane keeps serving.
 /// `Artifact` errors disable the component.
 /// `Invariant` errors mark the component failing and prevent suspect vectors from being returned; only the dimension, finiteness, and norm postconditions raise them.
 #[derive(Debug, Clone)]
 pub enum InferenceError {
     Input(String),
+    Execution(String),
     Artifact(String),
     Invariant(String),
 }
@@ -41,6 +41,7 @@ impl std::fmt::Display for InferenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Input(reason) => write!(f, "invalid inference input: {reason}"),
+            Self::Execution(reason) => write!(f, "inference execution failure: {reason}"),
             Self::Artifact(reason) => write!(f, "inference artifact failure: {reason}"),
             Self::Invariant(reason) => write!(f, "inference invariant failure: {reason}"),
         }
@@ -207,9 +208,43 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
 }
 
 /// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
+/// Shortens `text` to at most `max_bytes` without splitting a character.
+fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+}
+
+/// The served-vector contract every engine must meet: `dims` finite components with an L2 norm within `UNIT_NORM_TOLERANCE` of 1.
+/// Accumulating in f64 keeps summation roundoff below the tolerance at `MAX_DIMS`; an f32 sum can drift past it and fail a correctly normalized vector.
+pub(crate) fn validate_unit_vector(dims: usize, vector: &[f32]) -> Result<(), String> {
+    if vector.len() != dims {
+        return Err(format!(
+            "vector has {} dimensions, manifest requires {dims}",
+            vector.len()
+        ));
+    }
+    if vector.iter().any(|v| !v.is_finite()) {
+        return Err("vector contains a non-finite component".to_owned());
+    }
+    let norm = vector
+        .iter()
+        .map(|v| f64::from(*v).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    if (norm - 1.0).abs() > super::bundle::UNIT_NORM_TOLERANCE {
+        return Err("vector is not L2-normalized".to_owned());
+    }
+    Ok(())
+}
+
 pub struct Backend {
     model: Mutex<TextEmbedding>,
     dims: usize,
+    /// The tokenizer truncates every text to this many tokens.
+    max_tokens: usize,
     /// When the tokenizer's post-processor adds special tokens, every encoding is non-empty and the per-text zero-token pass is skipped.
     zero_token_inputs_possible: bool,
 }
@@ -220,7 +255,9 @@ impl Backend {
 
         let VerifiedBundle {
             manifest,
-            max_text_bytes: _,
+            max_text_bytes,
+            max_batch_text_bytes,
+            certification_rows,
             onnx,
             initializers,
             tokenizer_file,
@@ -293,10 +330,12 @@ impl Backend {
         let backend = Self {
             model: Mutex::new(embedder),
             dims: manifest.dims as usize,
+            max_tokens: manifest.max_tokens as usize,
             zero_token_inputs_possible,
         };
         backend.structural_probe()?;
-        backend.certify(&corpus)?;
+        backend.certify(&corpus, certification_rows, max_batch_text_bytes)?;
+        backend.long_input_probe(&corpus, max_text_bytes, certification_rows)?;
         Ok(backend)
     }
 
@@ -328,9 +367,13 @@ impl Backend {
                 ));
             }
         }
-        let vectors = model
-            .embed(texts, None)
-            .map_err(|e| InferenceError::Input(format!("inference failed: {e}")))?;
+        // Tokenizer faults are caller input; everything else is a native runtime fault that must not be reported as a schema violation, or callers would never retry it.
+        let vectors = model.embed(texts, None).map_err(|error| match error {
+            fastembed::Error::Tokenization(_) | fastembed::Error::EmptyTokenizations => {
+                InferenceError::Input(format!("inference rejected the input: {error}"))
+            }
+            other => InferenceError::Execution(format!("inference failed: {other}")),
+        })?;
         drop(model);
         if vectors.len() != texts.len() {
             return Err(InferenceError::Invariant(
@@ -344,30 +387,7 @@ impl Backend {
     }
 
     fn validate_vector(&self, vector: &[f32]) -> Result<(), InferenceError> {
-        if vector.len() != self.dims {
-            return Err(InferenceError::Invariant(format!(
-                "vector has {} dimensions, manifest requires {}",
-                vector.len(),
-                self.dims
-            )));
-        }
-        if vector.iter().any(|v| !v.is_finite()) {
-            return Err(InferenceError::Invariant(
-                "vector contains a non-finite component".to_owned(),
-            ));
-        }
-        // Accumulating in f64 keeps summation roundoff below the tolerance at `MAX_DIMS`; an f32 sum can drift past it and fail a correctly normalized vector.
-        let norm = vector
-            .iter()
-            .map(|v| f64::from(*v).powi(2))
-            .sum::<f64>()
-            .sqrt();
-        if (norm - 1.0).abs() > NORM_TOLERANCE {
-            return Err(InferenceError::Invariant(
-                "vector is not L2-normalized".to_owned(),
-            ));
-        }
-        Ok(())
+        validate_unit_vector(self.dims, vector).map_err(InferenceError::Invariant)
     }
 
     fn structural_probe(&self) -> Result<(), InferenceError> {
@@ -383,19 +403,205 @@ impl Backend {
     /// certify uses a corpus that detects incorrect output selection, pooling, and truncation.
     /// certify rejects structurally healthy models with semantically incorrect output.
     /// load rejects semantically wrong models before returning a backend that can serve vectors.
-    fn certify(&self, corpus: &Corpus) -> Result<(), InferenceError> {
+    /// `batch_rows` is the size of the multi-row check: the largest batch the host admits, as sized by `load_bundle`.
+    /// `max_batch_text_bytes` bounds every certification batch's aggregate text the way the routed parser bounds a request, so certification never executes a workload the lane would refuse.
+    fn certify(
+        &self,
+        corpus: &Corpus,
+        batch_rows: usize,
+        max_batch_text_bytes: usize,
+    ) -> Result<(), InferenceError> {
+        let matches = |got: &[f32], item: &CorpusItem| {
+            !super::bundle::certification_mismatch(got, &item.expected, corpus.tolerance)
+        };
         for item in &corpus.items {
             let got = self.embed(&[item.text.as_str()])?;
-            let got = &got[0];
-            let mismatch = got
-                .iter()
-                .zip(&item.expected)
-                .any(|(g, e)| (g - e).abs() > corpus.tolerance);
-            if mismatch {
+            if !matches(&got[0], item) {
                 return Err(InferenceError::Artifact(
                     "semantic certification failed".to_owned(),
                 ));
             }
+        }
+        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so multi-row calls are certified as well.
+        // The attribution call uses only pairwise-distinct expectations, so any permutation of its rows changes some row's output and is caught; repeated expectations would let a permutation among equal rows pass unseen.
+        // The set is seeded with a mismatching pair so it always holds two rows, then grows greedily up to the admitted batch size.
+        let differ = |a: &CorpusItem, b: &CorpusItem| {
+            super::bundle::certification_mismatch(&a.expected, &b.expected, corpus.tolerance)
+        };
+        let mut distinct: Vec<&CorpusItem> = corpus
+            .items
+            .iter()
+            .enumerate()
+            .find_map(|(index, first)| {
+                corpus.items[index + 1..]
+                    .iter()
+                    .find(|second| differ(first, second))
+                    .map(|second| vec![first, second])
+            })
+            .unwrap_or_else(|| vec![&corpus.items[0]]);
+        for item in &corpus.items {
+            if distinct.len() >= batch_rows.max(1) {
+                break;
+            }
+            if distinct.iter().all(|kept| differ(kept, item)) {
+                distinct.push(item);
+            }
+        }
+        // A lane that admits one item per batch is never asked for two rows, so its certification stays within that contract; the aggregate cap trims the batch the same way.
+        distinct.truncate(batch_rows.max(1));
+        while distinct.len() > 1
+            && distinct.iter().map(|item| item.text.len()).sum::<usize>() > max_batch_text_bytes
+        {
+            distinct.pop();
+        }
+        if distinct.len() >= 2 {
+            self.certify_batch(&distinct, &matches)?;
+        }
+        // Full-size batches certify every admitted position with only two distinct items: batch `k` labels each position by bit `k` of its index and its complement swaps the labels, so any two positions differ in some batch and every position sees both items. A graph that mixes rows at any pair of positions, or mishandles one input at one position, produces a mismatch. The same batches are the capacity check, so a graph that fails only at the admitted size is caught too.
+        // The labeled batches use the shortest mismatching pair; `load_bundle` requires that pair to fit `batch_rows` rows under the aggregate cap, so every admitted position is exercised by a request the lane would admit.
+        let (first, second) =
+            super::bundle::shortest_mismatching_pair(corpus).unwrap_or((distinct[0], distinct[0]));
+        let per_row = first.text.len().max(second.text.len()).max(1);
+        let rows = batch_rows.max(1).min(max_batch_text_bytes / per_row).max(1);
+        debug_assert_eq!(
+            rows,
+            batch_rows.max(1),
+            "load_bundle admits only certifiable corpora"
+        );
+        if rows > 1 {
+            for bit in 0..usize::BITS - (rows - 1).leading_zeros() {
+                for complement in [false, true] {
+                    let labeled: Vec<&CorpusItem> = (0..rows)
+                        .map(|position| {
+                            if ((position >> bit) & 1 == 0) != complement {
+                                first
+                            } else {
+                                second
+                            }
+                        })
+                        .collect();
+                    self.certify_batch(&labeled, &matches)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Corpus texts are short, so a graph with a fixed short sequence axis passes every semantic probe and then fails an ordinary long request. This probe embeds a text at the advertised byte limit that reaches the truncation window; the result must be a valid vector, with no expectation to compare.
+    /// Corpus phrases can tokenize sparsely, so every candidate's encoding is measured and the densest one is embedded; a lane whose candidates all fall short of `max_tokens` is not published.
+    /// The window is then exercised jointly with the batch axis. The graph receives token tensors, not bytes, so `[batch_rows, max_tokens]` is certified directly with `batch_rows` copies of the window text, each row reproducing the singleton vector; the aggregate byte cap governs admission and does not narrow what the graph must survive. Batched tokenization pads every row to the longest sequence, so the window text is also embedded beside short corpus items, whose rows must still match their expectations under that padding.
+    fn long_input_probe(
+        &self,
+        corpus: &Corpus,
+        max_text_bytes: usize,
+        batch_rows: usize,
+    ) -> Result<(), InferenceError> {
+        let mut text = String::new();
+        for item in corpus.items.iter().cycle() {
+            if text.len() >= max_text_bytes {
+                break;
+            }
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&item.text);
+        }
+        truncate_to_char_boundary(&mut text, max_text_bytes);
+        // Candidates that tokenize densely for common vocabularies: isolated ASCII letters, isolated digits, and CJK punctuation; the probe is the candidate with the most tokens, so it reaches the longest sequence a request can send.
+        let mut best = (self.token_count(&text)?, text);
+        if best.0 < self.max_tokens {
+            for pattern in ["x ", "7 ", "\u{3002}"] {
+                let mut candidate = pattern.repeat(max_text_bytes / pattern.len() + 1);
+                truncate_to_char_boundary(&mut candidate, max_text_bytes);
+                let tokens = self.token_count(&candidate)?;
+                if tokens > best.0 {
+                    best = (tokens, candidate);
+                }
+                if best.0 >= self.max_tokens {
+                    break;
+                }
+            }
+        }
+        // The lane is published only when the window was exercised: truncation caps every request at `max_tokens`, so a probe that reaches it covers the longest sequence any request can produce, while a shortfall leaves the advertised axis unverified.
+        if best.0 < self.max_tokens {
+            return Err(InferenceError::Artifact(format!(
+                "no probe within {max_text_bytes} bytes reaches the advertised max_tokens ({}); the longest reached {} tokens; raise max_text_bytes or lower the bundle's max_tokens",
+                self.max_tokens, best.0
+            )));
+        }
+        let text = best.1;
+        let vectors = self.embed(&[text.as_str()])?;
+        if vectors.len() != 1 {
+            return Err(InferenceError::Artifact(
+                "long-input probe returned a wrong item count".to_owned(),
+            ));
+        }
+        if batch_rows < 2 {
+            return Ok(());
+        }
+        let singleton = &vectors[0];
+        let full = vec![text.as_str(); batch_rows];
+        let full_rows = self.embed(&full)?;
+        let full_rows_match = full_rows.len() == batch_rows
+            && full_rows.iter().all(|row| {
+                !super::bundle::certification_mismatch(row, singleton, corpus.tolerance)
+            });
+        if !full_rows_match {
+            return Err(InferenceError::Artifact(format!(
+                "[{batch_rows}, {}] certification failed: batched window rows diverge from the singleton",
+                self.max_tokens
+            )));
+        }
+        let short = corpus
+            .items
+            .iter()
+            .min_by_key(|item| item.text.len())
+            .expect("corpus parsing requires items");
+        let mut padded = vec![text.as_str()];
+        padded.extend(std::iter::repeat_n(short.text.as_str(), batch_rows - 1));
+        let padded_rows = self.embed(&padded)?;
+        // The long row is checked too: a graph can corrupt the window row only when its neighbours are shorter, which the all-long batch never shows.
+        let padded_rows_match = padded_rows.len() == padded.len()
+            && !super::bundle::certification_mismatch(&padded_rows[0], singleton, corpus.tolerance)
+            && padded_rows[1..].iter().all(|row| {
+                !super::bundle::certification_mismatch(row, &short.expected, corpus.tolerance)
+            });
+        if !padded_rows_match {
+            return Err(InferenceError::Artifact(
+                "long-input batch certification failed: rows diverge when short items are padded to the window".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Tokens in `text` after the tokenizer's truncation, so a count equal to `max_tokens` means the text reached the window.
+    fn token_count(&self, text: &str) -> Result<usize, InferenceError> {
+        let model = self
+            .model
+            .lock()
+            .map_err(|_| InferenceError::Invariant("inference state is poisoned".to_owned()))?;
+        model
+            .tokenizer
+            .encode(text, true)
+            .map(|encoding| encoding.get_ids().len())
+            .map_err(|_| {
+                InferenceError::Artifact("tokenizer failed to encode the probe".to_owned())
+            })
+    }
+
+    fn certify_batch(
+        &self,
+        batch: &[&CorpusItem],
+        matches: &impl Fn(&[f32], &CorpusItem) -> bool,
+    ) -> Result<(), InferenceError> {
+        let texts: Vec<&str> = batch.iter().map(|item| item.text.as_str()).collect();
+        let rows = self.embed(&texts)?;
+        if rows.len() != batch.len()
+            || !rows.iter().zip(batch).all(|(row, item)| matches(row, item))
+        {
+            return Err(InferenceError::Artifact(
+                "multi-row semantic certification failed".to_owned(),
+            ));
         }
         Ok(())
     }

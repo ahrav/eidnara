@@ -318,18 +318,28 @@ fn receive_grant(
     stream: &mut UnixStream,
     deadline: Instant,
 ) -> io::Result<(Grant, [OwnedFd; SETUP_DESCRIPTOR_COUNT])> {
-    set_timeout(stream, deadline)?;
     let mut bytes = vec![0u8; MAX_SETUP_MESSAGE_LEN + 4];
     let mut control = [std::mem::MaybeUninit::uninit();
         rustix::cmsg_space!(ScmRights(SETUP_DESCRIPTOR_COUNT + 1))];
     let mut ancillary = RecvAncillaryBuffer::new(&mut control);
     let mut iov = [IoSliceMut::new(&mut bytes)];
-    let received = recvmsg(
-        stream.as_fd(),
-        &mut iov,
-        &mut ancillary,
-        RecvFlags::CMSG_CLOEXEC,
-    )?;
+    // A signal can interrupt the blocking receive before the grant arrives; like the connect,
+    // read, and write paths, the receive retries with the remaining deadline re-armed instead of
+    // reporting a spurious setup failure.
+    let received = loop {
+        set_timeout(stream, deadline)?;
+        match recvmsg(
+            stream.as_fd(),
+            &mut iov,
+            &mut ancillary,
+            RecvFlags::CMSG_CLOEXEC,
+        ) {
+            Ok(received) => break received,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::AGAIN) => return Err(timed_out()),
+            Err(errno) => return Err(errno.into()),
+        }
+    };
     if received.bytes == 0 || received.flags.contains(ReturnFlags::CTRUNC) {
         return Err(invalid());
     }

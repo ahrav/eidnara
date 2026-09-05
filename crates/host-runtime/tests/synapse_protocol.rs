@@ -377,12 +377,13 @@ async fn route_loss_drops_queued_query_without_engine_work_and_releases_slot() {
 /// Resident accounting rejects the bound-plus-one request with `queue_full`.
 // `WAITER_BOUNDARY` is the largest feasible value under the startup scratch formula.
 // Formula or pool changes require recomputing it.
-// Each waiter slot reserves 2,097,408 bytes: twice `max_text_bytes` plus 256.
+// Each waiter slot reserves 2,162,944 bytes: twice `max_text_bytes`, 256 response bytes, and one maximal 65,536-byte vector.
 // Queued text reserves `max_queued_request_bytes` (8,388,608 bytes).
 // Queued metadata reserves 3,940,352 bytes for 64 jobs.
 // Worst-case parsing reserves 100,708,352 bytes.
-// The boundary is 32 because at most 33 waiter charges fit in the reservable pool.
-const WAITER_BOUNDARY: usize = 32;
+// The reservable pool is 182,781,184 bytes.
+// The boundary is 31 because at most 32 waiter charges fit in the reservable pool.
+const WAITER_BOUNDARY: usize = 31;
 
 #[test]
 fn waiter_boundary_is_the_last_feasible_startup_configuration() {
@@ -409,7 +410,7 @@ fn waiter_boundary_is_the_last_feasible_startup_configuration() {
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "opens 33 concurrent ring clients, but MAX_RING_RESIDENT_BYTES (1 GiB of arena) \
+#[ignore = "opens 32 concurrent ring clients, but MAX_RING_RESIDENT_BYTES (1 GiB of arena) \
             admits at most 8 rings per process, so the ninth setup socket closes before its \
             descriptor grant and the test never reaches its assertions"]
 async fn boundary_waiters_with_maximal_texts_are_all_admitted() {
@@ -1018,7 +1019,7 @@ async fn equal_replays_reuse_one_job_and_one_inference() {
         "equal replays run inference exactly once"
     );
 
-    // Resending a retained key over changed order, IDs, texts, or hashes fails the canonical-key check before the job table is consulted, and never reruns the job.
+    // Resending a retained key over changed order, IDs, texts, or hashes is classified against the retained payload before the canonical-key check, so it is an idempotency conflict and never reruns the job.
     for other in [
         items(&[("item:0", "different text")]),
         items(&[("item:1", "replay me")]),
@@ -1027,9 +1028,9 @@ async fn equal_replays_reuse_one_job_and_one_inference() {
         let mut conflicting = batch_params(&lane, &other);
         conflicting["request_key"] = request_key(&lane, &page).into();
         let frame = call(&mut client, channel, epoch, "embed.batch", conflicting).await;
-        assert_eq!(frame.error_code(), "schema_violation");
+        assert_eq!(frame.error_code(), "idempotency_conflict");
     }
-    // An unretained key that fails the canonical check gets the same verdict.
+    // An unretained key that fails the canonical check is a malformed request.
     let mut fresh = batch_params(&lane, &items(&[("item:9", "fresh text")]));
     fresh["request_key"] = sha256_hex("some other key").into();
     let frame = call(&mut client, channel, epoch, "embed.batch", fresh).await;
@@ -1101,8 +1102,20 @@ async fn result_pages_preserve_order_and_cursor_discipline() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
+    // Boundary 4 is a legal page start, but a cursor built by hand carries no authenticator and never resolves.
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.result",
+        poll(serde_json::Value::String(format!("{job_id}:4"))),
+    )
+    .await;
+    assert_eq!(frame.error_code(), "schema_violation");
+
     let mut collected = Vec::new();
     let mut cursor = serde_json::Value::Null;
+    let mut issued_second_page_cursor = None;
     let mut pages = 0;
     loop {
         let frame = call(
@@ -1126,6 +1139,7 @@ async fn result_pages_preserve_order_and_cursor_discipline() {
         assert_eq!(result["done"], false);
         cursor = result["next_cursor"].clone();
         assert!(cursor.is_string(), "non-final pages carry a cursor");
+        issued_second_page_cursor.get_or_insert_with(|| cursor.clone());
     }
     assert_eq!(pages, 3);
     assert_eq!(collected, vec!["i0", "i1", "i2", "i3", "i4"]);
@@ -1145,13 +1159,13 @@ async fn result_pages_preserve_order_and_cursor_discipline() {
         assert_eq!(frame.error_code(), "schema_violation");
     }
 
-    // Re-reading a previously issued page boundary is allowed when a lost response is retried with the same cursor.
+    // Re-reading a previously issued cursor is allowed when a lost response is retried with it.
     let frame = call(
         &mut client,
         channel,
         epoch,
         "embed.result",
-        poll(serde_json::Value::String(format!("{job_id}:2"))),
+        poll(issued_second_page_cursor.expect("the first page issued a cursor")),
     )
     .await;
     let body = frame.json();
