@@ -515,13 +515,14 @@ fn manifest_digest_changes_when_any_field_changes() {
         ("source_roots", |m| {
             m.source_roots.push("zz-extra-root".to_owned())
         }),
-        // The launch fields must name nodes, so the node path moves with them; each new
-        // path keeps the nodes sorted.
-        ("interpreter", |m| {
+        // `interpreter` and `entrypoint` are changed alone in
+        // `launch_roots_participate_in_the_digest_on_their_own`, which needs a second
+        // eligible node to point at.
+        ("nodes[0].path", |m| {
             m.nodes[0].path = "bin/node2".to_owned();
             m.interpreter = Some("bin/node2".to_owned());
         }),
-        ("entrypoint", |m| {
+        ("nodes[1].path", |m| {
             let path = "node_modules/@earendil-works/pi-coding-agent/dist/cli2.js".to_owned();
             m.nodes[1].path = path.clone();
             m.entrypoint = Some(path);
@@ -541,12 +542,11 @@ fn manifest_digest_changes_when_any_field_changes() {
         ("nodes[1].dependencies[0].kind", |m| {
             m.nodes[1].dependencies[0].kind = DependencyKind::FiniteDynamic;
         }),
-        // Retargeting the finite dynamic edge from the extension to the addon's sibling
-        // keeps the edge list sorted and leaves the native edge untouched.
+        // Retargeting the finite dynamic edge from the extension to the interpreter keeps
+        // its kind, keeps the extension reachable as a root, and re-sorts the edge list.
         ("nodes[1].dependencies[1].path", |m| {
-            m.nodes[1].dependencies[1].path =
-                "node_modules/@earendil-works/pi-coding-agent/native/addon.node".to_owned();
-            m.nodes[1].dependencies[1].kind = DependencyKind::Native;
+            m.nodes[1].dependencies[1].path = "bin/node".to_owned();
+            m.nodes[1].dependencies.sort_by(|a, b| a.path.cmp(&b.path));
         }),
         ("nodes[1].dependencies.len", |m| {
             m.nodes[1].dependencies.truncate(1)
@@ -585,6 +585,74 @@ fn manifest_digest_changes_when_any_field_changes() {
             "{name} yields the same digest as another mutation"
         );
     }
+}
+
+/// A manifest whose interpreter and entrypoint each have one eligible alternative node.
+/// The alternatives hang off the extension root so every node stays reachable when a
+/// launch field moves away from the node it named.
+fn manifest_with_alternate_launch_roots() -> ClosureManifest {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
+    let mut manifest: ClosureManifest =
+        serde_json::from_slice(&std::fs::read(fixture).expect("read closure fixture"))
+            .expect("decode closure fixture");
+    let mut alternate_interpreter = manifest.nodes[0].clone();
+    alternate_interpreter.path = "bin/node2".to_owned();
+    let mut alternate_entrypoint = manifest.nodes[1].clone();
+    alternate_entrypoint.path =
+        "node_modules/@earendil-works/pi-coding-agent/dist/cli2.js".to_owned();
+    alternate_entrypoint.dependencies.clear();
+    manifest.nodes.insert(1, alternate_interpreter);
+    manifest.nodes.insert(3, alternate_entrypoint);
+    let extension = manifest
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == NodeKind::Extension)
+        .expect("fixture has an extension node");
+    extension.dependencies = vec![
+        ClosureDependency {
+            path: "bin/node".to_owned(),
+            kind: DependencyKind::Static,
+        },
+        ClosureDependency {
+            path: "bin/node2".to_owned(),
+            kind: DependencyKind::Static,
+        },
+        ClosureDependency {
+            path: "node_modules/@earendil-works/pi-coding-agent/dist/cli.js".to_owned(),
+            kind: DependencyKind::Static,
+        },
+        ClosureDependency {
+            path: "node_modules/@earendil-works/pi-coding-agent/dist/cli2.js".to_owned(),
+            kind: DependencyKind::Static,
+        },
+    ];
+    validate_manifest(&manifest).expect("alternate-root manifest is valid");
+    manifest
+}
+
+#[test]
+fn launch_roots_participate_in_the_digest_on_their_own() {
+    let baseline = manifest_with_alternate_launch_roots();
+    let before = manifest_digest(&baseline).expect("digest");
+
+    let mut other_interpreter = baseline.clone();
+    other_interpreter.interpreter = Some("bin/node2".to_owned());
+    let interpreter_digest = manifest_digest(&other_interpreter).expect("digest");
+    assert_ne!(
+        before, interpreter_digest,
+        "interpreter does not participate in the digest"
+    );
+
+    let mut other_entrypoint = baseline.clone();
+    other_entrypoint.entrypoint =
+        Some("node_modules/@earendil-works/pi-coding-agent/dist/cli2.js".to_owned());
+    let entrypoint_digest = manifest_digest(&other_entrypoint).expect("digest");
+    assert_ne!(
+        before, entrypoint_digest,
+        "entrypoint does not participate in the digest"
+    );
+    assert_ne!(interpreter_digest, entrypoint_digest);
 }
 
 #[test]

@@ -923,14 +923,14 @@ mod tests {
     }
 
     #[test]
-    fn every_artifact_hash_participates_in_the_fingerprint() {
+    fn every_artifact_hash_and_embedding_scalar_participates_in_the_fingerprint() {
         let baseline = manifest();
         let before = canonical_fingerprint(&baseline);
         let replacement = sha256_hex(b"replaced");
-        // Each entry changes one artifact hash and nothing else, so a hash the
-        // pre-image omits leaves the fingerprint equal to `before`.
+        // Each entry changes one artifact hash or one embedding-space scalar and nothing
+        // else, so an input the pre-image omits leaves the fingerprint equal to `before`.
         type Mutation = (&'static str, fn(&mut BundleManifest, &str));
-        let fields: [Mutation; 8] = [
+        let fields: [Mutation; 16] = [
             ("model_file", |m, h| m.model_file.sha256 = h.to_owned()),
             ("external_initializers[0]", |m, h| {
                 m.external_initializers[0].sha256 = h.to_owned()
@@ -951,6 +951,22 @@ mod tests {
                 m.tokenizer.tokenizer_config.sha256 = h.to_owned()
             }),
             ("corpus", |m, h| m.corpus.sha256 = h.to_owned()),
+            ("pooling", |m, _| m.pooling = "cls".to_owned()),
+            ("quantization", |m, _| m.quantization = "int8".to_owned()),
+            ("output.name", |m, _| {
+                m.output.name = Some("sentence_embedding".to_owned())
+            }),
+            ("output.index", |m, _| {
+                m.output.name = None;
+                m.output.index = Some(1);
+            }),
+            ("output.only_one", |m, _| {
+                m.output.name = None;
+                m.output.only_one = Some(true);
+            }),
+            ("max_tokens", |m, _| m.max_tokens += 1),
+            ("dims", |m, _| m.dims += 1),
+            ("table_epoch", |m, _| m.table_epoch += 1),
         ];
         let mut seen = std::collections::BTreeSet::from([before.clone()]);
         for (name, mutate) in fields {
