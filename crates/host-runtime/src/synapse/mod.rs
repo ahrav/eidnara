@@ -342,6 +342,32 @@ impl SynapseComponent {
     /// `Invariant` errors mark the lane failing before returning, so later callers cannot obtain vectors from a suspect backend.
     /// The lane is read under one lock acquisition so a concurrent `activate` cannot change the state between the readiness check and the reason lookup.
     pub fn embed_blocking(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+        // The synchronous path admits only what a routed batch could: the same item count, per-text, and aggregate byte bounds the lane was validated and certified against.
+        let limits = &self.inner.limits;
+        if texts.is_empty() || texts.len() > limits.max_batch_items {
+            return Err(InferenceError::Input(format!(
+                "text count {} is outside 1..={}",
+                texts.len(),
+                limits.max_batch_items
+            )));
+        }
+        let mut total_bytes = 0usize;
+        for text in texts {
+            if text.is_empty() || text.len() > limits.max_text_bytes {
+                return Err(InferenceError::Input(format!(
+                    "text length {} is outside 1..={}",
+                    text.len(),
+                    limits.max_text_bytes
+                )));
+            }
+            total_bytes = total_bytes.saturating_add(text.len());
+        }
+        if total_bytes > limits.max_batch_text_bytes {
+            return Err(InferenceError::Input(format!(
+                "aggregate text {total_bytes} bytes exceeds {}",
+                limits.max_batch_text_bytes
+            )));
+        }
         let lane = {
             let state = self.inner.lock_state();
             match &*state {

@@ -305,6 +305,10 @@ pub(crate) fn validate_lane_identity(lane: &super::LaneInfo) -> Result<(), Bundl
     if lane.model.is_empty() || lane.model.len() > MAX_MODEL_NAME_BYTES {
         return Err(err("model name out of bounds"));
     }
+    // The lane is CPU-only; the fixed provider string also bounds that field of the cached `models.list` body.
+    if lane.execution_provider != "cpu" {
+        return Err(err("execution provider must be cpu"));
+    }
     validate_sha256_hex(&lane.fingerprint).map_err(err)?;
     if lane.dims == 0 || lane.dims as u64 > MAX_DIMS {
         return Err(err("dims out of bounds"));

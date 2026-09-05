@@ -402,28 +402,48 @@ impl Backend {
                 ));
             }
         }
-        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so two multi-row calls are certified as well.
-        // The attribution call uses only pairwise-distinct expectations, so any permutation of its rows changes some row's output and is caught; repeated expectations would let a permutation among equal rows pass unseen. Its size is therefore bounded by how many distinct items the corpus supplies.
-        let mut distinct: Vec<&CorpusItem> = Vec::new();
+        // Routed batches pass many items to one backend call. A graph with a fixed or row-permuting batch dimension passes the singleton checks above, so multi-row calls are certified as well.
+        // The attribution call uses only pairwise-distinct expectations, so any permutation of its rows changes some row's output and is caught; repeated expectations would let a permutation among equal rows pass unseen.
+        // The set is seeded with a mismatching pair so it always holds two rows, then grows greedily up to the admitted batch size.
+        let differ = |a: &CorpusItem, b: &CorpusItem| {
+            super::bundle::certification_mismatch(&a.expected, &b.expected, corpus.tolerance)
+        };
+        let mut distinct: Vec<&CorpusItem> = corpus
+            .items
+            .iter()
+            .enumerate()
+            .find_map(|(index, first)| {
+                corpus.items[index + 1..]
+                    .iter()
+                    .find(|second| differ(first, second))
+                    .map(|second| vec![first, second])
+            })
+            .unwrap_or_else(|| vec![&corpus.items[0]]);
         for item in &corpus.items {
             if distinct.len() == batch_rows.max(1) {
                 break;
             }
-            if distinct.iter().all(|kept| {
-                super::bundle::certification_mismatch(
-                    &kept.expected,
-                    &item.expected,
-                    corpus.tolerance,
-                )
-            }) {
+            if distinct.iter().all(|kept| differ(kept, item)) {
                 distinct.push(item);
             }
         }
         self.certify_batch(&distinct, &matches)?;
-        // The capacity call runs at the largest admitted batch size, cycling the corpus to fill it, so a graph that fails, exhausts memory, or drifts only at large sizes is caught before publication; each row is still compared with its own expectation.
-        if batch_rows > distinct.len() {
-            let full: Vec<&CorpusItem> = corpus.items.iter().cycle().take(batch_rows).collect();
-            self.certify_batch(&full, &matches)?;
+        // Full-size batches certify every admitted position with only two distinct items: batch `k` labels each position by bit `k` of its index, so any two positions differ in some batch and a graph that mixes rows at any pair of positions produces a mismatch there. The same batches are the capacity check, so a graph that fails only at the admitted size is caught too.
+        let rows = batch_rows.max(1);
+        if rows > 1 {
+            let (first, second) = (distinct[0], distinct[1.min(distinct.len() - 1)]);
+            for bit in 0..usize::BITS - (rows - 1).leading_zeros() {
+                let labeled: Vec<&CorpusItem> = (0..rows)
+                    .map(|position| {
+                        if (position >> bit) & 1 == 0 {
+                            first
+                        } else {
+                            second
+                        }
+                    })
+                    .collect();
+                self.certify_batch(&labeled, &matches)?;
+            }
         }
         Ok(())
     }
