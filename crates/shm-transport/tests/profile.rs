@@ -204,10 +204,8 @@ fn host_test_ring_profile_names_one_geometry() {
     assert!(profile.descriptor().hardware_matches("host-test-ring-v1"));
     assert_eq!(profile.descriptor_depth(), 8);
     assert_eq!(profile.max_leases(), 8);
-    // One arena per logical direction is what one connection charges.
-    assert_eq!(
-        profile.charges().arena_bytes,
-        2 * shm_transport::MIN_ARENA_BYTES as u64
-    );
+    // One arena per logical direction is what one connection charges: two 64 MiB arenas.
+    // The literal keeps this assertion independent of `MIN_ARENA_BYTES`.
+    assert_eq!(profile.charges().arena_bytes, 134_217_728);
     assert_eq!(profile.charges().descriptors, 16);
 }
