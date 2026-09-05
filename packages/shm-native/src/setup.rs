@@ -361,24 +361,30 @@ const MAPPING_SLOTS: [usize; SETUP_MAPPING_COUNT] = [0, 3];
 /// `SCM_RIGHTS` installs a fresh fd per slot even when two slots name one open file.
 /// Duplicates are therefore detected on the open file description, never the fd number.
 /// The setup socket is included: a slot must not alias the stream being read.
-///
-/// Every `eventfd` shares the kernel's anonymous inode, so `(st_dev, st_ino)` is identical
-/// across doorbells. `kcmp(2)` compares open file descriptions instead. `ENOSYS` and `EPERM`
-/// make `kcmp(2)` unavailable; the fallback checks the mapping descriptors and the socket by
-/// inode identity, which is unique for them. Aliased doorbells then pass; the worst they can
-/// do is cross-wake the two rings.
 fn reject_aliased_descriptors(descriptors: &[OwnedFd], stream: &UnixStream) -> io::Result<()> {
     let files: Vec<BorrowedFd<'_>> = descriptors
         .iter()
         .map(OwnedFd::as_fd)
         .chain([stream.as_fd()])
         .collect();
+    reject_aliased_files(&files)
+}
+
+/// Rejects two slots that name one open file description. `files` holds the six ring
+/// descriptors in wire order, optionally followed by the setup socket.
+///
+/// Every `eventfd` shares the kernel's anonymous inode, so `(st_dev, st_ino)` is identical
+/// across doorbells. `kcmp(2)` compares open file descriptions instead. `ENOSYS` and `EPERM`
+/// make `kcmp(2)` unavailable; the fallback checks the mapping descriptors and the socket by
+/// inode identity, which is unique for them. Aliased doorbells then pass; the worst they can
+/// do is cross-wake the two rings.
+pub(crate) fn reject_aliased_files(files: &[BorrowedFd<'_>]) -> io::Result<()> {
     for (index, first) in files.iter().enumerate() {
         for second in &files[index + 1..] {
             match same_open_file(*first, *second)? {
                 Some(true) => return Err(invalid()),
                 Some(false) => {}
-                None => return reject_aliased_inodes(&files),
+                None => return reject_aliased_inodes(files),
             }
         }
     }
@@ -387,8 +393,8 @@ fn reject_aliased_descriptors(descriptors: &[OwnedFd], stream: &UnixStream) -> i
 
 fn reject_aliased_inodes(files: &[BorrowedFd<'_>]) -> io::Result<()> {
     let mut identities = BTreeSet::new();
-    let socket = files.len() - 1;
-    for slot in MAPPING_SLOTS.into_iter().chain([socket]) {
+    let trailing = SETUP_DESCRIPTOR_COUNT..files.len();
+    for slot in MAPPING_SLOTS.into_iter().chain(trailing) {
         let stat = rustix::fs::fstat(files[slot])?;
         if !identities.insert((stat.st_dev, stat.st_ino)) {
             return Err(invalid());

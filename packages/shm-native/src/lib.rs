@@ -7,7 +7,7 @@ mod setup;
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::os::fd::BorrowedFd;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -262,7 +262,7 @@ pub(crate) fn grant_matches_profile(grant: RingGrant) -> bool {
         && matches(geometry.max_leases, profile.max_leases())
 }
 
-fn attach_ring(fds: [i32; 3], grant: RingGrant) -> Result<Ring> {
+fn clone_descriptors(fds: [i32; 3]) -> Result<[OwnedFd; 3]> {
     let mut descriptors = Vec::with_capacity(3);
     for fd in fds {
         // SAFETY: N-API caller retains each descriptor through this synchronous clone.
@@ -273,13 +273,13 @@ fn attach_ring(fds: [i32; 3], grant: RingGrant) -> Result<Ring> {
                 .map_err(|_| error("shared-memory attachment failed"))?,
         );
     }
-    Ring::attach(
-        descriptors
-            .try_into()
-            .map_err(|_| error("shared-memory attachment failed"))?,
-        grant,
-    )
-    .map_err(|_| error("shared-memory attachment failed"))
+    descriptors
+        .try_into()
+        .map_err(|_| error("shared-memory attachment failed"))
+}
+
+fn attach_ring(descriptors: [OwnedFd; 3], grant: RingGrant) -> Result<Ring> {
+    Ring::attach(descriptors, grant).map_err(|_| error("shared-memory attachment failed"))
 }
 
 fn cleanup_created_refs(
@@ -630,6 +630,21 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
         {
             return Err(descriptor_error());
         }
+        // The distinct-number check cannot detect `dup` aliases. An unopened fd is a
+        // resolution failure, not a malformed descriptor.
+        let files: Vec<BorrowedFd<'_>> = host_to_peer_fds
+            .into_iter()
+            .chain(peer_to_host_fds)
+            // SAFETY: N-API caller retains each descriptor through this synchronous call.
+            .map(|fd| unsafe { BorrowedFd::borrow_raw(fd) })
+            .collect();
+        setup::reject_aliased_files(&files).map_err(|failure| {
+            if failure.kind() == std::io::ErrorKind::InvalidData {
+                descriptor_error()
+            } else {
+                error("shared-memory attachment failed")
+            }
+        })?;
         // Exclusive active attachment: a grant already backing a live
         // channel anywhere in this process is a replayed or concurrently
         // duplicated descriptor. The claim is process-wide because worker
@@ -638,8 +653,8 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
             host_to_peer_grant.encode().to_vec(),
             peer_to_host_grant.encode().to_vec(),
         )?;
-        let from_host = attach_ring(host_to_peer_fds, host_to_peer_grant)?;
-        let to_host = attach_ring(peer_to_host_fds, peer_to_host_grant)?;
+        let from_host = attach_ring(clone_descriptors(host_to_peer_fds)?, host_to_peer_grant)?;
+        let to_host = attach_ring(clone_descriptors(peer_to_host_fds)?, peer_to_host_grant)?;
         REGISTRY.with(|registry| {
             let mut registry = registry
                 .try_borrow_mut()
