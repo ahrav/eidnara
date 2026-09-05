@@ -599,10 +599,17 @@ Guarantee: Forced shutdown terminates every connection writer task.
 Check: `always` - park a writer on a stalled peer, run the forced path, and assert the host tracker's wait completes, that the endpoint's own completion signal fires (`done_tx` at `ring_transport.rs:229`, awaited by the tracked proxy at `:284`) and the endpoint thread has exited, and that the ring's permits and charges are released; tracker quiescence alone proves only that tracked handles are gone, which an untracked writer or an aborted proxy also satisfies.
 Fault/timing angle: the writer is spawned with the tracker's own `spawn`, not the
 tracked helper, so no abort handle is registered and the forced sweep cannot reach
-it directly. It *is* tracked, so the wait does cover it. Termination therefore
-depends on a chain: the sweep aborts the connection task, which drops the
-abort-on-drop handle, which aborts the writer. Break either link and forced
-shutdown waits forever on a stalled writer while holding the instance lock.
+it directly. It *is* tracked, so the wait does cover it. The chain the source catalog
+relied on, sweep aborts the connection task, which drops the abort-on-drop
+handle, which aborts the writer, does not reach the endpoint: the
+`AbortOnDropHandle` owns only the async proxy that awaits `done_rx`
+(`ring_transport.rs:283-285`), while the OS endpoint thread owns `worker_root`
+and releases admission only after `run_endpoint` exits (`:261-274`). If the
+shutdown deadline expires before the drain reaches `generation.token.cancel()`
+(`runtime.rs:1031`), `abort_all` drops the proxy, the tracker quiesces, and the
+thread and its charges survive. That is the predicted violation at HEAD: no owner
+cancels the root on that path, so the Check's endpoint-exit clause fails unless a
+root-cancellation owner is added.
 Required faults and enabling state: a peer that authenticates then stops reading,
 queued frames, and a drain that misses its deadline so the forced branch runs.
 Confidence: high - [evidence](evidence/the-writer-task-is-abortable-through-a-stated-owner.md). the spawn-helper difference at this one site is unambiguous and
@@ -935,9 +942,13 @@ that lands it.
 Status: active
 Exercised: partial - the success path only.
 Guarantee: When an incarnation removes its publication, the on-disk record already reads stopping, so an orderly stop never classifies wedged; if the stopping write fails, the publication is not removed until the failure has been surfaced.
-Check: `always` - fault-inject the phase write, run each teardown path, and assert that the publication survives until the phase is demoted, or that the write failure is surfaced (returned or logged) before the removal; a removal after a silently failed demotion fails the check. This is a predicted violation at HEAD: `begin_stopping` (`crates/host-runtime/src/lifecycle.rs:383-386`, re-verified) discards the write result with `let _ =` and removes the publication unconditionally, so a failed demotion is neither ordered nor surfaced.
-Fault/timing angle: the ordering inside the demotion function is correct and all
-five teardown paths route through it. The gap is that the phase write's error is
+Check: `always` - fault-inject the phase write, run each teardown path including the direct `InstanceGuard::drop` unpublication (`instance.rs:390-400`), and assert that the publication survives until the phase is demoted, or that the write failure is surfaced (returned or logged) before the removal; a removal after a silently failed demotion fails the check. This is a predicted violation at HEAD: `begin_stopping` (`crates/host-runtime/src/lifecycle.rs:383-386`, re-verified) discards the write result with `let _ =` and removes the publication unconditionally, so a failed demotion is neither ordered nor surfaced.
+Fault/timing angle: the ordering inside the demotion function is correct and
+four teardown paths route through it; the fifth, `InstanceGuard::drop`
+(`instance.rs:390-400`), calls `remove_publication()` directly with no
+`begin_stopping`, relying on the graceful path having already demoted. Whether
+the drop path can meet a live publication with no preceding demotion is
+unproved, so the campaign must include it rather than assume it is covered. The gap is that the phase write's error is
 discarded and teardown proceeds regardless. The in-code justification, that a
 stale phase ages to wedged honestly, covers a *successful* write followed by a
 hang, not a *failed* write, which produces an immediate wedged for a clean stop.
@@ -1305,10 +1316,12 @@ panicking unrelated task on the same worker to prove the guard is not over-broad
 Confidence: high - [evidence](evidence/every-callback-invocation-is-inside-the-redaction-guard.md). On the inventory, which is an exhaustive grep of roughly twenty
 call sites; medium on the guarantee, because the promise is enforced by convention
 at each site with nothing in the type system requiring a new site to wrap.
-Existing check: `tests/dispatch.rs:661` pins the not-over-broad direction. Verified:
-`panic_boundary.rs` has **zero** test modules of its own, so nothing asserts what
-is printed, that the prior hook is preserved, or that the depth counter unwinds
-correctly through a panic.
+Existing check: `tests/dispatch.rs:661` pins the not-over-broad direction. `tests/dispatch.rs:616-622` asserts the fixed redacted
+diagnostic is printed and the handler payload is not, and `:624-627` asserts an
+unrelated panic still reaches the previously installed hook. Verified:
+`panic_boundary.rs` has **zero** test modules of its own, so what remains
+unasserted is that the depth counter unwinds correctly through a panic and that
+the call-site inventory is complete.
 Impact: one unwrapped call site leaks handler panic payloads and backtraces.
 Open questions: None.
 
@@ -2075,14 +2088,14 @@ pong_deadline
 Fault/timing angle: the bound is stated in the units the code bounds, so this
 is a finite check rather than an unbounded "eventually". The wake is the
 minimum of the next tick and the earliest `probe.sent + pong_deadline`
-(`connection.rs:1355-1364`); expiry is `>= pong_deadline` from `probe.sent`
-(`:1370-1373`); the tick re-arms at `now + ping_interval` (`:1399`).
+(`connection.rs:741-749`); expiry is `>= pong_deadline` from `probe.sent`
+(`:755-760`); the tick re-arms at `now + ping_interval` (`:779`).
 `config.rs:370-382` rejects a zero value for either, so both bounds are
 strictly positive in any accepted configuration. The subtle part is which
-instant `probe.sent` holds: the insert at `:1403-1411` records the enqueue
-instant with `written_at: None`, and the write-completion hook at `:1421-1447`
+instant `probe.sent` holds: the insert at `:783-792` records the enqueue
+instant with `written_at: None`, and the write-completion hook at `:810-820`
 overwrites it with `completed_at`. Probes with `written_at: None` are excluded
-from both the deadline wake (`:1358`) and the expiry scan (`:1372`), so
+from both the deadline wake (`:745`) and the expiry scan (`:758`), so
 queueing delay neither expires a probe nor arms one. Both halves need paused
 time; wall-clock sleeps cannot distinguish the boundary from scheduler noise.
 Required faults and enabling state: a configured `LivenessPolicy`, which no
@@ -3826,8 +3839,13 @@ Exercised: not yet - unconstructible from any host path.
 Guarantee: The zero-copy segmented inbound path that the frame-channel
 abstraction and the transport doc both describe has a production producer, so
 the copy accounting and the wrap-around lease handling are exercised.
-Check: `reachable` - the code location `InboundFrame::segmented`
-(removed at HEAD; see the evidence file) is executed at least once per campaign.
+Check: `reachable` - the live wrap-around conversion in `ring_transport.rs`, where
+a body whose descriptor spans the arena end is assembled into the single `Vec<u8>`
+that `InboundFrame::owned` carries (`:549`), is executed at least once per
+campaign; `InboundFrame::segmented` and `ReceiveBody::Segmented`, the sites the
+source catalog named, were removed with the single-`Vec<u8>` `InboundFrame`
+(`frame_channel.rs:423-475`), and only the lease-level `ReceiveLease::segmented`
+(`frame_channel.rs:300`) remains, reached from `contiguous` at `:297`.
 `reachable` fits because this is location coverage; the derived state claim,
 that every host inbound frame carries exactly one copy, is what a cheaper
 screen would assert.
@@ -9607,18 +9625,26 @@ Fault/timing angle: none. This is a static property of the wiring.
 Required faults and enabling state: none. The check is an enumeration, best
 expressed as a test that names each field and its consumer, or as a review gate.
 Confidence: high - [evidence](evidence/rt-a-every-published-configuration-field-changes-host-behaviour.md).
-Grepped each of the 21 fields across the whole repository. One violator:
-`HostInit::host_capabilities` (`config.rs:250`), read nowhere, written as
-`Vec::new()` at all four construction sites.
+Grepped each of the 21 fields across the whole repository. No violator under
+the init-field rule the Check states: `HostInit::host_capabilities`
+(`config.rs:250`) has no reader of its own inside the host, but the whole
+`HostInit` is moved into `HostHandler::initialize` at `runtime.rs:640-644` and
+forwarded by the composite to its primary at `composite.rs:203-208`, which is the
+handler-level consumption the Check accepts for pass-through fields; it is written
+as `Vec::new()` at all four in-tree construction sites because no in-tree handler
+reads it.
 Existing check: none. Status `unaudited`.
-Impact: an embedder who populates `host_capabilities` believes it advertises
-capabilities and it does nothing. Its `Debug` appearance at `config.rs:262` makes
-it look load-bearing in diagnostics.
+Impact: a limit, timing, or liveness field with no consumer would let an embedder
+believe it configured behaviour it did not; for the pass-through init fields the
+risk is narrower, since `host_capabilities` reaches the handler unchanged and
+whether it does anything is the handler's contract, not the host's. Its `Debug`
+appearance at `config.rs:262` makes it look load-bearing in host diagnostics
+even though the host itself never reads it.
 Open questions:
-- Is `host_capabilities` a placeholder for the source module-host work work, in which
-  case the record documents an accepted gap, or a wiring omission?
-  `config.rs:246-247` says `HostInit` is "handed to the linked handler", so a
-  handler outside this repository could read it. (needs human input)
+- Does any handler outside this repository read `host_capabilities`, so that the
+  forwarding contract is exercised end to end? `config.rs:246-247` says `HostInit`
+  is "handed to the linked handler"; no in-tree handler reads the field. (needs
+  human input)
 
 > Synthesis note sharpening this record's `Impact:` with a fact lens B added,
 > carried here rather than edited into it. `host_capabilities` is not merely
