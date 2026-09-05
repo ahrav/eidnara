@@ -34,6 +34,7 @@ use crate::lifecycle::{is_canonical_payload_digest, lifecycle_dir_path};
 use crate::store_fs::{
     HARDENED_DIR_FLAGS, hash_copy, is_stale_mtime, is_temp_name, open_created_dir,
     open_rel_nofollow, read_dir_names, read_dir_names_partitioned, rename_no_replace,
+    same_snapshot,
 };
 
 pub const GENERATIONS_DIR_NAME: &str = "generations";
@@ -572,14 +573,14 @@ impl GenerationStore {
         if self.read_current()? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
         }
+        // Opening before the capacity check pins each source inode, so the preflight and the
+        // copy read the same file even if the working directory or the pathname changes.
+        let mut opened = Vec::with_capacity(sources.len());
         let mut sizes = Vec::with_capacity(sources.len());
         for spec in sources {
-            let meta = std::fs::symlink_metadata(&spec.source)
-                .map_err(|_| invalid("staging source is missing"))?;
-            if !meta.is_file() {
-                return Err(invalid("staging source is not a regular file"));
-            }
-            sizes.push(meta.len());
+            let source = open_source(spec)?;
+            sizes.push(source.stat.st_size as u64);
+            opened.push(source);
         }
         let required =
             required_stage_bytes(&sizes).ok_or_else(|| invalid("manifest size overflow"))?;
@@ -591,7 +592,7 @@ impl GenerationStore {
         }
 
         let (temp_name, temp_fd) = self.create_staging_temp()?;
-        let result = self.stage_into_temp(&temp_fd, sources, meta);
+        let result = self.stage_into_temp(&temp_fd, sources, &opened, meta);
         let manifest = match result {
             Ok(manifest) => manifest,
             Err(err) => {
@@ -647,18 +648,19 @@ impl GenerationStore {
         &self,
         temp_fd: &OwnedFd,
         sources: &[SourceSpec],
+        opened: &[OpenedSource],
         meta: &StageMeta,
     ) -> Result<GenerationManifest, GenerationError> {
         let mut files = Vec::with_capacity(sources.len());
         let mut seen = BTreeSet::new();
         // The code fsyncs each directory that receives an entry because fsyncing a file does not persist its parent entry.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
-        for spec in sources {
+        for (spec, source) in sources.iter().zip(opened) {
             validate_rel_path(&spec.rel_path)?;
             if !seen.insert(spec.rel_path.clone()) {
                 return Err(invalid("duplicate staged path"));
             }
-            let entry = copy_source_into(temp_fd, spec, &mut dirs)?;
+            let entry = copy_source_into(temp_fd, spec, source, &mut dirs)?;
             files.push(entry);
         }
         files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -933,30 +935,43 @@ fn ensure_parent_dirs(
     Ok(())
 }
 
-/// The copy rejects symlink sources and fails if source identity changes before completion.
-fn copy_source_into(
-    temp_fd: &OwnedFd,
-    spec: &SourceSpec,
-    dirs: &mut BTreeSet<String>,
-) -> Result<ManifestFile, GenerationError> {
-    let source_fd = openat(
+struct OpenedSource {
+    fd: OwnedFd,
+    /// `fstat` snapshot of `fd` at open time.
+    stat: rustix::fs::Stat,
+}
+
+/// `open_source` requires a regular file whose size matches `expected_size` when specified.
+fn open_source(spec: &SourceSpec) -> Result<OpenedSource, GenerationError> {
+    let fd = openat(
         rustix::fs::CWD,
         &*spec.source,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| invalid("staging source open failed"))?;
-    let before = rustix::fs::fstat(&source_fd).map_err(|_| invalid("source stat failed"))?;
-    if (mode_bits(&before) & S_IFMT) != S_IFREG {
+    let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("source stat failed"))?;
+    if (mode_bits(&stat) & S_IFMT) != S_IFREG {
         return Err(invalid("staging source is not a regular file"));
     }
     if spec
         .expected_size
-        .is_some_and(|size| size != before.st_size as u64)
+        .is_some_and(|size| size != stat.st_size as u64)
     {
         return Err(invalid("staging source size differs from payload manifest"));
     }
+    Ok(OpenedSource { fd, stat })
+}
 
+/// The copy fails if the source's identity or timestamps change between open and completion.
+fn copy_source_into(
+    temp_fd: &OwnedFd,
+    spec: &SourceSpec,
+    source: &OpenedSource,
+    dirs: &mut BTreeSet<String>,
+) -> Result<ManifestFile, GenerationError> {
+    let source_fd = &source.fd;
+    let before = &source.stat;
     ensure_parent_dirs(temp_fd, &spec.rel_path, dirs)?;
     let mode: u32 = if spec.executable { 0o700 } else { 0o600 };
     let dest_fd = openat(
@@ -973,7 +988,7 @@ fn copy_source_into(
         .map_err(|_| invalid("staging output chmod failed"))?;
 
     let (total, sha256) =
-        hash_copy(&source_fd, Some(&dest_fd), before.st_size as u64).map_err(|e| {
+        hash_copy(source_fd, Some(&dest_fd), before.st_size as u64).map_err(|e| {
             if e.kind() == std::io::ErrorKind::InvalidData {
                 invalid("staging source grew during copy")
             } else {
@@ -982,15 +997,8 @@ fn copy_source_into(
         })?;
     fsync_preserving_storage(&dest_fd, "staging output fsync failed")?;
 
-    // The before/after check requires the same device, inode, size, mtime, and mtime nanoseconds.
-    let after = rustix::fs::fstat(&source_fd).map_err(|_| invalid("source stat failed"))?;
-    #[allow(clippy::unnecessary_cast)]
-    let same_identity = before.st_dev as u64 == after.st_dev as u64
-        && before.st_ino as u64 == after.st_ino as u64
-        && before.st_size == after.st_size
-        && before.st_mtime == after.st_mtime
-        && before.st_mtime_nsec == after.st_mtime_nsec;
-    if !same_identity || total != before.st_size as u64 {
+    let after = rustix::fs::fstat(source_fd).map_err(|_| invalid("source stat failed"))?;
+    if !same_snapshot(before, &after) || total != before.st_size as u64 {
         return Err(invalid("staging source mutated during copy"));
     }
     let dest_stat = rustix::fs::fstat(&dest_fd).map_err(|_| invalid("output stat failed"))?;

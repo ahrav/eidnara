@@ -25,7 +25,7 @@ use crate::lifecycle::is_canonical_payload_digest;
 use crate::store_fs::{
     HARDENED_DIR_FLAGS, create_owned_dir, exchange_dirs, hash_copy, is_stale_mtime, is_temp_name,
     open_created_dir, open_dir_for_removal, open_rel_nofollow, read_dir_names,
-    read_dir_names_partitioned, remove_tree, rename_no_replace, write_new_file,
+    read_dir_names_partitioned, remove_tree, rename_no_replace, same_snapshot, write_new_file,
 };
 
 const MANIFEST_NAME: &str = "manifest.json";
@@ -568,14 +568,15 @@ impl HarnessClosureStore {
     /// store unchanged and the digest name is never absent. Because the caller holds
     /// `transaction.lock`, nothing else mutates the occupant during the swap.
     ///
-    /// A harness running from the torn tree keeps its open inodes; later opens under
-    /// `closure_path` resolve to the replacement.
+    /// `protected` contains digests whose retained harness descriptors may still reference their trees.
+    /// Repair unlinks the swapped-out tree, so a corrupt protected digest is refused rather than repaired; the caller decides when a retry is safe.
     ///
     /// A "closure store fsync failed" error after promotion means the digest may already be
     /// named by the store but its durability is unproven; retrying revalidates it in place.
     pub fn materialize(
         &self,
         candidate: &ClosureCandidate,
+        protected: &BTreeSet<String>,
     ) -> Result<ValidatedHarnessClosure, HarnessClosureError> {
         validate_manifest(&candidate.manifest)?;
         validate_source_root_set(candidate)?;
@@ -587,7 +588,7 @@ impl HarnessClosureStore {
         let (temp_name, temp_fd) = self.create_temp()?;
         let promoted = self
             .stage_candidate(&temp_fd, candidate)
-            .and_then(|()| self.promote_temp(&temp_name, &digest));
+            .and_then(|()| self.promote_temp(&temp_name, &digest, protected));
         // After a successful exchange the torn tree sits at `temp_name`; after any failure the
         // staged tree does. Either way the temp is discarded, best effort: a survivor ages past
         // `STALE_TEMP_AFTER` and `prune` reclaims it.
@@ -597,9 +598,14 @@ impl HarnessClosureStore {
         self.validate(&digest)
     }
 
-    /// Moves the staged temp to `digest`. When the name is occupied, a valid occupant wins and
-    /// the temp is left for the caller to discard; an owned invalid occupant is swapped out.
-    fn promote_temp(&self, temp_name: &str, digest: &str) -> Result<(), HarnessClosureError> {
+    /// Moves the staged temp to `digest`. A valid occupant wins and the temp is left for the
+    /// caller to discard.
+    fn promote_temp(
+        &self,
+        temp_name: &str,
+        digest: &str,
+        protected: &BTreeSet<String>,
+    ) -> Result<(), HarnessClosureError> {
         match rename_no_replace(&self.root_fd, temp_name, digest) {
             Ok(true) => return Ok(()),
             Ok(false) => {}
@@ -607,6 +613,9 @@ impl HarnessClosureStore {
         }
         if self.validate(digest).is_ok() {
             return Ok(());
+        }
+        if protected.contains(digest) {
+            return Err(invalid("corrupt digest target is protected"));
         }
         if open_dir_for_removal(&self.root_fd, digest).is_err() {
             return Err(invalid("digest target exists but is invalid"));
@@ -824,22 +833,11 @@ fn copy_node(
         })?;
     fsync(&destination).map_err(|_| invalid("closure node fsync failed"))?;
     let after = rustix::fs::fstat(&source).map_err(|_| invalid("source node stat failed"))?;
-    if !same_file_snapshot(&before, &after) || copied != node.size_bytes || sha256 != node.sha256 {
+    if !same_snapshot(&before, &after) || copied != node.size_bytes || sha256 != node.sha256 {
         return Err(invalid("source node bytes diverge from manifest"));
     }
     verify_secure_file(&destination, node.mode)?;
     Ok(())
-}
-
-fn same_file_snapshot(before: &rustix::fs::Stat, after: &rustix::fs::Stat) -> bool {
-    #[allow(clippy::unnecessary_cast)]
-    {
-        before.st_dev as u64 == after.st_dev as u64
-            && before.st_ino as u64 == after.st_ino as u64
-            && before.st_size == after.st_size
-            && before.st_mtime == after.st_mtime
-            && before.st_mtime_nsec == after.st_mtime_nsec
-    }
 }
 
 fn create_parent_dirs(

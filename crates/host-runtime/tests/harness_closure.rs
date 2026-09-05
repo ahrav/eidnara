@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -152,7 +152,9 @@ fn setup() -> (tempfile::TempDir, PathBuf, ClosureCandidate) {
 fn resolved_descriptor_is_rewound_after_verification() {
     let (temp, _source, candidate) = setup();
     let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
-    let closure = store.materialize(&candidate).expect("materialize");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
 
     let node = closure
         .resolve_node_descriptor("node_modules/pi/dist/helper.js")
@@ -185,7 +187,9 @@ fn materialization_preserves_layout_and_security() {
     let (temp, _source, candidate) = setup();
     let store_root = temp.path().join("closures");
     let store = HarnessClosureStore::open(&store_root).expect("store");
-    let closure = store.materialize(&candidate).expect("materialize");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
 
     let entrypoint = closure
         .resolve_node_descriptor("node_modules/pi/dist/cli.js")
@@ -208,12 +212,14 @@ fn retained_closure_survives_source_deletion_and_deduplicates_by_digest() {
     let (temp, source, candidate) = setup();
     let store_root = temp.path().join("closures");
     let store = HarnessClosureStore::open(&store_root).expect("store");
-    let first = store.materialize(&candidate).expect("first materialize");
+    let first = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("first materialize");
     let digest = first.digest().to_owned();
     std::fs::remove_dir_all(source).expect("delete source");
 
     let second = store
-        .materialize(&candidate)
+        .materialize(&candidate, &BTreeSet::new())
         .expect("dedupe does not reopen deleted source");
     assert_eq!(second.digest(), digest);
     assert_eq!(
@@ -300,10 +306,13 @@ fn retained_executable_loads_dependency_and_extension_after_source_deletion() {
     };
     let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
     let closure = store
-        .materialize(&ClosureCandidate {
-            manifest,
-            source_roots: BTreeMap::from([("install".to_owned(), source.clone())]),
-        })
+        .materialize(
+            &ClosureCandidate {
+                manifest,
+                source_roots: BTreeMap::from([("install".to_owned(), source.clone())]),
+            },
+            &BTreeSet::new(),
+        )
         .expect("materialize");
     std::fs::remove_dir_all(source).expect("delete source");
 
@@ -332,7 +341,7 @@ fn source_and_retained_hash_mismatches_fail_closed() {
     .expect("mutate source");
     assert_eq!(
         store
-            .materialize(&bad_source)
+            .materialize(&bad_source, &BTreeSet::new())
             .expect_err("source hash mismatch")
             .detail(),
         "source node bytes diverge from manifest"
@@ -343,7 +352,9 @@ fn source_and_retained_hash_mismatches_fail_closed() {
         b"export const answer = 42",
     )
     .expect("restore source");
-    let closure = store.materialize(&candidate).expect("materialize");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
     let retained = closure.path().join("files/node_modules/pi/dist/helper.js");
     std::fs::write(&retained, b"export const answer = 41").expect("mutate retained");
     assert_eq!(
@@ -384,7 +395,7 @@ fn traversal_and_symlink_sources_are_rejected() {
     let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
     assert_eq!(
         store
-            .materialize(&candidate)
+            .materialize(&candidate, &BTreeSet::new())
             .expect_err("symlink refused")
             .detail(),
         "source node is missing or insecure"
@@ -473,10 +484,16 @@ fn production_closures_from_environment_materialize() {
         HarnessClosureStore::open(&store_root.path().join("closures")).expect("open closure store");
 
     let opencode = store
-        .materialize(&ClosureCandidate {
-            manifest: read_manifest("opencode-linux-x64-1.18.22.json"),
-            source_roots: BTreeMap::from([("runtime".to_owned(), PathBuf::from(opencode_root))]),
-        })
+        .materialize(
+            &ClosureCandidate {
+                manifest: read_manifest("opencode-linux-x64-1.18.22.json"),
+                source_roots: BTreeMap::from([(
+                    "runtime".to_owned(),
+                    PathBuf::from(opencode_root),
+                )]),
+            },
+            &BTreeSet::new(),
+        )
         .expect("materialize OpenCode closure");
     assert!(
         opencode
@@ -487,13 +504,16 @@ fn production_closures_from_environment_materialize() {
     );
 
     let pi = store
-        .materialize(&ClosureCandidate {
-            manifest: read_manifest("pi-linux-x64-node-24.18.0.json"),
-            source_roots: BTreeMap::from([
-                ("pi-install".to_owned(), pi_install),
-                ("runtime".to_owned(), pi_runtime),
-            ]),
-        })
+        .materialize(
+            &ClosureCandidate {
+                manifest: read_manifest("pi-linux-x64-node-24.18.0.json"),
+                source_roots: BTreeMap::from([
+                    ("pi-install".to_owned(), pi_install),
+                    ("runtime".to_owned(), pi_runtime),
+                ]),
+            },
+            &BTreeSet::new(),
+        )
         .expect("materialize Pi closure");
     assert!(
         pi.resolve_node_descriptor("node_modules/@earendil-works/pi-coding-agent/dist/cli.js")
@@ -510,7 +530,7 @@ fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
     let extra_store =
         HarnessClosureStore::open(&extra_temp.path().join("closures")).expect("store");
     let extra = extra_store
-        .materialize(&extra_candidate)
+        .materialize(&extra_candidate, &BTreeSet::new())
         .expect("materialize");
     std::fs::write(extra.path().join("files/unlisted"), b"extra").expect("extra file");
     assert_eq!(
@@ -525,7 +545,7 @@ fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
     let missing_store =
         HarnessClosureStore::open(&missing_temp.path().join("closures")).expect("store");
     let missing = missing_store
-        .materialize(&missing_candidate)
+        .materialize(&missing_candidate, &BTreeSet::new())
         .expect("materialize");
     std::fs::remove_file(missing.path().join("files/node_modules/pi/dist/helper.js"))
         .expect("remove retained node");
@@ -540,7 +560,7 @@ fn retained_closure_rejects_extra_missing_and_wrong_mode_nodes() {
     let (mode_temp, _source, mode_candidate) = setup();
     let mode_store = HarnessClosureStore::open(&mode_temp.path().join("closures")).expect("store");
     let mode = mode_store
-        .materialize(&mode_candidate)
+        .materialize(&mode_candidate, &BTreeSet::new())
         .expect("materialize");
     let helper = mode.path().join("files/node_modules/pi/dist/helper.js");
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
@@ -582,7 +602,9 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
     let (temp, _source, candidate) = setup();
     let store_root = temp.path().join("closures");
     let store = HarnessClosureStore::open(&store_root).expect("store");
-    let closure = store.materialize(&candidate).expect("materialize");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
     let digest = closure.digest().to_owned();
 
     // A stale temp inherits the ambient umask; `prune` must not require mode `0o700`.
@@ -601,7 +623,7 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
     let unnamed = store_root.join(std::ffi::OsStr::from_bytes(b"\xff\xfe-not-utf8"));
     std::fs::create_dir(&unnamed).expect("non-utf8 entry");
 
-    let protected = std::collections::BTreeSet::from([digest.clone()]);
+    let protected = BTreeSet::from([digest.clone()]);
     store.prune(&protected).expect("prune with protection");
     assert!(
         store_root.join(&digest).is_dir(),
@@ -626,7 +648,7 @@ fn prune_reclaims_unprotected_digests_and_stale_temps_only() {
         .expect("protected closure still validates");
 
     store
-        .prune(&std::collections::BTreeSet::new())
+        .prune(&BTreeSet::new())
         .expect("prune without protection");
     assert!(
         !store_root.join(&digest).is_dir(),
@@ -651,7 +673,9 @@ fn an_existing_owned_store_root_is_repaired_to_owner_only() {
             & 0o777,
         0o700
     );
-    store.materialize(&candidate).expect("materialize");
+    store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
 }
 
 /// One unremovable entry must not abort reclamation of the entries sorted after it.
@@ -661,7 +685,7 @@ fn prune_continues_past_an_unremovable_entry() {
     let store_root = temp.path().join("closures");
     let store = HarnessClosureStore::open(&store_root).expect("store");
     let digest = store
-        .materialize(&candidate)
+        .materialize(&candidate, &BTreeSet::new())
         .expect("materialize")
         .digest()
         .to_owned();
@@ -673,7 +697,7 @@ fn prune_continues_past_an_unremovable_entry() {
     age_past_stale_threshold(&blocked);
     std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("mode");
 
-    let result = store.prune(&std::collections::BTreeSet::new());
+    let result = store.prune(&BTreeSet::new());
     std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).expect("restore");
     assert!(result.is_err(), "the blocked entry is reported");
     assert!(
@@ -721,7 +745,7 @@ fn a_torn_digest_directory_is_repaired_by_materialize() {
     );
     assert_eq!(
         store
-            .materialize(&unstageable)
+            .materialize(&unstageable, &BTreeSet::new())
             .expect_err("missing source root cannot stage")
             .detail(),
         "source root open failed"
@@ -731,8 +755,22 @@ fn a_torn_digest_directory_is_repaired_by_materialize() {
         "a failed restage must not remove the torn occupant"
     );
 
+    // A protected digest names a tree a live harness may still open through; it is refused,
+    // not swapped out from under that harness.
+    assert_eq!(
+        store
+            .materialize(&candidate, &BTreeSet::from([digest.clone()]))
+            .err()
+            .map(|error| error.detail()),
+        Some("corrupt digest target is protected")
+    );
+    assert!(
+        torn.join("manifest.json").is_file(),
+        "a refused repair leaves the occupant in place"
+    );
+
     let closure = store
-        .materialize(&candidate)
+        .materialize(&candidate, &BTreeSet::new())
         .expect("materialize repairs the torn digest");
     assert_eq!(closure.digest(), digest);
     store.validate(&digest).expect("repaired closure validates");
@@ -754,7 +792,9 @@ fn inherit_in_child_exposes_the_node_at_its_descriptor_path() {
 
     let (temp, _source, candidate) = setup();
     let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
-    let closure = store.materialize(&candidate).expect("materialize");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
     let node = closure
         .resolve_node_descriptor("node_modules/pi/dist/helper.js")
         .expect("resolve node");
@@ -824,10 +864,13 @@ fn a_shebang_executable_launches_through_its_descriptor_path() {
     };
     let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
     let closure = store
-        .materialize(&ClosureCandidate {
-            manifest,
-            source_roots: BTreeMap::from([("install".to_owned(), source)]),
-        })
+        .materialize(
+            &ClosureCandidate {
+                manifest,
+                source_roots: BTreeMap::from([("install".to_owned(), source)]),
+            },
+            &BTreeSet::new(),
+        )
         .expect("materialize");
     let node = closure
         .resolve_node_descriptor("bin/run")

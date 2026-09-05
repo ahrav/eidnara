@@ -69,6 +69,23 @@ pub(crate) fn rename_no_replace(
     }
 }
 
+/// `true` when two `stat` results describe the same unchanged inode.
+///
+/// `ctime` is included because an unprivileged owner can rewrite a file and then restore its
+/// `mtime` with `utimensat`, but cannot set `ctime`; every write and metadata change bumps it.
+pub(crate) fn same_snapshot(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
+    #[allow(clippy::unnecessary_cast)]
+    {
+        left.st_dev as u64 == right.st_dev as u64
+            && left.st_ino as u64 == right.st_ino as u64
+            && left.st_size == right.st_size
+            && left.st_mtime == right.st_mtime
+            && left.st_mtime_nsec == right.st_mtime_nsec
+            && left.st_ctime == right.st_ctime
+            && left.st_ctime_nsec == right.st_ctime_nsec
+    }
+}
+
 /// Atomically swaps the entries `a` and `b` under `dir`; both must exist.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn exchange_dirs(dir: &OwnedFd, a: &str, b: &str) -> rustix::io::Result<()> {
