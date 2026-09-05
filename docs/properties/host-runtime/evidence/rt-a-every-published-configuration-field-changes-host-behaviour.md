@@ -124,13 +124,16 @@ reflection for this, so the practical forms are:
 2. A review gate: any new public field on `HostConfig`, `HostLimits`,
    `HostTiming`, `LivenessPolicy`, or `HostInit` must be accompanied by a test
    that observes its effect.
-3. For the pass-through fields specifically, a behavioural assertion: set
-   `host_capabilities` to a non-empty value and assert *some* observable differs.
-   Today none does, so this test would fail, which is the point - it converts a
-   silent gap into a failing check.
+3. For the pass-through fields specifically, a delivery assertion at the
+   handler: set `host_capabilities` and `storage` to distinguishable values and
+   assert the `HostInit` passed to `HostHandler::initialize` (`handler.rs:532`)
+   carries them unchanged. The host does not publish either value and a
+   conforming handler may ignore them, so requiring a client-visible difference
+   would reject valid pass-through behaviour; the forwarding contract is the
+   only thing the host can be held to.
 
-Form 3 is the only one that is genuinely mechanical. It asserts the precondition
-that a settable field is observable, not the defect.
+Form 3 is the only one that is genuinely mechanical. It asserts the forwarding
+contract, which is what the catalog's `Check:` field for init fields requires.
 
 `config.rs` already has the shape for the validation half; `defaults_validate` at
 `:467-470` is a one-line existence check of the same kind.

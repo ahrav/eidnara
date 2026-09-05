@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "d26715e8882d75bafad8c121989b4c2b2b1e709034f82b6afcc669b912070023",
+      "destination_sha256": "c59e27aced4a1abe27b28f6c610f25e270986d2fae823355443140c71ee141e0",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "b363810ba37ac7076741d152158c2d7a349a7de28523e102a897220391878979",
+      "destination_sha256": "333bfb73871e9b3a568387a510921e4963eaadabce53ed26b55df6d0fd168078",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -4732,7 +4732,7 @@
         "blob_sha": "05c483886b008e22ff9646594be76082af575001"
       },
       "destination": "docs/properties/host-runtime/evidence/rt-a-every-published-configuration-field-changes-host-behaviour.md",
-      "destination_sha256": "5fa8fcc326a4d4a8c45e0901c16f153b2ea99a6de604614d3a9edd358035b4b3",
+      "destination_sha256": "0aed8255985baa5b8189cb74ebfb86a86ac9b08e87c9bb35b9e9aba33ec61789",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {

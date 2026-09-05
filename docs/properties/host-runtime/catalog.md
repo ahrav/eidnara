@@ -149,7 +149,7 @@ order, so no row was added, and none of the 38 surviving records was touched.
 | [phase-evidence-outlives-a-long-phase](#phase-evidence-outlives-a-long-phase) | safety | high |
 | [clock-anomalies-do-not-invalidate-live-evidence](#clock-anomalies-do-not-invalidate-live-evidence) | safety | high |
 | [legacy-incumbent-classification-needs-an-unforgeable-witness](#legacy-incumbent-classification-needs-an-unforgeable-witness) | safety | high |
-| [an-observed-wedge-cause-reaches-the-operator](#an-observed-wedge-cause-reaches-the-operator) | reachability | high |
+| [an-observed-wedge-cause-reaches-the-operator](#an-observed-wedge-cause-reaches-the-operator) | safety | high |
 | [current-profile-never-names-an-unvalidatable-generation](#current-profile-never-names-an-unvalidatable-generation) | safety | high |
 | [validation-and-enumeration-address-one-directory-object](#validation-and-enumeration-address-one-directory-object) | safety | high |
 | [an-undecidable-quarantine-witness-fails-closed](#an-undecidable-quarantine-witness-fails-closed) | safety | high |
@@ -275,10 +275,7 @@ Exercised: not yet - nothing exercises admission after cancel.
 Guarantee: After a generation is retired with both `token.cancel()` and
 `writer.discard()`, no byte of any frame admitted after the cancel reaches the
 socket.
-Check: `always` - cancel the token, then have a producer that already passed its
-`is_cancelled` precheck call send; assert the bytes never appear on the peer
-socket. Separately assert `token.cancel()` alone does *not* stop queued frames,
-because the drain paths depend on that.
+Check: `always` - cancel the token and call `writer.discard()`, then have a producer that already passed its `is_cancelled` precheck call send; assert the bytes never appear on the peer socket. Both halves of the precondition are required: `send_ticket_before` gates on the writer's own `retired` token (`frame_channel.rs:640-653`), and the endpoint select services a ready queue before `root.cancelled()` (`ring_transport.rs:438-470`), so cancelling the generation token alone may still publish the newly queued frame. Separately assert `token.cancel()` alone does *not* stop queued frames, because the drain paths depend on that.
 Fault/timing angle: `send_ticket_before` gates on `retired` only, not on the
 generation token or `discard` (`frame_channel.rs:812-825`). So the guarantee is
 enforced downstream by the writer's biased discard arm, not by admission: a
@@ -594,8 +591,7 @@ part of the ordinary shutdown path.
 Status: active
 Exercised: not yet for the forced path.
 Guarantee: Forced shutdown terminates every connection writer task.
-Check: `always` - park a writer on a stalled peer, run the forced path, and assert
-the host tracker's wait completes.
+Check: `always` - park a writer on a stalled peer, run the forced path, and assert the host tracker's wait completes, that the endpoint's own completion signal fires (`done_tx` at `ring_transport.rs:229`, awaited by the tracked proxy at `:284`) and the endpoint thread has exited, and that the ring's permits and charges are released; tracker quiescence alone proves only that tracked handles are gone, which an untracked writer or an aborted proxy also satisfies.
 Fault/timing angle: the writer is spawned with the tracker's own `spawn`, not the
 tracked helper, so no abort handle is registered and the forced sweep cannot reach
 it directly. It *is* tracked, so the wait does cover it. Termination therefore
@@ -1064,7 +1060,7 @@ Open questions:
 
 ### an-observed-wedge-cause-reaches-the-operator
 
-Type: reachability
+Type: safety
 Reachability: test-only - the lifecycle record this probe reads is written on
 every host start (`crates/host-runtime/src/runtime.rs:587` for `Starting`, `:715`
 for `Running`, re-verified) and on teardown (`lifecycle.rs:384`), but the reader
@@ -1076,8 +1072,7 @@ Status: active
 Exercised: not yet - in-crate tests assert the reason field directly; nothing asserts that each distinguished wedge reason reaches an operator-visible surface, and the CLI that would render it is not in this tree.
 Guarantee: When the host distinguishes a wedge cause, that distinction is
 observable outside the process.
-Check: `reachable` - for each distinguished wedge reason, some operator-visible
-output differs. This is location and output coverage, not a state to construct.
+Check: `always` - for every one of the thirteen reasons `classify` (`crates/host-runtime/src/lifecycle.rs:917`) distinguishes, the operator-visible output produced from that reason differs from the output produced from every other reason. This is a value-mapping assertion over the whole reason set, not location coverage: reaching the renderer once proves nothing when twelve reasons collapse to the same `wedged` output, which is the predicted violation at HEAD.
 Fault/timing angle: none. The classifier computes thirteen distinct reasons; the
 sole production consumer forwards one and collapses the rest to a bare "wedged".
 A probe *error* also becomes "wedged", erasing the distinction between fence
@@ -5410,8 +5405,14 @@ the native addon would refuse.
 Check: `always` - for each native rejection reason, construct the grant that
 triggers it and assert the managed Rust path also refuses. Enumerated from the
 native side: wire version (`setup.rs:113`), descriptor schema (`:114`), grant hex
-and decode (`:118-119`), profile (`:120`), grant distinctness (`:120`), and the
-process-wide claim (`lib.rs:673-676` in `connect_setup`, `:608-611` in `attach`).
+and decode (`:118-119`), profile (`:120`), grant distinctness (`:120`), the
+process-wide claim (`lib.rs:673-676` in `connect_setup`, `:608-611` in `attach`),
+the descriptor-count and ancillary-shape rejections both receivers perform, and
+an unknown top-level field on an otherwise valid grant, which the native
+`GrantMessage` refuses through `deny_unknown_fields`
+(`packages/shm-native/src/setup.rs:37-46`) while the managed `GrantMessage`
+(`crates/host-runtime/src/setup_socket.rs:53-60`) carries no such attribute; that
+case is the predicted violation at HEAD and the campaign must include it.
 `always` because it is a per-descriptor invariant, the same shape as Part 1's
 `native-boundary-not-weaker-than-its-wrapper`.
 Fault/timing angle: none temporal. The exposure is a divergence in two
@@ -6153,7 +6154,12 @@ with the result discarded; and the host's watcher (`connection.rs:180-190`) is a
 generation already retired by ring evidence stops observing the socket before
 `observe_peer` resolves. Asserting that `record_peer_death` did not fire therefore
 requires establishing both that the write landed and that the watcher was still
-armed, neither of which follows from this client's code.
+armed, neither of which follows from this client's code. The conditional case is
+therefore asserted as its own clause with its own setup: in a run where the
+campaign establishes that the goodbye write landed while the watcher was still
+armed (the host generation not yet retired by ring evidence), assert the host did
+not count the ring failure as peer death; a run where either condition cannot be
+established owes nothing on this clause.
 Fault/timing angle: None for the write itself. The consequence lands on the host,
 whose watcher at `connection.rs:199-206` calls `record_peer_death()` only for a
 non-`Goodbye` close (`:200`), and only if that arm of the select wins.
@@ -7660,7 +7666,10 @@ only signal is a clean connection close.
 Check: `always` - whenever `publish_one` returns `Err` for a frame whose
 correlation has `won == true`, assert that no `Error` terminal for that
 correlation is emitted afterwards and that the generation's close carries no
-distinguishing reason. `always` rather than `always-or-unreached` because the
+distinguishing reason; and, positively, that the client observes the clean
+connection close and settles the affected request within the transport's bounded
+teardown window, so a failure that leaves the endpoint or the client pending
+forever fails the check instead of passing on the absent `Error` alone. `always` rather than `always-or-unreached` because the
 settlement half runs on every request; only the failure half is conditional, and
 the guarantee is about their relationship.
 Fault/timing angle: `settle` completes at `dispatch.rs:460` once `send_before`
@@ -9958,7 +9967,7 @@ Reachability: test-only - every Broca send through a composed `BrocaComponent` i
 Status: active
 Exercised: partial - identical resends and racing identical sends are covered; a resend after the run's terminal was retained then evicted is not.
 Guarantee: While a session entry is retained, byte-identical resends of `session.send` converge on one backend run and a differing body for the same key is rejected as a conflict. Retention ends when `TERMINAL_RETENTION` (15 minutes, `crates/host-runtime/src/broca/config.rs:126`) expires or `enforce_terminal_cap` evicts the entry beyond `MAX_TERMINAL_SESSIONS` (256, `:122`); a resend after that legitimately starts a new run.
-Check: `always` - within the retention of a session entry, `runs_started <= 1` per identical send key and a differing body returns the conflict terminal; the campaign reads `terminal_retention` and the cap from the supervisor limits and stops counting a key only once `sweep_for` or `enforce_terminal_cap` (`supervisor.rs:1085`, `:1005`) has removed it; and a session entry is present until `terminal_retention` has elapsed since its terminal or the cap has been exceeded, so a removal before either condition holds fails the check rather than ending the count.
+Check: `always` - within the retention of a session entry, `runs_started <= 1` per identical send key and a differing body returns the conflict terminal; the campaign reads `terminal_retention` and the cap from the supervisor limits and stops counting a key only once `sweep_for` or `enforce_terminal_cap` (`supervisor.rs:1085`, `:1005`) has removed it or `session.delete` has replaced the live run with a retained `SessionEntry::Tombstone` (`:509-527`); the conflict assertion is scoped to live entries, and a send against a tombstone must return `session_deleted` (`:356-372`) rather than the conflict terminal until the tombstone expires or is evicted; and a session entry is present until `terminal_retention` has elapsed since its terminal or the cap has been exceeded, so a removal before either condition holds fails the check rather than ending the count.
 Fault/timing angle: Two harness clients retry the same prompt concurrently.
 Required faults and enabling state: Concurrent identical sends; a differing resend under the same key.
 Confidence: medium - [evidence](evidence/broca-identical-resends-converge-on-one-run.md). `identical_resend_dedups_and_any_byte_difference_conflicts`, `racing_identical_sends_converge_on_one_run_and_one_backend_start` (`crates/host-runtime/tests/broca_supervisor.rs`).
