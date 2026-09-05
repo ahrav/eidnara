@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "b3d85b1fbe2522fdcf36504a94d85461d55a774d19356aa30e8c71bdacb18221",
+  "source_sha256": "07891af1a9c40728825db0d31f9d15d909947c328cc4e2abe387851274d5b664",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -23,7 +23,7 @@
       "required_faults": "a counter seeded near its maximum. The two-generations-per-socket case needs a candidate promotion, which is a test-only path.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/generation-id-strictly-increases-and-is-never-reused.md). verified: the counter is initialized to 1 at `runtime.rs:898` and `gen_counter` has exactly two references."
+        "evidence": "[evidence](evidence/generation-id-strictly-increases-and-is-never-reused.md). re-verified: the counter is initialized to 1 at `runtime.rs:788` and `gen_counter` has exactly two references."
       },
       "existing_check": "none. `routing.rs:535` `concurrent_generations_never_share_a_live_channel` asserts channel exclusivity between two hand-built ids, not id minting.",
       "impact": "a duplicate id would let one generation's close finalize another's route, or let a stale generation's frames settle a live correlation.",
@@ -101,7 +101,7 @@
         "semantics": "always",
         "condition": "cancel the token and call `writer.discard()`, then have a producer that already passed its `is_cancelled` precheck call send; assert the bytes never appear on the peer socket. Both halves of the precondition are required: `send_ticket_before` gates on the writer's own `retired` token (`frame_channel.rs:640-653`), and the endpoint select services a ready queue before `root.cancelled()` (`ring_transport.rs:438-470`), so cancelling the generation token alone may still publish the newly queued frame. Separately assert `token.cancel()` alone does *not* stop queued frames, because the drain paths depend on that."
       },
-      "fault_timing": "`send_ticket_before` gates on `retired` only, not on the generation token or `discard` (`frame_channel.rs:812-825`). So the guarantee is enforced downstream by the writer's biased discard arm, not by admission: a producer can be admitted after cancel, and it is the writer that must drop it.",
+      "fault_timing": "`send_ticket_before` gates on `retired` only, not on the generation token or `discard` (`frame_channel.rs:812-825` (source-catalog line, not present at HEAD)). So the guarantee is enforced downstream by the writer's biased discard arm, not by admission: a producer can be admitted after cancel, and it is the writer that must drop it.",
       "required_faults": "a producer suspended between its `is_cancelled` precheck and its send, with the cancel landing in between.",
       "confidence": {
         "level": "high",
@@ -133,7 +133,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/a-retired-generation-emits-nothing-and-mutates-nothing.md). every emit path routes through a charge helper or an explicit `is_cancelled` pair."
       },
-      "existing_check": "`tests/transport_negotiation.rs:907` covers one shape; `connection.rs:1598-1606` pins the positive fence, not the negative case.",
+      "existing_check": "`tests/transport_negotiation.rs:907` covers one shape; `connection.rs:1598-1606` (source-catalog line, not present at HEAD) pins the positive fence, not the negative case.",
       "impact": "the fail-closed property the whole retirement design rests on.",
       "open_questions": [],
       "extra": {}
@@ -458,7 +458,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/read-task-quiescence-implies-no-further-registration.md). all ten registration sites enumerated; all are inside the read loop's dynamic extent or precede it."
       },
-      "existing_check": "`connection.rs:1598-1607` proves an already-started producer is waited for, but hand-rolls the producer with a bare spawn instead of driving the real read loop, so it does not cover who else can register. Both are current-thread.",
+      "existing_check": "`connection.rs:1598-1607` (source-catalog line, not present at HEAD) proves an already-started producer is waited for, but hand-rolls the producer with a bare spawn instead of driving the real read loop, so it does not cover who else can register. Both are current-thread.",
       "impact": "a refactor that spawns into the set from outside the read loop, or stops tracking the read loop itself, makes shutdown silently stop waiting for producers.",
       "open_questions": [],
       "extra": {}
@@ -1031,7 +1031,7 @@
       "slug": "negotiation-precedes-every-gated-frame-kind",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "when live - at `ed487e11^` every accepted connection began in `BootstrapTcp` and the gate ran on every inbound frame.",
+      "reachability_note": "when live - at `ed487e11^` every accepted connection began in `BootstrapTcp` and the gate ran on every inbound frame. Superseded rather than live: the mandatory-ring refactor removed transport negotiation and the setup state machine, so no generation is ever in a not-ready setup state at HEAD and the subject of this record is unreachable by any configuration.",
       "status": "invalidated",
       "exercised": {
         "state": "partial",
@@ -1053,9 +1053,7 @@
       "open_questions": [
         "Should a premature oversize control declaration receive the section 7.1 authoritative terminal before retiring, or does the setup gate correctly outrank it? The code chooses the gate (`:430` refuses before any emission), while the malformed-negotiate path chooses the terminal (`:849-875`). The document specifies both rules and does not order them. (needs human input)"
       ],
-      "extra": {
-        "Superseded rather than live": "the mandatory-ring refactor removed transport negotiation and the setup state machine, so no generation is ever in a not-ready setup state at HEAD and the subject of this record is unreachable by any configuration."
-      },
+      "extra": {},
       "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
@@ -1071,7 +1069,7 @@
       "guarantee": "at most one negotiation commits per generation. Once the state leaves `BootstrapTcp` it never returns, at most one candidate handoff is ever recorded, and any later or repeated negotiation retires the generation.",
       "check": {
         "semantics": "always",
-        "condition": "instrument the two `setup.state` writes (`connection.rs:960`, `:1103`) and the `setup.handoff` write (`:1104`); assert at most one of each per `ConnectionSetup`, assert no write whose prior state is not `BootstrapTcp`, and assert every `handle_negotiate` entry with a non-`BootstrapTcp` state returns `ControlFlow::Close` (`:846-848`). `always` because stickiness is evaluated on every negotiate frame, and a single violation hands one connection two transports."
+        "condition": "instrument the two `setup.state` writes (`connection.rs:960` (source-catalog line, not present at HEAD), `:1103`) and the `setup.handoff` write (`:1104`); assert at most one of each per `ConnectionSetup`, assert no write whose prior state is not `BootstrapTcp`, and assert every `handle_negotiate` entry with a non-`BootstrapTcp` state returns `ControlFlow::Close` (`:846-848`). `always` because stickiness is evaluated on every negotiate frame, and a single violation hands one connection two transports."
       },
       "fault_timing": "none in the single-reader design. All three writes happen on the sole read loop, so no interleaving can produce two selections. The timing question is the reverse one: the state closes at `:960` and `:1103` before the corresponding response is emitted, so retirement of a late negotiation can be observed by the client before it observes the first selection.",
       "required_faults": "a raw client that negotiates twice. The `TcpCommitted` arc needs no provider and no configuration. The `CandidateSetup` and `ProviderActive` arcs need an injected provider, which is test-only; that is why this record is labelled by its default-reachable arc and the provider arcs are named explicitly.",
@@ -1130,10 +1128,10 @@
         "condition": "assert that a campaign produces at least one interval in which the setup state is `BootstrapTcp` or `CandidateSetup`, a host Ping is outstanding in `gen.pings`, and a matching `Pong` is delivered to the read loop. Marker `SETUP_PONG_WINDOW_OBSERVED`. `sometimes` and not `always`, because asserting either resolution would resolve a normative question this record exists to record: the honest check is that the window occurs, so a human can decide against a real trace. Situation coverage, not location coverage: the `Pong` arm's lines are already executed by post-negotiation tests while the setup window is never produced."
       },
       "fault_timing": "the whole record is a window. It opens when `liveness_loop` is spawned at `:296` and closes when the state commits at `:960` or `:1103`. Its width is `ping_interval` versus the client's time to negotiate, so a fast client never sees a Ping and a slow or paused client always does. The grant path narrows, but does not close, the window: it stops and joins bootstrap liveness at `:1032-1036`, which is after any bootstrap Ping may already have been sent.",
-      "required_faults": "`liveness: Some(..)` in `HostConfig`, which is not a shipped configuration in this tree; the default is `None` (`config.rs:296`) and the only `Some` is inside the test module (`config.rs:664`). Plus a client that authenticates, delays negotiation past `ping_interval`, and then answers the Ping. The weaker half of the contradiction, that an *unsolicited* `Pong` before negotiation is silently ignored rather than retiring the generation, needs no liveness at all and is default-production; it is a strictly smaller claim and is recorded in the evidence file.",
+      "required_faults": "`liveness: Some(..)` in `HostConfig`, which is not a shipped configuration in this tree; the default is `None` (`config.rs:296`) and the only `Some` is inside the test module (`config.rs:664` (source-catalog line, not present at HEAD)). Plus a client that authenticates, delays negotiation past `ping_interval`, and then answers the Ping. The weaker half of the contradiction, that an *unsolicited* `Pong` before negotiation is silently ignored rather than retiring the generation, needs no liveness at all and is default-production; it is a strictly smaller claim and is recorded in the evidence file.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md)."
+        "evidence": "[evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md). Both sides read at HEAD: the document sentence, the ungated `Pong` arm, the liveness start point, and the grant path's own comment explaining that bootstrap probing is live during setup."
       },
       "existing_check": "none. `pong-preanswer-rejected-in-every-mutex-order` in this catalog covers the `Pong` arm's acceptance rule, not its absent readiness gate.",
       "impact": "unresolved, and that is the finding. Under the document's reading the host kills healthy generations' probes by answering them; under the code's reading the document forbids a frame the host itself solicits. A test author picking either side without a decision would encode a guess as a regression test.",
@@ -1141,9 +1139,7 @@
         "Should the document drop `Pong` from the retirement list at `:562`, or should liveness probing be deferred until a selection commits? (needs human input)",
         "If probing is deferred, does the setup deadline (`shared.timing.transport_setup_deadline`, used at `:1022`) fully replace liveness for detecting a peer that authenticates and then goes silent without negotiating? The bootstrap has no such deadline before a grant."
       ],
-      "extra": {
-        "Both sides read at HEAD": "the document sentence, the ungated `Pong` arm, the liveness start point, and the grant path's own comment explaining that bootstrap probing is live during setup."
-      },
+      "extra": {},
       "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`, `ed487e11`) removed transport negotiation, the `TransportState` setup machine (`BootstrapTcp`, `CandidateSetup`, `transport_ready`, `handle_negotiate`), and `tests/transport_negotiation.rs`; no file under `crates/host-runtime` holds this mechanism at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
@@ -1159,7 +1155,7 @@
       "guarantee": "when both conditions are present across the evaluated offers, `unavailable` outranks `capability_version_mismatch`; a permanently absent provider and a panicking preflight both contribute no reason and select reasonless TCP.",
       "check": {
         "semantics": "always-or-unreached",
-        "condition": "whenever a reason is computed (`connection.rs:953-959`), assert `dynamically_unavailable` implies the emitted reason is `Unavailable` regardless of `capability_mismatch`, and that a `StaticallyOmitted` or panicking preflight contributes no reason. These semantics and not `always`, because the path may never run in a shipped configuration: with an empty provider registry both flags are unconditionally false, so it must be correct when reached rather than reached at all."
+        "condition": "whenever a reason is computed (`connection.rs:953-959` (source-catalog line, not present at HEAD)), assert `dynamically_unavailable` implies the emitted reason is `Unavailable` regardless of `capability_mismatch`, and that a `StaticallyOmitted` or panicking preflight contributes no reason. These semantics and not `always`, because the path may never run in a shipped configuration: with an empty provider registry both flags are unconditionally false, so it must be correct when reached rather than reached at all."
       },
       "fault_timing": "a panicking preflight is the fault of interest. It is caught at `:907-912` and mapped to `StaticallyOmitted`, so a broken provider is indistinguishable from one that was never installed, and the client is denied the re-upgrade probe that `docs/host-wire-protocol.md:621` reserves for `unavailable`. Ordering matters too: the loop breaks on the first serveable TCP offer (`:892-896`), so offers after the TCP entry are never evaluated and cannot contribute a reason.",
       "required_faults": "at least two injected providers, one returning `DynamicallyUnavailable` from `preflight` and one installed at a capability version the client does not offer, with the client offering the unavailable transport at lower preference than the mismatched one. Injected providers are test-only: `TransportProviders::default()` is empty (`transport_provider.rs:157-163`), the module documents providers as test-injected (`:1-13`), and `HostConfig::default` installs the empty registry (`config.rs:297`). Verified consequence: in every shipped configuration the reason is always `None`.",
@@ -1302,7 +1298,7 @@
       "guarantee": "An early-rejected oversize control frame is drained without charging the ingress byte budget, and the work it costs is bounded by the rejected frame's own absolute frame deadline, by the connection permit semaphore, and by nothing else.",
       "check": {
         "semantics": "always",
-        "condition": "across a sustained reject-then-drain cycle, the ingress budget's available permits return to their starting value after every cycle (the intended property, already asserted once), and each drain completes or fails within the deadline armed at the rejected frame's first header byte."
+        "condition": "across a sustained reject-then-drain cycle, the ingress budget's available permits return to their starting value after every cycle (the intended property, already asserted once), and each drain completes or fails within the deadline armed at the rejected frame's first header byte. State the bound in the units the code bounds: the absolute deadline from `tcp_frame_channel.rs:169`, carried into `PendingDrain` at `:126`, default 30 s (`config.rs:224`); and `max_connections` concurrent loops, default 64 (`config.rs:129`, `runtime.rs:890`). Do not assert a byte-rate ceiling, because there is none."
       },
       "fault_timing": "the deadline is armed at the *first header byte*, not at the drain's start, and is spent by the header read and by the engine's rejection emission before the drain begins (`connection.rs:433-462` spawns the emission between the two `recv` calls). So a host slow to emit shortens its own drain window and converts the drain into `RejectedDrainFailed`, which closes the generation. That makes the loop self-limiting under host slowness but not under host health.",
       "required_faults": "a peer sending channel-0 `Request` headers with strictly increasing correlations (`connection.rs:426-429`) declaring `len > MAX_CONTROL_BODY_LEN`, each followed by the declared bytes, repeated. To observe the aggregate, run `max_connections` of them.",
@@ -1316,9 +1312,7 @@
         "Is the unbudgeted cost acceptable, or should the drain hold a nominal charge or a dedicated permit? The zero-budget property is deliberate and correct as a *resident-memory* property (never buffer the body); the open question is whether the same reasoning should extend to the bandwidth and CPU the discard costs. (needs human input)",
         "Should the reject-then-drain cycle be counted? The gap here is a missing bound, and today no signal would show the loop running at all. (needs human input)"
       ],
-      "extra": {
-        "State the bound in the units the code bounds": "the absolute deadline from `tcp_frame_channel.rs:169`, carried into `PendingDrain` at `:126`, default 30 s (`config.rs:224`); and `max_connections` concurrent loops, default 64 (`config.rs:129`, `runtime.rs:890`). Do not assert a byte-rate ceiling, because there is none."
-      },
+      "extra": {},
       "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
@@ -1340,23 +1334,21 @@
       "required_faults": "to *prove* unreachability, none: it follows from the four verified steps in the evidence. To detect a regression, instrument the arm and run the ordinary inbound suite.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md)."
+        "evidence": "[evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md). Verified all four steps the claim rests on: the cap equals the framing maximum (`client.rs:88`, `:403`); `validate_inbound` rejects a larger `len` first (`:2040`, called at `:1957`); `ByteCounter::charge` refuses only when `used > 0` or on overflow (`:1770-1781`); and `used` is zero at every read because every `dispatch` arm releases the charge (`:1433`, `:1530`, and ownership drop at `:1431`, `:1479`, and function exit) while retained stream bytes go to `retained_budget` (`:1523`, documented at `:956-961`)."
       },
       "existing_check": "none. The comment at `client.rs:1965-1969` states the invariant in prose and correctly labels the branch as a structural guard, but nothing enforces or observes it.",
       "impact": "low today and that is the finding. Two dead claims hang off it: `drain_until`'s doc at `client.rs:2010-2011` promises a realignment that no code consumes, and even if the branch fired, `read_active_frame` returns `Err(())` immediately after, which retires the connection at `:1897-1899` and discards the realignment. If the branch ever does fire it signals a real regression in the reader-exclusive reservation, and nothing would report it.",
       "open_questions": [
         "Should the branch keep its drain, or return the error directly? The drain's only stated purpose is a realignment the sole caller discards. Removing it would delete the client's only `frame_read::drain` call site and make the guard a bare error return. (needs human input)"
       ],
-      "extra": {
-        "Verified all four steps the claim rests on": "the cap equals the framing maximum (`client.rs:88`, `:403`); `validate_inbound` rejects a larger `len` first (`:2040`, called at `:1957`); `ByteCounter::charge` refuses only when `used > 0` or on overflow (`:1770-1781`); and `used` is zero at every read because every `dispatch` arm releases the charge (`:1433`, `:1530`, and ownership drop at `:1431`, `:1479`, and function exit) while retained stream bytes go to `retained_budget` (`:1523`, documented at `:956-961`)."
-      },
+      "extra": {},
       "unreachability_evidence": "the mandatory-ring refactor (`host@907746f7b`) removed this mechanism; no file under `crates/host-runtime/src` holds it at the pinned commit, so the subject is unreachable by any configuration."
     },
     {
       "slug": "a-timely-pong-sustains-the-generation-within-a-bounded-round",
       "type": "liveness",
       "reachability": "explicit-config-only",
-      "reachability_note": "",
+      "reachability_note": "the liveness loop is spawned only when a policy is configured (`crates/host-runtime/src/connection.rs:264-270`, re-verified), `HostConfig::default` leaves `liveness: None` (`config.rs:236`, re-verified), and no in-tree caller of `run`, in `crates/host-runtime/examples/` or the bench, sets `liveness`; the daemon that will build the production config is scheduled for U4 (`docs/properties/README.md:52`).",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -1368,7 +1360,7 @@
         "condition": "under paused virtual time, for a policy with a chosen `ping_interval` and `pong_deadline`: (a) answer every Ping strictly inside `pong_deadline` measured from the write-completion instant recorded at `connection.rs:816`, advance the clock by `k * ping_interval` for a fixed small `k` and assert exactly `k` Pings were written (the loop rearms `next_ping_at` after every send at `connection.rs:779`, so the cadence count is taken over the requested intervals only), then advance a further `pong_deadline` and assert `gen.token` is not cancelled without asserting the count, since `pong_deadline >= ping_interval` is a valid configuration (`config.rs:304-317`) under which that tail produces more Pings, and additionally assert the per-round inductive invariant that makes the finite run stand for the unbounded guarantee: after each timely Pong the liveness state carries no counter, deadline, or flag that depends on how many rounds have passed (the `expired` predicate at `connection.rs:755-760` reads only each outstanding probe's `written_at` and `sent`, and an answered probe is removed from `pings`), so round `k + 1` is decided by the same inputs as round 1; (b) with `invalidate_on_missed: true`, answer nothing, advance to `write_completion + pong_deadline`, and assert `gen.token` is cancelled; and assert it is *not* cancelled at `write_completion + pong_deadline - 1ns`. `always` because the two directions are the dual outcomes of one predicate, `expired` at `connection.rs:755-760`, and both must hold at every evaluation of the loop."
       },
       "fault_timing": "the bound is stated in the units the code bounds, so this is a finite check rather than an unbounded \"eventually\". The wake is the minimum of the next tick and the earliest `probe.sent + pong_deadline` (`connection.rs:741-749`); expiry is `>= pong_deadline` from `probe.sent` (`:755-760`); the tick re-arms at `now + ping_interval` (`:779`). `config.rs:370-382` rejects a zero value for either, so both bounds are strictly positive in any accepted configuration. The subtle part is which instant `probe.sent` holds: the insert at `:783-792` records the enqueue instant with `written_at: None`, and the write-completion hook at `:810-820` overwrites it with `completed_at`. Probes with `written_at: None` are excluded from both the deadline wake (`:745`) and the expiry scan (`:758`), so queueing delay neither expires a probe nor arms one. Both halves need paused time; wall-clock sleeps cannot distinguish the boundary from scheduler noise.",
-      "required_faults": "a configured `LivenessPolicy`, which no shipped configuration supplies. For (a) a cooperative peer, which the in-crate duplex harness at `connection.rs:1480` onward already provides. For (b) a peer that reads but never sends a Pong, plus `invalidate_on_missed: true`. Paused tokio time for both. No adversary and no concurrency campaign.",
+      "required_faults": "a configured `LivenessPolicy`, which no shipped configuration supplies. For (a) a cooperative peer, which the in-crate duplex harness at `connection.rs:1480` (source-catalog line, not present at HEAD; the duplex harness lives in the crate's test module) onward already provides. For (b) a peer that reads but never sends a Pong, plus `invalidate_on_missed: true`. Paused tokio time for both. No adversary and no concurrency campaign.",
       "confidence": {
         "level": "high",
         "evidence": "[evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). Every bound was read at HEAD and the two `sent` anchors were traced through both writers of the field."
@@ -1384,7 +1376,7 @@
       "slug": "slow-egress-alone-does-not-retire-a-probed-generation",
       "type": "safety",
       "reachability": "explicit-config-only",
-      "reachability_note": "",
+      "reachability_note": "the liveness loop is spawned only when a policy is configured (`crates/host-runtime/src/connection.rs:264-270`, re-verified), `HostConfig::default` leaves `liveness: None` (`config.rs:236`, re-verified), and no in-tree caller of `run`, in `crates/host-runtime/examples/` or the bench, sets `liveness`; the daemon that will build the production config is scheduled for U4 (`docs/properties/README.md:52`).",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -1395,7 +1387,7 @@
         "semantics": "always",
         "condition": "in every window in which the coverage preconditions below hold, the generation is not retired and `probe.expired` stays false until the peer's Pong arrives, with `invalidate_on_missed` false; the catalog's own trace says `FrameSender::send` retires the generation when the writer queue stays saturated through the Ping admission deadline, so this is a predicted violation at HEAD rather than a pass. The two markers below are coverage instrumentation that shows the window was constructed, not the assertion. A constant marker `probe_queued_behind_saturated_egress` fires when all of these independent, legal preconditions hold at one instant: a `LivenessPolicy` is configured; `invalidate_on_missed` is `false`; the writer queue holds `writer_queue_frames` admitted frames; and a Ping tick is due. A second constant marker `pong_parked_pending_write_completion` fires when a matching Pong is observed while `probe.written_at.is_none()`, which is the park branch at `connection.rs:464`. The markers use situation coverage rather than line coverage because a campaign can execute those lines while never producing the operational state: line coverage of `:464` proves the branch compiled and ran, whereas the property needs a full queue coinciding with a due tick, which is situation coverage. Both markers assert only legal preconditions, so they still fire against a correct implementation; neither asserts a retirement, an expiry, or any violation."
       },
-      "fault_timing": "the window exists because the host writer has no control lane. `frame_channel.rs:761` holds a single `mpsc::Sender<QueuedOutboundFrame>`, created at `:862` with capacity `queue_frames`, default 64 (`config.rs:141`, passed at `connection.rs:181`). There is no reserved control slot, unlike the client, which reserves one (`client.rs:954`). Two distinct consequences follow, and only the first is handled. First, a Ping queued behind application frames is deadline-anchored at completion (`connection.rs:1443`) and its Pong is parked rather than judged (`:528-535`), so queueing delay is not charged to the peer. That is correct and deliberate. Second, and unhandled: the Ping's *admission* is bounded. `gen.writer.send(...)` at `:1449` reaches `FrameSender::send` (`frame_channel.rs:779-781`), which passes `admission_deadline()`, that is `now + admission_timeout` (`:783-785`), and `connection.rs:178-186` supplies `shared.timing.frame_deadline` there, default 30 seconds (`config.rs:224`). The timeout arm at `frame_channel.rs:819-823` calls `self.retired.cancel()` and `self.generation.cancel()`. So a Ping that cannot be admitted within `frame_deadline` retires the generation from inside the sender, before `liveness_loop` observes `sent.is_err()` at `:1457`. This bypasses `invalidate_on_missed` entirely: the missed-Pong retirement at `:1376` is gated on that flag and the admission retirement is not.",
+      "fault_timing": "the window exists because the host writer has no control lane. `frame_channel.rs:590-597` (re-verified) holds a single `mpsc::Sender<QueuedOutboundFrame>`, created at `:862` with capacity `queue_frames`, default 64 (`config.rs:141`, passed at `connection.rs:181`). There is no reserved control slot, unlike the client, which reserves one (`client.rs:954`). Two distinct consequences follow, and only the first is handled. First, a Ping queued behind application frames is deadline-anchored at completion (`connection.rs:816-817` (re-verified)) and its Pong is parked rather than judged (`:528-535`), so queueing delay is not charged to the peer. That is correct and deliberate. Second, and unhandled: the Ping's *admission* is bounded. `gen.writer.send(...)` at `:1449` reaches `FrameSender::send` (`frame_channel.rs:609-614` (re-verified)), which passes `admission_deadline()`, that is `now + admission_timeout` (`:783-785`), and `connection.rs:178-186` supplies `shared.timing.frame_deadline` there, default 30 seconds (`config.rs:224`). The timeout arm at `frame_channel.rs:647-651` (re-verified) calls `self.retired.cancel()` and `self.generation.cancel()`. So a Ping that cannot be admitted within `frame_deadline` retires the generation from inside the sender, before `liveness_loop` observes `sent.is_err()` at `:1457`. This bypasses `invalidate_on_missed` entirely: the missed-Pong retirement at `:1376` is gated on that flag and the admission retirement is not.",
       "required_faults": "a configured `LivenessPolicy` with `invalidate_on_missed: false`; a handler producing frames faster than the peer drains them so all 64 slots stay occupied; and a peer that keeps reading fast enough that no single dequeued write exceeds `frame_deadline`, since a peer that stops reading is retired by the write deadline on its own, which `config.rs:204-206` documents as intended. Paused time makes the 30 second window cheap. The second marker needs only a Ping enqueued behind at least one unwritten frame plus a prompt Pong.",
       "confidence": {
         "level": "high",
@@ -1540,16 +1532,14 @@
       "required_faults": "none for the structural check. For a runtime check, an active connection with both directions carrying traffic, so that a second thread would actually contend.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/ring-a-endpoint-thread-solely-owns-both-ring-endpoints.md)."
+        "evidence": "[evidence](evidence/ring-a-endpoint-thread-solely-owns-both-ring-endpoints.md). Verified by inspection: `DuplexRing::create` at `ring_transport.rs:248` is inside the thread closure opened at `:240`; `rings` is moved into `run_endpoint` by value at `:265`; `PreparedRing` (`:93-101`) has seven fields and none is a `Ring`; the only values crossing the `sync_channel` at `:231` are a `serde_json::Value` and `[OwnedFd; RING_DESCRIPTOR_COUNT]` - six descriptors post-#131, up from two, still no ring - sent at `:261`."
       },
       "existing_check": "`ring_transport.rs:851-856` `construction_has_no_ring_side_effects` - covers the process owner only, and runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`). Status unaudited.",
       "impact": "two threads driving one direction's cursors is a data race on the shared control page, which the transport's `try_receive` would surface as descriptor validation failure and quarantine at best, and as torn payload delivery at worst.",
       "open_questions": [
         "Should `PreparedRing` carry a negative marker, or a compile-fail doctest like the two on `frame_channel::ReceiveLease` (`frame_channel.rs:296-308`), so the confinement is enforced rather than reviewed?"
       ],
-      "extra": {
-        "Verified by inspection": "`DuplexRing::create` at `ring_transport.rs:248` is inside the thread closure opened at `:240`; `rings` is moved into `run_endpoint` by value at `:265`; `PreparedRing` (`:93-101`) has seven fields and none is a `Ring`; the only values crossing the `sync_channel` at `:231` are a `serde_json::Value` and `[OwnedFd; RING_DESCRIPTOR_COUNT]` - six descriptors post-#131, up from two, still no ring - sent at `:261`."
-      }
+      "extra": {}
     },
     {
       "slug": "ring-a-no-producer-retains-a-committed-release-identity",
@@ -1598,16 +1588,14 @@
       "required_faults": "one fault per path. `DuplexRing::create` failure needs shared-memory object creation to fail, reachable by exhausting `/dev/shm` or the fd limit. `worker_descriptor` failure needs `Ring::attachment()` to fail. Thread-spawn failure (`:279-281`) exits before `admit`'s guard leaves the caller, so it needs the guard's `Drop` on the `prepare` side. A panic inside `run_endpoint` needs the `catch_unwind` at `:264` to still reach `:276`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/ring-a-admission-charge-releases-on-every-endpoint-thread-exit.md)."
+        "evidence": "[evidence](evidence/ring-a-admission-charge-releases-on-every-endpoint-thread-exit.md). Verified by inspection: `Admission` carries an `AdmissionState` (`profile.rs:546-557`) and its `Drop` releases when `Active` (`profile.rs:581-586`); the explicit `release()` at `ring_transport.rs:276` is outside the `catch_unwind`, so a panic inside `run_endpoint` still reaches it; `AdmissionController::release` (`profile.rs:512-520`) is a `checked_sub` that silently no-ops on underflow, so a double release cannot go negative but also cannot be detected."
       },
       "existing_check": "`released_admissions_recompute_active_span_charge` (`crates/shm-transport/tests/profile.rs`) covers `Admission::release` and the `Drop` path at the transport layer; nothing in the 2b file set covers the endpoint thread's exits. Status unaudited.",
       "impact": "a stranded charge is permanent. Since `process_limits` multiplies the per-connection charge by the connection count - post-#131 additionally capped by `MAX_RING_RESIDENT_BYTES` (`ring_transport.rs:60-80`) - one stranded connection's worth of arena bytes permanently removes one connection slot, and the failure presents much later as `RingUnavailable` on an unrelated connect with `state: \"healthy\"` in diagnostics (see `ring-a-host-doctor-emits-one-of-five-declared-terminal-classes`).",
       "open_questions": [
         "`AdmissionController::release` swallows a `checked_sub` underflow (`profile.rs:516-519`). Is a double release meant to be silent, or should it be a detectable accounting fault?"
       ],
-      "extra": {
-        "Verified by inspection": "`Admission` carries an `AdmissionState` (`profile.rs:546-557`) and its `Drop` releases when `Active` (`profile.rs:581-586`); the explicit `release()` at `ring_transport.rs:276` is outside the `catch_unwind`, so a panic inside `run_endpoint` still reaches it; `AdmissionController::release` (`profile.rs:512-520`) is a `checked_sub` that silently no-ops on underflow, so a double release cannot go negative but also cannot be detected."
-      }
+      "extra": {}
     },
     {
       "slug": "ring-a-host-never-quarantines-an-admission-charge",
@@ -1657,7 +1645,7 @@
       "required_faults": "an outbound publish failure. Four mechanisms reach it: reservation deadline expiry under a full host-to-peer ring (`reserve_until`, `ring.rs:980`, deadline exits at `:989`, `:1005`, `:1024`, `:1044`), a wire-header/length disagreement rejected by `commit_reservation` (`ring.rs:1577-1593`), a panic in the direct serializer caught at `:584-587`, and `ReservationWriter` exhaustion (`:635-643`). The cheapest to construct is a peer that attaches and then never receives, filling the host-to-peer ring until `reserve_until` hits its deadline.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/ring-a-publish-failure-is-reported-as-a-clean-peer-close.md)."
+        "evidence": "[evidence](evidence/ring-a-publish-failure-is-reported-as-a-clean-peer-close.md). Verified by inspection: `publish_one` returns `Result<(), ()>` (`:560-565`), so every distinct cause is erased to a unit before `run_endpoint` sees it; the `:479-484` block sends nothing; `:354` is the only `CleanEof` producer in the crate; `connection.rs:401` is the only `CleanEof` consumer."
       },
       "existing_check": "none. `connection.rs:401-404` is the consuming match, not a check.",
       "impact": "two consequences. Operationally, a host-side ring fault is indexed as a peer disconnect, so the diagnostics counters and any operator narrative blame the client. Protocol-wise, `ReadExit::Peer` retires silently and discards the queued frames (`connection.rs:315-318`), which is the correct handling for a peer-caused close but means a host-caused close also produces no terminal, so every pending correlation becomes `outcome_unknown` with no recorded reason.",
@@ -1665,9 +1653,7 @@
         "Should `publish_one` carry a cause enum rather than `()`? The information exists at each of the four failure sites and is discarded at `:588-590`.",
         "Is the asymmetry between `:535-537` (`Corrupt`) and `:479-484` (`CleanEof`) for the identical fault deliberate? (needs human input)"
       ],
-      "extra": {
-        "Verified by inspection": "`publish_one` returns `Result<(), ()>` (`:560-565`), so every distinct cause is erased to a unit before `run_endpoint` sees it; the `:479-484` block sends nothing; `:354` is the only `CleanEof` producer in the crate; `connection.rs:401` is the only `CleanEof` consumer."
-      }
+      "extra": {}
     },
     {
       "slug": "ring-a-endpoint-thread-panic-is-reported-as-orderly-completion",
@@ -1684,20 +1670,18 @@
         "semantics": "always-or-unreached",
         "condition": "if the outer `catch_unwind` at `ring_transport.rs:261` observes `Err`, then the connection observes a cause other than a clean completion, and no `QueuedOutboundFrame` remains in state `COMPLETE` without having reached the ring. `always-or-unreached` fits because a panic on this thread is an optional path that a correct build never takes, but it must be safe when it does; `always` would overstate a requirement that the path be exercised."
       },
-      "fault_timing": "the exposed window is between `:587` and `:600`. The inner `catch_unwind` protects only the reserve-fill-commit block. A panic in the publish hook (`:594`), or in the `written` local-completion hook (`:598`), unwinds `publish_one` and `run_endpoint`, is swallowed by `let _ =` at `:264`, and then `admission.release()` (`:276`) and `done_tx.send(())` (`:277`) run exactly as on an orderly exit. Neither `queue.retired` nor `root` is cancelled, so `FrameSender::send_ticket_before` keeps admitting frames until its own admission timeout fires (`frame_channel.rs:742-750`), and the `io` future completes successfully, which `connection.rs:347` reads as a clean join. A second, narrower window: a panic inside `on_publish()` (`frame_channel.rs:653-655`) leaves the ticket state at `PUBLISHED` with the frame never written, so a later `FrameSendTicket::cancel` returns `PossibleSend` for a frame that was provably not sent, contradicting `docs/host-wire-protocol.md:60`.",
+      "fault_timing": "the exposed window is between `:587` and `:600`. The inner `catch_unwind` protects only the reserve-fill-commit block. A panic in the publish hook (`:594`), or in the `written` local-completion hook (`:598`), unwinds `publish_one` and `run_endpoint`, is swallowed by `let _ =` at `:264`, and then `admission.release()` (`:276`) and `done_tx.send(())` (`:277`) run exactly as on an orderly exit. Neither `queue.retired` nor `root` is cancelled, so `FrameSender::send_ticket_before` keeps admitting frames until its own admission timeout fires (`frame_channel.rs:742-750` (source-catalog line, not present at HEAD)), and the `io` future completes successfully, which `connection.rs:347` reads as a clean join. A second, narrower window: a panic inside `on_publish()` (`frame_channel.rs:653-655`) leaves the ticket state at `PUBLISHED` with the frame never written, so a later `FrameSendTicket::cancel` returns `PossibleSend` for a frame that was provably not sent, contradicting `docs/host-wire-protocol.md:60`.",
       "required_faults": "a panicking hook. `written` is the production one; `dispatch.rs` supplies it through `OutboundFrame::written` (`frame_channel.rs:630`). Part 2a owns writer-hook panics on the writer task (`no-writer-hook-panic-poisons-a-generation-lock`); this is the ring thread, a different owner, and the panic there has no boundary at all.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/ring-a-endpoint-thread-panic-is-reported-as-orderly-completion.md)."
+        "evidence": "[evidence](evidence/ring-a-endpoint-thread-panic-is-reported-as-orderly-completion.md). Verified by inspection: `:264` discards the `catch_unwind` result; the inner `catch_unwind` closes at `:587`; `:591` stores `COMPLETE` before the hooks run at `:592-598`; `panic_boundary::redact_sync` wraps only the direct serializer (`:610-613`) and not the hooks."
       },
       "existing_check": "none for the ring thread. `panic_boundary.rs` is Part 2a scope.",
       "impact": "the host loses its only transport thread and reports success. Frames admitted after the panic sit in the queue until each hits its admission deadline, so the connection degrades over `frame_deadline` per frame rather than retiring, and diagnostics records nothing at all: no `peer_death`, no `exhaustion`, and `state: \"healthy\"`.",
       "open_questions": [
         "Should `:591`'s `COMPLETE` store move after the hooks, or should the hooks move inside the inner `catch_unwind`? The two answers differ on whether a hook panic should retire the connection."
       ],
-      "extra": {
-        "Verified by inspection": "`:264` discards the `catch_unwind` result; the inner `catch_unwind` closes at `:587`; `:591` stores `COMPLETE` before the hooks run at `:592-598`; `panic_boundary::redact_sync` wraps only the direct serializer (`:610-613`) and not the hooks."
-      }
+      "extra": {}
     },
     {
       "slug": "ring-a-ring-unavailability-fails-closed-without-a-classified-reason",
@@ -1718,7 +1702,7 @@
       "required_faults": "one fault per cause. Admission exhaustion needs `max_connections` concurrent live rings. `DuplexRing::create` failure needs shared-memory creation to fail. `worker_descriptor` failure needs `Ring::attachment()` to fail. Thread-spawn failure needs the thread limit. `initialized_rx.recv` failure needs the endpoint thread to die between spawn and handshake. The timeout path needs `prepare` to exceed `transport_setup_deadline`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/ring-a-ring-unavailability-fails-closed-without-a-classified-reason.md)."
+        "evidence": "[evidence](evidence/ring-a-ring-unavailability-fails-closed-without-a-classified-reason.md). Verified by inspection: `RingUnavailable` (`:103-112`) is a unit struct with a fixed `Display` string and no cause field; only `:224` increments a counter; `connection.rs:149-164`'s `else` branch is a bare `return` that emits no `ServerMessage`, so the peer observes a closed setup socket and `activate_client` (`client.rs:367`) reports the generic `ClientError::new(\"setup_failed\", ...)` at `client.rs:368`."
       },
       "existing_check": "`ring_transport.rs:884` asserts `diagnostics[\"exhaustion\"][\"observed\"] == 0` on a transport with no admissions. Nothing covers the other four causes. Status unaudited.",
       "impact": "the host fails closed, which is the important half and holds. But four of five causes are invisible: a host that cannot create shared-memory objects at all refuses every connection while reporting `state: \"healthy\"` with all five counters at zero, and the client sees only `setup_failed`. That is a silent total outage of the only datapath.",
@@ -1726,9 +1710,7 @@
         "Should `RingUnavailable` carry a closed cause class matching the doctor's five terminal classes (`docs/shm-transport.md:53-59`)?",
         "On the `prepare` timeout path, should the connection task cancel the ring it abandoned? It currently relies on sender-drop, which the `received == true` branch can defer (see `ring-a-cancellation-close-requires-an-empty-inbound-observation`)."
       ],
-      "extra": {
-        "Verified by inspection": "`RingUnavailable` (`:103-112`) is a unit struct with a fixed `Display` string and no cause field; only `:224` increments a counter; `connection.rs:149-164`'s `else` branch is a bare `return` that emits no `ServerMessage`, so the peer observes a closed setup socket and `activate_client` (`client.rs:367`) reports the generic `ClientError::new(\"setup_failed\", ...)` at `client.rs:368`."
-      }
+      "extra": {}
     },
     {
       "slug": "ring-a-reclamation-count-does-not-witness-charge-release",
@@ -1749,16 +1731,14 @@
       "required_faults": "a connection that reaches `serve_generation` and finds `shared.draining` already set or `shared.shutdown` already cancelled - that is, a connection accepted and authenticated during the shutdown sequence.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/ring-a-reclamation-count-does-not-witness-charge-release.md)."
+        "evidence": "[evidence](evidence/ring-a-reclamation-count-does-not-witness-charge-release.md). Verified by inspection: `connection.rs:208-209` places `record_reclamation` after the `serve_generation` await, and an inner `return` at `:275` still returns there; `AbortOnDropHandle` aborts on drop; `ring_transport.rs:276-277` orders release before the done signal."
       },
       "existing_check": "`ring_transport.rs:883` asserts `diagnostics[\"reclamation\"][\"completed\"] == 1` after a direct `record_reclamation()` call, which exercises the counter and not the ordering. Status unaudited.",
       "impact": "the exact metric a release gate would read as proof that charges came back can be incremented before they did. The gate would pass on a host that is in fact still holding the charge.",
       "open_questions": [
         "Should `record_reclamation` move onto the endpoint thread, immediately after `admission.release()`, so the counter is release-witnessed by construction?"
       ],
-      "extra": {
-        "Verified by inspection": "`connection.rs:208-209` places `record_reclamation` after the `serve_generation` await, and an inner `return` at `:275` still returns there; `AbortOnDropHandle` aborts on drop; `ring_transport.rs:276-277` orders release before the done signal."
-      }
+      "extra": {}
     },
     {
       "slug": "ring-a-host-doctor-emits-one-of-five-declared-terminal-classes",
@@ -1776,7 +1756,7 @@
         "condition": "at least once per campaign, for each of `missing_addon`, `identity_mismatch`, `setup_failure`, `peer_death`, and `resource_exhaustion`, observe a completed `daemon doctor` report whose `shared_memory.error_class` equals that class, produced by the real classification path from a real host or addon condition rather than by constructing the value; in this tree that path is absent, so the check is deferred with the record's reachability and no in-tree campaign can discharge it yet. **This record previously claimed `reachable` over \"five distinct emission points\" in the host, and both the boundary and the semantics were wrong.** There are no five host emission points to reach, and there never were: the terminal report is synthesized **client-side**. `classifySharedMemoryFailure` (`packages/plugin/src/shared/host-client/shared-memory-failure.ts:10-30`) maps an observed error into `SharedMemoryTerminalClass` (`types.ts:68-73`), and `policy.ts:648-672` feeds that into `terminalSharedMemoryDiagnostics` (`policy.ts:854-872`), which builds the entire terminal object including `error_class`, `bounds`, `peer_death`, and `exhaustion` without consulting the host at all. Exactly one of the five literals exists in Rust, `\"setup_failure\"` at `ring_transport.rs:173`, and it is the host's own poisoned-mutex arm rather than a member of the client taxonomy. So `reachable` was location coverage over locations that do not exist. The five classes are **situations** - an addon that will not load, an identity that does not match, a setup that failed, a peer that died, a resource that ran out - and METHOD.md's rule is that situation coverage is `sometimes`. Reaching the classifier's lines proves nothing: a campaign can execute `classifySharedMemoryFailure` on a constructed error and never produce the operational state the class names, which is exactly what the existing TypeScript coverage does."
       },
       "fault_timing": "none for the classification itself, which is a total function on an observed error. The window that matters is per class: each needs its own host or addon condition to exist while the doctor runs.",
-      "required_faults": "one condition per class, and they do not share a mechanism. `missing_addon` needs a load that fails to find the packaged addon, which is 2c's S6 and is structurally suppressed in CI by `ci.yml:193`'s `build:source`. `identity_mismatch` needs a `connect_setup` failure carrying that message. PR #131 split `shm-native`'s `lib.rs` into `lifecycle`, `napi_buffers`, `scheduling`, and `setup` modules; the pre-merge citation `lib.rs:579-587` now lands in `RingGrant` decode code, and the identity check lives at `packages/shm-native/src/setup.rs:229`, with the message itself built at `setup.rs:413-416`. `setup_failure` is the classifier's default arm and is reachable from any other native startup failure. `peer_death` needs an `ECONNRESET`, `EPIPE`, or unexpected-EOF error from a peer that died, which the coarse kill harness already produces. And `resource_exhaustion` needs a `memory_cap` code or a capacity message, which admission exhaustion produces at `ring_transport.rs:223-226`.",
+      "required_faults": "one condition per class, and they do not share a mechanism. `missing_addon` needs a load that fails to find the packaged addon, which is 2c's S6 and is structurally suppressed in CI by `ci.yml:193` (source-catalog line, not present at HEAD)'s `build:source`. `identity_mismatch` needs a `connect_setup` failure carrying that message. PR #131 split `shm-native`'s `lib.rs` into `lifecycle`, `napi_buffers`, `scheduling`, and `setup` modules; the pre-merge citation `lib.rs:579-587` now lands in `RingGrant` decode code, and the identity check lives at `packages/shm-native/src/setup.rs:229`, with the message itself built at `setup.rs:413-416`. `setup_failure` is the classifier's default arm and is reachable from any other native startup failure. `peer_death` needs an `ECONNRESET`, `EPIPE`, or unexpected-EOF error from a peer that died, which the coarse kill harness already produces. And `resource_exhaustion` needs a `memory_cap` code or a capacity message, which admission exhaustion produces at `ring_transport.rs:223-226`.",
       "confidence": {
         "level": "high",
         "evidence": "[evidence](evidence/ring-a-host-doctor-emits-one-of-five-declared-terminal-classes.md). Verified by grepping the five literals across `crates` and `packages` and then reading the client path end to end for this disposition: `\"setup_failure\"` appears in Rust only at `ring_transport.rs:176`; the other four appear only in TypeScript, at `packages/plugin/src/shared/host-client/types.ts:68-73` and `shared-memory-failure.ts:14-30`. `policy.ts:669-671` calls `terminalSharedMemoryDiagnostics(classifySharedMemoryFailure(error))`, and `terminalSharedMemoryDiagnostics` (`policy.ts:854-872`) hard-codes `state: \"terminal\"`, zeroes `bounds`, sets `accounting: null`, and derives `peer_death.observed` and `exhaustion.observed` from the class it was handed. So the terminal shape is not a host projection at all. `peer_death` and `resource_exhaustion` do exist host-side, but only as counters (`ring_transport.rs:191`, `:193`), and `state` stays `\"healthy\"` while `exhaustion.observed` is non-zero because the host `match` keys on `accounting()` alone."
@@ -1807,7 +1787,7 @@
       "required_faults": "a held lease **and** a release failure. `Ring::release` returns `Err` on quarantine (`ring.rs:1176-1178`), wrong incarnation (`:1179-1181`), wrong lane (`:1182-1184`), stale sequence (`:1193-1196`), and duplicate release (`lease.rs:186`). **Quarantine is reachable directly from the peer, and this record previously said it was not.** The original text required \"a peer that publishes a malformed descriptor\" so `try_receive` would quarantine from inside the transport, and recorded that as unavailable. It is not the only route. `Ring::enter_quarantine` is a **public** method (`ring.rs:1373-1378`, in `crates/shm-transport/src/backend/ring.rs`) that stores the flag on the shared lifecycle page, and a peer already holds the ring it needs: `RingClientEndpoint` exposes `to_host` and `from_host` as `pub` fields (`ring_transport.rs:651-656`), and the existing fixture at `tests/support/raw_client.rs` attaches one and already reaches through those fields (`:691`, `:738`, `:781`). So the whole fault is `endpoint.to_host.enter_quarantine()` from the test peer, one line, no seam and no malformed producer. `Ring::release` checks `is_quarantined()` before any other validation (`ring.rs:1176-1178`), so the host's next release on that direction fails. Held-lease timing still needs the ingress-wait state below: park the host inside the budget wait with a lease held, quarantine from the peer, then let the wait exit on `Cancelled` or `Overloaded`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/ring-a-lease-release-failure-is-observable-only-on-the-success-path.md)."
+        "evidence": "[evidence](evidence/ring-a-lease-release-failure-is-observable-only-on-the-success-path.md). Verified by inspection: `receive_one`'s return points that follow a successful `try_receive` are `:509`, `:516`, `:525`, `:531`, `:536`, `:539`, `:545`, `:548`, `:556`, `:557`; of those, only `:509` and `:548` route a release error; `lease.rs:201-206` discards the drop-path `Result` with `let _ =`. Re-verified for this disposition: `pub fn enter_quarantine(&self)` at `ring.rs:1373` writes `quarantined` on the lifecycle page with `Ordering::Release`, `is_quarantined` reads it with `Ordering::Acquire` (`:1381-1388`), and both directions of one duplex pair map the same object, so the peer's store is visible to the host's consumer."
       },
       "existing_check": "`crates/shm-transport/tests/ring.rs:240` `quarantine_rejects_all_operations_and_reports_conservation` covers the transport-side `Err(Quarantined)` from `release`, not the host's handling of it. Status unaudited.",
       "impact": "this is the host-side counterpart of Part 1's `release-failure-is-observable`, which Part 1 marked `medium` confidence with its host anchor at `shm_provider.rs:365`. That anchor is gone; the surviving host behaviour is the asymmetry above. Scoped correctly after investigation: all three untracked paths return an `Err(ReadClose::..)` that ends the read loop (`:406-411`), so a silent release failure always coincides with the connection retiring and cannot accumulate across its life. What is lost is the signal that the ring was quarantined rather than merely overloaded, and that matters because `ReadClose::Overloaded`'s own doc comment (`frame_channel.rs:40-43`) asserts \"the peer and the transport are healthy\" - false on a quarantined ring. Today `connection.rs:401-404` collapses `Corrupt` and `Overloaded` into the same `ReadExit::Peer`, so the gap is latent and becomes live only if that taxonomy is split.",
@@ -1815,9 +1795,7 @@
         "Should the `Overloaded` and `Cancelled` paths release explicitly and upgrade a release failure to `Corrupt`? Investigation found this buys nothing until `connection.rs:401-404` stops collapsing the two causes into one `ReadExit`, so the two changes travel together or not at all.",
         "A peer can condemn the shared ring unilaterally through the public `Ring::enter_quarantine` (`ring.rs:1373`) while the host holds a lease. Is that intended peer authority, or should quarantine be host-initiated only? It is the cheapest route to this record's fault and simultaneously a capability the threat model may not want. (needs human input)"
       ],
-      "extra": {
-        "Verified by inspection": "`receive_one`'s return points that follow a successful `try_receive` are `:509`, `:516`, `:525`, `:531`, `:536`, `:539`, `:545`, `:548`, `:556`, `:557`; of those, only `:509` and `:548` route a release error; `lease.rs:201-206` discards the drop-path `Result` with `let _ =`. Re-verified for this disposition: `pub fn enter_quarantine(&self)` at `ring.rs:1373` writes `quarantined` on the lifecycle page with `Ordering::Release`, `is_quarantined` reads it with `Ordering::Acquire` (`:1381-1388`), and both directions of one duplex pair map the same object, so the peer's store is visible to the host's consumer."
-      }
+      "extra": {}
     },
     {
       "slug": "ring-a-cancellation-close-requires-an-empty-inbound-observation",
@@ -1896,16 +1874,14 @@
       "required_faults": "for the branch to be reachable at all, the transport would have to emit `ReadClose::RejectedDrainFailed` after an oversize channel-0 rejection whose realignment failed. On the ring there is no realignment: a frame is one descriptor, and `receive_one:475-477` releases the lease and returns `Ok(true)` with no drain step.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/ring-a-rejected-drain-failure-close-has-no-producer.md)."
+        "evidence": "[evidence](evidence/ring-a-rejected-drain-failure-close-has-no-producer.md). Verified by grepping both variants: `ReadClose::RejectedDrainFailed` appears at `frame_channel.rs:47` (declaration) and `connection.rs:391` (consumer) and nowhere else; `ReadClose::Io` appears at `frame_channel.rs:45` and `connection.rs:364` and nowhere else. `ReadExit::PeerKeepQueue` is produced only at `connection.rs:355-358`, so the `serve_generation` arm at `connection.rs:281-285` plus the `reject_written` bookkeeping at `connection.rs:349`, `:357`, and `:393` are dead. `#[allow(dead_code)]` on the `ReadClose` enum (`frame_channel.rs:32`) is what keeps this compiling silently."
       },
       "existing_check": "none. Part 2a's `the-client-body-budget-refusal-drain-is-never-entered` is the closest analogue and was written against the deleted `frame_read.rs`.",
       "impact": "the wire contract at `docs/host-wire-protocol.md:321` promises that an early oversize-control terminal \"is authoritative for its correlation even if the declared body then truncates, stalls, or EOFs\". On the ring that promise is satisfied vacuously, since there is no separate body to truncate, but the engine still carries the machinery that would have honoured it. The risk is not a current defect; it is that the dead arm looks like coverage.",
       "open_questions": [
         "Should `RejectedDrainFailed` and `Io` be removed, or retained for a future transport? Removing them would make Part 2a's drain records genuinely closed rather than superseded."
       ],
-      "extra": {
-        "Verified by grepping both variants": "`ReadClose::RejectedDrainFailed` appears at `frame_channel.rs:47` (declaration) and `connection.rs:391` (consumer) and nowhere else; `ReadClose::Io` appears at `frame_channel.rs:45` and `connection.rs:364` and nowhere else. `ReadExit::PeerKeepQueue` is produced only at `connection.rs:355-358`, so the `serve_generation` arm at `connection.rs:281-285` plus the `reject_written` bookkeeping at `connection.rs:349`, `:357`, and `:393` are dead. `#[allow(dead_code)]` on the `ReadClose` enum (`frame_channel.rs:32`) is what keeps this compiling silently."
-      }
+      "extra": {}
     },
     {
       "slug": "ring-a-segmented-inbound-body-has-no-production-producer",
@@ -1926,16 +1902,14 @@
       "required_faults": "for the segmented path to matter at all, a body whose descriptor spans two arena ranges, which the transport produces when `span_count == 2` (`ring.rs:1105-1112`). That is reachable: it needs a body that straddles the arena wrap point. But `receive_one` collapses it with `lease.to_vec()` (`:544`) before the host ever sees the span structure.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/ring-a-segmented-inbound-body-has-no-production-producer.md)."
+        "evidence": "[evidence](evidence/ring-a-segmented-inbound-body-has-no-production-producer.md). Verified by grepping: `InboundFrame::segmented` has zero call sites in the tree, including tests. `ReceiveBody::Segmented` (`frame_channel.rs:448`) is therefore unconstructible, so `with_lease` (`:506-513`) always takes the `Owned` arm and `decode_contiguous`'s `None` arm (`connection.rs:586`) is dead. `ring_transport.rs:552` is the only `InboundFrame` constructor call on the host path and it uses `owned`."
       },
       "existing_check": "`frame_channel/contract_tests.rs:141` calls `with_lease` and asserts `lease.segment(0)`, on a hand-built frame. Status unaudited.",
       "impact": "two things. First, the attribute at `frame_channel.rs:476` reads `#[allow(dead_code, reason = \"shared-memory backends supply wrapped bodies\")]` and that reason is false at `HEAD`: the shared-memory backend supplies `owned`. A stale suppression reason is how a genuinely dead branch survives review. Second, `docs/shm-transport.md:19` says the receiver \"validates the descriptor and header before exposing a scoped lease\", which is true of the transport but not of the host boundary: the host exposes a lease over its own copy.",
       "open_questions": [
         "Is the segmented path intended to return, or should `InboundFrame::segmented`, `ReceiveBody::Segmented`, and `frame_channel::LeaseTracker` be deleted together? `LeaseTracker` (`frame_channel.rs:398-444`), `frame_channel::ProducerReservation` (`:117`), and `ProducedBody` (`:231`) are in the same position: test-only, with `ProducedBody::into_charge` (`:283`) having no caller at all."
       ],
-      "extra": {
-        "Verified by grepping": "`InboundFrame::segmented` has zero call sites in the tree, including tests. `ReceiveBody::Segmented` (`frame_channel.rs:448`) is therefore unconstructible, so `with_lease` (`:506-513`) always takes the `Owned` arm and `decode_contiguous`'s `None` arm (`connection.rs:586`) is dead. `ring_transport.rs:552` is the only `InboundFrame` constructor call on the host path and it uses `owned`."
-      }
+      "extra": {}
     },
     {
       "slug": "decode-header-is-total-over-arbitrary-bytes",
@@ -1945,7 +1919,7 @@
       "status": "active",
       "exercised": {
         "state": "partial",
-        "note": "`wire.rs:722-742` covers three specific short and bad-version inputs, and `wire.rs:745-774` covers four bad flag or type bytes."
+        "note": "`wire.rs:722-742` covers three specific short and bad-version inputs, and `wire.rs:745-774` covers four bad flag or type bytes. Missing: any sweep over arbitrary bytes, any exhaustive length sweep from 0 to 21, and any structured mutation of an accepted seed. There is no fuzz target for this decoder anywhere in the repository (`crates/shm-transport/fuzz` is the only fuzz directory; its three targets are `frame_descriptor.rs`, `provider_grant.rs` and `provider_sample.rs`, all transport decoders)."
       },
       "guarantee": "For every byte slice, `decode_header` returns either an `EnvelopeHeader` satisfying all eleven gate postconditions or a typed `DecodeError`; it never panics and never allocates.",
       "check": {
@@ -1963,9 +1937,7 @@
       "open_questions": [
         "Should `header_len_for_version` be required to return at least the largest constant index used by the parse body, so a future version cannot silently make the parse out of bounds? (needs human input)"
       ],
-      "extra": {
-        "Missing": "any sweep over arbitrary bytes, any exhaustive length sweep from 0 to 21, and any structured mutation of an accepted seed. There is no fuzz target for this decoder anywhere in the repository (`crates/shm-transport/fuzz` is the only fuzz directory; its three targets are `frame_descriptor.rs`, `provider_grant.rs` and `provider_sample.rs`, all transport decoders)."
-      }
+      "extra": {}
     },
     {
       "slug": "accepted-header-decode-is-a-bijection-on-twenty-one-bytes",
@@ -2040,7 +2012,7 @@
       "required_faults": "none beyond a caller passing an out-of-contract value. For the `FrameId::routed` hole specifically, a `RouteHandle` with a nonzero channel and epoch 0. **The lens left whether the route allocator can mint one open, and it is resolved here: it cannot.** `RouteRegistry::reserve` (`routing.rs:113-156`) skips channel 0 with `if candidate != 0` at `:123`, initializes a fresh slot with `last_epoch: 0` at `:125`, and mints `epoch = slot.last_epoch + 1` at `:129-130`, so the least epoch it can produce is 1 and the least channel is 1. That is pinned by `reserved_channels_are_nonzero_distinct_and_start_at_epoch_one` (`routing.rs:512`), whose asserts at `:522-526` require both channels nonzero and both epochs equal to 1. So the enabling state is a **hand-constructed** `RouteHandle`, which the public fields at `handler.rs:36-40` permit. Hand-building a handle the allocator would never mint is already established practice in-tree, though not with epoch 0: `routing.rs:715-718` builds a stale-epoch handle and `:750-753` builds `epoch: handle.epoch + 1`, both to drive registry rejection paths.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/encoder-never-emits-a-frame-its-own-decoder-rejects.md)."
+        "evidence": "[evidence](evidence/encoder-never-emits-a-frame-its-own-decoder-rejects.md). The gap is high confidence and unchanged: all encoders were read end to end and the only rejection in either production encoder is the body-length cap, at [wire.rs:577] and [:618]. `Flags::new` [wire.rs:146-156] cannot produce the illegal flag values, and the two host flag helpers `response_flags` [wire.rs:636-638] and `pure_header_flags` [wire.rs:642-644] both go through it, so the in-tree host emission paths are safe today by construction rather than by enforcement. **Two things the lens recorded are corrected here.** First, the lens counted three production encoders and cited a third cap at [wire.rs:548]; that cap is inside `encode_frame`, which carries `#[cfg(test)]` at [wire.rs:541] and whose only two callers are `frame_channel/contract_tests.rs:93` and `:163`. So there are two production encoders and one test-only one, and the guarantee is stated over the two. Second, the lens's `medium on reachability` rested on not having audited route allocation; that audit is done above and the allocator is closed, which leaves the hole reachable only through a hand-built handle. The finding survives both corrections: nothing on either production encoder checks the pure-header, Sheddable, reserved-bit or channel-and-epoch rules its own decoder enforces."
       },
       "existing_check": "none. `tests/protocol_vectors.rs:143` `committed_header_vectors_decode_to_their_documented_fields` asserts the document's byte vectors against the independent `raw_client::decode_header` oracle (`tests/support/raw_client.rs:286`), which is the decode direction over fixed inputs and not encoder refusal. Status: none found.",
       "impact": "this is the encode side of the framing contract, and it is entirely unenforced. A host that emits a frame its own decoder would reject produces stream-alignment corruption at the peer, which the protocol requires the peer to answer by retiring the connection without resynchronization and with no error frame (`docs/host-wire-protocol.md:296`, which lists \"unsupported version, unknown type, invalid flags, nonzero channel-0 epoch, zero epoch on a routed channel, pure-header body\" - three of this record's four holes by name) - an unattributable connection drop. **One citation repaired at carry time:** the lens cited `:293`, which was correct at `1c193ae0`, where that line began \"Clean EOF before any byte of the next header is orderly connection close. EOF after the first header byte, truncated header/body, unsupported version, unknown t...\". The document shrank from 1,031 lines to 936 and that sentence was rewritten; both its clean-close and its retirement clauses now sit in `:296`. `:293` is blank at `HEAD`.",
@@ -2048,9 +2020,7 @@
         "Should the encoders validate, or should the illegal region be made unconstructible by removing the public field from `Flags` and by giving pure-header types a body-free encoder? (needs human input)",
         "Should `encode_frame`'s `#[cfg(test)]` gate be reconsidered? It is the only encoder that takes `&[u8]` rather than an owned body, and its existence means the contract-test suite exercises an encoder the production path never uses. (needs human input)"
       ],
-      "extra": {
-        "The gap is high confidence and unchanged": "all encoders were read end to end and the only rejection in either production encoder is the body-length cap, at [wire.rs:577] and [:618]. `Flags::new` [wire.rs:146-156] cannot produce the illegal flag values, and the two host flag helpers `response_flags` [wire.rs:636-638] and `pure_header_flags` [wire.rs:642-644] both go through it, so the in-tree host emission paths are safe today by construction rather than by enforcement. **Two things the lens recorded are corrected here.** First, the lens counted three production encoders and cited a third cap at [wire.rs:548]; that cap is inside `encode_frame`, which carries `#[cfg(test)]` at [wire.rs:541] and whose only two callers are `frame_channel/contract_tests.rs:93` and `:163`. So there are two production encoders and one test-only one, and the guarantee is stated over the two. Second, the lens's `medium on reachability` rested on not having audited route allocation; that audit is done above and the allocator is closed, which leaves the hole reachable only through a hand-built handle. The finding survives both corrections: nothing on either production encoder checks the pure-header, Sheddable, reserved-bit or channel-and-epoch rules its own decoder enforces."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-no-descriptor-leaves-the-host-without-a-verified-client-proof",
@@ -2071,14 +2041,12 @@
       "required_faults": "a peer that connects and then presents a malformed `ClientHello`, a short nonce, a wrong `ClientAuth`, or nothing at all, while the send site is instrumented.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-no-descriptor-leaves-the-host-without-a-verified-client-proof.md)."
+        "evidence": "[evidence](evidence/setup-a-no-descriptor-leaves-the-host-without-a-verified-client-proof.md). Verified: `authenticate_server` is called at `connection.rs:120-129` and its error return exits at `:130-133`; `activate_server` is reached only at `:170`; `send_grant` is `activate_server`'s first statement (`setup_socket.rs:249`)."
       },
       "existing_check": "`crates/host-runtime/tests/lifecycle.rs:1643-1673` `shutdown_requires_authentication_and_a_valid_shape` and `crates/host-runtime/tests/protocol_vectors.rs:294` `malformed_and_wrong_proof_handshakes_close_without_envelope_traffic` both assert no byte reaches an unauthenticated socket, which subsumes descriptors. Status unaudited.",
       "impact": "a peer with no credential obtains read-write mappings of host memory. Part 1 established the whole object is mapped `PROT_READ|PROT_WRITE` with no `F_SEAL_WRITE` (`quarantine-authority-survives-peer-writes`), so this is arbitrary write access to host transport state, not merely disclosure.",
       "open_questions": [],
-      "extra": {
-        "Verified": "`authenticate_server` is called at `connection.rs:120-129` and its error return exits at `:130-133`; `activate_server` is reached only at `:170`; `send_grant` is `activate_server`'s first statement (`setup_socket.rs:249`)."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token",
@@ -2099,22 +2067,20 @@
       "required_faults": "a peer that completes authentication, calls `receive_grant`, and then diverges from the protocol. `shm_failure_modes.rs:44-58` already builds it; the missing part is mapping the received fds and writing.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token.md)."
+        "evidence": "[evidence](evidence/setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token.md). Verified: `activate_server` sends before it reads (`setup_socket.rs:249-261`); the token is minted by the host (`connection.rs:165`, `:216-226`) and travels inside the same message as the descriptors (`setup_socket.rs:254`)."
       },
       "existing_check": "none for the authority claim. `setup_socket.rs:768-808` `client_rejects_stale_identity_without_activate_write_or_returned_descriptors` proves the well-behaved client does not *return* descriptors it rejected; it does not and cannot prove a hostile peer lacks them.",
       "impact": "the security argument for the setup socket rests on the connection file's `0600` mode and the runtime directory's `0700` mode, which is what a bearer-key model implies and what `docs/host-wire-protocol.md:27` says: a key reader \"MUST therefore be trusted as the same local security principal as the host\". The consequence worth guarding is forward-looking rather than current. Any future design that treats the token as a second factor - to fence a compromised key, for example - would be relying on a check that runs after the asset is gone, and the message order makes that mistake easy to make and hard to see. That is what this record protects against, and it is the whole of its claim.",
       "open_questions": [
         "Was descriptor-before-validation chosen so the host need not hold the ring while waiting on a peer round trip, or is it incidental? Reordering to `Activate`-then-grant would make the token a real gate, at the cost of one extra round trip inside the setup deadline. (needs human input)"
       ],
-      "extra": {
-        "Verified": "`activate_server` sends before it reads (`setup_socket.rs:249-261`); the token is minted by the host (`connection.rs:165`, `:216-226`) and travels inside the same message as the descriptors (`setup_socket.rs:254`)."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "every accepted socket authenticates through `authenticate_server` (called at `connection.rs:91`, re-verified) and receives its activation token from the grant path inside `run_connection` (`activate_server` at `:155-165`), with no configuration gate on either step.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -2129,22 +2095,20 @@
       "required_faults": "two peers that both authenticate and then swap the tokens they received.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it.md)."
+        "evidence": "[evidence](evidence/setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it.md). Verified: the token is drawn per `run_connection` at `connection.rs:165` from a 32-byte `getrandom` (`:216-226`), compared with `subtle::ConstantTimeEq` at `setup_socket.rs:267-272`, and `activate_server` reads exactly one message in the `Activate` position (`:261-280`) then only accepts `Commit` (`:281-284`)."
       },
       "existing_check": "`setup_socket.rs:725-765` `stale_wire_or_descriptor_schema_is_invalid_identity` covers the wire-version and schema half of the same match arm, giving `InvalidIdentity` but never `InvalidActivation`. So the token comparison itself has **no** negative test. Status unaudited.",
       "impact": "the token is what makes \"one grant, one activation\" observable. If the comparison were always-true, activation would stop distinguishing the peer that received a grant from any other authenticated peer, and the doc's \"one-use activation token\" (`host-wire-protocol.md:561`) would be vacuous.",
       "open_questions": [
         "The token is compared but never *consumed* into any store. \"One-use\" holds only because each connection mints its own. Is that the intended reading of `host-wire-protocol.md:561`? (needs human input)"
       ],
-      "extra": {
-        "Verified": "the token is drawn per `run_connection` at `connection.rs:165` from a 32-byte `getrandom` (`:216-226`), compared with `subtle::ConstantTimeEq` at `setup_socket.rs:267-272`, and `activate_server` reads exactly one message in the `Activate` position (`:261-280`) then only accepts `Commit` (`:281-284`)."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-a-captured-client-proof-never-authenticates-twice",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "the proof check runs in `authenticate_server` (called at `connection.rs:91`, re-verified) for every accepted socket before any transport work; no option disables authentication.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -2159,16 +2123,14 @@
       "required_faults": "a passive observer of one handshake. On a Unix socket that means a same-uid process able to trace the peer, so this is a defence-in-depth property under the stated trust model.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-a-captured-client-proof-never-authenticates-twice.md)."
+        "evidence": "[evidence](evidence/setup-a-a-captured-client-proof-never-authenticates-twice.md). Verified: `random_nonce` at `auth.rs:379-383` is a direct `getrandom` per call, called once per `authenticate_server_inner` at `:245`; nothing caches or reuses it."
       },
       "existing_check": "`auth.rs:924-939` `repeated_handshakes_receive_fresh_server_nonces` asserts distinctness across two handshakes. It never attempts a replay, so it proves the precondition and not the property. Status unaudited.",
       "impact": "if the nonce ever became derived, fixed, or counter-based, one observed transcript would become a permanent credential for that incarnation, and it would still satisfy the existing test if the counter merely incremented.",
       "open_questions": [
         "`client_nonce` is unchecked. Should the host reject an all-zero or repeated client nonce, or is server-nonce freshness genuinely sufficient? The doc claims sufficiency at `host-wire-protocol.md:177`. (needs human input)"
       ],
-      "extra": {
-        "Verified": "`random_nonce` at `auth.rs:379-383` is a direct `getrandom` per call, called once per `authenticate_server_inner` at `:245`; nothing caches or reuses it."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-credentials-do-not-survive-a-host-incarnation",
@@ -2189,16 +2151,14 @@
       "required_faults": "two host incarnations in the same data directory, plus a peer that reuses the earlier snapshot.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-credentials-do-not-survive-a-host-incarnation.md)."
+        "evidence": "[evidence](evidence/setup-a-credentials-do-not-survive-a-host-incarnation.md). Verified: key and daemon id are each a fresh `getrandom` inside `acquire` (`instance.rs:263-266`), the ordering comment at `:222-231` states credentials are minted after the lock is won, and `ConnectionInfo` carries both by value (`connection_file.rs:37-38`) so nothing persistent backs them."
       },
       "existing_check": "none direct. `auth.rs:385-403` claims two bootstrap tests \"named for key rotation and singleton probing\" carry the always-false coverage; those are in other files and were not located in this pass, so the claim is unverified here.",
       "impact": "without per-incarnation rotation, an old snapshot would be a permanent bearer credential, and `daemon_ver` fencing (`auth.rs:346-348`) would be the only thing distinguishing incarnations.",
       "open_questions": [
         "Where are the two bootstrap tests named at `auth.rs:390-392`? Not found in `crates/host-runtime/tests/` in this pass. Locating them changes this record's `Existing check` line. (unresolved, needs a repository-wide test search)"
       ],
-      "extra": {
-        "Verified": "key and daemon id are each a fresh `getrandom` inside `acquire` (`instance.rs:263-266`), the ordering comment at `:222-231` states credentials are minted after the lock is won, and `ConnectionInfo` carries both by value (`connection_file.rs:37-38`) so nothing persistent backs them."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof",
@@ -2219,16 +2179,14 @@
       "required_faults": "an impostor listener. Constructible in-process with `UnixStream::pair`, which is what the existing tests do.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof.md)."
+        "evidence": "[evidence](evidence/setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof.md). Verified: all three peer checks precede the `ClientAuth` write in both implementations, and the native side short-circuits them into one `if` with `ct_eq` on the proof and the daemon id (`setup.rs:200-205`)."
       },
       "existing_check": "`auth.rs:1022-1073` `rejected_server_sends_no_client_auth`, driven by `:1074-1081` `invalid_server_proof_sends_no_client_auth` and `:1082-1089` `daemon_id_mismatch_sends_no_client_auth`. The always-true guard on the comparison is unnamed in `auth.rs`; the source catalog cited a `foreign_server_reused_port_never_receives_client_auth` identifier that no file under `crates/` declares. The `daemon_ver` mismatch case is not visibly covered by the two named tests. Status unaudited.",
       "impact": "this is the only thing standing between a same-uid squatter and a peer's `ClientAuth`, because neither peer checks the socket's ownership or mode before connecting. A leaked `ClientAuth` is not directly a credential, since it is nonce-bound, but it is an oracle on the key.",
       "open_questions": [
         "Should the peer stat the socket for owner and mode before connecting, as the connection-file reader already does for the file (`connection_file.rs:267-287`)? It would be defence in depth over a check the mutual proof already carries. (needs human input)"
       ],
-      "extra": {
-        "Verified": "all three peer checks precede the `ClientAuth` write in both implementations, and the native side short-circuits them into one `if` with `ct_eq` on the proof and the daemon id (`setup.rs:200-205`)."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-the-setup-socket-is-never-connectable-outside-the-owning-uid",
@@ -2249,22 +2207,20 @@
       "required_faults": "a permissive umask in the host's process, and an observer sampling the mode. Demonstrating actual cross-uid connectability additionally needs a second uid, which may be unconstructible in CI and should be recorded as such rather than skipped silently.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-the-setup-socket-is-never-connectable-outside-the-owning-uid.md)."
+        "evidence": "[evidence](evidence/setup-a-the-setup-socket-is-never-connectable-outside-the-owning-uid.md). Verified: the bind-then-chmod order at `setup_socket.rs:44-48`, the failure rollback that unlinks on a failed chmod at `:45-47`, and the parent's unconditional `fchmod(0o700)` at `instance.rs:560-573`."
       },
       "existing_check": "`setup_socket.rs:480-491` `setup_socket_is_owner_only` asserts the mode after `bind_owner_only` returns, so it covers the end state and not the window. `instance.rs:979` `permissive_umask_still_yields_owner_only_dir_and_file` covers the directory and the connection file under a permissive umask but not the socket. Status unaudited.",
       "impact": "low today, because the parent directory is the real gate. The property is worth holding because the socket's own mode is the layer a reader would believe, and a future change that moves the socket out of the `0700` directory would inherit an unprotected window.",
       "open_questions": [
         "Would binding through a temporary name and `renameat` into place, or setting the umask around the bind, be preferred to relying on the parent directory? (needs human input)"
       ],
-      "extra": {
-        "Verified": "the bind-then-chmod order at `setup_socket.rs:44-48`, the failure rollback that unlinks on a failed chmod at `:45-47`, and the parent's unconditional `fchmod(0o700)` at `instance.rs:560-573`."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-a-hostile-occupant-of-the-socket-path-fails-closed",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "the setup-socket bind runs once per `run` at publication (`bind_owner_only`, `setup_socket.rs:28-48`, classifies the occupant with `symlink_metadata` at `:29` before binding at `:45`; re-verified), on every incarnation and for every data directory the embedder passes.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -2279,16 +2235,14 @@
       "required_faults": "filesystem state planted at the socket path before the host starts. Four of the six shapes are constructible unprivileged in a temporary directory. The wrong-owner case needs a second uid.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-a-hostile-occupant-of-the-socket-path-fails-closed.md)."
+        "evidence": "[evidence](evidence/setup-a-a-hostile-occupant-of-the-socket-path-fails-closed.md). Verified: `symlink_metadata` and not `metadata`, so a symlink is classified as a symlink and fails the `is_socket()` clause (`setup_socket.rs:28-32`); the three clauses are one conjunction at `:30-32`; the refusal at `:33-38` precedes the unlink at `:39`."
       },
       "existing_check": "`setup_socket.rs:493-501` `insecure_stale_occupant_is_not_replaced` covers the regular-file case and does assert the occupant survives. Symlink, wrong mode, wrong owner, directory and FIFO are untested. Status unaudited.",
       "impact": "a mode or owner clause that silently stopped being evaluated would let the host adopt and then unlink an attacker-planted object, or bind over a live socket. The conjunction is exactly the shape that passes for the wrong reason when one clause is dropped.",
       "open_questions": [
         "The stale-socket branch removes and rebinds. Is there a case where the occupant is a *live* socket of a still-running incarnation that lost its lock, and should the instance lock be consulted before the unlink? (needs human input)"
       ],
-      "extra": {
-        "Verified": "`symlink_metadata` and not `metadata`, so a symlink is classified as a symlink and fails the `is_socket()` clause (`setup_socket.rs:28-32`); the three clauses are one conjunction at `:30-32`; the refusal at `:33-38` precedes the unlink at `:39`."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released",
@@ -2306,19 +2260,17 @@
         "condition": "with `max_handshakes = 1`, hold the slot with a socket that never speaks, assert a second accept closes with no bytes read, then release the squatter and assert the slot becomes available. Enumerate every exit from `run_connection` before `drop(handshake_permit)` and assert each releases: auth error (`connection.rs:101-103`) and connection-permit exhaustion (`:106-108`), and the two exits that take neither return: the tracked `run_connection` future aborted by forced shutdown while awaiting authentication, and the future dropped by an unwinding panic; in each case assert the handshake slot is available again, since a permit transferred or leaked on those paths is invisible to the two explicit returns. `always` because the bound must hold at every instant."
       },
       "fault_timing": "the permit swap at `connection.rs:137-141` acquires the connection permit *before* releasing the handshake permit, so a peer is briefly charged to both classes. The consequence is that the post-auth descriptor transfer, bounded by `transport_setup_deadline` at 2 seconds (`config.rs:227`), is charged to `max_connections` and not to `max_handshakes`.",
-      "required_faults": "a squatter that authenticates and stalls, and a squatter that never speaks; both already exist in the test support (`tests/support/raw_client.rs:878`).",
+      "required_faults": "a squatter that authenticates and stalls, and a squatter that never speaks; both already exist in the test support (`tests/support/raw_client.rs:878` (source-catalog line, not present at HEAD)).",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released.md)."
+        "evidence": "[evidence](evidence/setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released.md). Verified: `try_acquire_owned` before spawn at `runtime.rs:887-894`, the `drop(stream)` on failure at `:889`, and the two pre-swap exits in `connection.rs`."
       },
       "existing_check": "`crates/host-runtime/tests/lifecycle.rs:237` `saturated_handshake_capacity_closes_without_reading_client_bytes` and `:337` `an_unauthenticated_flood_cannot_starve_established_work`; `crates/host-runtime/tests/handler_contract.rs:256` asserts the default is positive. Status unaudited.",
       "impact": "without the bound an unauthenticated peer drives unbounded task and descriptor growth. `host-wire-protocol.md:161` states the requirement as a MUST, and the code satisfies it; the residual is the class-crossing window.",
       "open_questions": [
         "Should the 2-second post-auth setup window have its own bound rather than sharing `max_connections`? Sixty-four concurrent stalled setups each hold a prepared ring, which is 128 MiB of arena per connection by `host-shm-transport.md:77`. (needs human input)"
       ],
-      "extra": {
-        "Verified": "`try_acquire_owned` before spawn at `runtime.rs:887-894`, the `drop(stream)` on failure at `:889`, and the two pre-swap exits in `connection.rs`."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-an-abandoned-setup-strands-no-ring-charge",
@@ -2339,14 +2291,12 @@
       "required_faults": "three exits need a peer that stalls after `receive_grant`, which `shm_failure_modes.rs:44-58` already builds. The fourth needs `ring.prepare` to miss `transport_setup_deadline`, and **a near-zero deadline does not deterministically force it.** `timeout_at(Instant::now() + deadline, prepared)` races a timer against a `spawn_blocking` task that may already have completed, so a fast `prepare` wins and the connection proceeds normally; the test would pass having exercised the wrong path and would flake in both directions. Reaching it deterministically needs either injected slowness inside `prepare` - which is 2b's R1 and has no seam - or a barrier that holds the blocking task past the deadline. That is why this record stays `partial`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-an-abandoned-setup-strands-no-ring-charge.md)."
+        "evidence": "[evidence](evidence/setup-a-an-abandoned-setup-strands-no-ring-charge.md). Verified by inspection: the discard-and-cancel pairs at `connection.rs:166-169` and `:180-185`, and the tracked late-cleanup task that performs the same pair on the `prepare`-timeout exit at `:128-134`. Verified for this disposition and previously recorded as unverified: `FrameSender` holds the queue's only `mpsc::Sender` (`frame_channel.rs:685-694`), `run_endpoint` returns when `queue.recv()` yields `None` (`ring_transport.rs:437-440`), and `admission.release()` at `:291` is unconditional and outside the `catch_unwind`. Part 1's `charge-release-never-silently-strands` remains the neighbouring obligation."
       },
       "existing_check": "`crates/host-runtime/tests/shm_failure_modes.rs:232-245` `setup_active_and_idle_sigkill_each_return_exact_capacity` and `:247-263` `repeated_crashes_do_not_ratchet_single_connection_capacity` cover a killed peer in the `setup` role, which is the post-grant pre-activation state. Neither reaches the `prepare` timeout. Status unaudited.",
       "impact": "with `max_connections = 1` a single stranded charge is a permanent denial. The existing tests were written for exactly that reason, so the uncovered exit is a gap in an otherwise deliberate campaign. What the mechanism above changes is the shape of the gap: the risk is not that the charge is stranded today, it is that the only thing returning it on that exit is a channel-closure side effect three files away, which a refactor that gave the endpoint thread another sender clone would silently remove.",
       "open_questions": [],
-      "extra": {
-        "Verified by inspection": "the discard-and-cancel pairs at `connection.rs:166-169` and `:180-185`, and the tracked late-cleanup task that performs the same pair on the `prepare`-timeout exit at `:128-134`. Verified for this disposition and previously recorded as unverified: `FrameSender` holds the queue's only `mpsc::Sender` (`frame_channel.rs:685-694`), `run_endpoint` returns when `queue.recv()` yields `None` (`ring_transport.rs:437-440`), and `admission.release()` at `:291` is unconditional and outside the `catch_unwind`. Part 1's `charge-release-never-silently-strands` remains the neighbouring obligation."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-a-stalled-setup-is-torn-down-within-the-transport-setup-deadline",
@@ -2367,16 +2317,14 @@
       "required_faults": "a peer that authenticates and then stalls in the setup exchange. `tests/shm_failure_modes.rs:44-58` already builds exactly this peer against a real host and runs in CI (`ci.yml:133`); the missing part is an assertion on *when* the host gave up, not a new fixture. A shortened `transport_setup_deadline` through `TestHost::start_with` makes the window cheap to observe, and unlike the `prepare`-timeout exit this needs no race: the peer's silence, not a scheduling outcome, is what makes the deadline fire.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-a-stalled-setup-is-torn-down-within-the-transport-setup-deadline.md). **Evidence file written**: this record was added by the portfolio disposition, which was scoped to `catalog.md`, `fault-map.md`, and `portfolio-evaluation.md` and forbidden from writing under `evidence/`. The link is written to the schema's target so it resolves once the file lands, and the gap is recorded in the process caveat of [portfolio-evaluation.md](setup-identity/portfolio-evaluation.md). Everything the file would hold is verified and stated here."
+        "evidence": "[evidence](evidence/setup-a-a-stalled-setup-is-torn-down-within-the-transport-setup-deadline.md). **Evidence file written**: this record was added by the portfolio disposition, which was scoped to `catalog.md`, `fault-map.md`, and `portfolio-evaluation.md` and forbidden from writing under `evidence/`. The link is written to the schema's target so it resolves once the file lands, and the gap is recorded in the process caveat of [portfolio-evaluation.md](setup-identity/portfolio-evaluation.md). Everything the file would hold is verified and stated here. Verified: the single `deadline` computation at `setup_socket.rs:246-248` and its reuse at `:249-260`, `:261`, `:273`, `:281`, and `:282`; `read_message` (`:369-386`) wrapping both reads in `timeout_at(deadline, ..)` and mapping expiry to `SetupError::Timeout`; `activate_server` being called with `shared.timing.transport_setup_deadline` at `connection.rs:177`; the default of 2 seconds at `config.rs:227`; and the discard-and-cancel teardown at `connection.rs:180-185`."
       },
       "existing_check": "none. `tests/shm_failure_modes.rs:232-245` `setup_active_and_idle_sigkill_each_return_exact_capacity` asserts capacity returns after a killed peer, which is a different exit and carries no timing claim. Status unaudited.",
       "impact": "**this is the part's only bound on how long an authenticated peer can hold a prepared ring without completing setup**, and the resource it holds is the expensive one. `setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released` records that the post-auth setup window is charged to `max_connections` (64) rather than to `max_handshakes` (32), and its own open question observes that 64 concurrent stalled setups each hold a prepared ring. Whether that is 2 seconds of exposure or unbounded exposure is exactly this record, and nothing else in the catalog states it.",
       "open_questions": [
         "Should the post-grant exchange have a tighter deadline than the pre-grant one? Both halves currently share `transport_setup_deadline`, but only the post-grant half holds a prepared ring. (needs human input)"
       ],
-      "extra": {
-        "Verified": "the single `deadline` computation at `setup_socket.rs:246-248` and its reuse at `:249-260`, `:261`, `:273`, `:281`, and `:282`; `read_message` (`:369-386`) wrapping both reads in `timeout_at(deadline, ..)` and mapping expiry to `SetupError::Timeout`; `activate_server` being called with `shared.timing.transport_setup_deadline` at `connection.rs:177`; the default of 2 seconds at `config.rs:227`; and the discard-and-cancel teardown at `connection.rs:180-185`."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap",
@@ -2397,16 +2345,14 @@
       "required_faults": "a peer that completes commit and then sends a huge length prefix.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap.md)."
+        "evidence": "[evidence](evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap.md). Verified: the cap at `setup_socket.rs:361-363` precedes the `vec![0u8; len]` at `:364`, and `MAX_SETUP_MESSAGE_LEN` is `16 * 1024` (`:24`)."
       },
       "existing_check": "`setup_socket.rs:810-825` `goodbye_and_eof_have_distinct_outcomes` covers the `Goodbye` and EOF classifications. `:599-651` `activation_and_commit_complete_on_setup_socket` covers the `ProtocolError` classification. None covers the cap. Status unaudited.",
       "impact": "the cap is the only thing between a post-commit peer and a 4 GiB allocation, on a read that has no deadline at all, so it is what keeps an idle authenticated connection cheap.",
       "open_questions": [
         "Should `read_message_unbounded` be renamed to say what it actually is, time-unbounded and length-capped? The current name invites the exact wrong conclusion, and the re-scope document drew it. (needs human input)"
       ],
-      "extra": {
-        "Verified": "the cap at `setup_socket.rs:361-363` precedes the `vec![0u8; len]` at `:364`, and `MAX_SETUP_MESSAGE_LEN` is `16 * 1024` (`:24`)."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input",
@@ -2427,14 +2373,12 @@
       "required_faults": "a peer that sends a partial length prefix and then stalls, plus a cancellation of `read_cancel` while it is parked. Both halves are in-process over a `UnixStream::pair`, the shape `setup_socket.rs:810-825` already uses.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input.md)."
+        "evidence": "[evidence](evidence/setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input.md). Verified: `read_message_unbounded` (`:355-367`) applies no `timeout_at`, unlike `read_message` (`:369-386`) which wraps both `read_exact` calls; the `select!` at `connection.rs:196-206` is `biased` with `peer_read_cancel.cancelled()` first (`:198`); `observe_peer` is `setup_socket.rs:345-353`. The evidence file for this record is its own; the safety sibling links `evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap.md`, and the evidence files re-verify the line citations above against this tree."
       },
       "existing_check": "none. `setup_socket.rs:810-825` `goodbye_and_eof_have_distinct_outcomes` reaches `observe_peer` but always through a peer-driven outcome, never through cancellation. Status unaudited.",
       "impact": "this is the exit that makes an idle authenticated connection releasable on the host's own schedule. Without it, teardown of a connection whose peer has gone quiet mid-message depends on the peer, which is the one party a teardown path must not depend on.",
       "open_questions": [],
-      "extra": {
-        "Verified": "`read_message_unbounded` (`:355-367`) applies no `timeout_at`, unlike `read_message` (`:369-386`) which wraps both `read_exact` calls; the `select!` at `connection.rs:196-206` is `biased` with `peer_read_cancel.cancelled()` first (`:198`); `observe_peer` is `setup_socket.rs:345-353`. The evidence file for this record is its own; the safety sibling links `evidence/setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap.md`, and the evidence files re-verify the line citations above against this tree."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-concurrent-setup-saturation-is-reached",
@@ -2455,14 +2399,12 @@
       "required_faults": "`max_handshakes` and `max_connections` both above 1, more concurrent dialers than `max_handshakes`, and at least one dialer that authenticates and then delays its `Activate` inside the setup deadline.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-concurrent-setup-saturation-is-reached.md)."
+        "evidence": "[evidence](evidence/setup-a-concurrent-setup-saturation-is-reached.md). Verified: the two existing saturation tests set `max_handshakes` to 1 (`tests/lifecycle.rs:239`) and 4 (`:339`) and both use squatters that never speak (`:243-244`, `:355-357`), so neither can populate the second clause."
       },
       "existing_check": "none. The two lifecycle tests establish the first clause only.",
       "impact": "without this marker the bounding and scoping records can pass on a campaign that never ran two setups at once, which is the same vacuity Part 1's Group M records were introduced to prevent.",
       "open_questions": [],
-      "extra": {
-        "Verified": "the two existing saturation tests set `max_handshakes` to 1 (`tests/lifecycle.rs:239`) and 4 (`:339`) and both use squatters that never speak (`:243-244`, `:355-357`), so neither can populate the second clause."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection",
@@ -2483,16 +2425,14 @@
       "required_faults": "a host, or a stand-in, that emits a grant naming two identical grant strings, or a second concurrent attach of the same grant in one process.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection.md)."
+        "evidence": "[evidence](evidence/setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection.md). Verified: two divergences, with the native-side line numbers corrected from lens A per the provenance note above. First, `ring_transport.rs:646-650` compares `from_host_grant.geometry() != to_host_grant.geometry()` and rejects on *inequality*, whereas native `setup.rs:122` and `lib.rs:588-590` reject on grant *equality*; the two checks are not the same predicate and the managed path admits the aliased pair the native path refuses. Second, native `lib.rs:540-543` (`attach`) and `:591-594` (`connect_setup`) take a process-wide `GrantReservation::claim`; the managed Rust path takes no claim at all. `setup_socket.rs:302-306`, the managed peer's setup step, checks only wire version and schema and returns the descriptor as an unvalidated `serde_json::Value`."
       },
       "existing_check": "none on the managed Rust peer. Part 1's `native-boundary-not-weaker-than-its-wrapper` recorded the mirror-image gap and is still the reference for method.",
       "impact": "**the asymmetry Part 1 found has inverted rather than closed.** The refactor added `packages/shm-native/src/setup.rs` and moved profile, decode, alias and replay-claim checks into the native boundary, so the native side is now the stronger one. The weaker boundary is the managed Rust client. Part 1's record should be re-read with that in mind rather than assumed still-oriented.",
       "open_questions": [
         "Can an aliased grant pair actually arise? The only producer is `ring_transport.rs:324-327`, which encodes two distinct rings, so today this is latent. It becomes live under a rogue or impersonating host, which is the threat model this lens is written against."
       ],
-      "extra": {
-        "Verified": "two divergences, with the native-side line numbers corrected from lens A per the provenance note above. First, `ring_transport.rs:646-650` compares `from_host_grant.geometry() != to_host_grant.geometry()` and rejects on *inequality*, whereas native `setup.rs:122` and `lib.rs:588-590` reject on grant *equality*; the two checks are not the same predicate and the managed path admits the aliased pair the native path refuses. Second, native `lib.rs:540-543` (`attach`) and `:591-594` (`connect_setup`) take a process-wide `GrantReservation::claim`; the managed Rust path takes no claim at all. `setup_socket.rs:302-306`, the managed peer's setup step, checks only wire version and schema and returns the descriptor as an unvalidated `serde_json::Value`."
-      }
+      "extra": {}
     },
     {
       "slug": "setup-a-only-an-authenticated-grant-enters-the-native-channel-registry",
@@ -2513,16 +2453,14 @@
       "required_faults": "none beyond running the shipped plugin with both sites instrumented.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-a-only-an-authenticated-grant-enters-the-native-channel-registry.md)."
+        "evidence": "[evidence](evidence/setup-a-only-an-authenticated-grant-enters-the-native-channel-registry.md). Verified: `attach` at `lib.rs:525` reads `hostToPeerFd` and `peerToHostFd` as caller-supplied integers (`:510-513`) and never touches a socket; `connect_setup` at `:774` starts the `BeginSetupTask` whose completion calls `setup::connect` which performs the three-message handshake (`setup.rs:107-113`). Both end in `insert_channel` on the same `REGISTRY`, at `:551` and `:612`. `index.ts:537-540` and `:542-545` expose both; `shm-frame-channel.ts:77` uses only `connectSetup`, and grepping the source repository's `packages/plugin/src` for any other `.attach(` call site returns nothing outside tests; that package is absent from this tree."
       },
       "existing_check": "Part 1's `test-only-surface-absent-from-the-shipped-addon` is the neighbouring property and should be checked for whether it already covers `attach`. `attach` carries no `#[cfg(test)]` and no `#[doc(hidden)]`, so on the face of it that record does not reach it. Status unaudited.",
       "impact": "`attach` is an authenticated-path bypass reachable from JavaScript in the same process. Under the same-uid trust model that is not a privilege escalation, and it may well be intended surface - `create_test_pair` at `lib.rs:631` suggests a test reading and a worker-thread re-attach reading is equally consistent with the code. What it does mean, regardless of intent, is that **the setup socket is not the only way into the ring**, so any reasoning of the form \"the peer must have authenticated to hold this ring\" is unsound for in-process callers. That is the consequence worth protecting against regression, and it is why this record stays in the catalog after the narrowing.",
       "open_questions": [
         "Is `attach` intended as production surface, test surface, or a worker-thread re-attach path? `create_test_pair` at `lib.rs:631` suggests the test reading. If it is test surface, the check strengthens to a build-time assertion that the shipped addon does not export it, which is Part 1's neighbouring record; if it is production surface, the narrowed guarantee above is the strongest form available. (needs human input)"
       ],
-      "extra": {
-        "Verified": "`attach` at `lib.rs:525` reads `hostToPeerFd` and `peerToHostFd` as caller-supplied integers (`:510-513`) and never touches a socket; `connect_setup` at `:774` starts the `BeginSetupTask` whose completion calls `setup::connect` which performs the three-message handshake (`setup.rs:107-113`). Both end in `insert_channel` on the same `REGISTRY`, at `:551` and `:612`. `index.ts:537-540` and `:542-545` expose both; `shm-frame-channel.ts:77` uses only `connectSetup`, and grepping the source repository's `packages/plugin/src` for any other `.attach(` call site returns nothing outside tests; that package is absent from this tree."
-      }
+      "extra": {}
     },
     {
       "slug": "client-a-a-retired-generation-forgets-why-it-retired",
@@ -2918,7 +2856,7 @@
       "slug": "req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -2944,7 +2882,7 @@
       "slug": "req-a-no-emission-reaches-a-retired-generation-or-a-settled-correlation",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -2970,7 +2908,7 @@
       "slug": "req-a-a-pre-dispatch-rejection-is-emitted-or-the-generation-is-retired",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -2996,7 +2934,7 @@
       "slug": "req-a-a-route-open-is-answered-unless-the-host-is-failing-or-draining",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3024,7 +2962,7 @@
       "slug": "req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3039,12 +2977,12 @@
       "required_faults": "A forced shutdown past the drain deadline with requests in flight, so `force_close_all_routes` aborts outer tasks whose keys no `settle_route_work` collected. **Placement constraint, established during disposition:** the oracle must live in-crate. `mod connection` is private (`lib.rs:24`), so no integration test can name `GenerationCore`, but `pending` is `pub` on it (`connection.rs:95`) and therefore directly readable and insertable from any in-crate test.",
       "confidence": {
         "level": "medium",
-        "evidence": "[evidence](evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md). The sweep asymmetry is verified by reading both functions. What I could not verify is whether the forced path is always followed by the whole `GenerationCore` being dropped, which would make the leak unobservable; that depends on `runtime.rs:1144-1244`, which is sub-part 2f. **One premise of the original record was wrong and is corrected here: the map is not unobservable.** The claim that \"the map is private to the crate\" and that \"no in-crate test constructs a `GenerationCore`\" is false on the second half. `connection.rs:946-963` (`shutdown_registration_rejection_leaves_no_graceful_drain_work`) constructs a complete `GenerationCore` today, all eleven fields, using `frame_sender` for the writer, and asserts against it. So the postcondition is assertable; what it costs is placing the oracle in an inline unit-test lane, which CI runs in this tree (`ci.yml:118`, `:126`); that is a trade rather than a block."
+        "evidence": "[evidence](evidence/req-a-every-pending-entry-is-removed-by-its-owner-or-its-route-close.md). The sweep asymmetry is verified by reading both functions. What I could not verify is whether the forced path is always followed by the whole `GenerationCore` being dropped, which would make the leak unobservable; that depends on `runtime.rs:1144-1244`, which is sub-part 2f. **One premise of the original record was wrong and is corrected here: the map is not unobservable.** The claim that \"the map is private to the crate\" and that \"no in-crate test constructs a `GenerationCore`\" is false on the second half. `connection.rs:946-963` (source-catalog line, not present at HEAD) (`shutdown_registration_rejection_leaves_no_graceful_drain_work`) constructs a complete `GenerationCore` today, all eleven fields, using `frame_sender` for the writer, and asserts against it. So the postcondition is assertable; what it costs is placing the oracle in an inline unit-test lane, which CI runs in this tree (`ci.yml:118`, `:126`); that is a trade rather than a block."
       },
-      "existing_check": "none for this record's postcondition. `connection.rs:946-963` is not a check of it - it constructs a `GenerationCore` for an unrelated claim - but it is the construction proof this record's oracle needs. Status `unaudited`.",
+      "existing_check": "none for this record's postcondition. `connection.rs:946-963` (source-catalog line, not present at HEAD) is not a check of it - it constructs a `GenerationCore` for an unrelated claim - but it is the construction proof this record's oracle needs. Status `unaudited`.",
       "impact": "Bounded by the pending-permit pool in the worst case, so this is not unbounded growth. The consequence is a stale `PendingEntry` holding a `CancellationToken` and an `Arc<Settlement>` for the remaining life of the generation, which makes `handle_cancel` for that key a live no-op against an already-dead task.",
       "open_questions": [
-        "Does the forced path always drop the `GenerationCore` immediately afterwards? `close_generation` removes the connection at `dispatch.rs:1409-1413`, but `force_close_all_routes` does not call it. (unresolved, needs sub-part 2f)",
+        "Does the forced path always drop the `GenerationCore` immediately afterwards? `close_generation` removes the connection at `dispatch.rs:1409-1413` (source-catalog line, not present at HEAD), but `force_close_all_routes` does not call it. (unresolved, needs sub-part 2f)",
         "Should the oracle be an in-crate test that reads `pending` directly, or should a test-only accessor expose it so the integration binaries CI might one day run can assert it? The first is free and runs nowhere; the second is a production edit. (needs human input)"
       ],
       "extra": {}
@@ -3053,7 +2991,7 @@
       "slug": "req-a-a-routed-terminal-carries-no-delivery-acknowledgement",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3064,7 +3002,7 @@
         "semantics": "always",
         "condition": "for every routed terminal emission, the `OutboundFrame` carries `written: None`, so host-side acknowledged effects are identically zero while attempted effects equal the settlement count. Per METHOD's effect accounting, assert observed client terminals at most the host's settlement count and at least zero, and assert per-correlation that no host state claims delivery. `always` because it holds on every emission, not on a failure path."
       },
-      "fault_timing": "The gap is unbounded in time. `send_before` returning `Ok` proves queue admission (`frame_channel.rs:715-723`); publication happens later inside the endpoint thread (`ring_transport.rs:536-578`).",
+      "fault_timing": "The gap is unbounded in time. `send_before` returning `Ok` proves queue admission (`frame_channel.rs:715-723` (source-catalog line, not present at HEAD)); publication happens later inside the endpoint thread (`ring_transport.rs:536-578`).",
       "required_faults": "A generation whose writer queue holds a settled terminal when the generation is cancelled or the publication fails. The settlement is already recorded; the frame never leaves.",
       "confidence": {
         "level": "high",
@@ -3081,7 +3019,7 @@
       "slug": "req-a-a-response-publication-failure-never-reaches-the-settling-path",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3109,7 +3047,7 @@
       "slug": "req-a-a-handler-response-is-length-checked-and-never-content-checked",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3166,7 +3104,7 @@
       "slug": "req-a-a-handler-outliving-every-host-deadline-is-reached",
       "type": "reachability",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3220,7 +3158,7 @@
       "slug": "req-a-shutdown-rejects-routed-and-control-work-under-divergent-codes",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "yes",
@@ -3248,7 +3186,7 @@
       "slug": "req-a-three-control-rejection-paths-carry-three-different-bounds",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3276,11 +3214,11 @@
       "slug": "req-a-handler-authored-diagnostics-are-capped-before-any-egress-wait",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "on the routed request path of `host_runtime::run` with no configuration gate: `accept_loop` (`runtime.rs:870`) spawns `run_connection` (`connection.rs:86`), which serves one generation (`:192`) whose `read_loop` hands control frames to `handle_control` (`:549`) and routed frames to `dispatch_request` (`dispatch.rs:780`); none of those steps is behind a feature, an option, or a composition choice.",
       "status": "active",
       "exercised": {
         "state": "partial",
-        "note": "`tests/dispatch.rs:1524` `diagnostic_limit_substitution_drops_retry_hint` is an inline unit test covering `bounded_terminal_error` only, and inline `host-runtime` tests run in CI in this tree (`ci.yml:118`, `:126`). The `BindOutcome::Reject` copy of the same policy has no test."
+        "note": "`tests/dispatch.rs:1524` (source-catalog line, not present at HEAD) `diagnostic_limit_substitution_drops_retry_hint` is an inline unit test covering `bounded_terminal_error` only, and inline `host-runtime` tests run in CI in this tree (`ci.yml:118`, `:126`). The `BindOutcome::Reject` copy of the same policy has no test."
       },
       "guarantee": "Handler-authored error codes and messages are truncated-by- substitution to at most 128 and 4,096 bytes before the terminal is held across any await, on both the request-error and bind-rejection paths.",
       "check": {
@@ -3291,14 +3229,12 @@
       "required_faults": "A handler returning a multi-megabyte error message, at pending-pool or route-pool saturation, with a slow-reading peer so the terminals queue.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/req-a-handler-authored-diagnostics-are-capped-before-any-egress-wait.md)."
+        "evidence": "[evidence](evidence/req-a-handler-authored-diagnostics-are-capped-before-any-egress-wait.md). Both capping sites read and their limits compared: same constants, different substitute messages, and the bind path re-implements the comparison by hand instead of calling `bounded_terminal_error`."
       },
-      "existing_check": "`tests/dispatch.rs:1524` (inline; runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`)). Status unaudited.",
+      "existing_check": "`tests/dispatch.rs:1524` (source-catalog line, not present at HEAD) (inline; runs in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`)). Status unaudited.",
       "impact": "Without the cap, `max_pending_requests` (1024) times an arbitrary message is unbounded uncharged residency. With two hand-written copies of one policy, a future limit change applied to one and missed in the other silently reopens half of it.",
       "open_questions": [],
-      "extra": {
-        "Both capping sites read and their limits compared": "same constants, different substitute messages, and the bind path re-implements the comparison by hand instead of calling `bounded_terminal_error`."
-      }
+      "extra": {}
     },
     {
       "slug": "composite-route-entry-is-removed-by-exactly-one-route-gone",
@@ -3325,7 +3261,7 @@
       "impact": "a bind path that never yields `route_gone` leaks one map entry per connection for the host's lifetime, and the leaked entry keeps routing a reused handle to a stale child.",
       "open_questions": [
         "Does the host guarantee `route_gone` after a panicking `bind`, or only after `Reject` and close? The comment claims all three; the runtime side is outside this lens. **Resolved at carry time, and the answer is yes.** The runtime side is `dispatch.rs`, which is inside *this* sub-part's scope rather than outside it, so the question was answerable here and was not asked. A panic in `bind` propagates out of the spawned task, because `panic_boundary::redact_sync` (`panic_boundary.rs:52-55`) only marks the panic-hook depth and does not `catch_unwind`; `lifecycle_join` observes `is_panic()` at `runtime.rs:187`, trips the fatal latch at `:192-193`, and returns `Err(LifecycleFailure { stopped: true })` at `:194`; and `dispatch.rs:1164` matches that arm and calls `run_route_gone` at `:1166`. All three outcomes the comment at `composite.rs:262-265` names do produce exactly one `route_gone`.",
-        "**A new question, opened by that resolution.** There are three further bind or close outcomes the composite's comment does not name, and on each the map entry is never removed: `dispatch.rs:1174`, where the bind is still executing past `lifecycle_callback_deadline` and the comment at `:1171-1173` deliberately declines to run `route_gone`; `dispatch.rs:1440-1444`, where a dispatch task did not stop before route-gone and the function returns before the `run_route_gone` at `:1446`; and `run_route_gone` returning `false` at `:1276`, where the child's own callback did not return. All three trip the fatal latch, so the leak is bounded by a terminating incarnation rather than by the host's lifetime, which is a weaker bound than this record's `Impact:` assumes but not an unbounded one. Is that bound intended as the answer, or should the composite's map be dropped wholesale on a fatal latch? (needs human input)"
+        "**A new question, opened by that resolution.** There are three further bind or close outcomes the composite's comment does not name, and on each the map entry is never removed: `dispatch.rs:1174`, where the bind is still executing past `lifecycle_callback_deadline` and the comment at `:1171-1173` deliberately declines to run `route_gone`; `dispatch.rs:1440-1444` (source-catalog line, not present at HEAD), where a dispatch task did not stop before route-gone and the function returns before the `run_route_gone` at `:1446`; and `run_route_gone` returning `false` at `:1276`, where the child's own callback did not return. All three trip the fatal latch, so the leak is bounded by a terminating incarnation rather than by the host's lifetime, which is a weaker bound than this record's `Impact:` assumes but not an unbounded one. Is that bound intended as the answer, or should the composite's map be dropped wholesale on a fatal latch? (needs human input)"
       ],
       "extra": {}
     },
@@ -3359,7 +3295,7 @@
       "slug": "rt-a-startup-refuses-every-configuration-it-cannot-fund",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "`run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3385,7 +3321,7 @@
       "slug": "rt-a-the-ingress-pool-derivation-cannot-underflow",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "`run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3411,7 +3347,7 @@
       "slug": "rt-a-no-configured-limit-is-silently-clamped",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "`run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3426,7 +3362,7 @@
       "required_faults": "none. Pure function of a constructed `HostConfig`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/rt-a-no-configured-limit-is-silently-clamped.md). Read every branch of both validators and every `Display` arm. The one silent narrowing found is `file_mode.rs:18`, outside `HostConfig`."
+        "evidence": "[evidence](evidence/rt-a-no-configured-limit-is-silently-clamped.md). Read every branch of both validators and every `Display` arm. The one silent narrowing found is `file_mode.rs:18` (source-catalog line, not present at HEAD), outside `HostConfig`."
       },
       "existing_check": "seven unit tests in `config.rs`, per key, not exhaustive over fields. Status `unaudited`.",
       "impact": "an operator who sets a value and gets a different one silently loses the ability to reason about the host's capacity, which is the premise of `config.rs:87-88`.",
@@ -3439,7 +3375,7 @@
       "slug": "rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "the health task is spawned by `run` for every incarnation and selects its interval at `runtime.rs:972-976` on each iteration from the handler's report (`activation_in_progress`, `:900`); no option disables the loop.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3467,7 +3403,7 @@
       "slug": "rt-a-the-serial-setup-budget-triples-the-configured-transport-deadline",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "every accepted socket runs `run_connection` (`connection.rs:86`) through authentication (`auth_deadline`), `ring.prepare` (`:116-125`), and `activate_server` (`:155-165`), each under a `HostTiming` deadline with a non-zero default; no option skips a stage.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3493,7 +3429,7 @@
       "slug": "rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "every `run` ends through `shutdown_sequence` (`runtime.rs:986`), reached from the shutdown token on both the graceful and forced paths; the deadlines it consumes are `HostTiming` fields with non-zero defaults (`config.rs:169`, `:172`), so the bound is evaluated on every incarnation.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3522,7 +3458,7 @@
       "slug": "rt-a-the-default-configuration-arms-no-liveness-probe",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "the assertion is about the default path itself: `HostConfig::default` leaves `liveness: None` (`config.rs:236`, re-verified) and `connection.rs:264-270` spawns `liveness_loop` only inside `if let Some(policy)`, so the no-spawn outcome is what every unconfigured `run` produces.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3550,7 +3486,7 @@
       "slug": "rt-a-an-unprobed-health-snapshot-is-distinguishable-from-a-degraded-one",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "the health task is spawned by `run` for every incarnation and selects its interval at `runtime.rs:972-976` on each iteration from the handler's report (`activation_in_progress`, `:900`); no option disables the loop.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3576,7 +3512,7 @@
       "slug": "rt-a-the-activation-fast-probe-interval-is-entered",
       "type": "reachability",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "the health task is spawned by `run` for every incarnation and selects its interval at `runtime.rs:972-976` on each iteration from the handler's report (`activation_in_progress`, `:900`); no option disables the loop.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3602,7 +3538,7 @@
       "slug": "rt-a-every-published-configuration-field-changes-host-behaviour",
       "type": "safety",
       "reachability": "explicit-config-only",
-      "reachability_note": "",
+      "reachability_note": "the fields under test are set by the embedder's `HostConfig`, `HostLimits`, `HostTiming`, `LivenessPolicy`, or `HostInit`; `run` (`runtime.rs:541`) consumes whatever the caller passes, and the default construction (`HostConfig::default`, `config.rs:87`) exercises none of the non-default values, so the observable difference exists only under an explicit configuration.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3630,7 +3566,7 @@
       "slug": "rt-a-configuration-is-frozen-for-the-incarnation",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "`run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3656,7 +3592,7 @@
       "slug": "rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration",
       "type": "safety",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "`run` (`runtime.rs:541`) validates the configuration (`config.validate()` at `:559`, `HostConfig::validate` at `config.rs:242`) and constructs `HostShared` (`:748`) on every start before publishing the transport; no option skips either step.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3710,7 +3646,7 @@
       "slug": "rt-a-an-initialized-handler-drains-without-publishing",
       "type": "reachability",
       "reachability": "default-production",
-      "reachability_note": "",
+      "reachability_note": "the window is inside `run` between `HostHandler::initialize` (`runtime.rs:640-644`) and transport publication, on every start; an initialization that fails or a shutdown that lands in that window takes the unpublished drain path with no configuration gate.",
       "status": "active",
       "exercised": {
         "state": "not-yet",
@@ -3924,7 +3860,7 @@
       "slug": "broca-identical-resends-converge-on-one-run",
       "type": "safety",
       "reachability": "test-only",
-      "reachability_note": "every Broca send through a composed `BrocaComponent` is deduplicated by the supervisor. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
+      "reachability_note": "every Broca send through a composed `BrocaComponent` is deduplicated by the supervisor. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3950,7 +3886,7 @@
       "slug": "broca-permits-and-charges-return-to-baseline",
       "type": "safety",
       "reachability": "test-only",
-      "reachability_note": "every run path of a composed `BrocaComponent` releases what it took. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
+      "reachability_note": "every run path of a composed `BrocaComponent` releases what it took. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3976,7 +3912,7 @@
       "slug": "broca-children-are-reaped-as-a-process-group",
       "type": "safety",
       "reachability": "test-only",
-      "reachability_note": "every harness child a composed `BrocaComponent` spawns runs in its own process group under `PR_SET_PDEATHSIG`. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
+      "reachability_note": "every harness child a composed `BrocaComponent` spawns runs in its own process group under `PR_SET_PDEATHSIG`. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4033,7 +3969,7 @@
       "slug": "broca-protocol-shapes-are-closed",
       "type": "safety",
       "reachability": "test-only",
-      "reachability_note": "every request a composed `BrocaComponent` receives is decoded against the closed shape set. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
+      "reachability_note": "every request a composed `BrocaComponent` receives is decoded against the closed shape set. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4085,7 +4021,7 @@
       "slug": "synapse-admission-boundaries-are-exact",
       "type": "safety",
       "reachability": "test-only",
-      "reachability_note": "every batch and query a composed `SynapseComponent` receives is admitted through these bounds. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
+      "reachability_note": "every batch and query a composed `SynapseComponent` receives is admitted through these bounds. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4113,7 +4049,7 @@
       "slug": "synapse-degrades-to-disabled-and-keeps-the-context-routable",
       "type": "liveness",
       "reachability": "test-only",
-      "reachability_note": "every artifact fault in a composed `SynapseComponent` takes this path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
+      "reachability_note": "every artifact fault in a composed `SynapseComponent` takes this path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4139,7 +4075,7 @@
       "slug": "synapse-requests-are-validated-before-any-inference",
       "type": "safety",
       "reachability": "test-only",
-      "reachability_note": "every Synapse request to a composed `SynapseComponent` is decoded and bounded before it reaches the engine. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
+      "reachability_note": "every Synapse request to a composed `SynapseComponent` is decoded and bounded before it reaches the engine. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4165,7 +4101,7 @@
       "slug": "synapse-inference-runs-through-a-sealed-runtime-image",
       "type": "safety",
       "reachability": "test-only",
-      "reachability_note": "every inference in a composed `SynapseComponent` loads ONNX Runtime through the sealed memfd path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
+      "reachability_note": "every inference in a composed `SynapseComponent` loads ONNX Runtime through the sealed memfd path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
