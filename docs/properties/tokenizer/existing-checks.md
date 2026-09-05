@@ -93,7 +93,10 @@ pins the corrected prototype-name ids rather than the stock oracle's.
 `Vocab::from_blob` (`src/bpe.rs:116-150`) panics on first use if the blob has
 trailing bytes or if any byte lacks a single-byte token (`:144-148`).
 `encode_piece` carries two `debug_assert!`s, on span validity and on pieces of
-at least two bytes (`:206`, `:218`), which are absent from release builds.
+at least two bytes (`:206`, `:218`), and the packed-key builders carry one
+each on the length they accept, `short_key` requiring `3..=7` (`:71`) and
+`mid_key` requiring `8..=15` (`:87`), which pin the preconditions for their
+shifts and copies; all four are absent from release builds.
 
 ## Suspiciously quiet areas
 

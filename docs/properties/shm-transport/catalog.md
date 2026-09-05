@@ -354,6 +354,7 @@ and `n/a - invalidated` for an invalidated record.
 | [foreign-slot-state-on-reserve-is-a-fault-not-backpressure](#foreign-slot-state-on-reserve-is-a-fault-not-backpressure) | safety | high | yes |
 | [failed-publication-wake-leaves-the-slot-published](#failed-publication-wake-leaves-the-slot-published) | safety | high | yes |
 | [release-leaves-the-consumer-parked-marker-intact](#release-leaves-the-consumer-parked-marker-intact) | liveness | high | yes |
+| [capacity-wait-unparks-on-exit-and-survives-a-stale-token](#capacity-wait-unparks-on-exit-and-survives-a-stale-token) | liveness | high | yes |
 
 ---
 
@@ -1699,11 +1700,19 @@ Exercised: partial - the bench compares the reported checksum against an
 independently derived expectation and fails the run on mismatch; no test corrupts
 a delivered byte to show the comparison fires.
 Guarantee: Every arm's reported checksum is a function of the bytes actually
-delivered, so a corrupted or skipped transfer cannot produce the same value as a
-correct one.
+delivered, so a skipped transfer, a short transfer, or a corruption that changes
+the byte sum cannot produce the same value as a correct one. The checksum is a
+wrapping sum of byte values (`LeaseSpan::checksum`,
+`crates/shm-transport/src/lease.rs:96-123`, and the copied-receiver fold), so
+it is order-insensitive and compensating corruptions, one byte raised and
+another lowered by the same amount, keep the sum; the guarantee is therefore
+against dropped, truncated, and additive corruption, not against every
+corruption.
 Check: `always` - assert the checksum is computed from received bytes on every
 arm and compared against an expectation derived without reading them; corrupt
-one delivered byte and assert the run fails.
+one delivered byte and assert the run fails. A compensating pair of corruptions
+is outside the oracle's reach by construction and must not be used as a
+negative case.
 Fault/timing angle: silently dropped or corrupted frames on the selectable arm.
 Required faults and enabling state: none to demonstrate the gap; a byte
 corruption to demonstrate the impact.
@@ -1723,7 +1732,12 @@ when the bench runs; no test corrupts a byte. Status unaudited.
 Impact: if the consumer's fold or the driver's comparison were removed, a fully
 corrupted ring transfer would report a bit-identical checksum and the benchmark
 could not distinguish a working transport from a broken one.
-Open questions: None.
+Open questions:
+- Should the bench move to an order-sensitive checksum (a CRC or a
+  position-weighted sum) so that swapped or compensating corruptions are
+  detectable, or is the byte sum's witness against dropped and truncated
+  transfers the extent of what the envelope bench is meant to prove?
+  (needs human input)
 
 ### traceability-pointers-resolve
 
@@ -2468,8 +2482,12 @@ duplex ring (`crates/host-runtime/src/connection.rs:137-138`), so this code is o
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: not yet — one of the four bytes is perturbed by a test, and the corpus
-seed that encodes the case has its outcome unasserted.
+Exercised: partial — `artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected`
+(`crates/shm-transport/tests/ring.rs:328-329`) sets reserved byte 54 to one
+and asserts `RingGrant::decode` returns `InvalidGrant`, so the rejection arm is
+exercised for one of the four positions; bytes 55 through 57 are perturbed by
+nothing, the re-encode arm is unchecked, and the corpus seed that encodes the
+case has its outcome unasserted.
 Guarantee: A grant is accepted only if all four reserved bytes are zero, and
 `encode` reproduces them as zero, so the region stays reserved in fact rather
 than only in intent.
@@ -4844,6 +4862,10 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   complement of `quarantine-wakes-a-parked-waiter` and
   `capacity-recheck-after-a-wake-race`: those say who must signal a parked
   waiter; this says which operation must not un-park it.
+  `capacity-wait-unparks-on-exit-and-survives-a-stale-token` is the producer
+  side of the same marker with the polarity flipped: an abandoned park must
+  un-park itself, and a stale token must cost a spurious wake rather than a
+  missed one.
 
 ## Discovered at U3
 
@@ -5565,3 +5587,62 @@ Impact: a lost wake at the most common consumer transition: the consumer parks
 after releasing, the publisher skips the doorbell, and the frame sits until an
 unrelated event; on an idle channel, forever.
 Open questions: None.
+
+### capacity-wait-unparks-on-exit-and-survives-a-stale-token
+
+Type: liveness
+Reachability: default-production - every host publish that finds the ring full
+enters `reserve_until` (`crates/shm-transport/src/backend/ring.rs:1345-1390`,
+reached from `ring_transport.rs:910` and the bridge's `send_bounded`); each
+iteration arms the capacity wake through `ParkGuard::arm` (`:1359`) and the
+guard's `Drop` clears `parked` on every exit from the iteration, including the
+`?` returns (`:653-657`, comment at `:1358`).
+Status: active
+Exercised: partial - `reserve_until_deadline_leaves_the_capacity_wake_unparked`
+(`ring.rs:4189-4210`) fills the arena, lets `reserve_until` expire on a 30 ms
+deadline, asserts `Deadline` within 2 s, and asserts the capacity wake's
+`parked` is zero afterwards (`:4205-4209`);
+`stale_capacity_token_after_a_drain_does_not_deadlock_the_next_park`
+(`:4213-4240`) has a spawned consumer thread signal the capacity doorbell before
+any capacity exists, sleep 100 ms, then receive and release, while the test
+thread blocks in `reserve_until` with a 10 s deadline and must return inside
+5 s. The first is single-threaded; the second is the file's one two-thread test
+and bounds progress at the mid-block scale only, with no instruction-scale race
+constructed.
+Guarantee: A producer that leaves `reserve_until` by any exit (a successful
+reservation, `Deadline`, or an error) leaves the capacity wake's `parked`
+marker at zero, so the next consumer release does not send a doorbell byte that
+nobody is waiting for; and a stale capacity token already queued on the doorbell
+when the producer parks costs at most one spurious wake, never a missed one:
+`reserve_until` drains and re-checks (`:1368-1371`, `:1385-1388`) and returns
+within the deadline once capacity exists.
+Check: `always` - after `reserve_until` returns `Err(Deadline)`,
+`capacity_wake().parked == 0` and the call returned no later than the deadline
+plus scheduling slack; with a token queued before the park and capacity released
+from another thread, `reserve_until` returns `Ok` strictly before its deadline.
+Fault/timing angle: this is the producer-side mirror of
+`release-leaves-the-consumer-parked-marker-intact` with the polarity flipped.
+A leftover non-zero `parked` after an abandoned park makes the next release
+swap it and send a byte with no waiter, and a later genuine park can consume
+that stale byte through `drain` and then wait on an empty doorbell for a
+release that already happened; `reserve_until` defends against the second half
+by re-checking capacity after every drain (`:1371-1375`) and comparing the
+wake generation before it blocks (`:1364-1366`, `:1376-1378`). The hazard is a
+refactor that returns from an iteration without running the guard's `Drop`
+(moving the arm outside the loop, or holding the guard across iterations), or
+one that blocks without the post-drain re-check.
+Required faults and enabling state: a full ring and an expiring deadline for the
+unpark half; a queued doorbell byte plus a release from another thread for the
+stale-token half (F4 at the mid-block scale).
+Confidence: high - [evidence](evidence/capacity-wait-unparks-on-exit-and-survives-a-stale-token.md).
+`reserve_until`'s arm ladder, `ParkGuard`'s `Drop`, and both tests were read
+directly.
+Existing check: the two tests named above, unaudited.
+Impact: a producer that parks for capacity after an earlier timeout either wakes
+spuriously (cost: one extra loop) or, if the stale token is consumed before the
+real release lands and no re-check follows, sleeps until its deadline while
+capacity sits free; the host's publish path then reports `Deadline` on a ring
+that could have taken the frame.
+Open questions:
+- Should the capacity-wake and data-wake marker records be one two-sided
+  wake-protocol property rather than two mirrors? (needs human input)

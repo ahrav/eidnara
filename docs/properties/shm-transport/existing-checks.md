@@ -156,8 +156,8 @@ assertion. Rows that a catalog record already cites are marked with the record.
 | `partial_page_reclaim_preserves_live_neighbor` (`:4118`) | Partial page reclaim preserves live neighbor | unaudited |
 | `trim_preserves_bytes_of_an_uncommitted_reservation` (`:4136`) | Trim preserves bytes of an uncommitted reservation | unaudited; cited by `trim-removes-only-dead-pages-below-the-write-cursor` |
 | `outstanding_reservation_is_refused_without_parking` (`:4164`) | Outstanding reservation is refused without parking | unaudited |
-| `reserve_until_deadline_leaves_the_capacity_wake_unparked` (`:4189`) | Reserve until deadline leaves the capacity wake unparked | unaudited |
-| `stale_capacity_token_after_a_drain_does_not_deadlock_the_next_park` (`:4213`) | Stale capacity token after a drain does not deadlock the next park | unaudited |
+| `reserve_until_deadline_leaves_the_capacity_wake_unparked` (`:4189`) | Reserve until deadline leaves the capacity wake unparked | unaudited; cited by `capacity-wait-unparks-on-exit-and-survives-a-stale-token` |
+| `stale_capacity_token_after_a_drain_does_not_deadlock_the_next_park` (`:4213`) | Stale capacity token after a drain does not deadlock the next park | unaudited; cited by `capacity-wait-unparks-on-exit-and-survives-a-stale-token` |
 | `page_removal_failure_quarantines_before_capacity_publication` (`:4243`) | Page removal failure quarantines before capacity publication | unaudited |
 | `quarantine_survives_peer_clearing_shared_flag` (`:4261`) | Quarantine survives peer clearing shared flag | unaudited; cited by `quarantine-authority-survives-peer-writes`; also cited by `trim-removes-only-dead-pages-below-the-write-cursor` |
 | `impossible_slot_state_quarantines_the_receiver` (`:4277`) | Impossible slot state quarantines the receiver | unaudited; cited by `foreign-slot-state-on-reserve-is-a-fault-not-backpressure` |
@@ -316,7 +316,7 @@ Guard clusters, all unaudited:
 | Cluster | What it enforces |
 | --- | --- |
 | Mapping geometry and arithmetic | Layout overflow checks, alignment overflow, the single `ptr_at` bounds gate behind every page accessor, mmap failure, prefault verification |
-| Object and runtime-directory authentication | Directory creation mode and inode identity, revalidation through the open descriptor, object owner, exact size, file type on Linux, permission bits, required seals, platform-specific object creation |
+| Object authentication | Object owner, exact size, file type, permission bits, and required seals checked through the open descriptor before mapping (`validate_object`, `validate_seals`); `Mapping::create` creates a memfd directly. In the source tree this cluster also covered runtime-directory creation mode, inode identity, and descriptor revalidation; no `RuntimeDir`, `create_in`, or runtime-directory path exists in the transport or the addon at HEAD, and that half is retired |
 | Grant decode and geometry agreement | Reserved bytes must be zero, layout version, nonzero depth, arena floor, lease cap range, exact length, and total bytes equal to the recomputed layout; the mapped lifecycle page must equal the grant field by field |
 | Profile and creation gates | Schema version, depth, arena floor, span range, lease cap, mapping floor, worker and scheduling coherence, ownership mode, charge overflow |
 | Producer reservation and commit | Bound check, quarantine gate, outstanding underflow, depth exhaustion, sequence overflow, slot claim, arena exhaustion, deadline remap, abort-once, wire header agreement, commit-outside-reservation, underfill |
