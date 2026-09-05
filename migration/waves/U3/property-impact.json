@@ -1652,16 +1652,16 @@
       "strategy_decision": "Example test spelling the id and every geometry literal, added at U3 for the renamed profile id; the addon package test states the same geometry independently.",
       "audit_verdict": "pass",
       "evidence_pointer": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
-      "evidence_digest": "10b470fe03ad63ed17b29b49c9773a9343a4c468218581879ac0445085d21eb3",
+      "evidence_digest": "cdc78f118cbf5967791e0865d2cad815713f8ed45c5c0cb4c290c4608578094a",
       "check_pointer": "crates/shm-transport/tests/profile.rs#host_test_ring_profile_names_one_geometry",
-      "check_hash": "ff14509c365bd1efc596abc99095bff7be617a945d99638232c7c23ebc47a1ed",
-      "code_hash": "86ab14987e1389c83a13b1626ff239ecc86db9228f51466bdeec6a1762ffdbb8",
+      "check_hash": "de3e01bdc657f4033bd7bd82746080645c6ebc4133ae03023fb98dc267d0a3d8",
+      "code_hash": "c760b178f47c442efbcd9ff234fcab90d19444fa83bac5dbd99b9a400ece2e9b",
       "target_configurations": [
         "x86_64-unknown-linux-gnu, Rust 1.98 and stable, --all-features --locked"
       ],
       "evidence_attempts": 1,
       "new_evidence": {
-        "digest": "10b470fe03ad63ed17b29b49c9773a9343a4c468218581879ac0445085d21eb3",
+        "digest": "cdc78f118cbf5967791e0865d2cad815713f8ed45c5c0cb4c290c4608578094a",
         "description": "U3 evidence record docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md: regenerated or added check with an oracle outside the implementation; see the record's audit verdict."
       }
     },

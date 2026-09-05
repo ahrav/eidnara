@@ -4559,16 +4559,15 @@ Open questions: None.
 Type: safety
 Reachability: default-production - the host stamps `host-test-ring-v1` into every production grant.
 Status: active
-Exercised: partial - the id string, depth, lease bound, and descriptor charge are asserted against literals spelled in the test; the arena charge is compared against `2 * shm_transport::MIN_ARENA_BYTES`, so a change to that constant moves both sides of the assertion and the arena dimension is unexercised.
+Exercised: yes - the id string, depth, lease bound, descriptor charge, and arena charge (134,217,728 bytes, two 64 MiB arenas) are all asserted against literals spelled in the test, so a geometry change under an unchanged id fails it.
 Guarantee: The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.
-Check: `always` - `host_test_ring_profile()` matches the literal id, depth, lease bound, descriptor charge, and a literal 64 MiB arena per direction; the current test pins everything but the arena literal.
+Check: `always` - `host_test_ring_profile()` matches the literal id, depth, lease bound, descriptor charge, and a literal 64 MiB arena per direction.
 Fault/timing angle: A peer that echoes the id exercises whatever geometry the host built; if the id survived a geometry change the peer's bounds would be silently wrong.
 Required faults and enabling state: None; the check is a literal comparison.
 Confidence: high - [evidence](evidence/one-profile-id-names-one-ring-geometry-in-code.md). The id is a renamed identity, so the record is `core` for U3; the sibling record `one-profile-name-denotes-one-geometry` states the cross-peer half and keeps its source status.
 Existing check: `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs:202`), added at U3; the addon's setup fixture and `packages/shm-native/tests/mechanism.ts` name the same id.
 Impact: A peer sized for a different depth over- or under-runs the ring.
-Open questions:
-- Should `host_test_ring_profile_names_one_geometry` compare `arena_bytes` against a spelled 128 MiB (two 64 MiB arenas) instead of `2 * MIN_ARENA_BYTES`, so a constant change is caught? Queue it?
+Open questions: None.
 
 ### addon-reservations-drop-before-the-ring
 

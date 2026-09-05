@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "shm-transport",
   "source": "catalog.md",
-  "source_sha256": "d9497819c22c1b763900caa36d7b33a0827914ab946e3c17a9fc55540082a0cf",
+  "source_sha256": "b3698536aee92a2e5e1e1d9f92704b11795eb4bc3cca51d59eac01a0ee610521",
   "records": [
     {
       "slug": "quarantine-authority-survives-peer-writes",
@@ -2003,13 +2003,13 @@
       "reachability_note": "the host stamps `host-test-ring-v1` into every production grant.",
       "status": "active",
       "exercised": {
-        "state": "partial",
-        "note": "the id string, depth, lease bound, and descriptor charge are asserted against literals spelled in the test; the arena charge is compared against `2 * shm_transport::MIN_ARENA_BYTES`, so a change to that constant moves both sides of the assertion and the arena dimension is unexercised."
+        "state": "yes",
+        "note": "the id string, depth, lease bound, descriptor charge, and arena charge (134,217,728 bytes, two 64 MiB arenas) are all asserted against literals spelled in the test, so a geometry change under an unchanged id fails it."
       },
       "guarantee": "The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.",
       "check": {
         "semantics": "always",
-        "condition": "`host_test_ring_profile()` matches the literal id, depth, lease bound, descriptor charge, and a literal 64 MiB arena per direction; the current test pins everything but the arena literal."
+        "condition": "`host_test_ring_profile()` matches the literal id, depth, lease bound, descriptor charge, and a literal 64 MiB arena per direction."
       },
       "fault_timing": "A peer that echoes the id exercises whatever geometry the host built; if the id survived a geometry change the peer's bounds would be silently wrong.",
       "required_faults": "None; the check is a literal comparison.",
@@ -2019,9 +2019,7 @@
       },
       "existing_check": "`host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs:202`), added at U3; the addon's setup fixture and `packages/shm-native/tests/mechanism.ts` name the same id.",
       "impact": "A peer sized for a different depth over- or under-runs the ring.",
-      "open_questions": [
-        "Should `host_test_ring_profile_names_one_geometry` compare `arena_bytes` against a spelled 128 MiB (two 64 MiB arenas) instead of `2 * MIN_ARENA_BYTES`, so a constant change is caught? Queue it?"
-      ],
+      "open_questions": [],
       "extra": {}
     },
     {

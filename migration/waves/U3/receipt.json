@@ -602,7 +602,7 @@
         "blob_sha": "b1fc8fc47b0e3bb421c28c24edf2567955ef3a17"
       },
       "destination": "crates/shm-transport/tests/profile.rs",
-      "destination_sha256": "ff14509c365bd1efc596abc99095bff7be617a945d99638232c7c23ebc47a1ed",
+      "destination_sha256": "de3e01bdc657f4033bd7bd82746080645c6ebc4133ae03023fb98dc267d0a3d8",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2088,7 +2088,7 @@
         "blob_sha": "33b65a1644e04373f5ed6e871c5c6e331fb34add"
       },
       "destination": "docs/properties/shm-transport/catalog.md",
-      "destination_sha256": "d9497819c22c1b763900caa36d7b33a0827914ab946e3c17a9fc55540082a0cf",
+      "destination_sha256": "b3698536aee92a2e5e1e1d9f92704b11795eb4bc3cca51d59eac01a0ee610521",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2137,7 +2137,7 @@
     {
       "source": null,
       "destination": "docs/properties/shm-transport/index.json",
-      "destination_sha256": "72cfd2ebe7f74dfe41d435e4dfee45a46fccb0f632692a96d60c2db55d1eac3d",
+      "destination_sha256": "b34cd1bf3c3a717beb76c8cacea235a2fc1073e9b52d708eeb7cfdb10efc54a8",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3003,7 +3003,7 @@
     {
       "source": null,
       "destination": "docs/properties/shm-transport/evidence/one-profile-id-names-one-ring-geometry-in-code.md",
-      "destination_sha256": "10b470fe03ad63ed17b29b49c9773a9343a4c468218581879ac0445085d21eb3",
+      "destination_sha256": "cdc78f118cbf5967791e0865d2cad815713f8ed45c5c0cb4c290c4608578094a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5483,7 +5483,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "7fbdff168614a2d0cb14faf157fb1864587ffb52889fd800e484561987821dce",
+      "destination_sha256": "0e5d04d29e507d68bdb87acf96fdf42b003aefed54dea63ed7fe5bf7cc592c53",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5494,7 +5494,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/architecture-impact.json",
-      "destination_sha256": "1b9bd54ec7007102ee5fe72b7f9b31461c7e6fa6ea24040b857b048a2c081964",
+      "destination_sha256": "68ecbe90dfcae74b661f23f59f226f134118c01492d4fb89e39456b73e2dde1f",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
