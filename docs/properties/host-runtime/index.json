@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "c59e27aced4a1abe27b28f6c610f25e270986d2fae823355443140c71ee141e0",
+  "source_sha256": "707a0b616a58792009ddafc0c946d0b89e2d23bf05ab792c8b7d67832c555d22",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -3758,7 +3758,7 @@
       "existing_check": "`committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction`, `proof_folds_every_input`, and `production_proof_matches_the_oracle_across_perturbed_tuples` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.",
       "impact": "A client that cannot authenticate, or a rogue listener that can.",
       "open_questions": [
-        "`docs/host-wire-protocol.md:213` and `:217` carry example proof bytes that match neither the code nor a recomputation, and `:220` names the daemon version differently from `:213`. Code and tests agree with each other; the document needs a fix. (needs human input)"
+        "None. The section 5.2 examples in `docs/host-wire-protocol.md` were regenerated at U3 to the committed vectors, and the prose there names `eidnara-host/0.1.0`; the evidence record's investigation log carries the reproduction."
       ],
       "extra": {}
     },
@@ -3876,7 +3876,7 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows."
+        "note": "the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes including a multibyte value agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows."
       },
       "guarantee": "The credential fingerprint is `HMAC(derive(connection_key, \"eidnara-broca-credential-v1\"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.",
       "check": {

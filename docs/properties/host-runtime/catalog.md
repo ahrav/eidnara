@@ -9866,8 +9866,7 @@ Required faults and enabling state: The committed inputs and the test-local HMAC
 Confidence: high - [evidence](evidence/host-proof-construction-matches-the-committed-vectors.md).
 Existing check: `committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction`, `proof_folds_every_input`, and `production_proof_matches_the_oracle_across_perturbed_tuples` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.
 Impact: A client that cannot authenticate, or a rogue listener that can.
-Open questions:
-- `docs/host-wire-protocol.md:213` and `:217` carry example proof bytes that match neither the code nor a recomputation, and `:220` names the daemon version differently from `:213`. Code and tests agree with each other; the document needs a fix. (needs human input)
+Open questions: None. The section 5.2 examples in `docs/host-wire-protocol.md` were regenerated at U3 to the committed vectors, and the prose there names `eidnara-host/0.1.0`; the evidence record's investigation log carries the reproduction.
 
 ### data-root-resolves-under-the-managed-directory
 
@@ -9935,7 +9934,7 @@ Open questions: None.
 Type: safety
 Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `BrocaComponent::new_with_credentials` (`crates/host-runtime/src/broca/mod.rs:82`) installs one; its single caller is `tests/broca_protocol.rs:443`. `BrocaComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
 Status: active
-Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows.
+Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes including a multibyte value agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-broca-credential-v1"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
 Check: `always` - for the documented row, `credential_fingerprint(key, harness, provider) == committed literal`; for every generated `(key, harness, provider name, value)` row in a campaign, `credential_fingerprint` equals an independent implementation of the documented derivation (`HMAC(derive(key, "eidnara-broca-credential-v1"), canonical_row)` with length-prefixed fields), including rows that differ only by moving one byte across a field boundary and rows with an empty field, which must yield distinct fingerprints; and the per-value size cap rejects before fingerprinting. `always` because the derivation is a pure function evaluated on every row.
 Fault/timing angle: A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.
