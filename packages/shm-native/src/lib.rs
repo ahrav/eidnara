@@ -1123,6 +1123,15 @@ pub fn commit_reservation(
             .as_ref()
             .try_into()
             .map_err(|_| error("wire header has invalid length"))?;
+        // The count is validated for the same reason: `advance` aborts the reservation on
+        // overflow, which would make a rejected commit unretryable once the token is gone.
+        let over_capacity = channel
+            .producers
+            .get(&token)
+            .is_some_and(|active| written as usize > active.reservation.remaining());
+        if over_capacity {
+            return Err(error("producer overflow"));
+        }
         let mut reservation = detach_producer(env, channel, token)?;
         reservation
             .set_wire_header(header)

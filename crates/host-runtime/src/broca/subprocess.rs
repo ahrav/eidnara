@@ -266,6 +266,8 @@ pub enum SubprocessEnd {
     StderrOverflow,
     /// CaptureFailed records a stdout read failure; parsers distrust the transcript even after a clean exit.
     CaptureFailed,
+    /// The leader exited but its status could not be reaped, so a clean exit cannot be proven; parsers distrust the transcript. commentlint: allow(JUDGE)
+    ExitUnknown,
     /// A group signal failure other than "already gone" leaves the run unsettled because descendants may still execute billable requests.
     TeardownUnconfirmed,
 }
@@ -767,10 +769,11 @@ pub async fn run(
                 // the pgid.
                 group_gone =
                     signalled && wait_other_members_gone(group, limits.termination_grace).await;
+                // A failed reap (`ExitedUnfenced`: another in-process reaper consumed the leader) leaves the exit status unknown; treating it as a clean drain would let a nonzero exit publish a parseable transcript as success. commentlint: allow(JUDGE)
                 child
                     .wait()
                     .await
-                    .map_or(SubprocessEnd::DrainKilled, |status| {
+                    .map_or(SubprocessEnd::ExitUnknown, |status| {
                         status
                             .code()
                             .map_or(SubprocessEnd::Signaled, SubprocessEnd::Exited)
@@ -1530,6 +1533,13 @@ pub(crate) fn abnormal_end_terminal(
             retry_after_secs: None,
             provider_code: None,
         },
+        // An unreapable exit status does not classify the request either.
+        SubprocessEnd::ExitUnknown => BackendError {
+            class: ErrorClass::Transient,
+            message: format!("{name} backend exit status could not be determined"),
+            retry_after_secs: None,
+            provider_code: None,
+        },
         // Signal denial is transient because a later run may be permitted.
         // The terminal must report that the work did not settle.
         // The supervisor must not treat `BackendTerminal::FailedUnresolved` as proof that the work stopped.
@@ -1915,6 +1925,40 @@ pub mod group_registry {
         scan_group_members(pgid, Some(pgid))
     }
 
+    /// Membership plus identity: a member must share `owner_sid` (descendants never leave the owner's session without also leaving the pgid, because only `setsid` changes a session and it also creates a new group) and must have started at or after the recorded leader. commentlint: allow(JUDGE)
+    /// A group that recycled the numeric pgid inside another session fails the session check; one inside the same session with pre-leader members fails the start check. commentlint: allow(JUDGE)
+    fn group_has_verified_descendants(
+        pgid: i32,
+        owner_sid: i32,
+        leader_start: u64,
+    ) -> io::Result<bool> {
+        for proc_entry in fs::read_dir("/proc")? {
+            let Some(pid) = proc_entry?
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            match proc_stat_row(pid) {
+                Ok(Some(row))
+                    if row.pgrp == pgid
+                        && row.state != 'Z'
+                        && row.state != 'X'
+                        && row.sid == owner_sid
+                        && row.start >= leader_start =>
+                {
+                    return Ok(true);
+                }
+                Ok(_) => {}
+                Err(err) if pid_vanished(&err) => {}
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(false)
+    }
+
     fn scan_group_members(pgid: i32, exclude_pid: Option<i32>) -> io::Result<bool> {
         for proc_entry in fs::read_dir("/proc")? {
             let Some(pid) = proc_entry?
@@ -1944,6 +1988,18 @@ pub mod group_registry {
 
     /// `/proc/<pid>/stat` stores state and process group as the first and third fields after `comm`.
     fn proc_stat_pgrp_state(pid: i32) -> io::Result<Option<(i32, char)>> {
+        Ok(proc_stat_row(pid)?.map(|row| (row.pgrp, row.state)))
+    }
+
+    struct ProcStatRow {
+        state: char,
+        pgrp: i32,
+        sid: i32,
+        start: u64,
+    }
+
+    /// After `comm`, `/proc/<pid>/stat` lists state, ppid, pgrp, session, ... and start time as the 20th field. commentlint: allow(JUDGE)
+    fn proc_stat_row(pid: i32) -> io::Result<Option<ProcStatRow>> {
         let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
         let unreadable = || io::Error::other("unreadable /proc stat format");
         let rest = stat.rsplit_once(')').ok_or_else(unreadable)?.1;
@@ -1957,7 +2013,23 @@ pub mod group_registry {
             .ok_or_else(unreadable)?
             .parse()
             .map_err(|_| unreadable())?;
-        Ok(Some((pgrp, state)))
+        let sid = fields
+            .next()
+            .ok_or_else(unreadable)?
+            .parse()
+            .map_err(|_| unreadable())?;
+        // `start` is stat field 22: after state (3), ppid (4), pgrp (5), session (6) are consumed, it is 15 fields further on. commentlint: allow(JUDGE)
+        let start = fields
+            .nth(15)
+            .ok_or_else(unreadable)?
+            .parse()
+            .map_err(|_| unreadable())?;
+        Ok(Some(ProcStatRow {
+            state,
+            pgrp,
+            sid,
+            start,
+        }))
     }
 
     /// `boot_id` must not use a placeholder, because one would make existing records appear to come from a different boot.
@@ -2019,12 +2091,14 @@ pub mod group_registry {
         leader_start: u64,
         owner_pid: i32,
         owner_start: u64,
+        /// The leader joins a fresh process group but keeps the owner's session, so every descendant shares this session id; it is the identity proof for a group whose leader is gone. commentlint: allow(JUDGE)
+        owner_sid: i32,
     }
 
     impl Entry {
         fn parse(text: &str) -> Option<Self> {
             let mut lines = text.lines();
-            if lines.next()? != "v1" {
+            if lines.next()? != "v2" {
                 return None;
             }
             let boot_id = lines.next()?.to_owned();
@@ -2034,12 +2108,14 @@ pub mod group_registry {
             };
             let (leader_pid, leader_start) = pid_line(&mut lines)?;
             let (owner_pid, owner_start) = pid_line(&mut lines)?;
+            let owner_sid = lines.next()?.parse().ok()?;
             Some(Self {
                 boot_id,
                 leader_pid,
                 leader_start,
                 owner_pid,
                 owner_start,
+                owner_sid,
             })
         }
     }
@@ -2057,13 +2133,14 @@ pub mod group_registry {
             let leader_start = proc_start_time(leader_pid).ok().flatten()?;
             let owner_pid = std::process::id() as i32;
             let owner_start = proc_start_time(owner_pid).ok().flatten()?;
+            let owner_sid = rustix::process::getsid(None).ok()?.as_raw_nonzero().get();
             let dir = root.registry_dir().ok()?;
             let mut nonce = [0u8; 8];
             getrandom::getrandom(&mut nonce).ok()?;
             let name = format!("{leader_pid}-{:016x}", u64::from_le_bytes(nonce));
             let path = dir.join(&name);
             let body = format!(
-                "v1\n{}\n{leader_pid} {leader_start}\n{owner_pid} {owner_start}\n",
+                "v2\n{}\n{leader_pid} {leader_start}\n{owner_pid} {owner_start}\n{owner_sid}\n",
                 boot_id().ok()?
             );
             // A record is visible only once it is complete: a host crash between create and write must not leave a truncated record that the sweep discards without signaling its group.
@@ -2179,10 +2256,16 @@ pub mod group_registry {
                 // A reused leader PID proves the recorded group is gone: a PID used as a PGID cannot be reallocated while group members remain.
                 // provably gone.
                 Some(_) => false,
-                // The leader was reaped (pdeathsig kills only the leader).
-                // Surviving members retain the PGID, so they are descendants of the recorded run.
-                // recorded run.
-                None => group_has_members(entry.leader_pid)?,
+                // The leader was reaped (pdeathsig kills only the leader), so the numeric pgid alone
+                // is no proof: it can be recycled into an unrelated same-UID group whose own leader
+                // has also exited. A surviving member counts as this run's descendant only when it
+                // shares the recording owner's session and started no earlier than the recorded
+                // leader. commentlint: allow(JUDGE)
+                None => group_has_verified_descendants(
+                    entry.leader_pid,
+                    entry.owner_sid,
+                    entry.leader_start,
+                )?,
             };
             if group_live {
                 if let Some(group) = rustix::process::Pid::from_raw(entry.leader_pid) {

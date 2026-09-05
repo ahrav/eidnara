@@ -339,6 +339,19 @@ impl Supervisor {
     /// The spawned run task, not admission, waits for a backend permit.
     /// The stored fingerprint uses the exact request bytes in `body`.
     /// The stored fingerprint makes byte-identical retries idempotent.
+    /// Resolves a byte-identical resend of a live run to its run ID without admitting anything.
+    /// A client recovering a lost `send` response must reach this even when the harness has since become unavailable: the existing run keeps executing from its already-open descriptors, so availability checks apply only to a new admission. commentlint: allow(JUDGE)
+    pub fn resend_of_live_run(&self, key: &SessionKey, body: &[u8]) -> Option<String> {
+        let fingerprint: [u8; 32] = Sha256::digest(body).into();
+        let index = lock_index(&self.inner);
+        match index.sessions.get(key) {
+            Some(SessionEntry::Live(run)) if run.fingerprint == fingerprint => {
+                Some(run.run_id.clone())
+            }
+            _ => None,
+        }
+    }
+
     pub fn send(
         &self,
         key: &SessionKey,

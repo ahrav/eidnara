@@ -221,6 +221,10 @@ impl CompositeComponent for BrocaComponent {
         };
         match request {
             Request::Send(send) => {
+                // A byte-identical resend of a live run resolves before any admission gate so a client recovering a lost response is not rejected by a harness that became unavailable after the run started. commentlint: allow(JUDGE)
+                if let Some(run_id) = self.supervisor.resend_of_live_run(&key, &ctx.body) {
+                    return respond(&ctx, protocol::send_response_body(&run_id)).await;
+                }
                 // The handler checks harness availability before credentials because descriptor failures take precedence over credential failures.
                 if let Some(reason) = self.supervisor.harness_unavailable_reason(key.harness) {
                     return app_error("harness_unavailable", reason);
