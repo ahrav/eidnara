@@ -98,11 +98,10 @@ The record's check has three parts, each with a test in
 
 - `canonical_manifest_digest_is_pinned` covers
   `manifest_digest(fixture) == committed`.
-- `manifest_digest_is_stable_under_key_reordering` rewrites the fixture as
-  JSON text with every object's keys in reverse order, asserts the text
-  differs from serde's key-sorted output, decodes it, and asserts the digest
-  equals the fixture's. This pins the key-order clause against a future
-  `preserve_order` feature or a raw-bytes digest.
+- Key order in the input JSON is not a digest input by construction: the
+  typed `ClosureManifest` erases it before `manifest_digest` runs, so no
+  test decodes a reordered fixture. The external-canonicalization test below
+  sorts keys on its side as insurance against a `preserve_order` unification.
 - `manifest_digest_changes_when_any_field_changes` changes one field at a
   time while keeping the manifest valid (`harness`, `package`, `version`,
   `argument_variant`, `source_roots`, the extension list, the node count,

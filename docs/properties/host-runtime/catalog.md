@@ -10077,7 +10077,7 @@ Check: `always` - `manifest_digest(fixture) == committed literal`; the digest ch
 Fault/timing angle: A digest that depended on serialization order would let two equal manifests disagree; a digest over a different canonical form would break the TypeScript twin, which lands with the packages in U7 and reads this fixture.
 Required faults and enabling state: The committed fixture and an oracle outside the crate.
 Confidence: high - [evidence](evidence/harness-closure-manifest-digest-is-canonical.md). The fixture's `schema` field is a renamed identity, so the digest was regenerated once; a Python `json.dumps(sort_keys=True, indent=2)` digest reproduced the predecessor value from the predecessor schema string and the new value from the new one.
-Existing check: `canonical_manifest_digest_is_pinned`, `manifest_digest_is_stable_under_key_reordering`, `manifest_digest_changes_when_any_field_changes`, `launch_roots_participate_in_the_digest_on_their_own`, and the strict-decode tests (`crates/host-runtime/tests/harness_closure.rs`); audited at U3.
+Existing check: `canonical_manifest_digest_is_pinned`, `manifest_digest_matches_an_external_canonicalization_of_the_fixture_text`, `manifest_digest_changes_when_any_field_changes`, `launch_roots_participate_in_the_digest_on_their_own`, and the strict-decode tests (`crates/host-runtime/tests/harness_closure.rs`); audited at U3.
 Impact: A closure verified by one side is rejected by the other, or a tampered closure passes.
 Open questions: None.
 

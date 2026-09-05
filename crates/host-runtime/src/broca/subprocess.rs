@@ -2642,10 +2642,11 @@ mod tests {
     }
 
     /// Rows that hold the same bytes but split them differently across adjacent fields
-    /// must encode differently; the pure encoder is used because `credential_fingerprint`
-    /// refuses empty and unsupported fields before canonicalization.
+    /// must encode differently under the documented encoder. This guards the oracle itself:
+    /// the pure encoder is used because `credential_fingerprint` refuses empty and
+    /// unsupported fields before canonicalization, so production never sees these rows.
     #[test]
-    fn canonical_row_boundaries_separate_adjacent_fields() {
+    fn the_documented_encoder_separates_adjacent_fields() {
         let key = [0x42u8; 32];
         type Row<'a> = (&'a str, &'a str, &'a str, &'a [u8]);
         let pairs: [[Row<'_>; 2]; 5] = [
@@ -2687,9 +2688,8 @@ mod tests {
         }
     }
 
-    /// Every generated row agrees with the documented derivation, rows that differ in any
-    /// input yield distinct fingerprints, and empty or oversize values are refused before
-    /// fingerprinting.
+    /// Every generated row agrees with the documented derivation, and rows that differ in
+    /// any input yield distinct fingerprints.
     #[test]
     fn credential_fingerprint_matches_the_documented_derivation_across_rows() {
         let keys: [[u8; 32]; 3] = [
@@ -2757,7 +2757,7 @@ mod tests {
                             harness,
                             canonical,
                             variable,
-                            value.as_encoded_bytes()
+                            std::os::unix::ffi::OsStrExt::as_bytes(value)
                         ),
                         "{harness}/{provider} value {value:?} disagrees with the documented derivation"
                     );
@@ -2772,29 +2772,37 @@ mod tests {
                 }
             }
         }
-        // Eight (harness, provider) pairs canonicalize onto six rows, so the campaign
-        // yields exactly keys x six rows x values distinct fingerprints; the two raw
-        // byte values count separately, which a lossy conversion would not allow.
-        assert_eq!(seen.len(), keys.len() * 6 * values.len());
+        // Aliases collapse onto their canonical (harness, canonical, variable) row, so the
+        // campaign yields exactly keys x canonical rows x values distinct fingerprints; the
+        // two raw byte values count separately, which a lossy conversion would not allow.
+        let canonical_rows: std::collections::BTreeSet<_> = providers
+            .iter()
+            .map(|(harness, _, variable, canonical)| (harness, canonical, variable))
+            .collect();
+        assert!(canonical_rows.len() < providers.len());
+        assert_eq!(seen.len(), keys.len() * canonical_rows.len() * values.len());
+    }
 
-        // An empty value is refused before fingerprinting.
+    /// Empty and oversize values are refused before any fingerprint is derived.
+    #[test]
+    fn credential_fingerprint_refuses_empty_and_oversize_values_before_hashing() {
+        let key = [0x42u8; 32];
         let empty = EnvSnapshot::capture_from(vec![(
             OsString::from("ANTHROPIC_API_KEY"),
             OsString::from(""),
         )])
         .expect("snapshot");
         assert!(matches!(
-            empty.credential_fingerprint(&keys[1], "opencode", "anthropic"),
+            empty.credential_fingerprint(&key, "opencode", "anthropic"),
             Err(CredentialRowError::CredentialMissing)
         ));
-        // A value over the cap is refused before fingerprinting.
         let oversize = EnvSnapshot::capture_from(vec![(
             OsString::from("ANTHROPIC_API_KEY"),
             OsString::from("v".repeat(CREDENTIAL_VALUE_CAP_BYTES + 1)),
         )])
         .expect("snapshot");
         assert!(matches!(
-            oversize.credential_fingerprint(&keys[1], "opencode", "anthropic"),
+            oversize.credential_fingerprint(&key, "opencode", "anthropic"),
             Err(CredentialRowError::CredentialValueTooLarge)
         ));
     }

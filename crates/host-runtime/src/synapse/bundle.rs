@@ -1087,11 +1087,30 @@ mod tests {
         let baseline = manifest();
         let before = canonical_fingerprint(&baseline);
         let replacement = sha256_hex(b"replaced");
+        // Every field is named so a new field fails to compile until one of the two tables
+        // below classifies it as a fingerprint input or as excluded.
+        let BundleManifest {
+            schema_version: _,
+            model: _,
+            fingerprint: _,
+            table_epoch: _,
+            dims: _,
+            pooling: _,
+            quantization: _,
+            output: _,
+            max_tokens: _,
+            provenance: _,
+            recommended_batch: _,
+            model_file: _,
+            external_initializers: _,
+            tokenizer: _,
+            corpus: _,
+        } = &baseline;
         // Each entry changes one artifact hash, one initializer name, or one
         // embedding-space scalar and nothing else, so an input the pre-image omits leaves
         // the fingerprint equal to `before`.
         type Mutation = (&'static str, fn(&mut BundleManifest, &str));
-        let fields: [Mutation; 19] = [
+        let fields: [Mutation; 20] = [
             ("model_file", |m, h| m.model_file.sha256 = h.to_owned()),
             ("external_initializers[0].sha256", |m, h| {
                 m.external_initializers[0].sha256 = h.to_owned()
@@ -1105,9 +1124,9 @@ mod tests {
             ("external_initializers[1].name", |m, _| {
                 m.external_initializers[1].name = "renamed-second.bin".to_owned()
             }),
-            // A name whose byte length (12) differs from its character count (11); the
-            // pre-image prefixes the byte length, and this is the case that distinguishes
-            // the two.
+            // A non-ASCII name participates like an ASCII one. Its byte length (12) differs
+            // from its character count (11), but with `:`-free hex hashes both prefixes are
+            // injective, so this case pins participation, not the choice of prefix.
             ("external_initializers[0].name (multibyte)", |m, _| {
                 let name = "w\u{eb}ights.bin";
                 assert_eq!(name.len(), 12);
@@ -1136,6 +1155,12 @@ mod tests {
                 m.output.name = None;
                 m.output.index = Some(1);
             }),
+            // The same selector tag with a different index value: the numeric value itself
+            // must move the fingerprint, not only the tag.
+            ("output.index=2", |m, _| {
+                m.output.name = None;
+                m.output.index = Some(2);
+            }),
             ("output.only_one", |m, _| {
                 m.output.name = None;
                 m.output.only_one = Some(true);
@@ -1163,22 +1188,48 @@ mod tests {
             );
         }
 
-        // The selector-form cases above change the tag; the numeric index must also
-        // move the fingerprint when only its value changes under an unchanged tag.
-        let mut by_index = baseline;
-        by_index.output.name = None;
-        by_index.output.index = Some(1);
-        let index_one = canonical_fingerprint(&by_index);
-        by_index.output.index = Some(2);
-        let index_two = canonical_fingerprint(&by_index);
-        assert_ne!(
-            index_one, index_two,
-            "output.index value does not participate in the fingerprint"
-        );
-        assert!(
-            seen.insert(index_two),
-            "output.index=2 collides with another field"
-        );
+        // Fields the pre-image excludes by design: `fingerprint` is the value the pre-image
+        // is compared against, `schema_version` is fixed by validation, artifact names
+        // other than the initializers' are resolved from the bundle directory, and the
+        // remaining fields describe serving, not the embedding space. Each entry changes
+        // one excluded field and asserts the fingerprint is unchanged.
+        let excluded: [Mutation; 12] = [
+            ("schema_version", |m, _| m.schema_version += 1),
+            ("model", |m, _| m.model.push('x')),
+            ("fingerprint", |m, h| m.fingerprint = h.to_owned()),
+            ("provenance", |m, _| {
+                m.provenance = serde_json::json!({"source": "elsewhere"})
+            }),
+            ("recommended_batch.rows", |m, _| {
+                m.recommended_batch.rows += 1
+            }),
+            ("recommended_batch.token_budget", |m, _| {
+                m.recommended_batch.token_budget += 1
+            }),
+            ("model_file.name", |m, _| m.model_file.name.push('x')),
+            ("tokenizer.tokenizer.name", |m, _| {
+                m.tokenizer.tokenizer.name.push('x')
+            }),
+            ("tokenizer.config.name", |m, _| {
+                m.tokenizer.config.name.push('x')
+            }),
+            ("tokenizer.special_tokens_map.name", |m, _| {
+                m.tokenizer.special_tokens_map.name.push('x')
+            }),
+            ("tokenizer.tokenizer_config.name", |m, _| {
+                m.tokenizer.tokenizer_config.name.push('x')
+            }),
+            ("corpus.name", |m, _| m.corpus.name.push('x')),
+        ];
+        for (name, mutate) in excluded {
+            let mut manifest = baseline.clone();
+            mutate(&mut manifest, &replacement);
+            assert_eq!(
+                before,
+                canonical_fingerprint(&manifest),
+                "{name} must not participate in the fingerprint"
+            );
+        }
     }
 
     #[test]

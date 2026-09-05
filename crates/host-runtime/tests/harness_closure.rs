@@ -482,57 +482,9 @@ fn canonical_manifest_digest_is_pinned() {
     );
 }
 
-/// Emits `value` as JSON text with every object's keys in reverse order, so the text differs
-/// from serde's key-sorted output while denoting the same manifest.
-fn json_with_reversed_keys(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            keys.reverse();
-            let fields: Vec<String> = keys
-                .into_iter()
-                .map(|key| {
-                    format!(
-                        "{}:{}",
-                        serde_json::to_string(key).expect("key"),
-                        json_with_reversed_keys(&map[key])
-                    )
-                })
-                .collect();
-            format!("{{{}}}", fields.join(","))
-        }
-        serde_json::Value::Array(values) => {
-            let items: Vec<String> = values.iter().map(json_with_reversed_keys).collect();
-            format!("[{}]", items.join(","))
-        }
-        scalar => serde_json::to_string(scalar).expect("scalar"),
-    }
-}
-
-#[test]
-fn manifest_digest_is_stable_under_key_reordering() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
-    let text = std::fs::read_to_string(fixture).expect("read closure fixture");
-    let manifest: ClosureManifest = serde_json::from_str(&text).expect("decode closure fixture");
-    let value = serde_json::to_value(&manifest).expect("value");
-    let reordered_text = json_with_reversed_keys(&value);
-    assert_ne!(
-        reordered_text,
-        serde_json::to_string(&manifest).expect("sorted text"),
-        "the reordered text must be a different byte sequence for the same manifest"
-    );
-    let reordered: ClosureManifest =
-        serde_json::from_str(&reordered_text).expect("decode reordered manifest");
-    assert_eq!(
-        manifest_digest(&reordered).expect("digest"),
-        manifest_digest(&manifest).expect("digest"),
-        "key order in the input must not change the digest"
-    );
-}
-
-/// Sorts every object's keys so the text matches the canonical form's key order.
+/// Sorts every object's keys so the text matches the canonical form's key order. Under the
+/// default `serde_json` (`Map` is a `BTreeMap`) this is an identity; it stays as insurance
+/// against a future `preserve_order` unification changing the key order.
 fn json_with_sorted_keys(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
@@ -554,6 +506,8 @@ fn json_with_sorted_keys(value: &serde_json::Value) -> serde_json::Value {
 /// The digest is reproduced from the fixture's own JSON text, never from the crate's
 /// `Serialize` impl, so a field the impl dropped (a node path, a dependency edge) would
 /// leave the two digests different even though every in-crate mutation still moved it.
+/// The formatter (`to_vec_pretty`) is shared with production, so the independence is
+/// scoped to the `Serialize` impl, not to the text layout.
 #[test]
 fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
     let fixture =
@@ -564,9 +518,6 @@ fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
     let canonical = serde_json::to_vec_pretty(&json_with_sorted_keys(&raw)).expect("pretty");
     let external = format!("{:x}", Sha256::digest(&canonical));
     assert_eq!(manifest_digest(&manifest).expect("digest"), external);
-    // Every node path and dependency edge is present in the canonical text as many times
-    // as the fixture names it.
-    let canonical_text = String::from_utf8(canonical).expect("utf8");
     // A multibyte identifier: the canonical form must carry its UTF-8 bytes rather than a
     // `\\u` escape, and the digest must follow the external canonicalization of the same
     // text edit. A serializer that started escaping non-ASCII would change the digest of
@@ -595,17 +546,6 @@ fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
         manifest_digest(&edited).expect("digest"),
         format!("{:x}", Sha256::digest(&edited_canonical))
     );
-    for node in &manifest.nodes {
-        let needle = format!("\"{}\"", node.path);
-        let in_fixture = text.matches(needle.as_str()).count();
-        assert!(in_fixture >= 1);
-        assert_eq!(
-            canonical_text.matches(needle.as_str()).count(),
-            in_fixture,
-            "node path {} occurs a different number of times in the canonical form",
-            node.path
-        );
-    }
 }
 
 #[test]
@@ -616,11 +556,41 @@ fn manifest_digest_changes_when_any_field_changes() {
         serde_json::from_slice(&std::fs::read(fixture).expect("read closure fixture"))
             .expect("decode closure fixture");
     let before = manifest_digest(&baseline).expect("digest");
+    // Every field is named so a new field fails to compile until a mutation names it.
+    // `launch_roots_participate_in_the_digest_on_their_own` mutates the three launch roots.
+    let ClosureManifest {
+        schema: _,
+        harness: _,
+        package: _,
+        version: _,
+        argument_variant: _,
+        source_roots: _,
+        executable: _,
+        interpreter: _,
+        entrypoint: _,
+        extensions: _,
+        nodes: _,
+    } = &baseline;
     // The schema is not a digest input but a gate: any other value is refused before
     // hashing, so no manifest with a different schema can reproduce this digest.
     let mut other_schema = baseline.clone();
     other_schema.schema.push('x');
-    assert!(manifest_digest(&other_schema).is_err());
+    assert_eq!(
+        manifest_digest(&other_schema)
+            .expect_err("other schema")
+            .detail(),
+        "unsupported manifest schema"
+    );
+    // `mode` is fixed by `kind`, so a different mode is refused before hashing rather than
+    // hashed differently.
+    let mut other_mode = baseline.clone();
+    other_mode.nodes[2].mode = 0o700;
+    assert_eq!(
+        manifest_digest(&other_mode)
+            .expect_err("other mode")
+            .detail(),
+        "non-launch node has executable mode"
+    );
     // Each entry changes one field and nothing else, and keeps the manifest valid so the
     // digest is computed. A field the canonical form drops leaves the digest equal to
     // `before`.
@@ -688,11 +658,6 @@ fn manifest_digest_changes_when_any_field_changes() {
             });
         }),
     ];
-    // `mode` is fixed by `kind`, so a different mode is refused before hashing rather than
-    // hashed differently.
-    let mut other_mode = baseline.clone();
-    other_mode.nodes[2].mode = 0o700;
-    assert!(manifest_digest(&other_mode).is_err());
     let mut seen = std::collections::BTreeSet::from([before.clone()]);
     for (name, mutate) in mutations {
         let mut manifest = baseline.clone();
