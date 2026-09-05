@@ -3041,7 +3041,7 @@ duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: partial — the pre-#131 `crates/host-runtime/tests/shm_failure_modes.rs:195`
+Exercised: not-yet — no check at HEAD. The pre-#131 `crates/host-runtime/tests/shm_failure_modes.rs:195`
 published one
 header the transport accepts and the host rejects, but asserted only the
 downstream quarantine, so it could not distinguish rejection before the charge from
@@ -3071,10 +3071,10 @@ runs its seven steps in the order above with `?` on each, and nothing between
 `WIRE_V2_HEADER_BYTES`
 equals `HEADER_LEN` at 21, so `decode_header`'s truncation gates
 (`wire.rs:312-322`) are statically dead on this path.
-Existing check: the pre-#131 `shm_failure_modes.rs:195`
+Existing check: none at HEAD. The pre-#131 `shm_failure_modes.rs:195`
 `corrupt_peer_frame_quarantines_exact_charges_and_returns_ready` (one role-invalid
 type, quarantine outcome only) was removed in the #131 test rewrite; no
-successor found at HEAD. Status unaudited as an ordering oracle.
+successor exists.
 Impact: this is the ordering the trust boundary rests on, and it is correct at
 HEAD. Cataloged because nothing fails if it stops being correct. Moving the charge
 or the copy above `ring_transport.rs:500` lets a peer hold up to 64 MiB of ingress

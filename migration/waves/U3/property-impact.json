@@ -721,13 +721,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/shm-transport/tests/evidence.rs#purity_gate_rejects_injected_copy_allocation_queue_and_wake",
       "evidence_pointer": "docs/properties/shm-transport/evidence/operation-counters-are-observed-not-declared.md"
@@ -1172,14 +1172,14 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "partial",
-        "check_status": "unaudited",
+        "exercised": "not-yet",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "partial",
-        "check_status": "unaudited",
+        "exercised": "not-yet",
+        "check_status": "none",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
@@ -2026,13 +2026,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/dispatch.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/no-task-outlives-the-generation-it-serves.md"
@@ -4470,13 +4470,13 @@
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/tests/composite_routing.rs#rejected_broca_bind_gets_exactly_one_broca_route_gone",
       "evidence_pointer": "docs/properties/host-runtime/evidence/composite-route-entry-is-removed-by-exactly-one-route-gone.md"

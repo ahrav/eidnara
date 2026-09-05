@@ -2088,7 +2088,7 @@
         "blob_sha": "33b65a1644e04373f5ed6e871c5c6e331fb34add"
       },
       "destination": "docs/properties/shm-transport/catalog.md",
-      "destination_sha256": "7925ffeeb3ec01ed8d1cb15f5429c7c10f0214e4f034279c3999c5cff2e1fce3",
+      "destination_sha256": "84c9dfb0d571bc828fb0864f92d0ad7d7ec0148f9afaeca824fd3efefdcefd2d",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -2137,7 +2137,7 @@
     {
       "source": null,
       "destination": "docs/properties/shm-transport/index.json",
-      "destination_sha256": "d9743d6d9fe01a6cbd10a7457017e4526983abbbe7ec9d28dff840fddd622383",
+      "destination_sha256": "35ebea5d8549de1cde4532485cdf56de56b44f184eebc4935f46a126d9d1f8d7",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "2447f9351b1042b46430a1a5c7c1432563d6acb8873b534fd946727bfc8a36d7",
+      "destination_sha256": "ec5c3e2551c0c5ffe01f9044345e77e6bede2df2e244ab739b1be22f53ef55c9",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
