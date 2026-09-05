@@ -70,7 +70,9 @@ wildcard pass that questioned the framing itself.
    `regex-syntax`'s; a codepoint assigned in a newer Unicode version splits
    differently, and no corpus case exercises a recently assigned script. Needs a
    record plus a human decision on which Unicode version is authoritative.
-3. **Totality of `encode_ordinary`.** Six panic sites: five `expect` calls in
+3. **Totality of `encode_ordinary`.** Closed 2026-09-05 as
+   `tokenizer-encoding-is-total-over-valid-utf8` (the fuzz oracle it names is
+   still to be written). Six panic sites: five `expect` calls in
    the loader and pattern init (`lib.rs:95`, `:98`, `:99`, `:103`, `:110`) and
    one on the hot path, the backtrack-limit `expect` at `lib.rs:140`, reachable
    for any input above the cap because the pattern carries a negative
@@ -83,13 +85,16 @@ wildcard pass that questioned the framing itself.
    `estimate_tokens(t) == encode_ordinary(t).len()` is the cheapest oracle in
    the crate.
 4. **The BOM divergence is a commitment with a self-referential oracle and no
-   record.** `bom_before_newline_is_preserved` computes its expectation by
+   record.** Closed 2026-09-05 as `tokenizer-bom-is-its-own-token`, with the
+   asset ranks as the independent oracle. `bom_before_newline_is_preserved` computes its expectation by
    calling `encode_ordinary` three times and comparing the composite to the
    concatenation (`token_golden.rs:102-109`), so a consistently wrong BOM
    treatment still passes; unlike the prototype-name case, no patched oracle
    pins it. Needs an `always` record whose Confidence line records the circular
    oracle.
-5. **Determinism and shared lazy initialisation.** `deterministic_across_calls`
+5. **Determinism and shared lazy initialisation.** Closed 2026-09-05 as
+   `tokenizer-encoding-is-deterministic-across-calls-and-threads`.
+   `deterministic_across_calls`
    and `deterministic_across_threads` (`token_golden.rs:64-95`) assert that
    repeated and concurrent calls agree and that the `OnceLock` tokenizer
    (`lib.rs:83-84`) is shared safely; both are unaudited with no record, and

@@ -339,6 +339,8 @@ and `n/a - invalidated` for an invalidated record.
 | [transport-debug-output-redacts-every-sentinel](#transport-debug-output-redacts-every-sentinel) | safety | high | no |
 | [trim-removes-only-dead-pages-below-the-write-cursor](#trim-removes-only-dead-pages-below-the-write-cursor) | safety | high | no |
 | [quarantine-wakes-a-parked-waiter](#quarantine-wakes-a-parked-waiter) | liveness | high | yes |
+| [readiness-redispatch-is-bounded-under-persistent-arm-failure](#readiness-redispatch-is-bounded-under-persistent-arm-failure) | liveness | high | yes |
+| [each-channel-wake-survives-a-shared-acknowledgement](#each-channel-wake-survives-a-shared-acknowledgement) | liveness | high | yes |
 
 ---
 
@@ -3913,8 +3915,8 @@ delivered by a subsequent callback without any further publication, within one
 acknowledgement cycle.
 Check: `always` — every `readiness_handled` acknowledgement whose per-channel
 re-arm observes visible data or a generation change (`arm_data_wait` returning
-false, `lib.rs:1148-1152`) returns `redispatch = true`, and the dispatcher
-re-enters on true (`index.ts:524-526`). `always` because the acknowledgement
+false, `lib.rs:1155-1161`) returns `redispatch = true`, and the dispatcher
+re-enters on true (`index.ts:524`). `always` because the acknowledgement
 runs after every callback and is the sole carrier of a wake whose doorbell
 token was already drained; a bounded window (one cycle) makes this checkable
 by a finite test.
@@ -4504,6 +4506,15 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   covers the grant envelope decoded before it. The invalidated
   `native-boundary-not-weaker-than-its-wrapper` sat between them against a
   wrapper decoder this tree does not have.
+- **One acknowledgement, many channels.**
+  `reactor-callback-is-one-in-flight` and
+  `addon-scheduling-wakes-only-on-acknowledged-readiness` bound how many
+  batches run at once; `wake-published-during-readiness-callback-is-not-lost`,
+  `each-channel-wake-survives-a-shared-acknowledgement`, and
+  `readiness-redispatch-is-bounded-under-persistent-arm-failure` say what one
+  batch must and must not do for each channel. The first two can hold while any
+  of the last three fails, because sequential callbacks are compatible with a
+  dropped channel and with an unbounded run of them.
 
 ## Discovered at U3
 
@@ -4571,6 +4582,102 @@ Confidence: medium - [evidence](evidence/addon-scheduling-wakes-only-on-acknowle
 Existing check: The two unit tests named above; unaudited.
 Impact: A stalled harness client that never sees the daemon's frames.
 Open questions: None.
+
+### readiness-redispatch-is-bounded-under-persistent-arm-failure
+
+Type: liveness
+Reachability: default-production - the addon is the shipped client and
+`dispatchReadiness` (`packages/shm-native/index.ts:515-525`) is the readiness
+path of every watched channel; a quarantined ring is an ordinary outcome of peer
+death or a verification failure, so a registered channel whose re-arm fails
+persistently is a production state.
+Status: active
+Exercised: not yet - the readiness suites in `tests/mechanism.ts` cover the
+acknowledged-wake path on a healthy ring; nothing registers a channel, quarantines
+its ring, leaves it registered, and counts dispatches.
+Guarantee: When a watched channel's `complete_data_wait` or `arm_data_wait`
+fails on every acknowledgement (a quarantined ring returns `Err(Quarantined)`
+from `arm_data_wait`, `crates/shm-transport/src/backend/ring.rs:1067-1068`),
+the redispatch loop terminates within a bounded number of microtasks: the
+failing channel is unregistered or reported, and `dispatchReadiness` is not
+requeued on every acknowledgement for as long as the caller leaves the channel
+open.
+Check: `always` - with one registered channel quarantined and its handler not
+closing it, the count of `dispatchReadiness` invocations after the quarantine is
+bounded, and a queued macrotask (a timer or I/O callback) runs.
+Fault/timing angle: `readiness_handled` (`packages/shm-native/src/lib.rs:1143-1166`)
+sets `redispatch = true` for any registered channel whose `complete_data_wait`
+errs or whose `arm_data_wait` returns `Ok(false)` or `Err(_)`, and the
+dispatcher's `finally` requeues itself whenever that returns true
+(`index.ts:524`). `Ok(false)` means data is already visible and a redispatch is
+correct; `Err` means the ring cannot be armed at all, and redispatching it makes
+the same call fail again. The only unregistration paths are `close` (`lib.rs:1323`)
+and `force_close` (`:1350`), both caller-driven, so until the caller closes, a
+self-requeuing microtask runs ahead of every macrotask on the event loop.
+Required faults and enabling state: a watched channel whose ring is quarantined
+(F1 peer death or any verification failure) and a handler that does not close it
+within the same tick.
+Confidence: high - [evidence](evidence/readiness-redispatch-is-bounded-under-persistent-arm-failure.md).
+The acknowledgement walk, the two return values it conflates, the dispatcher's
+`finally`, and both unregistration sites were read directly.
+Existing check: none. The one-in-flight records hold throughout, because the
+callbacks stay sequential; this record is about how many of them run.
+Impact: one dead channel starves every other channel and every macrotask in the
+client process until the application closes it; the failure presents as a hung
+event loop rather than as a peer-death error.
+Open questions:
+
+- Should `readiness_handled` distinguish `Ok(false)` (redispatch) from `Err`
+  (unregister and surface), or should the wrapper cap consecutive redispatches
+  and force-close the offending channel? (needs human input)
+
+---
+
+### each-channel-wake-survives-a-shared-acknowledgement
+
+Type: liveness
+Reachability: default-production - one reactor serves every watched channel in
+the process (`packages/shm-native/src/lib.rs:1152-1163` re-arms all registered
+channels in one walk), and a client with more than one channel is the shipped
+topology whenever it opens a second connection (`tests/capability.ts` opens two).
+Status: active
+Exercised: not yet - `readiness acknowledgement preserves a frame published
+during callback` (`tests/mechanism.ts:211-278`) proves the single-channel case;
+no test lands edges from two channels inside one pending window.
+Guarantee: With two or more registered channels, an edge on channel B that
+arrives while the batch raised by channel A is pending, before
+`readinessHandled()`, results in B's handler observing B's frame within the
+next batch; the shared acknowledgement and the joint re-arm walk never drop one
+channel's progress in favour of another's.
+Check: `always` - publish to B between A's callback start and A's
+acknowledgement; B's handler observes the frame in the immediately following
+batch, and A's handler is not invoked more than once more for the same edge.
+Fault/timing angle: the mechanism that should make this hold is the same as the
+single-channel record's: B's `arm_data_wait` returns `Ok(false)` because data
+is visible (`ring.rs:1070-1071`), any `Ok(false)` in the walk sets
+`redispatch`, and `dispatchReadiness` runs every handler on the redispatch.
+The hazard is that the walk is one boolean over all channels and the batch is
+one epoll wake: B's doorbell token, drained by the shared wake, is not a signal
+of its own, so B's progress rests entirely on the re-arm observing its data.
+A channel whose re-arm fails (see the previous record) is also a channel whose
+data is never observed this way.
+Required faults and enabling state: two registered channels and a publication
+to the second timed inside the first's pending window; enabling situation
+`shm_second_channel_edge_during_pending_callback`.
+Confidence: high - [evidence](evidence/each-channel-wake-survives-a-shared-acknowledgement.md).
+The re-arm walk, `arm_data_wait`'s `Ok(false)` contract, and the dispatcher
+were read directly; the property is unexercised, not unverified.
+Existing check: none for two channels; the single-channel suite named above is
+unaudited.
+Impact: one channel stalls until its next unrelated edge while the process looks
+healthy; with a request/response protocol on that channel, the stall is a hang.
+Open questions:
+
+- Should the walk return per-channel results so the dispatcher can run only
+  the handlers with visible data, which would make this property structural
+  rather than emergent? (needs human input)
+
+---
 
 ### addon-scheduling-reaches-peer-eof-and-interrupted-wait
 

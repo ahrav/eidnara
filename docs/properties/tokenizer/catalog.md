@@ -14,7 +14,8 @@ from this file; the record contract is [`../METHOD.md`](../METHOD.md).
   BOM (`EF BB BF`) is scored with the BOM present where the oracle's `TextDecoder` strips it. The golden corpus pins the
   corrected prototype-name ids by running the oracle with a null-prototype encoder copy (`gen/gen-token-golden.ts`), and
   `bom_before_newline_is_preserved` (`crates/tokenizer/tests/token_golden.rs`) pins the BOM case against the crate's own
-  single-character encodings; a campaign must not treat either divergence as a regression.
+  single-character encodings, and `tokenizer-bom-is-its-own-token` pins it against the asset ranks; a campaign must not
+  treat either divergence as a regression.
 - No workspace crate depends on `tokenizer` and nothing outside `crates/tokenizer` calls `encode_ordinary` or
   `estimate_tokens`; the workspace is `publish = false`. Every record is therefore `test-only` at HEAD. Reclassify to
   `default-production` in the wave that adds the first production caller.
@@ -31,6 +32,9 @@ The `Reaches production` column is derived from each record's `Reachability` and
 | [tokenizer-vocabulary-is-embedded-and-complete](#tokenizer-vocabulary-is-embedded-and-complete) | safety | medium | no |
 | [tokenizer-over-long-pieces-are-chunked-and-bounded](#tokenizer-over-long-pieces-are-chunked-and-bounded) | safety | high | no |
 | [tokenizer-pattern-is-upstream-with-ecmascript-whitespace](#tokenizer-pattern-is-upstream-with-ecmascript-whitespace) | safety | high | no |
+| [tokenizer-bom-is-its-own-token](#tokenizer-bom-is-its-own-token) | safety | high | no |
+| [tokenizer-encoding-is-deterministic-across-calls-and-threads](#tokenizer-encoding-is-deterministic-across-calls-and-threads) | safety | high | no |
+| [tokenizer-encoding-is-total-over-valid-utf8](#tokenizer-encoding-is-total-over-valid-utf8) | safety | medium | no |
 
 ## Records
 
@@ -93,8 +97,53 @@ Fault/timing angle: An edit to `assets/claude.pat`, to `ecmascript_whitespace!`,
 Required faults and enabling state: None; static checks over the constant and the class.
 Confidence: high - [evidence](evidence/tokenizer-pattern-is-upstream-with-ecmascript-whitespace.md). The constant, the crate docs at `lib.rs:10-13`, and both tests were read directly.
 Existing check: The two tests named above; unaudited.
-Impact: A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`lib.rs:101`); U+0085 is not known to be in the corpus.
+Impact: A pattern drift silently changes ids for whitespace-adjacent text while `tokenizer-encoding-matches-the-independent-oracle` passes on every golden case that lacks the affected code points. U+FEFF is reached by `bom_before_newline_is_preserved` (`tests/token_golden.rs:101`); U+0085 is not known to be in the corpus.
 Open questions: Does any golden case contain U+0085, so that a class drift on that code point would also fail parity? (needs human input)
+
+### tokenizer-bom-is-its-own-token
+
+Type: safety
+Reachability: test-only - the BOM path is inside `encode_ordinary` for every caller, but no workspace crate depends on `tokenizer`, so only the crate's tests reach it; the label moves with the other records when a production caller lands.
+Status: active
+Exercised: partial - `bom_before_newline_is_preserved` (`tests/token_golden.rs:101-109`) encodes `"x"`, `"\u{feff}"`, and `"\n"` separately and asserts the composite equals their concatenation, so it proves the BOM is one standalone piece but derives every expected id from `encode_ordinary` itself; a vocabulary edit that moves the BOM's rank passes it.
+Guarantee: `encode_ordinary("x\u{feff}\n")` is `[92, 57538, 203]`: U+FEFF (`EF BB BF`, base64 `77u/`) is a standalone token whose id is its asset rank (`assets/claude.tiktoken:57534`), between `x` (`eA==`, rank 92, `:88`) and `\n` (`Cg==`, rank 203, `:199`). The stock oracle's `[92, 203]` is the documented divergence, not the target.
+Check: `always` - the three ids equal the ranks read from the asset independently of `encode_ordinary`, and the count is three.
+Fault/timing angle: A BOM-stripping decode on the rank-lookup path (the oracle's defect) drops the middle id; a vocabulary edit that merges `EF BB BF` with a neighbour or renumbers it changes the id while the self-referential test still passes because all three single encodings move together.
+Required faults and enabling state: None; static check against the asset.
+Confidence: high - [evidence](evidence/tokenizer-bom-is-its-own-token.md). The test, the crate docs on the divergence, and the three asset rows were read directly.
+Existing check: `bom_before_newline_is_preserved`; unaudited; its oracle is circular, which is the gap this record closes.
+Impact: Files that begin with a BOM count one token short or encode a different id; the parity record does not cover this input because the oracle is wrong on it.
+Open questions: Should the golden generator pin `[92, 57538, 203]` through a patched oracle, as it already does for prototype-name inputs, so the divergence is asserted in the corpus rather than in a hand-written test? (needs human input)
+
+### tokenizer-encoding-is-deterministic-across-calls-and-threads
+
+Type: safety
+Reachability: test-only - the `OnceLock` initialisation of the tokenizer (`crates/tokenizer/src/lib.rs:82-84`) and the pattern (`:108-109`) runs for every caller, but no workspace crate depends on `tokenizer`; the label moves with the other records when a production caller lands.
+Status: active
+Exercised: yes - `deterministic_across_calls` (`tests/token_golden.rs:64`) repeats `estimate_tokens` a thousand times on one input; `deterministic_across_threads` (`:73`) has eight scoped threads encode every golden case, compares thread 0 to the golden ids and counts, and compares every other thread to thread 0, so concurrent first callers race the lazy initialisation.
+Guarantee: `encode_ordinary` and `estimate_tokens` are pure functions of their input: repeated calls, and concurrent calls including ones that race the first initialisation, return identical ids and counts, and `estimate_tokens(t) == encode_ordinary(t).len()` holds on every call.
+Check: `always` - for any input, N sequential calls agree, and K concurrent first callers agree with each other and with a later sequential call.
+Fault/timing angle: The hazard is a cache or lazy value initialised outside `OnceLock`, or an initialisation that can observe a half-built table; `OnceLock` runs the initialiser once and blocks other callers, so the current shape holds by construction and the record guards a future cache.
+Required faults and enabling state: None; concurrent first callers on a cold process.
+Confidence: high - [evidence](evidence/tokenizer-encoding-is-deterministic-across-calls-and-threads.md). Both tests and both `OnceLock` sites were read directly.
+Existing check: The two tests named above; unaudited.
+Impact: Token budgets computed on different threads or at different times disagree, so a session's context accounting drifts without any input change.
+Open questions: None.
+
+### tokenizer-encoding-is-total-over-valid-utf8
+
+Type: safety
+Reachability: test-only - the panic site is on the `encode_bounded` path every caller takes for inputs above the cap, but no workspace crate depends on `tokenizer`; the label moves with the other records when a production caller lands.
+Status: active
+Exercised: not yet - the over-long tests (`tests/token_golden.rs:116`, `:134`, `:150`) use letter and CJK runs and assert chunking; nothing drives an input shaped to exhaust `fancy_regex`'s backtrack limit, and the corpus's longest whitespace run is 50 spaces.
+Guarantee: `encode_ordinary` and `estimate_tokens` return for every `&str` without panicking. In particular an input longer than `MAX_PIECE_BYTES` (`lib.rs:80`, 4096) never reaches the `expect` at `lib.rs:140`, which aborts on a `fancy_regex` backtrack-limit error before chunking runs.
+Check: `always` - a fuzz or adversarial-whitespace oracle over inputs above the cap, including long alternations of whitespace and non-whitespace that exercise the negative lookahead in the pattern (`lib.rs:70-71`), asserts no panic and `estimate_tokens(t) == encode_ordinary(t).len()`.
+Fault/timing angle: The pattern's `[ws]+(?![^ws])` needs the backtracking engine, and `encode_bounded` iterates `find_iter` over the whole over-cap text (`lib.rs:138-139`) before any chunking; a match error there is unwrapped with `expect`, so the count aborts the caller's thread instead of returning. Inputs at or below the cap go to `CoreBPE::encode_ordinary` whole (`:133-135`), whose own regex path is outside this record.
+Required faults and enabling state: None; an input above 4096 bytes shaped to backtrack.
+Confidence: medium - [evidence](evidence/tokenizer-encoding-is-total-over-valid-utf8.md). The panic site and the pattern were read directly; whether any input reaches the default backtrack limit under this pattern is not established.
+Existing check: None on the error path; the over-long tests cover chunking only.
+Impact: One adversarial or unlucky input aborts token counting in the caller's process rather than returning a count.
+Open questions: Does any input reach `fancy_regex`'s default backtrack limit under this pattern, or is the `expect` unreachable in practice? A targeted search or fuzz target answers it; until then the record stands on the panic site alone. (needs human input)
 
 ## Relationship map
 
@@ -124,7 +173,19 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   drift fails parity on any golden case containing an affected code point and
   passes on the rest. Parity dominates the pattern record only over the code
   points the corpus reaches.
-- **Reachability moves together.** All four records are `test-only` for one
+- **Two divergences, two oracles.** `tokenizer-bom-is-its-own-token` and the
+  prototype-name cases inside `tokenizer-encoding-matches-the-independent-oracle`
+  are the two places the crate is right and the stock oracle is wrong. The
+  prototype-name cases are pinned in the corpus through a patched oracle; the
+  BOM case is pinned by asset ranks in its own record. Parity says nothing about
+  either input.
+- **Purity and totality frame the rest.**
+  `tokenizer-encoding-is-deterministic-across-calls-and-threads` says the
+  functions return the same answer every time;
+  `tokenizer-encoding-is-total-over-valid-utf8` says they return at all. Every
+  other record assumes both: a parity or chunking assertion is vacuous on an
+  input that panics, and meaningless if a second call could differ.
+- **Reachability moves together.** All seven records are `test-only` for one
   reason, the absence of a production caller, so the wave that adds the first
-  caller reclassifies all four at once and must re-evaluate which golden cases
+  caller reclassifies all seven at once and must re-evaluate which golden cases
   are load-bearing for that caller's inputs.

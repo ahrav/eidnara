@@ -25,7 +25,7 @@ every other tokenizer record depends on.
   U+000C, `\r`, space, U+00A0, U+1680, U+2000, U+200A, U+2028, U+2029, U+202F,
   U+205F, U+3000, U+FEFF) and no match for U+0085, U+200B, `a`, U+180E
   (`:195-210`).
-- `bom_before_newline_is_preserved` (`:101`) encodes `"x\u{feff}\n"` and so
+- `bom_before_newline_is_preserved` (`tests/token_golden.rs:101`) encodes `"x\u{feff}\n"` and so
   reaches U+FEFF through the golden corpus; no golden case is known to contain
   U+0085.
 - No workspace crate depends on `tokenizer`, per the other three records'
@@ -62,7 +62,7 @@ membership table for the class; already present as the two tests.
 
 ### Q: Would parity catch a drift on U+0085?
 
-- Sources examined: `lib.rs:101` and the golden corpus description in
+- Sources examined: `tests/token_golden.rs:101` and the golden corpus description in
   `existing-checks.md`.
 - Findings: U+FEFF is in the corpus; U+0085 is not known to be.
 - Missing evidence: a scan of `assets` golden cases for U+0085.

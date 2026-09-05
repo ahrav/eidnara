@@ -275,6 +275,8 @@ while testing nothing.
 | raw-native-attach-rejects-hostile-descriptors-without-effects | A descriptor object built without the wrapper: non-object, unsafe numeric field, malformed or aliased grant text, accessor or proxy | **Yes** - four raw-descriptor suites in `tests/mechanism.ts` (`:401`, `:424`, `:446`, `:476`) with the leak counters checked around each call |
 | diagnostics-report-lifecycle-counts-in-a-fixed-shape | One activation, one peer death (F1 or F4), one reclamation on a live connection, with a status request after each | Partial - the report shape and counter mapping are pinned by calling `record_*` directly; no test drives the events through `connection.rs` |
 | transport-debug-output-redacts-every-sentinel | None; formatting each sentinel-bearing type and error variant | **Yes** - `debug_and_errors_redact_every_sentinel`, `sample_errors_redact_every_sentinel`, `debug_redacts_profile_admission_and_quarantine_record` (no shipped formatter reaches the impls today) |
+| readiness-redispatch-is-bounded-under-persistent-arm-failure | A watched channel whose ring is quarantined (F1 or any verification failure) and left open by its handler; count `dispatchReadiness` invocations and confirm a macrotask still runs | No - the readiness suites cover the acknowledged-wake path on a healthy ring only |
+| each-channel-wake-survives-a-shared-acknowledgement | Two registered channels with a publication to the second inside the first's pending window; enabling situation `shm_second_channel_edge_during_pending_callback` | No - `mechanism.ts:211-278` proves the single-channel case only |
 
 ### Coverage checks to add (Group N)
 

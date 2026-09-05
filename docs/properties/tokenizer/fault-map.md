@@ -30,6 +30,9 @@ not timing or process faults.
 | tokenizer-vocabulary-is-embedded-and-complete | T2 against the committed asset | No - only the generator checks, at generation time |
 | tokenizer-over-long-pieces-are-chunked-and-bounded | T3 and T5 | Partial - T3 yes, T5 no |
 | tokenizer-pattern-is-upstream-with-ecmascript-whitespace | T1 as pattern drift: an edit to `assets/claude.pat` or to `ecmascript_whitespace!` that moves piece boundaries | Yes - `pattern_is_upstream_with_ecmascript_whitespace` derives the constant from the asset; `whitespace_class_matches_ecmascript_not_unicode_white_space` pins U+FEFF in and U+0085 out |
+| tokenizer-bom-is-its-own-token | T1 or T2 on the `EF BB BF` row: a renumbered or merged BOM rank, or a BOM-stripping lookup | Partial - `bom_before_newline_is_preserved` reaches the input but derives its expectation from the crate; the asset-rank oracle in the record is not yet a test |
+| tokenizer-encoding-is-deterministic-across-calls-and-threads | Concurrent first callers racing the `OnceLock` initialisation; repeated calls on one input | Yes - `deterministic_across_calls` and `deterministic_across_threads` construct both |
+| tokenizer-encoding-is-total-over-valid-utf8 | T5 shaped to backtrack: an input above `MAX_PIECE_BYTES` whose whitespace and non-whitespace alternation stresses the negative lookahead | No - no test or fuzz target reaches the `expect` at `lib.rs:140` |
 
 ## Coverage checks to add
 

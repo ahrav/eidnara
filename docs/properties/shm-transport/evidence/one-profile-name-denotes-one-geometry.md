@@ -27,7 +27,12 @@ derived constant silently weakening a test suite for a day. Searching for other
 copies of the same geometry found seven artifacts naming one profile string,
 `host-test-ring-v1`, with two different geometries.
 
-## The arithmetic, computed rather than asserted
+## Evidence trail
+
+The two subsections below are the trail: the geometry arithmetic recomputed
+from the constants, then the artifact-by-artifact agreement check.
+
+### The arithmetic, computed rather than asserted
 
 `Layout::new` (`crates/shm-transport/src/backend/ring.rs:140-184`) is
 deterministic in `(depth, arena_bytes)`. The inputs it depends on:
@@ -65,7 +70,7 @@ arithmetically: the old value `12_288` is exactly the depth-32 overhead one page
 short, matching "assumed the control region ahead of the arena fit in two pages.
 It now needs three."
 
-## Which artifacts agree, and which disagree
+### Which artifacts agree, and which disagree
 
 Depth 8, overhead 8,192:
 
