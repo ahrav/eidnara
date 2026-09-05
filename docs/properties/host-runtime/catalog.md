@@ -1372,8 +1372,7 @@ integration binary in the workspace, including `tests/lifecycle.rs` (35 tests),
 Guarantee: The executed proof of shutdown ordering, lock-release ordering, latch
 commit, fence overlap refusal, and probe-across-an-incarnation runs in continuous
 integration.
-Check: `reachable` - the lifecycle, activation, and roundtrip integration binaries
-execute in a workflow on at least one platform.
+Check: `reachable` - each named proof, not merely its containing binary, executes in a workflow on at least one platform: the shutdown-ordering, lock-release-ordering, latch-commit, fence-overlap-refusal, and probe-across-an-incarnation tests in `tests/lifecycle.rs`, `tests/activation.rs`, and `tests/host_roundtrip.rs` each carry a reachability marker or are enumerated by name against the executed test list, so a test that is removed, renamed, filtered, or marked `#[ignore]` while its binary still runs fails the check.
 Fault/timing angle: none; a configuration fact.
 Required faults and enabling state: none.
 Confidence: high - [evidence](evidence/the-largest-lifecycle-proof-runs-in-ci.md). Verified in this tree by reading
@@ -2042,9 +2041,13 @@ write completion.
 Check: `always` - under paused virtual time, for a policy with a chosen
 `ping_interval` and `pong_deadline`: (a) answer every Ping strictly inside
 `pong_deadline` measured from the write-completion instant recorded at
-`connection.rs:816`, advance the clock by `k * ping_interval + pong_deadline`
-for a fixed small `k`, and assert `gen.token` is not cancelled and exactly `k`
-Pings were written, and additionally assert the per-round inductive invariant that
+`connection.rs:816`, advance the clock by `k * ping_interval` for a fixed small `k` and assert exactly
+`k` Pings were written (the loop rearms `next_ping_at` after every send at
+`connection.rs:779`, so the cadence count is taken over the requested intervals
+only), then advance a further `pong_deadline` and assert `gen.token` is not
+cancelled without asserting the count, since `pong_deadline >= ping_interval` is
+a valid configuration (`config.rs:304-317`) under which that tail produces more
+Pings, and additionally assert the per-round inductive invariant that
 makes the finite run stand for the unbounded guarantee: after each timely Pong the
 liveness state carries no counter, deadline, or flag that depends on how many
 rounds have passed (the `expired` predicate at `connection.rs:755-760` reads only
@@ -5047,7 +5050,11 @@ never speaks, assert a second accept closes with no bytes read, then release the
 squatter and assert the slot becomes available. Enumerate every exit from
 `run_connection` before `drop(handshake_permit)` and assert each releases:
 auth error (`connection.rs:101-103`) and connection-permit exhaustion
-(`:106-108`). `always` because the bound must hold at every instant.
+(`:106-108`), and the two exits that take neither return: the tracked
+`run_connection` future aborted by forced shutdown while awaiting
+authentication, and the future dropped by an unwinding panic; in each case assert
+the handshake slot is available again, since a permit transferred or leaked on
+those paths is invisible to the two explicit returns. `always` because the bound must hold at every instant.
 Fault/timing angle: the permit swap at `connection.rs:137-141` acquires the
 connection permit *before* releasing the handshake permit, so a peer is briefly
 charged to both classes. The consequence is that the post-auth descriptor
@@ -5057,8 +5064,8 @@ Required faults and enabling state: a squatter that authenticates and stalls, an
 a squatter that never speaks; both already exist in the test support
 (`tests/support/raw_client.rs:878`).
 Confidence: high - [evidence](evidence/setup-a-unauthenticated-setup-work-is-bounded-and-every-slot-is-released.md).
-Verified: `try_acquire_owned` before spawn at `runtime.rs:1037-1040`, the
-`drop(stream)` on failure at `:1038`, and the two pre-swap exits in
+Verified: `try_acquire_owned` before spawn at `runtime.rs:887-894`, the
+`drop(stream)` on failure at `:889`, and the two pre-swap exits in
 `connection.rs`.
 Existing check: `crates/host-runtime/tests/lifecycle.rs:237`
 `saturated_handshake_capacity_closes_without_reading_client_bytes` and `:337`
@@ -5159,16 +5166,22 @@ parks on `std::future::pending()` forever and the test asserts capacity return, 
 nothing asserts that the host tore the setup down or when.
 Guarantee: A peer that authenticates and then stalls anywhere in the post-grant
 setup exchange has its connection torn down, and its handshake and connection
-permits and ring charge released, within one `transport_setup_deadline` of the
-grant send.
+permits and ring charge released, refused within one `transport_setup_deadline` of the
+grant send and released within a stated teardown bound after that refusal.
 Check: `always` - evaluated at the close of an explicit bounded window. Drive a
 peer that authenticates and then stalls at each post-grant I/O position in turn:
 before the `Activate` message, mid-length-prefix, after `Activate` (so the host
 blocks in the `Activated` write against a full peer buffer), before `Commit`, and
 after `Commit` (blocking the `Committed` write); at each position **stop all peer
-activity**, which is what makes the window fault-free; then poll until the
-host has released the connection and assert it happened within
-`transport_setup_deadline` measured from the deadline anchor. The bound is stated
+activity**, which is what makes the window fault-free; then assert two bounds in
+sequence: `activate_server` returns its timeout by `transport_setup_deadline`
+measured from the deadline anchor, and the teardown that follows it, the discard
+and cancel at `connection.rs:166-169` and the ring-charge release the endpoint
+thread performs at `ring_transport.rs:273-274`, completes within its own explicit
+bound stated by the campaign (one `lifecycle_callback_deadline` is the largest
+budget the host attaches to any teardown step); the refusal cannot precede the
+deadline it waits for, so requiring release at that same instant would fail a
+compliant path or hide the cleanup behind an unbounded poll. The bound is stated
 in the unit the code bounds, a **single absolute deadline**:
 `activate_server` computes `deadline = Instant::now() + timeout` **once**
 (`setup_socket.rs:244-246`) and threads that same `Instant` through every
@@ -5285,14 +5298,16 @@ Guarantee: Once `read_cancel` fires, the sentinel task completes without requiri
 any further byte from the peer, even when it is parked mid-message.
 Check: `always` - evaluated at the close of an explicit bounded window. Park the
 sentinel by sending three of the four length-prefix bytes and stopping, cancel
-`read_cancel`, **send nothing further**, then poll the generation's tracked task
-set until it is empty and assert it emptied. The bound is stated in the unit the
+`read_cancel`, **send nothing further**, then poll the parked sentinel future
+exactly once and assert that poll returns `Ready`, and assert the generation's
+tracked task set is then empty; the attempt cap is one, fixed by the record, not a
+test parameter. The bound is stated in the unit the
 code bounds, which is a **cancellation edge and one poll of a `biased` select**,
 not a duration: `connection.rs:180-190` is `tokio::select!` with `biased` and
 `peer_read_cancel.cancelled()` as its **first** arm (`:182`), so the cancellation
 branch is chosen the next time the task is polled and the `observe_peer` future is
-dropped where it stands. The polling cap is a test parameter and must be stated as
-an explicit attempt count in the test, not as a generous timeout.
+dropped where it stands. A regression that adds yields after the cancellation arm fails
+the one-poll assertion, which a generous cap would hide.
 **This record exists because an earlier revision rejected it on a misreading of
 METHOD.md, and the misreading is corrected here.** That revision argued no liveness
 record could be written for this part because the available bounds are wall-clock
@@ -6430,7 +6445,7 @@ Exercised: not yet - no test stalls inbound delivery and measures Pong egress
 Guarantee: Once inbound delivery backpressures, an enqueued Pong waits on the
 same bridge thread that is parked delivering inbound frames, and the client
 tolerates that for the full 30-second frame deadline before reacting.
-Check: `always` - with the inbound channel full and the bridge parked in `read_tx.blocking_send` (`client.rs:1905`), a control frame enqueued at `:1283` is not written until the bridge resumes or `timeout_at(frame.deadline, completed_rx)` (`:2031`) expires, where `frame.deadline` is `now + CLIENT_FRAME_TIMEOUT` (`:1281`, 30 s per `:45`); and then exactly one terminal outcome follows: if the bridge resumes before the deadline, the Pong's write completes within that same frame deadline with the generation still live, and if the stall outlasts the deadline, the client retires the generation with `write_failed` (`:2025`, `:2034`). The bound is one frame deadline in the unit the code bounds, not "eventually". `always` because the dependency and its terminal outcome hold on every control write once the precondition is met.
+Check: `always` - with the inbound channel full and the bridge parked in `read_tx.blocking_send` (`client.rs:1905`), a control frame enqueued at `:1283` is not written until the bridge resumes or `timeout_at(frame.deadline, completed_rx)` (`:2031`) expires, where `frame.deadline` is `now + CLIENT_FRAME_TIMEOUT` (`:1281`, 30 s per `:45`); and then exactly one terminal outcome follows: if the bridge resumes with enough of the frame deadline left for the ring reservation (`endpoint.send` at `client.rs:1851` receives the same `frame.deadline`, handed over at `:2021`, so there is no independent send budget), the Pong's write completes within that frame deadline with the generation still live, and if the frame deadline expires first, whether at the writer's `timeout_at` (`:2031`) or inside the ring reservation against the same instant, the client retires the generation with `write_failed` (`:2025`, `:2034`); a bridge that resumes with too little budget left falls into the second outcome, not a false failure of the first. The bound is one frame deadline in the unit the code bounds, not "eventually". `always` because the dependency and its terminal outcome hold on every control write once the precondition is met.
 Fault/timing angle: The bridge thread is the sole producer of write completions
 (`:1872`) and the sole consumer of the write channel, so any inbound stall is
 also an egress stall. This is the client-side mirror of Part 2b's
@@ -9982,7 +9997,7 @@ Reachability: test-only - every run path of a composed `BrocaComponent` releases
 Status: active
 Exercised: partial - success, failure, cancel, transport detach, and shutdown paths are covered in-process; a backend that never exits is covered only through the escalation timers.
 Guarantee: Every run path returns its pending permits, task permits, and byte charges to the supervisor baseline, and host shutdown drains the supervisor to zero state; when an uncooperative backend outlives the termination grace, shutdown reports the unresolved count to the caller instead of claiming zero state.
-Check: `always` - after every terminal, the supervisor's pending permits and task permits equal their starting values and `finish` (`crates/host-runtime/src/broca/supervisor.rs:938`) has released the run's excess bytes, while the retained session's base charge and replay frames are still held for `terminal_retention`; the full byte-budget baseline is required only once `remove_session` (`:1059`) has removed that entry by expiry, cap eviction, deletion, or shutdown; after shutdown, either the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or the count is nonzero and exactly equals the number of backends still unreaped, with no permit, charge, or run state retained beyond those; a zero count with retained state, or a nonzero count that is not surfaced to the caller, fails the check.
+Check: `always` - after every terminal, the supervisor's pending permits and task permits equal their starting values and `finish` (`crates/host-runtime/src/broca/supervisor.rs:938`) has released the run's excess bytes, while the retained session's base charge and replay frames are still held for `terminal_retention`; the full byte-budget baseline is required only once `remove_session` (`:1059`) has removed that entry by expiry, cap eviction, deletion, or shutdown; after shutdown, either the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or the count is nonzero and exactly equals the number of runs whose final `work_unresolved` verdict is set (`supervisor.rs:629-634` counts unproven teardowns, not processes live at inspection time, and a process may exit after `terminate_group` fails to confirm it), with no permit, charge, or run state retained; a zero count with retained state, or a nonzero count that is not surfaced to the caller, fails the check.
 Fault/timing angle: A leaked permit shrinks the admission pool until the host restarts.
 Required faults and enabling state: Each terminal path: success, error, cancel, detach, shutdown.
 Confidence: medium - [evidence](evidence/broca-permits-and-charges-return-to-baseline.md). `every_path_returns_permits_and_charges_to_baseline`, `host_shutdown_drains_the_supervisor_to_zero_state`, `transport_detach_paths_leave_the_run_untouched` (`crates/host-runtime/tests/broca_supervisor.rs`).
