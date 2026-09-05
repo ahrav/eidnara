@@ -334,8 +334,7 @@ Status: active
 Exercised: not yet - needs an induced panic or abort between insert and removal.
 Guarantee: A generation inserted into the registry is removed before its
 connection task can finish or die.
-Check: `always` - for every path out of `serve_generation` after the insert, the
-registry no longer contains that id, including the panic path.
+Check: `always` - for every path out of `serve_generation` after the insert, the registry no longer contains that id and no `Arc<GenerationCore>` for it is retained: the ordinary return, the panic path, and the abort path, where the connection task's future is dropped by the forced shutdown's `abort_all` between insert and removal and the removal must run from a drop guard rather than from a return.
 Fault/timing angle: `close_generation` is the only remover and runs after
 `read_tasks.wait()` and after the `shutdown_complete` rendezvous. Any unwind
 before that line leaks the entry; the leaked `Arc<GenerationCore>` then keeps the
@@ -2053,7 +2052,13 @@ Check: `always` - under paused virtual time, for a policy with a chosen
 `pong_deadline` measured from the write-completion instant recorded at
 `connection.rs:816`, advance the clock by `k * ping_interval + pong_deadline`
 for a fixed small `k`, and assert `gen.token` is not cancelled and exactly `k`
-Pings were written; (b) with `invalidate_on_missed: true`, answer nothing,
+Pings were written, and additionally assert the per-round inductive invariant that
+makes the finite run stand for the unbounded guarantee: after each timely Pong the
+liveness state carries no counter, deadline, or flag that depends on how many
+rounds have passed (the `expired` predicate at `connection.rs:755-760` reads only
+each outstanding probe's `written_at` and `sent`, and an answered probe is removed
+from `pings`), so round `k + 1` is decided by the
+same inputs as round 1; (b) with `invalidate_on_missed: true`, answer nothing,
 advance to `write_completion + pong_deadline`, and assert `gen.token` is
 cancelled; and assert it is *not* cancelled at `write_completion +
 pong_deadline
@@ -4034,8 +4039,9 @@ Guarantee: For every byte slice, `decode_header` returns either an
 `EnvelopeHeader` satisfying all eleven gate postconditions or a typed
 `DecodeError`; it never panics and never allocates.
 Check: `always` - call `decode_header` on arbitrary bytes of arbitrary length;
-assert the call returns, and that on `Ok` every one of the eleven gate
-conditions holds on the returned value. A panic is a forbidden state with no
+assert the call returns, that on `Ok` every one of the eleven gate
+conditions holds on the returned value, and, under a counting global allocator,
+that the call performs zero heap allocations for every input. A panic is a forbidden state with no
 dedicated detection point, so this is `always(!panic)`; `unreachable` is wrong
 because no code location must never execute.
 Fault/timing angle: none. The function is pure over one immutable slice. The
@@ -6474,11 +6480,7 @@ Guarantee: If the host answers two `route.open` requests with the same
 `(channel, epoch)`, the client conflates them into one cache entry, and one
 `close_route` settles both callers' work while neither bind is separately
 released.
-Check: `always` - whenever `parse_route_open` yields a handle already present in
-`routes`, `routes.insert` (`client.rs:477`) returns `false` and the set is
-unchanged, so `settle_route` (`:1525`) can remove it at most once and
-`release_stranded_route` returns early at `:1485-1487`. `always` because the set
-semantics hold on every insert.
+Check: `always` - whenever `parse_route_open` yields a handle already present in `routes`, `routes.insert` (`client.rs:477`) returns `false` and the set is unchanged, so `settle_route` (`:1525`) can remove it at most once and `release_stranded_route` returns early at `:1485-1487`; and with one pending request outstanding per caller, one `close_route` settles both callers' pending requests with a classified outcome and the host observes at most one release. `always` because the set semantics and the settlement hold on every duplicate bind.
 Fault/timing angle: None required, but the damage compounds if the two opens
 overlap: the second caller receives `Ok(handle)` for a route the first caller can
 close underneath it.
@@ -9814,7 +9816,7 @@ Reachability: default-production - every client and server handshake computes th
 Status: active
 Exercised: partial - the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal; no test calls `compute_proof` and `raw_client::proof` against each other, so the equality in the Check is met through the literal rather than asserted directly.
 Guarantee: The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v1` and `eidnara-client-v1`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.
-Check: `always` - `compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every single-field perturbation the proof changes.
+Check: `always` - `compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every generated or single-field-perturbed input tuple, where `raw_client::proof` is the test-local HMAC implementation of the documented transcript; the equality over arbitrary inputs, not the change under perturbation, is the oracle, and distinct inputs must give distinct proofs. `always` because the transcript is a pure function evaluated on every handshake.
 Fault/timing angle: Only an external oracle detects a transcript change both sides apply.
 Required faults and enabling state: The committed inputs and the test-local HMAC oracle.
 Confidence: high - [evidence](evidence/host-proof-construction-matches-the-committed-vectors.md).
@@ -9935,8 +9937,8 @@ Type: safety
 Reachability: test-only - every run path of a composed `BrocaComponent` releases what it took. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - success, failure, cancel, transport detach, and shutdown paths are covered in-process; a backend that never exits is covered only through the escalation timers.
-Guarantee: Every run path returns its pending permits, task permits, and byte charges to the supervisor baseline, and host shutdown drains the supervisor to zero state.
-Check: `always` - after every terminal, the supervisor's permits and charges equal their starting values; after shutdown the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or that count is surfaced to the caller as work that may still be running.
+Guarantee: Every run path returns its pending permits, task permits, and byte charges to the supervisor baseline, and host shutdown drains the supervisor to zero state; when an uncooperative backend outlives the termination grace, shutdown reports the unresolved count to the caller instead of claiming zero state.
+Check: `always` - after every terminal, the supervisor's permits and charges equal their starting values; after shutdown, either the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or the count is nonzero and exactly equals the number of backends still unreaped, with no permit, charge, or run state retained beyond those; a zero count with retained state, or a nonzero count that is not surfaced to the caller, fails the check.
 Fault/timing angle: A leaked permit shrinks the admission pool until the host restarts.
 Required faults and enabling state: Each terminal path: success, error, cancel, detach, shutdown.
 Confidence: medium - [evidence](evidence/broca-permits-and-charges-return-to-baseline.md). `every_path_returns_permits_and_charges_to_baseline`, `host_shutdown_drains_the_supervisor_to_zero_state`, `transport_detach_paths_leave_the_run_untouched` (`crates/host-runtime/tests/broca_supervisor.rs`).
@@ -10060,7 +10062,7 @@ Reachability: test-only - every inference in a composed `SynapseComponent` loads
 Status: active
 Exercised: partial - `source_replacement_cannot_change_verified_loader_bytes` asserts the seals, rejected writes, replacement resistance, and the digest on the memfd path; the full load into ONNX Runtime is exercised only where the runtime library is present.
 Guarantee: The ONNX Runtime library is loaded from a sealed memfd named `host-onnxruntime` whose bytes were certified with the bundle, so a library swapped on disk after certification cannot reach inference.
-Check: `always` - the loaded image's digest equals the certified digest and the memfd carries the write and grow seals; both are invariants over every load, so one `always` covers the conjunction.
+Check: `always` - the loaded image's digest equals the certified digest, and the memfd carries the shrink, grow, write, and seal seals (`F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL`, as applied at `crates/host-runtime/src/synapse/inference.rs:152-159`), so the image can neither be modified, grown, truncated, nor unsealed after certification; both are invariants over every load, so one `always` covers the conjunction.
 Fault/timing angle: A library swapped between certification and load changes every embedding.
 Required faults and enabling state: A modified library on disk after certification; a memfd without seals.
 Confidence: medium - [evidence](evidence/synapse-inference-runs-through-a-sealed-runtime-image.md). `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`) observes the seals and the digest.
