@@ -662,13 +662,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/ring_transport.rs#ring_profile_pins_per_connection_grant_geometry",
       "evidence_pointer": "docs/properties/shm-transport/evidence/attach-binds-geometry-to-a-local-profile.md"
@@ -1870,13 +1870,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/runtime.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/generation-registry-entry-released-on-every-connection-exit.md"
@@ -2002,13 +2002,13 @@
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "none",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/config.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/host-ping-correlation-exhaustion-retires-the-generation.md"
@@ -2328,13 +2328,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/lifecycle.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/phase-evidence-outlives-a-long-phase.md"
@@ -2351,13 +2351,13 @@
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "not-yet",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/runtime.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/clock-anomalies-do-not-invalidate-live-evidence.md"
@@ -2466,13 +2466,13 @@
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "destination_status": {
         "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
-        "known_violation": false
+        "known_violation": true
       },
       "check_pointer": "crates/host-runtime/src/generation.rs",
       "evidence_pointer": "docs/properties/host-runtime/evidence/an-undecidable-quarantine-witness-fails-closed.md"
