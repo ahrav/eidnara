@@ -653,6 +653,28 @@ fn launch_roots_participate_in_the_digest_on_their_own() {
         "entrypoint does not participate in the digest"
     );
     assert_ne!(interpreter_digest, entrypoint_digest);
+
+    // The executable launch form: both `bin/node` nodes become executables, the
+    // interpreted roots are cleared, and `executable` alone moves between them.
+    let mut executable_form = baseline;
+    for node in executable_form.nodes.iter_mut() {
+        if node.kind == NodeKind::Interpreter {
+            node.kind = NodeKind::Executable;
+        }
+    }
+    executable_form.interpreter = None;
+    executable_form.entrypoint = None;
+    executable_form.executable = Some("bin/node".to_owned());
+    validate_manifest(&executable_form).expect("executable-form manifest is valid");
+    let executable_before = manifest_digest(&executable_form).expect("digest");
+    let mut other_executable = executable_form.clone();
+    other_executable.executable = Some("bin/node2".to_owned());
+    let executable_digest = manifest_digest(&other_executable).expect("digest");
+    assert_ne!(
+        executable_before, executable_digest,
+        "executable does not participate in the digest"
+    );
+    assert_ne!(executable_before, before);
 }
 
 #[test]
