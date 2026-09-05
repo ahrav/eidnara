@@ -13,7 +13,10 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   whose mechanism moved keep their status and cite the file that owns the mechanism now.
 - Every line citation inside the `Check:` field of an active record is verified against this tree, because
   those are the lines a campaign instruments; a construct the tree no longer has is named as removed rather than
-  given a line. Citations in the other fields are verified where the record says `re-verified`; the rest are the
+  given a line. One exemption: a check whose subject lives in a package that is not in this tree (today only
+  `ring-a-host-doctor-emits-one-of-five-declared-terminal-classes`, whose classifier is in `packages/plugin`)
+  keeps its source-repository citations, and the record says so and marks the check deferred; those anchors
+  are not resolvable here and are not claimed verified. Citations in the other fields are verified where the record says `re-verified`; the rest are the
   source catalogs' coordinates and are unverified against this tree, which METHOD rule 1 requires to be labelled
   rather than restated as fact. An automated range check marks every such citation that lies beyond the current
   file's length as `(source-catalog line, not present at HEAD)`; a citation without that mark is still not a
@@ -2710,13 +2713,14 @@ them covers in-tree use only.
 ### Coverage: 37 in-crate tests, and all of them run in CI
 
 **37 in-crate tests reach this sub-part, and CI executes every one.** This
-reverses the authoring-time headline. `ci.yml:115` runs
-`cargo nextest run -p host-runtime -p shm-transport --lib` in the "Mandatory ring
-unit and client suites (Linux)" job (`:93`); `--lib` selects the package library
-test target, which is where all three units live -
+reverses the authoring-time headline. `ci.yml:118` and `:126` run
+`cargo test --workspace --all-targets --all-features --locked` on the 1.98 and
+stable toolchains (re-verified; the source catalog cited a `cargo nextest ... --lib`
+step at `:115`, which in this tree is the Clippy step); `--all-targets` includes the
+package library test target, which is where all three units live -
 `frame_channel/contract_tests.rs` is reachable as `pub(crate) mod contract_tests`
 from `frame_channel.rs:27`, so it is a library module, not an integration
-binary. Counts below were re-derived with `cargo nextest list -p host-runtime --lib`
+binary. Counts below were re-derived with `cargo test -p host-runtime --lib -- --list`
 rather than by grepping attributes, which is what corrects the earlier
 `ring_transport.rs` figure from 7 to 9 and confirms 14 for
 `contract_tests` (9 at the module root plus 5 in its nested
@@ -2724,9 +2728,9 @@ rather than by grepping attributes, which is what corrects the earlier
 
 | Unit | Tests | Executed in CI |
 | --- | --- | --- |
-| `wire.rs`, `mod tests` at `:614-937` | **14** | **Yes** (`ci.yml:115`, `--lib`) |
-| `frame_channel/contract_tests.rs` | **14** | **Yes** (`ci.yml:115`, `--lib`) |
-| `ring_transport.rs`, `mod tests` at `:783-1044` | **9** | **Yes** (`ci.yml:115`, `--lib`) |
+| `wire.rs`, `mod tests` at `:614-937` | **14** | **Yes** (`ci.yml:118`, `:126`, `--all-targets`) |
+| `frame_channel/contract_tests.rs` | **14** | **Yes** (`ci.yml:118`, `:126`, `--all-targets`) |
+| `ring_transport.rs`, `mod tests` at `:783-1044` | **9** | **Yes** (`ci.yml:118`, `:126`, `--all-targets`) |
 | `frame_channel.rs` | **0** | n/a |
 | **Total in-crate** | **37** | **Yes** |
 
@@ -6263,10 +6267,13 @@ Type: reachability
 Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - nothing constructs the ordering, but the thread's *exit* is
-observed in CI: `tests/shm_soak.rs:54-110` and
-`tests/shm_failure_modes.rs:193-228` poll until the process thread count returns
-to a post-close baseline after real `Client::connect`/`close` cycles, so a bridge
-thread that never left its loop would fail those assertions
+observed in CI by `tests/shm_soak.rs:54-110`, whose `await_envelope` predicate
+compares the process thread count against a post-close baseline after real
+`Client::connect`/`close` cycles, so a bridge thread that never left its loop
+would fail it; `tests/shm_failure_modes.rs:193-228` proves only that a
+replacement connection can acquire capacity after a close, which a detached
+bridge thread that holds no host permit does not affect, so it is not evidence
+of thread exit
 Guarantee: The window in which `close()` has returned `Ok` while the detached
 bridge thread has not yet written its setup-socket Goodbye is genuinely
 reachable, so a client's departure from the setup socket is not joined to its own
@@ -9018,7 +9025,8 @@ shutdown-is-unconditional row was refuted. Carried in full in
    rejection.
 2. **The configuration contract is proven only by rejection.** `config.rs` is the
    only authority for twenty of the twenty-one keys, its ten tests all prove
-   rejection, none runs in CI, and the file has no doctest even though one would.
+   rejection, all ten run in CI through `cargo test --workspace --all-targets`
+   (`ci.yml:118`, `:126`), and the file has no doctest even though one would.
    `HostTiming`'s seven keys are validated for zero and overflow at `:341-363`
    and for nothing else, so `shutdown_deadline` is proven nonzero and never
    proven to bound shutdown.
@@ -9954,7 +9962,7 @@ Reachability: default-production - every client and server handshake computes th
 Status: active
 Exercised: yes - the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal, and `production_proof_matches_the_oracle_across_perturbed_tuples` calls `compute_proof` and `raw_client::proof` on the same tuple for both domains over the committed inputs, each input perturbed alone, daemon versions of several lengths, and short and long keys, asserting equality and distinctness.
 Guarantee: The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v1` and `eidnara-client-v1`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.
-Check: `always` - `compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every generated or single-field-perturbed input tuple, where `raw_client::proof` is the test-local HMAC implementation of the documented transcript; the equality over arbitrary inputs, not the change under perturbation, is the oracle, and distinct inputs must give distinct proofs. `always` because the transcript is a pure function evaluated on every handshake.
+Check: `always` - `compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every generated or single-field-perturbed input tuple, where `raw_client::proof` is the test-local HMAC implementation of the documented transcript; the equality over arbitrary inputs, not the change under perturbation, is the oracle; the campaign does not assert global injectivity, since HMAC-SHA256 over a larger input space must collide somewhere and a found collision would say nothing about transcript conformance. `always` because the transcript is a pure function evaluated on every handshake.
 Fault/timing angle: Only an external oracle detects a transcript change both sides apply.
 Required faults and enabling state: The committed inputs and the test-local HMAC oracle.
 Confidence: high - [evidence](evidence/host-proof-construction-matches-the-committed-vectors.md).
