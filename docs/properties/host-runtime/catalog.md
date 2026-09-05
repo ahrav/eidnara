@@ -466,9 +466,14 @@ policy is configured (`crates/host-runtime/src/connection.rs:279`),
 `crates/host-runtime/examples/` or the bench, sets `liveness`; the daemon that will build the
 production config is scheduled for U4 (`docs/properties/README.md:52`).
 Status: active
-Exercised: yes - `tests/lifecycle.rs:406`
+Exercised: partial - `tests/lifecycle.rs:406`
 `ping_and_consumer_correlations_do_not_cross_settle` constructs a numerically
-equal consumer correlation. That file runs in CI in this tree (`ci.yml:118`, `:126`, `cargo test --workspace --all-targets`).
+equal consumer correlation and proves a Pong does not clear the pending consumer
+request, but it answers the equal-correlation Ping (`:436-447`) before the
+consumer terminal is produced (`:453-473`), so the probe is already legitimately
+gone and the other direction, a consumer terminal leaving an outstanding probe
+intact, is not exercised. That file runs in CI in this tree (`ci.yml:118`, `:126`,
+`cargo test --workspace --all-targets`).
 Guarantee: Host-originated ping correlations and consumer-originated correlations
 never settle each other even when numerically equal.
 Check: `always` - pong handling reads only the pings map; consumer terminals key
@@ -3030,11 +3035,14 @@ every authenticated connection (`connection.rs:148`), with no gate.
 because `shm-transport` is a non-optional dependency, and it has **no caller
 anywhere in `crates/host-runtime/src`**, in production or in test. That is stated
 here rather than defaulted: the label is neither `default-production` nor
-`test-only` for the quarantine half, because the path is reachable from no host
-code at all.
+`test-only` for the quarantine half, because no host code reaches it; a test peer
+can reach it through the public transport API, which is what makes the record
+testable at all.
 Status: active
-Exercised: not yet - nothing in `host-runtime` can construct the state, so no host
-test can reach it.
+Exercised: not yet - no existing test constructs the state; it is constructible
+from a test peer, which can call the public `Ring::enter_quarantine`
+(`ring.rs:1373-1378`) on `RingClientEndpoint.to_host` (`ring_transport.rs:651-656`)
+while the host holds a lease, as the required-faults field below lays out.
 Guarantee: Every admission charge an endpoint takes is accounted exactly once at its exit: released, or quarantined when the exit is a ring-corruption exit that the transport contract (`docs/shm-transport.md:21`, `:65`, `:79`) says should quarantine; never both and never neither. The slug names the discovery-time finding that no `host-runtime` path calls `Admission::quarantine`, so today the quarantined side of that accounting is structurally zero and every corrupt exit releases as if the storage were cleanly recycled, which is a contract-versus-code disagreement, not a forbidden location.
 Check: `always` - across every endpoint exit in a campaign, including corrupt-ring and swallowed-panic exits, `released + quarantined` charges equal the charges taken (no leak, no double count), and for every exit the transport contract classifies as corrupt, `snapshot().quarantined` has grown by that endpoint's charge. The second clause is a predicted violation at HEAD, because `Admission::quarantine` (`profile.rs:561`) has no `host-runtime` caller; the check asserts the documented contract rather than freezing the gap. `always` because accounting must balance at every exit.
 Fault/timing angle: the window that matters is a `Corrupt` exit. When
@@ -9072,7 +9080,7 @@ question".
    [rt-a-every-published-configuration-field-changes-host-behaviour](#rt-a-every-published-configuration-field-changes-host-behaviour),
    and lens A's reasoning is that the property is about what an *embedder* can
    set rather than about what the production binary does set.** Its subject is the
-   published surface, and its one violator, `HostInit::host_capabilities`, is
+   published surface, and the pass-through field `HostInit::host_capabilities`, which the source catalog called a violator and which reaches the handler through `initialize`, is
    written as `Vec::new()` at all four construction sites, so a default
    production host never populates it.
 
@@ -9082,7 +9090,7 @@ One asymmetry to state explicitly, because it is the opposite of what the
 `ResourceDeclaration` with `route_class: RouteClass::Reserved` and 96/96 counts
 (`broca/config.rs:185`, `:188`), the comment at `broca/mod.rs:169-170` makes it
 deliberate and unconditional, `composite.rs:10-13` fixes the direct profile's
-tertiary as `broca/management_surface`, and `serve.rs:575` composes it. So the
+tertiary as `broca/management_surface`; the daemon that would compose it (`serve.rs:575` in the source repository) is not in this tree, so in this checkout the reserved Broca class is `test-only`, as the Broca records below classify it. So the
 comment's second clause is false and its first clause is true only of a
 composition that excludes Broca. Sub-part 2e reached the same verdict
 independently. The record this bears on,
@@ -9410,22 +9418,22 @@ cancellable callbacks**, and an oracle must construct a yielding slow callback,
 not a blocking one, or it will time out rather than fail an assertion. A
 non-yielding callback defeats every finite ceiling here, which is why the previous
 single-figure framing was not merely imprecise but the wrong shape.
-Fault/timing angle: `:1214` fails, then `:1224` awaits a second, fresh budget
-computed at `:1223` as `lifecycle_callback_deadline.saturating_mul(2)`. At
+Fault/timing angle: `:1048` fails, then `:1054` awaits a second, fresh budget
+computed at `:1053` as `lifecycle_callback_deadline.saturating_mul(2)`. At
 defaults, 60 s armed after a 10 s deadline expired, and then either the fatal
-latch at `:1234` or 30 s more at `:1240`. `saturating_mul` means a
+latch at `:1064` or 30 s more at `:1067` (all re-verified). `saturating_mul` means a
 `lifecycle_callback_deadline` above half of `MAX_CONFIG_DURATION` yields a budget
 the validator would itself reject.
 Required faults and enabling state: a tracked task that survives the shutdown
-deadline and then *does* drain, for the `:1241` exit; one that never drains, for
-the `:1238` exit. `tests/lifecycle.rs:678` and `:714` build the non-yielding
+deadline and then *does* drain, for the `:1067` exit; one that never drains, for
+the `:1064` exit. `tests/lifecycle.rs:678` and `:714` build the non-yielding
 callback shape, which reaches the forced path but which, being non-yielding, is
 the shape that cannot bound anything. Distinguishing the two forced exits is
 fixture work nothing currently does.
 Confidence: high - [evidence](evidence/rt-a-forced-shutdown-outlives-the-configured-shutdown-deadline.md).
-Verified both deadline sites, read the justifying comment at `:1217-1222`, and
-re-read `:1234-1243` and `run_handler_shutdown` (`:1259-1297`) end to end for
-this disposition to separate the three exits.
+Re-verified both deadline sites (`:1037`, `:1048`), read the justifying comment at
+`:1051-1052`, and re-read `:1053-1069` and `run_handler_shutdown` (`:1085`) end
+to end to separate the three exits.
 Existing check: none bounding any of the three totals. Status `unaudited`.
 Impact: a supervisor that budgets `shutdown_deadline` for a stop, plus the
 documented client 5 s, kills the host during a cleanup phase the host considers
@@ -9440,8 +9448,8 @@ Open questions:
   Whether the derived budget should be clamped to `MAX_CONFIG_DURATION` is
   unresolved. It cannot overflow, so this is a coherence question rather than a
   defect.
-- Should the fatal-latch exit at `:1238` run the handler shutdown callback? The
-  comment at `:1228-1233` argues it must not, to avoid overlapping two handler
+- Should the fatal-latch exit at `:1064` run the handler shutdown callback? The
+  comment at `:1058-1059` argues it must not, to avoid overlapping two handler
   callbacks, and that argument is sound. The consequence it does not state is
   that a host taking this exit returns `false` having never invoked `shutdown()`
   on this path, which is a different contract from the other two exits.
@@ -9579,7 +9587,7 @@ Open questions: None.
 ## Group D: the configuration surface, frozen and mostly effective
 
 Three records on the surface itself rather than on any one key. The first is that
-every published field reaches a consumer, with one violator. The second is that
+every published field reaches a consumer; the one field the source catalog called a violator, `HostInit::host_capabilities`, is a pass-through the handler consumes. The second is that
 nothing changes value after `HostShared` construction, which is the assumption 55
 or more records across the catalog rest on. The third is that the reserved pools
 are correctly gated when nothing declares a reservation. Grouped because all
@@ -9734,9 +9742,11 @@ footprint.
 ### rt-a-a-closure-store-open-failure-is-classified-not-swallowed
 
 Type: safety
-Reachability: test-only - `HarnessClosureStore::open` is called only from
-`crates/host-runtime/tests/harness_closure.rs` in this tree, and `manifest_digest`
-is reached only through the store; the daemon that opens the store in production
+Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
+this tree (`crates/host-runtime/tests/harness_closure.rs` and
+`tests/broca_subprocess.rs:845`, which opens a store to materialise a fixture
+closure), and `manifest_digest` is reached through the store and directly from
+`tests/harness_closure.rs:410-413`; the daemon that opens the store in production
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 in the wave that lands it.
 Status: active
@@ -9861,8 +9871,8 @@ rather than the configuration contract.
   [rt-a-the-default-configuration-arms-no-liveness-probe](#rt-a-the-default-configuration-arms-no-liveness-probe),
   [rt-a-an-unprobed-health-snapshot-is-distinguishable-from-a-degraded-one](#rt-a-an-unprobed-health-snapshot-is-distinguishable-from-a-degraded-one).
   Both are about what a default host can observe about its own health. The first
-  is already `Exercised: yes`, uniquely in this catalog, because
-  `tests/lifecycle.rs:496` asserts no Ping arrives within 500 ms. Hypothesis: it
+  is `Exercised: partial`: `tests/lifecycle.rs:496` asserts no Ping arrives
+  within 500 ms but never observes whether a `liveness_loop` task was spawned. Hypothesis: it
   dominates **nothing**, and that is the interesting part: proving the probe is
   absent says nothing about whether the *other* health signal, the snapshot, is
   interpretable. Conversely the snapshot record needs a slow first `health`
@@ -9877,7 +9887,7 @@ rather than the configuration contract.
   limit as constant, and it is dominated by nothing, because no runtime oracle
   can observe the absence of a reload path that does not exist. The
   every-field record is the complement: it proves the surface is wired, and its
-  one violator is the only field where an embedder's action has no effect. Worth
+  pass-through field `host_capabilities` is the only one whose effect is the handler's to define rather than the host's. Worth
   building as one census pass, since both walk the same 21 fields.
 - **Two startup paths whose failure is invisible.**
   [rt-a-a-closure-store-open-failure-is-classified-not-swallowed](#rt-a-a-closure-store-open-failure-is-classified-not-swallowed),
@@ -10001,9 +10011,11 @@ Open questions: None.
 ### harness-closure-manifest-digest-is-canonical
 
 Type: safety
-Reachability: test-only - `HarnessClosureStore::open` is called only from
-`crates/host-runtime/tests/harness_closure.rs` in this tree, and `manifest_digest`
-is reached only through the store; the daemon that opens the store in production
+Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
+this tree (`crates/host-runtime/tests/harness_closure.rs` and
+`tests/broca_subprocess.rs:845`, which opens a store to materialise a fixture
+closure), and `manifest_digest` is reached through the store and directly from
+`tests/harness_closure.rs:410-413`; the daemon that opens the store in production
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 in the wave that lands it.
 Status: active
