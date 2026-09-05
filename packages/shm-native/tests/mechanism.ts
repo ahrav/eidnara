@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
+    assertUint32Argument,
     DESCRIPTOR_SCHEMA_VERSION,
     NativeChannel,
     nativeWireConstants,
@@ -255,6 +256,15 @@ describe("readiness dispatch", () => {
             second.second.close();
         }
     });
+
+    test("out-of-range u32 arguments are rejected before reaching the addon", () => {
+        for (const value of [-1, 0.5, 2 ** 32, Number.NaN, Number.POSITIVE_INFINITY]) {
+            expect(() => assertUint32Argument("timeoutMs", value)).toThrow(RangeError);
+        }
+        for (const value of [0, 1, 0xffff_ffff]) {
+            expect(assertUint32Argument("timeoutMs", value)).toBe(value);
+        }
+    });
 });
 
 describe("raw N-API descriptor boundary", () => {
@@ -313,6 +323,64 @@ describe("raw N-API descriptor boundary", () => {
         expect(report.after).toBe(true);
         expect(report.dispatches).toBe(report.settled);
         expect(report.receiveErrors).toBeGreaterThan(0);
+    });
+
+    test("a handler that throws over an undrained frame does not liveloop the event loop", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        // Runs in a child so event-loop starvation surfaces as the child timing out.
+        const script = join(scratch, "throwing-handler.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const pair = addon.createTestPair();\n` +
+                `let dispatches = 0;\n` +
+                `const onReady = () => {\n` +
+                `  try { dispatches += 1; throw new Error("handler failed before draining"); }\n` +
+                `  catch {}\n` +
+                `  finally { if (addon.readinessHandled()) queueMicrotask(onReady); }\n` +
+                `};\n` +
+                `addon.watch(pair.second, onReady);\n` +
+                `const header = new Uint8Array(21);\n` +
+                `const view = new DataView(header.buffer);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 2); view.setUint8(5, 3);\n` +
+                `view.setUint16(7, 1, true); view.setUint32(9, 1, true); view.setBigUint64(13, 7n, true);\n` +
+                `addon.produce(pair.first, header, 1, 0, (segments) => { segments[0][0] = 7; return 1; }, () => {});\n` +
+                `const deadline = Date.now() + 2000;\n` +
+                `while (dispatches === 0 && Date.now() < deadline) {\n` +
+                `  await new Promise((resolve) => setTimeout(resolve, 1));\n` +
+                `}\n` +
+                `const settled = dispatches;\n` +
+                `const timerFired = await new Promise((resolve) => setTimeout(() => resolve(true), 100));\n` +
+                `let drained = false;\n` +
+                `addon.poll(pair.second, (token) => { drained = true; addon.release(pair.second, token); });\n` +
+                `console.log(JSON.stringify({ settled, dispatches, timerFired, drained }));\n` +
+                `addon.close(pair.first);\n` +
+                `addon.close(pair.second);\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            settled: number;
+            dispatches: number;
+            timerFired: boolean;
+            drained: boolean;
+        };
+        expect(report.settled).toBeGreaterThan(0);
+        expect(report.settled).toBeLessThanOrEqual(2);
+        expect(report.dispatches).toBe(report.settled);
+        expect(report.timerFired).toBe(true);
+        expect(report.drained).toBe(true);
     });
 
     test("readiness acknowledgement preserves a frame published during callback", async () => {

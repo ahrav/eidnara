@@ -218,20 +218,24 @@ impl Reactor {
                         {
                             let status = callback.call((), ThreadsafeFunctionCallMode::NonBlocking);
                             if status != Status::Ok {
+                                // A rejected call ends the reactor: nothing drains the doorbells
+                                // or the setup hangup, so `epoll_wait` would return immediately
+                                // on every iteration.
+                                failed.store(true, Ordering::Release);
                                 pending.store(false, Ordering::Release);
-                            } else {
-                                match wait_until_handled(&control, &pending, &closing) {
-                                    Ok(true) if kick.load(Ordering::Acquire) => {
-                                        let _ = rustix::io::write(&control, &1u64.to_ne_bytes());
-                                    }
-                                    Ok(true) => {}
-                                    Ok(false) => break,
-                                    Err(_) => {
-                                        failed.store(true, Ordering::Release);
-                                        let _ = callback
-                                            .call((), ThreadsafeFunctionCallMode::NonBlocking);
-                                        break;
-                                    }
+                                break;
+                            }
+                            match wait_until_handled(&control, &pending, &closing) {
+                                Ok(true) if kick.load(Ordering::Acquire) => {
+                                    let _ = rustix::io::write(&control, &1u64.to_ne_bytes());
+                                }
+                                Ok(true) => {}
+                                Ok(false) => break,
+                                Err(_) => {
+                                    failed.store(true, Ordering::Release);
+                                    let _ =
+                                        callback.call((), ThreadsafeFunctionCallMode::NonBlocking);
+                                    break;
                                 }
                             }
                         }

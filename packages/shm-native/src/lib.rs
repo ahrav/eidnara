@@ -249,6 +249,19 @@ fn strict_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
     Some(bytes)
 }
 
+/// `Ring::attach` validates a grant against its own mapping, not against `PROFILE`, so two
+/// self-consistent grants with different geometry would otherwise attach as one channel.
+pub(crate) fn grant_matches_profile(grant: RingGrant) -> bool {
+    let Ok(profile) = host_test_ring_profile() else {
+        return false;
+    };
+    let geometry = grant.geometry();
+    let matches = |actual: u64, expected: usize| u64::try_from(expected) == Ok(actual);
+    matches(geometry.descriptor_depth, profile.descriptor_depth())
+        && matches(geometry.arena_bytes, profile.arena_bytes())
+        && matches(geometry.max_leases, profile.max_leases())
+}
+
 fn attach_ring(fds: [i32; 3], grant: RingGrant) -> Result<Ring> {
     let mut descriptors = Vec::with_capacity(3);
     for fd in fds {
@@ -355,21 +368,36 @@ fn detach_producer(
     Ok(active.reservation)
 }
 
+/// Detaches every alias the channel still holds. A failure does not stop the sweep: the
+/// remaining producers, leases, and stranded views are still detached, and the first
+/// failure is returned once every alias has been processed.
+fn detach_all_aliases(env: &Env, channel: &mut Channel, complete_leases: bool) -> Result<()> {
+    let mut first_failure = None;
+    let mut record = |result: Result<()>| {
+        if let Err(failure) = result
+            && first_failure.is_none()
+        {
+            first_failure = Some(failure);
+        }
+    };
+    let producer_tokens: Vec<u32> = channel.producers.keys().copied().collect();
+    for token in producer_tokens {
+        record(detach_producer(env, channel, token).map(ProducerReservation::abort));
+    }
+    let tokens: Vec<u32> = channel.active.keys().copied().collect();
+    for token in tokens {
+        record(detach_active(env, channel, token, complete_leases));
+    }
+    record(detach_stranded(env, channel));
+    first_failure.map_or(Ok(()), Err)
+}
+
 fn close_channel(env: &Env, channel: &mut Channel) -> Result<()> {
     channel.closed = true;
     if let Some(mut setup) = channel.setup.take() {
         setup::goodbye(&mut setup);
     }
-    let producer_tokens: Vec<u32> = channel.producers.keys().copied().collect();
-    for token in producer_tokens {
-        detach_producer(env, channel, token)?.abort();
-    }
-    let tokens: Vec<u32> = channel.active.keys().copied().collect();
-    for token in tokens {
-        detach_active(env, channel, token, true)?;
-    }
-    detach_stranded(env, channel)?;
-    Ok(())
+    detach_all_aliases(env, channel, true)
 }
 
 fn quarantine_channel(env: &Env, channel: &mut Channel) -> Result<()> {
@@ -380,16 +408,7 @@ fn quarantine_channel(env: &Env, channel: &mut Channel) -> Result<()> {
     }
     channel.to_host.enter_quarantine();
     channel.from_host.enter_quarantine();
-    let producer_tokens: Vec<u32> = channel.producers.keys().copied().collect();
-    for token in producer_tokens {
-        detach_producer(env, channel, token)?.abort();
-    }
-    let tokens: Vec<u32> = channel.active.keys().copied().collect();
-    for token in tokens {
-        detach_active(env, channel, token, false)?;
-    }
-    detach_stranded(env, channel)?;
-    Ok(())
+    detach_all_aliases(env, channel, false)
 }
 
 fn insert_channel(registry: &mut Registry, channel: Channel) -> Result<u32> {
@@ -604,7 +623,11 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
             .into_iter()
             .chain(peer_to_host_fds)
             .collect::<BTreeSet<_>>();
-        if distinct.len() != 6 || host_to_peer_grant == peer_to_host_grant {
+        if distinct.len() != 6
+            || host_to_peer_grant == peer_to_host_grant
+            || !grant_matches_profile(host_to_peer_grant)
+            || !grant_matches_profile(peer_to_host_grant)
+        {
             return Err(descriptor_error());
         }
         // Exclusive active attachment: a grant already backing a live
@@ -1080,6 +1103,24 @@ pub fn abort_reservation(env: &Env, channel_id: u32, token: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_geometry_admits_the_test_profile_and_rejects_another_depth() {
+        let profile = host_test_ring_profile().expect("profile");
+        let ring = Ring::create(&profile, 1).expect("ring");
+        let grant = ring.attachment().expect("attachment").grant();
+        assert!(grant_matches_profile(grant));
+
+        let other = shm_transport::profile::ring_profile(
+            shm_transport::descriptor::HardwareProfileId::new("other-geometry-v1")
+                .expect("profile id"),
+        )
+        .expect("other profile");
+        assert_ne!(other.descriptor_depth(), profile.descriptor_depth());
+        let other_ring = Ring::create(&other, 1).expect("ring");
+        let other_grant = other_ring.attachment().expect("attachment").grant();
+        assert!(!grant_matches_profile(other_grant));
+    }
 
     #[test]
     fn channel_drops_borrowing_reservations_before_the_ring() {

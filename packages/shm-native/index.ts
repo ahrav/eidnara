@@ -155,14 +155,27 @@ const ADDON_PAYLOAD_PATH = "payload/native/shm_native.node";
 
 type PlatformPackage = (typeof PLATFORM_PACKAGES)[keyof typeof PLATFORM_PACKAGES];
 
-export function supportsNativePlatform(platform: string, arch: string): boolean {
-    return `${platform}-${arch}` in PLATFORM_PACKAGES;
+/**
+ * `process.platform` and `process.arch` cannot distinguish glibc from musl. `PLATFORM_PACKAGES`
+ * requires glibc; Node and Bun omit `glibcVersionRuntime` on musl.
+ */
+function isMuslLinux(): boolean {
+    if (process.platform !== "linux") return false;
+    const report = (process as { report?: { getReport?: () => unknown } }).report;
+    const header = (report?.getReport?.() as { header?: { glibcVersionRuntime?: unknown } } | undefined)
+        ?.header;
+    return typeof header?.glibcVersionRuntime !== "string";
+}
+
+export function supportsNativePlatform(platform: string, arch: string, musl = false): boolean {
+    return !musl && `${platform}-${arch}` in PLATFORM_PACKAGES;
 }
 
 function platformPackage(): PlatformPackage {
-    const platform = PLATFORM_PACKAGES[`${process.platform}-${process.arch}` as keyof typeof PLATFORM_PACKAGES];
-    if (!platform) throw new NativeStartupError("unsupported_platform");
-    return platform;
+    if (!supportsNativePlatform(process.platform, process.arch, isMuslLinux())) {
+        throw new NativeStartupError("unsupported_platform");
+    }
+    return PLATFORM_PACKAGES[`${process.platform}-${process.arch}` as keyof typeof PLATFORM_PACKAGES];
 }
 
 function packageAddonPath(platform: PlatformPackage): string {
@@ -252,6 +265,17 @@ function protect(segments: readonly Uint8Array[]): void {
         }
         markAsUntransferable(segment.buffer);
     }
+}
+
+/**
+ * N-API converts JavaScript numbers to `u32` with ToUint32 semantics, silently wrapping
+ * negative and oversized values.
+ */
+export function assertUint32Argument(name: string, value: number): number {
+    if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+        throw new RangeError(`${name} must be an integer in [0, 4294967295]`);
+    }
+    return value;
 }
 
 export function probeCapabilities(): NativeCapabilities {
@@ -455,6 +479,7 @@ export class NativeProducerReservation {
         beforePublish?: () => void,
     ): void {
         this.assertActive();
+        assertUint32Argument("written", written);
         this.active = false;
         this.native.commitReservation(
             this.channel,
@@ -556,6 +581,7 @@ export class NativeChannel {
 
     static async connectSetup(options: NativeSetupOptions): Promise<NativeChannel> {
         const native = capableAddon();
+        assertUint32Argument("timeoutMs", options.timeoutMs);
         const pending = await native.connectSetup(options);
         return new NativeChannel(native, await native.finishSetup(pending));
     }
@@ -579,6 +605,8 @@ export class NativeChannel {
         timeoutMs = 0,
     ): void {
         this.assertOpen();
+        assertUint32Argument("capacity", capacity);
+        assertUint32Argument("timeoutMs", timeoutMs);
         this.native.produce(
             this.id,
             header,
@@ -598,6 +626,8 @@ export class NativeChannel {
 
     reserve(capacity: number, timeoutMs = 0): NativeProducerReservation {
         this.assertOpen();
+        assertUint32Argument("capacity", capacity);
+        assertUint32Argument("timeoutMs", timeoutMs);
         let token: number | undefined;
         let segments: Uint8Array[] | undefined;
         this.native.reserve(

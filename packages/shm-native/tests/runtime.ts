@@ -198,11 +198,14 @@ function runNativeLifecycle(): void {
     fill(partial.first, 4, 3, 1_000);
     const refsBeforeFailure = activeExternalRefs();
     setExternalViewCreationFailpoint(2);
-    assert.throws(
-        () => partial.second.drainOne(() => {}),
-        /external view creation failpoint/,
-    );
-    setExternalViewCreationFailpoint(0);
+    try {
+        assert.throws(
+            () => partial.second.drainOne(() => {}),
+            /external view creation failpoint/,
+        );
+    } finally {
+        setExternalViewCreationFailpoint(0);
+    }
     assert.equal(activeExternalRefs(), refsBeforeFailure);
     fill(partial.first, 1, 4, 1_000);
     receive(partial.second).release();
