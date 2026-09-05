@@ -3049,7 +3049,7 @@ testable at all.
 Status: active
 Exercised: not yet - no existing test constructs the state; it is constructible
 from a test peer, which can call the public `Ring::enter_quarantine`
-(`ring.rs:1373-1378`) on `RingClientEndpoint.to_host` (`ring_transport.rs:651-656`)
+(`crates/shm-transport/src/backend/ring.rs:1889-1897` (re-verified; the source catalog cited `:1373-1378`, which now leases a second frame span)) on `RingClientEndpoint.to_host` (`ring_transport.rs:651-656`)
 while the host holds a lease, as the required-faults field below lays out.
 Guarantee: Every admission charge an endpoint takes is accounted exactly once at its exit: released, or quarantined when the exit is a ring-corruption exit that the transport contract (`docs/shm-transport.md:21`, `:65`, `:79`) says should quarantine; never both and never neither. The slug names the discovery-time finding that no `host-runtime` path calls `Admission::quarantine`, so today the quarantined side of that accounting is structurally zero and every corrupt exit releases as if the storage were cleanly recycled, which is a contract-versus-code disagreement, not a forbidden location.
 Check: `always` - across every endpoint exit in a campaign, including corrupt-ring and swallowed-panic exits, `released + quarantined` charges equal the charges taken (no leak, no double count), and for every exit the transport contract classifies as corrupt, `snapshot().quarantined` has grown by that endpoint's charge. The second clause is a predicted violation at HEAD, because `Admission::quarantine` (`profile.rs:561`) has no `host-runtime` caller; the check asserts the documented contract rather than freezing the gap. `always` because accounting must balance at every exit.
@@ -3065,7 +3065,7 @@ Required faults and enabling state: a quarantined peer-to-host ring plus an
 inspection of `accounting().quarantined` afterwards. Two producers reach it, and
 the second is cheaper than this record originally recorded: a
 descriptor-validation failure inside `try_receive` (`ring.rs:1098`), or a peer
-that calls the public `Ring::enter_quarantine` (`ring.rs:1373-1378`) directly on
+that calls the public `Ring::enter_quarantine` (`crates/shm-transport/src/backend/ring.rs:1889-1897` (re-verified; the source catalog cited `:1373-1378`, which now leases a second frame span)) directly on
 the endpoint it already holds (`RingClientEndpoint.to_host` is a `pub` field,
 `ring_transport.rs:651-656`). See
 [ring-a-lease-release-failure-is-observable-only-on-the-success-path](#ring-a-lease-release-failure-is-observable-only-on-the-success-path).
@@ -3507,7 +3507,7 @@ release (`lease.rs:186`). **Quarantine is reachable directly from the peer, and
 this record previously said it was not.** The original text required "a peer that
 publishes a malformed descriptor" so `try_receive` would quarantine from inside
 the transport, and recorded that as unavailable. It is not the only route.
-`Ring::enter_quarantine` is a **public** method (`ring.rs:1373-1378`, in
+`Ring::enter_quarantine` is a **public** method (`crates/shm-transport/src/backend/ring.rs:1889-1897` (re-verified; the source catalog cited `:1373-1378`, which now leases a second frame span), in
 `crates/shm-transport/src/backend/ring.rs`) that stores the flag on the shared
 lifecycle page, and a peer already holds the ring it needs: `RingClientEndpoint`
 exposes `to_host` and `from_host` as `pub` fields (`ring_transport.rs:651-656`),
@@ -4696,9 +4696,15 @@ Exercised: partial - three integration tests prove an unauthenticated socket
 receives no bytes; none instruments the descriptor-send site itself.
 Guarantee: A `SCM_RIGHTS` message carrying ring descriptors is never written to a
 setup socket on which `authenticate_server` has not returned `Ok`.
-Check: `always` - instrument `send_grant` (`setup_socket.rs:153-159`); every
-invocation is preceded on that same stream by an `Ok(Authenticated)` from
-`auth.rs:251`. `always` because it is a per-send ordering invariant with no
+Check: `always` - instrument the production call path, `activate_server`'s
+`send_grant` call at `setup_socket.rs:247` as reached from `connection.rs:155-164`,
+and assert every invocation is preceded on that same stream by the
+`Ok(Authenticated)` that `authenticate_server` returned at `connection.rs:91-103`.
+The helper itself (`send_grant`, `setup_socket.rs:133`) is also called directly by
+its unit tests at `:448` and `:774` on `UnixStream::pair` sockets with no
+authentication, so a marker on every `send_grant` invocation would false-fail
+under the workspace-wide test run; scope the marker to the production path or add
+a provenance predicate. `always` because it is a per-send ordering invariant with no
 optional path and no eventual convergence; a single violation is a full loss of
 the boundary.
 Fault/timing angle: none in the ordering itself, it is straight-line. The window
@@ -5262,13 +5268,8 @@ assertion on *when* the host gave up, not a new fixture. A shortened
 observe, and unlike the `prepare`-timeout exit this needs no race: the peer's
 silence, not a scheduling outcome, is what makes the deadline fire.
 Confidence: high - [evidence](evidence/setup-a-a-stalled-setup-is-torn-down-within-the-transport-setup-deadline.md).
-**Evidence file written**: this record was added by the portfolio
-disposition, which was scoped to `catalog.md`, `fault-map.md`, and
-`portfolio-evaluation.md` and forbidden from writing under `evidence/`. The link is
-written to the schema's target so it resolves once the file lands, and the gap is
-recorded in the process caveat of
-[portfolio-evaluation.md](setup-identity/portfolio-evaluation.md). Everything the file would hold
-is verified and stated here. Verified: the single `deadline` computation at `setup_socket.rs:246-248` and its
+The evidence file exists in this tree (the portfolio disposition that added the
+record could not write under `evidence/`, and the merge supplied it). Verified: the single `deadline` computation at `setup_socket.rs:246-248` and its
 reuse at `:249-260`, `:261`, `:273`, `:281`, and `:282`; `read_message`
 (`:369-386`) wrapping both reads in `timeout_at(deadline, ..)` and mapping expiry
 to `SetupError::Timeout`; `activate_server` being called with
@@ -5562,7 +5563,9 @@ Confidence: high - [evidence](evidence/setup-a-only-an-authenticated-grant-enter
 caller-supplied integers (`:510-513`) and never touches a socket;
 `connect_setup` at `:774` starts the `BeginSetupTask` whose completion calls `setup::connect` which performs the three-message
 handshake (`setup.rs:107-113`). Both end in `insert_channel` on the same
-`REGISTRY`, at `:551` and `:612`. `index.ts:537-540` and `:542-545` expose both;
+`REGISTRY`: `:619` from `attach`, `:745` from the `finish_setup` task that completes
+`connect_setup`; the other two call sites, `:823` and `:840`, are inside
+`create_test_pair`, a test-only export (all four re-verified). `index.ts:537-540` and `:542-545` expose both;
 `shm-frame-channel.ts:77` uses only `connectSetup`, and grepping
 the source repository's `packages/plugin/src` for any other `.attach(` call site
 returns nothing outside tests; that package is absent from this tree.

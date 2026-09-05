@@ -112,7 +112,7 @@ means step 2's lease must be held while a *different* receive path quarantines.
 Since `receive_one` is single-threaded on the endpoint thread, the only way is
 the peer writing the shared `quarantined` byte directly, which is exactly Part
 1's `quarantine-authority-survives-peer-writes` scenario: the flag lives in
-shared memory (written by `enter_quarantine`, `ring.rs:1373-1378`) and every
+shared memory (written by `enter_quarantine`, `crates/shm-transport/src/backend/ring.rs:1889-1897`) and every
 gate re-reads it, so a peer can set it
 between the host's `try_receive` and the host's release.
 
