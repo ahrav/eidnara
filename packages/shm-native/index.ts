@@ -41,6 +41,7 @@ export type NativeStartupFailureReason =
     | "checksum_mismatch"
     | "debug_build"
     | "wrong_platform_binary"
+    | "addon_load_failed"
     | "capability_unavailable";
 
 /** Bounded startup failure safe for cross-package classification. */
@@ -236,7 +237,15 @@ function requireAddon(): NativeAddon {
         const addonPath = existsSync(localPath)
             ? fileURLToPath(localPath)
             : packageAddonPath(platform);
-        const native = createRequire(import.meta.url)(addonPath) as NativeAddon;
+        // A present, checksummed payload can still fail to load (wrong architecture, missing
+        // loader symbol); the raw loader error carries paths and dynamic-linker text, so it is
+        // translated into the bounded reason taxonomy before it crosses the package boundary.
+        let native: NativeAddon;
+        try {
+            native = createRequire(import.meta.url)(addonPath) as NativeAddon;
+        } catch {
+            throw new NativeStartupError("addon_load_failed");
+        }
         if (native.buildProfile() !== "release") {
             throw new NativeStartupError("debug_build");
         }
@@ -487,6 +496,18 @@ export class ProducerCursor {
     }
 }
 
+/**
+ * Liveness shared between a channel and the handles it issues: a successful native close
+ * consumes every outstanding token, so the handles must stop presenting themselves as active
+ * without each being told individually.
+ */
+class ChannelLiveness {
+    closed = false;
+}
+
+/** Module-private transition for a lease whose token the addon already consumed. */
+const markConsumed = Symbol("markConsumed");
+
 export class NativeProducerReservation {
     private active = true;
 
@@ -495,6 +516,7 @@ export class NativeProducerReservation {
         private readonly channel: number,
         private readonly token: number,
         readonly segments: readonly Uint8Array[],
+        private readonly liveness: ChannelLiveness = new ChannelLiveness(),
     ) {
         protect(segments);
     }
@@ -526,13 +548,22 @@ export class NativeProducerReservation {
     }
 
     abort(): void {
-        if (!this.active) return;
-        this.native.abortReservation(this.channel, this.token);
+        if (!this.isActive()) return;
+        try {
+            this.native.abortReservation(this.channel, this.token);
+        } catch (error) {
+            if (consumesHandle(error)) this.active = false;
+            throw error;
+        }
         this.active = false;
     }
 
+    private isActive(): boolean {
+        return this.active && !this.liveness.closed;
+    }
+
     private assertActive(): void {
-        if (!this.active) throw new Error("producer reservation is released");
+        if (!this.isActive()) throw new Error("producer reservation is released");
     }
 }
 
@@ -545,6 +576,7 @@ export class NativeReceiveLease {
         private readonly token: number,
         private readonly segments: readonly Uint8Array[],
         readonly header: Uint8Array,
+        private readonly liveness: ChannelLiveness = new ChannelLiveness(),
     ) {
         protect(segments);
     }
@@ -569,13 +601,12 @@ export class NativeReceiveLease {
         return segment;
     }
 
-    /** Records that the addon already consumed this lease's token, so no release call may follow. */
-    markReleased(): void {
+    [markConsumed](): void {
         this.released = true;
     }
 
     release(): void {
-        if (this.released) throw new Error("receive lease is already released");
+        if (this.isReleased()) throw new Error("receive lease is already released");
         // A failure after the addon detached the token cannot be retried; the wrapper releases
         // so `segment()` stops returning detached views.
         try {
@@ -588,12 +619,16 @@ export class NativeReceiveLease {
     }
 
     [Symbol.dispose](): void {
-        if (this.released) return;
+        if (this.isReleased()) return;
         this.release();
     }
 
+    private isReleased(): boolean {
+        return this.released || this.liveness.closed;
+    }
+
     private assertActive(): void {
-        if (this.released) throw new Error("receive lease is released");
+        if (this.isReleased()) throw new Error("receive lease is released");
     }
 }
 
@@ -625,7 +660,10 @@ function dispatchReadiness(): void {
             try {
                 handler();
             } catch {
-                // One failed channel cannot starve readiness for other channels.
+                // One failed channel cannot starve readiness for other channels. A handler that
+                // threw before draining leaves its frame visible with no further wake, so it is
+                // unregistered rather than left to stall silently; `startReadiness` re-arms it.
+                readinessHandlers.delete(id);
             }
         }
     } finally {
@@ -638,7 +676,7 @@ function dispatchReadiness(): void {
 }
 
 export class NativeChannel {
-    private closed = false;
+    private readonly liveness = new ChannelLiveness();
 
     private constructor(
         private readonly native: NativeAddon,
@@ -722,6 +760,7 @@ export class NativeChannel {
             this.id,
             token,
             segments,
+            this.liveness,
         );
     }
 
@@ -745,13 +784,14 @@ export class NativeChannel {
                 token,
                 segments,
                 header,
+                this.liveness,
             );
             // A throwing `deliver` makes the addon detach and release the token, so a wrapper
             // that escaped the callback must not present itself as active afterwards.
             try {
                 deliver(lease);
             } catch (error) {
-                lease.markReleased();
+                lease[markConsumed]();
                 throw error;
             }
         });
@@ -763,17 +803,17 @@ export class NativeChannel {
      * dead peer without this signal.
      */
     peerClosed(): boolean {
-        if (this.closed) return true;
+        if (this.liveness.closed) return true;
         return this.native.peerClosed(this.id);
     }
 
     close(): void {
-        if (this.closed) return;
+        if (this.liveness.closed) return;
         this.finishClose(() => this.native.close(this.id));
     }
 
     forceClose(): void {
-        if (this.closed) return;
+        if (this.liveness.closed) return;
         this.finishClose(() => this.native.forceClose(this.id));
     }
 
@@ -788,16 +828,18 @@ export class NativeChannel {
         } catch (error) {
             if (consumesHandle(error)) {
                 readinessHandlers.delete(this.id);
-                this.closed = true;
+                this.liveness.closed = true;
             }
             throw error;
         }
         readinessHandlers.delete(this.id);
-        this.closed = true;
+        // A successful native close consumed every outstanding token; the shared liveness flag
+        // retires every lease and reservation issued by this channel at once.
+        this.liveness.closed = true;
     }
 
     private assertOpen(): void {
-        if (this.closed) throw new Error("native channel is closed");
+        if (this.liveness.closed) throw new Error("native channel is closed");
     }
 }
 

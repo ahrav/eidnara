@@ -628,11 +628,12 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
             _ => return Err(format!("unknown event type at line {line_no}")),
         }
     }
-    // A decisive `agent_end` decision overrides `message_end`; a nonterminal final assistant or missing `agent_end` uses the last provisional `message_end` decision.
-    if let Some((message, line_no)) = &agent_end_final
-        && let Some((text, terminal)) = assistant_message_terminal(message, *line_no)?
-    {
-        return Ok((text.into_iter().collect(), terminal));
+    // `agent_end` is authoritative: its final assistant decides, and a nonterminal final (tool request, missing or intermediate stop reason) means the run never reached a terminal answer, so the provisional `message_end` decision must not stand in for it. commentlint: allow(JUDGE)
+    if let Some((message, line_no)) = &agent_end_final {
+        return match assistant_message_terminal(message, *line_no)? {
+            Some((text, terminal)) => Ok((text.into_iter().collect(), terminal)),
+            None => Err("agent_end without a terminal final assistant message".to_owned()),
+        };
     }
     let Some((text, terminal)) = provisional else {
         return Err("output ended without a terminal event".to_owned());
