@@ -227,7 +227,7 @@ and `n/a - invalidated` for an invalidated record.
 | [release-authority-bound-to-lease-ownership](#release-authority-bound-to-lease-ownership) | safety | high | yes |
 | [release-exactly-once-per-sequence](#release-exactly-once-per-sequence) | safety | high | yes |
 | [receive-failure-leaves-no-wedged-slot](#receive-failure-leaves-no-wedged-slot) | safety | high | yes |
-| [release-failure-is-observable](#release-failure-is-observable) | liveness | medium | yes |
+| [release-failure-is-observable](#release-failure-is-observable) | liveness | high | yes |
 | [attach-reconciles-or-refuses-stale-shared-cursors](#attach-reconciles-or-refuses-stale-shared-cursors) | safety | high | yes |
 | [crashed-producer-does-not-wedge-the-sequence](#crashed-producer-does-not-wedge-the-sequence) | liveness | high | no |
 | [dead-peer-charges-are-reclaimed-or-declared](#dead-peer-charges-are-reclaimed-or-declared) | safety | high | yes |
@@ -409,14 +409,15 @@ Open questions:
 ### attach-refuses-a-quarantined-object
 
 Type: safety
-Reachability: default-production — the client's default frame channel is
-`ShmFrameChannel` over this addon
-(`packages/plugin/src/shared/host-client/connection.ts:396`); only a test
-`channelFactory` bypasses it (`:392-393`). The host side is unconditional too
-(`crates/host-runtime/src/runtime.rs:741`), so the test-only framing above predates
-the ring-transport refactor.
+Reachability: default-production - every attach of transferred descriptors goes
+through `Ring::attach` (`crates/shm-transport/src/backend/ring.rs:969`), on the
+host (`crates/host-runtime/src/connection.rs:116-117`) and in the shipped addon;
+the source tree's `ShmFrameChannel` in `packages/plugin` is not in this tree.
 Status: active
-Exercised: not yet — needs an attach against an already-quarantined object.
+Exercised: yes - `attach_refuses_a_quarantined_ring` (`ring.rs:3715-3719`) takes
+an attachment, quarantines the ring, and asserts `attach()` returns
+`RingError::Quarantined`. The addon-side half (no channel id issued, no grant
+claim consumed) is not asserted.
 Guarantee: Attaching to a shared object whose lifecycle page is quarantined
 fails at attach, before a channel id is issued or a process-wide grant claim is
 consumed.
@@ -428,15 +429,19 @@ first reserve or receive.
 Required faults and enabling state: a quarantine trigger, then a fresh attach
 using the same grant.
 Confidence: high — [evidence](evidence/attach-refuses-a-quarantined-object.md).
-Raised from medium after direct verification - `validate_lifecycle`
-(`ring.rs:2067-2098`) reads exactly eight fields at `:2074-2085` — magic, layout
-version, depth, arena, leases, total, incarnation, and lane — and compares them
-at `:2086-2096`. It never reads `quarantined`. The per-operation gates are the
-only readers of that flag.
-Existing check: per-operation `is_quarantined()` guards only.
-Impact: a caller receives a channel id and a usable-looking channel that fails at
-first reserve or receive. The grant claim is held until the registry entry is
-removed; `close` and `force_close` do remove it once producers, active leases,
+At HEAD `Ring::attach` (`ring.rs:969-1030`) checks `ring.is_quarantined()` and
+returns `RingError::Quarantined` (`:1020-1022`) before the ring is usable, so
+the transport half of the guarantee holds by construction; the source tree's
+attach validated the lifecycle page's eight identity fields and never read the
+`quarantined` flag, which is the defect this record was written against. The
+addon builds its channel entry and consumes its grant claim around this call, so
+whether a refused attach leaves no registry entry and no claim is the half still
+to verify.
+Existing check: `attach_refuses_a_quarantined_ring` (`ring.rs:3715-3719`) for the
+transport half; none for the addon-side entry and claim. Status unaudited.
+Impact: if the attach gate were removed, a caller would receive a channel id and
+a usable-looking channel that fails at first reserve or receive. The grant claim
+is held until the registry entry is removed; `close` and `force_close` do remove it once producers, active leases,
 and stranded aliases are all empty (`packages/shm-native/src/lib.rs:1326-1329`,
 `:1350-1352`), so the claim is pinned indefinitely only when a detach has already
 stranded an alias. An earlier draft of this record overstated that as "for the
@@ -939,42 +944,50 @@ connection (`crates/host-runtime/src/connection.rs:117`), so the `Reaches
 production: no` line above, set when only the host driver was gone, no longer
 describes this path.
 Status: active
-Exercised: not yet — needs an injected release failure on an otherwise clean
-path.
+Exercised: partial - `mismatched_release_identity_names_the_field_and_quarantines`
+(`crates/shm-transport/src/backend/ring.rs:3902-3936`) forges each identity field
+in turn and asserts the release error names it and that the ring is quarantined
+afterwards; no test drives the drop path with a failing release and observes the
+quarantine from outside.
 Guarantee: A release or completion that fails is retried, reported, or surfaced;
 never dropped silently.
 Check: `always` — inject a release failure on the drop path and on the clean
 close path, and assert that some counter, diagnostic, or suspect record fires.
-Fault/timing angle: `ReceiveLease::Drop` calls `release_once()` and discards the
-result, so a drop-time `WrongIncarnation`, `Quarantined`, or `DuplicateRelease`
-is unobservable. The host half of this record is gone: `let _ =
-custody.release()` no longer exists, and the suspect path it fell through to no
-longer exists either.
+Fault/timing angle: `ReceiveLease::Drop` (`crates/shm-transport/src/lease.rs:253`)
+calls `release_once()` and discards the returned error, but the failure itself is
+not silent: `Ring::release` (`ring.rs:1469-1475`) wraps `release_inner` in
+`inspect_err(|_| self.enter_quarantine())`, so every release failure latches the
+terminal state and rings both doorbells, and a ring that was already quarantined
+returns `Quarantined` before releasing. The discarded value is the error, not the
+signal. The source tree's host half, `let _ = custody.release()` falling through
+to a suspect record, is gone.
 Required faults and enabling state: a release that fails while the surrounding
 operation is otherwise clean.
-Confidence: medium — [evidence](evidence/release-failure-is-observable.md).
-The surviving discard site is explicit
-(`crates/shm-transport/src/lease.rs:201-207`, verified unchanged). The former
+Confidence: high - [evidence](evidence/release-failure-is-observable.md).
+Verified at HEAD - the drop-path discard is `lease.rs:253`, and `Ring::release`
+(`ring.rs:1469-1475`) quarantines on every `release_inner` error, so the failure
+is observable through `is_quarantined()`, `conservation()`, and the doorbell
+wake even though the `Result` is dropped. The former
 host discard site `crates/host-runtime/src/shm_provider.rs:365` was replaced by
 `crates/host-runtime/src/ring_transport.rs:276`, which calls
 `Admission::release(mut self)` (`crates/shm-transport/src/profile.rs:512`).
 That signature returns `()`, so there is no longer a host-side result to discard
 and no host-side clean-path release failure to observe; the silent-no-op risk
 inside `AdmissionController::release` moved wholly into
-`charge-release-never-silently-strands`. Whether `release()` can actually fail on
-a clean close depends on `AdmissionError` reachability that was not fully traced,
-which is why this is medium. Reachability moved to `no` because the remaining
-discard is on the transport-side lease drop path, which no shipped configuration
-selects.
-Existing check: none. `recovery.report_suspect(custody)` was deleted with
-`provider_recovery.rs`.
-Impact: a stranded charge or an unreclaimed frame with no counter, no log, and
-no suspect record. The operator learns nothing, and the arena bytes stay
-unreclaimable.
+`charge-release-never-silently-strands`. Whether `Admission::release` can fail on a
+clean close is that record's question, not this one's; the transport-side drop
+path is on every shipped connection's teardown.
+Existing check: `mismatched_release_identity_names_the_field_and_quarantines`
+(`ring.rs:3902-3936`). Status unaudited.
+Impact: if the quarantine-on-error wrapping were removed, a release failure on the
+drop path would strand a charge or an unreclaimed frame with no counter, log, or
+terminal state, and the arena bytes would stay unreclaimable with nothing
+telling the operator. At HEAD the quarantine is the signal.
 Open questions:
 
-- Is silent loss on the drop path intended, given the addon `mem::forget`s
-  leases and releases through its own table instead?
+- The signal is quarantine, which is terminal for the direction. Is that the
+  intended response to a drop-time release failure, or should the drop path
+  report without condemning the ring? (needs human input)
 
 ---
 
@@ -1350,23 +1363,34 @@ Exercised: not yet — needs an attach whose grant geometry differs from the
 admitted profile.
 Guarantee: A peer only maps a shared object whose declared geometry equals the
 geometry its own admitted profile charged for.
-Check: `always` — at attach, assert grant depth, arena bytes, and lease cap all
-equal the local profile's values, and assert an upper bound on depth and total
-bytes exists inside Rust.
+Check: `always` - at attach, assert grant depth, arena bytes, and lease cap all
+equal the local profile's values. The absolute ceiling is already present and is
+not part of this check: `Layout::new` rejects any depth above
+`MAX_DESCRIPTOR_DEPTH` (4096) with `InvalidLayout` (`ring.rs:234-235`), and
+`RingGrant::checked_layout` (`:812-819`) calls it before a grant is accepted.
 Fault/timing angle: no fault needed. `Ring::attach` takes no `TargetProfile`, so
 geometry is only checked for self-consistency and against the mapped lifecycle
 page — never against what admission charged.
 Required faults and enabling state: a grant declaring a geometry the local
 profile did not charge for.
 Confidence: high — [evidence](evidence/attach-binds-geometry-to-a-local-profile.md).
-`Ring::attach` (`ring.rs:598`) has no profile parameter, and `checked_layout`
-(`:461`) bounds depth only by `!= 0` plus layout arithmetic.
-Existing check: `crates/host-runtime/src/ring_transport.rs:822`
-`ring_profile_pins_per_connection_grant_geometry` pins the *host*
-profile's geometry; nothing pins the attaching side's. Status unaudited.
-Impact: admission accounting describes an object that was never mapped. It also
-means a self-consistent grant with a very large depth reaches `mmap` with only a
-TypeScript-side cap in the way.
+`Ring::attach` (`ring.rs:969`) has no profile parameter, so geometry is checked
+for self-consistency and against the mapped lifecycle page, never against what
+admission charged. The absolute bound the source-tree record said was missing
+exists at HEAD: `checked_layout` (`:812-819`) calls `Layout::new`, which
+rejects `depth == 0 || depth > MAX_DESCRIPTOR_DEPTH` (`:234-235`,
+`MAX_DESCRIPTOR_DEPTH = 4096` at `:50`) and a non-page-multiple arena, and the
+test at `:3833-3841` drives a depth of `MAX_DESCRIPTOR_DEPTH + 1` to rejection.
+What is still missing is the equality against the local profile.
+Existing check: `ring_profile_pins_per_connection_grant_geometry`
+(`crates/host-runtime/src/ring_transport.rs:904`) pins the host profile's
+geometry, and the depth-ceiling test at `ring.rs:3833-3841` pins the absolute
+bound; nothing pins the attaching side's geometry to its admitted profile.
+Status unaudited.
+Impact: admission accounting describes an object that was never mapped: a grant
+with any depth up to 4096 and any page-multiple arena that the host will issue
+is accepted regardless of what the attaching side's profile charged. An
+arbitrarily large depth cannot reach `mmap`; a wrong but in-range one can.
 Open questions: None.
 
 ### one-profile-name-denotes-one-geometry
@@ -4097,7 +4121,7 @@ Check: `always` - `compute_proof(inputs) == vectors::SERVER_PROOF` and `== vecto
 Fault/timing angle: A transcript change (field order, length prefix, domain string) that both peers apply symmetrically still interoperates, so only a vector computed outside the implementation detects it.
 Required faults and enabling state: The committed inputs (key `00..1f`, nonces `20..3f` and `40..5f`, daemon id `60..6f`, `daemon_ver` `eidnara-host/0.1.0`) and an oracle that is not `compute_proof`.
 Confidence: high - [evidence](evidence/setup-proof-vectors-pin-the-shared-hmac-transcript.md). The vectors were regenerated once at U3 because the domain separators and the daemon version prefix are renamed identities; a Python HMAC implementation reproduced the predecessor vectors from the predecessor strings and the new vectors from the new strings.
-Existing check: `committed_vectors_pin_the_shared_construction` (`crates/shm-transport/src/setup_auth.rs`), `daemon_ver_is_bound_into_the_proof`, `auth_proofs_match_committed_wire_vectors` (`packages/shm-native/src/setup.rs`), and `committed_auth_proof_vectors_pin_the_construction` in `crates/host-runtime/tests/protocol_vectors.rs`, whose oracle is the test-local `raw_client::proof`; audited at U3.
+Existing check: `committed_vectors_pin_the_shared_construction` (`crates/shm-transport/src/setup_auth.rs`), `daemon_ver_is_bound_into_the_proof`, `auth_proofs_match_committed_wire_vectors` (`packages/shm-native/src/setup.rs`), and `committed_auth_proof_vectors_pin_the_construction` in `crates/host-runtime/tests/protocol_vectors.rs`, whose oracle is the test-local `raw_client::proof`; unaudited.
 Impact: Host and addon disagree on the proof and no client can attach; or both agree on a weakened transcript and a rogue listener obtains a proof.
 Open questions: None.
 

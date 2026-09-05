@@ -1,9 +1,10 @@
 # Tokenizer existing-check inventory
 
 Every claim-bearing check for `crates/tokenizer` at U3, with per-check status.
-Statuses follow `../METHOD.md`: `unaudited` until a discovery pass reads the
-assertion against the record it serves; `audited at U3` where the catalog record
-already did so.
+Every status is `unaudited`, as `../METHOD.md` requires: an existing check never
+removes a property from the catalog, and adequacy verdicts belong to a separate
+invariant-test review. Where a catalog record cites a test, the row says so; that
+is a link, not a verdict.
 
 ## Rust integration tests
 
@@ -11,15 +12,15 @@ already did so.
 
 | Test | Claim asserted | Status |
 | --- | --- | --- |
-| `encode_ordinary_matches_ai_tokenizer_ids` (`:24`) | For all 46 golden cases, `encode_ordinary(text) == golden.ids` | audited at U3 (`tokenizer-encoding-matches-the-independent-oracle`) |
-| `estimate_tokens_matches_golden_counts` (`:47`) | For all golden cases, `estimate_tokens(text) == golden.ids.len()` | audited at U3 (same record) |
+| `encode_ordinary_matches_ai_tokenizer_ids` (`:24`) | For all 46 golden cases, `encode_ordinary(text) == golden.ids` | unaudited; cited by `tokenizer-encoding-matches-the-independent-oracle` |
+| `estimate_tokens_matches_golden_counts` (`:47`) | For all golden cases, `estimate_tokens(text) == golden.ids.len()` | unaudited; cited by same record |
 | `empty_text_is_zero` (`:59`) | `estimate_tokens("") == 0` | unaudited |
 | `deterministic_across_calls` (`:64`) | Repeated calls on one input return identical ids | unaudited |
 | `deterministic_across_threads` (`:73`) | Concurrent callers on one input return identical ids; the `OnceLock` tokenizer is shared safely | unaudited |
-| `bom_before_newline_is_preserved` (`:101`) | `"x\u{feff}\n"` encodes to `[x, bom, newline]`, diverging from the stock oracle's BOM-stripping lookup | audited at U3 (scope exception in `catalog.md`) |
-| `over_long_piece_is_chunked_and_bounded` (`:116`) | A letter run above `MAX_PIECE_BYTES` encodes as the concatenation of its chunk encodings and the count matches | audited at U3 (`tokenizer-over-long-pieces-are-chunked-and-bounded`) |
-| `over_long_cjk_piece_keeps_char_boundaries` (`:134`) | A multi-byte run above the cap encodes without splitting a codepoint and yields a plausible count | audited at U3 (same record) |
-| `long_text_without_over_long_piece_is_unaffected_by_bound` (`:150`) | Text above the cap with no over-long piece encodes identically to its per-sentence encoding | audited at U3 (same record) |
+| `bom_before_newline_is_preserved` (`:101`) | `"x\u{feff}\n"` encodes to `[x, bom, newline]`, diverging from the stock oracle's BOM-stripping lookup | unaudited; cited by scope exception in `catalog.md` |
+| `over_long_piece_is_chunked_and_bounded` (`:116`) | A letter run above `MAX_PIECE_BYTES` encodes as the concatenation of its chunk encodings and the count matches | unaudited; cited by `tokenizer-over-long-pieces-are-chunked-and-bounded` |
+| `over_long_cjk_piece_keeps_char_boundaries` (`:134`) | A multi-byte run above the cap encodes without splitting a codepoint and yields a plausible count | unaudited; cited by same record |
+| `long_text_without_over_long_piece_is_unaffected_by_bound` (`:150`) | Text above the cap with no over-long piece encodes identically to its per-sentence encoding | unaudited; cited by same record |
 
 ## In-crate unit tests
 
