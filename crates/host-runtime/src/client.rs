@@ -162,18 +162,11 @@ impl CallError {
     /// with string `code` and `message`, and an unsigned `retry_after_ms` when present.
     /// Unknown members are permitted.
     fn host_terminal(body: &[u8]) -> Option<Self> {
-        // A repeated recognized member would let the last occurrence win silently, so it is
-        // malformed; repeated unknown members are ignored like any other unknown member (§7.4).
-        if !recognized_keys_are_unique(body, &["code", "message", "retry_after_ms"]) {
-            return None;
-        }
-        let value = serde_json::from_slice::<Value>(body).ok()?;
-        let code = value.get("code")?.as_str()?;
-        value.get("message")?.as_str()?;
-        let retry_after = match value.get("retry_after_ms") {
-            None => None,
-            Some(delay) => Some(Duration::from_millis(delay.as_u64()?)),
-        };
+        // Only the recognized members are materialized; unknown members are skipped in the
+        // stream so a large ignored member never costs a second body-sized allocation.
+        let fields = ErrorBodyFields::scan(body)?;
+        let code = fields.code.as_str();
+        let retry_after = fields.retry_after_ms.map(Duration::from_millis);
         // Raw terminal messages may contain request, credential, or identity data.
         // `CallError` retains the bounded terminal code and discards the raw terminal message.
         // `host.` identifies host-supplied codes; the raw code is bounded on its own so a
@@ -686,7 +679,10 @@ impl Client {
                 None,
             )
             .await?;
-        let acknowledged = control_op(&response.body).as_deref() == Some(OP_HOST_SHUTDOWN);
+        // §7.1: the tag must be unique and the whole object within the control nesting bound.
+        let acknowledged = control_op(&response.body).as_deref() == Some(OP_HOST_SHUTDOWN)
+            && serde_json::from_slice::<Value>(&response.body)
+                .is_ok_and(|value| !exceeds_control_depth(&value));
         if !acknowledged {
             // A channel-0 response that is not the tagged JSON object §7.1 requires is framing corruption, not an application result.
             self.inner.retire("invalid_shutdown_response");
@@ -741,14 +737,20 @@ impl Client {
             )
             .await?;
         // A channel-0 response that is not the tagged JSON object §7.1 requires is framing corruption, not an application result.
-        let decoded = serde_json::from_slice::<WireStatus>(&response.body).map_err(|_| {
+        let malformed = || {
             self.inner.retire("invalid_host_status_response");
             CallError::local(
                 SendOutcome::Terminal,
                 "invalid_host_status_response",
                 "host.status response is malformed",
             )
-        })?;
+        };
+        // §7.1: unknown members count toward the control nesting bound.
+        let value = serde_json::from_slice::<Value>(&response.body).map_err(|_| malformed())?;
+        if exceeds_control_depth(&value) {
+            return Err(malformed());
+        }
+        let decoded: WireStatus = serde_json::from_value(value).map_err(|_| malformed())?;
         let invalid_identity = || {
             self.inner.retire("invalid_host_status_response");
             CallError::local(
@@ -1603,8 +1605,12 @@ impl Inner {
                                         let binds = lock_unpoisoned(&self.binds);
                                         let same_channel =
                                             |route: &RouteHandle| route.channel == handle.channel;
+                                        // A handle whose earlier bind was torn down before its
+                                        // opener resumed still has one marker outstanding; a reuse
+                                        // would let two openers share it.
                                         routes.iter().any(same_channel)
                                             || binds.publishing.iter().any(same_channel)
+                                            || binds.torn_down.contains(&handle)
                                     }
                                 {
                                     drop(charge);
@@ -1982,9 +1988,11 @@ impl Inner {
             };
             if tokio::time::timeout_at(deadline, &mut *task).await.is_err() {
                 within_deadline = false;
-                // `JoinHandle` must not be awaited again after it completes.
+                // `abort` only schedules cancellation; a task in non-yielding work finishes
+                // that work first. The aborted handle stays in its slot so a later `close`
+                // joins it under its own deadline instead of blocking this one past it.
                 task.abort();
-                let _ = task.await;
+                continue;
             }
             *slot = None;
         }
@@ -3179,6 +3187,107 @@ fn route_open_body(target: &RouteTarget, identity: &RouteIdentity) -> Result<Vec
         ));
     }
     Ok(body)
+}
+
+/// The recognized members of a canonical `ErrorBody` (§6.2), read in one pass. A repeated
+/// recognized member, a missing or mistyped `code` or `message`, or a `retry_after_ms` that
+/// is not an unsigned integer makes the body non-canonical; unknown members are skipped.
+struct ErrorBodyFields {
+    code: String,
+    retry_after_ms: Option<u64>,
+}
+
+impl ErrorBodyFields {
+    fn scan(body: &[u8]) -> Option<Self> {
+        use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
+        struct Fields;
+        impl<'de> Visitor<'de> for Fields {
+            type Value = Option<ErrorBodyFields>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a canonical error body")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut code: Option<String> = None;
+                let mut message_seen = false;
+                let mut retry: Option<Option<u64>> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "code" => {
+                            if code.is_some() {
+                                return Ok(None);
+                            }
+                            let Ok(value) = map.next_value::<String>() else {
+                                return Ok(None);
+                            };
+                            code = Some(value);
+                        }
+                        "message" => {
+                            if message_seen {
+                                return Ok(None);
+                            }
+                            // The text is redacted; only its type is checked.
+                            let Ok(IgnoredString) = map.next_value::<IgnoredString>() else {
+                                return Ok(None);
+                            };
+                            message_seen = true;
+                        }
+                        "retry_after_ms" => {
+                            if retry.is_some() {
+                                return Ok(None);
+                            }
+                            let Ok(value) = map.next_value::<u64>() else {
+                                return Ok(None);
+                            };
+                            retry = Some(Some(value));
+                        }
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                match (code, message_seen) {
+                    (Some(code), true) => Ok(Some(ErrorBodyFields {
+                        code,
+                        retry_after_ms: retry.flatten(),
+                    })),
+                    _ => Ok(None),
+                }
+            }
+        }
+        struct Seed;
+        impl<'de> DeserializeSeed<'de> for Seed {
+            type Value = Option<ErrorBodyFields>;
+            fn deserialize<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                deserializer.deserialize_map(Fields)
+            }
+        }
+        let mut deserializer = serde_json::Deserializer::from_slice(body);
+        let fields = Seed.deserialize(&mut deserializer).ok()??;
+        deserializer.end().ok()?;
+        Some(fields)
+    }
+}
+
+/// Accepts a JSON string without retaining it.
+struct IgnoredString;
+
+impl<'de> serde::Deserialize<'de> for IgnoredString {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = IgnoredString;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_str<E>(self, _: &str) -> Result<IgnoredString, E> {
+                Ok(IgnoredString)
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
 }
 
 /// Whether each key in `recognized` appears at most once at the top level of `body`.
