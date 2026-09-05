@@ -347,6 +347,14 @@ impl CompositeComponent for BrocaComponent {
                  caller-private prompt material may remain on disk"
             )));
         }
+        // A retained crash-ownership record remains in the registry for a successor to sweep.
+        let records = self.supervisor.record_unresolved_runs();
+        if records > 0 {
+            return Err(ShutdownError(format!(
+                "{records} run(s) could not remove their crash-ownership records; \
+                 the registry retains them for a later sweep"
+            )));
+        }
         Ok(())
     }
 }

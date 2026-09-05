@@ -410,6 +410,32 @@ pub async fn run(
     // The successor sweeps the group's descendants after this host exits.
     let mut group_record = group_record;
 
+    // Cancellation can arrive during adapter setup or registration, before the drain loop below polls the token.
+    // Delivering the prompt after cancellation can start a provider request for an already-cancelled run.
+    if cancel.is_cancelled() {
+        let group_gone = terminate_group(group, &mut child, limits.termination_grace)
+            .await
+            .is_ok();
+        let mut record_retained = false;
+        if group_gone
+            && let Some(record) = group_record.take()
+            && record.remove().is_err()
+        {
+            record_retained = true;
+        }
+        return Ok(SubprocessResult {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            end: if group_gone {
+                SubprocessEnd::Cancelled
+            } else {
+                SubprocessEnd::TeardownUnconfirmed
+            },
+            prompt_delivered: false,
+            record_retained,
+        });
+    }
+
     // Concurrent prompt delivery and output draining prevent a child that fills stdout before reading stdin from deadlocking the host.
     // Prompt delivery drops stdin after writing so print-mode reads receive EOF.
     let mut stdin_pipe = child.stdin.take();
@@ -668,7 +694,7 @@ async fn kill_group_fenced(
 
 /// Runs a synchronous `/proc` or filesystem step on the blocking pool so it never stalls a runtime worker.
 /// A cancelled or panicked blocking task reads as an unknown answer.
-async fn off_runtime<T: Send + 'static>(
+pub(crate) async fn off_runtime<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> io::Result<T> {
     tokio::task::spawn_blocking(work)
@@ -748,6 +774,9 @@ pub struct CleanupFailure {
 /// The provider fallback uses `CleanupFailure`'s `Display` text as its retry discriminator.
 /// The Pi fallback gate does not retry after cleanup leaves private prompt material on disk.
 pub(crate) const CLEANUP_FAILURE_MARKER: &str = "cleanup failed";
+
+/// Settlement uses this text to recognize a retained crash-ownership record in a terminal message.
+pub(crate) const RECORD_RETAINED_MARKER: &str = "could not remove its crash-ownership record";
 
 impl std::fmt::Display for CleanupFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -907,10 +936,20 @@ pub fn merge_cleanup(
 /// The supervisor latches it before a committed cancellation terminal replaces the backend terminal that carries the failure text.
 /// `Completed` never carries residue because `merge_cleanup` converts a completed run with a cleanup failure to `Failed`.
 pub(crate) fn terminal_reports_cleanup_residue(terminal: &BackendTerminal) -> bool {
+    terminal_message(terminal).is_some_and(|message| message.contains(CLEANUP_FAILURE_MARKER))
+}
+
+/// `terminal_reports_record_residue` is the settlement-side discriminator for a retained crash-ownership record.
+/// A retained record outlives the run, so settlement must observe it even when a cancellation terminal replaces the backend terminal.
+pub(crate) fn terminal_reports_record_residue(terminal: &BackendTerminal) -> bool {
+    terminal_message(terminal).is_some_and(|message| message.contains(RECORD_RETAINED_MARKER))
+}
+
+fn terminal_message(terminal: &BackendTerminal) -> Option<&str> {
     match terminal {
-        BackendTerminal::Completed { .. } => false,
+        BackendTerminal::Completed { .. } => None,
         BackendTerminal::Failed(error) | BackendTerminal::FailedUnresolved(error) => {
-            error.message.contains(CLEANUP_FAILURE_MARKER)
+            Some(&error.message)
         }
     }
 }
@@ -1338,10 +1377,7 @@ fn merge_record_retained(
     if !retained {
         return terminal;
     }
-    let detail = format!(
-        "{} backend could not remove its crash-ownership record",
-        harness.as_str()
-    );
+    let detail = format!("{} backend {RECORD_RETAINED_MARKER}", harness.as_str());
     match terminal {
         BackendTerminal::Completed { finish_reason } => BackendTerminal::Failed(BackendError {
             class: ErrorClass::Transient,

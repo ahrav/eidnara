@@ -16,6 +16,7 @@ use super::backend::{
     self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
     EventSink, FinishReason, Harness, LlmExecutionBackend,
 };
+use super::config::MAX_PI_PROVIDER_EXTENSIONS;
 use super::subprocess::group_registry::StateRoot;
 use super::subprocess::{
     self, EnvSnapshot, PrivateDir, ProbeSignal, SubprocessLimits, SubprocessSpec,
@@ -131,6 +132,10 @@ impl LlmExecutionBackend for PiBackend {
         if harness != Harness::Pi {
             return None;
         }
+        // `run_pi` holds every resolved extension descriptor at once, so an oversized set fails the run; a rejected send must report the same subreason.
+        if self.descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
+            return Some("extension_budget_exceeded");
+        }
         let closure = &self.descriptor.closure;
         let mut required = [
             &self.descriptor.interpreter_node,
@@ -240,34 +245,33 @@ async fn run_pi(
             return subprocess::credential_failure(Harness::Pi, error);
         }
     };
-    // Closure resolution precedes the private directory so an unavailable harness never writes the caller-private system prompt to disk.
-    let interpreter = match descriptor
-        .closure
-        .resolve_node_descriptor(&descriptor.interpreter_node)
-    {
-        Ok(path) => path,
-        Err(_) => {
-            return subprocess::harness_unavailable_failure(Harness::Pi, "closure_incomplete");
-        }
-    };
-    let entrypoint = match descriptor
-        .closure
-        .resolve_node_descriptor(&descriptor.entrypoint_node)
-    {
-        Ok(path) => path,
-        Err(_) => {
-            return subprocess::harness_unavailable_failure(Harness::Pi, "closure_incomplete");
-        }
-    };
-    let mut resolved_extensions = Vec::with_capacity(descriptor.provider_extension_nodes.len());
-    for extension_node in &descriptor.provider_extension_nodes {
-        match descriptor.closure.resolve_node_descriptor(extension_node) {
-            Ok(extension) => resolved_extensions.push(extension),
-            Err(_) => {
-                return subprocess::harness_unavailable_failure(Harness::Pi, "closure_incomplete");
-            }
-        }
+    // The bound is checked before resolution so an oversized descriptor set opens no files.
+    if descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
+        return subprocess::harness_unavailable_failure(Harness::Pi, "extension_budget_exceeded");
     }
+    // Closure resolution precedes the private directory so an unavailable harness never writes the caller-private system prompt to disk.
+    // Resolution opens and stats every node, so it runs on the blocking pool in one hop rather than on a runtime worker.
+    let closure = Arc::clone(&descriptor.closure);
+    let interpreter_node = descriptor.interpreter_node.clone();
+    let entrypoint_node = descriptor.entrypoint_node.clone();
+    let extension_nodes = descriptor.provider_extension_nodes.clone();
+    let resolved = subprocess::off_runtime(move || {
+        let interpreter = closure.resolve_node_descriptor(&interpreter_node).ok()?;
+        let entrypoint = closure.resolve_node_descriptor(&entrypoint_node).ok()?;
+        let mut extensions = Vec::with_capacity(extension_nodes.len());
+        for node in &extension_nodes {
+            extensions.push(closure.resolve_node_descriptor(node).ok()?);
+        }
+        Some((interpreter, entrypoint, extensions))
+    })
+    .await;
+    let (interpreter, entrypoint, resolved_extensions) = match resolved {
+        Ok(Some(resolved)) => resolved,
+        Ok(None) => {
+            return subprocess::harness_unavailable_failure(Harness::Pi, "closure_incomplete");
+        }
+        Err(err) => return subprocess::spawn_failure(Harness::Pi, &err),
+    };
 
     let dir = match PrivateDir::create_async(state_root.clone(), "broca-pi").await {
         Ok(dir) => dir,

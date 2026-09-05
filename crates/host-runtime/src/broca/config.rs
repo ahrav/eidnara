@@ -18,6 +18,10 @@ pub const MAX_SEND_BODY_BYTES: usize = 512 * 1024;
 /// The adapter rejects oversized configuration before `exec(2)` can fail with `E2BIG`.
 pub const MAX_OPENCODE_CONFIG_BYTES: usize = 96 * 1024;
 
+/// Each resolved Pi provider extension holds an open descriptor for the whole run and contributes an `--extension <path>` argv pair.
+/// The bound keeps both the descriptor table and argv within limits `exec(2)` enforces.
+pub const MAX_PI_PROVIDER_EXTENSIONS: usize = 32;
+
 /// `MAX_RUN_REPLAY_BYTES` includes terminal headroom so a full replay can record one terminal unit.
 pub const MAX_RUN_REPLAY_BYTES: usize = 1024 * 1024;
 

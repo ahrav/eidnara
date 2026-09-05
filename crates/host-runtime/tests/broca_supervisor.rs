@@ -871,6 +871,47 @@ async fn unproven_teardown_outranks_cleanup_residue() {
     assert_eq!(supervisor.cleanup_unresolved_runs(), 1);
 }
 
+/// A retained crash-ownership record must survive cancellation arbitration the same way private-file residue does.
+#[tokio::test]
+async fn cancellation_winning_the_terminal_still_reports_record_residue() {
+    let backend = ScriptedBackend::with_behavior(|_request, _events, cancel| {
+        Box::pin(async move {
+            cancel.cancelled().await;
+            // The message mirrors `merge_record_retained` output for a run whose record removal failed.
+            BackendTerminal::Failed(BackendError {
+                class: ErrorClass::Transient,
+                message: "pi backend could not remove its crash-ownership record".to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        })
+    });
+    let supervisor = Supervisor::new(backend as Arc<_>);
+
+    let run_id = send(&supervisor, "s-cancel-record", "p1");
+    until(
+        || supervisor.status(&key("s-cancel-record"), &run_id) == Ok("running"),
+        "the backend starts before the cancel races it",
+    )
+    .await;
+
+    let cancelled = supervisor
+        .cancel(&key("s-cancel-record"), &run_id)
+        .await
+        .expect_err("cancel cannot report success while a record remains");
+    assert_eq!(cancelled.code, "record_unconfirmed");
+    assert_eq!(
+        supervisor.status(&key("s-cancel-record"), &run_id),
+        Ok("cancelled")
+    );
+    let deleted = supervisor
+        .delete(&key("s-cancel-record"))
+        .await
+        .expect_err("delete reports the same record residue");
+    assert_eq!(deleted.code, "record_unconfirmed");
+    assert_eq!(supervisor.record_unresolved_runs(), 1);
+}
+
 /// A panicking backend leaves its process group unproven: unwinding kills only the leader, so settlement must not report success.
 #[tokio::test]
 async fn backend_panic_reports_unconfirmed_teardown() {

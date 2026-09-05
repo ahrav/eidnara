@@ -205,6 +205,14 @@ fn main() {
         ),
         ("private_dir_contract", private_dir_contract),
         (
+            "precancelled_run_never_delivers_the_prompt",
+            precancelled_run_never_delivers_the_prompt,
+        ),
+        (
+            "pi_extension_budget_rejects_oversized_descriptors",
+            pi_extension_budget_rejects_oversized_descriptors,
+        ),
+        (
             "retained_crash_record_withholds_success",
             retained_crash_record_withholds_success,
         ),
@@ -2824,6 +2832,85 @@ fn retained_crash_record_withholds_success() {
         error.message
     );
     assert!(!error.message.contains(SYSTEM_SENTINEL));
+}
+
+/// A run cancelled before delivery must not write the prompt: delivery can start a provider request the caller already abandoned.
+fn precancelled_run_never_delivers_the_prompt() {
+    let setup = RunSetup::new();
+    let transcript = write_transcript(
+        setup.scratch.path(),
+        "success.ndjson",
+        &pi_success_lines("hi", "stop"),
+    );
+    let backend = pi_backend(
+        &setup,
+        &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
+        Vec::new(),
+        None,
+    );
+    // A pre-cancelled token exercises cancellation before adapter setup or registration.
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let request = request(
+        setup.project.path(),
+        Harness::Pi,
+        "anthropic/m",
+        Some(SYSTEM_SENTINEL),
+    );
+    let runtime = rt();
+    let (sink, _store) = collecting_sink();
+    let terminal = runtime.block_on(backend.execute(request, sink, cancel));
+
+    let error = failed(&terminal);
+    assert!(error.message.contains("cancelled"), "{:?}", error.message);
+    // The fixture writes `stdin.bin` only after reading the prompt to EOF.
+    assert!(
+        !setup.out.path().join("stdin.bin").exists(),
+        "a cancelled run must not deliver the prompt"
+    );
+}
+
+/// The extension budget is enforced before resolution, so an oversized set opens no descriptors and `send` and the run agree on the subreason.
+fn pi_extension_budget_rejects_oversized_descriptors() {
+    use host_runtime::broca::backend::LlmExecutionBackend;
+
+    let setup = RunSetup::new();
+    let closure = fixture_closure(&setup, "pi", &[]);
+    let over_budget = host_runtime::broca::config::MAX_PI_PROVIDER_EXTENSIONS + 1;
+    let backend = PiBackend::with_limits(
+        PiRuntimeDescriptor {
+            closure,
+            interpreter_node: "bin/runtime".to_owned(),
+            entrypoint_node: "node_modules/pi/entry.mjs".to_owned(),
+            // The cap is checked before resolution, so these names are never opened.
+            provider_extension_nodes: (0..over_budget)
+                .map(|index| format!("node_modules/provider/{index}.mjs"))
+                .collect(),
+        },
+        setup.snapshot(&[]),
+        state_root(),
+        None,
+        quick_limits(),
+    );
+
+    assert_eq!(
+        backend.unavailable_reason(Harness::Pi),
+        Some("extension_budget_exceeded"),
+        "send must reject before admitting a run"
+    );
+
+    let request = request(setup.project.path(), Harness::Pi, "anthropic/m", None);
+    let runtime = rt();
+    let (sink, _store) = collecting_sink();
+    let terminal = runtime.block_on(backend.execute(request, sink, CancellationToken::new()));
+    let error = failed(&terminal);
+    assert!(
+        error.message.contains("extension_budget_exceeded"),
+        "{:?}",
+        error.message
+    );
+    // No child ran, so the fixture captured nothing.
+    assert!(!setup.out.path().join("argv.json").exists());
 }
 
 fn private_dir_contract() {

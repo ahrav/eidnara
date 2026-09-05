@@ -118,6 +118,8 @@ struct RunState {
     /// `cleanup_unresolved` means the backend could not remove the run's private files; caller-private prompt material may remain on disk.
     /// The latch survives the cancellation terminal replacing the backend terminal that carried the failure text.
     cleanup_unresolved: bool,
+    /// `record_unresolved` means the backend could not remove the run's crash-ownership record, which outlives the run in the registry.
+    record_unresolved: bool,
     /// `purged` removes the run from both indices; subscribers detach instead of replaying its log.
     /// A subscriber-held frame retains its charge until the subscriber drops it.
     purged: bool,
@@ -224,6 +226,8 @@ struct Inner {
     /// Runs whose backend could not remove their private files, counted once per run.
     /// The count survives terminal-cap eviction and retention expiry so shutdown reporting cannot lose the residue verdict.
     cleanup_unresolved_runs: AtomicUsize,
+    /// Runs whose crash-ownership record could not be removed, counted once per run.
+    record_unresolved_runs: AtomicUsize,
 }
 
 /// Tests use this read-only capacity snapshot to prove every permit and byte charge returns exactly to baseline across all failure paths.
@@ -288,6 +292,7 @@ impl Supervisor {
                 closing: CancellationToken::new(),
                 unresolved_runs: AtomicUsize::new(0),
                 cleanup_unresolved_runs: AtomicUsize::new(0),
+                record_unresolved_runs: AtomicUsize::new(0),
                 limits,
             }),
         }
@@ -411,6 +416,7 @@ impl Supervisor {
                 work_done: false,
                 work_unresolved: false,
                 cleanup_unresolved: false,
+                record_unresolved: false,
                 purged: false,
                 completed_at: None,
                 run_permit: Some(run_permit),
@@ -679,6 +685,12 @@ impl Supervisor {
         self.inner.cleanup_unresolved_runs.load(Ordering::Relaxed)
     }
 
+    /// Counts runs whose crash-ownership record could not be removed, once per run.
+    /// The counter is final only after `shutdown` drains the task tracker.
+    pub fn record_unresolved_runs(&self) -> usize {
+        self.inner.record_unresolved_runs.load(Ordering::Relaxed)
+    }
+
     /// The sweep releases expired retained entries so their charges cannot wedge the budget.
     /// Release detached charges before retrying so their budget is available.
     fn pressure_sweep(&self) {
@@ -813,6 +825,10 @@ impl Supervisor {
             if subprocess::terminal_reports_cleanup_residue(&terminal) {
                 mark_cleanup_unresolved(&inner, &mut lock_run(&run));
             }
+            // A retained crash-ownership record outlives the run, so the same arbitration applies.
+            if subprocess::terminal_reports_record_residue(&terminal) {
+                mark_record_unresolved(&inner, &mut lock_run(&run));
+            }
             // Cancellation must produce a `Cancelled` terminal even if the backend returns another terminal.
             let outcome = if run.cancel.is_cancelled() {
                 TerminalOutcome::Cancelled {
@@ -832,6 +848,7 @@ impl Supervisor {
 struct SettlementFlags {
     work_unresolved: bool,
     cleanup_unresolved: bool,
+    record_unresolved: bool,
 }
 
 impl SettlementFlags {
@@ -839,9 +856,11 @@ impl SettlementFlags {
         let state = lock_run(run);
         self.work_unresolved |= state.work_unresolved;
         self.cleanup_unresolved |= state.cleanup_unresolved;
+        self.record_unresolved |= state.record_unresolved;
     }
 
     /// Unproven teardown outranks cleanup residue because live descendants can keep executing a billable request.
+    /// Cleanup residue outranks a retained record because caller-private material is more sensitive than coordination state.
     /// Ranking runs after every verdict is absorbed, so one run's cleanup residue cannot hide another's unproven teardown.
     fn error(&self) -> Result<(), RequestError> {
         if self.work_unresolved {
@@ -856,6 +875,13 @@ impl SettlementFlags {
                 "cleanup_unconfirmed",
                 "the run's private files could not be removed; \
                  caller-private prompt material may remain on disk",
+            ));
+        }
+        if self.record_unresolved {
+            return Err(app(
+                "record_unconfirmed",
+                "the run's crash-ownership record could not be removed; \
+                 it remains in the registry for a later sweep",
             ));
         }
         Ok(())
@@ -877,6 +903,13 @@ fn mark_cleanup_unresolved(inner: &Inner, state: &mut RunState) {
         inner
             .cleanup_unresolved_runs
             .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn mark_record_unresolved(inner: &Inner, state: &mut RunState) {
+    if !state.record_unresolved {
+        state.record_unresolved = true;
+        inner.record_unresolved_runs.fetch_add(1, Ordering::Relaxed);
     }
 }
 

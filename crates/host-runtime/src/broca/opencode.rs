@@ -158,18 +158,22 @@ async fn run_opencode(
         });
     }
     // Closure resolution precedes the private directory so an unavailable harness creates no on-disk state.
-    let executable_node = match runtime
-        .closure
-        .resolve_node_descriptor(&runtime.executable_node)
-    {
-        Ok(path) => path,
-        Err(_) => {
-            return subprocess::harness_unavailable_failure(
-                Harness::OpenCode,
-                "closure_incomplete",
-            );
-        }
-    };
+    // Resolution opens and stats the node, so it runs on the blocking pool rather than on a runtime worker.
+    let closure = Arc::clone(&runtime.closure);
+    let executable = runtime.executable_node.clone();
+    let executable_node =
+        match subprocess::off_runtime(move || closure.resolve_node_descriptor(&executable).ok())
+            .await
+        {
+            Ok(Some(node)) => node,
+            Ok(None) => {
+                return subprocess::harness_unavailable_failure(
+                    Harness::OpenCode,
+                    "closure_incomplete",
+                );
+            }
+            Err(err) => return subprocess::spawn_failure(Harness::OpenCode, &err),
+        };
     let dir = match PrivateDir::create_async(state_root.clone(), "broca-opencode").await {
         Ok(dir) => dir,
         Err(err) => return subprocess::spawn_failure(Harness::OpenCode, &err),
