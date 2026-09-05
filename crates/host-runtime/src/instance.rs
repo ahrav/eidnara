@@ -599,7 +599,8 @@ pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceErr
                         .map_err(|e| io_err("fchmod_component", &walked, e))?;
                     // Only the parent's fsync makes the new component's dirent durable; stores
                     // under this directory fsync their own contents but never their ancestors.
-                    fsync(&current).map_err(|e| io_err("fsync_parent", &walked, e))?;
+                    let parent = walked.parent().map(Path::to_path_buf).unwrap_or_default();
+                    fsync(&current).map_err(|e| io_err("fsync_parent", &parent, e))?;
                 }
                 fd
             }

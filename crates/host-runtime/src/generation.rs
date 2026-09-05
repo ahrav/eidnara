@@ -561,8 +561,7 @@ impl GenerationStore {
     ///
     /// The method returns `InsufficientStorage` before creating a temp directory or after post-preflight `ENOSPC`; it removes the temp directory and preserves selectors in the latter case.
     /// The method returns `UnsupportedStateSchema` when the existing profile is quarantined.
-    /// The method returns `NativePayloadInvalid` for identity and validation faults.
-    /// (profile unchanged).
+    /// The method returns `NativePayloadInvalid` for identity and validation faults, leaving the profile unchanged.
     pub fn stage_and_promote(
         &self,
         sources: &[SourceSpec],
@@ -1230,6 +1229,7 @@ mod tests {
         assert_eq!(again, digest);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn descriptor_root_survives_generation_path_replacement() {
         let root = tempfile::tempdir().expect("root");

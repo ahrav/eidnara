@@ -914,7 +914,6 @@ fn native_edges_and_native_addons_must_correspond_exactly() {
     let (_temp, _source, candidate) = setup();
 
     // Validation rejects a non-`Native` dependency edge to a `NativeAddon`.
-    // qualification-side biconditional.
     let mut static_edge = candidate.clone();
     static_edge.manifest.nodes[2].dependencies = vec![
         dependency("node_modules/pi/dist/addon.node", DependencyKind::Static),
