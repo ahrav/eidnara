@@ -569,6 +569,9 @@ impl JobTable {
         }
         let text_bytes = job.text_bytes;
         job.text_bytes = 0;
+        // The failure message is retained uncharged for the retention window, so it is bounded to the diagnostic cap the wire enforces anyway.
+        let mut message = message;
+        super::protocol::bound_diagnostic(&mut message);
         job.state = JobState::Failed { code, message };
         job.completed_at = Some(Instant::now());
         // Failure drops queued items and worker-owned texts.
@@ -592,6 +595,10 @@ impl JobTable {
         };
         if job.key != key {
             return PollOutcome::KeyMismatch;
+        }
+        // Only a ready job has ever issued a cursor, so any cursor on a queued, running, or failed job is never-issued.
+        if cursor.is_some() && !matches!(job.state, JobState::Ready { .. }) {
+            return PollOutcome::BadCursor;
         }
         match &job.state {
             JobState::Queued { .. } | JobState::Running => PollOutcome::Pending {

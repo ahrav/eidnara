@@ -1303,8 +1303,10 @@ async fn execute_batch(
             let result = &json["result"];
             if let Some(vectors) = result["vectors"].as_array() {
                 validate_batch_page(&json, &expected_items, shape.page_vectors())?;
-                // A page is either final (`done:true`, no cursor) or a nonempty continuation (`done:false`, string cursor); anything else is a malformed envelope, not evidence.
-                let final_page = result["done"] == true && result.get("next_cursor").is_none();
+                // A page is either a nonempty final page (`done:true`, no cursor) or a nonempty continuation (`done:false`, string cursor); anything else, including an empty terminating page that would add a spurious poll, is a malformed envelope, not evidence.
+                let final_page = result["done"] == true
+                    && result.get("next_cursor").is_none()
+                    && !vectors.is_empty();
                 let continuation = result["done"] == false
                     && !vectors.is_empty()
                     && result["next_cursor"].is_string();
@@ -2080,7 +2082,8 @@ async fn run(
         .filter(|sample| sample.window.is_measured())
         .map(|sample| sample.service_ns)
         .collect();
-    let service_time = GatedLatency::from_unsorted(service_measured.clone(), censored_per_mille);
+    // Shutdown drained every started native call before the snapshot, so this series has no censored observations; the logical-request censoring fraction does not apply to it.
+    let service_time = GatedLatency::from_unsorted(service_measured.clone(), 0.0);
     let service_time_mean_ns = mean(&service_measured);
     let service_time_cv = coefficient_of_variation(&service_measured);
     let summary = Summary {

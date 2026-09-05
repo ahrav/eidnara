@@ -13,7 +13,7 @@ use crate::control::check_string;
 pub(crate) const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// `MAX_BODY_DEPTH` permits structural depth 8 and rejects depth 9.
 const MAX_BODY_DEPTH: usize = 8;
-const MAX_DIAGNOSTIC_BYTES: usize = 512;
+pub(crate) const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub(crate) const MAX_JOB_ID_BYTES: usize = 128;
 pub(crate) const MAX_CURSOR_BYTES: usize = 128;
 pub(crate) const MAX_DEADLINE_MS: u64 = 3_600_000;
@@ -26,8 +26,8 @@ pub struct RequestError {
     pub message: String,
 }
 
-pub(crate) fn schema(message: impl Into<String>) -> RequestError {
-    let mut message = message.into();
+/// Caps a diagnostic at `MAX_DIAGNOSTIC_BYTES` on a char boundary and releases the excess capacity, so a retained or emitted message never holds more resident bytes than the wire may carry.
+pub(crate) fn bound_diagnostic(message: &mut String) {
     if message.len() > MAX_DIAGNOSTIC_BYTES {
         let mut end = MAX_DIAGNOSTIC_BYTES;
         while !message.is_char_boundary(end) {
@@ -37,6 +37,11 @@ pub(crate) fn schema(message: impl Into<String>) -> RequestError {
         // Truncation alone keeps the original capacity allocated.
         message.shrink_to_fit();
     }
+}
+
+pub(crate) fn schema(message: impl Into<String>) -> RequestError {
+    let mut message = message.into();
+    bound_diagnostic(&mut message);
     RequestError {
         code: "schema_violation",
         message,

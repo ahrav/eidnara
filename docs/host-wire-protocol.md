@@ -445,7 +445,7 @@ The application error vocabulary is closed:
 
 | Code | Meaning | Retry disposition |
 | --- | --- | --- |
-| `queue_full` | admission capacity (job count, aggregate queued request bytes, or query-lane slot) exhausted before admission, or the fail-fast resident-byte reservation for request parsing and input ownership could not be acquired; in every case no state was created | bounded client-side retry; query-lane admission rejection carries the configured `query_retry_after_ms`, while other rejection sites omit the field |
+| `queue_full` | admission capacity (job count, aggregate queued request bytes, or query-lane slot) exhausted before admission, or the fail-fast resident-byte reservation for request parsing, input ownership, or a result page could not be acquired; in every case no state was created | bounded client-side retry; every `queue_full` carries a retry hint: query-lane admission rejection carries the configured `query_retry_after_ms`, and batch admission, parse-reservation, and result-page reservation rejections carry the configured `retry_after_ms` |
 | `model_loading` | reserved; not emitted by the current host: initialization completes before publication, so loading faults surface as bind-time `artifact_invalid` | bounded retry |
 | `timeout` | request-scoped deadline expired host-side | caller policy |
 | `artifact_invalid` | bundle missing/invalid (bind rejection) or response identity guard failed | permanent; no retry |
