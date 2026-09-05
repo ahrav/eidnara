@@ -2871,13 +2871,13 @@
       ],
       "provenance": "host@39e8230371b15966a5767771daf001e44d191aac",
       "source_status": {
-        "exercised": "not-yet",
+        "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false
       },
       "destination_status": {
-        "exercised": "not-yet",
+        "exercised": "partial",
         "check_status": "unaudited",
         "portfolio_verdict": "not-evaluated",
         "known_violation": false

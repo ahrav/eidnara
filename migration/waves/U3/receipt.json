@@ -3135,7 +3135,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/catalog.md",
-      "destination_sha256": "768a34f2dbf9181b4bcc9c3a55a3e9de9fc43ced1cceb51f1f483208861d00a2",
+      "destination_sha256": "f89f2e8c8bcfd6617a0a01c1decb1f517ab58f3798d82ce99fe90fc38de497d9",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -3146,7 +3146,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/index.json",
-      "destination_sha256": "c45e7b25df0add9688f14c8bf09cb93146c9c2a15b2022c02a97c6e9e6d57d9b",
+      "destination_sha256": "8bae919b53e9e0d146987781e7e78ee28e88fa322312362c09c0f0624375d908",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {
@@ -3445,7 +3445,7 @@
         "blob_sha": "02b2e48fa6d57df00a297c4f4d2cb3173d09f50b"
       },
       "destination": "docs/properties/host-runtime/evidence/generation-id-strictly-increases-and-is-never-reused.md",
-      "destination_sha256": "d75958e1c006b795686c337a69cec90cf20867f28badc56c499f6384aff06408",
+      "destination_sha256": "4e33a9b55fac6c2fee3d80263d3356d4598e92372a33ccfb5eb2c294a840c5a7",
       "transformation": "adapted",
       "class": "human-authored",
       "review_evidence": {
@@ -5337,7 +5337,7 @@
     {
       "source": null,
       "destination": "docs/properties/host-runtime/evidence/broca-child-environment-carries-only-the-provider-row.md",
-      "destination_sha256": "5d7e9357786e6a2d2c6c398e5902e5f4928cf9cc12ebedbbcdbd84180fafa366",
+      "destination_sha256": "94dbb5b6908ca28c61825e92816761c3eca71834a589cc2f49d817cdf0c5043a",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "aaf40b1cc53f55f5ddace48e136e507c43fb965110f7815e015e144b36ebe83e",
+      "destination_sha256": "4f7c225ee23dabc01e3a9d404696eb3a5b000a10d6145fdd77086aece96fd410",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {

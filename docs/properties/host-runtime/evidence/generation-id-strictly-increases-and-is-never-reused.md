@@ -24,12 +24,11 @@ from the original owner. Every connection mints exactly one id, at `new_generati
   initializes it as `AtomicU64::new(1)`, per `HostShared`, so the counter's
   lifetime is one host incarnation. Repo-wide `grep -rn gen_counter crates/`
   returns exactly these three lines - one declaration, one initializer, one use.
-  This confirms the catalog's "exactly two references" claim.
+  This confirms the catalog's "exactly two references" claim (the pre-refactor
+  count; the second call site is gone).
 - `connection.rs:175` is the single `new_generation` call site in
   `run_connection`; the candidate-promotion second site was removed with the
-  mandatory-ring refactor, so a socket consumes one id. **Correction:** the catalog's Group A prose puts the promote
-  and reap block at "~198-235"; the promoted mint is at `:211`, inside `match
-  promoted` at `:207-235`, and `let Some(handoff) = handoff else` is at `:198`.
+  mandatory-ring refactor, so a socket consumes one id.
 - `runtime.rs:137` `pub connections: Mutex<HashMap<u64, Arc<GenerationCore>>>` -
   the id is the map key. Insert is `connection.rs:260`; the only removal is
   `dispatch.rs:1386-1390` inside `close_generation`. A duplicate key would make
@@ -51,11 +50,11 @@ from the original owner. Every connection mints exactly one id, at `new_generati
 
 No path in the current code produces a duplicate; the scenario is what a
 regression would cost, and it is reachable through any change that stops routing
-ids through `:245`:
+ids through `connection.rs:219`:
 
 1. Two ids compare equal - a hand-set id in a new construction path, a counter
    reset on reconfiguration, or `fetch_add` wrapping past `u64::MAX`.
-2. The second generation's `connections.insert` at `:288` overwrites the first.
+2. The second generation's `connections.insert` at `connection.rs:260` overwrites the first.
    The first `Arc<GenerationCore>` leaves the registry while its `serve_generation`
    task is still reading, so shutdown's snapshot (`runtime.rs:1151-1157`) never
    sees it and never sends it a Goodbye.
@@ -68,7 +67,7 @@ ids through `:245`:
 
 ## Timing windows and dependencies
 
-`fetch_add(1, SeqCst)` at `:245` is a single atomic, so there is no window in the
+`fetch_add(1, SeqCst)` at `connection.rs:219` is a single atomic, so there is no window in the
 mint itself; the property's exposure is structural rather than temporal. The
 guarantee is scoped to one incarnation because the counter is reinitialized to 1
 at `runtime.rs:788` - id `1` recurs across incarnations by design, which is why
