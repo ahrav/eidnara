@@ -48,8 +48,10 @@ input where the orderings differ: a commit that fails after the hook has already
   never marks a failed commit complete.
 - `crates/shm-transport/src/backend/ring.rs:2536-2570` `commit` — five failure branches, all aborting the
   reservation: `Aborted` (`:2537-2539`), `CommitOutsideReservation` (`:2546-2550`), `Underfill` (`:2551-2555`),
-  and any error from `commit_reservation` (`:2562-2566`).
-- `ring.rs:2316-2317` — inside `commit_reservation`,
+  and, in the source tree, any error from the transport's `Ring::commit_reservation` (`:2562-2566`); at HEAD that
+  helper is `prepare_commit` (`:2308-2343`), distinct from the addon's N-API entry point of the same name
+  (`packages/shm-native/src/lib.rs:1159`), which still exists.
+- `ring.rs:2316-2317` — in the source tree, inside `Ring::commit_reservation`,
   `if declared_len as usize != exact_len || wire_header[4] != 2` returns `ProducerError::WireHeaderMismatch`.
   In the source tree this record was written against, the addon fixed the header at *reserve* time but committed
   the length the fill callback reported, so a fill that under-advanced produced this failure with no injected
@@ -65,7 +67,7 @@ input where the orderings differ: a commit that fails after the hook has already
   `:110-129`. What it pins is the hook's *position* relative to alias detachment, not commit success. Status
   unaudited.
   At HEAD: the declared-length and version comparison is delegated to `check_wire_header` inside `prepare_commit`, not written out as a declared_len versus exact_len comparison plus a wire_header[4] test.
-  At HEAD: The fifth branch now aborts on any error from `prepare_commit` (`:2308-2343`); `commit_reservation` no longer exists, and a Quarantined branch sits at `:2541-2545`.
+  At HEAD: The fifth branch now aborts on any error from `prepare_commit` (`:2308-2343`); the transport's `Ring::commit_reservation` no longer exists (the addon's N-API `commit_reservation` at `lib.rs:1159` does), and a Quarantined branch sits at `:2541-2545`.
 
 ## Failure scenario
 
@@ -135,7 +137,7 @@ the same fault, so the test documents the asymmetry rather than the symptom. Cov
 - Findings:
   Mechanisms whose citation moved and whose surrounding claim needed restating:
   - line 36, `packages/shm-native/src/lib.rs:1090-1093` now `packages/shm-native/src/lib.rs:1202-1207`: At HEAD both `commit_reservation` and `produce` validate the header against the committed count with `check_wire_header` before the hook runs (`:1192-1193`, `:1071-1072`; pinned by `a header that disagrees with the body is refused before beforePublish runs`, `tests/mechanism.ts:703`), so neither path can reach a post-hook WireHeaderMismatch; the post-hook failures left are quarantine, `Underfill`, `CommitOutsideReservation`, and a `prepare_commit` rejection of a descriptor page a peer rewrote after the pre-hook check.
-  - line 48, `:1839-1843` now `:2610-2614`: The fifth branch now aborts on any error from `prepare_commit` (`:2356-2391`); `commit_reservation` no longer exists, and a Quarantined branch sits at `:2589-2593`.
+  - line 48, `:1839-1843` now `:2610-2614`: The fifth branch now aborts on any error from `prepare_commit` (`:2356-2391`); the transport's `Ring::commit_reservation` no longer exists, and a Quarantined branch sits at `:2589-2593`.
   - line 49, `ring.rs:1591-1593` now `ring.rs:2316-2317`: At HEAD the declared-length and version comparison is delegated to `check_wire_header` inside `prepare_commit`, not written out as a declared_len versus exact_len comparison plus a wire_header[4] test.
   - line 85, `ring_transport.rs:588-591` now `ring_transport.rs:773-780`: At HEAD the host returns Err on a failed publish (`:773-775`) and only then runs the hook (`:776-780`); there is no completion marker left to store after commit.
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":

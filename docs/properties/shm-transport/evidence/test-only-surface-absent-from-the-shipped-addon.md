@@ -25,7 +25,7 @@ checked for build-time gating.
 
 ### Exported N-API surface
 
-`packages/shm-native/src/lib.rs` carries 32 `#[napi]` attributes at HEAD: 30
+`packages/shm-native/src/lib.rs` carries 35 `#[napi]` attributes at HEAD: 33
 exported functions and two `#[napi(object)]` types, regenerated from
 `rg -n '#\[napi' packages/shm-native/src/lib.rs`. In source order (the line is
 the attribute's; the item follows on the next line):
@@ -99,7 +99,12 @@ re-exports the test-only surface as public TypeScript: `registerCleanupProbe`
 `setExternalViewCreationFailpoint` (927), `activeNativeChannels` (931),
 `NativeChannel.createTestPair` (755), and `NativeChannel.forceClose` (873). These
 are not merely raw addon symbols reachable by `require`; they are the package's
-declared interface.
+declared interface. Two test-only exports, `create_external_probe` (524) and
+`detach_array_buffer` (529), have no `index.ts` re-export and are reachable only
+through the raw addon; the diagnostic counters `nativeLeakDiagnostics`,
+`activeExternalRefs`, and `activeNativeChannels` are re-exported and are
+classified above as diagnostic counters rather than test-only, because they
+report registry counts without mutating state or injecting faults.
 
 ### What each capability actually permits
 

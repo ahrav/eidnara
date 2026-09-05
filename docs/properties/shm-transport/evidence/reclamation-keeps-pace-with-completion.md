@@ -113,10 +113,13 @@ release, then a single-pass full-recovery assertion. Concretely, against the con
 profile: publish and acquire sequence 1 and hold it; publish, acquire, and release
 sequences 2 and 3; assert `descriptors.release_pending == 2` and
 `descriptors.receiver_leased == 1` so the non-contiguous shape is witnessed rather than
-assumed; release sequence 1; then perform exactly **one** `try_reserve` and assert
-`descriptors.free == descriptor_depth` and `bytes.free == arena_bytes` after it. A
-second arm should repeat the shape with a single `Ring::trim` in place of the
-`try_reserve`, since that is the idle-ring reclamation path. The
+assumed; release sequence 1; then perform exactly **one** `try_reserve`, abort the
+reservation it returns (a successful reserve holds one descriptor and its bytes, so
+`free` cannot read full capacity while it is live), and assert
+`descriptors.free == descriptor_depth` and `bytes.free == arena_bytes` after the
+abort. A second arm should repeat the shape with a single `Ring::trim` in place of
+the `try_reserve`, since that is the idle-ring reclamation path and leaves no
+reservation to close. The
 size of the request matters: ask for a frame that only fits if every sequence was
 reclaimed, so the assertion has an independent witness beyond the derived `bytes.free`.
 That single change closes the gap in the existing test, which asks for one byte. Add the
