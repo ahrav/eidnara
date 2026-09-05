@@ -25,12 +25,14 @@ pub struct OrtIdentity {
     pub sha256: String,
 }
 
-/// `Input` errors reject the affected request; a native inference failure over one page is `Input` because the model stays usable for other pages.
+/// `Input` errors reject the affected request as a caller fault: tokenization failures and zero-token texts.
+/// `Execution` errors are native runtime failures over one call (ORT session or tensor faults); the model stays usable, so the request is retryable and the lane keeps serving.
 /// `Artifact` errors disable the component.
 /// `Invariant` errors mark the component failing and prevent suspect vectors from being returned; only the dimension, finiteness, and norm postconditions raise them.
 #[derive(Debug, Clone)]
 pub enum InferenceError {
     Input(String),
+    Execution(String),
     Artifact(String),
     Invariant(String),
 }
@@ -39,6 +41,7 @@ impl std::fmt::Display for InferenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Input(reason) => write!(f, "invalid inference input: {reason}"),
+            Self::Execution(reason) => write!(f, "inference execution failure: {reason}"),
             Self::Artifact(reason) => write!(f, "inference artifact failure: {reason}"),
             Self::Invariant(reason) => write!(f, "inference invariant failure: {reason}"),
         }
@@ -326,9 +329,13 @@ impl Backend {
                 ));
             }
         }
-        let vectors = model
-            .embed(texts, None)
-            .map_err(|e| InferenceError::Input(format!("inference failed: {e}")))?;
+        // Tokenizer faults are caller input; everything else is a native runtime fault that must not be reported as a schema violation, or callers would never retry it.
+        let vectors = model.embed(texts, None).map_err(|error| match error {
+            fastembed::Error::Tokenization(_) | fastembed::Error::EmptyTokenizations => {
+                InferenceError::Input(format!("inference rejected the input: {error}"))
+            }
+            other => InferenceError::Execution(format!("inference failed: {other}")),
+        })?;
         drop(model);
         if vectors.len() != texts.len() {
             return Err(InferenceError::Invariant(

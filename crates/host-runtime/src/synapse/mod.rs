@@ -671,6 +671,9 @@ impl SynapseComponent {
             Err(QueryFault::Engine(InferenceError::Input(reason))) => {
                 app_error("schema_violation", &reason)
             }
+            Err(QueryFault::Engine(InferenceError::Execution(reason))) => {
+                app_error("internal_error", &reason)
+            }
             Err(QueryFault::Engine(InferenceError::Artifact(reason)))
             | Err(QueryFault::Engine(InferenceError::Invariant(reason))) => {
                 app_error("artifact_invalid", &reason)
@@ -771,6 +774,12 @@ impl SynapseComponent {
                     inner
                         .jobs
                         .publish_failed(seq, "schema_violation".to_owned(), reason);
+                }
+                // A native execution fault is a retryable job failure; the identical resubmission replaces it.
+                Err(InferenceError::Execution(reason)) => {
+                    inner
+                        .jobs
+                        .publish_failed(seq, "internal_error".to_owned(), reason);
                 }
                 Err(InferenceError::Artifact(reason)) | Err(InferenceError::Invariant(reason)) => {
                     inner
@@ -1117,9 +1126,9 @@ fn lane_state_after_load(loaded: Result<ReadyLane, InferenceError>) -> LaneState
     match loaded {
         Ok(lane) => LaneState::Ready(Arc::new(lane)),
         Err(InferenceError::Invariant(reason)) => LaneState::Failing { reason },
-        Err(InferenceError::Artifact(reason)) | Err(InferenceError::Input(reason)) => {
-            LaneState::Disabled { reason }
-        }
+        Err(InferenceError::Artifact(reason))
+        | Err(InferenceError::Input(reason))
+        | Err(InferenceError::Execution(reason)) => LaneState::Disabled { reason },
     }
 }
 
