@@ -5633,7 +5633,7 @@
     {
       "source": null,
       "destination": "migration/waves/U3/property-impact.json",
-      "destination_sha256": "26efe431040ab4b40d329e2f2ae75d2aaa02b636488ace49fb414ef857ffe2ef",
+      "destination_sha256": "86ab2f87459bca91be8a78c36d2389e83576c4488f532935e952a66e77e16ee0",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
