@@ -886,6 +886,18 @@ pub fn merge_cleanup(
     }
 }
 
+/// `terminal_reports_cleanup_residue` is the settlement-side discriminator for private run files left on disk.
+/// The supervisor latches it before a committed cancellation terminal replaces the backend terminal that carries the failure text.
+/// `Completed` never carries residue because `merge_cleanup` converts a completed run with a cleanup failure to `Failed`.
+pub(crate) fn terminal_reports_cleanup_residue(terminal: &BackendTerminal) -> bool {
+    match terminal {
+        BackendTerminal::Completed { .. } => false,
+        BackendTerminal::Failed(error) | BackendTerminal::FailedUnresolved(error) => {
+            error.message.contains(CLEANUP_FAILURE_MARKER)
+        }
+    }
+}
+
 /// `RegistrationTeardownUnproven` marks a spawn error whose pre-prompt process group was not proven torn down.
 /// Crash-ownership registration failure leaves no registry record for a successor to sweep.
 /// The marker requires a missing registry record and a SIGKILLed group not confirmed gone within the grace period.
@@ -1519,6 +1531,8 @@ pub mod group_registry {
                 .open(&temp)
                 .and_then(|mut file| {
                     use std::io::Write;
+                    // The `open(2)` mode is umask-filtered; `fchmod` through the descriptor forces `0600` so a successor daemon can read the record after a crash.
+                    file.set_permissions(fs::Permissions::from_mode(0o600))?;
                     file.write_all(body.as_bytes())
                 })
                 .and_then(|()| fs::rename(&temp, &path));

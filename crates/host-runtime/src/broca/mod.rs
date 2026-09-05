@@ -339,6 +339,14 @@ impl CompositeComponent for BrocaComponent {
                  process-group teardown; provider work may still be running"
             )));
         }
+        // Cleanup residue outranks a clean report: caller-private prompt material may remain on disk.
+        let residue = self.supervisor.cleanup_unresolved_runs();
+        if residue > 0 {
+            return Err(ShutdownError(format!(
+                "{residue} run(s) could not remove their private run files; \
+                 caller-private prompt material may remain on disk"
+            )));
+        }
         Ok(())
     }
 }

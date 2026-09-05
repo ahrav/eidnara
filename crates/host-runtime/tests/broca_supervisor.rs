@@ -786,6 +786,52 @@ async fn cancellation_winning_the_terminal_still_reports_unproven_teardown() {
     assert_eq!(deleted.code, "teardown_unconfirmed");
 }
 
+/// A committed cancellation terminal replaces the backend terminal, so the cleanup failure it carries must stay observable from cancel and delete.
+#[tokio::test]
+async fn cancellation_winning_the_terminal_still_reports_cleanup_residue() {
+    let backend = ScriptedBackend::with_behavior(|_request, _events, cancel| {
+        Box::pin(async move {
+            cancel.cancelled().await;
+            // The message mirrors `merge_cleanup` output for a cancelled run whose private-directory removal failed.
+            BackendTerminal::Failed(BackendError {
+                class: ErrorClass::Permanent,
+                message: "pi run stopped; additionally sensitive temp cleanup failed \
+                          (PermissionDenied)"
+                    .to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        })
+    });
+    let supervisor = Supervisor::new(backend as Arc<_>);
+
+    let run_id = send(&supervisor, "s-cancel-residue", "p1");
+    until(
+        || supervisor.status(&key("s-cancel-residue"), &run_id) == Ok("running"),
+        "the backend starts before the cancel races it",
+    )
+    .await;
+
+    let cancelled = supervisor
+        .cancel(&key("s-cancel-residue"), &run_id)
+        .await
+        .expect_err("cancel cannot report success while private files may remain");
+    assert_eq!(cancelled.code, "cleanup_unconfirmed");
+    assert_eq!(
+        supervisor.status(&key("s-cancel-residue"), &run_id),
+        Ok("cancelled")
+    );
+
+    let deleted = supervisor
+        .delete(&key("s-cancel-residue"))
+        .await
+        .expect_err("delete reports the same cleanup residue");
+    assert_eq!(deleted.code, "cleanup_unconfirmed");
+
+    // The counter, not the index, keeps the verdict for shutdown reporting.
+    assert_eq!(supervisor.cleanup_unresolved_runs(), 1);
+}
+
 /// `shutdown` reports runs with unproven teardown.
 #[tokio::test]
 async fn shutdown_counts_runs_with_unproven_teardown() {

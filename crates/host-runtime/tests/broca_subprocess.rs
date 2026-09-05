@@ -241,6 +241,10 @@ fn main() {
             group_registry_sweep_kills_only_dead_owner_groups,
         ),
         (
+            "group_record_mode_forced_under_umask",
+            group_record_mode_forced_under_umask,
+        ),
+        (
             "incomplete_closure_reports_unavailable_without_run_state",
             incomplete_closure_reports_unavailable_without_run_state,
         ),
@@ -3291,5 +3295,36 @@ fn group_registry_sweep_kills_only_dead_owner_groups() {
             "leaderless grandchild survived the sweep"
         );
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A successor daemon reads retained records with a fresh descriptor, so the published mode must stay `0600` under any umask.
+fn group_record_mode_forced_under_umask() {
+    use host_runtime::broca::subprocess::group_registry::GroupRecord;
+
+    for mask in [0o077u32, 0o777] {
+        let _guard = UmaskGuard::set(mask);
+        let own_pid = i32::try_from(std::process::id()).expect("pid fits");
+        let record = GroupRecord::record(&state_root(), own_pid).expect("record own group");
+        let registry = state_root();
+        let prefix = format!("{own_pid}-");
+        let record_path = fs::read_dir(registry.path())
+            .expect("read registry")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+            .expect("published record exists");
+        let mode = fs::symlink_metadata(&record_path)
+            .expect("record metadata")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o600, "record mode under umask {mask:o}");
+        let body = fs::read_to_string(&record_path).expect("record readable");
+        assert!(body.starts_with("v1\n"), "record is complete when visible");
+        record.remove();
     }
 }

@@ -26,6 +26,7 @@ use super::config::{
     BrocaLimits, KEY_META_OVERHEAD_BYTES, SESSION_IDENTITY_COPIES, TERMINAL_HEADROOM_BYTES,
 };
 use super::protocol::{self, RequestError, SendRequest};
+use super::subprocess;
 use crate::wire::{ByteBudget, ByteCharge};
 
 /// `SessionKey` scopes route claims and grants no authority beyond the authenticated host bearer.
@@ -114,6 +115,9 @@ struct RunState {
     /// `work_done` does not prove descendants stopped; they may still execute a billable request.
     /// Cancel and delete report failure if descendants may still execute a billable request.
     work_unresolved: bool,
+    /// `cleanup_unresolved` means the backend could not remove the run's private files; caller-private prompt material may remain on disk.
+    /// The latch survives the cancellation terminal replacing the backend terminal that carried the failure text.
+    cleanup_unresolved: bool,
     /// `purged` removes the run from both indices; subscribers detach instead of replaying its log.
     /// A subscriber-held frame retains its charge until the subscriber drops it.
     purged: bool,
@@ -217,6 +221,9 @@ struct Inner {
     /// Runs whose backend could not prove process-group teardown, counted once per run.
     /// The count survives terminal-cap eviction and retention expiry so `shutdown` cannot lose a verdict the index no longer holds.
     unresolved_runs: AtomicUsize,
+    /// Runs whose backend could not remove their private files, counted once per run.
+    /// The count survives terminal-cap eviction and retention expiry so shutdown reporting cannot lose the residue verdict.
+    cleanup_unresolved_runs: AtomicUsize,
 }
 
 /// Tests use this read-only capacity snapshot to prove every permit and byte charge returns exactly to baseline across all failure paths.
@@ -280,6 +287,7 @@ impl Supervisor {
                 tracker: TaskTracker::new(),
                 closing: CancellationToken::new(),
                 unresolved_runs: AtomicUsize::new(0),
+                cleanup_unresolved_runs: AtomicUsize::new(0),
                 limits,
             }),
         }
@@ -402,6 +410,7 @@ impl Supervisor {
                 subscriber_count: 0,
                 work_done: false,
                 work_unresolved: false,
+                cleanup_unresolved: false,
                 purged: false,
                 completed_at: None,
                 run_permit: Some(run_permit),
@@ -468,7 +477,7 @@ impl Supervisor {
             },
         );
         wait_work_done(&run).await;
-        Self::unresolved_teardown_error(&run)
+        Self::settlement_error(&run)
     }
 
     /// Cancels a live run, waits for its task, purges replay and charges, and installs a bounded tombstone.
@@ -559,17 +568,28 @@ impl Supervisor {
         }
         drop(index);
         // Retained bytes remain bounded whether tombstone charging succeeds or fails.
-        Self::unresolved_teardown_error(&run)
+        Self::settlement_error(&run)
     }
 
-    /// Return a teardown error when the backend cannot prove that its process tree stopped.
-    /// `work_done` proves only that the run task returned, not that the backend process tree stopped.
-    fn unresolved_teardown_error(run: &Arc<Run>) -> Result<(), RequestError> {
-        if lock_run(run).work_unresolved {
+    /// `work_done` proves only that the run task returned, not that the backend process tree stopped or its private files were removed.
+    /// Unproven teardown outranks cleanup residue because live descendants can keep executing a billable request.
+    fn settlement_error(run: &Arc<Run>) -> Result<(), RequestError> {
+        let (work_unresolved, cleanup_unresolved) = {
+            let state = lock_run(run);
+            (state.work_unresolved, state.cleanup_unresolved)
+        };
+        if work_unresolved {
             return Err(app(
                 "teardown_unconfirmed",
                 "the harness process group could not be confirmed stopped; \
                  work may still be running",
+            ));
+        }
+        if cleanup_unresolved {
+            return Err(app(
+                "cleanup_unconfirmed",
+                "the run's private files could not be removed; \
+                 caller-private prompt material may remain on disk",
             ));
         }
         Ok(())
@@ -645,6 +665,12 @@ impl Supervisor {
         debug_assert!(index.runs.is_empty(), "every run is session-owned");
         index.runs.clear();
         unresolved
+    }
+
+    /// Counts runs whose private files could not be removed, once per run.
+    /// The counter is final only after `shutdown` drains the task tracker; the component reads it to refuse a clean shutdown while caller-private prompt material may remain on disk.
+    pub fn cleanup_unresolved_runs(&self) -> usize {
+        self.inner.cleanup_unresolved_runs.load(Ordering::Relaxed)
     }
 
     /// The sweep releases expired retained entries so their charges cannot wedge the budget.
@@ -774,6 +800,11 @@ impl Supervisor {
             if matches!(terminal, BackendTerminal::FailedUnresolved(_)) {
                 mark_unresolved(&inner, &mut lock_run(&run));
             }
+            // A committed cancellation terminal replaces the backend terminal below, so a cleanup failure it carries must latch first.
+            // Cancel, delete, and shutdown reporting read this latch.
+            if subprocess::terminal_reports_cleanup_residue(&terminal) {
+                mark_cleanup_unresolved(&inner, &mut lock_run(&run));
+            }
             // Cancellation must produce a `Cancelled` terminal even if the backend returns another terminal.
             let outcome = if run.cancel.is_cancelled() {
                 TerminalOutcome::Cancelled {
@@ -793,6 +824,16 @@ fn mark_unresolved(inner: &Inner, state: &mut RunState) {
     if !state.work_unresolved {
         state.work_unresolved = true;
         inner.unresolved_runs.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Latches `cleanup_unresolved` and counts the run once; the counter keeps the residue verdict after the index drops the run.
+fn mark_cleanup_unresolved(inner: &Inner, state: &mut RunState) {
+    if !state.cleanup_unresolved {
+        state.cleanup_unresolved = true;
+        inner
+            .cleanup_unresolved_runs
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
