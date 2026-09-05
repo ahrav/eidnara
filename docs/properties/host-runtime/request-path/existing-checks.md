@@ -21,8 +21,10 @@ property from the catalog. Test adequacy belongs to
 
 ## The coverage fact that frames this inventory
 
+**Superseded in this tree.** All 37 in-crate tests, the 84 integration tests, and the 4 doctests in this scope run in CI through `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`, `:126`), which builds and runs every package's library and integration test targets. The census below records the source repository's workflow, whose `-p host-runtime` invocations were `--test`-filtered, and is kept as provenance; its "Executed in CI" column and any later "no CI lane" statements in this file do not describe this tree.
+
 **37 in-crate tests and 84 integration tests reach this sub-part. Of the binaries
-that carry them CI names none, and four `compile_fail` doctests do run, so 2e owns
+that carry them the source workflow named none, and four `compile_fail` doctests do run, so 2e owns
 four of the six CI-executed source-resident checks in the whole `host-runtime`
 library. One catalog record additionally has a CI-executed check in a binary
 outside the six; see the correction under "Integration tests".**

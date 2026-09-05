@@ -21,8 +21,9 @@ production guard adequacy belongs to
 
 ## The coverage fact that frames this inventory
 
-**40 in-crate tests reach this sub-part. None of them runs in CI. There are zero
-doctests. So no check resident in `client.rs` is executed by CI at all.**
+**Superseded in this tree.** All 40 in-crate tests and the 6 integration tests in this scope run in CI through `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`, `:126`), which builds and runs every package's library and integration test targets. The census below records the source repository's workflow, whose `-p host-runtime` invocations were `--test`-filtered, and is kept as provenance; its "Executed in CI" column and any later "no CI lane" statements in this file do not describe this tree.
+
+**40 in-crate tests reach this sub-part. In the source repository none of them ran in CI, and there are zero doctests, so no check resident in `client.rs` was executed by that CI at all.**
 
 | Unit | Test module | Lines | Tests | Executed in CI |
 | --- | --- | --- | --- | --- |

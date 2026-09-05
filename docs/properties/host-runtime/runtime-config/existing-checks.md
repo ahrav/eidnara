@@ -21,7 +21,9 @@ production guard adequacy belongs to
 
 ## The coverage fact that frames this inventory
 
-**11 in-crate tests reach 3,246 lines, none of them runs in CI, and there are
+**Superseded in this tree.** All 11 in-crate tests and the 52 integration tests in this scope run in CI through `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`, `:126`), which builds and runs every package's library and integration test targets. The census below records the source repository's workflow, whose `-p host-runtime` invocations were `--test`-filtered, and is kept as provenance; its "Executed in CI" column and any later "no CI lane" statements in this file do not describe this tree.
+
+**11 in-crate tests reach 3,246 lines, none of them ran in the source repository's CI, and there are
 zero doctests. This is the weakest source-resident position of the three
 sub-parts.** 2e owns four CI-executed `compile_fail` doctests and 2b owns two; 2f
 owns none.

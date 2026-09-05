@@ -5943,17 +5943,18 @@ a grep of `mod tests` for `start_ring_bridge`, `RingClientEndpoint`,
 `tests/client.rs` integration tests observes the thread or the socket. But two
 CI-executed integration tests do observe its **exit**, indirectly and genuinely.
 `tests/shm_soak.rs` runs a real `Client::connect`/`open_route`/`request`/`close`
-cycle (`:54-92`) and then polls `wait_for_envelope` (`:35-52`) until the process
-thread count equals a post-close baseline; `tests/shm_failure_modes.rs` does the
-same through `assert_resources_return_to` (`:193-210`) in
-`clean_close_returns_exact_single_connection_capacity` (`:218-230`). A bridge
-thread that never left its loop would hold the count above baseline and fail both
-assertions inside their budgets. Both run in CI at `ci.yml:130-135`
-("Mandatory ring client suite"). What remains genuinely unobserved is everything
+cycle (`:54-92`) and then polls `await_envelope` until the process thread count
+equals a post-close baseline, so a bridge thread that never left its loop would
+hold the count above baseline and fail inside its budget. `tests/shm_failure_modes.rs`
+`clean_close_returns_exact_single_connection_capacity` (`:201-210`) closes a client
+and connects a replacement; it proves capacity recovery only, never reads a
+thread count, and is not evidence of bridge exit (the `assert_resources_return_to`
+helper the source catalog credited does not exist in this tree). Both run in CI
+through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`). What remains genuinely unobserved is everything
 except termination: which `break` fired, whether `:1891` wrote anything, and the
 50-microsecond spin, none of which any check reaches.
 
-**Coverage: 40 in-crate tests, none in CI, all driving a synthetic inner.** The
+**Coverage: 40 in-crate tests, all in CI in this tree, all driving a synthetic inner.** The
 count was re-derived here by grepping `#[test]` and `tokio::test` from `:2266`
 onward, and it matches lens B exactly at 40; an initial pass of this synthesis
 under-counted at 38 by missing `#[tokio::test(flavor = ..., worker_threads = 2)]`
@@ -5961,12 +5962,11 @@ forms, which is recorded so a later pass does not repeat it. All 40 live in one
 `mod tests` at `:2266-3998` and all 40 build their subject through `test_inner`
 (`:2270`), which constructs `Arc::new(Inner { .. })` directly with a
 pre-populated route set. So there are **zero hits for the real `connect`
-(`:306`), `connect_info` (`:347`), or bridge entry points**. None of the 40 runs
-in CI, and the reason is structural: every `-p host-runtime` invocation in `ci.yml`
-carries a `--test <name>` filter, which selects one integration binary and never
-builds the lib target. Re-verified at `HEAD`: the 13 `host-runtime` hits are `:87`,
-`:132`, `:133`, `:134`, `:168`, `:169`, `:178`, `:187`, `:190`, `:211`, `:361`,
-`:442`, and `:461`, and `:168-169` are `cargo build`.
+(`:306`), `connect_info` (`:347`), or bridge entry points**. All 40 run in CI in
+this tree through the workspace-wide test steps described next; in the source
+repository none did, because every `-p host-runtime` invocation there carried a
+`--test <name>` filter that never built the lib target, which is the finding the
+per-part `existing-checks.md` records as provenance.
 
 **CI in this tree.** `.github/workflows/ci.yml:118` and `:126` run
 `cargo test --workspace --all-targets --all-features --locked` on the 1.98 and stable
