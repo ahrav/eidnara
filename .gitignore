@@ -1,3 +1,5 @@
 /target
-/node_modules
+node_modules/
 /tmp
+*.node
+/packages/shm-native/index.js

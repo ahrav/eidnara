@@ -23,7 +23,7 @@
     {
       "source": null,
       "destination": "Cargo.toml",
-      "destination_sha256": "6eb92ec40fc48794c51fdfaec52160cd37e6137e22ec4174b033645e53fa375d",
+      "destination_sha256": "87e9514d21681029c4b24d05ccb618be0a3f75028e33e8799fe926a0599806cf",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -78,7 +78,7 @@
     {
       "source": null,
       "destination": ".gitignore",
-      "destination_sha256": "93337f9cb022d881608d97016ae5debc16173aca323a5fd8f7fc6d9b80d51e43",
+      "destination_sha256": "de52842061e85983a10340fab1c64a56f8061ee53c6ff1b65123ce0b03b78f48",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -122,7 +122,7 @@
     {
       "source": null,
       "destination": ".github/workflows/ci.yml",
-      "destination_sha256": "d88a7302dc5746488fa6a0aea814406df60c6360690b27889232cca13048a034",
+      "destination_sha256": "07b0dcf97e20ebe5eae96cb5b1e0bcc7c9b00dabeba833ef7c400b1a9e939c06",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -133,7 +133,7 @@
     {
       "source": null,
       "destination": "migration/registry.json",
-      "destination_sha256": "dd5939dd0fd668cf423e881a407f7ce602877358c462b3fcda3f427a87bb1504",
+      "destination_sha256": "cd4e569363843afb27264b9bf37d577966d68e7839bdaa67d3a6a28cf787239c",
       "transformation": "authored",
       "class": "new-authored",
       "review_evidence": {
@@ -300,7 +300,7 @@
     {
       "source": null,
       "destination": "bun.lock",
-      "destination_sha256": "10e1437e96476ceaf6c26f7bad5ebd876f092d07453d9f0e5df32b90fdec72af",
+      "destination_sha256": "eff76983847b253df6156ba9c0d35a6927a75450e21a09fffee4174b11299903",
       "transformation": "generated",
       "class": "generated",
       "review_evidence": {

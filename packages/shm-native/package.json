@@ -1,0 +1,35 @@
+{
+  "name": "@eidnara/shm-native",
+  "version": "0.38.0",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.ts",
+  "exports": {
+    ".": {
+      "types": "./index.ts",
+      "bun": "./index.ts",
+      "import": "./index.js"
+    }
+  },
+  "scripts": {
+    "build": "bun run build:native && bun run build:js",
+    "build:native": "test \"$(uname -s)-$(uname -m)\" = Linux-x86_64 && cargo build --release -p shm-native && cp -f ../../target/release/libshm_native.so ./shm_native.node",
+    "build:js": "bun build index.ts --outfile index.js --target node --format esm",
+    "build:source": "bun run build",
+    "test": "bun test tests",
+    "test:bun": "bun test tests",
+    "test:node": "node --experimental-transform-types tests/runtime.ts",
+    "test:capability:bun": "bun tests/capability.ts",
+    "test:capability:node": "node --experimental-transform-types tests/capability.ts",
+    "typecheck": "tsc --noEmit",
+    "prepack": "bun run build:js"
+  },
+  "files": [
+    "index.js",
+    "index.ts"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^5.8.0"
+  }
+}
