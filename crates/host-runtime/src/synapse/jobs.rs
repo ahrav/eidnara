@@ -63,8 +63,6 @@ pub struct ResultPage {
     pub vectors: Vec<(String, String, Arc<[f32]>)>,
     pub done: bool,
     pub next_cursor: Option<String>,
-    /// The boundary `next_cursor` names. The caller passes it to [`JobTable::mark_cursor_issued`] once the response carrying the cursor exists, so a poll whose response fails does not make that boundary acceptable.
-    pub next_boundary: Option<usize>,
     /// Keeps the job's result bytes counted as live while this page holds its vectors, so an eviction during response construction cannot free capacity the vectors still occupy.
     pub lease: Arc<ResultLease>,
 }
@@ -98,9 +96,6 @@ enum JobState {
         boundaries: Vec<usize>,
         /// Dropped with the job on eviction; pages served from the job hold clones, so the live total falls only when the last holder goes.
         lease: Arc<ResultLease>,
-        /// Highest page boundary whose `next_cursor` reached a built response.
-        /// Cursors are issued in page order, so every issued boundary is at most this value; a boundary above it is never-issued and must be rejected even though it is a legal page start.
-        issued_through: usize,
     },
     Failed {
         code: String,
@@ -192,6 +187,8 @@ impl Jobs {
 pub struct JobTable {
     limits: SynapseLimits,
     incarnation: String,
+    /// Keys the authenticator in every issued cursor. A client can hold a valid cursor only by receiving it from this table, so a never-issued boundary cannot be fabricated even though its position is predictable.
+    cursor_key: [u8; 32],
     inner: std::sync::Mutex<Jobs>,
     /// Result bytes still alive anywhere: retained by a job or held by a page being served. `Jobs::retained_result_bytes` counts only retained jobs and drives eviction; this total is what admission measures against the cap.
     live_result_bytes: Arc<AtomicU64>,
@@ -325,9 +322,12 @@ impl JobTable {
         let mut nonce = [0u8; 8];
         // The incarnation fence must be unpredictable across restarts so stale job IDs cannot name live jobs.
         getrandom::getrandom(&mut nonce).expect("OS entropy for the job incarnation");
+        let mut cursor_key = [0u8; 32];
+        getrandom::getrandom(&mut cursor_key).expect("OS entropy for the cursor key");
         Self {
             limits,
             incarnation: nonce.iter().map(|b| format!("{b:02x}")).collect(),
+            cursor_key,
             live_result_bytes: Arc::new(AtomicU64::new(0)),
             inner: std::sync::Mutex::new(Jobs {
                 by_key: HashMap::new(),
@@ -532,7 +532,6 @@ impl JobTable {
                 result_bytes,
                 Arc::clone(&self.live_result_bytes),
             )),
-            issued_through: 0,
         };
         job.result_bytes = result_bytes;
         job.completed_at = Some(Instant::now());
@@ -612,16 +611,13 @@ impl JobTable {
                 vectors,
                 boundaries,
                 lease,
-                issued_through,
             } => {
                 let offset = match cursor {
                     None => 0,
-                    Some(cursor) => {
-                        match self.parse_cursor(cursor, seq, boundaries, *issued_through) {
-                            Some(offset) => offset,
-                            None => return PollOutcome::BadCursor,
-                        }
-                    }
+                    Some(cursor) => match self.parse_cursor(cursor, seq, boundaries) {
+                        Some(offset) => offset,
+                        None => return PollOutcome::BadCursor,
+                    },
                 };
                 let next_boundary = boundaries
                     .iter()
@@ -635,53 +631,52 @@ impl JobTable {
                     })
                     .collect();
                 let done = next_boundary >= vectors.len();
-                let next_cursor = (!done).then(|| format!("{}:{next_boundary}", self.job_id(seq)));
+                let next_cursor = (!done).then(|| self.cursor(seq, next_boundary));
                 // A served page marks the job as in use so retention prefers evicting jobs nobody is reading.
                 job.last_polled_at = Some(Instant::now());
                 PollOutcome::Page(ResultPage {
                     vectors: page,
                     done,
                     next_cursor,
-                    next_boundary: (!done).then_some(next_boundary),
                     lease: Arc::clone(lease),
                 })
             }
         }
     }
 
-    /// Records that a response carrying the cursor for `boundary` was built, making that boundary replayable.
-    /// The mark is deferred to the caller because a page `poll` returns can still fail output reservation or be abandoned; marking inside `poll` would accept a cursor the client never received.
-    /// Unknown or non-ready jobs are ignored: the job may have expired or been evicted between the poll and the response.
-    pub fn mark_cursor_issued(&self, job_id: &str, boundary: usize) {
-        let Some(seq) = self.parse_job_id(job_id) else {
-            return;
-        };
-        let mut jobs = self.lock_jobs();
-        if let Some(Job {
-            state: JobState::Ready { issued_through, .. },
-            ..
-        }) = jobs.by_seq.get_mut(&seq)
-        {
-            *issued_through = (*issued_through).max(boundary);
-        }
+    /// Cursors are `<job_id>:<boundary>:<authenticator>`. The authenticator is a keyed digest over the job and boundary, so only a cursor this table issued verifies; a client cannot name a legal page it has never been handed, and every issued cursor, including one whose response was lost, replays its page.
+    fn cursor(&self, seq: u64, boundary: usize) -> String {
+        format!(
+            "{}:{boundary}:{}",
+            self.job_id(seq),
+            self.cursor_authenticator(seq, boundary)
+        )
     }
 
-    /// Accept a cursor only when it names this job and its offset is a page boundary already issued as a `next_cursor`; allow previously served pages to be retried after a lost response.
-    /// A boundary above `issued_through` is a legal page start the caller has never been handed, so accepting it would let a client skip pages the protocol defines as opaque and never-issued.
-    /// The offset uses the same canonical-decimal rule as the job sequence so a never-issued spelling such as `+16` or `0016` is rejected.
-    fn parse_cursor(
-        &self,
-        cursor: &str,
-        seq: u64,
-        boundaries: &[usize],
-        issued_through: usize,
-    ) -> Option<usize> {
-        let (job_id, offset) = cursor.rsplit_once(':')?;
+    fn cursor_authenticator(&self, seq: u64, boundary: usize) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.cursor_key);
+        hasher.update(seq.to_le_bytes());
+        hasher.update((boundary as u64).to_le_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// Accepts a cursor only when it names this job, its boundary is a page start, and its authenticator matches the one this table issues for that boundary.
+    /// The boundary uses the same canonical-decimal rule as the job sequence so a never-issued spelling such as `+16` or `0016` is rejected.
+    fn parse_cursor(&self, cursor: &str, seq: u64, boundaries: &[usize]) -> Option<usize> {
+        let (rest, authenticator) = cursor.rsplit_once(':')?;
+        let (job_id, offset) = rest.rsplit_once(':')?;
         if self.parse_job_id(job_id) != Some(seq) {
             return None;
         }
         let offset = usize::try_from(parse_canonical_decimal(offset)?).ok()?;
-        (offset <= issued_through && boundaries.contains(&offset)).then_some(offset)
+        (boundaries.contains(&offset) && authenticator == self.cursor_authenticator(seq, offset))
+            .then_some(offset)
     }
 
     /// `MAX_F32_JSON_BYTES` is the longest `serde_json` encoding of a finite `f32`, e.g. `-0.0000010000001`.
@@ -1445,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn a_page_boundary_is_a_valid_cursor_only_after_it_was_issued() {
+    fn only_cursors_the_table_issued_resolve() {
         let limits = SynapseLimits {
             max_page_vectors: 1,
             ..SynapseLimits::default()
@@ -1464,14 +1459,19 @@ mod tests {
         jobs.start(seq).expect("paged job starts");
         jobs.publish_ready(seq, vec![vec![1.0], vec![1.0], vec![1.0]]);
 
-        // Boundaries 1 and 2 are legal page starts, but neither has been issued yet.
-        for unissued in [1, 2] {
+        // Boundaries 1 and 2 are legal page starts, but a client cannot name them without the table's authenticator.
+        for fabricated in [
+            format!("{job_id}:1"),
+            format!("{job_id}:2"),
+            format!("{job_id}:1:{}", "0".repeat(32)),
+            format!("{job_id}:2:{}", "f".repeat(32)),
+        ] {
             assert!(
                 matches!(
-                    jobs.poll(&job_id, "paged", Some(&format!("{job_id}:{unissued}"))),
+                    jobs.poll(&job_id, "paged", Some(&fabricated)),
                     PollOutcome::BadCursor
                 ),
-                "boundary {unissued} was never issued"
+                "fabricated cursor {fabricated} must not resolve"
             );
         }
 
@@ -1479,20 +1479,20 @@ mod tests {
             panic!("the first page is served from a null cursor");
         };
         let second_cursor = first.next_cursor.expect("the first page carries a cursor");
-        assert_eq!(second_cursor, format!("{job_id}:1"));
+        assert!(second_cursor.starts_with(&format!("{job_id}:1:")));
+        assert!(second_cursor.len() <= super::super::protocol::MAX_CURSOR_BYTES);
 
-        // A polled page whose response never got built issues nothing.
+        // An issued cursor's authenticator is bound to its boundary, so moving it to another boundary fails.
+        let authenticator = second_cursor.rsplit(':').next().expect("authenticator");
         assert!(matches!(
-            jobs.poll(&job_id, "paged", Some(&second_cursor)),
+            jobs.poll(
+                &job_id,
+                "paged",
+                Some(&format!("{job_id}:2:{authenticator}"))
+            ),
             PollOutcome::BadCursor
         ));
-        jobs.mark_cursor_issued(&job_id, first.next_boundary.expect("non-final page"));
 
-        // The issued boundary resolves; the one after it is still unissued.
-        assert!(matches!(
-            jobs.poll(&job_id, "paged", Some(&format!("{job_id}:2"))),
-            PollOutcome::BadCursor
-        ));
         let PollOutcome::Page(second) = jobs.poll(&job_id, "paged", Some(&second_cursor)) else {
             panic!("an issued cursor serves its page");
         };
@@ -1500,7 +1500,6 @@ mod tests {
         let third_cursor = second
             .next_cursor
             .expect("the second page carries a cursor");
-        jobs.mark_cursor_issued(&job_id, second.next_boundary.expect("non-final page"));
 
         // Replaying an earlier issued cursor stays valid after later pages were served.
         assert!(matches!(

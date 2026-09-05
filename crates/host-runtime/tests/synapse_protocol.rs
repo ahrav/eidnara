@@ -1102,7 +1102,7 @@ async fn result_pages_preserve_order_and_cursor_discipline() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    // Only the first page has been served, so its cursor (boundary 2) is issued and boundary 4 is a legal page start that was never issued.
+    // Boundary 4 is a legal page start, but a cursor built by hand carries no authenticator and never resolves.
     let frame = call(
         &mut client,
         channel,
@@ -1115,6 +1115,7 @@ async fn result_pages_preserve_order_and_cursor_discipline() {
 
     let mut collected = Vec::new();
     let mut cursor = serde_json::Value::Null;
+    let mut issued_second_page_cursor = None;
     let mut pages = 0;
     loop {
         let frame = call(
@@ -1138,6 +1139,7 @@ async fn result_pages_preserve_order_and_cursor_discipline() {
         assert_eq!(result["done"], false);
         cursor = result["next_cursor"].clone();
         assert!(cursor.is_string(), "non-final pages carry a cursor");
+        issued_second_page_cursor.get_or_insert_with(|| cursor.clone());
     }
     assert_eq!(pages, 3);
     assert_eq!(collected, vec!["i0", "i1", "i2", "i3", "i4"]);
@@ -1157,13 +1159,13 @@ async fn result_pages_preserve_order_and_cursor_discipline() {
         assert_eq!(frame.error_code(), "schema_violation");
     }
 
-    // Re-reading a previously issued page boundary is allowed when a lost response is retried with the same cursor.
+    // Re-reading a previously issued cursor is allowed when a lost response is retried with it.
     let frame = call(
         &mut client,
         channel,
         epoch,
         "embed.result",
-        poll(serde_json::Value::String(format!("{job_id}:2"))),
+        poll(issued_second_page_cursor.expect("the first page issued a cursor")),
     )
     .await;
     let body = frame.json();

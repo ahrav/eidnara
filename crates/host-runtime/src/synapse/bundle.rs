@@ -161,6 +161,8 @@ pub struct Corpus {
 pub struct VerifiedBundle {
     pub manifest: BundleManifest,
     pub max_text_bytes: usize,
+    /// The aggregate text a routed batch may carry; certification batches stay within it.
+    pub max_batch_text_bytes: usize,
     /// Rows in the multi-row certification call: the largest batch the host admits, so a graph that misbehaves only at sizes above the recommended batch fails certification instead of an ordinary request.
     pub certification_rows: usize,
     pub onnx: Vec<u8>,
@@ -281,6 +283,7 @@ pub fn load_bundle(
     Ok(VerifiedBundle {
         manifest,
         max_text_bytes: limits.max_text_bytes,
+        max_batch_text_bytes: limits.max_batch_text_bytes,
         certification_rows,
         onnx,
         initializers,

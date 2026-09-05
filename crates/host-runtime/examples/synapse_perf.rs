@@ -1866,6 +1866,7 @@ impl Observation {
 /// A censored request is known only to have taken at least its observed duration: a timed-out request at least its deadline, a request open at the window end at least the time it had. Placing every censored request above every completed one would misstate a request censored after microseconds, so each censored observation leaves the risk set at its own duration instead.
 /// The quantile `q` is the first completed duration at which the estimated cumulative probability reaches `q`; when the censored mass keeps the estimate below `q`, the value is not identifiable and is suppressed.
 /// A tail quantile with fewer than 30 completed observations beyond it rests on too little support and is suppressed as well, whether the shortfall comes from a small sample or from censoring that consumed the tail.
+/// `max_ns` is the longest observed duration, completed or censored, and so a lower bound on the slowest request.
 #[derive(Debug, PartialEq, serde::Serialize)]
 struct GatedLatency {
     count: u64,
@@ -1885,11 +1886,8 @@ impl GatedLatency {
         if count == 0 {
             return None;
         }
-        let max_ns = observations
-            .iter()
-            .filter(|o| o.completed)
-            .map(|o| o.duration_ns)
-            .max()?;
+        // The maximum is a lower bound on the slowest request: a censored request lasted at least its observed duration, so it counts here even though it never completed.
+        let max_ns = observations.iter().map(|o| o.duration_ns).max()?;
         // Returns the estimate and how many completed observations lie beyond the event that produced it.
         let quantile = |quantile_per_mille: u64| -> Option<(u64, u64)> {
             let target = quantile_per_mille as f64 / 1_000.0;

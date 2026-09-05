@@ -208,6 +208,27 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
 }
 
 /// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
+/// The mismatching pair with the smallest longer text, so labeled batches fit the most rows under the aggregate cap.
+fn shortest_mismatching_pair(corpus: &Corpus) -> Option<(&CorpusItem, &CorpusItem)> {
+    let mut best: Option<(&CorpusItem, &CorpusItem)> = None;
+    for (index, first) in corpus.items.iter().enumerate() {
+        for second in &corpus.items[index + 1..] {
+            if !super::bundle::certification_mismatch(
+                &first.expected,
+                &second.expected,
+                corpus.tolerance,
+            ) {
+                continue;
+            }
+            let longer = first.text.len().max(second.text.len());
+            if best.is_none_or(|(a, b)| longer < a.text.len().max(b.text.len())) {
+                best = Some((first, second));
+            }
+        }
+    }
+    best
+}
+
 /// Shortens `text` to at most `max_bytes` without splitting a character.
 fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
     let mut end = text.len().min(max_bytes);
@@ -256,6 +277,7 @@ impl Backend {
         let VerifiedBundle {
             manifest,
             max_text_bytes,
+            max_batch_text_bytes,
             certification_rows,
             onnx,
             initializers,
@@ -333,7 +355,7 @@ impl Backend {
             zero_token_inputs_possible,
         };
         backend.structural_probe()?;
-        backend.certify(&corpus, certification_rows)?;
+        backend.certify(&corpus, certification_rows, max_batch_text_bytes)?;
         backend.long_input_probe(&corpus, max_text_bytes)?;
         Ok(backend)
     }
@@ -403,7 +425,13 @@ impl Backend {
     /// certify rejects structurally healthy models with semantically incorrect output.
     /// load rejects semantically wrong models before returning a backend that can serve vectors.
     /// `batch_rows` is the size of the multi-row check: the largest batch the host admits, as sized by `load_bundle`.
-    fn certify(&self, corpus: &Corpus, batch_rows: usize) -> Result<(), InferenceError> {
+    /// `max_batch_text_bytes` bounds every certification batch's aggregate text the way the routed parser bounds a request, so certification never executes a workload the lane would refuse.
+    fn certify(
+        &self,
+        corpus: &Corpus,
+        batch_rows: usize,
+        max_batch_text_bytes: usize,
+    ) -> Result<(), InferenceError> {
         let matches = |got: &[f32], item: &CorpusItem| {
             !super::bundle::certification_mismatch(got, &item.expected, corpus.tolerance)
         };
@@ -440,15 +468,23 @@ impl Backend {
                 distinct.push(item);
             }
         }
-        // A lane that admits one item per batch is never asked for two rows, so its certification stays within that contract.
+        // A lane that admits one item per batch is never asked for two rows, so its certification stays within that contract; the aggregate cap trims the batch the same way.
         distinct.truncate(batch_rows.max(1));
+        while distinct.len() > 1
+            && distinct.iter().map(|item| item.text.len()).sum::<usize>() > max_batch_text_bytes
+        {
+            distinct.pop();
+        }
         if distinct.len() >= 2 {
             self.certify_batch(&distinct, &matches)?;
         }
         // Full-size batches certify every admitted position with only two distinct items: batch `k` labels each position by bit `k` of its index and its complement swaps the labels, so any two positions differ in some batch and every position sees both items. A graph that mixes rows at any pair of positions, or mishandles one input at one position, produces a mismatch. The same batches are the capacity check, so a graph that fails only at the admitted size is caught too.
-        let rows = batch_rows.max(1);
+        // The labeled batches use the shortest mismatching pair so as many admitted positions as the aggregate cap allows are exercised; a full-size batch of large texts is a request the lane would refuse.
+        let (first, second) =
+            shortest_mismatching_pair(corpus).unwrap_or((distinct[0], distinct[0]));
+        let per_row = first.text.len().max(second.text.len()).max(1);
+        let rows = batch_rows.max(1).min(max_batch_text_bytes / per_row).max(1);
         if rows > 1 {
-            let (first, second) = (distinct[0], distinct[1.min(distinct.len() - 1)]);
             for bit in 0..usize::BITS - (rows - 1).leading_zeros() {
                 for complement in [false, true] {
                     let labeled: Vec<&CorpusItem> = (0..rows)
@@ -499,6 +535,13 @@ impl Backend {
                     break;
                 }
             }
+        }
+        // Whitespace-separated single characters tokenize to at least one token each in tokenizers with whitespace pre-tokenization, so a window at or below half the byte cap is reachable; failing to reach it means the tokenizer cannot produce the sequence lengths the manifest advertises, and the lane is not published on an unverified axis.
+        if best.0 < self.max_tokens && self.max_tokens <= max_text_bytes / 2 {
+            return Err(InferenceError::Artifact(format!(
+                "no probe within {max_text_bytes} bytes reaches the advertised max_tokens ({}); the longest reached {} tokens",
+                self.max_tokens, best.0
+            )));
         }
         let text = best.1;
         let vectors = self.embed(&[text.as_str()])?;

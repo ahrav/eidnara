@@ -474,16 +474,26 @@ fn settle_inference(
 ) -> Result<Vec<Vec<f32>>, InferenceError> {
     match joined {
         Ok(Ok(vectors)) => Ok(vectors),
-        Ok(Err(InferenceError::Invariant(reason))) => {
+        // Reasons are bounded once here so the retained state and the propagated error carry the same capped text; an oversized error would otherwise be downgraded to `internal_error` at the terminal.
+        Ok(Err(InferenceError::Invariant(mut reason))) => {
+            protocol::bound_diagnostic(&mut reason);
             mark_failing(inner, reason.clone());
             Err(InferenceError::Invariant(reason))
         }
         // A runtime artifact fault means the backend declared its artifact unusable, so the lane is disabled rather than left serving it.
-        Ok(Err(InferenceError::Artifact(reason))) => {
+        Ok(Err(InferenceError::Artifact(mut reason))) => {
+            protocol::bound_diagnostic(&mut reason);
             mark_disabled(inner, reason.clone());
             Err(InferenceError::Artifact(reason))
         }
-        Ok(Err(other)) => Err(other),
+        Ok(Err(InferenceError::Input(mut reason))) => {
+            protocol::bound_diagnostic(&mut reason);
+            Err(InferenceError::Input(reason))
+        }
+        Ok(Err(InferenceError::Execution(mut reason))) => {
+            protocol::bound_diagnostic(&mut reason);
+            Err(InferenceError::Execution(reason))
+        }
         Err(_panicked) => {
             let reason = "inference task panicked".to_owned();
             mark_failing(inner, reason.clone());
@@ -959,12 +969,6 @@ impl SynapseComponent {
                 )
                 .await;
                 drop(meta_charge);
-                // The boundary becomes replayable only once a response carrying its cursor exists; a failed reservation leaves it never-issued.
-                if let (RequestOutcome::Response { .. }, Some(boundary)) =
-                    (&outcome, page.next_boundary)
-                {
-                    self.inner.jobs.mark_cursor_issued(&job_id, boundary);
-                }
                 outcome
             }
         }
