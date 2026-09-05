@@ -265,6 +265,13 @@ impl Reactor {
     ) -> Result<()> {
         self.ensure_healthy()?;
         if self.registrations.contains_key(&channel_id) {
+            // A re-registration re-arms the existing wait: after a handler failure the frame is
+            // still visible, no doorbell will fire for it, and the JavaScript handler was
+            // dropped, so the fresh handler needs an immediate wake to observe it.
+            match ring.arm_data_wait() {
+                Ok(true) => {}
+                Ok(false) | Err(_) => self.kick(channel_id),
+            }
             return Ok(());
         }
         let descriptor = ring

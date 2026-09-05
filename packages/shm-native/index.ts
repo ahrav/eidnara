@@ -136,6 +136,9 @@ interface NativeAddon {
     ): boolean;
     watch(channel: number, callback: () => void): void;
     isWatching(channel: number): boolean;
+    producerRegistered(channel: number, token: number): boolean;
+    leaseRegistered(channel: number, token: number): boolean;
+    channelRegistered(channel: number): boolean;
     readinessHandled(): boolean;
     release(channel: number, token: number): void;
     close(channel: number): void;
@@ -161,6 +164,15 @@ const HANDLE_CONSUMED_PREFIX = "native handle consumed: ";
 
 function consumesHandle(error: unknown): boolean {
     return error instanceof Error && error.message.startsWith(HANDLE_CONSUMED_PREFIX);
+}
+
+/** True only when the query ran and reported absence; a throwing (busy) query is not evidence. */
+function confirmedAbsent(query: () => boolean): boolean {
+    try {
+        return !query();
+    } catch {
+        return false;
+    }
 }
 
 type PlatformPackage = (typeof PLATFORM_PACKAGES)[keyof typeof PLATFORM_PACKAGES];
@@ -503,6 +515,12 @@ export class ProducerCursor {
  */
 class ChannelLiveness {
     closed = false;
+    /**
+     * Handles the channel has issued and not yet retired. A partial native close can consume
+     * some tokens and fail on others; each handle re-checks its own token so consumed ones
+     * retire while the rest stay releasable.
+     */
+    readonly handles = new Set<{ retireIfConsumed(): void }>();
 }
 
 /** Module-private transition for a lease whose token the addon already consumed. */
@@ -519,6 +537,20 @@ export class NativeProducerReservation {
         private readonly liveness: ChannelLiveness = new ChannelLiveness(),
     ) {
         protect(segments);
+        liveness.handles.add(this);
+    }
+
+    /** Retires the wrapper only on confirmed absence of its token; a busy registry is indeterminate. */
+    retireIfConsumed(): void {
+        if (!this.active) return;
+        if (confirmedAbsent(() => this.native.producerRegistered(this.channel, this.token))) {
+            this.retire();
+        }
+    }
+
+    private retire(): void {
+        this.active = false;
+        this.liveness.handles.delete(this);
     }
 
     commit(
@@ -541,10 +573,10 @@ export class NativeProducerReservation {
                 beforePublish ?? (() => {}),
             );
         } catch (error) {
-            if (consumesHandle(error)) this.active = false;
+            if (consumesHandle(error)) this.retire();
             throw error;
         }
-        this.active = false;
+        this.retire();
     }
 
     abort(): void {
@@ -552,10 +584,10 @@ export class NativeProducerReservation {
         try {
             this.native.abortReservation(this.channel, this.token);
         } catch (error) {
-            if (consumesHandle(error)) this.active = false;
+            if (consumesHandle(error)) this.retire();
             throw error;
         }
-        this.active = false;
+        this.retire();
     }
 
     private isActive(): boolean {
@@ -579,6 +611,20 @@ export class NativeReceiveLease {
         private readonly liveness: ChannelLiveness = new ChannelLiveness(),
     ) {
         protect(segments);
+        liveness.handles.add(this);
+    }
+
+    /** Retires the wrapper only on confirmed absence of its token; a busy registry is indeterminate. */
+    retireIfConsumed(): void {
+        if (this.released) return;
+        if (confirmedAbsent(() => this.native.leaseRegistered(this.channel, this.token))) {
+            this.retire();
+        }
+    }
+
+    private retire(): void {
+        this.released = true;
+        this.liveness.handles.delete(this);
     }
 
     get byteLength(): number {
@@ -602,7 +648,7 @@ export class NativeReceiveLease {
     }
 
     [markConsumed](): void {
-        this.released = true;
+        this.retire();
     }
 
     release(): void {
@@ -612,10 +658,10 @@ export class NativeReceiveLease {
         try {
             this.native.release(this.channel, this.token);
         } catch (error) {
-            if (consumesHandle(error)) this.released = true;
+            if (consumesHandle(error)) this.retire();
             throw error;
         }
-        this.released = true;
+        this.retire();
     }
 
     [Symbol.dispose](): void {
@@ -826,9 +872,16 @@ export class NativeChannel {
         try {
             nativeClose();
         } catch (error) {
-            if (consumesHandle(error)) {
+            // The consumed prefix names the first consumed token, not necessarily the channel, so
+            // removal of the channel entry is checked directly. A confirmed-removed channel
+            // retires everything; a retained one (partial sweep) lets each handle re-check its
+            // own token so only the consumed ones retire and the rest remain releasable.
+            if (confirmedAbsent(() => this.native.channelRegistered(this.id))) {
                 readinessHandlers.delete(this.id);
                 this.liveness.closed = true;
+                this.liveness.handles.clear();
+            } else {
+                for (const handle of [...this.liveness.handles]) handle.retireIfConsumed();
             }
             throw error;
         }
@@ -836,6 +889,7 @@ export class NativeChannel {
         // A successful native close consumed every outstanding token; the shared liveness flag
         // retires every lease and reservation issued by this channel at once.
         this.liveness.closed = true;
+        this.liveness.handles.clear();
     }
 
     private assertOpen(): void {
