@@ -138,26 +138,31 @@ pub(crate) fn open_dir_for_removal<N: AsRef<OsStr> + ?Sized>(
 }
 
 /// Removes `name` under `parent`, recursing through owned directories. A missing entry is `Ok`
-/// and a directory with a foreign owner fails with `EPERM`.
+/// and an entry with a foreign owner fails with `EPERM`.
 ///
-/// Ownership is checked on the entry itself before any open, because `rmdir` is authorized by
-/// the writable parent alone and would otherwise remove an empty foreign directory. A directory
-/// that passes that check but cannot be opened for traversal (mode `000` left by a crash between
-/// `mkdirat` and `chmodat`) is still removed when it is empty.
+/// Ownership is checked on the entry itself before any unlink or open, because both `unlink`
+/// and `rmdir` are authorized by the writable parent alone and would otherwise remove a
+/// foreign-owned file, symlink, or empty directory that happens to carry a managed-looking
+/// name. A directory that passes that check but cannot be opened for traversal (mode `000`
+/// left by a crash between `mkdirat` and `chmodat`) is still removed when it is empty.
 pub(crate) fn remove_tree<N: AsRef<OsStr> + ?Sized>(
     parent: &OwnedFd,
     name: &N,
 ) -> rustix::io::Result<()> {
     let name = name.as_ref();
-    match unlinkat(parent, name, AtFlags::empty()) {
-        Ok(()) | Err(rustix::io::Errno::NOENT) => return Ok(()),
-        // Linux reports EPERM for unlink-on-directory on some filesystems.
-        Err(rustix::io::Errno::ISDIR) | Err(rustix::io::Errno::PERM) => {}
+    let stat = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
         Err(e) => return Err(e),
-    }
-    let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
-    if mode_bits(&stat) & S_IFMT != S_IFDIR || stat.st_uid != owner_uid() {
+    };
+    if stat.st_uid != owner_uid() {
         return Err(rustix::io::Errno::PERM);
+    }
+    if mode_bits(&stat) & S_IFMT != S_IFDIR {
+        return match unlinkat(parent, name, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+            Err(e) => Err(e),
+        };
     }
     let dir = match open_dir_for_removal(parent, name) {
         Ok(dir) => dir,

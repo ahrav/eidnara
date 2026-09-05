@@ -306,6 +306,11 @@ fn open_rel_file(dir: &OwnedFd, rel: &str) -> Option<OwnedFd> {
 }
 
 fn verify_file_against_entry(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), GenerationError> {
+    // The stager emits only `0o600` and `0o700`; a set-ID or sticky bit in a manifest names
+    // permission semantics no generation can legitimately carry.
+    if entry.mode & !0o777 != 0 {
+        return Err(invalid("manifest mode carries special permission bits"));
+    }
     let stat = rustix::fs::fstat(fd).map_err(|_| invalid("file stat failed"))?;
     let mode = mode_bits(&stat);
     if (mode & S_IFMT) != S_IFREG {
@@ -314,6 +319,8 @@ fn verify_file_against_entry(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), G
     if stat.st_uid != owner_uid() || stat.st_nlink != 1 || (mode & 0o077) != 0 {
         return Err(invalid("file is not owner-only single-link"));
     }
+    // Masking with `0o7777` keeps set-ID and sticky bits in the comparison, so a retained file
+    // that gained one diverges from its manifest mode.
     if (mode & 0o7777) != entry.mode {
         return Err(invalid("file mode diverges from the manifest"));
     }
@@ -618,12 +625,22 @@ impl GenerationStore {
             _ => invalid("staging temp creation failed"),
         })?;
         // `mkdirat` rejects `EEXIST`, so success proves this call created the entry and the pathname `chmod` cannot follow a planted symlink.
-        let temp_fd = open_created_dir(&self.generations_fd, &temp_name)
-            .map_err(|_| invalid("staging temp chmod failed"))?;
-        if open_child_dir(&self.generations_fd, &temp_name).is_none() {
-            return Err(invalid("staging temp failed security checks"));
+        // A failure after creation must remove the entry here, because the caller never learns
+        // the name and repeated attempts would otherwise accumulate `tmp-*` directories.
+        let opened = open_created_dir(&self.generations_fd, &temp_name)
+            .map_err(|_| invalid("staging temp chmod failed"))
+            .and_then(|temp_fd| {
+                open_child_dir(&self.generations_fd, &temp_name)
+                    .map(|_| temp_fd)
+                    .ok_or_else(|| invalid("staging temp failed security checks"))
+            });
+        match opened {
+            Ok(temp_fd) => Ok((temp_name, temp_fd)),
+            Err(err) => {
+                let _ = remove_tree(&self.generations_fd, &temp_name);
+                Err(err)
+            }
         }
-        Ok((temp_name, temp_fd))
     }
 
     fn stage_into_temp(
@@ -1310,6 +1327,16 @@ mod tests {
         expect_invalid(&store);
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("mode");
 
+        // A set-user-ID bit keeps the owner-only shape but is never a mode the stager emits.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o4700)).expect("mode");
+        assert!(matches!(
+            store.validate(&digest),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "file mode diverges from the manifest"
+            })
+        ));
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("mode");
+
         let alias = gen_dir.join("alias-link");
         std::fs::hard_link(&bin, &alias).expect("link");
         expect_invalid(&store);
@@ -1491,6 +1518,43 @@ mod tests {
         );
         std::fs::set_permissions(&generations, std::fs::Permissions::from_mode(0o700))
             .expect("restore");
+    }
+
+    /// A manifest mode with set-ID bits passes owner and byte-equality checks when the file has
+    /// matching bits, so the manifest mode itself must be bounded to `0o777`.
+    #[test]
+    fn a_manifest_recording_special_permission_bits_is_rejected() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+
+        let bytes = std::fs::read(dir.join(GENERATION_MANIFEST_NAME)).expect("manifest");
+        let mut manifest: GenerationManifest = serde_json::from_slice(&bytes).expect("decode");
+        let bin = manifest
+            .files
+            .iter_mut()
+            .find(|file| file.path == "bin/eidnara-host")
+            .expect("launcher entry");
+        bin.mode = 0o4700;
+        let rewritten = manifest.canonical_bytes();
+        let renamed = manifest.digest();
+        std::fs::write(dir.join(GENERATION_MANIFEST_NAME), &rewritten).expect("write");
+        std::fs::set_permissions(
+            dir.join("bin/eidnara-host"),
+            std::fs::Permissions::from_mode(0o4700),
+        )
+        .expect("setuid mode");
+        let target = store.root().join(GENERATIONS_DIR_NAME).join(&renamed);
+        std::fs::rename(&dir, &target).expect("rename to the new byte hash");
+
+        assert!(matches!(
+            store.validate(&renamed),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "manifest mode carries special permission bits"
+            })
+        ));
     }
 
     /// A crash between `mkdirat` and `chmodat` under a restrictive umask leaves an empty
