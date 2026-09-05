@@ -923,6 +923,52 @@ mod tests {
     }
 
     #[test]
+    fn every_artifact_hash_participates_in_the_fingerprint() {
+        let baseline = manifest();
+        let before = canonical_fingerprint(&baseline);
+        let replacement = sha256_hex(b"replaced");
+        // Each entry changes one artifact hash and nothing else, so a hash the
+        // pre-image omits leaves the fingerprint equal to `before`.
+        type Mutation = (&'static str, fn(&mut BundleManifest, &str));
+        let fields: [Mutation; 8] = [
+            ("model_file", |m, h| m.model_file.sha256 = h.to_owned()),
+            ("external_initializers[0]", |m, h| {
+                m.external_initializers[0].sha256 = h.to_owned()
+            }),
+            ("external_initializers[1]", |m, h| {
+                m.external_initializers[1].sha256 = h.to_owned()
+            }),
+            ("tokenizer.tokenizer", |m, h| {
+                m.tokenizer.tokenizer.sha256 = h.to_owned()
+            }),
+            ("tokenizer.config", |m, h| {
+                m.tokenizer.config.sha256 = h.to_owned()
+            }),
+            ("tokenizer.special_tokens_map", |m, h| {
+                m.tokenizer.special_tokens_map.sha256 = h.to_owned()
+            }),
+            ("tokenizer.tokenizer_config", |m, h| {
+                m.tokenizer.tokenizer_config.sha256 = h.to_owned()
+            }),
+            ("corpus", |m, h| m.corpus.sha256 = h.to_owned()),
+        ];
+        let mut seen = std::collections::BTreeSet::from([before.clone()]);
+        for (name, mutate) in fields {
+            let mut manifest = baseline.clone();
+            mutate(&mut manifest, &replacement);
+            let after = canonical_fingerprint(&manifest);
+            assert_ne!(
+                before, after,
+                "{name} does not participate in the fingerprint"
+            );
+            assert!(
+                seen.insert(after),
+                "{name} yields the same fingerprint as another field"
+            );
+        }
+    }
+
+    #[test]
     fn maximum_batch_result_must_fit_retention() {
         let mut manifest = manifest();
         manifest.dims = MAX_DIMS;
