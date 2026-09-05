@@ -208,6 +208,15 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
 }
 
 /// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
+/// Shortens `text` to at most `max_bytes` without splitting a character.
+fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+}
+
 /// The served-vector contract every engine must meet: `dims` finite components with an L2 norm within `UNIT_NORM_TOLERANCE` of 1.
 /// Accumulating in f64 keeps summation roundoff below the tolerance at `MAX_DIMS`; an f32 sum can drift past it and fail a correctly normalized vector.
 pub(crate) fn validate_unit_vector(dims: usize, vector: &[f32]) -> Result<(), String> {
@@ -234,6 +243,8 @@ pub(crate) fn validate_unit_vector(dims: usize, vector: &[f32]) -> Result<(), St
 pub struct Backend {
     model: Mutex<TextEmbedding>,
     dims: usize,
+    /// The tokenizer truncates every text to this many tokens.
+    max_tokens: usize,
     /// When the tokenizer's post-processor adds special tokens, every encoding is non-empty and the per-text zero-token pass is skipped.
     zero_token_inputs_possible: bool,
 }
@@ -318,6 +329,7 @@ impl Backend {
         let backend = Self {
             model: Mutex::new(embedder),
             dims: manifest.dims as usize,
+            max_tokens: manifest.max_tokens as usize,
             zero_token_inputs_possible,
         };
         backend.structural_probe()?;
@@ -429,27 +441,30 @@ impl Backend {
             }
         }
         self.certify_batch(&distinct, &matches)?;
-        // Full-size batches certify every admitted position with only two distinct items: batch `k` labels each position by bit `k` of its index, so any two positions differ in some batch and a graph that mixes rows at any pair of positions produces a mismatch there. The same batches are the capacity check, so a graph that fails only at the admitted size is caught too.
+        // Full-size batches certify every admitted position with only two distinct items: batch `k` labels each position by bit `k` of its index and its complement swaps the labels, so any two positions differ in some batch and every position sees both items. A graph that mixes rows at any pair of positions, or mishandles one input at one position, produces a mismatch. The same batches are the capacity check, so a graph that fails only at the admitted size is caught too.
         let rows = batch_rows.max(1);
         if rows > 1 {
             let (first, second) = (distinct[0], distinct[1.min(distinct.len() - 1)]);
             for bit in 0..usize::BITS - (rows - 1).leading_zeros() {
-                let labeled: Vec<&CorpusItem> = (0..rows)
-                    .map(|position| {
-                        if (position >> bit) & 1 == 0 {
-                            first
-                        } else {
-                            second
-                        }
-                    })
-                    .collect();
-                self.certify_batch(&labeled, &matches)?;
+                for complement in [false, true] {
+                    let labeled: Vec<&CorpusItem> = (0..rows)
+                        .map(|position| {
+                            if ((position >> bit) & 1 == 0) != complement {
+                                first
+                            } else {
+                                second
+                            }
+                        })
+                        .collect();
+                    self.certify_batch(&labeled, &matches)?;
+                }
             }
         }
         Ok(())
     }
 
-    /// Corpus texts are short, so a graph with a fixed short sequence axis passes every semantic probe and then fails an ordinary long request. This probe embeds a text at the advertised byte limit, which tokenizes past `max_tokens` and exercises the truncation window; the result must be a valid vector, with no expectation to compare.
+    /// Corpus texts are short, so a graph with a fixed short sequence axis passes every semantic probe and then fails an ordinary long request. This probe embeds a text at the advertised byte limit that reaches the truncation window; the result must be a valid vector, with no expectation to compare.
+    /// Corpus phrases can tokenize sparsely, so the probe's encoding is measured; if it falls short of `max_tokens`, a dense text of isolated single-byte characters (about one token per two bytes) is used instead, which is the densest legal input a request can send.
     fn long_input_probe(
         &self,
         corpus: &Corpus,
@@ -465,11 +480,11 @@ impl Backend {
             }
             text.push_str(&item.text);
         }
-        let mut end = text.len().min(max_text_bytes);
-        while !text.is_char_boundary(end) {
-            end -= 1;
+        truncate_to_char_boundary(&mut text, max_text_bytes);
+        if self.token_count(&text)? < self.max_tokens {
+            text = "x ".repeat(max_text_bytes.div_ceil(2));
+            truncate_to_char_boundary(&mut text, max_text_bytes);
         }
-        text.truncate(end);
         let vectors = self.embed(&[text.as_str()])?;
         if vectors.len() != 1 {
             return Err(InferenceError::Artifact(
@@ -477,6 +492,21 @@ impl Backend {
             ));
         }
         Ok(())
+    }
+
+    /// Tokens in `text` after the tokenizer's truncation, so a count equal to `max_tokens` means the text reached the window.
+    fn token_count(&self, text: &str) -> Result<usize, InferenceError> {
+        let model = self
+            .model
+            .lock()
+            .map_err(|_| InferenceError::Invariant("inference state is poisoned".to_owned()))?;
+        model
+            .tokenizer
+            .encode(text, true)
+            .map(|encoding| encoding.get_ids().len())
+            .map_err(|_| {
+                InferenceError::Artifact("tokenizer failed to encode the probe".to_owned())
+            })
     }
 
     fn certify_batch(

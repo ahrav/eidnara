@@ -400,7 +400,9 @@ impl SynapseComponent {
     }
 }
 
-fn mark_failing(inner: &SynapseInner, reason: String) {
+/// The reason is retained uncharged for the component lifetime and cloned into status and error paths, so it is bounded to the shared diagnostic cap.
+fn mark_failing(inner: &SynapseInner, mut reason: String) {
+    protocol::bound_diagnostic(&mut reason);
     let mut state = inner.lock_state();
     if matches!(&*state, LaneState::Ready(_)) {
         *state = LaneState::Failing { reason };

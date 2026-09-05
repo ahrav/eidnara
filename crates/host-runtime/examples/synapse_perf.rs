@@ -1826,10 +1826,34 @@ struct Summary {
     fatal_errors: Vec<String>,
 }
 
-/// `GatedLatency` publishes each quantile over the offered population, not over completed samples alone.
+/// One request's latency observation: either a completed duration, or a right-censored duration (the request was still open when observation stopped).
+#[derive(Debug, Clone, Copy)]
+struct Observation {
+    duration_ns: u64,
+    completed: bool,
+}
+
+impl Observation {
+    fn completed(duration_ns: u64) -> Self {
+        Self {
+            duration_ns,
+            completed: true,
+        }
+    }
+
+    fn censored(duration_ns: u64) -> Self {
+        Self {
+            duration_ns,
+            completed: false,
+        }
+    }
+}
+
+/// `GatedLatency` publishes each quantile of the offered population with a Kaplan-Meier estimate over completed and right-censored observations.
 ///
-/// A censored request (timed out or still in flight) took longer than every completed one, so it sits above every completed sample in the offered distribution. The quantile `q` of the offered population is therefore the completed sample at rank `q / (1 - c)`, where `c` is the censored fraction; when that rank falls into the censored mass (`c > 1 - q`) the value is not identifiable and is suppressed.
-/// A tail quantile below its sample floor rests on too few observations above it and is suppressed as well.
+/// A censored request is known only to have taken at least its observed duration: a timed-out request at least its deadline, a request open at the window end at least the time it had. Placing every censored request above every completed one would misstate a request censored after microseconds, so each censored observation leaves the risk set at its own duration instead.
+/// The quantile `q` is the first completed duration at which the estimated cumulative probability reaches `q`; when the censored mass keeps the estimate below `q`, the value is not identifiable and is suppressed.
+/// A tail quantile below its sample floor rests on too few completed observations above it and is suppressed as well.
 #[derive(Debug, PartialEq, serde::Serialize)]
 struct GatedLatency {
     count: u64,
@@ -1842,66 +1866,97 @@ struct GatedLatency {
 }
 
 impl GatedLatency {
-    fn from_unsorted(mut samples: Vec<u64>, censored_per_mille: f64) -> Option<Self> {
-        samples.sort_unstable();
-        let count = samples.len() as u64;
-        let completed_fraction = 1.0 - censored_per_mille / 1_000.0;
-        // The offered-population quantile maps onto the completed samples at a higher rank; a rank at or past 1.0 is the completed maximum, a rank beyond the completed mass is censored.
-        let offered_quantile = |quantile_per_mille: u64| -> Option<u64> {
-            let adjusted = quantile_per_mille as f64 / 1_000.0 / completed_fraction;
-            // Floating-point slack at the boundary resolves toward publication of the maximum, matching the exact arithmetic of `c == 1 - q`.
-            if adjusted > 1.0 + 1e-9 {
-                return None;
+    fn from_observations(mut observations: Vec<Observation>) -> Option<Self> {
+        // Ties resolve events before censorings, so a request censored at exactly a completed duration still counts as at risk for that event.
+        observations.sort_by_key(|observation| (observation.duration_ns, !observation.completed));
+        let count = observations.iter().filter(|o| o.completed).count() as u64;
+        if count == 0 {
+            return None;
+        }
+        let max_ns = observations
+            .iter()
+            .filter(|o| o.completed)
+            .map(|o| o.duration_ns)
+            .max()?;
+        let quantile = |quantile_per_mille: u64| -> Option<u64> {
+            let target = quantile_per_mille as f64 / 1_000.0;
+            let mut survival = 1.0f64;
+            for (index, observation) in observations.iter().enumerate() {
+                if !observation.completed {
+                    continue;
+                }
+                let at_risk = (observations.len() - index) as f64;
+                survival *= 1.0 - 1.0 / at_risk;
+                // Floating-point slack resolves toward publication, matching exact arithmetic at `F == q`.
+                if 1.0 - survival + 1e-9 >= target {
+                    return Some(observation.duration_ns);
+                }
             }
-            perf_measurement::nearest_rank(
-                &samples,
-                (adjusted.min(1.0) * 100.0).max(f64::MIN_POSITIVE),
-            )
+            None
         };
         let tail = |quantile_per_mille: u64| {
             perf_measurement::quantile_publishable(count, quantile_per_mille)
-                .then(|| offered_quantile(quantile_per_mille))
+                .then(|| quantile(quantile_per_mille))
                 .flatten()
         };
         Some(Self {
             count,
-            p50_ns: offered_quantile(500)?,
-            p90_ns: offered_quantile(900)?,
-            p95_ns: offered_quantile(950)?,
+            p50_ns: quantile(500)?,
+            p90_ns: quantile(900)?,
+            p95_ns: quantile(950)?,
             p99_ns: tail(990),
             p999_ns: tail(999),
-            max_ns: *samples.last()?,
+            max_ns,
         })
+    }
+
+    /// Fully observed samples: every observation completed.
+    fn from_completed(samples: Vec<u64>) -> Option<Self> {
+        Self::from_observations(samples.into_iter().map(Observation::completed).collect())
     }
 }
 
-fn attempt_latency_by_method(
-    attempts: &[AttemptRecord],
-    censored_per_mille: f64,
-) -> BTreeMap<&'static str, GatedLatency> {
-    let mut samples: BTreeMap<&'static str, Vec<u64>> = BTreeMap::new();
+/// Each method's censoring comes from its own attempts: a timed-out attempt is censored at its deadline, every other terminal attempt is a completed observation, so a method whose attempts all settled carries no censoring from another phase.
+fn attempt_latency_by_method(attempts: &[AttemptRecord]) -> BTreeMap<&'static str, GatedLatency> {
+    let mut observations: BTreeMap<&'static str, Vec<Observation>> = BTreeMap::new();
     for attempt in attempts {
-        samples
+        let observation = if attempt.disposition == AttemptDisposition::Timeout {
+            Observation::censored(attempt.latency_ns)
+        } else {
+            Observation::completed(attempt.latency_ns)
+        };
+        observations
             .entry(attempt.method.wire_name())
             .or_default()
-            .push(attempt.latency_ns);
+            .push(observation);
     }
-    samples
+    observations
         .into_iter()
-        .filter_map(|(method, latencies)| {
-            GatedLatency::from_unsorted(latencies, censored_per_mille).map(|gated| (method, gated))
+        .filter_map(|(method, observations)| {
+            GatedLatency::from_observations(observations).map(|gated| (method, gated))
         })
         .collect()
 }
 
-fn logical_latency(records: &[LogicalRecord], censored_per_mille: f64) -> Option<GatedLatency> {
-    GatedLatency::from_unsorted(
+/// Completed requests are events; a timed-out request is censored at its deadline and a request still open at the window end is censored at the time it had before `window.end_ns`. Rejected requests carry no service latency and are excluded.
+fn logical_latency(
+    records: &[LogicalRecord],
+    window: &perf_measurement::HoldWindow,
+) -> Option<GatedLatency> {
+    GatedLatency::from_observations(
         records
             .iter()
-            .filter(|request| request.disposition == LogicalDisposition::Completed)
-            .map(|request| request.latency_ns)
+            .filter_map(|request| match request.disposition {
+                LogicalDisposition::Completed => Some(Observation::completed(request.latency_ns)),
+                LogicalDisposition::TimedOut => Some(Observation::censored(request.latency_ns)),
+                LogicalDisposition::InFlight => {
+                    Some(Observation::censored(window.end_ns.saturating_sub(
+                        perf_measurement::HoldWindow::opened_ns(request),
+                    )))
+                }
+                LogicalDisposition::Rejected => None,
+            })
             .collect(),
-        censored_per_mille,
     )
 }
 
@@ -2045,8 +2100,8 @@ async fn run(
     } else {
         censored as f64 * 1_000.0 / ledger.offered as f64
     };
-    let attempt_latency = attempt_latency_by_method(&attempt_estimates, censored_per_mille);
-    let logical_latency = logical_latency(&logical_estimates, censored_per_mille);
+    let attempt_latency = attempt_latency_by_method(&attempt_estimates);
+    let logical_latency = logical_latency(&logical_estimates, &window);
     let latency_residual_ns = SignedSummary::from_unsorted(
         attempt_estimates
             .iter()
@@ -2082,8 +2137,8 @@ async fn run(
         .filter(|sample| sample.window.is_measured())
         .map(|sample| sample.service_ns)
         .collect();
-    // Shutdown drained every started native call before the snapshot, so this series has no censored observations; the logical-request censoring fraction does not apply to it.
-    let service_time = GatedLatency::from_unsorted(service_measured.clone(), 0.0);
+    // Shutdown drained every started native call before the snapshot, so every service observation completed.
+    let service_time = GatedLatency::from_completed(service_measured.clone());
     let service_time_mean_ns = mean(&service_measured);
     let service_time_cv = coefficient_of_variation(&service_measured);
     let summary = Summary {
@@ -2340,18 +2395,27 @@ mod tests {
 
     #[test]
     fn logical_latency_counts_only_completed_requests() {
+        let window = perf_measurement::HoldWindow {
+            start_ns: 0,
+            warmup_end_ns: 0,
+            end_ns: 1_000_000,
+        };
         let mut records = vec![
             logical(1, LogicalDisposition::Completed),
             logical(2, LogicalDisposition::Completed),
             logical(3, LogicalDisposition::Rejected),
-            logical(4, LogicalDisposition::TimedOut),
-            logical(5, LogicalDisposition::InFlight),
         ];
+        // A rejection carries no service latency and neither counts nor censors.
         records[2].latency_ns = 1_000;
-        let summary = logical_latency(&records, 0.0).expect("two completed samples");
+        let summary = logical_latency(&records, &window).expect("two completed samples");
         assert_eq!(summary.count, 2);
         assert_eq!(summary.max_ns, 1);
-        assert!(logical_latency(&records[2..], 0.0).is_none());
+        assert!(logical_latency(&records[2..], &window).is_none());
+
+        // Two censored requests beside two completed ones leave the upper half unidentifiable, so no summary is published.
+        records.push(logical(4, LogicalDisposition::TimedOut));
+        records.push(logical(5, LogicalDisposition::InFlight));
+        assert!(logical_latency(&records, &window).is_none());
     }
 
     #[test]
@@ -2377,7 +2441,7 @@ mod tests {
             attempt(2, SynapseMethod::Result, 10),
             attempt(3, SynapseMethod::Result, 30),
         ];
-        let by_method = attempt_latency_by_method(&attempts, 0.0);
+        let by_method = attempt_latency_by_method(&attempts);
         assert_eq!(
             by_method.keys().copied().collect::<Vec<_>>(),
             ["embed.batch", "embed.result"]
@@ -2385,7 +2449,24 @@ mod tests {
         assert_eq!(by_method["embed.batch"].count, 1);
         assert_eq!(by_method["embed.result"].count, 2);
         assert_eq!(by_method["embed.result"].max_ns, 30);
-        assert!(attempt_latency_by_method(&[], 0.0).is_empty());
+        assert!(attempt_latency_by_method(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_censored_observation_leaves_the_risk_set_at_its_own_duration() {
+        // Ten completed at 1..=10 and one request censored at 5: it is at risk for the first five events only, so the
+        // estimate rises faster after it leaves and the median moves from 5 to 6.
+        let mut observations: Vec<Observation> = (1..=10).map(Observation::completed).collect();
+        let uncensored = GatedLatency::from_observations(observations.clone()).unwrap();
+        assert_eq!(uncensored.p50_ns, 5);
+        observations.push(Observation::censored(5));
+        let censored = GatedLatency::from_observations(observations).unwrap();
+        assert_eq!(censored.count, 10);
+        assert_eq!(censored.p50_ns, 6);
+        // A request censored after microseconds barely moves the estimate, unlike placing it above every completed sample.
+        let mut early: Vec<Observation> = (1..=10).map(Observation::completed).collect();
+        early.push(Observation::censored(0));
+        assert_eq!(GatedLatency::from_observations(early).unwrap().p50_ns, 5);
     }
 
     #[test]
@@ -2395,27 +2476,36 @@ mod tests {
         assert_eq!(p99_floor, 3_000);
         assert_eq!(p999_floor, perf_measurement::TAIL_SAMPLE_FLOOR);
 
-        let below = GatedLatency::from_unsorted((1..p99_floor).collect(), 0.0).unwrap();
+        let below = GatedLatency::from_completed((1..p99_floor).collect()).unwrap();
         assert_eq!(below.p99_ns, None);
         assert_eq!(below.p999_ns, None);
         assert_eq!(below.p50_ns, 1_500);
 
-        let p99_only = GatedLatency::from_unsorted((1..=p99_floor).collect(), 0.0).unwrap();
+        let p99_only = GatedLatency::from_completed((1..=p99_floor).collect()).unwrap();
         assert_eq!(p99_only.p99_ns, Some(2_970));
         assert_eq!(p99_only.p999_ns, None);
 
-        let full = GatedLatency::from_unsorted((1..=p999_floor).collect(), 0.0).unwrap();
+        let full = GatedLatency::from_completed((1..=p999_floor).collect()).unwrap();
         assert!(full.p99_ns.is_some());
         assert!(full.p999_ns.is_some());
 
-        // Censoring above 1 per mille hides p99.9; above 10 per mille it hides p99 as well.
-        let p999_censored = GatedLatency::from_unsorted((1..=p999_floor).collect(), 1.5).unwrap();
+        // Requests censored beyond every completed duration cap the estimate at the completed fraction: more than
+        // 1 per mille hides p99.9, more than 10 per mille hides p99 as well, and exactly 10 per mille still publishes p99.
+        let with_late_censoring = |per_mille_tenths: u64| {
+            let completed = p999_floor;
+            let censored = completed * per_mille_tenths / (10_000 - per_mille_tenths);
+            let mut observations: Vec<Observation> =
+                (1..=completed).map(Observation::completed).collect();
+            observations.extend((0..censored).map(|_| Observation::censored(completed + 1)));
+            GatedLatency::from_observations(observations).unwrap()
+        };
+        let p999_censored = with_late_censoring(15);
         assert!(p999_censored.p99_ns.is_some());
         assert_eq!(p999_censored.p999_ns, None);
-        let p99_censored = GatedLatency::from_unsorted((1..=p999_floor).collect(), 10.5).unwrap();
+        let p99_censored = with_late_censoring(105);
         assert_eq!(p99_censored.p99_ns, None);
         assert_eq!(p99_censored.p999_ns, None);
-        let at_boundary = GatedLatency::from_unsorted((1..=p999_floor).collect(), 10.0).unwrap();
+        let at_boundary = with_late_censoring(100);
         assert!(at_boundary.p99_ns.is_some());
     }
 
