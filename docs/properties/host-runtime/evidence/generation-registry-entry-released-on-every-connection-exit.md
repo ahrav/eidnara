@@ -105,11 +105,15 @@ deterministic panic injection, partial - callback panics are injectable through 
 test handler but internal points are not; and H3, task abort at a chosen point,
 unavailable). Concretely, two tests:
 
-- Panic: a failpoint on the `serve_generation` stack after `:288` - the cheapest
-  real one available today is a handler callback that panics during `route.open`,
-  since that path runs inline through `handle_control`. Drive one connection to a
-  registered state, fire the panic, then assert `shared.connections` no longer
-  contains the id. Assert it directly on the map, not via a shutdown that
+- Panic: a failpoint on the `serve_generation` stack after the insert at
+  `connection.rs:260`. A handler callback that panics during `route.open` is not
+  such a failpoint: `handle_control` launches `open_route` in a separate lifecycle
+  task (`connection.rs:655-665`) and the bind callback runs in another, whose panic
+  `lifecycle_join` converts into `LifecycleFailure`, so the connection task never
+  unwinds and reaches its ordinary removal. The panic case therefore needs an
+  internal failpoint on the connection task itself; without one, rely on the abort
+  construction below. Drive one connection to a registered state, fire the
+  failpoint, then assert `shared.connections` no longer contains the id. Assert it directly on the map, not via a shutdown that
   completes: the drain completing proves nothing, because it tolerates a dead
   generation silently.
 - Abort: `spawn_tracked` retains an abort handle (`runtime.rs:151-153`), so
