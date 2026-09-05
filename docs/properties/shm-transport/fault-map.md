@@ -92,7 +92,7 @@ classes the original map did not name.
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| decoder-totality-over-arbitrary-bytes | None; arbitrary bytes are the enabling state. Needs an exhaustive-length sweep, structured mutation of an accepted seed, and an allocation oracle | Partial — ten lengths and two fills, neither reaching an arithmetic guard |
+| decoder-totality-over-arbitrary-bytes | None; arbitrary bytes are the enabling state. Needs an exhaustive-length sweep, structured mutation of an accepted seed, and an allocation oracle | No — committed-seed replays only (`tests/fuzz_corpus.rs:75`, `:80`, `:85`); the source tree's ten-length, two-fill sweep is absent from this tree |
 | accepted-decode-consumes-its-declared-width | None; any accepted input. Needs a per-byte influence oracle | No — the one round-trip assertion cannot fail without a source edit |
 | identity-and-schema-rejection-is-one-contract | Enforcement: none. Disposition: a live lease plus F2 rewriting that slot's `schema_version`, then release and reserve | No |
 | grant-reserved-bytes-are-rejected-unless-zero | None; a nonzero reserved byte. Re-encode arm needs a decode-then-re-encode component that does not exist | Partial — one of four bytes; the corpus seed that encodes the case has its outcome unasserted |
@@ -277,6 +277,7 @@ while testing nothing.
 | transport-debug-output-redacts-every-sentinel | None; formatting each sentinel-bearing type and error variant | **Yes** - `debug_and_errors_redact_every_sentinel`, `sample_errors_redact_every_sentinel`, `debug_redacts_profile_admission_and_quarantine_record` (no shipped formatter reaches the impls today) |
 | readiness-redispatch-is-bounded-under-persistent-arm-failure | A watched channel whose ring is quarantined (F1 or any verification failure) and left open by its handler; count `dispatchReadiness` invocations and confirm a macrotask still runs | No - the readiness suites cover the acknowledged-wake path on a healthy ring only |
 | each-channel-wake-survives-a-shared-acknowledgement | Two registered channels with a publication to the second inside the first's pending window; enabling situation `shm_second_channel_edge_during_pending_callback` | No - `mechanism.ts:211-278` proves the single-channel case only |
+| packaged-addon-load-verifies-manifest-and-checksum | A staged platform package directory with no local `shm_native.node`, then one mutation per fault shape: absent payload, absent or malformed manifest, wrong package or target, absent or malformed checksum entry, altered payload bytes, debug or wrong-target binary | No - every in-tree run has a local `shm_native.node`, so `packageAddonPath` never executes under observation (`ci.yml:148-155`) |
 
 ### Coverage checks to add (Group N)
 
