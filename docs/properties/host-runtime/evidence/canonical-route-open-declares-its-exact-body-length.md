@@ -57,14 +57,17 @@ default-harness binary CI runs via `cargo test --workspace --all-targets`
   asserts equality with the committed bytes (`:173-177`). The routed
   44-byte header on channel 7, epoch 77, correlation 2 is checked the same
   way (`:181-192`).
-- `canonical_route_open_body_is_167_bytes` (`:196-210`) builds the body as a
+- `canonical_route_open_body_is_167_bytes` (`:196-218`) builds the body as a
   `concat!` of two string literals (`:197-200`), asserts `canonical.len()
-  == 167` (`:201-205`), parses it as JSON (`:207`), and asserts
+  == 167` (`:201-205`), converts the committed control header hex to bytes
+  and asserts `raw_client::decode_header(&control).len == canonical.len()`
+  (`:208-213`), parses the body as JSON (`:215`), and asserts
   `op == "route.open"` and `target.module_id == LINKED_MODULE_ID`
-  (`:208-209`). `LINKED_MODULE_ID` is `"context"` (`tests/support/mod.rs:25`).
+  (`:216-217`). `LINKED_MODULE_ID` is `"context"` (`tests/support/mod.rs:25`).
 
-The two tests are linked only by the literal `167` appearing in both. No test
-computes the header from the body.
+The body test ties the two literals together: the header's decoded length
+field is compared with the body's own length, so the header cannot declare a
+length the body does not have.
 
 ## Failure scenario
 
@@ -73,13 +76,13 @@ computes the header from the body.
 2. The committed header still declares `a7` (167). A reader that trusts the
    header reads 167 body bytes and then treats the trailing `}` as the first
    byte of the next header.
-3. As written, `canonical_route_open_body_is_167_bytes` fails on the length
-   assertion, and the header test is untouched. An edit that changes the
-   body and the header together but forgets the length byte is caught by the
-   header test's `decoded.len == 167` assertion only if the editor also
-   leaves the body at 167; a coordinated wrong edit to both is caught by
-   neither test alone. Section 6.4 of the protocol document is the third
-   copy of the same numbers.
+3. `canonical_route_open_body_is_167_bytes` fails twice: on
+   `canonical.len() == 167`, and on the decoded header length, which still
+   reads 167 while the body is 168. Updating the body's expected length to
+   168 without re-encoding the header leaves the second assertion failing,
+   so the header and the body cannot be edited independently. Section 6.4 of
+   the protocol document is a third copy of the same numbers that no test
+   reads.
 
 ## Timing windows and dependencies
 
@@ -91,14 +94,12 @@ document's hex; the tests carry their own copy.
 
 ## What a test must construct
 
-The record's check is `canonical.len() == 167` and
-`raw_client::header(167, ...) == committed bytes`, both of which exist. Two
-additions would tighten the link between the body and the header:
+The record's check is `canonical.len() == 167`,
+`raw_client::decode_header(committed).len == canonical.len()`, and
+`raw_client::header(167, ...) == committed bytes`, all of which exist. One
+addition would strengthen the record:
 
-1. One test that builds the header from `canonical.len()` rather than from
-   the literal `167` and compares it to the committed bytes, so the body and
-   header cannot drift independently.
-2. A live-connection check that sends the canonical body under the committed
+1. A live-connection check that sends the canonical body under the committed
    header through `RawClient` and receives a `route.open` response, proving
    the host frames exactly 167 bytes. `structural_corruption_is_rejected_
    before_dispatch` (`:362`) covers wrong headers but not this exact vector.

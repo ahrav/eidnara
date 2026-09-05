@@ -105,12 +105,36 @@ start does not change the expected fingerprint.
 
 ## What a test must construct
 
-The record's check is covered by the two vector tests plus the host-level
-test. The remaining gaps:
+The record's check is covered by the two vector tests, the host-level test,
+and `credential_fingerprint_matches_the_documented_derivation_across_rows`
+(the test module of `broca/subprocess.rs`). That campaign writes the
+documented derivation independently of `credential_fingerprint` and compares
+the two over three connection keys, eight harness-and-provider pairs
+including both Pi aliases (`openai-codex`, `google-antigravity`) that
+canonicalize onto shared provider names, and
+nine value shapes: five chosen to collide under naive concatenation (a
+colon that mimics the field separator, a digit run that mimics a length
+prefix, one byte), the longest admitted value, a multibyte value
+(`sécrét`, 8 bytes, 6 characters) whose length prefix differs between byte
+and character counting, and two non-UTF-8 values (`0x80`, `0x81`) that a
+lossy conversion maps to the same replacement character. The transcript
+carries the raw OS bytes of the name and value, so the two raw values
+fingerprint apart. `canonical_row_boundaries_separate_adjacent_fields` encodes
+five pairs of rows that hold the same bytes split differently across adjacent
+fields (harness/canonical, canonical/name, name/value, an empty name, an
+empty harness) through the pure documented encoder, which is the only path
+that can reach the empty and unsupported fields `credential_fingerprint`
+refuses. It asserts every distinct
+`(key, harness, canonical provider, variable, value)` row yields a distinct
+fingerprint, that an empty value is refused as `CredentialMissing`, and that
+a value over `CREDENTIAL_VALUE_CAP_BYTES` is refused as
+`CredentialValueTooLarge`, both before fingerprinting.
+
+The remaining gaps:
 
 1. A cross-product negative: the same key and row under a different domain
-   string produces a different digest. The zero-key case at `:1673-1679`
-   varies the key, not the domain.
+   string produces a different digest. The campaign varies every input the
+   function takes; the domain is a constant the function does not expose.
 2. A row-cap check. `CREDENTIAL_ROW_CAP_BYTES` (`:51`) has no reader in
    `crates/host-runtime/src`; only the per-value cap is enforced
    (`:162-164`). The record's open question already names this.

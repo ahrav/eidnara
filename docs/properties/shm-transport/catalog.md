@@ -3041,7 +3041,7 @@ duplex ring (`crates/host-runtime/src/connection.rs:117`), so this code is on th
 shipped path. This replaces the test-only, non-default framing in the
 product-context section above, which predates the ring-transport refactor.
 Status: active
-Exercised: partial — the pre-#131 `crates/host-runtime/tests/shm_failure_modes.rs:195`
+Exercised: not-yet — no check at HEAD. The pre-#131 `crates/host-runtime/tests/shm_failure_modes.rs:195`
 published one
 header the transport accepts and the host rejects, but asserted only the
 downstream quarantine, so it could not distinguish rejection before the charge from
@@ -3071,10 +3071,10 @@ runs its seven steps in the order above with `?` on each, and nothing between
 `WIRE_V2_HEADER_BYTES`
 equals `HEADER_LEN` at 21, so `decode_header`'s truncation gates
 (`wire.rs:312-322`) are statically dead on this path.
-Existing check: the pre-#131 `shm_failure_modes.rs:195`
+Existing check: none at HEAD. The pre-#131 `shm_failure_modes.rs:195`
 `corrupt_peer_frame_quarantines_exact_charges_and_returns_ready` (one role-invalid
 type, quarantine outcome only) was removed in the #131 test rewrite; no
-successor found at HEAD. Status unaudited as an ordering oracle.
+successor exists.
 Impact: this is the ordering the trust boundary rests on, and it is correct at
 HEAD. Cataloged because nothing fails if it stops being correct. Moving the charge
 or the copy above `ring_transport.rs:500` lets a peer hold up to 64 MiB of ingress
@@ -4559,16 +4559,15 @@ Open questions: None.
 Type: safety
 Reachability: default-production - the host stamps `host-test-ring-v1` into every production grant.
 Status: active
-Exercised: partial - the id string, depth, lease bound, and descriptor charge are asserted against literals spelled in the test; the arena charge is compared against `2 * shm_transport::MIN_ARENA_BYTES`, so a change to that constant moves both sides of the assertion and the arena dimension is unexercised.
-Guarantee: The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.
-Check: `always` - `host_test_ring_profile()` matches the literal id, depth, lease bound, descriptor charge, and a literal 64 MiB arena per direction; the current test pins everything but the arena literal.
+Exercised: yes - the id string, depth, lease bound, span bound, per-direction arena size (67,108,864 bytes), descriptor charge, and arena charge (134,217,728 bytes, two 64 MiB arenas) are all asserted against literals spelled in the test, so a geometry change under an unchanged id fails it.
+Guarantee: The profile id `host-test-ring-v1` denotes exactly the geometry `host_test_ring_profile` builds: depth 8, eight leases, a span bound of 2, one arena per logical direction, and a per-connection charge of two arenas and sixteen descriptors.
+Check: `always` - `host_test_ring_profile()` matches the literal id, depth, lease bound, span bound, descriptor charge, and a literal 64 MiB arena per direction.
 Fault/timing angle: A peer that echoes the id exercises whatever geometry the host built; if the id survived a geometry change the peer's bounds would be silently wrong.
 Required faults and enabling state: None; the check is a literal comparison.
 Confidence: high - [evidence](evidence/one-profile-id-names-one-ring-geometry-in-code.md). The id is a renamed identity, so the record is `core` for U3; the sibling record `one-profile-name-denotes-one-geometry` states the cross-peer half and keeps its source status.
 Existing check: `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs:202`), added at U3; the addon's setup fixture and `packages/shm-native/tests/mechanism.ts` name the same id.
 Impact: A peer sized for a different depth over- or under-runs the ring.
-Open questions:
-- Should `host_test_ring_profile_names_one_geometry` compare `arena_bytes` against a spelled 128 MiB (two 64 MiB arenas) instead of `2 * MIN_ARENA_BYTES`, so a constant change is caught? Queue it?
+Open questions: None.
 
 ### addon-reservations-drop-before-the-ring
 

@@ -3035,8 +3035,10 @@ outside the `catch_unwind`, so a panic inside `run_endpoint` still reaches it;
 `AdmissionController::release` (`profile.rs:512-520`) is a `checked_sub` that
 silently no-ops on underflow, so a double release cannot go negative but also
 cannot be detected.
-Existing check: none in the 2b file set. `crates/shm-transport/tests/contract.rs:472`
-covers `Admission::release` at the transport layer. Status unaudited.
+Existing check: `released_admissions_recompute_active_span_charge`
+(`crates/shm-transport/tests/profile.rs`) covers `Admission::release` and the
+`Drop` path at the transport layer; nothing in the 2b file set covers the
+endpoint thread's exits. Status unaudited.
 Impact: a stranded charge is permanent. Since `process_limits` multiplies the
 per-connection charge by the connection count - post-#131 additionally capped
 by `MAX_RING_RESIDENT_BYTES` (`ring_transport.rs:60-80`) - one
@@ -10002,16 +10004,15 @@ applied below and whose remaining findings are queued there.
 Type: safety
 Reachability: default-production - every client and server handshake computes this proof.
 Status: active
-Exercised: partial - the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal; no test calls `compute_proof` and `raw_client::proof` against each other, so the equality in the Check is met through the literal rather than asserted directly.
+Exercised: yes - the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal, and `production_proof_matches_the_oracle_across_perturbed_tuples` calls `compute_proof` and `raw_client::proof` on the same tuple for both domains over the committed inputs, each input perturbed alone, daemon versions of several lengths, and short and long keys, asserting equality and distinctness.
 Guarantee: The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v1` and `eidnara-client-v1`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.
 Check: `always` - `compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every generated or single-field-perturbed input tuple, where `raw_client::proof` is the test-local HMAC implementation of the documented transcript; the equality over arbitrary inputs, not the change under perturbation, is the oracle; the campaign does not assert global injectivity, since HMAC-SHA256 over a larger input space must collide somewhere and a found collision would say nothing about transcript conformance. `always` because the transcript is a pure function evaluated on every handshake.
 Fault/timing angle: Only an external oracle detects a transcript change both sides apply.
 Required faults and enabling state: The committed inputs and the test-local HMAC oracle.
 Confidence: high - [evidence](evidence/host-proof-construction-matches-the-committed-vectors.md).
-Existing check: `committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction` and `proof_folds_every_input` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.
+Existing check: `committed_wire_vectors_pin_the_proof_construction` (`crates/host-runtime/src/auth.rs`), `committed_auth_proof_vectors_pin_the_construction`, `proof_folds_every_input`, and `production_proof_matches_the_oracle_across_perturbed_tuples` (`crates/host-runtime/tests/protocol_vectors.rs`); audited at U3.
 Impact: A client that cannot authenticate, or a rogue listener that can.
-Open questions:
-- `docs/host-wire-protocol.md:213` and `:217` carry example proof bytes that match neither the code nor a recomputation, and `:220` names the daemon version differently from `:213`. Code and tests agree with each other; the document needs a fix. (needs human input)
+Open questions: None. The section 5.2 examples in `docs/host-wire-protocol.md` were regenerated at U3 to the committed vectors, and the prose there names `eidnara-host/0.1.0`; the evidence record's investigation log carries the reproduction.
 
 ### data-root-resolves-under-the-managed-directory
 
@@ -10051,7 +10052,7 @@ Reachability: default-production - every `route.open` carries a header whose dec
 Status: active
 Exercised: partial - `tests/protocol_vectors.rs:160-210` asserts the canonical body's byte length against a literal and decodes the committed header bytes with the test-local `raw_client::header`/`raw_client::decode_header`; neither the production route-open encoder nor `wire::decode_header` sees those bytes, so a production encoder that declared the wrong length would leave both tests passing. What is exercised is documentation-vector consistency, not the production round trip the Impact describes.
 Guarantee: The canonical compact `route.open` request targeting module `context` is 167 UTF-8 bytes, and the committed control header `a7 00 00 00 02 00 02 00 00 00 00 00 00 01 00 ...` declares exactly that length with version 2, request type, interactive flags, channel 0, epoch 0, correlation 1.
-Check: `always` - `canonical.len() == 167` and `raw_client::header(167, ...) == committed bytes`, decoded by the test-local decoder.
+Check: `always` - `canonical.len() == 167`, `raw_client::decode_header(committed).len == canonical.len()`, and `raw_client::header(167, ...) == committed bytes`, decoded by the test-local decoder.
 Fault/timing angle: A header that declares the wrong length desynchronizes framing on the first request.
 Required faults and enabling state: None; literal comparison against the documented vector.
 Confidence: high - [evidence](evidence/canonical-route-open-declares-its-exact-body-length.md). The module id `context` is a renamed identity, so the canonical body shrank from the predecessor's length and the vector was regenerated once; `docs/host-wire-protocol.md` section 6.4 carries the same bytes.
@@ -10070,13 +10071,13 @@ closure), and `manifest_digest` is reached through the store and directly from
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 in the wave that lands it.
 Status: active
-Exercised: partial - the committed fixture's digest is asserted and an independent canonical-JSON digest reproduced both the predecessor and the current value, but the suite perturbs only `extensions` and no test reorders JSON object keys, so the every-field sensitivity and key-order invariance halves of the check are not exercised (evidence, "What a test must construct").
+Exercised: yes - the committed fixture's digest is asserted, an independent canonical-JSON digest reproduced both the predecessor and the current value, a key-reordered copy of the fixture digests the same, and each manifest and node field is changed alone and shown to move the digest, with the validator-fixed fields shown to be refused.
 Guarantee: The manifest digest is SHA-256 over the manifest serialized as key-sorted, two-space-indented JSON, so any manifest with the same fields hashes the same regardless of field order, and the committed `pi-valid.json` fixture digests to `5386c200...f911`.
 Check: `always` - `manifest_digest(fixture) == committed literal`; the digest changes when any field changes and is unchanged under key reordering.
 Fault/timing angle: A digest that depended on serialization order would let two equal manifests disagree; a digest over a different canonical form would break the TypeScript twin, which lands with the packages in U7 and reads this fixture.
 Required faults and enabling state: The committed fixture and an oracle outside the crate.
 Confidence: high - [evidence](evidence/harness-closure-manifest-digest-is-canonical.md). The fixture's `schema` field is a renamed identity, so the digest was regenerated once; a Python `json.dumps(sort_keys=True, indent=2)` digest reproduced the predecessor value from the predecessor schema string and the new value from the new one.
-Existing check: `canonical_manifest_digest_is_pinned` (`crates/host-runtime/tests/harness_closure.rs`) and the strict-decode tests in the same file; audited at U3.
+Existing check: `canonical_manifest_digest_is_pinned`, `manifest_digest_is_stable_under_key_reordering`, `manifest_digest_changes_when_any_field_changes`, `launch_roots_participate_in_the_digest_on_their_own`, and the strict-decode tests (`crates/host-runtime/tests/harness_closure.rs`); audited at U3.
 Impact: A closure verified by one side is rejected by the other, or a tampered closure passes.
 Open questions: None.
 
@@ -10085,13 +10086,13 @@ Open questions: None.
 Type: safety
 Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `BrocaComponent::new_with_credentials` (`crates/host-runtime/src/broca/mod.rs:82`) installs one; its single caller is `tests/broca_protocol.rs:443`. `BrocaComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
 Status: active
-Exercised: partial - the committed vector is asserted and an independent HMAC oracle reproduced it, and the zero-key negative, provider selection, caps, and host-level accept/reject are covered; the comparison against an independent implementation over generated admissible rows and field-boundary perturbations that the check requires does not exist, so a mis-encoding of any non-fixture row would pass the current suite.
+Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes including a multibyte value and two non-UTF-8 byte values agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows; field-boundary pairs, including an empty name and an empty harness, are encoded apart by the pure encoder.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-broca-credential-v1"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
 Check: `always` - for the documented row, `credential_fingerprint(key, harness, provider) == committed literal`; for every generated `(key, harness, provider name, value)` row in a campaign that `provider_row` admits (a supported harness and provider under the closed `canonical_provider` mapping and a nonempty value; an empty value returns `CredentialMissing` at `subprocess.rs:151-174` before any fingerprint exists), `credential_fingerprint` equals an independent implementation of the documented derivation (`HMAC(derive(key, "eidnara-broca-credential-v1"), canonical_row)` with length-prefixed fields), including admissible rows that differ only by moving one byte across a field boundary, which must yield distinct fingerprints; boundary cases that leave a field empty or name an unsupported harness or provider are asserted against a pure canonical encoder of the documented row, not against `credential_fingerprint`, which rejects them before canonicalization; and the per-value size cap rejects before fingerprinting. `always` because the derivation is a pure function evaluated on every row.
 Fault/timing angle: A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.
 Required faults and enabling state: The documented inputs and an oracle outside the crate.
 Confidence: high - [evidence](evidence/credential-fingerprint-derives-from-the-product-domain.md). The domain separator is a renamed identity; the vector was regenerated once from a Python implementation of the documented derivation, which also reproduced the predecessor value from the predecessor domain.
-Existing check: `credential_fingerprint_matches_the_committed_vector` (`crates/host-runtime/src/broca/subprocess.rs`, added at U3) and `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`, a `harness = false` binary whose checks are plain functions the binary's own runner names); audited at U3.
+Existing check: `credential_fingerprint_matches_the_committed_vector` and `credential_fingerprint_matches_the_documented_derivation_across_rows` (`crates/host-runtime/src/broca/subprocess.rs`, added at U3) and `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`, a `harness = false` binary whose checks are plain functions the binary's own runner names); audited at U3.
 Impact: A credential row passes a fingerprint check it should fail, or fails one it should pass.
 Open questions: `CREDENTIAL_ROW_CAP_BYTES` is defined in `subprocess.rs` but nothing enforces it; only the 16 KiB per-value cap is checked.
 
@@ -10100,13 +10101,13 @@ Open questions: `CREDENTIAL_ROW_CAP_BYTES` is defined in `subprocess.rs` but not
 Type: safety
 Reachability: test-only - every bundle load through a composed `SynapseComponent` recomputes and compares the fingerprint (`load_bundle` is called only from `crates/host-runtime/src/synapse/mod.rs:1025`), but the component is not on `host_runtime::run`'s default path; an embedder composes it, and in this tree the only compositions are tests and `examples/synapse_host.rs:123`. The daemon that will compose it is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
-Exercised: partial - the committed tiny fixture's fingerprint is recomputed from its manifest, the stale fingerprint and table-epoch cases are covered, and `fingerprint_binds_initializer_names_to_their_hashes` covers the name pairing; the single-bit artifact test is rejected by each artifact's own digest before the fingerprint comparison, and no test perturbs pooling, quantization, output selection, the tokenizer hashes, dimensions, or the other scalars, so dropping one of those from `canonical_fingerprint` would pass the current suite.
+Exercised: yes - the committed tiny fixture's fingerprint is recomputed from its manifest and pinned as a literal; each artifact hash, each external-initializer name, each embedding-space scalar, and the numeric output index value is changed alone and shown to move the fingerprint; single-bit artifact changes are caught by each artifact's own digest at load.
 Guarantee: The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.
 Check: `always` - `canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load; and for every field the guarantee names (the model hash, each external-initializer hash and each external-initializer name, since the pre-image binds `name.len():name:sha256` per initializer at `crates/host-runtime/src/synapse/bundle.rs:585-594`, plus the name-to-hash pairing, so swapping two names while keeping every hash also changes the fingerprint; each of the four tokenizer artifact hashes, pooling, quantization, output selection, dimension, and the embedding-space scalars), perturbing that field alone in the manifest changes `canonical_fingerprint`, so no verified input is absent from the pre-image. `always` because the pre-image is a pure function of the manifest.
 Fault/timing angle: A fingerprint that omitted an artifact would let a swapped artifact change embedding bytes under an unchanged identity.
 Required faults and enabling state: The committed fixture and its generator's independent fingerprint function.
 Confidence: high - [evidence](evidence/synapse-bundle-fingerprint-covers-every-artifact.md). The pre-image's first line is a renamed identity; the fixture manifest's fingerprint was regenerated once with the generator's Python `canonical_fingerprint`, which also reproduced the predecessor value from the predecessor line.
-Existing check: `the_committed_fixture_carries_its_canonical_fingerprint`, `a_bundle_manifest_outside_the_committed_digest_does_not_load`, `one_bit_changes_to_each_artifact_disable_the_lane` (`crates/host-runtime/tests/synapse_bundle.rs`); audited at U3.
+Existing check: `the_committed_fixture_carries_its_canonical_fingerprint`, `a_bundle_manifest_outside_the_committed_digest_does_not_load`, `one_bit_changes_to_each_artifact_disable_the_lane` (`crates/host-runtime/tests/synapse_bundle.rs`), and `every_artifact_hash_and_embedding_scalar_participates_in_the_fingerprint` (`crates/host-runtime/src/synapse/bundle.rs`); audited at U3.
 Impact: A different model produces embeddings under the identity of the certified one.
 Open questions: None.
 
@@ -10186,6 +10187,21 @@ Required faults and enabling state: Malformed and boundary-sized bodies.
 Confidence: medium - [evidence](evidence/broca-protocol-shapes-are-closed.md). `each_valid_operation_decodes_its_exact_schema`, `every_malformed_shape_is_rejected_with_schema_violation`, `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over`, `malformed_requests_over_the_host_create_no_run_state`, `harness_vocabulary_is_closed` (`crates/host-runtime/tests/broca_protocol.rs`).
 Existing check: The tests named above; unaudited.
 Impact: Unvalidated input reaches the harness spawn path.
+Open questions: None.
+
+### broca-payload-hook-owns-the-generation-controls
+
+Type: safety
+Reachability: test-only - every Pi run loads the compiled-in hook as the last `--extension` after `--no-extensions` disables discovery, so the hook is the final `before_provider_request` handler on every provider request; but `PiBackend::new` and `run_pi` have no caller outside `crates/host-runtime/tests/broca_subprocess.rs` in this tree, so no production request reaches the hook until the daemon (U4) wires a real backend. Reclassify with the other Broca records then.
+Status: active
+Exercised: partial - a driver that registers a tampering handler ahead of the hook covers the OpenAI-style, Gemini-style, and mixed-spelling payloads plus one unrecognized shape; nothing runs the hook inside a real Pi process or covers a missing or non-numeric environment value.
+Guarantee: The provider payload Pi sends carries exactly the output-token bound and temperature the `session.send` request admitted: every recognized output-token spelling present on the payload and `generationConfig.maxOutputTokens` are rewritten to the request's `max_output_tokens`, `temperature` follows it, every unrelated field survives, and a payload with no recognized output-token field or a non-object payload fails the request rather than running uncapped.
+Check: `always` - for every payload the hook returns, each recognized output-token field equals the admitted bound and `temperature` equals the admitted temperature, fields the hook does not own are byte-identical to the input, and a payload with no recognized field throws; the rewrite is an invariant over every provider request, so one `always` covers the conjunction.
+Fault/timing angle: An earlier trusted extension leaves a larger limit in a second spelling, or a provider adds a wire family the hook does not recognize; either lets a provider default exceed the caller's budget.
+Required faults and enabling state: A payload touched by an earlier handler; a payload carrying two output-token spellings; a payload with no recognized spelling.
+Confidence: medium - [evidence](evidence/broca-payload-hook-owns-the-generation-controls.md). `pi_broca_hook_owns_generation_controls` (`crates/host-runtime/tests/broca_subprocess.rs`, `harness = false` runner) materializes the hook bytes from `PI_BROCA_EXTENSION_BYTES` and drives them under Node or Bun.
+Existing check: The check named above; unaudited.
+Impact: A provider request runs with a token budget or temperature the caller did not admit.
 Open questions: None.
 
 ### synapse-admission-boundaries-are-exact

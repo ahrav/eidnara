@@ -93,14 +93,41 @@ side is not in this tree.
 
 ## What a test must construct
 
-The record's check has three parts. The fixture literal covers
-`manifest_digest(fixture) == committed`. The `extensions` test covers one
-field change. No test decodes two byte-different JSON documents with the
-same fields in different key order and asserts equal digests; that is
-implied by decoding through a struct, but a test would pin it against a
-future `preserve_order` feature or a raw-bytes digest. A test that reads the
-fixture bytes, reorders keys at the JSON level, and asserts the same digest
-would close it.
+The record's check has three parts, each with a test in
+`tests/harness_closure.rs`:
+
+- `canonical_manifest_digest_is_pinned` covers
+  `manifest_digest(fixture) == committed`.
+- `manifest_digest_is_stable_under_key_reordering` rewrites the fixture as
+  JSON text with every object's keys in reverse order, asserts the text
+  differs from serde's key-sorted output, decodes it, and asserts the digest
+  equals the fixture's. This pins the key-order clause against a future
+  `preserve_order` feature or a raw-bytes digest.
+- `manifest_digest_changes_when_any_field_changes` changes one field at a
+  time while keeping the manifest valid (`harness`, `package`, `version`,
+  `argument_variant`, `source_roots`, the extension list, the node count,
+  and a node's `path`, `source_root`, `source_path`, `kind`, `sha256`,
+  `size_bytes`, dependency `kind`, dependency `path`, and dependency count)
+  and asserts the digest moves and no two mutations collide. A foreign
+  `schema` and a `mode` that disagrees with its `kind` are shown to be
+  refused before hashing, since the validator fixes both.
+- `manifest_digest_matches_an_external_canonicalization_of_the_fixture_text`
+  reproduces the digest from the fixture's JSON text with a test-local key
+  sort, independent of the crate's `Serialize` impl, and counts each node
+  path in the canonical text; it also edits the harness to `pï` and asserts
+  the canonical form carries the identifier's UTF-8 bytes rather than a `\u`
+  escape, with the digest following the same edit. The validator requires every node to be
+  referenced by a launch root, an extension, or a dependency edge, so no
+  in-crate mutation can move a node path alone; the external comparison is
+  what catches a canonical form that dropped one.
+- `launch_roots_participate_in_the_digest_on_their_own` builds a manifest
+  with an alternate interpreter node and an alternate entrypoint node, both
+  reachable through the extension root, and changes `interpreter` and
+  `entrypoint` each alone; it then converts the same manifest to the
+  executable launch form and moves `executable` alone between the two
+  executable nodes, so none of the three launch fields can hide behind the
+  node path it names. `ordered_extensions_are_part_of_manifest_identity`
+  covers extension order separately.
 
 ## Investigation log
 

@@ -172,16 +172,22 @@ impl EnvSnapshot {
     ) -> Result<String, CredentialRowError> {
         let canonical = canonical_provider(harness, provider)?;
         let row = self.provider_row(harness, canonical)?;
-        let encoded = |field: &str| format!("{}:{field}", field.len());
-        let mut message = encoded(CREDENTIAL_FINGERPRINT_CANONICALIZATION)
-            + &encoded(harness)
-            + &encoded(canonical);
+        // Fields enter the transcript as their raw OS bytes, so two credentials that differ
+        // only in bytes a lossy UTF-8 conversion would collapse still fingerprint apart.
+        let mut message = Vec::new();
+        let mut encoded = |field: &[u8]| {
+            message.extend_from_slice(format!("{}:", field.len()).as_bytes());
+            message.extend_from_slice(field);
+        };
+        encoded(CREDENTIAL_FINGERPRINT_CANONICALIZATION.as_bytes());
+        encoded(harness.as_bytes());
+        encoded(canonical.as_bytes());
         for (name, value) in row {
-            let name = name.to_string_lossy();
-            let value = value.to_string_lossy();
-            message.push_str(&encoded(&name));
-            message.push_str(&encoded(&value.len().to_string()));
-            message.push_str(&encoded(&value));
+            let name = name.as_encoded_bytes();
+            let value = value.as_encoded_bytes();
+            encoded(name);
+            encoded(value.len().to_string().as_bytes());
+            encoded(value);
         }
         let mut derive =
             Hmac::<Sha256>::new_from_slice(connection_key).expect("HMAC accepts any key length");
@@ -189,7 +195,7 @@ impl EnvSnapshot {
         let derived = derive.finalize().into_bytes();
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&derived).expect("HMAC accepts any key length");
-        mac.update(message.as_bytes());
+        mac.update(&message);
         Ok(mac
             .finalize()
             .into_bytes()
@@ -1650,9 +1656,16 @@ pub mod group_registry {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStringExt;
 
-    use super::EnvSnapshot;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    use super::{
+        CREDENTIAL_FINGERPRINT_CANONICALIZATION, CREDENTIAL_FINGERPRINT_DOMAIN,
+        CREDENTIAL_VALUE_CAP_BYTES, CredentialRowError, EnvSnapshot,
+    };
 
     /// The vector was produced outside this crate from the documented derivation, so a change to
     /// the domain separator, the canonicalization id, or the row layout fails here.
@@ -1677,5 +1690,195 @@ mod tests {
                 .expect("fingerprint"),
             "ecac831b94bb1d9e972ee993f7798c9ff7c6133b545e489ac1a3f60448127e80"
         );
+    }
+
+    /// The documented derivation, written from the contract rather than from
+    /// `credential_fingerprint`: `HMAC(derive(key, domain), canonical_row)` where every field
+    /// is `len:field` and the value is preceded by its length as its own field.
+    fn documented_fingerprint(
+        key: &[u8; 32],
+        harness: &str,
+        canonical: &str,
+        name: &str,
+        value: &[u8],
+    ) -> String {
+        let field = |text: &[u8]| [format!("{}:", text.len()).as_bytes(), text].concat();
+        let message = [
+            field(CREDENTIAL_FINGERPRINT_CANONICALIZATION.as_bytes()),
+            field(harness.as_bytes()),
+            field(canonical.as_bytes()),
+            field(name.as_bytes()),
+            field(value.len().to_string().as_bytes()),
+            field(value),
+        ]
+        .concat();
+        let mut derive = Hmac::<Sha256>::new_from_slice(key).expect("key");
+        derive.update(CREDENTIAL_FINGERPRINT_DOMAIN.as_bytes());
+        let derived = derive.finalize().into_bytes();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&derived).expect("derived key");
+        mac.update(&message);
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// Rows that hold the same bytes but split them differently across adjacent fields
+    /// must encode differently; the pure encoder is used because `credential_fingerprint`
+    /// refuses empty and unsupported fields before canonicalization.
+    #[test]
+    fn canonical_row_boundaries_separate_adjacent_fields() {
+        let key = [0x42u8; 32];
+        type Row<'a> = (&'a str, &'a str, &'a str, &'a [u8]);
+        let pairs: [[Row<'_>; 2]; 5] = [
+            // One byte moves from the end of harness to the start of the canonical name.
+            [
+                ("opencodea", "nthropic", "ANTHROPIC_API_KEY", b"secret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+            // From the end of the canonical name to the start of the variable name.
+            [
+                ("opencode", "anthropicA", "NTHROPIC_API_KEY", b"secret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+            // From the end of the variable name to the start of the value.
+            [
+                ("opencode", "anthropic", "ANTHROPIC_API_KE", b"Ysecret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+            // An empty name with the bytes pushed into the value.
+            [
+                ("opencode", "anthropic", "", b"ANTHROPIC_API_KEYsecret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+            // An empty harness with the bytes pushed into the canonical name.
+            [
+                ("", "opencodeanthropic", "ANTHROPIC_API_KEY", b"secret"),
+                ("opencode", "anthropic", "ANTHROPIC_API_KEY", b"secret"),
+            ],
+        ];
+        for [left, right] in pairs {
+            let encode = |(harness, canonical, name, value): Row<'_>| {
+                documented_fingerprint(&key, harness, canonical, name, value)
+            };
+            assert_ne!(
+                encode(left),
+                encode(right),
+                "{left:?} and {right:?} carry the same bytes and must still encode apart"
+            );
+        }
+    }
+
+    /// Every generated row agrees with the documented derivation, rows that differ in any
+    /// input yield distinct fingerprints, and empty or oversize values are refused before
+    /// fingerprinting.
+    #[test]
+    fn credential_fingerprint_matches_the_documented_derivation_across_rows() {
+        let keys: [[u8; 32]; 3] = [
+            [0u8; 32],
+            std::array::from_fn(|index| index as u8),
+            [0xff; 32],
+        ];
+        // Each (harness, provider) names the variable the row reads and the canonical name
+        // that enters the transcript; the two Pi aliases canonicalize onto shared names.
+        let providers: [(&str, &str, &str, &str); 8] = [
+            ("opencode", "anthropic", "ANTHROPIC_API_KEY", "anthropic"),
+            ("opencode", "google", "GEMINI_API_KEY", "google"),
+            ("opencode", "openai", "OPENAI_API_KEY", "openai"),
+            ("pi", "anthropic", "ANTHROPIC_API_KEY", "anthropic"),
+            ("pi", "google", "GEMINI_API_KEY", "google"),
+            ("pi", "google-antigravity", "GEMINI_API_KEY", "google"),
+            ("pi", "openai", "OPENAI_API_KEY", "openai"),
+            ("pi", "openai-codex", "OPENAI_API_KEY", "openai"),
+        ];
+        // Values that would collide under naive concatenation: a colon that mimics the
+        // field separator, a digit run that mimics a length prefix, one byte, and the
+        // longest admitted value. The multibyte value has a byte length (8) that differs
+        // from its character count (6), so a length prefix counted in characters diverges
+        // from the oracle.
+        let longest = "v".repeat(CREDENTIAL_VALUE_CAP_BYTES);
+        let multibyte = "s\u{e9}cr\u{e9}t";
+        assert_eq!(multibyte.len(), 8);
+        assert_eq!(multibyte.chars().count(), 6);
+        // Two values that are not UTF-8 and differ in one byte; a lossy conversion maps
+        // both to the same replacement character.
+        let raw_80 = OsString::from_vec(vec![0x80]);
+        let raw_81 = OsString::from_vec(vec![0x81]);
+        assert!(raw_80.to_str().is_none());
+        assert_eq!(raw_80.to_string_lossy(), raw_81.to_string_lossy());
+        let values: [&OsStr; 9] = [
+            OsStr::new("secret"),
+            OsStr::new("s"),
+            OsStr::new("1:a"),
+            OsStr::new("3:abc"),
+            OsStr::new("sec:ret"),
+            OsStr::new(multibyte),
+            OsStr::new(&longest),
+            &raw_80,
+            &raw_81,
+        ];
+
+        // Fingerprint to the row that produced it. A second row landing on an existing
+        // fingerprint must be the same row under an alias, never a different row.
+        let mut seen = std::collections::BTreeMap::new();
+        for key in &keys {
+            for (harness, provider, variable, canonical) in providers {
+                for value in values {
+                    let snapshot = EnvSnapshot::capture_from(vec![(
+                        OsString::from(variable),
+                        value.to_os_string(),
+                    )])
+                    .expect("snapshot");
+                    let actual = snapshot
+                        .credential_fingerprint(key, harness, provider)
+                        .expect("fingerprint");
+                    assert_eq!(
+                        actual,
+                        documented_fingerprint(
+                            key,
+                            harness,
+                            canonical,
+                            variable,
+                            value.as_encoded_bytes()
+                        ),
+                        "{harness}/{provider} value {value:?} disagrees with the documented derivation"
+                    );
+                    // The alias and its canonical provider name enter the same transcript,
+                    // so they share a fingerprint by contract; every other input distinguishes.
+                    let identity = (key, harness, canonical, variable, value);
+                    let owner = seen.entry(actual).or_insert(identity);
+                    assert_eq!(
+                        *owner, identity,
+                        "{harness}/{provider} value {value:?} collides with a different row"
+                    );
+                }
+            }
+        }
+        // Eight (harness, provider) pairs canonicalize onto six rows, so the campaign
+        // yields exactly keys x six rows x values distinct fingerprints; the two raw
+        // byte values count separately, which a lossy conversion would not allow.
+        assert_eq!(seen.len(), keys.len() * 6 * values.len());
+
+        // An empty value is refused before fingerprinting.
+        let empty = EnvSnapshot::capture_from(vec![(
+            OsString::from("ANTHROPIC_API_KEY"),
+            OsString::from(""),
+        )])
+        .expect("snapshot");
+        assert!(matches!(
+            empty.credential_fingerprint(&keys[1], "opencode", "anthropic"),
+            Err(CredentialRowError::CredentialMissing)
+        ));
+        // A value over the cap is refused before fingerprinting.
+        let oversize = EnvSnapshot::capture_from(vec![(
+            OsString::from("ANTHROPIC_API_KEY"),
+            OsString::from("v".repeat(CREDENTIAL_VALUE_CAP_BYTES + 1)),
+        )])
+        .expect("snapshot");
+        assert!(matches!(
+            oversize.credential_fingerprint(&keys[1], "opencode", "anthropic"),
+            Err(CredentialRowError::CredentialValueTooLarge)
+        ));
     }
 }

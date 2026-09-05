@@ -386,6 +386,14 @@ fn the_committed_fixture_carries_its_canonical_fingerprint() {
         host_runtime::synapse::bundle::canonical_fingerprint(&bundle.manifest),
         "regenerate the fixture with generate-synapse-tiny.py"
     );
+    // The literal is the fixture's committed fingerprint. A regenerated fixture whose
+    // pre-image changed without a reviewed contract change fails here, not only against
+    // the recomputation it also carries.
+    assert_eq!(
+        bundle.manifest.fingerprint,
+        "2bba4ff1399076304377c063fbccac0709daf89d183ab90e712a36c06ae42b5f",
+        "the committed fixture fingerprint changed; review the pre-image before regenerating"
+    );
 }
 
 /// The generation manifest hashes the bundle manifest, which hashes every artifact.

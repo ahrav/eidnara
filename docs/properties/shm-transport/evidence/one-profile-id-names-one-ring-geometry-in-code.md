@@ -7,7 +7,7 @@ U3 renamed the ring profile id to `host-test-ring-v1`. A renamed identity is an 
 ## Evidence trail
 
 - `host_test_ring_profile` (`crates/shm-transport/src/profile.rs:683-692`) builds the geometry from `HOST_TEST_RING_DEPTH` (8, `:679`) and `MIN_ARENA_BYTES`, with `max_leases` equal to the depth.
-- `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs:202`) asserts the id string, depth 8, eight leases, and sixteen descriptors against literals, and asserts the arena charge equals `2 * shm_transport::MIN_ARENA_BYTES`.
+- `host_test_ring_profile_names_one_geometry` (`crates/shm-transport/tests/profile.rs:202`) asserts the id string, depth 8, eight leases, a span bound of 2 (with the matching `spans_per_frame` charge), a per-direction arena of 67,108,864 bytes (the field `Ring::create` reads), sixteen descriptors, and an arena charge of 134,217,728 bytes (two 64 MiB arenas) against literals; none of the seven reads the constant it checks. `Ring::create` refuses a profile whose span bound is below `MAX_SPANS` (`ring.rs:921-924`), so the bound is part of the geometry the id promises.
 - The host reads the profile through `ring_profile()` (`crates/host-runtime/src/ring_transport.rs:38-39`) and every connection charges `profile.charges()`.
 - The addon fixture (`packages/shm-native/tests/mechanism.ts:106-110`) and the addon setup code name the same id.
 
@@ -21,14 +21,14 @@ None. The profile is a constant.
 
 ## What a test must construct
 
-- Present: literal assertions for id, depth, lease bound, and descriptor charge.
-- Missing: a literal arena assertion. The test compares `arena_bytes` against `2 * MIN_ARENA_BYTES`, so a change to that constant moves both sides; a spelled 128 MiB (two 64 MiB arenas) would catch it.
+- Present: literal assertions for id, depth, lease bound, span bound, per-direction arena size, descriptor charge, and arena charge. A change to `MIN_ARENA_BYTES`, `HOST_TEST_RING_DEPTH`, or the span bound under an unchanged id fails the test.
+- Missing: nothing for the in-code half; the cross-peer half belongs to `one-profile-name-denotes-one-geometry`.
 
 ## Investigation log
 
 ### Q: Does the test pin the arena dimension?
 
 - Sources examined: `crates/shm-transport/tests/profile.rs:202-213`.
-- Findings: The arena assertion reads the constant it checks; the other four dimensions are literals.
-- Missing evidence: A literal arena value in the test.
-- Conclusion: unresolved, needs the test to spell the arena literal; the record is `partial` until then.
+- Findings: All seven dimensions are literals. The arena assertion compared against `2 * MIN_ARENA_BYTES` when the record was first written, so a change to that constant moved both sides; the test now names 134,217,728 bytes.
+- Missing evidence: none.
+- Conclusion: resolved; the test pins every dimension the id denotes.
