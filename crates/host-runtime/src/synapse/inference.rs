@@ -208,27 +208,6 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
 }
 
 /// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
-/// The mismatching pair with the smallest longer text, so labeled batches fit the most rows under the aggregate cap.
-fn shortest_mismatching_pair(corpus: &Corpus) -> Option<(&CorpusItem, &CorpusItem)> {
-    let mut best: Option<(&CorpusItem, &CorpusItem)> = None;
-    for (index, first) in corpus.items.iter().enumerate() {
-        for second in &corpus.items[index + 1..] {
-            if !super::bundle::certification_mismatch(
-                &first.expected,
-                &second.expected,
-                corpus.tolerance,
-            ) {
-                continue;
-            }
-            let longer = first.text.len().max(second.text.len());
-            if best.is_none_or(|(a, b)| longer < a.text.len().max(b.text.len())) {
-                best = Some((first, second));
-            }
-        }
-    }
-    best
-}
-
 /// Shortens `text` to at most `max_bytes` without splitting a character.
 fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
     let mut end = text.len().min(max_bytes);
@@ -479,11 +458,16 @@ impl Backend {
             self.certify_batch(&distinct, &matches)?;
         }
         // Full-size batches certify every admitted position with only two distinct items: batch `k` labels each position by bit `k` of its index and its complement swaps the labels, so any two positions differ in some batch and every position sees both items. A graph that mixes rows at any pair of positions, or mishandles one input at one position, produces a mismatch. The same batches are the capacity check, so a graph that fails only at the admitted size is caught too.
-        // The labeled batches use the shortest mismatching pair so as many admitted positions as the aggregate cap allows are exercised; a full-size batch of large texts is a request the lane would refuse.
+        // The labeled batches use the shortest mismatching pair; `load_bundle` requires that pair to fit `batch_rows` rows under the aggregate cap, so every admitted position is exercised by a request the lane would admit.
         let (first, second) =
-            shortest_mismatching_pair(corpus).unwrap_or((distinct[0], distinct[0]));
+            super::bundle::shortest_mismatching_pair(corpus).unwrap_or((distinct[0], distinct[0]));
         let per_row = first.text.len().max(second.text.len()).max(1);
         let rows = batch_rows.max(1).min(max_batch_text_bytes / per_row).max(1);
+        debug_assert_eq!(
+            rows,
+            batch_rows.max(1),
+            "load_bundle admits only certifiable corpora"
+        );
         if rows > 1 {
             for bit in 0..usize::BITS - (rows - 1).leading_zeros() {
                 for complement in [false, true] {
@@ -504,7 +488,7 @@ impl Backend {
     }
 
     /// Corpus texts are short, so a graph with a fixed short sequence axis passes every semantic probe and then fails an ordinary long request. This probe embeds a text at the advertised byte limit that reaches the truncation window; the result must be a valid vector, with no expectation to compare.
-    /// Corpus phrases can tokenize sparsely, so every candidate's encoding is measured and the densest one is embedded; when none reaches `max_tokens`, the byte cap bounds the sequence below the advertised limit for every text this search can produce.
+    /// Corpus phrases can tokenize sparsely, so every candidate's encoding is measured and the densest one is embedded; a lane whose candidates all fall short of `max_tokens` is not published.
     fn long_input_probe(
         &self,
         corpus: &Corpus,
@@ -536,8 +520,8 @@ impl Backend {
                 }
             }
         }
-        // Whitespace-separated single characters tokenize to at least one token each in tokenizers with whitespace pre-tokenization, so a window at or below half the byte cap is reachable; failing to reach it means the tokenizer cannot produce the sequence lengths the manifest advertises, and the lane is not published on an unverified axis.
-        if best.0 < self.max_tokens && self.max_tokens <= max_text_bytes / 2 {
+        // The lane is published only when the window was exercised: truncation caps every request at `max_tokens`, so a probe that reaches it covers the longest sequence any request can produce, while a shortfall leaves the advertised axis unverified.
+        if best.0 < self.max_tokens {
             return Err(InferenceError::Artifact(format!(
                 "no probe within {max_text_bytes} bytes reaches the advertised max_tokens ({}); the longest reached {} tokens",
                 self.max_tokens, best.0

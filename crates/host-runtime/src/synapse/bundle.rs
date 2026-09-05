@@ -280,6 +280,17 @@ pub fn load_bundle(
     }
 
     let certification_rows = limits.max_batch_items.max(1);
+    // Every admitted position is certified with the shortest mismatching pair repeated across the batch, so that pair must fit `certification_rows` rows under the aggregate text cap; a corpus without one cannot certify the lane it ships with.
+    let per_row_budget = limits.max_batch_text_bytes / certification_rows;
+    let certifiable = shortest_mismatching_pair(&corpus)
+        .is_some_and(|(a, b)| a.text.len().max(b.text.len()) <= per_row_budget);
+    if !certifiable {
+        return Err(err(format!(
+            "corpus needs two items with differing expected vectors whose texts are at most \
+             {per_row_budget} bytes each, so a {certification_rows}-row certification batch fits \
+             max_batch_text_bytes"
+        )));
+    }
     Ok(VerifiedBundle {
         manifest,
         max_text_bytes: limits.max_text_bytes,
@@ -919,6 +930,23 @@ fn parse_corpus(bytes: &[u8], dims: usize) -> Result<Corpus, BundleError> {
         tolerance: raw.tolerance,
         items,
     })
+}
+
+/// The mismatching pair with the smallest longer text, so labeled batches fit the most rows under the aggregate cap.
+pub(crate) fn shortest_mismatching_pair(corpus: &Corpus) -> Option<(&CorpusItem, &CorpusItem)> {
+    let mut best: Option<(&CorpusItem, &CorpusItem)> = None;
+    for (index, first) in corpus.items.iter().enumerate() {
+        for second in &corpus.items[index + 1..] {
+            if !certification_mismatch(&first.expected, &second.expected, corpus.tolerance) {
+                continue;
+            }
+            let longer = first.text.len().max(second.text.len());
+            if best.is_none_or(|(a, b)| longer < a.text.len().max(b.text.len())) {
+                best = Some((first, second));
+            }
+        }
+    }
+    best
 }
 
 /// The certification criterion: two unit vectors match when every component is within `tolerance` and their cosine similarity is within `tolerance` of 1.
