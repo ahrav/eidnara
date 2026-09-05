@@ -94,8 +94,13 @@ committed to the tree.
 
 ## What a test must construct
 
-The existing pair already forms the record's `always` check. One gap
-remains: the protocol document's own example vectors do not match the code
+The existing fixed-vector pair is necessary but not the record's `always` check:
+the two implementations are never called against each other, so a defect that
+returns the committed literal for the fixture while mis-encoding another nonce,
+identity, or version passes both. The check needs direct
+`compute_proof(...) == raw_client::proof(...)` comparisons over generated and
+single-field-perturbed input tuples, with distinct inputs required to give
+distinct proofs. A second gap remains: the protocol document's own example vectors do not match the code
 (see the second question below). A test that decodes the JSON examples in
 `docs/host-wire-protocol.md` section 5.2 and compares them to
 `shm_transport::setup_auth::vectors` would catch documentation drift of this

@@ -138,7 +138,11 @@ rule the graceful path applies at `:1358-1372`.
 2. Send several routed requests so entries exist in `gen.pending`.
 3. Trigger shutdown with a shrunk `shutdown_deadline` so the graceful drain
    cannot finish and the forced path runs.
-4. Assert, after `force_close_all_routes` returns, that `gen.pending` is empty.
+4. Record, for every key inserted into `gen.pending`, the inserting dispatch task
+   and the site that removes it, and assert each removal came either from that
+   task's own exit or from the route close that aborted it; then assert, after
+   `force_close_all_routes` returns, that `gen.pending` is empty. Emptiness alone
+   is satisfied by an unrelated early removal that a later `Cancel` cannot find.
    This requires crate-internal access, since `pending` is `pub` on
    `GenerationCore` but `GenerationCore` is reachable only through
    `shared.connections`, which is also `pub` - so an in-crate integration test can

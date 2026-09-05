@@ -147,6 +147,12 @@ Cheapest construction, using the existing harness shape:
    it, `:505`), so `reserve_until` expires quickly.
 4. Assert the cause the receiver observes. Today it is `CleanEof`; the property
    requires anything else.
+5. Carry the scenario through the connection engine and assert the final
+   disposition or operator-visible classification is distinct from a peer close.
+   The intermediate enum is not enough: in the charge-wait path the receiver can
+   observe `ReadClose::Corrupt` while `read_loop` (`connection.rs:362-365`) folds
+   it into the same `ReadExit::Peer` arm as `CleanEof`, which is the predicted
+   violation of the check's second clause.
 
 A second, cleaner construction for the wire-header cause: admit an
 `OutboundFrame` whose `bytes[0..4]` declares a length that disagrees with

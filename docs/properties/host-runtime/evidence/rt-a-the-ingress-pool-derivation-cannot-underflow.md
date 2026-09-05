@@ -114,8 +114,11 @@ that `shared.ingress_budget.capacity()` equals `MAX_BODY_LEN`.
 already constructs the floor case and asserts the boundary from outside; it
 would need access to the budget's capacity to assert the inner value.
 
-A `debug_assert` immediately before `:896` stating the five-term inequality is
-the cheapest production guard, and it asserts a precondition rather than the
+A `debug_assert` immediately before the `ByteBudget::new` subtraction at
+`runtime.rs:762-767`, where `config.limits.max_resident_bytes`, `catalog_resident`,
+and `reservations.retained_bytes` are in scope, stating the five-term inequality is
+the cheapest production guard (`:896` is the accept loop's closing brace and has
+no operands to assert), and it asserts a precondition rather than the
 violation.
 
 ## Investigation log
