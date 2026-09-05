@@ -13,10 +13,13 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   whose mechanism moved keep their status and cite the file that owns the mechanism now.
 - Every line citation inside the `Check:` field of an active record is verified against this tree, because
   those are the lines a campaign instruments; a construct the tree no longer has is named as removed rather than
-  given a line. One exemption: a check whose subject lives in a package that is not in this tree (today only
-  `ring-a-host-doctor-emits-one-of-five-declared-terminal-classes`, whose classifier is in `packages/plugin`)
-  keeps its source-repository citations, and the record says so and marks the check deferred; those anchors
-  are not resolvable here and are not claimed verified. Citations in the other fields are verified where the record says `re-verified`; the rest are the
+  given a line. One exemption: a check whose subject lives in a package that is not in this tree keeps its
+  source-repository citations, and the record says so; those anchors are not resolvable here and are not
+  claimed verified. Today that is two records, both depending on `packages/plugin`:
+  `ring-a-host-doctor-emits-one-of-five-declared-terminal-classes` (the classifier) and
+  `setup-a-only-an-authenticated-grant-enters-the-native-channel-registry` (the shipped-plugin call-graph
+  census over `shm-frame-channel.ts`); the in-tree half of the second, the three `insert_channel` sites in
+  `packages/shm-native/src/lib.rs`, is verified. Citations in the other fields are verified where the record says `re-verified`; the rest are the
   source catalogs' coordinates and are unverified against this tree, which METHOD rule 1 requires to be labelled
   rather than restated as fact. An automated range check marks every such citation that lies beyond the current
   file's length as `(source-catalog line, not present at HEAD)`; a citation without that mark is still not a
@@ -2697,7 +2700,10 @@ it announced two non-default sub-surfaces but then resolved the second,
 `RingClientEndpoint::try_recv_with` (`:723`), as `default-production`, because
 `client.rs:1878` reaches it in production. That resolution is correct, so the
 test-only surface is the publish hook and its two entry points, not two
-independent surfaces. **No record in this catalog carries a `test-only` label.**
+independent surfaces. **One record in this section carries a `test-only` label,
+[ring-a-host-doctor-emits-one-of-five-declared-terminal-classes](#ring-a-host-doctor-emits-one-of-five-declared-terminal-classes),
+because its classifier lives in a package outside this tree; the other seventeen
+are `default-production`.**
 The one record that touches the hook,
 [ring-a-endpoint-thread-panic-is-reported-as-orderly-completion](#ring-a-endpoint-thread-panic-is-reported-as-orderly-completion),
 is `default-production` because the production `written` completion hook shares
@@ -4581,18 +4587,16 @@ is resolved in the comment's favour.
 There are **51 in-crate tests** across the five scope files: 22 in `instance.rs`,
 12 in `setup_socket.rs`, 11 in `auth.rs`, 4 in `connection_file.rs`, and 2 in
 `packages/shm-native/src/setup.rs`. Counts re-derived at `HEAD` by matching
-`#[test]` and `#[tokio::test]` per file. **49 of them never run.**
-
-The exclusion is structural, and so is the inclusion. Every `-p host-runtime` test
-invocation in `ci.yml` carries a `--test <name>` filter, which selects one
-integration binary and does not build the lib target, so the 386-line test module
-in `setup_socket.rs:441-826` and the other three `host-runtime` modules are never
-compiled in CI. The peer half is in a different crate, and `ci.yml:167` runs
-`cargo nextest run -p shm-native -p shm-transport` **unfiltered** on Linux;
-the unfiltered macOS `shm-native` run this preamble previously cited was
-removed with every other macOS job by PR #131 (merge `5d638e3e8`).
-So the 2 tests in the peer's `setup.rs` do run while the 11 in `auth.rs` that pin
-the same proof construction on the host side do not.
+`#[test]` and `#[tokio::test]` per file. **All 51 run in CI in this tree:**
+`ci.yml:118` and `:126` run `cargo test --workspace --all-targets`, which builds
+and runs every package's library test target, so the test module in
+`setup_socket.rs`, the other three `host-runtime` modules, and the peer's
+`setup.rs` all execute. The source catalog's finding that 49 never ran came from
+a workflow whose `-p host-runtime` invocations each carried a `--test <name>`
+filter; that is provenance for the per-part fault maps' CI capability rows, not
+the state of this tree. The former macOS `shm-native` run was removed with every
+other macOS job by PR #131 (merge `5d638e3e8`), so platform coverage, not
+execution, is the remaining gap.
 
 **There is no other source-resident check.** `ci.yml:175` runs
 `cargo test -p host-runtime --doc`, but this sub-part has zero doctests: a grep for
@@ -4641,10 +4645,11 @@ differ deliberately; every record appears exactly once in each.
 Distribution after the portfolio disposition in
 [portfolio-evaluation.md](setup-identity/portfolio-evaluation.md): **13 `safety`, 2 `liveness`, 1
 `reachability`**; **15 `always` and 1 `sometimes`**; 16 high confidence and 0
-medium. Reachability classes are 15 `default-production` plus one record whose
-subject is a published export **compiled with no shipped-plugin caller**
-(`setup-a-only-an-authenticated-grant-enters-the-native-channel-registry`); each
-label carries its own evidence on the record, per METHOD.md rule 4.
+medium. Reachability classes in this tree are 14 `default-production` and 2 `test-only`
+(`setup-a-only-an-authenticated-grant-enters-the-native-channel-registry` and
+`setup-a-the-managed-rust-peer-repeats-every-native-peer-rejection`, both because
+their callers are the absent plugin or tests only); each label carries its own
+evidence on the record, per METHOD.md rule 4.
 
 Before the disposition this read 13 `safety` and 1 `reachability`, 13 `always` and
 1 `sometimes`, all 14 `default-production`, with 1 medium confidence, **and no
@@ -6307,10 +6312,13 @@ The host's watcher is additionally a biased select on `peer_read_cancel`
 (`connection.rs:196-198`), which the ring goodbye has already tripped.
 Existing check: none constructs the ordering. Partial credit at the integration
 layer for the thread's exit, in CI: `tests/shm_soak.rs:54-110` (`cycle` plus
-`wait_for_envelope`) and `tests/shm_failure_modes.rs:193-228`
-(`assert_resources_return_to` plus `clean_close_returns_exact_single_connection_capacity`
-at `:218`), both run by `ci.yml:130-135`. They prove the thread terminates after
-a real close; they observe neither the goodbye write nor the ordering. Status
+`await_envelope`, whose predicate compares the process thread count to the
+baseline) proves the thread terminates after a real close but observes neither the
+goodbye write nor the ordering. `tests/shm_failure_modes.rs:193-228`
+(`clean_close_returns_exact_single_connection_capacity`, `:201-209`) closes a
+client and connects a replacement, which proves capacity recovery only; it never
+reads a thread count and is not evidence of bridge exit. Both run in CI through
+`cargo test --workspace --all-targets` (`ci.yml:118`, `:126`). Status
 `unaudited`.
 Impact: Narrower than originally recorded and still real. The client's own
 teardown contract is unjoined: `close` returns while an OS thread it spawned
@@ -7311,9 +7319,10 @@ are carried in [existing-checks.md](request-path/existing-checks.md).
 
 ## Reachability: admission and dispatch
 
-**Fifteen of the sixteen records are `default-production`; one,
-[req-a-both-admission-classes-and-the-rejection-bound-saturate](#req-a-both-admission-classes-and-the-rejection-bound-saturate),
-is `test-only` in this tree.** The labels rest on three facts, re-verified here,
+**Thirteen of the sixteen records are `default-production`; three are
+`test-only` in this tree:
+[req-a-both-admission-classes-and-the-rejection-bound-saturate](#req-a-both-admission-classes-and-the-rejection-bound-saturate)
+and the two composite records, whose composition no in-tree binary performs.** The labels rest on three facts, re-verified here,
 per METHOD rule 4.
 
 1. **The routed request path is `run`'s default path.** `host_runtime::run`
@@ -7389,14 +7398,15 @@ sub-part derived itself.
 
 Semantics distribution: twelve `always`, two `sometimes`. No
 `always-or-unreached`, no `reachable`, no `unreachable`. Type distribution:
-twelve safety, two reachability, no liveness. Reachability distribution:
-fourteen `default-production`. Confidence: thirteen high, one medium.
+twelve safety, two reachability, no liveness. Reachability distribution in this
+tree: eleven `default-production`, three `test-only`. Confidence: thirteen high,
+one medium.
 
 The two carried records add **2 safety** and semantics **2 `always`**, both
 `default-production` and both high confidence, so the sixteen-record totals are
 **fourteen safety, two reachability, no liveness**; semantics **fourteen
-`always`, two `sometimes`**; reachability **sixteen `default-production`**; and
-confidence **fifteen high, one medium**.
+`always`, two `sometimes`**; reachability **thirteen `default-production`, three
+`test-only`**; and confidence **fifteen high, one medium**.
 
 **The five group headings below are this synthesis's own**, chosen by shared
 mechanism rather than by the order records were proposed. Grouping reorders the
@@ -9056,8 +9066,10 @@ shutdown-is-unconditional row was refuted. Carried in full in
 
 ## Reachability: runtime and configuration
 
-**Thirteen records are `default-production` under the convention below, and one is `explicit-config-only`.**
-No record here is `test-only`. The labels rest on the construction conditionality
+**Twelve records are `default-production` under the convention below, one is
+`explicit-config-only`, and one,
+[rt-a-a-closure-store-open-failure-is-classified-not-swallowed](#rt-a-a-closure-store-open-failure-is-classified-not-swallowed),
+is `test-only` because the store is opened only from tests in this tree.** The labels rest on the construction conditionality
 map above plus three facts, per METHOD rule 4. **The map was rebuilt after an
 independent evaluation refuted two of its rows and one of its conclusions, and
 every one of these fourteen labels was re-derived against the corrected map
@@ -9129,9 +9141,9 @@ design; it built the 20-claim register and the check inventory.
 
 Semantics distribution: eleven `always`, one `always-or-unreached`, two
 `sometimes`. No `reachable`, no `unreachable`. Type distribution: twelve safety,
-two reachability, no liveness. Reachability distribution: thirteen
-`default-production`, one `explicit-config-only`. Confidence: thirteen high, one
-medium.
+two reachability, no liveness. Reachability distribution: twelve
+`default-production`, one `explicit-config-only`, one `test-only`. Confidence:
+thirteen high, one medium.
 
 **The five group headings below are this synthesis's own**, chosen by shared
 mechanism rather than by the order records were proposed. Grouping reorders the
@@ -9796,8 +9808,8 @@ Open questions:
 Type: reachability
 Reachability: default-production - the window is inside `run` between `HostHandler::initialize` (`runtime.rs:640-644`) and transport publication, on every start; an initialization that fails or a shutdown that lands in that window takes the unpublished drain path with no configuration gate.
 Status: active
-Exercised: not yet - the bind and publish failure paths at `runtime.rs:836` and
-`:842` have no fixture
+Exercised: not yet - the bind and publish failure paths at `runtime.rs:704` and
+`:710` (re-verified) have no fixture
 Guarantee: The state in which a handler completed initialization and then drained
 without the host ever publishing a transport occurs at least once per campaign,
 so `PrePublicationCleanup::finish` runs against a fully initialized handler.
@@ -9808,17 +9820,20 @@ initialization-failure arms at `:666` and `:677`, so a campaign can cover the
 function's lines while never producing the operational state that matters: a
 *successfully* initialized handler being drained with nothing published. That
 distinction is exactly what `:695-696` says the grouping exists to protect.
-Fault/timing angle: three entries. `bind_owner_only` failing at `:836`; `publish`
-failing at `:843`; and the shutdown token already cancelled at `:831`, which
+Fault/timing angle: three entries. `bind_owner_only` failing at `:704`; `publish`
+failing at `:710`; and the shutdown token already cancelled at `:699`, which
 returns `Ok(None)` and drains through `:856`. The third is the cheapest to
 construct.
 Required faults and enabling state: for the cheapest form, cancel the shutdown
-token between the return of `initialize` and the `is_cancelled` check at `:831`.
+token between the return of `initialize` and the `is_cancelled` check at `:699`.
+All three funnel into `cleanup.finish()` at `:722` (`Ok(None)`) or `:726`
+(`Err`), re-verified.
 For the bind form, occupy or make unwritable the `setup.sock` path inside the
 guard's directory. For the publish form, a connection-file write failure.
 Confidence: high - [evidence](evidence/rt-a-an-initialized-handler-drains-without-publishing.md).
-Verified all three entries, the shared `finish` path, and that `finish` demotes
-the phase at `:355-357` before the drain.
+Re-verified all three entries (`:699`, `:704`, `:710`), the shared `finish` path
+(`:308`, reached from `:722` and `:726`), and that `finish` demotes the phase with
+`begin_stopping` at `:310` before awaiting the handler shutdown at `:316`.
 Existing check: none. Status `unaudited`.
 Impact: this path runs the handler shutdown callback for a handler that never
 served a request, while the instance lock is still held. If the callback assumes

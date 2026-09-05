@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "9564dfe276d2a5d6d6e44e5f4d51b24e5525133f33d0b901a7db781b24107d52",
+  "source_sha256": "3c78e9271cb63554f9ffee649d972bc592a925426a547d111e33a3b41e0a332b",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -2569,7 +2569,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/client-a-a-close-completes-before-its-setup-goodbye-is-written.md). Verified `join_tasks_until` (`:1677-1695`) iterates only `[&self.writer, &self.reader]` and that the spawn at `:1852` discards its handle. **The original record's consequence was withdrawn during disposition and is not a premise of anything above.** It claimed a clean close is observed by the host as an abrupt EOF. It is not, for two independent reasons: `close` sends a ring channel-0 `Goodbye` through `send_control_wait` (`:702`) and that call returns only after the writer's per-frame `completed_rx` resolved `Ok` and the `ack` fired (`:1957-1971`), so the goodbye is published to the ring before `cancel.cancel()` at `:711`; and the setup socket is moved into the thread closure at `:1854`, so nothing closes it when `close` returns and the host sees no EOF at that instant. The host's watcher is additionally a biased select on `peer_read_cancel` (`connection.rs:196-198`), which the ring goodbye has already tripped."
       },
-      "existing_check": "none constructs the ordering. Partial credit at the integration layer for the thread's exit, in CI: `tests/shm_soak.rs:54-110` (`cycle` plus `wait_for_envelope`) and `tests/shm_failure_modes.rs:193-228` (`assert_resources_return_to` plus `clean_close_returns_exact_single_connection_capacity` at `:218`), both run by `ci.yml:130-135`. They prove the thread terminates after a real close; they observe neither the goodbye write nor the ordering. Status `unaudited`.",
+      "existing_check": "none constructs the ordering. Partial credit at the integration layer for the thread's exit, in CI: `tests/shm_soak.rs:54-110` (`cycle` plus `await_envelope`, whose predicate compares the process thread count to the baseline) proves the thread terminates after a real close but observes neither the goodbye write nor the ordering. `tests/shm_failure_modes.rs:193-228` (`clean_close_returns_exact_single_connection_capacity`, `:201-209`) closes a client and connects a replacement, which proves capacity recovery only; it never reads a thread count and is not evidence of bridge exit. Both run in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`). Status `unaudited`.",
       "impact": "Narrower than originally recorded and still real. The client's own teardown contract is unjoined: `close` returns while an OS thread it spawned still holds the setup socket, the ring attach, and the write-completion channel, and the protocol requires that teardown be joined (`:691`). The consequence is a contract gap and an unbounded-in-principle residency of one thread past a successful `close`, not a peer-death miscount.",
       "open_questions": [
         "Should `Inner` hold the bridge thread's `JoinHandle` so `close` can join it under the same 5-second budget? That budget is already shared with route teardown. (needs human input)",
@@ -3651,18 +3651,18 @@
       "status": "active",
       "exercised": {
         "state": "not-yet",
-        "note": "the bind and publish failure paths at `runtime.rs:836` and `:842` have no fixture"
+        "note": "the bind and publish failure paths at `runtime.rs:704` and `:710` (re-verified) have no fixture"
       },
       "guarantee": "The state in which a handler completed initialization and then drained without the host ever publishing a transport occurs at least once per campaign, so `PrePublicationCleanup::finish` runs against a fully initialized handler.",
       "check": {
         "semantics": "sometimes",
         "condition": "a marker inside `PrePublicationCleanup::finish` (`runtime.rs:308`), fired only when initialization had returned `Ok`. `sometimes` and not `reachable` because `finish` is also reached from the initialization-failure arms at `:666` and `:677`, so a campaign can cover the function's lines while never producing the operational state that matters: a *successfully* initialized handler being drained with nothing published. That distinction is exactly what `:695-696` says the grouping exists to protect."
       },
-      "fault_timing": "three entries. `bind_owner_only` failing at `:836`; `publish` failing at `:843`; and the shutdown token already cancelled at `:831`, which returns `Ok(None)` and drains through `:856`. The third is the cheapest to construct.",
-      "required_faults": "for the cheapest form, cancel the shutdown token between the return of `initialize` and the `is_cancelled` check at `:831`. For the bind form, occupy or make unwritable the `setup.sock` path inside the guard's directory. For the publish form, a connection-file write failure.",
+      "fault_timing": "three entries. `bind_owner_only` failing at `:704`; `publish` failing at `:710`; and the shutdown token already cancelled at `:699`, which returns `Ok(None)` and drains through `:856`. The third is the cheapest to construct.",
+      "required_faults": "for the cheapest form, cancel the shutdown token between the return of `initialize` and the `is_cancelled` check at `:699`. All three funnel into `cleanup.finish()` at `:722` (`Ok(None)`) or `:726` (`Err`), re-verified. For the bind form, occupy or make unwritable the `setup.sock` path inside the guard's directory. For the publish form, a connection-file write failure.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/rt-a-an-initialized-handler-drains-without-publishing.md). Verified all three entries, the shared `finish` path, and that `finish` demotes the phase at `:355-357` before the drain."
+        "evidence": "[evidence](evidence/rt-a-an-initialized-handler-drains-without-publishing.md). Re-verified all three entries (`:699`, `:704`, `:710`), the shared `finish` path (`:308`, reached from `:722` and `:726`), and that `finish` demotes the phase with `begin_stopping` at `:310` before awaiting the handler shutdown at `:316`."
       },
       "existing_check": "none. Status `unaudited`.",
       "impact": "this path runs the handler shutdown callback for a handler that never served a request, while the instance lock is still held. If the callback assumes publication occurred, or assumes at least one connection existed, the failure surfaces only here. It is also the path that decides whether a failed startup leaves a lock behind.",
