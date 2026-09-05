@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "12124b62da16e095003e4fc6658955c70b24255ba8dedcecaa1073ea97937113",
+  "source_sha256": "ec3e67ff99b3d3b647c869879fa9cd3ae8600c92bc8e103b9b2bde5f08d3e6d5",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -975,7 +975,7 @@
     },
     {
       "slug": "authentication-and-capacity-rejections-are-observable",
-      "type": "reachability",
+      "type": "safety",
       "reachability": "default-production",
       "reachability_note": "both rejection arms are on the default connection path: the authentication return and the connection-permit `try_acquire_owned` failure (`crates/host-runtime/src/connection.rs:130-138`).",
       "status": "active",
@@ -983,10 +983,10 @@
         "state": "not-yet",
         "note": "no test triggers each rejection class and asserts an operator-visible record; the record itself finds there is no channel to carry one."
       },
-      "guarantee": "A rejected connection produces some record an operator can see.",
+      "guarantee": "Every rejected connection produces some record an operator can see.",
       "check": {
-        "semantics": "reachable",
-        "condition": "for each rejection class (authentication failure, connection capacity exhaustion, post-authentication drain refusal), some counter, log, or frame differs from the accepted case."
+        "semantics": "always",
+        "condition": "for every rejection event (authentication failure, connection capacity exhaustion, post-authentication drain refusal), some counter, log line, or frame differs from the accepted case; three constant coverage markers, one per class, show that each class was constructed at least once, and are instrumentation rather than the assertion. This is a predicted violation at HEAD: the record finds no channel that carries any of the three. `always` because the guarantee is over every rejection, not over one example per class."
       },
       "fault_timing": "none. Verified: authentication failure returns with no counter, no log, and no rate signal, and the peer address is already dropped at accept, so a credential-probing client is indistinguishable from silence. Capacity exhaustion and drain refusal both drop an authenticated client with no frame. The crate has no tracing or log dependency, so there is no channel to carry any of it.",
       "required_faults": "an authentication failure, a capacity exhaustion, and a drain refusal.",
@@ -1380,7 +1380,7 @@
     },
     {
       "slug": "slow-egress-alone-does-not-retire-a-probed-generation",
-      "type": "reachability",
+      "type": "safety",
       "reachability": "explicit-config-only",
       "reachability_note": "",
       "status": "active",
@@ -1390,8 +1390,8 @@
       },
       "guarantee": "Application egress backpressure, on its own, never retires a generation whose peer is answering Pings, and in particular never retires one when `invalidate_on_missed` is `false`.",
       "check": {
-        "semantics": "sometimes",
-        "condition": "a constant marker `probe_queued_behind_saturated_egress` fires when all of these independent, legal preconditions hold at one instant: a `LivenessPolicy` is configured; `invalidate_on_missed` is `false`; the writer queue holds `writer_queue_frames` admitted frames; and a Ping tick is due. A second constant marker `pong_parked_pending_write_completion` fires when a matching Pong is observed while `probe.written_at.is_none()`, which is the park branch at `connection.rs:464`. `sometimes` rather than `reachable` because a campaign can execute those lines while never producing the operational state: line coverage of `:464` proves the branch compiled and ran, whereas the property needs a full queue coinciding with a due tick, which is situation coverage. Both markers assert only legal preconditions, so they still fire against a correct implementation; neither asserts a retirement, an expiry, or any violation."
+        "semantics": "always",
+        "condition": "in every window in which the coverage preconditions below hold, the generation is not retired and `probe.expired` stays false until the peer's Pong arrives, with `invalidate_on_missed` false; the catalog's own trace says `FrameSender::send` retires the generation when the writer queue stays saturated through the Ping admission deadline, so this is a predicted violation at HEAD rather than a pass. The two markers below are coverage instrumentation that shows the window was constructed, not the assertion. A constant marker `probe_queued_behind_saturated_egress` fires when all of these independent, legal preconditions hold at one instant: a `LivenessPolicy` is configured; `invalidate_on_missed` is `false`; the writer queue holds `writer_queue_frames` admitted frames; and a Ping tick is due. A second constant marker `pong_parked_pending_write_completion` fires when a matching Pong is observed while `probe.written_at.is_none()`, which is the park branch at `connection.rs:464`. The markers use situation coverage rather than line coverage because a campaign can execute those lines while never producing the operational state: line coverage of `:464` proves the branch compiled and ran, whereas the property needs a full queue coinciding with a due tick, which is situation coverage. Both markers assert only legal preconditions, so they still fire against a correct implementation; neither asserts a retirement, an expiry, or any violation."
       },
       "fault_timing": "the window exists because the host writer has no control lane. `frame_channel.rs:761` holds a single `mpsc::Sender<QueuedOutboundFrame>`, created at `:862` with capacity `queue_frames`, default 64 (`config.rs:141`, passed at `connection.rs:181`). There is no reserved control slot, unlike the client, which reserves one (`client.rs:954`). Two distinct consequences follow, and only the first is handled. First, a Ping queued behind application frames is deadline-anchored at completion (`connection.rs:1443`) and its Pong is parked rather than judged (`:528-535`), so queueing delay is not charged to the peer. That is correct and deliberate. Second, and unhandled: the Ping's *admission* is bounded. `gen.writer.send(...)` at `:1449` reaches `FrameSender::send` (`frame_channel.rs:779-781`), which passes `admission_deadline()`, that is `now + admission_timeout` (`:783-785`), and `connection.rs:178-186` supplies `shared.timing.frame_deadline` there, default 30 seconds (`config.rs:224`). The timeout arm at `frame_channel.rs:819-823` calls `self.retired.cancel()` and `self.generation.cancel()`. So a Ping that cannot be admitted within `frame_deadline` retires the generation from inside the sender, before `liveness_loop` observes `sent.is_err()` at `:1457`. This bypasses `invalidate_on_missed` entirely: the missed-Pong retirement at `:1376` is gated on that flag and the admission retirement is not.",
       "required_faults": "a configured `LivenessPolicy` with `invalidate_on_missed: false`; a handler producing frames faster than the peer drains them so all 64 slots stay occupied; and a peer that keeps reading fast enough that no single dequeued write exceeds `frame_deadline`, since a peer that stops reading is retired by the write deadline on its own, which `config.rs:204-206` documents as intended. Paused time makes the 30 second window cheap. The second marker needs only a Ping enqueued behind at least one unwritten frame plus a prompt Pong.",
@@ -1609,7 +1609,7 @@
     },
     {
       "slug": "ring-a-host-never-quarantines-an-admission-charge",
-      "type": "reachability",
+      "type": "safety",
       "reachability": "default-production",
       "reachability_note": "for the release path this record contrasts against, and **compiled-with-no-production-caller** for the subject itself. `admission.release()` (`ring_transport.rs:276`) runs on every endpoint exit of every authenticated connection (`connection.rs:148`), with no gate. `Admission::quarantine` (`profile.rs:568`) is compiled into every host build because `shm-transport` is a non-optional dependency, and it has **no caller anywhere in `crates/host-runtime/src`**, in production or in test. That is stated here rather than defaulted: the label is neither `default-production` nor `test-only` for the quarantine half, because the path is reachable from no host code at all.",
       "status": "active",
@@ -1617,10 +1617,10 @@
         "state": "not-yet",
         "note": "nothing in `host-runtime` can construct the state, so no host test can reach it."
       },
-      "guarantee": "The host's quarantined-charge accounting is structurally always zero, because no `host-runtime` path calls `Admission::quarantine`; every endpoint exit, including one caused by ring corruption or a swallowed panic, releases the charge as if the storage were cleanly recycled.",
+      "guarantee": "Every admission charge an endpoint takes is accounted exactly once at its exit: released, or quarantined when the exit is a ring-corruption exit that the transport contract (`docs/shm-transport.md:21`, `:65`, `:79`) says should quarantine; never both and never neither. The slug names the discovery-time finding that no `host-runtime` path calls `Admission::quarantine`, so today the quarantined side of that accounting is structurally zero and every corrupt exit releases as if the storage were cleanly recycled, which is a contract-versus-code disagreement, not a forbidden location.",
       "check": {
-        "semantics": "unreachable",
-        "condition": "the code location `Admission::quarantine` (`profile.rs:561`) is never entered from any `host-runtime` call path. `unreachable` fits because the subject is a specific unentered function, not a forbidden state; the derived state claim (`snapshot().quarantined == ResourceCharges::ZERO` for every host process) follows from it and is the cheaper screen. **One caveat is recorded rather than resolved.** METHOD.md reserves `unreachable` for a *forbidden* code location, and nobody forbids `Admission::quarantine`: `docs/shm-transport.md:21`, `:65`, and `:79` say it should be live. So this record is closer to a static architecture assertion than to a forbidden-location claim, and whether such assertions belong in this catalog at all is bias 1 in [portfolio-evaluation.md](ring-datapath/portfolio-evaluation.md). The independent evaluation raised the same objection against the release-identity record and it was applied there; it was not extended here, because that record's subject is an argument provenance at an *executed* function and this one's is a function that never executes. Resolving the bias decides this semantics choice."
+        "semantics": "always",
+        "condition": "across every endpoint exit in a campaign, including corrupt-ring and swallowed-panic exits, `released + quarantined` charges equal the charges taken (no leak, no double count), and for every exit the transport contract classifies as corrupt, `snapshot().quarantined` has grown by that endpoint's charge. The second clause is a predicted violation at HEAD, because `Admission::quarantine` (`profile.rs:561`) has no `host-runtime` caller; the check asserts the documented contract rather than freezing the gap. `always` because accounting must balance at every exit."
       },
       "fault_timing": "the window that matters is a `Corrupt` exit. When `Ring::try_receive` fails descriptor validation it calls `enter_quarantine()` inside the transport (`ring.rs:1098`), so the ring is terminally quarantined per Part 1's `quarantine-authority-survives-peer-writes`. The host maps that to `ReadClose::Corrupt` (`ring_transport.rs:499`), exits `run_endpoint` at `:406-411`, and still calls `admission.release()` at `:276`. The process-wide accounting therefore shows the arena bytes as free while the ring that held them is condemned.",
       "required_faults": "a quarantined peer-to-host ring plus an inspection of `accounting().quarantined` afterwards. Two producers reach it, and the second is cheaper than this record originally recorded: a descriptor-validation failure inside `try_receive` (`ring.rs:1098`), or a peer that calls the public `Ring::enter_quarantine` (`ring.rs:1373-1378`) directly on the endpoint it already holds (`RingClientEndpoint.to_host` is a `pub` field, `ring_transport.rs:651-656`). See [ring-a-lease-release-failure-is-observable-only-on-the-success-path](#ring-a-lease-release-failure-is-observable-only-on-the-success-path).",
@@ -1631,6 +1631,7 @@
       "existing_check": "`ring_transport.rs:880` asserts `accounting.quarantined.arena_bytes == 0` on a fresh transport, which is the same value the property says can never change. A second assertion of the same fact is at `:855`. Status unaudited.",
       "impact": "the quarantine accounting that `docs/shm-transport.md:21`, `:65`, and `:79` present as a live safety mechanism is inert on the host. Because the mapping is genuinely unmapped when `run_endpoint` drops the `DuplexRing`, releasing the charge is arguably correct and the doc is what is wrong; but the two readings differ on whether a quarantined ring's arena bytes should be retained against the process bound, and only a human can settle which was intended. This is the release-versus-quarantine policy question, and it is bias 2 in [portfolio-evaluation.md](ring-datapath/portfolio-evaluation.md); it must be settled before this record and [ring-a-admission-charge-releases-on-every-endpoint-thread-exit](#ring-a-admission-charge-releases-on-every-endpoint-thread-exit) can both be right, because one requires the charge to come back on every exit and the other asks whether a condemned ring is an exception.",
       "open_questions": [
+        "Is the missing quarantine caller a deferred feature or a decision that the host never quarantines? The transport document says the former; the record's second clause fails until one of them is implemented or the document changes. (needs human input)",
         "Was host-side quarantine accounting deliberately dropped with `provider_recovery.rs`, or lost? Part 1's `quarantine-charge-transition-is-atomic` cited `provider_recovery.rs:187` as its host-side driver, and that file has no successor. (needs human input)"
       ],
       "extra": {}
@@ -3146,7 +3147,7 @@
       "guarantee": "Concurrent handler callbacks are bounded by the class-scoped `task_permits` pool, concurrent unsettled requests by the class-scoped `pending_permits` pool, both acquired non-blockingly on the read loop before any task is spawned, and each class is unreachable from the other.",
       "check": {
         "semantics": "always",
-        "condition": "assert that live handler callbacks never exceed the class's task-permit count, that unsettled requests never exceed its pending-permit count, and that both acquisitions are `try_acquire_owned` on the reader so exhaustion rejects instead of queueing. `always` because both bounds must hold at every instant."
+        "condition": "assert that live handler callbacks never exceed the class's task-permit count, that unsettled requests never exceed its pending-permit count, that both acquisitions are `try_acquire_owned` on the reader so exhaustion rejects instead of queueing, and that each route class acquires only from its matching permit pair (`dispatch.rs:821`): with the general pools saturated a reserved-class request is admitted and with the reserved pools saturated a general-class request is admitted, and neither class ever holds a permit from the other pair (`saturated_broca_reserve_cannot_consume_a_general_slot` and `saturated_general_capacity_cannot_consume_the_broca_reserve` in `tests/dispatch.rs` are the existing forms). `always` because all four bounds must hold at every instant."
       },
       "fault_timing": "The task permit is released when the handler returns (`dispatch.rs:990`, inside the inner task) while the pending permit is held across the egress wait (`:933`, in the outer task). Under a slow peer the two counts diverge, which is intended: a blocked terminal must not occupy handler capacity.",
       "required_faults": "A client pipelining more requests than `max_handler_tasks` on one route, plus a slow-reading peer so terminals queue and the pending count exceeds the task count.",
@@ -3610,7 +3611,7 @@
       "guarantee": "Every field an embedder can set on `HostConfig`, `HostLimits`, `HostTiming`, `LivenessPolicy`, or `HostInit` reaches at least one consumer, so setting it changes some observable host behaviour.",
       "check": {
         "semantics": "always",
-        "condition": "for each public configuration field, assert at least one read site outside `config.rs` and outside a `Debug` implementation. `always` because it is a property of the surface, evaluated once per field."
+        "condition": "for each public configuration field, two host executions that differ only in that field produce the documented observable difference for its family: a limit field moves the admission boundary at which a request or connection is rejected, a timing field moves the instant at which the corresponding deadline fires under paused time, a liveness field changes the probe cadence or the retirement decision, and an init field changes the published value the client reads. A read site outside `config.rs` and outside a `Debug` implementation is a necessary screen, not the check: a field that is read and ignored fails. `always` because it is a property of the surface, evaluated once per field."
       },
       "fault_timing": "none. This is a static property of the wiring.",
       "required_faults": "none. The check is an enumeration, best expressed as a test that names each field and its consumer, or as a review gate.",
@@ -3878,7 +3879,7 @@
       "guarantee": "The credential fingerprint is `HMAC(derive(connection_key, \"eidnara-broca-credential-v1\"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.",
       "check": {
         "semantics": "always",
-        "condition": "`credential_fingerprint(key, harness, provider) == committed literal` for the documented row; the per-value size cap rejects before fingerprinting."
+        "condition": "for the documented row, `credential_fingerprint(key, harness, provider) == committed literal`; for every generated `(key, harness, provider name, value)` row in a campaign, `credential_fingerprint` equals an independent implementation of the documented derivation (`HMAC(derive(key, \"eidnara-broca-credential-v1\"), canonical_row)` with length-prefixed fields), including rows that differ only by moving one byte across a field boundary and rows with an empty field, which must yield distinct fingerprints; and the per-value size cap rejects before fingerprinting. `always` because the derivation is a pure function evaluated on every row."
       },
       "fault_timing": "A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.",
       "required_faults": "The documented inputs and an oracle outside the crate.",
@@ -4041,7 +4042,7 @@
       "guarantee": "The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.",
       "check": {
         "semantics": "always",
-        "condition": "every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, and a rejected request leaves no run; every clause is an invariant over every request, so one `always` covers the conjunction."
+        "condition": "every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, a bind naming a harness outside the supported set is rejected with exactly `invalid_identity` (`bind_requires_absolute_root_nonempty_session_and_supported_harness`, `crates/host-runtime/tests/broca_protocol.rs:372`, asserts the code at `:397`), and a rejected request or bind leaves no run state; every clause is an invariant over every request, so one `always` covers the conjunction."
       },
       "fault_timing": "A permissive decoder lets a harness smuggle fields the host does not validate.",
       "required_faults": "Malformed and boundary-sized bodies.",
@@ -4095,7 +4096,7 @@
       "guarantee": "An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.",
       "check": {
         "semantics": "always",
-        "condition": "for every artifact fault, `activate` returns `Ok` with the lane disabled, and a context request issued afterwards completes within the campaign's request deadline; the existing test bounds it with the 5 s harness `BUDGET` (`crates/host-runtime/tests/support/synapse.rs:22`, `:265`), and the host itself imposes no dispatch deadline (see [req-a-a-handler-outliving-every-host-deadline-is-reached](#req-a-a-handler-outliving-every-host-deadline-is-reached)), so the bound must come from the campaign. The second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation."
+        "condition": "for every artifact fault, `activate` returns `Ok` with the lane disabled, a bind to the disabled lane is refused with exactly `artifact_invalid` (`crates/host-runtime/tests/synapse_bundle.rs:241`, `tests/synapse_roundtrip.rs:93`), and a context request issued afterwards completes within the campaign's request deadline; the existing test bounds it with the 5 s harness `BUDGET` (`crates/host-runtime/tests/support/synapse.rs:22`, `:265`), and the host itself imposes no dispatch deadline (see [req-a-a-handler-outliving-every-host-deadline-is-reached](#req-a-a-handler-outliving-every-host-deadline-is-reached)), so the bound must come from the campaign. The second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation."
       },
       "fault_timing": "A host-fatal Synapse fault would take the product down for an optional lane.",
       "required_faults": "Each artifact fault class; an unconfigured component.",
@@ -4121,7 +4122,7 @@
       "guarantee": "A request that violates a constraint, carries an unknown field, exceeds the depth or size bound, names a different model, fingerprint, or epoch, or names a foreign job is rejected before the engine runs (as `schema_violation`, `substitution_rejected`, or `module_restarted` by class), and equal replays reuse one job and one inference.",
       "check": {
         "semantics": "always",
-        "condition": "`engine.calls` is unchanged by a rejected request, and equal replays produce exactly one inference; both are invariants over every request, so one `always` covers the conjunction."
+        "condition": "`engine.calls` is unchanged by a rejected request; the rejection code matches the violation class exactly: `schema_violation` for a constraint violation, an unknown field, or an exceeded depth or size bound, `substitution_rejected` for a different model, fingerprint, or epoch, and `module_restarted` for a foreign or unknown job (`unknown_and_foreign_jobs_are_module_restarted`, `crates/host-runtime/tests/synapse_protocol.rs:1218`); and equal replays produce exactly one inference. Every clause is an invariant over every request, so one `always` covers the conjunction."
       },
       "fault_timing": "Validation after inference would spend model time on hostile input.",
       "required_faults": "Each violation class; replayed requests.",
