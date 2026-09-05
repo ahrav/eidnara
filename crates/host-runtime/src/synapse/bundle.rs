@@ -989,6 +989,23 @@ mod tests {
                 "{name} yields the same fingerprint as another field"
             );
         }
+
+        // The selector-form cases above change the tag; the numeric index must also
+        // move the fingerprint when only its value changes under an unchanged tag.
+        let mut by_index = baseline;
+        by_index.output.name = None;
+        by_index.output.index = Some(1);
+        let index_one = canonical_fingerprint(&by_index);
+        by_index.output.index = Some(2);
+        let index_two = canonical_fingerprint(&by_index);
+        assert_ne!(
+            index_one, index_two,
+            "output.index value does not participate in the fingerprint"
+        );
+        assert!(
+            seen.insert(index_two),
+            "output.index=2 collides with another field"
+        );
     }
 
     #[test]
