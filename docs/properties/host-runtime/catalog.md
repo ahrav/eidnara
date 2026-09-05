@@ -893,17 +893,22 @@ Reachability: default-production - the shutdown latch is constructed for every
 host incarnation (`crates/host-runtime/src/runtime.rs:919`) and driven by the
 ordinary shutdown path; nothing gates it on configuration.
 Status: active
-Exercised: yes - one in-crate test directly pins the enable-before-check rule.
+Exercised: yes - `an_enabled_change_future_survives_a_pre_poll_notification` (`crates/host-runtime/src/lifecycle.rs:1771`) pins that a notification landing between `try_own` and the first poll is observed; note that it constructs `changed()` before `try_own()`, which is the ordering that carries the guarantee (see the timing angle).
 Guarantee: A shutdown requester that observes the wait state is always woken by
 the next phase change.
-Check: `always` - for every interleaving of ownership attempt, reopen, commit, and
+Check: `always` - for every interleaving of ownership attempt, reopen, commit, and a waiter's change-future lifecycle, the waiter eventually returns owner or committed; the invariant a test must protect is that the `Notified` future is created (`changed()`, `lifecycle.rs:1091`) before the state is re-checked (`try_own()`, `:1065`).
 a waiter's change-future lifecycle, the waiter eventually returns owner or
 committed.
-Fault/timing angle: the notification wakes only enabled or already-polled futures
-and stores no permit, so the enable-before-recheck order is load-bearing. Reopen
-releases the phase lock before notifying while commit notifies while holding it;
-the asymmetry is harmless for a wake-all but is undocumented and would matter if
-either became a wake-one.
+Fault/timing angle: the latch notifies with `notify_waiters` (`lifecycle.rs:1083`,
+`:1088`), which stores no permit. For the pinned Tokio 1.53.1, a `Notified` future
+is guaranteed to observe `notify_waiters` from the moment it is created, polled or
+not (`tokio/src/sync/notify.rs:529-531`); `enable()` is load-bearing for
+`notify_one`, not for this primitive. The lost-wake fence is therefore creating
+`changed()` before calling `try_own()`; a mutation that moves the creation below
+the state check reintroduces the lost wake even if `enable()` is still called.
+Reopen releases the phase lock before notifying while commit notifies while
+holding it; the asymmetry is harmless for a wake-all but is undocumented and
+would matter if either became a wake-one.
 Required faults and enabling state: at least two concurrent requests on distinct
 generations, plus a pre-acknowledgement failure so reopen fires rather than
 commit. Needs a multi-thread runtime for the notify-between-check-and-poll
@@ -912,7 +917,8 @@ Confidence: high - [evidence](evidence/latch-wake-cannot-be-lost.md). the protoc
 spelled out in comments.
 Existing check: the strongest existing check in this scope. Status unaudited.
 Impact: a lost wakeup is a permanently stuck requester holding a pending permit.
-Open questions: None.
+Open questions:
+- The source comment at `lifecycle.rs:1769` and the `enable()` calls at `:1750` and `:1776` attribute the guarantee to enabling rather than to creation order; the calls are harmless but the stated rationale disagrees with the Tokio contract. Contract-versus-code note, not resolved here. (needs human input)
 
 ---
 
@@ -929,7 +935,7 @@ this record is about, `probe_lifecycle` (`lifecycle.rs:805`), has no caller outs
 (`crates/daemon`), is scheduled for U4 (`docs/properties/README.md:52`); reclassify
 to `default-production` in the wave that lands it.
 Status: active
-Exercised: yes - five in-crate tests, all Linux-only.
+Exercised: yes - five in-crate tests in `lifecycle.rs`, none gated on `target_os`; the only Linux-gated items in that module are the FIFO cases, which do not bear on this record (re-verified).
 Guarantee: The probe returns stopped only when both the lifetime fence and the
 runtime-directory instance lock are observed free.
 Check: `always` - for every evidence shape, hold each fence in turn and assert the
@@ -944,7 +950,7 @@ Required faults and enabling state: a live daemon plus namespace replacement, or
 probe sampling inside the few-syscall window between the two acquisitions.
 Confidence: high - [evidence](evidence/probe-never-reports-stopped-while-either-fence-is-held.md). stopped is returned from exactly two places and both require
 the lifetime fence free.
-Existing check: strong, five tests. Status unaudited; all Linux-only.
+Existing check: strong, five tests, portable across Unix. Status unaudited.
 Impact: a false stopped authorizes a launcher to start a second incarnation over a
 live one.
 Open questions: None.
@@ -1487,7 +1493,7 @@ liveness, and no fault injection: `TestHost::start` plus `setup_client`
 of the state predicate additionally needs an injected provider, which is
 test-only; the `BootstrapTcp` half is the default path.
 Confidence: high - [evidence](evidence/negotiation-precedes-every-gated-frame-kind.md).
-[evidence](evidence/negotiation-precedes-every-gated-frame-kind.md). All five
+All five
 gate sites and all fourteen frame-kind arms enumerated against
 `connection.rs:417-598` and `:626-647`.
 Existing check: `tests/transport_negotiation.rs:906` covers six of the eight
@@ -1540,7 +1546,6 @@ and `ProviderActive` arcs need an injected provider, which is test-only; that
 is why this record is labelled by its default-reachable arc and the provider
 arcs are named explicitly.
 Confidence: high - [evidence](evidence/setup-selection-is-sticky-for-the-generation.md).
-[evidence](evidence/setup-selection-is-sticky-for-the-generation.md).
 `setup.state` has exactly two write sites and `setup.handoff` exactly one, all
 enumerated by grep over `connection.rs`.
 Existing check: `tests/transport_negotiation.rs:962`
@@ -1582,7 +1587,7 @@ variant in a test fixture, or assert both predicates over all variants; the
 `matches!` shape means a new variant is refused by both copies unless a author
 adds it, which is the fail-closed direction.
 Confidence: high - [evidence](evidence/setup-readiness-is-decided-by-one-predicate.md).
-[evidence](evidence/setup-readiness-is-decided-by-one-predicate.md). Both
+Both
 predicate bodies read at HEAD and confirmed textually identical over the same
 field; the four `transport_ready` call sites and the one inline site
 enumerated.
@@ -1641,7 +1646,6 @@ ignored rather than retiring the generation, needs no liveness at all and is
 default-production; it is a strictly smaller claim and is recorded in the
 evidence file.
 Confidence: high - [evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md).
-[evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md).
 Both sides read at HEAD: the document sentence, the ungated `Pong` arm, the
 liveness start point, and the grant path's own comment explaining that
 bootstrap probing is live during setup.
@@ -1703,7 +1707,6 @@ test-injected (`:1-13`), and `HostConfig::default` installs the empty registry
 (`config.rs:297`). Verified consequence: in every shipped configuration the
 reason is always `None`.
 Confidence: high - [evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md).
-[evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md).
 Precedence block, preflight default, panic mapping, and the `serves_transport`
 gate all read at HEAD; the empty-registry conclusion traced from
 `HostConfig::default` to `TransportProviders::default`.
@@ -1769,7 +1772,6 @@ plus a token cancelled before the poll. Both are constructible with
 No scheduler control is needed because the ordering is established before the
 call.
 Confidence: high - [evidence](evidence/cancellation-preempts-every-bounded-frame-read.md).
-[evidence](evidence/cancellation-preempts-every-bounded-frame-read.md).
 Verified the `biased;` keyword and branch order at `frame_read.rs:47-49`,
 `:81-83`, `:111-113`; the production cancellation sources at
 `connection.rs:305`, `runtime.rs:1160`, and `runtime.rs:431`; and by exhaustive
@@ -1818,7 +1820,6 @@ buffer pre-filled with `k` bytes, `0 < k < len`, and a reader holding `len`
 body bytes followed by a valid header. The observable is that the header no
 longer parses on the next read.
 Confidence: high - [evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md).
-[evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md).
 The cap and the loop condition were read at `frame_read.rs:79-80`; the
 freshness of both callers' buffers was verified at `tcp_frame_channel.rs:217`
 and `client.rs:2003`; the `take` semantics were confirmed against tokio 1.53.1.
@@ -1866,7 +1867,6 @@ one header byte (`read_exact`), after a partial declared body (`read_body`),
 and after a partial drained body (`drain`). All three are one `drop(client)` on
 a `tokio::io::duplex` pair.
 Confidence: high - [evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md).
-[evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md).
 Read the three `if read == 0` sites at `frame_read.rs:55-57`, `:89-91`,
 `:119-121`, and verified the non-empty-target guards at `:46`, `:109-110`. The
 `read_body` case needed dependency evidence, since `read_buf` has two other
@@ -1921,7 +1921,7 @@ Required faults and enabling state: any stop class, then an attempted second
 read. Cheapest construction: a truncated declared body for EOF, a paused clock
 for the deadline, a cancelled token for cancellation.
 Confidence: high - [evidence](evidence/no-framed-read-resumes-after-a-read-stop.md).
-[evidence](evidence/no-framed-read-resumes-after-a-read-stop.md). Verified that
+Verified that
 no helper retains an offset (`frame_read.rs:45`, `:79`, `:108`), and that both
 callers stop: the host's four exhaustive `Err` arms at `connection.rs:400`,
 `:401-410`, `:411-414`, and the client's `break` at `client.rs:1897-1900` plus
@@ -1975,7 +1975,6 @@ with strictly increasing correlations (`connection.rs:426-429`) declaring
 `len > MAX_CONTROL_BODY_LEN`, each followed by the declared bytes, repeated. To
 observe the aggregate, run `max_connections` of them.
 Confidence: high on the mechanism, medium on whether the cost is a defect - [evidence](evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md).
-[evidence](evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md).
 Verified that the oversize branch at `tcp_frame_channel.rs:198-202` precedes
 the budget charge at `:204-215`; that the ceiling is `MAX_BODY_LEN` and not the
 control cap, because `validate_inbound_header` (`frame_channel.rs:58-61`) runs
@@ -2031,7 +2030,6 @@ Required faults and enabling state: to *prove* unreachability, none: it follows
 from the four verified steps in the evidence. To detect a regression,
 instrument the arm and run the ordinary inbound suite.
 Confidence: high - [evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md).
-[evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md).
 Verified all four steps the claim rests on: the cap equals the framing maximum
 (`client.rs:88`, `:403`); `validate_inbound` rejects a larger `len` first
 (`:2040`, called at `:1957`); `ByteCounter::charge` refuses only when
@@ -2119,7 +2117,6 @@ duplex harness at `connection.rs:1480` onward already provides. For (b) a peer
 that reads but never sends a Pong, plus `invalidate_on_missed: true`. Paused
 tokio time for both. No adversary and no concurrency campaign.
 Confidence: high - [evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md).
-[evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md).
 Every bound was read at HEAD and the two `sent` anchors were traced through
 both writers of the field.
 Existing check: partial. `tests/client.rs:97-145` covers direction (a) with an
@@ -2190,7 +2187,6 @@ that stops reading is retired by the write deadline on its own, which
 window cheap. The second marker needs only a Ping enqueued behind at least one
 unwritten frame plus a prompt Pong.
 Confidence: high - [evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md).
-[evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md).
 The admission path was traced from the Ping send through the cancel calls, and
 the absence of a host-side control lane was confirmed by reading the whole
 `FrameSender` and its constructor.
@@ -2249,7 +2245,6 @@ Required faults and enabling state: none. The check is a pure unit test with no
 store, no filesystem, and no fault injection. It is the cheapest record in this
 pass.
 Confidence: high - [evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md).
-[evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md).
 Both structs, both encoding functions, and the existing fixture were read at
 HEAD, and the three blind spots were each confirmed by reasoning from the
 fixture's literal contents.
@@ -2305,7 +2300,6 @@ needs a fixture manifest whose bytes encode an older field order, which is a
 string literal, plus a staged directory whose files match it. No fault
 injection.
 Confidence: high - [evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md).
-[evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md).
 Both equality checks were read at HEAD, and the fail-closed conclusion was
 derived from them rather than assumed; the prompt's "silently change every
 retained generation's digest" is corrected in the evidence file.
@@ -2362,7 +2356,6 @@ test `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
 the missing element is executing it on macOS. On the stub platforms the check
 is a compile-and-call assertion.
 Confidence: high - [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md).
-[evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md).
 Both cfg arms and the call site were read at the authoring pass's HEAD, along
 with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`)
 since deleted that job with every other macOS job, so the claim that no macOS
@@ -2427,8 +2420,7 @@ the fallback on Linux at all needs a filesystem that rejects `renameat2` flags;
 running it as the default needs macOS.
 Confidence: high - [evidence](evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md). On the mechanism, medium on severity, since the transaction
 lock does exclude the in-model actors and no out-of-model writer is
-demonstrated -
-[evidence](evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md).
+demonstrated.
 Both branches, the caller's contract, and the lock references were read at
 HEAD.
 Existing check: none. No test drives the portable fallback on any platform, and
@@ -10015,7 +10007,7 @@ Open questions: None.
 ### broca-identical-resends-converge-on-one-run
 
 Type: safety
-Reachability: default-production - every Broca send is deduplicated by the supervisor.
+Reachability: test-only - every Broca send through a composed `BrocaComponent` is deduplicated by the supervisor. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - identical resends and racing identical sends are covered; a resend after the run's terminal was retained then evicted is not.
 Guarantee: Two byte-identical sends converge on one run and one backend start; any byte difference under the same key is a conflict, never a silent second run.
@@ -10031,7 +10023,7 @@ Open questions:
 ### broca-permits-and-charges-return-to-baseline
 
 Type: safety
-Reachability: default-production - every run path releases what it took.
+Reachability: test-only - every run path of a composed `BrocaComponent` releases what it took. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - success, failure, cancel, transport detach, and shutdown paths are covered in-process; a backend that never exits is covered only through the escalation timers.
 Guarantee: Every run path returns its pending permits, task permits, and byte charges to the supervisor baseline, and host shutdown drains the supervisor to zero state.
@@ -10046,7 +10038,7 @@ Open questions: None.
 ### broca-children-are-reaped-as-a-process-group
 
 Type: safety
-Reachability: default-production - every harness child runs in its own process group under `PR_SET_PDEATHSIG`.
+Reachability: test-only - every harness child a composed `BrocaComponent` spawns runs in its own process group under `PR_SET_PDEATHSIG`. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - SIGTERM-then-SIGKILL reaping on cancel, delete, and shutdown is covered with real processes; the orphan sweep is covered for dead owners.
 Guarantee: Cancelling, deleting, or shutting down a run terminates the whole harness process group, escalating from SIGTERM to SIGKILL when the child ignores the first, and the orphan sweep kills only groups whose owner is dead.
@@ -10065,20 +10057,21 @@ Type: safety
 Reachability: test-only - `EnvSnapshot::capture_from` (`crates/host-runtime/src/broca/subprocess.rs:97`) and `BrocaComponent::new_with_credentials` (`broca/mod.rs:82`) have no caller outside tests in this tree, and `OpenCodeBackend::new` and `PiBackend::new` have none at all; the spawn path is exercised by fixtures only. Reclassify when the daemon (U4) wires a real backend.
 Status: active
 Exercised: partial - launch-identity stripping, per-entry overhead, ambient-credential exclusion, and the size caps are covered; the OpenCode and Pi argv contracts are covered by fixture executables.
-Guarantee: The child environment is the admitted snapshot with the launch identity stripped and exactly one provider credential row; ambient credentials are excluded and every entry is charged against the admission caps.
-Check: `always` - the spawned environment contains no `EIDNARA_MODULE_ID` or `EIDNARA_LAUNCH_NONCE`, exactly the selected provider variable, and no entry over the per-value cap.
+Guarantee: A snapshot admitted through `EnvSnapshot::capture_from` (`crates/host-runtime/src/broca/subprocess.rs:97`) has the launch identity stripped and is charged per entry and in aggregate, and the harness child spawned from it receives only the selected provider credential row plus adapter-owned variables.
+Check: `always` - for a snapshot built by `capture_from`, the spawned environment contains no `EIDNARA_MODULE_ID` or `EIDNARA_LAUNCH_NONCE`, exactly the selected provider variable, and no entry over the per-value cap, and the aggregate and per-entry charges are applied; the property is scoped to `capture_from` because the public `from_vars` (`:122`) bypasses that accounting.
 Fault/timing angle: A leaked launch identity lets the child impersonate the module; a leaked ambient credential reaches a harness the user did not choose.
 Required faults and enabling state: An environment with several provider credentials and the launch identity set.
 Confidence: medium - [evidence](evidence/broca-child-environment-carries-only-the-provider-row.md). `env_snapshot_strips_launch_identity`, `env_snapshot_admission_charges_per_entry_overhead`, `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`), `credential_snapshot_must_match_before_backend_spawn` (`crates/host-runtime/tests/broca_protocol.rs`).
 Existing check: The checks named above; unaudited.
 Impact: Credential exfiltration through a harness child.
 Open questions:
+- `EnvSnapshot::from_vars` (`subprocess.rs:122`) is public and skips the aggregate-byte and per-entry-overhead accounting that `capture_from` applies before calling it (`:98`); an embedder that passes a `from_vars` snapshot to `new_with_credentials` retains an unbounded ambient snapshot. The selected provider value is still capped at spawn. Gap: either make `from_vars` private or account in it. (needs human input)
 - The Guarantee says the child receives the admitted snapshot; the code forwards only the provider row plus adapter-owned variables (`subprocess.rs:317` clears the environment). Should the Guarantee be narrowed to match, and `CREDENTIAL_ROW_CAP_BYTES` (`subprocess.rs:51`), which has no reader, be enforced or removed? (needs human input)
 
 ### broca-protocol-shapes-are-closed
 
 Type: safety
-Reachability: default-production - every Broca request is decoded through the closed schema.
+Reachability: test-only - every request a composed `BrocaComponent` receives is decoded against the closed shape set. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: yes - each valid operation decodes its exact schema, every enumerated malformed shape is rejected, and the 512 KiB boundary is exact.
 Guarantee: The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.
@@ -10108,7 +10101,7 @@ Open questions: None.
 ### synapse-admission-boundaries-are-exact
 
 Type: safety
-Reachability: default-production - every batch and query is admitted through these bounds.
+Reachability: test-only - every batch and query a composed `SynapseComponent` receives is admitted through these bounds. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - count and byte boundaries, eviction order, and expiry are covered with a deterministic engine; the bounded-waiter test that opens 33 ring clients is ignored because the host admits at most 8 rings per process.
 Guarantee: Job admission is exact at the count and queued-byte boundaries, never evicts live work, evicts completed jobs oldest first under count pressure, and reports expired jobs as `module_restarted`.
@@ -10124,7 +10117,7 @@ Open questions:
 ### synapse-degrades-to-disabled-and-keeps-the-context-routable
 
 Type: liveness
-Reachability: default-production - every artifact fault takes this path.
+Reachability: test-only - every artifact fault in a composed `SynapseComponent` takes this path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - missing, corrupt, extra, wrong-identity, and wrong-pooling artifacts disable the lane while the context module stays routable; a fault during inference itself is covered only by the deterministic engine.
 Guarantee: An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.
@@ -10139,7 +10132,7 @@ Open questions: None.
 ### synapse-requests-are-validated-before-any-inference
 
 Type: safety
-Reachability: default-production - every Synapse request is decoded and bounded before it reaches the engine.
+Reachability: test-only - every Synapse request to a composed `SynapseComponent` is decoded and bounded before it reaches the engine. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - constraint violations, unknown fields, excessive depth, oversize bodies, and replay reuse are covered with a deterministic engine that counts calls.
 Guarantee: A request that violates a constraint, carries an unknown field, exceeds the depth or size bound, names a different model, fingerprint, or epoch, or names a foreign job is rejected before the engine runs (as `schema_violation`, `substitution_rejected`, or `module_restarted` by class), and equal replays reuse one job and one inference.
@@ -10154,7 +10147,7 @@ Open questions: None.
 ### synapse-inference-runs-through-a-sealed-runtime-image
 
 Type: safety
-Reachability: default-production - every inference loads ONNX Runtime through the sealed memfd path.
+Reachability: test-only - every inference in a composed `SynapseComponent` loads ONNX Runtime through the sealed memfd path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - `source_replacement_cannot_change_verified_loader_bytes` asserts the seals, rejected writes, replacement resistance, and the digest on the memfd path; the full load into ONNX Runtime is exercised only where the runtime library is present.
 Guarantee: The ONNX Runtime library is loaded from a sealed memfd named `host-onnxruntime` whose bytes were certified with the bundle, so a library swapped on disk after certification cannot reach inference.

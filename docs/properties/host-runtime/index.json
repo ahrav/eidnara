@@ -2,7 +2,7 @@
   "schema_version": 1,
   "part": "host-runtime",
   "source": "catalog.md",
-  "source_sha256": "50709d87c91f2ca90417970a4e15d7cb52404682bf6a16e80da48547b9ec7d14",
+  "source_sha256": "142486fcc088284953a2c940ac139ef4e14831a1efc53a52368507522c3e7c6c",
   "records": [
     {
       "slug": "generation-id-strictly-increases-and-is-never-reused",
@@ -601,14 +601,14 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "one in-crate test directly pins the enable-before-check rule."
+        "note": "`an_enabled_change_future_survives_a_pre_poll_notification` (`crates/host-runtime/src/lifecycle.rs:1771`) pins that a notification landing between `try_own` and the first poll is observed; note that it constructs `changed()` before `try_own()`, which is the ordering that carries the guarantee (see the timing angle)."
       },
       "guarantee": "A shutdown requester that observes the wait state is always woken by the next phase change.",
       "check": {
         "semantics": "always",
-        "condition": "for every interleaving of ownership attempt, reopen, commit, and a waiter's change-future lifecycle, the waiter eventually returns owner or committed."
+        "condition": "for every interleaving of ownership attempt, reopen, commit, and a waiter's change-future lifecycle, the waiter eventually returns owner or committed; the invariant a test must protect is that the `Notified` future is created (`changed()`, `lifecycle.rs:1091`) before the state is re-checked (`try_own()`, `:1065`). a waiter's change-future lifecycle, the waiter eventually returns owner or committed."
       },
-      "fault_timing": "the notification wakes only enabled or already-polled futures and stores no permit, so the enable-before-recheck order is load-bearing. Reopen releases the phase lock before notifying while commit notifies while holding it; the asymmetry is harmless for a wake-all but is undocumented and would matter if either became a wake-one.",
+      "fault_timing": "the latch notifies with `notify_waiters` (`lifecycle.rs:1083`, `:1088`), which stores no permit. For the pinned Tokio 1.53.1, a `Notified` future is guaranteed to observe `notify_waiters` from the moment it is created, polled or not (`tokio/src/sync/notify.rs:529-531`); `enable()` is load-bearing for `notify_one`, not for this primitive. The lost-wake fence is therefore creating `changed()` before calling `try_own()`; a mutation that moves the creation below the state check reintroduces the lost wake even if `enable()` is still called. Reopen releases the phase lock before notifying while commit notifies while holding it; the asymmetry is harmless for a wake-all but is undocumented and would matter if either became a wake-one.",
       "required_faults": "at least two concurrent requests on distinct generations, plus a pre-acknowledgement failure so reopen fires rather than commit. Needs a multi-thread runtime for the notify-between-check-and-poll interleaving to be reachable, and every existing test is current-thread.",
       "confidence": {
         "level": "high",
@@ -616,7 +616,9 @@
       },
       "existing_check": "the strongest existing check in this scope. Status unaudited.",
       "impact": "a lost wakeup is a permanently stuck requester holding a pending permit.",
-      "open_questions": [],
+      "open_questions": [
+        "The source comment at `lifecycle.rs:1769` and the `enable()` calls at `:1750` and `:1776` attribute the guarantee to enabling rather than to creation order; the calls are harmless but the stated rationale disagrees with the Tokio contract. Contract-versus-code note, not resolved here. (needs human input)"
+      ],
       "extra": {}
     },
     {
@@ -627,7 +629,7 @@
       "status": "active",
       "exercised": {
         "state": "yes",
-        "note": "five in-crate tests, all Linux-only."
+        "note": "five in-crate tests in `lifecycle.rs`, none gated on `target_os`; the only Linux-gated items in that module are the FIFO cases, which do not bear on this record (re-verified)."
       },
       "guarantee": "The probe returns stopped only when both the lifetime fence and the runtime-directory instance lock are observed free.",
       "check": {
@@ -640,7 +642,7 @@
         "level": "high",
         "evidence": "[evidence](evidence/probe-never-reports-stopped-while-either-fence-is-held.md). stopped is returned from exactly two places and both require the lifetime fence free."
       },
-      "existing_check": "strong, five tests. Status unaudited; all Linux-only.",
+      "existing_check": "strong, five tests, portable across Unix. Status unaudited.",
       "impact": "a false stopped authorizes a launcher to start a second incarnation over a live one.",
       "open_questions": [],
       "extra": {}
@@ -1042,7 +1044,7 @@
       "required_faults": "a raw client that authenticates and then sends one frame of each gated kind without negotiating. No provider, no liveness, and no fault injection: `TestHost::start` plus `setup_client` (`tests/support/mod.rs:688`) is sufficient. Reaching the `CandidateSetup` half of the state predicate additionally needs an injected provider, which is test-only; the `BootstrapTcp` half is the default path.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/negotiation-precedes-every-gated-frame-kind.md). [evidence](evidence/negotiation-precedes-every-gated-frame-kind.md). All five gate sites and all fourteen frame-kind arms enumerated against `connection.rs:417-598` and `:626-647`."
+        "evidence": "[evidence](evidence/negotiation-precedes-every-gated-frame-kind.md). All five gate sites and all fourteen frame-kind arms enumerated against `connection.rs:417-598` and `:626-647`."
       },
       "existing_check": "`tests/transport_negotiation.rs:906` covers six of the eight gated shapes and asserts no bind occurred; it does not cover `Cancel`, routed `Goodbye`, or the absence of a terminal on the oversize path.",
       "impact": "any hole admits application-visible work on a connection whose transport is not yet chosen, which is the one thing section 7.7 exists to forbid. A routed dispatch there would run handler code the client can then be told to reach over a different transport.",
@@ -1073,7 +1075,7 @@
       "required_faults": "a raw client that negotiates twice. The `TcpCommitted` arc needs no provider and no configuration. The `CandidateSetup` and `ProviderActive` arcs need an injected provider, which is test-only; that is why this record is labelled by its default-reachable arc and the provider arcs are named explicitly.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-selection-is-sticky-for-the-generation.md). [evidence](evidence/setup-selection-is-sticky-for-the-generation.md). `setup.state` has exactly two write sites and `setup.handoff` exactly one, all enumerated by grep over `connection.rs`."
+        "evidence": "[evidence](evidence/setup-selection-is-sticky-for-the-generation.md). `setup.state` has exactly two write sites and `setup.handoff` exactly one, all enumerated by grep over `connection.rs`."
       },
       "existing_check": "`tests/transport_negotiation.rs:962` `repeated_negotiation_after_negotiated_tcp_selection_retires` covers the `TcpCommitted` arc only. Status `unaudited`.",
       "impact": "a second accepted negotiation would prepare a second candidate, overwrite `setup.handoff` at `:1104`, and leak the first candidate's sender, cancellation root, and I/O task, because the setup owner reaps only what the slot still holds (`:201-234`).",
@@ -1100,7 +1102,7 @@
       "required_faults": "none for the current tree, which satisfies the property. To make the check meaningful, add a fifth `TransportState` variant in a test fixture, or assert both predicates over all variants; the `matches!` shape means a new variant is refused by both copies unless a author adds it, which is the fail-closed direction.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/setup-readiness-is-decided-by-one-predicate.md). [evidence](evidence/setup-readiness-is-decided-by-one-predicate.md). Both predicate bodies read at HEAD and confirmed textually identical over the same field; the four `transport_ready` call sites and the one inline site enumerated."
+        "evidence": "[evidence](evidence/setup-readiness-is-decided-by-one-predicate.md). Both predicate bodies read at HEAD and confirmed textually identical over the same field; the four `transport_ready` call sites and the one inline site enumerated."
       },
       "existing_check": "none.",
       "impact": "divergence makes the negotiation-first gate non-uniform for exactly one frame class, which is the shape the `Pong` hole already has. This record is the structural reason that hole is easy to create.",
@@ -1129,7 +1131,7 @@
       "required_faults": "`liveness: Some(..)` in `HostConfig`, which is not a shipped configuration in this tree; the default is `None` (`config.rs:296`) and the only `Some` is inside the test module (`config.rs:664`). Plus a client that authenticates, delays negotiation past `ping_interval`, and then answers the Ping. The weaker half of the contradiction, that an *unsolicited* `Pong` before negotiation is silently ignored rather than retiring the generation, needs no liveness at all and is default-production; it is a strictly smaller claim and is recorded in the evidence file.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md). [evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md)."
+        "evidence": "[evidence](evidence/a-setup-pong-is-required-and-forbidden-in-the-same-window.md)."
       },
       "existing_check": "none. `pong-preanswer-rejected-in-every-mutex-order` in this catalog covers the `Pong` arm's acceptance rule, not its absent readiness gate.",
       "impact": "unresolved, and that is the finding. Under the document's reading the host kills healthy generations' probes by answering them; under the code's reading the document forbids a frame the host itself solicits. A test author picking either side without a decision would encode a guess as a regression test.",
@@ -1161,7 +1163,7 @@
       "required_faults": "at least two injected providers, one returning `DynamicallyUnavailable` from `preflight` and one installed at a capability version the client does not offer, with the client offering the unavailable transport at lower preference than the mismatched one. Injected providers are test-only: `TransportProviders::default()` is empty (`transport_provider.rs:157-163`), the module documents providers as test-injected (`:1-13`), and `HostConfig::default` installs the empty registry (`config.rs:297`). Verified consequence: in every shipped configuration the reason is always `None`.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md). [evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md). Precedence block, preflight default, panic mapping, and the `serves_transport` gate all read at HEAD; the empty-registry conclusion traced from `HostConfig::default` to `TransportProviders::default`."
+        "evidence": "[evidence](evidence/fallback-reason-precedence-survives-a-silent-preflight.md). Precedence block, preflight default, panic mapping, and the `serves_transport` gate all read at HEAD; the empty-registry conclusion traced from `HostConfig::default` to `TransportProviders::default`."
       },
       "existing_check": "`tests/transport_negotiation.rs:136` `version_mismatches_encode_the_documented_tcp_fallback_reasons` covers the encoders, and `:876` covers one live mismatch fallback. Neither covers precedence between the two reasons. Status `unaudited`.",
       "impact": "reporting a static mismatch where a transient condition exists permanently suppresses the client's re-upgrade probe, so a transport that would recover in seconds stays unused for the life of the connection. The panic mapping has the same effect for a provider whose preflight is merely buggy.",
@@ -1190,7 +1192,7 @@
       "required_faults": "a reader with bytes buffered and ready, plus a token cancelled before the poll. Both are constructible with `tokio::io::duplex`: write the bytes, cancel the token, then call the helper. No scheduler control is needed because the ordering is established before the call.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/cancellation-preempts-every-bounded-frame-read.md). [evidence](evidence/cancellation-preempts-every-bounded-frame-read.md). Verified the `biased;` keyword and branch order at `frame_read.rs:47-49`, `:81-83`, `:111-113`; the production cancellation sources at `connection.rs:305`, `runtime.rs:1160`, and `runtime.rs:431`; and by exhaustive `awk` over both test modules that no in-crate test cancels a read token."
+        "evidence": "[evidence](evidence/cancellation-preempts-every-bounded-frame-read.md). Verified the `biased;` keyword and branch order at `frame_read.rs:47-49`, `:81-83`, `:111-113`; the production cancellation sources at `connection.rs:305`, `runtime.rs:1160`, and `runtime.rs:431`; and by exhaustive `awk` over both test modules that no in-crate test cancels a read token."
       },
       "existing_check": "none. The 24 tests in `tcp_frame_channel.rs:512-1155` and the two `read_active_frame` tests at `client.rs:3650` and `:3683` all construct a fresh `CancellationToken::new()` and never cancel it.",
       "impact": "a retiring generation keeps consuming frames. Each completed read admits a frame and charges the ingress budget on a generation the host has already decided to stop, which contradicts [a-retired-generation-emits-nothing-and-mutates-nothing](#a-retired-generation-emits-nothing-and-mutates-nothing) on the read side, and delays shutdown by up to one frame deadline per admitted frame.",
@@ -1217,7 +1219,7 @@
       "required_faults": "no fault. Call `read_body` directly with a buffer pre-filled with `k` bytes, `0 < k < len`, and a reader holding `len` body bytes followed by a valid header. The observable is that the header no longer parses on the next read.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md). [evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md). The cap and the loop condition were read at `frame_read.rs:79-80`; the freshness of both callers' buffers was verified at `tcp_frame_channel.rs:217` and `client.rs:2003`; the `take` semantics were confirmed against tokio 1.53.1."
+        "evidence": "[evidence](evidence/a-body-read-consumes-exactly-the-declared-frame-boundary.md). The cap and the loop condition were read at `frame_read.rs:79-80`; the freshness of both callers' buffers was verified at `tcp_frame_channel.rs:217` and `client.rs:2003`; the `take` semantics were confirmed against tokio 1.53.1."
       },
       "existing_check": "partial and indirect. `tcp_frame_channel.rs:836-896`, `fragmented_and_coalesced_frames_preserve_alignment`, proves alignment survives fragmentation and coalescing for empty buffers, which covers the over-read direction end to end. Nothing covers the non-empty case. Status unaudited.",
       "impact": "silent stream desynchronization with an `Ok` return. `k` body bytes are parsed as the next header, so a peer's body content chooses the host's next header, and the frame handed up contains `k` bytes that are not its body.",
@@ -1246,7 +1248,7 @@
       "required_faults": "a mid-target peer close, three times: after one header byte (`read_exact`), after a partial declared body (`read_body`), and after a partial drained body (`drain`). All three are one `drop(client)` on a `tokio::io::duplex` pair.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md). [evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md). Read the three `if read == 0` sites at `frame_read.rs:55-57`, `:89-91`, `:119-121`, and verified the non-empty-target guards at `:46`, `:109-110`. The `read_body` case needed dependency evidence, since `read_buf` has two other `Ok(0)` causes: both were ruled out against `tokio-1.53.1/src/io/util/read_buf.rs:46-48` and `bytes-1.12.1/src/buf/buf_mut.rs:1599-1636` at the versions pinned in `Cargo.lock`."
+        "evidence": "[evidence](evidence/a-zero-length-read-ends-the-read-instead-of-looping.md). Read the three `if read == 0` sites at `frame_read.rs:55-57`, `:89-91`, `:119-121`, and verified the non-empty-target guards at `:46`, `:109-110`. The `read_body` case needed dependency evidence, since `read_buf` has two other `Ok(0)` causes: both were ruled out against `tokio-1.53.1/src/io/util/read_buf.rs:46-48` and `bytes-1.12.1/src/buf/buf_mut.rs:1599-1636` at the versions pinned in `Cargo.lock`."
       },
       "existing_check": "three tests, of unequal strength. `tcp_frame_channel.rs:599-618` asserts the exact string `Corrupt(\"EOF inside frame\")` and does discriminate a looping `read_body`. `:580-597` asserts only `Corrupt(_)`, which a looping `read_exact` would also satisfy. `:810-834` covers `drain` through `RejectedDrainFailed`, which collapses every stop class into one variant (`connection.rs:401-410`) and so cannot discriminate either. Status unaudited.",
       "impact": "a hot spin for the whole frame deadline on every orderly mid-frame close, plus a close reason that blames a slow peer for a clean disconnect.",
@@ -1275,7 +1277,7 @@
       "required_faults": "any stop class, then an attempted second read. Cheapest construction: a truncated declared body for EOF, a paused clock for the deadline, a cancelled token for cancellation.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/no-framed-read-resumes-after-a-read-stop.md). [evidence](evidence/no-framed-read-resumes-after-a-read-stop.md). Verified that no helper retains an offset (`frame_read.rs:45`, `:79`, `:108`), and that both callers stop: the host's four exhaustive `Err` arms at `connection.rs:400`, `:401-410`, `:411-414`, and the client's `break` at `client.rs:1897-1900` plus its clean-EOF `break` at `:1894-1897`."
+        "evidence": "[evidence](evidence/no-framed-read-resumes-after-a-read-stop.md). Verified that no helper retains an offset (`frame_read.rs:45`, `:79`, `:108`), and that both callers stop: the host's four exhaustive `Err` arms at `connection.rs:400`, `:401-410`, `:411-414`, and the client's `break` at `client.rs:1897-1900` plus its clean-EOF `break` at `:1894-1897`."
       },
       "existing_check": "`connection.rs:398-415` is a production structural guard rather than a test, and covers the host completely. The client has neither a test nor a guard, only `reader_loop`'s shape. Status unaudited.",
       "impact": "a resumed read parses body bytes as a header. Every downstream identity decision - correlation, channel, epoch, frame type - is then made from attacker-chosen bytes on a stream the host believes is aligned.",
@@ -1304,7 +1306,7 @@
       "required_faults": "a peer sending channel-0 `Request` headers with strictly increasing correlations (`connection.rs:426-429`) declaring `len > MAX_CONTROL_BODY_LEN`, each followed by the declared bytes, repeated. To observe the aggregate, run `max_connections` of them.",
       "confidence": {
         "level": "high",
-        "evidence": "on the mechanism, medium on whether the cost is a defect - [evidence](evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md). [evidence](evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md). Verified that the oversize branch at `tcp_frame_channel.rs:198-202` precedes the budget charge at `:204-215`; that the ceiling is `MAX_BODY_LEN` and not the control cap, because `validate_inbound_header` (`frame_channel.rs:58-61`) runs first at `:196` (`wire.rs:35`, `:371`, `:374`); and that the only permits in the path are `connection_permits` (`connection.rs:165-169`) and `busy_rejects` (`:443-447`, cap 32 at `:53`), the latter bounding the emissions rather than the drain, exactly as its comment at `:437-442` says."
+        "evidence": "on the mechanism, medium on whether the cost is a defect - [evidence](evidence/oversize-control-drain-work-is-bounded-without-ingress-budget.md). Verified that the oversize branch at `tcp_frame_channel.rs:198-202` precedes the budget charge at `:204-215`; that the ceiling is `MAX_BODY_LEN` and not the control cap, because `validate_inbound_header` (`frame_channel.rs:58-61`) runs first at `:196` (`wire.rs:35`, `:371`, `:374`); and that the only permits in the path are `connection_permits` (`connection.rs:165-169`) and `busy_rejects` (`:443-447`, cap 32 at `:53`), the latter bounding the emissions rather than the drain, exactly as its comment at `:437-442` says."
       },
       "existing_check": "`tcp_frame_channel.rs:772-808` covers one reject-then-drain cycle and asserts the zero-budget property at `:803-807` with a deliberately tiny budget. `:730-770` covers realignment. Neither repeats the cycle, and no check bounds the cost. Status unaudited.",
       "impact": "a peer can force up to 64 MiB of read-and-discard per frame per connection, and up to `max_connections` of those concurrently, while holding no resident-byte budget. Those bytes are also unobserved: `drain` never touches the `CopyCounter`, whose only producers are `frame_channel.rs:376` and `shm_provider.rs:611`, so no counter in the crate sees them.",
@@ -1336,7 +1338,7 @@
       "required_faults": "to *prove* unreachability, none: it follows from the four verified steps in the evidence. To detect a regression, instrument the arm and run the ordinary inbound suite.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md). [evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md)."
+        "evidence": "[evidence](evidence/the-client-body-budget-refusal-drain-is-never-entered.md)."
       },
       "existing_check": "none. The comment at `client.rs:1965-1969` states the invariant in prose and correctly labels the branch as a structural guard, but nothing enforces or observes it.",
       "impact": "low today and that is the finding. Two dead claims hang off it: `drain_until`'s doc at `client.rs:2010-2011` promises a realignment that no code consumes, and even if the branch fired, `read_active_frame` returns `Err(())` immediately after, which retires the connection at `:1897-1899` and discards the realignment. If the branch ever does fire it signals a real regression in the reader-exclusive reservation, and nothing would report it.",
@@ -1367,7 +1369,7 @@
       "required_faults": "a configured `LivenessPolicy`, which no shipped configuration supplies. For (a) a cooperative peer, which the in-crate duplex harness at `connection.rs:1480` onward already provides. For (b) a peer that reads but never sends a Pong, plus `invalidate_on_missed: true`. Paused tokio time for both. No adversary and no concurrency campaign.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). [evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). Every bound was read at HEAD and the two `sent` anchors were traced through both writers of the field."
+        "evidence": "[evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). Every bound was read at HEAD and the two `sent` anchors were traced through both writers of the field."
       },
       "existing_check": "partial. `tests/client.rs:97-145` covers direction (a) with an indirect oracle, and is the only place in the crate where a full client answers a host Ping. `tests/lifecycle.rs:468` covers an *unmatched* Pong, not a missed one. Nothing covers direction (b).",
       "impact": "the probe exists to detect a peer that has stopped reading. If (a) fails, healthy long-running work is killed, which is the exact outcome `config.rs:236-238` cites as the reason `invalidate_on_missed` defaults to `false`. If (b) fails, a dead peer holds a generation, its route registrations, and its egress budget for the life of the process.",
@@ -1395,7 +1397,7 @@
       "required_faults": "a configured `LivenessPolicy` with `invalidate_on_missed: false`; a handler producing frames faster than the peer drains them so all 64 slots stay occupied; and a peer that keeps reading fast enough that no single dequeued write exceeds `frame_deadline`, since a peer that stops reading is retired by the write deadline on its own, which `config.rs:204-206` documents as intended. Paused time makes the 30 second window cheap. The second marker needs only a Ping enqueued behind at least one unwritten frame plus a prompt Pong.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md). [evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md). The admission path was traced from the Ping send through the cancel calls, and the absence of a host-side control lane was confirmed by reading the whole `FrameSender` and its constructor."
+        "evidence": "[evidence](evidence/slow-egress-alone-does-not-retire-a-probed-generation.md). The admission path was traced from the Ping send through the cancel calls, and the absence of a host-side control lane was confirmed by reading the whole `FrameSender` and its constructor."
       },
       "existing_check": "none. `tests/client.rs:97-145` is named `stream_order_and_slow_consumer_do_not_block_ping_or_unary`, but its `stream_then_hang` handler (`tests/support/mod.rs:492-501`) streams two items that the client consumes before the observed window, so the queue is empty throughout and there is no slow consumer. The hang is in the handler.",
       "impact": "the documented safety valve does not hold. `config.rs:236-238` states that `invalidate_on_missed` stays `false` because enabling it \"would kill healthy long-running awaits (protocol §9.3)\". An embedder that configures a policy with the flag off, believing invalidation is disabled, still loses generations to egress backpressure. The failure looks like a transport reset to both sides, and per `authentication-and-capacity-rejections-are-observable` there is no channel to report it.",
@@ -1424,7 +1426,7 @@
       "required_faults": "none. The check is a pure unit test with no store, no filesystem, and no fault injection. It is the cheapest record in this pass.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). [evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). Both structs, both encoding functions, and the existing fixture were read at HEAD, and the three blind spots were each confirmed by reasoning from the fixture's literal contents."
+        "evidence": "[evidence](evidence/manifest-canonical-bytes-and-digest-are-pinned-by-a-full-golden-vector.md). Both structs, both encoding functions, and the existing fixture were read at HEAD, and the three blind spots were each confirmed by reasoning from the fixture's literal contents."
       },
       "existing_check": "`generation.rs:1395-1412` `a_generation_staged_before_the_source_digest_field_still_decodes` asserts `decoded.canonical_bytes() == predecessor` against the literal at `:1401`. It is the only byte-exact manifest vector in the crate and it does pin the relative order of the four leading scalars and `files`, and it does catch the addition of a required field, because `deny_unknown_fields` plus a missing field fails the decode. Status unaudited.",
       "impact": "declaration order is a wire-compatibility contract that is currently enforced by a fixture that cannot see two thirds of it. A maintainer who inserts `source_payload_manifest_sha256` beside the other hashes for readability, or who alphabetizes `ManifestFile`, changes the digest of every generation with files and sees a green suite.",
@@ -1450,7 +1452,7 @@
       "required_faults": "none at runtime. Constructing the check needs a fixture manifest whose bytes encode an older field order, which is a string literal, plus a staged directory whose files match it. No fault injection.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md). [evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md). Both equality checks were read at HEAD, and the fail-closed conclusion was derived from them rather than assumed; the prompt's \"silently change every retained generation's digest\" is corrected in the evidence file."
+        "evidence": "[evidence](evidence/a-declaration-order-change-cannot-orphan-a-retained-generation.md). Both equality checks were read at HEAD, and the fail-closed conclusion was derived from them rather than assumed; the prompt's \"silently change every retained generation's digest\" is corrected in the evidence file."
       },
       "existing_check": "partial and narrow. The predecessor fixture at `generation.rs:1395-1412` is the only cross-version manifest test, and it covers one specific evolution, a field added at the end and omitted when absent. Nothing covers a field that moves.",
       "impact": "the first start after an upgrade reports `native_payload_invalid` for every retained generation carrying the moved field, refusing payloads that are byte-for-byte intact. That is the forward-compatibility break the `Option` on `source_payload_manifest_sha256` was introduced to prevent.",
@@ -1478,7 +1480,7 @@
       "required_faults": "a corrupt, unprotected generation already occupying the digest target, plus a restage of the same digest. The existing test `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` (`generation.rs:1689`) already builds that fixture, so the fault is available; the missing element is executing it on macOS. On the stub platforms the check is a compile-and-call assertion.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). [evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms and the call site were read at the authoring pass's HEAD, along with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`) since deleted that job with every other macOS job, so the claim that no macOS lifecycle or generation test executes now holds trivially: `ci.yml` at HEAD contains only `ubuntu-latest` jobs."
+        "evidence": "[evidence](evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms and the call site were read at the authoring pass's HEAD, along with the whole macOS CI job as it then existed. PR #131 (merge `5d638e3e8`) since deleted that job with every other macOS job, so the claim that no macOS lifecycle or generation test executes now holds trivially: `ci.yml` at HEAD contains only `ubuntu-latest` jobs."
       },
       "existing_check": "partial, Linux only. `generation.rs:1526` (re-located at HEAD) `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the branch. The macOS CI job this entry previously described was removed by PR #131 (merge `5d638e3e8`); no `generation` or `lifecycle` test body runs on macOS because nothing runs on macOS. Status unaudited.",
       "impact": "the exchange is the store's only repair primitive for a corrupt occupant, and it is immediately followed by a deletion. If macOS `RENAME_SWAP` behaves differently on APFS than `RENAME_EXCHANGE` on ext4, the failure mode is deleting a retained generation, on a platform whose lifecycle code the suite never runs.",
@@ -1507,7 +1509,7 @@
       "required_faults": "a directory appearing at the target between the `statat` and the `renameat`. Deterministically: a failpoint between the two calls, or an extracted fallback called with the target pre-planted. Reaching the fallback on Linux at all needs a filesystem that rejects `renameat2` flags; running it as the default needs macOS.",
       "confidence": {
         "level": "high",
-        "evidence": "[evidence](evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md). On the mechanism, medium on severity, since the transaction lock does exclude the in-model actors and no out-of-model writer is demonstrated - [evidence](evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md). Both branches, the caller's contract, and the lock references were read at HEAD."
+        "evidence": "[evidence](evidence/an-occupied-rename-target-is-never-replaced-on-the-portable-path.md). On the mechanism, medium on severity, since the transaction lock does exclude the in-model actors and no out-of-model writer is demonstrated. Both branches, the caller's contract, and the lock references were read at HEAD."
       },
       "existing_check": "none. No test drives the portable fallback on any platform, and no test plants an empty directory at a digest target.",
       "impact": "the guarantee `promote_temp` documents as mandatory, that a protected occupant corrupted into an empty directory is never silently destroyed, is enforced by the kernel on Linux and by a prose argument on macOS. A defect here destroys a retained generation, which is the outcome the protection check exists to prevent.",
@@ -3857,8 +3859,8 @@
     {
       "slug": "broca-identical-resends-converge-on-one-run",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every Broca send is deduplicated by the supervisor.",
+      "reachability": "test-only",
+      "reachability_note": "every Broca send through a composed `BrocaComponent` is deduplicated by the supervisor. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3885,8 +3887,8 @@
     {
       "slug": "broca-permits-and-charges-return-to-baseline",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every run path releases what it took.",
+      "reachability": "test-only",
+      "reachability_note": "every run path of a composed `BrocaComponent` releases what it took. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3911,8 +3913,8 @@
     {
       "slug": "broca-children-are-reaped-as-a-process-group",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every harness child runs in its own process group under `PR_SET_PDEATHSIG`.",
+      "reachability": "test-only",
+      "reachability_note": "every harness child a composed `BrocaComponent` spawns runs in its own process group under `PR_SET_PDEATHSIG`. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -3946,10 +3948,10 @@
         "state": "partial",
         "note": "launch-identity stripping, per-entry overhead, ambient-credential exclusion, and the size caps are covered; the OpenCode and Pi argv contracts are covered by fixture executables."
       },
-      "guarantee": "The child environment is the admitted snapshot with the launch identity stripped and exactly one provider credential row; ambient credentials are excluded and every entry is charged against the admission caps.",
+      "guarantee": "A snapshot admitted through `EnvSnapshot::capture_from` (`crates/host-runtime/src/broca/subprocess.rs:97`) has the launch identity stripped and is charged per entry and in aggregate, and the harness child spawned from it receives only the selected provider credential row plus adapter-owned variables.",
       "check": {
         "semantics": "always",
-        "condition": "the spawned environment contains no `EIDNARA_MODULE_ID` or `EIDNARA_LAUNCH_NONCE`, exactly the selected provider variable, and no entry over the per-value cap."
+        "condition": "for a snapshot built by `capture_from`, the spawned environment contains no `EIDNARA_MODULE_ID` or `EIDNARA_LAUNCH_NONCE`, exactly the selected provider variable, and no entry over the per-value cap, and the aggregate and per-entry charges are applied; the property is scoped to `capture_from` because the public `from_vars` (`:122`) bypasses that accounting."
       },
       "fault_timing": "A leaked launch identity lets the child impersonate the module; a leaked ambient credential reaches a harness the user did not choose.",
       "required_faults": "An environment with several provider credentials and the launch identity set.",
@@ -3960,6 +3962,7 @@
       "existing_check": "The checks named above; unaudited.",
       "impact": "Credential exfiltration through a harness child.",
       "open_questions": [
+        "`EnvSnapshot::from_vars` (`subprocess.rs:122`) is public and skips the aggregate-byte and per-entry-overhead accounting that `capture_from` applies before calling it (`:98`); an embedder that passes a `from_vars` snapshot to `new_with_credentials` retains an unbounded ambient snapshot. The selected provider value is still capped at spawn. Gap: either make `from_vars` private or account in it. (needs human input)",
         "The Guarantee says the child receives the admitted snapshot; the code forwards only the provider row plus adapter-owned variables (`subprocess.rs:317` clears the environment). Should the Guarantee be narrowed to match, and `CREDENTIAL_ROW_CAP_BYTES` (`subprocess.rs:51`), which has no reader, be enforced or removed? (needs human input)"
       ],
       "extra": {}
@@ -3967,8 +3970,8 @@
     {
       "slug": "broca-protocol-shapes-are-closed",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every Broca request is decoded through the closed schema.",
+      "reachability": "test-only",
+      "reachability_note": "every request a composed `BrocaComponent` receives is decoded against the closed shape set. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "yes",
@@ -4019,8 +4022,8 @@
     {
       "slug": "synapse-admission-boundaries-are-exact",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every batch and query is admitted through these bounds.",
+      "reachability": "test-only",
+      "reachability_note": "every batch and query a composed `SynapseComponent` receives is admitted through these bounds. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4047,8 +4050,8 @@
     {
       "slug": "synapse-degrades-to-disabled-and-keeps-the-context-routable",
       "type": "liveness",
-      "reachability": "default-production",
-      "reachability_note": "every artifact fault takes this path.",
+      "reachability": "test-only",
+      "reachability_note": "every artifact fault in a composed `SynapseComponent` takes this path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4073,8 +4076,8 @@
     {
       "slug": "synapse-requests-are-validated-before-any-inference",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every Synapse request is decoded and bounded before it reaches the engine.",
+      "reachability": "test-only",
+      "reachability_note": "every Synapse request to a composed `SynapseComponent` is decoded and bounded before it reaches the engine. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
@@ -4099,8 +4102,8 @@
     {
       "slug": "synapse-inference-runs-through-a-sealed-runtime-image",
       "type": "safety",
-      "reachability": "default-production",
-      "reachability_note": "every inference loads ONNX Runtime through the sealed memfd path.",
+      "reachability": "test-only",
+      "reachability_note": "every inference in a composed `SynapseComponent` loads ONNX Runtime through the sealed memfd path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree the only compositions are tests and `crates/host-runtime/examples/` (`synapse_host.rs:123`, `synapse_perf.rs`). The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.",
       "status": "active",
       "exercised": {
         "state": "partial",
