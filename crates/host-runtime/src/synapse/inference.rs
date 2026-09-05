@@ -560,13 +560,15 @@ impl Backend {
         let mut padded = vec![text.as_str()];
         padded.extend(std::iter::repeat_n(short.text.as_str(), batch_rows - 1));
         let padded_rows = self.embed(&padded)?;
-        let short_rows_match = padded_rows.len() == padded.len()
+        // The long row is checked too: a graph can corrupt the window row only when its neighbours are shorter, which the all-long batch never shows.
+        let padded_rows_match = padded_rows.len() == padded.len()
+            && !super::bundle::certification_mismatch(&padded_rows[0], singleton, corpus.tolerance)
             && padded_rows[1..].iter().all(|row| {
                 !super::bundle::certification_mismatch(row, &short.expected, corpus.tolerance)
             });
-        if !short_rows_match {
+        if !padded_rows_match {
             return Err(InferenceError::Artifact(
-                "long-input batch certification failed: short rows diverge under padding to the window".to_owned(),
+                "long-input batch certification failed: rows diverge when short items are padded to the window".to_owned(),
             ));
         }
         Ok(())
