@@ -343,7 +343,14 @@ impl Supervisor {
     /// A client recovering a lost `send` response must reach this even when the harness has since become unavailable: the existing run keeps executing from its already-open descriptors, so availability checks apply only to a new admission. commentlint: allow(JUDGE)
     pub fn resend_of_live_run(&self, key: &SessionKey, body: &[u8]) -> Option<String> {
         let fingerprint: [u8; 32] = Sha256::digest(body).into();
-        let index = lock_index(&self.inner);
+        // Declared before the lock so releases drop after it, matching `send`.
+        let mut released = Released::default();
+        let mut index = lock_index(&self.inner);
+        // A closed index or an expired terminal must not answer as a live run: `send` reports the closed error, and an expired entry would hand back an ID that the next `status` call reports missing. commentlint: allow(JUDGE)
+        if index.closed {
+            return None;
+        }
+        self.sweep_expired(&mut index, &mut released);
         match index.sessions.get(key) {
             Some(SessionEntry::Live(run)) if run.fingerprint == fingerprint => {
                 Some(run.run_id.clone())

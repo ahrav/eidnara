@@ -360,7 +360,9 @@ pub async fn run(
     let host_pid = std::process::id();
     let child_inherit_fds = inherit_fds.clone();
     // Every descendant inherits this per-run nonce; the startup sweep uses it to prove that a member of a leaderless group descends from this run rather than from an unrelated group that recycled the numeric pgid. commentlint: allow(JUDGE)
-    let group_nonce = group_registry::new_group_nonce()?;
+    // Nonce and handshake-pipe setup precede the child, so their failures are retryable registration failures rather than permanent spawn errors. commentlint: allow(JUDGE)
+    let group_nonce =
+        group_registry::new_group_nonce().map_err(|_| io::Error::other(RegistrationFailed))?;
     let mut env = env;
     env.push((
         OsString::from(group_registry::GROUP_NONCE_ENV),
@@ -369,9 +371,11 @@ pub async fn run(
     // Register crash ownership before `exec` so successor sweeps can find helpers after a host crash: `pdeathsig` kills only the leader, and a helper forked before record publication would otherwise be unrecorded. commentlint: allow(JUDGE)
     // `spawn` waits for `exec`, so the blocking-pool registrar reads `pid_report`, publishes the record, then releases `exec_barrier`.
     let (pid_report_read, pid_report_write) =
-        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .map_err(|_| io::Error::other(RegistrationFailed))?;
     let (exec_barrier_read, exec_barrier_write) =
-        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .map_err(|_| io::Error::other(RegistrationFailed))?;
     let child_pid_report_write = pid_report_write.as_raw_fd();
     let child_exec_barrier_read = exec_barrier_read.as_raw_fd();
     let child_pid_report_read = pid_report_read.as_raw_fd();
@@ -1196,15 +1200,17 @@ impl PrivateDir {
             // `create` rejects existing entries, including symlinks, so success uses a previously absent pathname.
             match builder.create(&candidate) {
                 Ok(()) => {
+                    // The guard is constructed before any post-create check so a failure below removes the directory through `Drop` instead of leaving it for the restart sweep. commentlint: allow(JUDGE)
+                    let dir = Self {
+                        path: Some(candidate),
+                    };
                     // `mkdir(2)` modes are umask-filtered, so `set_permissions` forces `0700`.
-                    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))?;
-                    let meta = fs::symlink_metadata(&candidate)?;
+                    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
+                    let meta = fs::symlink_metadata(dir.path())?;
                     if !meta.file_type().is_dir() || meta.file_type().is_symlink() {
                         return Err(io::Error::other("private temp path is not a fresh dir"));
                     }
-                    return Ok(Self {
-                        path: Some(candidate),
-                    });
+                    return Ok(dir);
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(err) => return Err(err),
@@ -1961,7 +1967,7 @@ pub mod group_registry {
 
     /// Membership plus identity: a member must share `owner_sid`, must have started at or after the recorded leader, and must carry the recorded [`GROUP_NONCE_ENV`] in its environment. commentlint: allow(JUDGE)
     /// The nonce is the non-reusable fence: a group that recycled the numeric pgid — even inside the owner's still-live session — never inherited it, whereas every descendant of the recorded leader did. commentlint: allow(JUDGE)
-    /// An unreadable environment (another user's process, or a descendant that a sandbox hid) reads as unverified, so the sweep leaks rather than kills when it cannot prove identity. commentlint: allow(JUDGE)
+    /// An unreadable environment on a stat-matching candidate fails the sweep closed, retaining the record; the stat checks run first so foreign processes are never probed. commentlint: allow(JUDGE)
     fn group_has_verified_descendants(
         pgid: i32,
         owner_sid: i32,
@@ -1983,10 +1989,20 @@ pub mod group_registry {
                         && row.state != 'Z'
                         && row.state != 'X'
                         && row.sid == owner_sid
-                        && row.start >= leader_start
-                        && environ_has_entry(pid, marker.as_bytes()) =>
+                        && row.start >= leader_start =>
                 {
-                    return Ok(true);
+                    // A candidate that passes every stat check is almost certainly this run's; an unreadable environment leaves its identity indeterminate, so the sweep fails closed and retains the record rather than releasing a group that may still be running provider work. commentlint: allow(JUDGE)
+                    match environ_has_entry(pid, marker.as_bytes()) {
+                        Ok(true) => return Ok(true),
+                        Ok(false) => {}
+                        Err(err) if pid_vanished(&err) => {}
+                        Err(err) => {
+                            return Err(io::Error::other(format!(
+                                "a candidate descendant's environment could not be read ({})",
+                                err.kind()
+                            )));
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(err) if pid_vanished(&err) => {}
@@ -1997,11 +2013,10 @@ pub mod group_registry {
         Ok(false)
     }
 
-    /// `/proc/<pid>/environ` is NUL-separated `NAME=value` entries; a read failure means the identity cannot be proven.
-    fn environ_has_entry(pid: i32, entry: &[u8]) -> bool {
-        fs::read(format!("/proc/{pid}/environ"))
-            .map(|environ| environ.split(|byte| *byte == 0).any(|item| item == entry))
-            .unwrap_or(false)
+    /// `/proc/<pid>/environ` is NUL-separated `NAME=value` entries; the caller decides what an unreadable environment means.
+    fn environ_has_entry(pid: i32, entry: &[u8]) -> io::Result<bool> {
+        let environ = fs::read(format!("/proc/{pid}/environ"))?;
+        Ok(environ.split(|byte| *byte == 0).any(|item| item == entry))
     }
 
     fn scan_group_members(pgid: i32, exclude_pid: Option<i32>) -> io::Result<bool> {

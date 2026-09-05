@@ -226,8 +226,16 @@ impl CompositeComponent for BrocaComponent {
                     return respond(&ctx, protocol::send_response_body(&run_id)).await;
                 }
                 // The handler checks harness availability before credentials because descriptor failures take precedence over credential failures.
-                if let Some(reason) = self.supervisor.harness_unavailable_reason(key.harness) {
-                    return app_error("harness_unavailable", reason);
+                // The probe opens, hashes, and stats closure nodes, so it runs on the blocking pool like the execution-path resolution; a stalled closure store must not occupy runtime workers. commentlint: allow(JUDGE)
+                let supervisor = Arc::clone(&self.supervisor);
+                let harness = key.harness;
+                let probe =
+                    subprocess::off_runtime(move || supervisor.harness_unavailable_reason(harness))
+                        .await;
+                match probe {
+                    Ok(None) => {}
+                    Ok(Some(reason)) => return app_error("harness_unavailable", reason),
+                    Err(_) => return app_error("harness_unavailable", "closure_unverified"),
                 }
                 if let Some(verifier) = &self.credential_verifier {
                     let fingerprints = self
