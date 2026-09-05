@@ -37,6 +37,7 @@ at `backend/ring.rs:1444` and refuses to produce a lease otherwise (`:1445`).
 So by the time `ring_transport.rs:681` decodes the header, `header.len ==
 body_len` is already true — proved in `shm-transport`, consumed in `host-runtime`,
 with no assertion, comment, or type linking the two.
+At HEAD: The comparison moved into the shared `check_wire_header` (`descriptor.rs:28-42`), so it now has three callers: `FrameDescriptor::validate` (`:323`), `SamplePrefix::validate` (`crates/shm-transport/src/backend/sample.rs:93`), and the producer's `prepare_commit` (`crates/shm-transport/src/backend/ring.rs:2316`).
 
 Downstream of the charge, nothing re-derives it. `InboundFrame::owned`
 (`frame_channel.rs:117-128`) stores the header, the body vector, and the
@@ -54,6 +55,7 @@ reachable only by a peer writing the shared descriptor page directly, which the
 mapping permits: both `Mapping::create` and `Mapping::attach` map
 `PROT_READ|PROT_WRITE` (`backend/ring.rs:462`, `:481`) and the required seals are
 `F_SEAL_GROW|SHRINK|SEAL` with no `F_SEAL_WRITE` (`:2850`).
+At HEAD: `send` delegates to `send_bounded` (`:901-933`), which is the path that reserves and commits, and the endpoint is no longer test-only: `start_ring_bridge` in `crates/host-runtime/src/client.rs:2489` attaches one in production.
 
 The peer-side consumer showed what not delegating looks like. In the former
 `packages/plugin/src/shared/host-client/transport-provider.ts:406-426` the
@@ -64,6 +66,8 @@ file was deleted by `907746f7b` (ring transport made mandatory); the comparison
 survives only as pre-rewrite evidence of the non-delegating shape.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A peer writes a descriptor whose `body_len` and span lengths describe 64 bytes
 while `wire_header[0..4]` declares 64 MiB, then publishes. If
@@ -93,6 +97,7 @@ validating. Depends on `wire-header-fully-validated-before-any-consumer-acts` fo
 the ordering that puts the charge after the header gates, and on
 `quarantine-authority-survives-peer-writes` for the writable-control-page
 premise.
+At HEAD: The two constants are no longer independent: `MAX_FRAME_BODY_LEN` is defined as `shm_transport::MAX_FRAME_BYTES as u32`, so the host imports the transport's value instead of restating it.
 
 ## What a test must construct
 

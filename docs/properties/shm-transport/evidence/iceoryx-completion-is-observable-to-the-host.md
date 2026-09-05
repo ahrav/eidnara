@@ -90,6 +90,8 @@ property to catalog, because the ring's release does all four.
 
 ## Failure scenario
 
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
+
 A host that adopted this backend would have no way to observe reclamation, and
 the release gate would not notice. Concretely: a caller that drops an
 `IceoryxReceiveLease` on a cancellation path reclaims the sample correctly and
@@ -107,6 +109,7 @@ introduced anywhere in `run_iceoryx` would change none of them. This is the same
 shape as `operation-counters-are-observed-not-declared`, but stricter: on the
 ring arm the counters are at least derived from parameters, and here they are
 constants.
+At HEAD: The measurement half of this record is no longer live: the bench has no iceoryx arm and no `selectable` field at HEAD.
 
 ## Timing windows and dependencies
 

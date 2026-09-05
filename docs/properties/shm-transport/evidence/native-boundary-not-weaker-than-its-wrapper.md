@@ -48,6 +48,7 @@ The native boundary, `attach` in `packages/shm-native/src/lib.rs:634-765`:
   peer_to_host_grant` rejects. Two of the wrapper's three aliasing conditions.
 - `:694-697` — `GrantReservation::claim` refuses a grant already live in this
   process.
+  At HEAD: The rejection now also requires six distinct descriptor numbers and calls `grant_matches_profile` on both grants (`:668-669`), with `setup::reject_aliased_files` (`:683`) catching `dup` aliases the number comparison cannot.
 
 What the native boundary does **not** do, checked against the list above:
 
@@ -69,6 +70,10 @@ What the native boundary does **not** do, checked against the list above:
 7. No absolute total-bytes ceiling. Native instead requires `layout.total ==
    total` exactly (`ring.rs:942-944`), which is *stronger* for internal
    consistency and *weaker* as a cap, since it admits any consistent total.
+   At HEAD: With depth and arena bytes pinned by `grant_matches_profile`, the consistent total is determined, so the missing absolute ceiling no longer admits an arbitrary total.
+   At HEAD: The addon now pins the geometry itself: `grant_matches_profile` (`packages/shm-native/src/lib.rs:257-266`), called at `:668-669`, compares depth, arena bytes, and lease bound against `host_test_ring_profile`, so a depth-32 grant is refused.
+   At HEAD: `NativeDescriptor` declares nine fields at HEAD, still without `candidateId`.
+   At HEAD: Nine named fields are read at HEAD: `profile`, six descriptor numbers, and two grants; extra properties are still ignored.
 
 `GrantReservation` (`packages/shm-native/src/lib.rs:104-130` for `claim`, and
 its `Drop`) keys on the two encoded grants and removes them on drop, so the claim
@@ -76,6 +81,8 @@ covers only concurrently live grants. A grant released and re-presented is
 admitted again.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Any caller reaching the addon without the wrapper — the addon's own mechanism
 test, a worker that requires the `.node` directly, or a future non-TypeScript

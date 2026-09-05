@@ -27,6 +27,7 @@ References are to `crates/shm-transport/src/backend/ring.rs`.
   same `RingError::InvalidGrant`. Every grant rejection in this decoder collapses
   to one error variant, so a reserved-byte failure and a wrong-version failure
   are indistinguishable to the caller.
+  At HEAD: LAYOUT_VERSION is 3 at HEAD, not 2.
 
 Existing checks are real and narrower than they look.
 
@@ -50,6 +51,7 @@ Existing checks are real and narrower than they look.
   re-encodes byte-exactly (`:104-108`). Because `encode` zeroes `54..58`
   unconditionally, that assertion is what would catch a `decode` that started
   reading a field out of the reserved region without a matching `encode` change.
+  At HEAD: replay also asserts rejection for every name in REJECTED_SEEDS (`:14`), near-valid included (`:60-66`), and near-valid differs from valid at byte 57 rather than byte 54.
 
 The contrast worth recording: the frame descriptor's shared image has an
 unconstrained equivalent. `SharedDescriptor` (`backend/ring.rs:96-108`) is `#[repr(C)]`, and I
@@ -60,6 +62,8 @@ named fields. So those 12 bytes are neither given a defined value on write nor
 constrained on read, which is the opposite discipline from the grant's four.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The forward-compatibility case, in two directions.
 
@@ -139,6 +143,7 @@ campaign can show the guard was reached.
   the right choice for a reader, `encode`'s unconditional zeroing is the wrong
   behaviour for a relay, and the only thing currently connecting the two is a
   fuzz assertion whose stated purpose is exact consumption.
+  At HEAD: The doc comment now says decode rejects a nonzero reserved tail rather than that it rejects reserved-byte tampering, and it still says nothing about forward compatibility or re-encoding.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

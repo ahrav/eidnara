@@ -59,8 +59,11 @@ were added.
   (`:213`, `:225`) and the restart test (`:302`) never perform a post-kill attach
   to the same object; the file has no attach call at all. The pre-rewrite
   six-test inventory (`:105`…`:358`) no longer exists.
+  At HEAD: `attach` loads all six shared cursors as this handle's baseline, refuses a quarantined mapping, and runs `conservation_inner(true)`, so it does read cursors, slot states, and the quarantine flag.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. A receiver attaches and takes `K == max_leases` leases. Each lease sets its slot
    to `RECEIVER_LEASED` (`ring.rs:1452`), advances `consumed` (`:1453`), and increments
@@ -100,6 +103,7 @@ divergence `dead-peer-charges-are-reclaimed-or-declared` records. Platform gatin
 post-#131 attach receives already-transferred descriptors plus two eventfd
 doorbells (`ring.rs:1095`), so the attach path is Linux-only via `eventfd`
 (`ring.rs:389` (source tree; not at HEAD)); the former `/proc/{pid}/fd/{fd}` open is gone.
+At HEAD: Attach receives three already-transferred descriptors and each doorbell is one end of an AF_UNIX socketpair rather than an eventfd.
 
 One scoping correction worth stating plainly. In the shipped two-process topology a
 *replacement* peer does not attach to the dead peer's object — each candidate gets a
@@ -173,6 +177,7 @@ check to emit: `shm_kill_with_leases_held`.
   requires no further investigation; the normative question decides whether the test
   above asserts reconciliation or asserts refusal, and those are different tests with
   different oracles.
+  At HEAD: The release is not unconditional at HEAD: a quarantined ring whose peer has not released its attachment moves its charges through `admission.quarantine()` instead (`ring_transport.rs:353-361`).
 
 ### Q: Does attach inspect the shared cursors at HEAD? (added 2026-09-05)
 

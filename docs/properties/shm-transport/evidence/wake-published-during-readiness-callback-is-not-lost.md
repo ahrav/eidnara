@@ -36,8 +36,11 @@ while the prior callback returns". Leads only; mechanism re-verified at HEAD.
   unconditionally (`:2032`) and writes the eventfd only when a parked epoch
   existed (`:2033-2035`). The generation bump is what `arm_data_wait`'s
   recheck observes even when no eventfd byte was written.
+  At HEAD: The doorbell is an AF_UNIX socketpair (`:710-720`), so this writes a one-byte token through `Doorbell::signal` (`:783-798`) rather than incrementing an eventfd.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Peer publishes frame N+1 while the JS callback for frame N is running. The
 doorbell token for N+1 is either coalesced into the token the callback is
@@ -74,6 +77,7 @@ re-arm (`lib.rs:1463-1469`) landing during a pending callback.
   already reads as `POLLIN`; treating it as success loses nothing.
 - Missing evidence: none.
 - Conclusion: resolved with answer — no.
+  At HEAD: The doorbell is a socketpair, so the saturation case is a full socket buffer: `send_token` returning `WouldBlock` means unread wake tokens are already queued, which is the same readable outcome, and it is treated as success at `:793`.
 
 ### Q: is the generation bump alone sufficient when no epoch is parked?
 

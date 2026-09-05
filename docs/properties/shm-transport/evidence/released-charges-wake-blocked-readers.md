@@ -26,8 +26,13 @@ wake from wasted CPU into a hang. Lead only; mechanism re-verified at HEAD.
 - The registration is per-counter and last-writer-wins (`set_wake` overwrites
   the `Mutex<Option<Weak<OwnedFd>>>`), and `read_budget` is per-connection
   (`:432-444`), so one bridge per counter holds at HEAD.
+  At HEAD: The call is guarded by owner.parked as well as by a live registered wake, and parked is read only after the used lock is released.
+  At HEAD: the drop signals the eventfd only when owner.parked is set (`:2321`), so a release with no parked waiter performs no write; a registered live wake alone is no longer sufficient.
+  At HEAD: The wait is now bracketed by an explicit parked marker, read_budget.parked set true at `:2631` before the loop and false at `:2659` after it, so there is an armed-marker protocol here and the release side consults it.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The read budget is exhausted by in-flight frames. The bridge parks in the
 charge poll. The consumer finishes a frame and drops its `ByteCharge`. If

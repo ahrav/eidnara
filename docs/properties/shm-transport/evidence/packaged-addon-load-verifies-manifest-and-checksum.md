@@ -40,8 +40,11 @@ path.
 - `packages/shm-native/tests/` contains no reference to `packageAddonPath`,
   `payload-manifest`, `missing_manifest`, `wrong_platform_payload`, or
   `checksum_mismatch`.
+  At HEAD: The union carries a tenth reason at HEAD, `addon_load_failed` (`index.ts:44`), which the refusal list above does not name.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A release ships a platform package with a missing or stale manifest, a checksum
 entry for another build, or a payload altered after the manifest was written. In

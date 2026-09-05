@@ -72,8 +72,14 @@ emptiness cannot prove that saturation ends.
   (`crates/shm-transport/src/profile.rs:679`, `:683-697`), so the endpoint loop
   holds at most one of eight. Saturation is reachable only through a synthetic
   profile or a caller that retains leases.
+  At HEAD: `release` signals only the `capacity_ready` doorbell; the doc comment at `:1519-1523` states the data doorbell is deliberately left alone, so a consumer parked in `wait_for_data` is not woken by a release.
+  At HEAD: the decrement is an `advance_cursor` compare-exchange (`:1592-1593`), not a `Relaxed` `fetch_sub`.
+  At HEAD: both cursors move through `advance_cursor` (`:1951-1956`), which compare-exchanges the expected prior value with `AcqRel` instead of a `Relaxed` `fetch_add`.
+  At HEAD: `verified_consumer_cursors` reads `consumed` and `active_leases` together (`:1413-1416`) before the gate, so only `published` is read after it (`:1423`).
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. A receiver holds `max_leases` leases while the producer has published further
    frames. Those frames sit in `SLOT_PUBLISHED` with `consumed < published`.
@@ -99,6 +105,7 @@ emptiness cannot prove that saturation ends.
    (`:566`, `:594`), no error is raised, no quarantine occurs, and no counter moves.
    This is the same silent-capacity-loss signature as
    `attach-reconciles-or-refuses-stale-shared-cursors`, reached without any crash.
+   At HEAD: only `capacity_ready` is signalled on release, so a release does not wake a parked `wait_for_data`.
 
 ## Timing windows and dependencies
 
@@ -119,6 +126,7 @@ reach, and at least one frame must be published beyond the leased set, or the
 second gate fires first and the test proves nothing about the first. The
 reachability caveat above is a dependency on the configuration, not on timing: in
 the shipped host topology this window never opens.
+At HEAD: both cursors are loaded with `Acquire` and checked against the handle's own record in `verified_consumer_cursors` (`:1990-2000`), not read `Relaxed`.
 
 ## What a test must construct
 
@@ -211,6 +219,7 @@ property from passing vacuously in a configuration that can never saturate.
   `always-or-unreached`, the single-call recovery window stands for the state
   half, and the wake half needs its own arm with a deadline strictly separating a
   wake from a timeout.
+  At HEAD: `release` signals `capacity_ready` only; `data_ready` is deliberately not touched (`:1519-1523`), so the release does not wake a parked `wait_for_data` waiter.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

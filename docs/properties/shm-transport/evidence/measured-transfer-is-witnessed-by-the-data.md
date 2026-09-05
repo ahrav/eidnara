@@ -14,6 +14,8 @@ The ring family — `h1_raw_descriptor_ring_payload_touch`,
 `direct_producer_leased_receiver`, `ring`, and the three copied ablations, all
 dispatched to `run_ring` at `benches/hardware_envelope.rs:317-332` — computes
 its checksum at `:675-677`:
+At HEAD: That closed form is now the expected value, not the reported one: `run_ring` loads the consumer's accumulated checksum at `:678` and fails the arm with "ring peer observed a different payload than the producer published" when the two disagree (`:679-681`), so the reported checksum is witnessed by delivered bytes.
+At HEAD: `h1_raw_descriptor_ring_payload_touch` no longer dispatches to `run_ring`; it returns an error (`:319-321`), so the ring family is `direct_producer_leased_receiver`, `ring`, `injected_avoidable_operations`, and the three copied ablations.
 
 ```rust
 let checksum = iterations
@@ -31,6 +33,8 @@ iterates the lease segments and evaluates `black_box(span.checksum())` at
 or returned. On the copied-receiver path the bytes are copied by
 `lease.to_vec()` at `:757` and only `is_err()` is inspected, so the copied
 bytes are never examined either.
+At HEAD: The copied bytes are examined now: they are folded into the same running checksum at `:760-762`.
+At HEAD: The value is no longer discarded or wrapped in `black_box`: it accumulates into `checksum` and is published to the producer through `PeerReport` at `:777-786`.
 
 The other arm families do checksum real data:
 
@@ -58,6 +62,8 @@ the arm. A frame that is delivered with wrong bytes does not.
 
 ## Failure scenario
 
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
+
 A defect corrupts payload bytes between `reservation.write(source)` (`:718`)
 and the consumer's view of the segment. The consumer computes
 `span.checksum()` at `:768` over the corrupted bytes and throws the result
@@ -67,6 +73,7 @@ bit-identical to a correct run: same `elapsed_ns` distribution, same counters,
 same checksum. The `ring` arm is among the emitted `paired_process_arms`
 (`:289`), so this is the
 arm a shipping decision would rest on.
+At HEAD: The fill byte is now the `BODY_BYTE` constant and the product is only the expectation; a mutated byte would make the consumer's reported checksum differ and the arm would fail at `:679-681` instead of emitting a bit-identical record.
 
 ## Timing windows and dependencies
 
@@ -93,6 +100,7 @@ If it also prevents `try_receive` from yielding, the exit-status oracle at
    `:768` must be accumulated and returned across the fork boundary, since the
    process that sees the bytes is the child and the process that emits the
    record is the parent.
+   At HEAD: The wiring change this asked for exists: the checksum crosses the fork boundary through the shared `PeerReport` (`:118`, published at `:777-786`) and the parent compares it at `:678-681`.
 
 ## Investigation log
 
@@ -117,6 +125,7 @@ resolved during the trail is logged so the reasoning is reproducible.
   data, and the field is not comparable across arm families. Total
   non-delivery is still caught, by the child exit status rather than by the
   checksum.
+  At HEAD: It is no longer discarded: the ring family's reported checksum is exactly this accumulated value, checked against the closed form before the arm is allowed to succeed.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

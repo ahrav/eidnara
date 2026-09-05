@@ -19,6 +19,7 @@ That makes the role gate a per-consumer obligation rather than a property of the
 transport. Checking the consumers against each other found the Rust host applies
 its gate and the TypeScript peer, over shared memory only, does not — while the
 same peer's TCP path does.
+At HEAD: The declared-length and version check lives in the shared check_wire_header helper (`:28-42`) that both FrameDescriptor::validate (`:323`) and SamplePrefix::validate call.
 
 ## Evidence trail
 
@@ -75,8 +76,11 @@ Consumer three, the Rust test peer. `TestShmPeer::recv`
 `decode_header` at `:947` and no role gate. It
 is test-only surface, but it is a third reader of `ValidatedFrame::wire_header()`
 and it demonstrates that the transport's lease API invites decode-only use.
+At HEAD: The test peer is RingClientEndpoint, its decode-only body is try_recv_with, and the blocking recv survives only under cfg(test) at `:1013-1032`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A host that has been compromised, or that regresses, publishes a `Hello` or a
 host-originated `Request` into the host-to-peer ring. The transport accepts it —

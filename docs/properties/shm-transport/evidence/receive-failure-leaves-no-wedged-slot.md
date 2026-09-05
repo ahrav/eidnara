@@ -52,8 +52,14 @@ returns an error while leaving shared state advanced.
   (`descriptor.rs:23`, `:282-284`); `spans[0].offset + spans[0].len > arena_bytes`
   rejected (`:289-295`); and for `span_count == 2`, `spans[1].offset != 0` or
   `spans[1].len > arena_bytes` rejected (`:310-319`).
+  At HEAD: `try_receive` quarantines that error through `quarantine_with` (`:1401`), so `is_quarantined()` becomes true rather than staying false.
+  At HEAD: The three writes are not inside an `unsafe` block at HEAD, and the two cursor writes are `advance_cursor` compare-exchanges rather than plain stores, followed by a local mirror at `:1455-1458`.
+  At HEAD: `enter_quarantine` no longer appears anywhere inside the receive path; quarantine comes from the uniform `quarantine_with` wrapper in `try_receive`, which covers every failure, not just descriptor validation.
+  At HEAD: `try_receive_inner` no longer quarantines on the validation path; `try_receive` maps every error it returns through `quarantine_with` (`:1401`), so all three failure paths quarantine at HEAD.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Path 1, the wedge:
 

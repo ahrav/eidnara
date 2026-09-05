@@ -43,6 +43,8 @@ The report had a test and no record.
 
 ## Failure scenario
 
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
+
 A lifecycle path that forgets its `record_*` call, or a refactor that moves the
 call behind a branch not taken on the failure path, turns a peer death or a
 reclamation that happened back into silence. The report still validates against

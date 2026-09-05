@@ -46,6 +46,7 @@ tuple, and there the map is exact: the ten field widths total
 Every field's full domain is reachable and no input bit is wasted, so fuzzing the
 108-byte encoding is coverage-equivalent to fuzzing the typed struct's named
 fields.
+At HEAD: `snapshot()` has three call sites: `:1442-1445` in `try_receive_inner`, `:1846-1849` in `validate_idle_window`, and `:2098-2101` in `reclaim_completed_inner`.
 
 The call convention is where coverage is lost. `validate` takes three inputs —
 `self`, `expected`, and `arena_bytes` (`descriptor.rs:252-256`) — and in
@@ -62,6 +63,7 @@ same collapse is in `provider_sample`: `harness.rs:122` passes
 `prefix.identity()` and `:136-140` flips only the lane. `arena_bytes` is pinned
 to `MAX_FRAME_BYTES` at `harness.rs:73`, which is the gap
 `validated-spans-are-disjoint-and-inside-the-arena` already owns.
+At HEAD: the identity comparisons live in `ReleaseIdentity::check` (`:183-197`), which `validate` calls at `:271`.
 
 Existing checks. The width constant is derived from `WIRE_V2_HEADER_BYTES`, and
 `MAX_SPANS` is coupled by type: the two-element array literal at `harness.rs:51`
@@ -72,6 +74,8 @@ the sum of the read regions equals the constant, and nothing asserts the
 incarnation and sequence guards are reachable from the fuzz target.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The 12 padding bytes are the shape the encoding cannot represent, and they are
 the one part of the shared descriptor with no decode contract at all.
@@ -85,6 +89,7 @@ reserved bytes, which `decode` requires to be zero
 using one of the three padding runs: the fuzz corpus has no bit for it, the
 harness constant would not change, and the new field would be exercised by
 nothing.
+At HEAD: the literal is built by `prepare_commit` and written by `publish_commit`; there is no `commit_reservation`.
 
 The offset drift shape is separate and sharper. Because the harness offsets are
 independent literals rather than derived from the field list, a reordering that

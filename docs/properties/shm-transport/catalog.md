@@ -350,6 +350,8 @@ and `n/a - invalidated` for an invalidated record.
 | [setup-descriptors-name-distinct-open-files](#setup-descriptors-name-distinct-open-files) | safety | high | yes |
 | [setup-connect-honors-its-deadline](#setup-connect-honors-its-deadline) | liveness | high | yes |
 | [addon-tokens-never-collide-with-live-entries](#addon-tokens-never-collide-with-live-entries) | safety | high | yes |
+| [attach-makes-every-received-descriptor-close-on-exec](#attach-makes-every-received-descriptor-close-on-exec) | safety | high | yes |
+| [foreign-slot-state-on-reserve-is-a-fault-not-backpressure](#foreign-slot-state-on-reserve-is-a-fault-not-backpressure) | safety | high | yes |
 
 ---
 
@@ -845,6 +847,14 @@ Fault/timing angle: `before_publish` is invoked before `reservation.commit` on
 both native produce paths (`packages/shm-native/src/lib.rs:1073-1076`,
 `:1202-1207`), so whatever a JavaScript caller does inside `beforePublish`
 (`packages/shm-native/index.ts:558`, `:770`) runs while commit can still fail.
+Both paths now run `check_wire_header` against the written length before the
+hook (`lib.rs:1071-1072`, `:1192-1193`), so a header that disagrees with the
+body is refused pre-hook (`a header that disagrees with the body is refused
+before beforePublish runs`, `packages/shm-native/tests/mechanism.ts:703`); what
+can still fail after the hook is `commit` itself: a quarantined ring, a
+`CommitOutsideReservation` or `Underfill` check, or a `prepare_commit` failure
+when a peer rewrote the descriptor page between the pre-hook check and the
+commit (`crates/shm-transport/src/backend/ring.rs:2536-2566`).
 The host's `publish_one` (`crates/host-runtime/src/ring_transport.rs:749`)
 runs its `publish_hook` and `written` callbacks only after
 `matches!(result, Ok(Ok(())))` (`:773-785`), so the two sides place their
@@ -4795,6 +4805,16 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
   issues both without any connect, so the ordering does not hold there.
   `setup-proof-vectors-pin-the-shared-hmac-transcript` covers only what happens
   after the connection exists.
+- **Attach closes what it receives, and reserve trusts only FREE.**
+  `attach-makes-every-received-descriptor-close-on-exec` is the last gate in
+  the attach chain after `setup-descriptors-name-distinct-open-files` and
+  `attach-validates-doorbell-sockets`: distinct, then the right type, then not
+  inheritable. `foreign-slot-state-on-reserve-is-a-fault-not-backpressure`
+  is the regression contract for the correction that
+  `crashed-producer-does-not-wedge-the-sequence` records as a source-tree
+  defect: the two records name the same compare-exchange, one as the hazard and
+  one as the required disposition, so the older record's Fault/timing angle is
+  the negative case of the newer one's Check.
 
 ## Discovered at U3
 
@@ -5227,3 +5247,99 @@ Open questions:
 - Is the dead `identity exhausted` path on the per-channel tables worth keeping
   as a defensive branch or worth deleting, and can a caller move a channel id
   across worker threads? (needs human input)
+
+### attach-makes-every-received-descriptor-close-on-exec
+
+Type: safety
+Reachability: default-production - `Ring::attach`
+(`crates/shm-transport/src/backend/ring.rs:1095-1101`) sets `FD_CLOEXEC` on all
+three received descriptors as its first action, before the mapping is validated
+or the doorbells are wrapped; every attach in the addon and the bridge endpoint
+goes through it (`packages/shm-native/src/lib.rs:287`,
+`crates/host-runtime/src/ring_transport.rs:877-879`).
+Status: active
+Exercised: yes - `attach_sets_close_on_exec_on_every_descriptor`
+(`ring.rs:3474-3491`) clears the flag on all three descriptors of a fresh
+attachment (`:3477-3479`), attaches, and asserts `sys::is_cloexec` on each raw
+descriptor while the ring holds it (`:3482-3489`). Nothing tests the failure
+arm, in which `fcntl` fails and attach returns `ObjectValidationFailed`.
+Guarantee: After a successful `Ring::attach`, the mapping descriptor and both
+doorbell ends carry `FD_CLOEXEC`, whatever flags they arrived with; a descriptor
+whose flag cannot be set makes the attach fail before anything is mapped.
+Check: `always` - for each of the three descriptors of an attached ring,
+`fcntl(F_GETFD)` reports `FD_CLOEXEC`; an attach whose `set_cloexec` fails
+returns `RingError::ObjectValidationFailed` and leaves no mapping.
+Fault/timing angle: descriptors received over `SCM_RIGHTS` without
+`MSG_CMSG_CLOEXEC` arrive inheritable (`ring.rs:1096-1098`). If the gate
+regressed, a child this process later execs would hold the mapping and the
+peer's doorbell ends open: the peer's `peer_closed` sentinel and its doorbell
+`drain` would keep seeing a live end after this side exited, so peer death would
+be hidden for as long as the child lives, and the mapping's pages would stay
+resident in a process that never reads them. The addon side sets `SOCK_CLOEXEC`
+on the setup socket and dups with `CLOEXEC` (`packages/shm-native/src/setup.rs:159`,
+`lib.rs:270-284`), so the transport gate is the only one that covers descriptors
+handed to `Ring::attach` by any other caller.
+Required faults and enabling state: an attachment whose descriptors arrive
+without the flag, then an `exec` from the attaching process; the test clears the
+flag by hand instead of forking.
+Confidence: high - [evidence](evidence/attach-makes-every-received-descriptor-close-on-exec.md).
+The gate, its position in `attach`, `sys::set_cloexec`, and the test were read
+directly.
+Existing check: `attach_sets_close_on_exec_on_every_descriptor`, unaudited.
+Impact: a forked-and-execed child inherits shared memory and the peer's wake
+channel; the peer cannot tell this process exited, and its charges stay pinned
+until the child does.
+Open questions: None.
+
+### foreign-slot-state-on-reserve-is-a-fault-not-backpressure
+
+Type: safety
+Reachability: default-production - every producer reservation goes through
+`try_reserve` (`crates/shm-transport/src/backend/ring.rs:1267-1312`), and the
+compare-exchange at `:1302-1311` is the only place a slot enters
+`PRODUCER_RESERVED`; the receive side's counterpart is the compare-exchange in
+`try_receive_inner` (`:1431-1438`), reached by every receive.
+Status: active
+Exercised: yes - `foreign_slot_state_on_reserve_is_a_fault_not_backpressure`
+(`ring.rs:3960-3970`) stores `SLOT_PRODUCER_RESERVED` into the next reusable
+slot by hand (`:3964`) and asserts that `try_reserve` returns
+`ProducerError::Ring(RingError::InvalidSharedState)` (`:3965-3968`) and that
+the ring is quarantined (`:3969`); `impossible_slot_state_quarantines_the_receiver`
+(`:4277-4295`) stores `SLOT_RELEASE_PENDING` into a published slot and asserts
+`try_receive` returns `InvalidSharedState` and quarantines. Both tests write the
+shared page in-process; no cross-process peer performs the write.
+Guarantee: When the depth check has established that the next slot's previous
+occupant was reclaimed (`outstanding < depth`, `:1294-1297`), that slot must be
+`SLOT_FREE`; any other state is corruption, so `try_reserve` returns
+`InvalidSharedState` and quarantines the ring rather than reporting
+`Exhausted`. Symmetrically, a published slot the consumer is about to take must
+be `SLOT_PUBLISHED`; any other state fails the receive with
+`InvalidSharedState` and quarantines through `try_receive`'s `map_err`
+(`:1399-1401`).
+Check: `always` - with `outstanding < depth` and the next slot forced to each
+non-`FREE` state, `try_reserve` returns `InvalidSharedState`, never
+`Exhausted`, and `is_quarantined()` holds afterwards; with a published slot
+forced to each non-`PUBLISHED` state, `try_receive` returns
+`InvalidSharedState` and quarantines; `reserve_until` returns the same error
+without parking.
+Fault/timing angle: the two errors have opposite downstream contracts.
+`Exhausted` tells `reserve_until` (`:1345-1390`) to park on the capacity
+doorbell and retry until its deadline, so a corruption presented as exhaustion
+would spin the producer against a slot that can never free and surface as a
+`Deadline` after the full budget with the ring still usable;
+`InvalidSharedState` is terminal and wakes both doorbells through
+`enter_quarantine` (`:1915-1922`). The source tree mapped a lost
+compare-exchange to `Exhausted`, which is the defect
+`crashed-producer-does-not-wedge-the-sequence` records; this record owns the
+regression contract for the corrected mapping on both sides.
+Required faults and enabling state: F2, a peer or corrupted mapping that leaves
+the next reusable slot, or a published slot, in a state the protocol cannot
+reach; a depth that has not been exhausted.
+Confidence: high - [evidence](evidence/foreign-slot-state-on-reserve-is-a-fault-not-backpressure.md).
+Both compare-exchanges, their error mappings, `reserve_until`'s handling of
+`Exhausted`, and both tests were read directly.
+Existing check: the two tests named above, unaudited.
+Impact: protocol corruption presented as backpressure: the producer parks and
+retries until its deadline, the caller sees a timeout rather than a fault, and
+the corrupted ring stays in service for the next connection attempt.
+Open questions: None.

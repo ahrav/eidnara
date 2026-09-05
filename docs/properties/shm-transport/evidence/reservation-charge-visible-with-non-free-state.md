@@ -21,6 +21,7 @@ is a claim the code is supposed to satisfy.
   (`ProducerError::Arena(error)`). The rollback ordering matters to the analysis,
   so the distinction is worth keeping.
 - `ring.rs:1682-1683` is the contradiction, quoted exactly:
+  At HEAD: The quoted lines no longer exist: the comment reads "The reservation length is assigned before any non-free state becomes visible" and the load is safe code (`let len = slot.reservation_len.load(Ordering::Relaxed);`), so the SAFETY wording and the unsafe block are gone while the false ordering claim survives.
 
   ```rust
   // SAFETY: reservation length is atomic and assigned before non-free state is observed.
@@ -61,8 +62,11 @@ is a claim the code is supposed to satisfy.
   and `:193-197` all call `conservation()` single-threaded between operations, so
   no reservation is ever open when they read. The catalog's ranges are accurate
   to within a line.
+At HEAD: It is no longer the only reader: `validate_idle_window` also loads `reservation_len` with Acquire at `:1837` and compares it against the descriptor's `allocation_len` (`:1851`), and the grep now returns ten non-test sites rather than six.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. The producer calls `try_reserve(bound, header)`.
 2. The compare-exchange at `ring.rs:1302-1311` succeeds, so slot N reads
@@ -100,6 +104,8 @@ outlives the endpoint thread, so isolation alone proves the provider side is
 clean" and never touched a `Ring`. `ed487e11` deleted that implementation with
 `shm_provider.rs` and `provider_recovery.rs`, and nothing in the tree replaces it,
 so the observer this property protects still does not exist.
+At HEAD: The same walk now has a production caller through a different entry point: `Ring::attach` calls `conservation_inner(true)` at `:1148`, so a peer-broken mapping is refused at attach time even though `conservation()` itself stays probe-only.
+At HEAD: The window no longer contains any atomic load: `verified_producer_cursors` (`:1287-1289`) reads `arena_write` and `arena_reclaimed` before the exchange, so only the `SpanPlan::reserve` call sits between the exchange and the store.
 
 ## What a test must construct
 
@@ -160,6 +166,7 @@ producer's own plan for reserved ones.
   property stays latent and its priority is lower than the raw contradiction
   suggests. It becomes live if any cross-process readiness or observability path
   starts calling `conservation()`.
+  At HEAD: the grep returns `Ring::probe` (`:1891`) plus `Ring::attach` (`:1148`, through `conservation_inner`), and six `conservation()` calls in `crates/shm-transport/tests/ring.rs` rather than nine.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

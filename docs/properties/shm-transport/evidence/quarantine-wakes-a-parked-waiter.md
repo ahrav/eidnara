@@ -27,8 +27,14 @@ terminality and gating, not delivery.
   `rings.second.arm_data_wait()`; `:1026` calls `.wait_for_data(deadline)`. Both
   are on the shipped receive path, so a parked host waiter is a production
   state.
+  At HEAD: RingClientEndpoint::recv is cfg(test)-only at HEAD, so the shipped host parks through arm_data_wait plus an AsyncFd readiness select! and never calls wait_for_data.
+  At HEAD: armed_wait_holds takes a shared WakeEpoch reference and is a pure predicate; it no longer unparks on any path because the caller's ParkGuard owns that.
+  At HEAD: arm_data_wait delegates to arm_data_wait_guarded (`:1201`), and the test calls the guarded form directly so the ParkGuard stays alive.
+  At HEAD: The test arms through arm_data_wait_guarded, asserts armed_wait_holds leaves parked nonzero, and only the guard's drop clears it to 0.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A quarantine entry point that sets the quarantine flag without ringing the
 doorbell, reached after the waiter's armed re-check has passed, leaves the
@@ -58,6 +64,7 @@ quarantine result, and `parked == 0`.
 - Findings: the host arms and waits on the ring doorbell on its receive path.
 - Missing evidence: none for reachability.
 - Conclusion: `default-production`.
+  At HEAD: Only the cfg(test) peer helper calls wait_for_data, so reachability in the shipped host rests on arm_data_wait and the AsyncFd readiness arm alone.
 
 ### Q: Does the capacity doorbell get the same treatment?
 

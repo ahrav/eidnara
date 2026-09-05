@@ -19,6 +19,10 @@ lifecycle.checked_add(PAGE_SIZE)` (`:330-332`). `system_page_size()`
 (`:443-450`) exists and falls back to `PAGE_SIZE`, but its only caller is
 `verify_prefaulted` (`:1009` (source tree; not at HEAD)), which uses it to size the `mincore` residency
 vector. No layout arithmetic consults it.
+At HEAD: system_page_size() has many callers at HEAD, including Layout::new (`:280`), punch_batch_bytes (`:2160`), punch_dead_pages (`:2185`), and punch_range (`:2294`), so the layout arithmetic does consult the kernel page size.
+At HEAD: The addend is the runtime page_size local, not the PAGE_SIZE constant.
+At HEAD: The alignment argument is the runtime page_size local, not the PAGE_SIZE constant.
+At HEAD: Layout::new reads page_size = system_page_size() (`:280`), rejects an arena_bytes that is not a multiple of it (`:283-285`), aligns arena and lifecycle to that runtime page size, adds one runtime page for total, and uses CACHELINE for five control pages rather than three.
 
 `total` is what leaves the crate. `Ring::create_in` passes it to
 `Mapping::create(layout.total)` (`:1061`), which `ftruncate`s the object to that
@@ -55,6 +59,8 @@ be 67141632 — 24576 bytes larger than the depth-2 and depth-8 figure and 16384
 larger than the depth-32 figure.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 On a 16 KiB-page host the lifecycle page stops being a page. For depth 8, real
 page 4096 spans bytes 67108864 to 67125248; the lifecycle structure sits at

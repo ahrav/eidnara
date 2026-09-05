@@ -58,8 +58,12 @@ input where the orderings differ: a commit that fails after the hook has already
   `assert.equal(publishSawDetached, true)` is at `:129` — just outside that range. The accurate span is
   `:110-129`. What it pins is the hook's *position* relative to alias detachment, not commit success. Status
   unaudited.
+  At HEAD: the declared-length and version comparison is delegated to `check_wire_header` inside `prepare_commit`, not written out as a declared_len versus exact_len comparison plus a wire_header[4] test.
+  At HEAD: The fifth branch now aborts on any error from `prepare_commit` (`:2308-2343`); `commit_reservation` no longer exists, and a Quarantined branch sits at `:2541-2545`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. The client calls `publishFrame`; the header declares `len = N`.
 2. Native `produce` reserves capacity `N` with that header.
@@ -85,6 +89,7 @@ configuration dependency, no platform gating. This is a client-side property: th
 (`ring_transport.rs:773-780`) is ordered correctly, so a host-only test cannot observe it. It interacts with
 `no-frame-observable-before-commit`, which establishes the other half — the peer really does see nothing — and
 that is what makes the client's signal wrong rather than merely early.
+At HEAD: the host returns Err on a failed publish (`:773-775`) and only then runs the hook (`:776-780`); there is no completion marker left to store after commit.
 
 ## What a test must construct
 
@@ -123,7 +128,7 @@ the same fault, so the test documents the asymmetry rather than the symptom. Cov
 - Sources examined: every file this trail cites, at the merged HEAD.
 - Findings:
   Mechanisms whose citation moved and whose surrounding claim needed restating:
-  - line 36, `packages/shm-native/src/lib.rs:1090-1093` now `packages/shm-native/src/lib.rs:1202-1207`: At HEAD `commit_reservation` validates the header against the committed count with `check_wire_header` before the hook runs (`:1192-1193`), so the two-phase path can no longer reach a post-hook WireHeaderMismatch; only `produce` still can.
+  - line 36, `packages/shm-native/src/lib.rs:1090-1093` now `packages/shm-native/src/lib.rs:1202-1207`: At HEAD both `commit_reservation` and `produce` validate the header against the committed count with `check_wire_header` before the hook runs (`:1192-1193`, `:1071-1072`; pinned by `a header that disagrees with the body is refused before beforePublish runs`, `tests/mechanism.ts:703`), so neither path can reach a post-hook WireHeaderMismatch; the post-hook failures left are quarantine, `Underfill`, `CommitOutsideReservation`, and a `prepare_commit` rejection of a descriptor page a peer rewrote after the pre-hook check.
   - line 48, `:1839-1843` now `:2610-2614`: The fifth branch now aborts on any error from `prepare_commit` (`:2356-2391`); `commit_reservation` no longer exists, and a Quarantined branch sits at `:2589-2593`.
   - line 49, `ring.rs:1591-1593` now `ring.rs:2316-2317`: At HEAD the declared-length and version comparison is delegated to `check_wire_header` inside `prepare_commit`, not written out as a declared_len versus exact_len comparison plus a wire_header[4] test.
   - line 85, `ring_transport.rs:588-591` now `ring_transport.rs:773-780`: At HEAD the host returns Err on a failed publish (`:773-775`) and only then runs the hook (`:776-780`); there is no completion marker left to store after commit.

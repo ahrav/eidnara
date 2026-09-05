@@ -35,6 +35,7 @@ Both signatures confirmed by direct read at this commit:
 // crates/shm-transport/src/backend/ring.rs:1528
 pub fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError>
 ```
+At HEAD: `release` is `pub(crate) fn release`, reachable only through `ReceiveLease` via the crate-private `ReleaseSink` trait, so holding a `&Ring` is no longer a public capability to complete a frame.
 
 ```rust
 // crates/shm-transport/src/backend/ring.rs:2536
@@ -74,8 +75,12 @@ pub fn commit(mut self, body_len: usize) -> Result<ReleaseIdentity, ProducerErro
   call is one unmutated argument away from an existing test.
   `crates/shm-transport/src/backend/ring.rs:3910` `stale_lap_release_cannot_complete_recycled_slot` is
   confirmed and is a genuine full-lap test.
+  At HEAD: The ladder moved into the `ring.rs` unit tests as the table-driven `mismatched_release_identity_names_the_field_and_quarantines`, which adds a fourth `DuplicateRelease` case and asserts every mismatch quarantines; `crates/shm-transport/tests/ring.rs` cannot call `Ring::release` at all now that it is `pub(crate)`.
+  At HEAD: The checks now live in `release_inner`, they include an `active_leases == 0` rejection at `:1559`, every failure quarantines through `inspect_err(|_| self.enter_quarantine())` at `:1533`, and `release` is `pub(crate)`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Within one process holding a single `Ring` used in both directions:
 
@@ -147,6 +152,7 @@ Three independent facts establish this:
    addon's `to_host`/`from_host` (`lib.rs:77-78`) and the host's
    `rings.first`/`rings.second` (former `shm_provider.rs:597`, former `:555-557`) both follow this
    split, and no non-test path reserves and receives on the same `Ring`.
+   At HEAD: The addon holds a `ReceiveLease<'static>` inside `ActiveLease` and never calls `Ring::release`, which is `pub(crate)` at HEAD, so the only `Ring::release` caller in the tree is the `ReleaseSink` impl the lease uses.
 
 Severity therefore: a latent API-shape hazard, not a live defect in the shipped
 topology. What keeps it worth a record is that the composition is available rather
@@ -203,6 +209,7 @@ should not be public, the test becomes a compile-fail assertion instead.
   sub-question needs human input, because the answer determines whether the test
   above asserts a runtime rejection or whether the correct outcome is that the
   composition stops being expressible at all.
+  At HEAD: The doc comment now names the caller set: it says only `ReceiveLease` reaches this, because an identity is `Copy` and a public entry point would let a caller release a frame while still holding the lease that reads it (`:1514-1517`).
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

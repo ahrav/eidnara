@@ -11,8 +11,11 @@ The native addon's `Channel` holds producer reservations and receive leases that
 - `close` (`lib.rs:1546-1561`) removes the registry entry only when `producers`, `active`, and `stranded` are all empty; otherwise the entry and its mapping stay registered and a later `close` retries.
 - `channel_drops_borrowing_reservations_before_the_ring` (`lib.rs:1282`) builds a `Channel` holding a reservation that borrows `to_host` and drops it; the test passes only if the reservation is destroyed first.
 - `packages/shm-native/tests/runtime.ts` asserts detachment under Bun and records `detachment_unavailable` under Node.
+  At HEAD: `close_channel` delegates to `detach_all_aliases` (`:386-405`), which does not stop at the first failure: it detaches every producer, lease, and stranded alias and returns the first failure afterwards.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A field reorder, or a new borrowing field declared after the rings, so a finalizer runs against unmapped memory. Externally, a `Uint8Array` that stays attached after a successful `close`.
 

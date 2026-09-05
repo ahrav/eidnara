@@ -42,6 +42,7 @@ deterministic in `(depth, arena_bytes)`. The inputs it depends on:
 `#[repr(C, align(128))]` holding `AtomicU8`, two `AtomicU64`, and
 `UnsafeCell<SharedDescriptor>` (`:146-154`), where `SharedDescriptor` is
 `#[repr(C)]` (`:94-108`).
+At HEAD: the control-region prefix ahead of the slots is five cache lines, because two WakeEpoch pages (`:87-92`) follow the reclaim page, so the prefix is 640 bytes and not the 384 the next paragraph computes; each page also carries an explicit _padding UnsafeCell field. The page-aligned arena offsets and the totals in the table are unchanged, so the two overhead figures still hold.
 
 I compiled those exact declarations and evaluated the arithmetic rather than
 computing it by hand. Results: `size_of::<SharedDescriptor>() == 120` and
@@ -86,6 +87,7 @@ Depth 8, overhead 8,192:
 - `packages/plugin/src/shared/host-client/test-support/shm-grant-fixtures.ts:26-30` (source tree; not at HEAD)
   — `grantHex` defaults: `depth ?? 8n`, `arena ?? 67_108_864n`,
   `maxLeases ?? 8n`, `total ?? arena + 8_192n`.
+  At HEAD: `qualified_test_profile` no longer exists; `ring_profile()` returns `shm_transport::profile::host_test_ring_profile()`, which sets the depth, arena, and lease bound itself.
 
 Depth 32, overhead 16,384:
 
@@ -100,6 +102,8 @@ Depth 32, overhead 16,384:
   Decoding it gives layout version 2, lane 0, depth 32, arena 67,108,864, leases
   32, total 67,125,248, reserved 0 — overhead 16,384. This fixture doubles as the
   fuzz `provider_grant` seed asserted to be *accepted*.
+  At HEAD: The frozen fixture encodes layout version 3, not 2; lane 0, depth 32, arena 67,108,864, leases 32, and total 67,125,248 are unchanged, so the overhead is still 16,384.
+  At HEAD: `ring_profile` takes a caller-supplied HardwareProfileId and is documented as a depth-32 caller-thread profile under an arbitrary id, so it is not a definition of host-test-ring-v1; `host_test_ring_profile` (`:683-697`) is the depth-8 definition of that name.
 
 So four artifacts describe depth 8 and three describe depth 32, under one profile
 name. Every artifact is internally consistent and every one of the seven agrees
@@ -107,6 +111,8 @@ with `Layout::new` for the depth it declares. The contradiction is entirely in t
 name.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The name is the only thing a caller matches on: the addon's attach checks
 `profile != PROFILE` (`packages/shm-native/src/lib.rs:645-647`) and nothing
@@ -173,6 +179,8 @@ the two geometries the name means.
   grants through `grantHex()` from the depth-8 fixtures module instead. The
   instruction points at a file that can no longer be kept in sync, and following
   it would put a depth-32 literal into a depth-8 suite.
+  At HEAD: The document states the per-connection charge in prose at HEAD, 16 ring descriptors and 16 receive leases, rather than in a table, and it still describes only the depth-8 geometry.
+  At HEAD: The comment names host_test_ring_profile at HEAD.
 
 ### Q: Do the artifacts still disagree at HEAD? (added 2026-09-05)
 

@@ -64,8 +64,11 @@ in CI the addon exports `registerCleanupProbe` (`src/lib.rs:535`), so
 `packages/shm-native/tests/capability.ts:9-59` asserts channel counts around
 the probe and that `createTestPair` throws `/capability unavailable/` when the
 probe reports unavailable; it does not test gating.
+At HEAD: the unavailable branch asserts `createTestPair` throws `/shared-memory native addon|shared-memory native startup failed/` (`:55-58`), not `/capability unavailable/`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A runtime ships an addon build without `registerCleanupProbe`, or the export is
 renamed. `probeCapabilities()` reaches line 202, returns `available: true`, and

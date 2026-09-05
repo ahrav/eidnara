@@ -49,8 +49,17 @@ Three that mutate slot state and publish descriptors do not.
   `detach_producer(...)?.abort()`. The `?` means a mid-walk failure leaves later
   producers registered, and each surviving `ProducerReservation` will still
   abort ungated on drop.
+  At HEAD: `quarantine_channel` now delegates to `detach_all_aliases`, which records the first failure and finishes the sweep instead of propagating with `?`, so a mid-walk failure no longer leaves later producers registered.
+  At HEAD: `reclaim_completed` has two call sites at HEAD, `try_reserve` (`:1281`) and `trim` (`:2256`); both are gated, `trim` at `:2248`.
+  At HEAD: These callers are no longer all ungated: `commit` checks `is_quarantined()` first and aborts (`:2541-2545`), so it has four abort paths and the first one is the gate.
+  At HEAD: `abort_reservation` also punches the pages the reservation dirtied above `arena_write` and quarantines if that removal fails (`:2272-2277`).
+  At HEAD: `published` now advances through an `advance_cursor` compare-exchange with `AcqRel`, not a plain `Release` store.
+  At HEAD: The commit path is gated at HEAD: `ProducerReservation::commit` checks `is_quarantined()`, aborts the reservation, and returns `ProducerError::Quarantined` (`:2541-2545`), and `publish_commit` re-checks quarantine after publication (`:2382`).
+  At HEAD: The grep no longer returns six hits or five gates: at HEAD `crates/shm-transport/src/backend/ring.rs` gates in `attach` (`:1141`), `arm_data_wait_guarded` (`:1202`), `armed_wait_holds` (`:1228`), `try_reserve` (`:1275`), `try_receive` (`:1396` and `:1404`), `wait_for_data` (`:1478`), `release` (`:1529`), `conservation` (`:1608`), `probe` (`:1888`), `trim` (`:2248`), `publish_commit` (`:2382`), and `ProducerReservation::commit` (`:2541`), and `is_quarantined` is also read in `crates/host-runtime/src/ring_transport.rs:353` and `:926` and `packages/shm-native/src/lib.rs:1488`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. The producer holds an open `ProducerReservation` over sequence N. The slot is
    `SLOT_PRODUCER_RESERVED` and `reservation_len` is set (`ring.rs:1302-1326`).
@@ -67,6 +76,8 @@ Three that mutate slot state and publish descriptors do not.
    `:2280`. The descriptor slot and its arena range return to the free pool, and
    the next `try_reserve` may hand those exact bytes to a new frame while the
    stranded JavaScript view still points at them.
+   At HEAD: This step is refused at HEAD: `commit` checks `is_quarantined()` and aborts the reservation before `prepare_commit` runs (`:2541-2545`), so a reservation admitted before quarantine cannot publish.
+   At HEAD: Quarantine on the receive path is no longer raised inside the validation arm; `try_receive` maps every `try_receive_inner` error through `quarantine_with`.
 
 ## Timing windows and dependencies
 

@@ -60,8 +60,11 @@ reads it.
   `custody_releases_exactly_once_and_rejects_stale_releases`
   (`provider_recovery.rs:811` at `9c1eb4d1`) had the right oracle shape but never
   perturbed the lock or the arithmetic, and `ed487e11` deleted it with its subject.
+At HEAD: The call is no longer unconditional: the endpoint thread quarantines at `:358` when either ring is quarantined and releases at `:360` otherwise, and `Admission::release` returns `()`, so there is no result to discard.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The verified route to a charge mismatch runs through a failed quarantine.
 
@@ -88,6 +91,8 @@ The verified route to a charge mismatch runs through a failed quarantine.
 7. If they do not, `checked_sub` returns `None`, the release silently no-ops, and
    `active` is merely correct-by-accident while `quarantined` never received the
    charges at all.
+   At HEAD: The add now runs before any store, so its failure returns `ChargeOverflow` with `active` unreduced.
+   At HEAD: `quarantine` (`:508-532`) computes both the reduced active total (`:520-523`) and the increased quarantined total (`:524-527`) before storing either at `:528-529`, so a failed add leaves the accounting untouched.
 
 The poisoning route is separate. A panic while the accounting guard is held
 poisons the mutex, after which every later `release` returns at `:500` and every
@@ -123,6 +128,7 @@ verified sequence: seed `quarantined` near `u64::MAX` in one field, hold two liv
 admissions, call `Admission::quarantine()` on one and let it fail, then assert
 `snapshot().active` still equals the charges of the one remaining admission. That
 assertion fails today because of the second subtraction at `profile.rs:573`.
+At HEAD: There is no second subtraction at HEAD: a failed `Admission::quarantine` stores nothing, so the `Drop` release at `:573` is the only subtraction and the proposed assertion would pass.
 
 For the poisoning case, wrap a call that holds the guard in
 `std::panic::catch_unwind` and force a panic inside the critical section. Since
@@ -164,6 +170,7 @@ against today, which is the finding.
   and the check semantics can stay `always` rather than moving to
   `always-or-unreached`. Whether the enabling accounting state is reachable
   without injection is still open and needs the intended limit ranges.
+  At HEAD: `quarantine` stores nothing until both totals succeed, so a failed quarantine subtracts no charges and `Drop` cannot double-subtract; the reachable mismatch this log recorded is closed.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

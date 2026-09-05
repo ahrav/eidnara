@@ -62,8 +62,16 @@ recycled slot's descriptor bytes on a later lap.
   and is a genuine full-lap test: it wraps `depth` sequences (`:3918-3921`), leases a
   fresh frame (`:3924`), and asserts the lap-old identity yields `InvalidSequence`
   (`:3925-3929`).
+  At HEAD: The stale release also quarantines the ring now, and the test asserts the recycled slot stays SLOT_RECEIVER_LEASED for the fresh frame.
+  At HEAD: Each identity mismatch now also quarantines the ring, and the surviving lease's own release then returns Quarantined.
+  At HEAD: release_once sets `released` before calling the sink, so Drop cannot retry a failed release, and the sink is a borrowed ReleaseSink rather than a raw callback and context pair.
+  At HEAD: The descriptor is read through DescriptorSlot::read_descriptor rather than an inline std::ptr::read_volatile.
+  At HEAD: consumed comes from verified_consumer_cursors, which loads the shared cursors with Acquire and rejects any value that disagrees with this handle's own record.
+  At HEAD: The compare-exchange runs on a &DescriptorSlot with no unsafe block, and Ring::release wraps release_inner so any failure also quarantines the ring.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The sequential cases are covered. The uncovered one is the read-then-CAS window,
 which needs a second party progressing between `:1565` and `:1575`:
@@ -103,6 +111,7 @@ target is the honest place to run it. Relationship: this record dominates
 release by the wrong party passes this property's check and is that record's
 concern. `receive-failure-leaves-no-wedged-slot` shares the same CAS as its arbiter,
 approached from the receive side.
+At HEAD: Both the increment and the decrement of active_leases go through Ring::advance_cursor, an AcqRel compare-exchange from the handle's recorded value, so neither is a Relaxed fetch any more.
 
 ## What a test must construct
 
@@ -147,6 +156,7 @@ the thing to make explicit, so it is the question investigated.
   property on state still holds, and the residual hazard is misattribution rather
   than a double success. It remains unexercised, needs F3, and is the reason this
   record stays open despite good sequential coverage.
+  At HEAD: Ring::release is pub(crate) and reachable only through ReceiveLease, so a party holding a copied ReleaseIdentity cannot call it directly.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

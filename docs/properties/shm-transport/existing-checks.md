@@ -121,7 +121,7 @@ assertion. Rows that a catalog record already cites are marked with the record.
 | `sealed_object_of_the_wrong_size_is_refused_before_mapping` (`:3398`) | Sealed object of the wrong size is refused before mapping | unaudited |
 | `probe_checks_cursors_against_slot_states` (`:3414`) | Probe checks cursors against slot states | unaudited |
 | `rewound_published_cursor_does_not_hide_a_queued_frame` (`:3456`) | Rewound published cursor does not hide a queued frame | unaudited |
-| `attach_sets_close_on_exec_on_every_descriptor` (`:3474`) | Attach sets close on exec on every descriptor | unaudited |
+| `attach_sets_close_on_exec_on_every_descriptor` (`:3474`) | Attach sets close on exec on every descriptor | unaudited; cited by `attach-makes-every-received-descriptor-close-on-exec` |
 | `attach_refuses_a_mapping_whose_cursors_already_break_the_protocol` (`:3494`) | Attach refuses a mapping whose cursors already break the protocol | unaudited; cited by `attach-reconciles-or-refuses-stale-shared-cursors` |
 | `probe_tolerates_every_intermediate_state_of_honest_transitions` (`:3523`) | Probe tolerates every intermediate state of honest transitions | unaudited |
 | `probe_rejects_a_lease_count_more_than_one_transition_from_the_slots` (`:3548`) | Probe rejects a lease count more than one transition from the slots | unaudited |
@@ -145,7 +145,7 @@ assertion. Rows that a catalog record already cites are marked with the record.
 | `mismatched_release_identity_names_the_field_and_quarantines` (`:3871`) | Mismatched release identity names the field and quarantines | unaudited |
 | `stale_lap_release_cannot_complete_recycled_slot` (`:3910`) | Stale lap release cannot complete recycled slot | unaudited |
 | `shared_quarantine_flag_latches_locally_when_observed` (`:3942`) | Shared quarantine flag latches locally when observed | unaudited; cited by `quarantine-authority-survives-peer-writes` |
-| `foreign_slot_state_on_reserve_is_a_fault_not_backpressure` (`:3960`) | Foreign slot state on reserve is a fault not backpressure | unaudited |
+| `foreign_slot_state_on_reserve_is_a_fault_not_backpressure` (`:3960`) | Foreign slot state on reserve is a fault not backpressure | unaudited; cited by `foreign-slot-state-on-reserve-is-a-fault-not-backpressure` |
 | `failed_publication_wake_leaves_the_slot_published` (`:3973`) | Failed publication wake leaves the slot published | unaudited |
 | `forged_arena_write_quarantines_instead_of_underflowing` (`:3999`) | Forged arena write quarantines instead of underflowing | unaudited |
 | `unaligned_batch_boundaries_do_not_strand_pages` (`:4016`) | Unaligned batch boundaries do not strand pages | unaudited |
@@ -160,7 +160,7 @@ assertion. Rows that a catalog record already cites are marked with the record.
 | `stale_capacity_token_after_a_drain_does_not_deadlock_the_next_park` (`:4213`) | Stale capacity token after a drain does not deadlock the next park | unaudited |
 | `page_removal_failure_quarantines_before_capacity_publication` (`:4243`) | Page removal failure quarantines before capacity publication | unaudited |
 | `quarantine_survives_peer_clearing_shared_flag` (`:4261`) | Quarantine survives peer clearing shared flag | unaudited; cited by `quarantine-authority-survives-peer-writes`; also cited by `trim-removes-only-dead-pages-below-the-write-cursor` |
-| `impossible_slot_state_quarantines_the_receiver` (`:4277`) | Impossible slot state quarantines the receiver | unaudited |
+| `impossible_slot_state_quarantines_the_receiver` (`:4277`) | Impossible slot state quarantines the receiver | unaudited; cited by `foreign-slot-state-on-reserve-is-a-fault-not-backpressure` |
 | `forged_reclaim_length_quarantines_the_producer` (`:4291`) | Forged reclaim length quarantines the producer | unaudited |
 | `wrapped_errors_preserve_sources` (`:4309`) | Wrapped errors preserve sources | unaudited |
 

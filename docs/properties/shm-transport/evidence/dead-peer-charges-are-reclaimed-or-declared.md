@@ -78,8 +78,11 @@ test rather than a paragraph.
   cap shows enough aggregate capacity returned; it does not show the killed
   candidate's exact tuple returned, and no accounting snapshot exposes an
   "unreclaimable" class.
+  At HEAD: Release is conditional at HEAD: `:353-361` quarantines the admission when either ring is quarantined and the peer has not released it, and calls `admission.release()` only otherwise.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A peer commits a candidate, holds it idle, and is killed. Under the eventfd
 mechanism the ring goes silent rather than busy: the endpoint is parked on the
@@ -113,6 +116,7 @@ channel is *closed*; on a full channel with a live receiver the send parks
 indefinitely, and cancelling `root` or `read_cancel` cannot wake it. So if the
 connection task retains the receiver without draining it, the endpoint never
 joins and `admission.release()` may never run at all.
+At HEAD: both hand-offs go through `deliver` (`:649-661`), whose `select!` carries `queue.discard` and `root` cancellation arms, so the send is no longer uncancellable.
 
 The fault-free bound is therefore one socket-closure delivery plus at most one
 `frame_deadline` **given a draining inbound receiver**. Without that
@@ -193,6 +197,7 @@ chain is the only mechanism under test.
 - Conclusion: resolved with answer for the mechanism (sentinel plus unconditional
   release, both cited); the per-identity oracle remains the open test gap carried
   in the catalog record.
+  At HEAD: Release is conditional at HEAD: `:358` quarantines the admission when a ring is quarantined and the peer has not released it, and `:360` releases it otherwise.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

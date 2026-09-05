@@ -58,8 +58,17 @@ siblings are `Release`, and one load has no gate.
 - `docs/properties/shm-transport/existing-checks.md:393-395` records that
   no loom, shuttle, Miri, or ThreadSanitizer configuration exists anywhere in the
   repository, so no tool currently checks any ordering choice in this file.
+  At HEAD: The comment now reads "The acquire exchange above pairs with the producer's release of `published`", and the one-read snapshot it referred to is now `DescriptorSlot::read_descriptor` (`:194-199`).
+  At HEAD: The load moved into `verified_published` (`:1976-1986`), which `try_receive_inner` calls at `:1423`; that helper also rejects a rewound or over-far `published`.
+  At HEAD: The comment at `:2089` reads "Acquire pairs with the receiver's release store of `completion_sequence`", not "SAFETY: acquire pairs with receiver release publication"; the pairing it names is unchanged.
+  At HEAD: The store to `ProducerPage::published` is now an AcqRel compare_exchange inside `Self::advance_cursor`, so the argument holds a fortiori: it is still a different location from `state`.
+  At HEAD: `published` is no longer a Release store either; it moves through the same AcqRel compare_exchange in `Self::advance_cursor` (`:1951-1956`).
+  At HEAD: `arena_write` is no longer a Relaxed store: `Self::advance_cursor` (`:1951-1956`) moves it with an AcqRel compare_exchange that fails closed if the peer rewrote the cursor.
+  At HEAD: the state access set is larger than the six stores, three exchanges, and two loads listed here: `validate_idle_window` adds two more Acquire loads of `state` (`:1836` and `:1869`), and the exchange in `try_receive_inner` now moves the slot to the intermediate `SLOT_RECEIVER_HELD`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. The producer commits. The descriptor bytes are written at `ring.rs:2364` and
    the slot state becomes `SLOT_PUBLISHED` at `:2365` with `Relaxed` ordering.
@@ -93,6 +102,7 @@ function has no production caller at this commit (`Ring::probe` at `ring.rs:1887
 is its only non-test caller, and `ShmRecoveryBackend::probe` at
 the host-side readiness probe that returned a constant without touching a
 `Ring`).
+At HEAD: The conservation walk does have a production caller at HEAD: `Ring::attach` runs `conservation_inner(true)` at `:1148` to refuse a mapping the peer already broke, so only the counts-returning `conservation()` remains probe-only.
 
 ## What a test must construct
 
@@ -145,6 +155,8 @@ capability recorded as F5 in
   finding; asserting it as the intent would be fabrication. What is settled
   without an answer: the `Acquire` load at `:1681` synchronizes with nothing when it
   observes `SLOT_PUBLISHED`, and the invariant that keeps that safe is unwritten.
+  At HEAD: The comment is no longer a SAFETY comment and reads "The reservation length is assigned before any non-free state becomes visible"; the load below it needs no unsafe block now.
+  At HEAD: The comment at `:2142` reads "Capacity becomes visible only after every removal succeeded"; it no longer mentions producer-exclusive publication, and it now sits above the two `advance_cursor` calls rather than the slot stores.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

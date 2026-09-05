@@ -13,6 +13,7 @@ implementation of the same transport contract, and the natural parity question i
 what it does at the same point. It returns one error variant and changes no
 state. Asking that question forced the wider ledger below, because the answer is
 not "a weaker gate" but "no gate exists to weaken".
+At HEAD: `try_receive` quarantines through `quarantine_with` (`:1943-1946`), which calls `enter_quarantine` and hands the error back.
 
 ## Evidence trail
 
@@ -79,8 +80,14 @@ not "a weaker gate" but "no gate exists to weaken".
   backend compiles whenever the transport crate is built on its own, while
   `crates/host-runtime/Cargo.toml:25` (source tree; not at HEAD) and `packages/shm-native/Cargo.toml:16` (source tree; not at HEAD) both
   set `default-features = false`, so no shipped artifact contains it.
+  At HEAD: a quarantined ring's `conservation` returns Ok with every descriptor and every arena byte counted in the quarantined bucket rather than failing.
+  At HEAD: The comparison moved out of `SamplePrefix::validate` into `ReleaseIdentity::check`.
+  At HEAD: the identity comparisons live in `ReleaseIdentity::check`, which `SamplePrefix::validate` calls at `crates/shm-transport/src/backend/sample.rs:82`.
+  At HEAD: the module doc reads 'Backends that publish frames into the arena.' and the module declares ring, sample, and a crate-private sys; there is no iceoryx declaration, and there is still no trait.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A sample arrives whose prefix disagrees with the local expectation.
 `SamplePrefix::validate` fails on one of nine `DescriptorError` causes,

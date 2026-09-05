@@ -94,8 +94,17 @@ at once.
   `two_process_zero_copy_exchange_uses_authenticated_grant`
   (`crates/shm-transport/tests/ring.rs:488-543`) uses a single ring in a single
   direction.
+  At HEAD: recv is cfg(test)-only at HEAD, so no shipped host code calls wait_for_data.
+  At HEAD: send delegates to send_bounded (`:901-933`), which reserves, writes, rechecks the frame deadline, checks quarantine, then commits, and reports a SendFailure stage instead of an opaque error.
+  At HEAD: send_ticket_before and the publication ticket are gone; the admission select! lives in send_before and reserves a permit with self.tx.reserve().
+  At HEAD: The inbound channel is sized queue_frames plus one and the extra slot is held as an owned permit for the terminal event, so a fault or cancellation is delivered even when the receiver has stopped draining (`:279-291`).
+  At HEAD: The handoff goes through `deliver`, a biased select! over inbound.send, queue.discard.cancelled(), and root.cancelled(), so it is cancellable and no longer an unselected untimed await.
+  At HEAD: A failed publish_one now calls `fail`, which sends ReadClose::Corrupt("shared-memory publish failed") on the inbound channel before cancelling `retired` and `root`.
+  At HEAD: The data_ready doorbell is one end of a connected AF_UNIX stream socketpair, not an eventfd (`crates/shm-transport/src/backend/ring.rs:710-728`).
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. The peer offers inbound frames continuously and the host has responses queued, so
    both directions have work.
@@ -117,6 +126,7 @@ at once.
    parks in `inbound.send().await` and publishes nothing until the outbound sender's own
    admission timeout retires the generation. Either way one direction's pressure ends
    the other direction's progress, and both terminate as transport faults.
+   At HEAD: Release signals only the capacity doorbell now; the data doorbell is deliberately left alone because the releasing thread is the thread that would poll for data.
 
 ## Timing windows and dependencies
 
@@ -192,6 +202,7 @@ timeout rather than an unbounded stall. Coverage check to emit:
   the receive-then-publish alternation and not of the two blocking paths. The property
   must therefore be a bounded ratio plus a bounded post-pressure drain, and the
   duplex-overlap situation must be constructed before either can be measured.
+  At HEAD: The handoff is inside `deliver`, a biased select! against discard and root, so it is bounded by cancellation rather than being neither timed nor selected.
 
 ### 2026-08-31: re-derivation against the eventfd doorbell mechanism
 
@@ -219,6 +230,8 @@ timeout rather than an unbounded stall. Coverage check to emit:
   survive; only the bound derivation changes. K must be pinned by the test from
   `frame_deadline` alone, and the drain arm gains a second job as a lost-wake
   detector.
+  At HEAD: The doorbell is a connected AF_UNIX stream socketpair end held in a UnixStream, not an eventfd, and its syscalls go through backend/sys.rs.
+  At HEAD: The main impl block holds send, send_bounded, try_recv, and try_recv_with; recv moved into a separate cfg(test) impl at `:1013-1032`.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

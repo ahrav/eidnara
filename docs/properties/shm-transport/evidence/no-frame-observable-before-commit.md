@@ -35,8 +35,14 @@ round-trip tests assert the positive direction only, so nothing pins the negativ
   routes through `abort_reservation` at `:2547`, `:2552`, `:2563` before returning,
   and `abort_reservation` (`:2271-2282`) stores `SLOT_FREE` without ever touching
   `published`.
+  At HEAD: `published` is advanced by `Self::advance_cursor`, an `AcqRel` compare-exchange, and it is still the last cursor written in the publication block.
+  At HEAD: `arena_write` is advanced by `Self::advance_cursor`, an `AcqRel` compare-exchange against the handle's own record, not a relaxed store.
+  At HEAD: `published` now arrives from `verified_published` (`ring.rs:1976-1987`), which loads it with `Ordering::Acquire` and refuses a value below the highest already seen.
+  At HEAD: `consumed` now arrives from `verified_consumer_cursors` (`ring.rs:1990-2000`), which loads it with `Ordering::Acquire` and checks it against this handle's own record.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. The producer calls `try_reserve`; the slot moves to `PRODUCER_RESERVED` and the
    arena span is handed out.
@@ -106,6 +112,7 @@ investigated is the one its `high` confidence rests on.
   commit writes it last, so the property holds by construction at this commit. It
   stays cataloged because no test asserts the negative and a one-line change to
   the gate at `:1424-1426` would not fail anything.
+  At HEAD: `published` is written in exactly one place at HEAD, the `advance_cursor` compare-exchange at `ring.rs:2368`, and it is the last cursor written before the wake.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

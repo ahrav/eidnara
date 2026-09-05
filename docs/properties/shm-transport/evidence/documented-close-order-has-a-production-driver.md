@@ -52,6 +52,8 @@ The two real close paths each implement their own ordering:
   regardless of outcome (the former clean/unclean custody disposition was
   deleted with `shm_provider.rs`). This is a disposition decision, not an
   ordered teardown, and it does not call `Lifecycle::advance` either.
+  At HEAD: The thread does branch on the outcome at HEAD: a panic increments the counter, cancels, and sends a `Corrupt` close at `:343-349`, and the disposition chooses `admission.quarantine()` at `:358` when either ring is quarantined or `admission.release()` at `:360` otherwise.
+  At HEAD: `close_channel` now sets `closed`, sends `setup::goodbye`, and delegates the sweep to `detach_all_aliases` (`:386-405`), which aborts producers, detaches leases, then detaches stranded views and returns the first failure instead of stopping at it.
 
 The documented "drains published data" stage has no counterpart in the addon
 path. `close_channel` **aborts** producer reservations rather than committing or
@@ -59,6 +61,8 @@ draining them, and **detaches** active leases rather than waiting for them to be
 received. Published-but-unreceived frames are not polled.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A future change reorders the addon close path — for example, detaching stranded
 references before active leases, or dropping the mapping before the last alias

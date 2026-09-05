@@ -78,8 +78,15 @@ early return between them.
   `Quarantined`, matching `docs/shm-transport.md:90` (source tree; not at HEAD) and former `:112`.
 - Existing check: `crates/shm-transport/tests/profile.rs:50`
   `host_admission_retains_quarantined_commitments` asserts the success path only.
+  At HEAD: a failed `quarantine` leaves `accounting.active` unchanged, so the `Drop`-driven `release` subtracts charges that are still counted and is one correct refund rather than a double subtraction.
+  At HEAD: `release_spans` runs only after both checked operations succeed, so its side effect cannot be committed before a failure.
+  At HEAD: nothing is written through the `MutexGuard` until both checked operations succeed, so a failed add leaves `active` unreduced.
+  At HEAD: the addition is computed into a local `quarantined` first, so a failure returns before either field is written.
+  At HEAD: the subtraction is computed into a local `active` and mapped to `AdmissionError::ChargeUnderflow`; `accounting.active` is assigned only after the `checked_add` succeeds (`:528`).
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. Accounting reaches a state where `quarantined + retained` overflows in at
    least one field. Because `checked_add` on `ResourceCharges` (`profile.rs:62`)
@@ -99,6 +106,7 @@ early return between them.
    (`profile.rs:573`). If other admissions still hold at least `charges` in every
    field, the subtraction succeeds and `active` is reduced a second time. If not,
    `checked_sub` returns `None` and the release silently no-ops.
+   At HEAD: `active` is not reduced until both checked operations succeed, so an add failure leaves the accounting untouched.
 
 Either branch loses the charges from `quarantined` entirely. The double-subtract
 branch additionally makes `active` under-report by `charges`, and calls
@@ -168,6 +176,7 @@ implicit.
   the observability angle.
 - Conclusion: resolved as an observation. It does not change this property's
   check, and it is recorded so the shared cause is not rediscovered.
+  At HEAD: the `active` shortfall maps to `ChargeUnderflow`, which is distinct from `AccountingUnavailable`.
 
 ## Refresh outcome, 2026-08-30
 

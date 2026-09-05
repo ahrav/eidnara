@@ -13,6 +13,8 @@ rule explicitly: "A full lease set is backpressure, not a fault" and "Errors are
 reserved for faults that end the channel" (`ring.rs:1392-1394`). The iceoryx
 backend has no descriptor set, no lease counter, and no deadline parameter, so
 the question is what it returns instead when the same two limits bind.
+At HEAD: The doc comment now says `Ok(None)` means nothing is deliverable and `Err` means the channel is dead (`ring.rs:1392-1394`); the sentence about errors being reserved for channel-ending faults is gone, and the backpressure sentence survives only as an inner comment (`:1418-1420`).
+At HEAD: `reserve_until` takes a caller-supplied `deadline: Instant` (`ring.rs:1345-1390`) and converts `Exhausted` to `Deadline` once that deadline has passed; the profile carries no scheduling budget.
 
 ## Evidence trail
 
@@ -74,8 +76,11 @@ the question is what it returns instead when the same two limits bind.
 - `backend/iceoryx.rs:151-157` and `:371` — every `receive()` error becomes
   `IceoryxError::ReceiveFailed`, displayed as "iceoryx receive failed". There is
   no branch that maps borrow saturation to `Ok(None)`.
+  At HEAD: the module declares `ring`, `sample`, and a crate-private `sys`, and still defines no shared backend trait.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Two independent scenarios, neither needing a fault, a second process, or
 concurrency.

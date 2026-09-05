@@ -22,6 +22,8 @@ The five-condition sequence, in the same order, in two places:
   (`:193-195`).
 - `backend/sample.rs:79-82` — the same five, same order, same error variants,
   written against `self` instead of a destructured `Self`.
+  At HEAD: `SamplePrefix::validate` no longer restates the four identity conditions; it checks the schema at `:79-81` and calls the shared `ReleaseIdentity::check` at `:82`, so the drift risk this record was built on is closed for the identity half.
+  At HEAD: The five conditions are no longer one block: `FrameDescriptor::validate` checks the schema at `:268-270` and delegates the four identity conditions to `ReleaseIdentity::check` (`:183-197`), which `SamplePrefix::validate` calls too, so there is one shared identity contract instead of two copies.
 
 The third reader is narrower. `Ring::release`
 (`backend/ring.rs:1528-1600`) checks `is_quarantined` (`:1529-1531`),
@@ -32,6 +34,7 @@ The third reader is narrower. `Ring::release`
 (`:1566-1568`), `lane` (`:1569-1571`), `sequence` (`:1572-1574`). It never calls
 `snapshot()` and never calls `validate`, so `schema_version` is not read on this
 path.
+At HEAD: Release is no longer the non-quarantining reader: `Ring::release` (`:1528-1534`) wraps `release_inner` with `.inspect_err(|_| self.enter_quarantine())` at `:1533`, so every identity mismatch at release time now quarantines the ring.
 
 Rejection disposition differs by reader, and this is the part no document states:
 
@@ -49,6 +52,8 @@ Rejection disposition differs by reader, and this is the part no document states
   close-failure path (`lib.rs:301`, `:308`, `:337`, `:345`, `:368`, `:375`,
   `:421-422`, `:461-462`).
 - `release` returns a `LeaseError` variant and never quarantines.
+  At HEAD: `try_reserve` is no longer the only caller: `Ring::trim` also drives a reclaim pass at `:2256`, so the same rejection can now surface as a `RingError` out of `trim`.
+  At HEAD: `try_receive_inner` returns the error and `try_receive` quarantines through `.map_err(|error| self.quarantine_with(error))` at `:1401`; the effect is the same but `enter_quarantine` is no longer called at the validation site.
 
 So the same malformed descriptor produces a terminal channel on one path, an
 ordinary producer error on another, and no observation at all on the third.
@@ -62,8 +67,11 @@ incarnation, lane, and sequence for the sample prefix, and
 `backend/ring.rs:3871-3907` covers wrong incarnation, wrong lane, wrong sequence,
 and duplicate release against `Ring::release`. Nothing asserts that the three
 readers enforce the same set, and nothing asserts what a rejection does.
+At HEAD: The coverage moved into the backend's own unit tests as `mismatched_release_identity_names_the_field_and_quarantines`, and it now also asserts that each mismatch quarantines (`:3904`).
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Two shapes.
 
@@ -144,6 +152,7 @@ not a measurement. Coverage check to emit:
   reachability. The enforcement divergence is verified by direct read: two
   readers enforce five conditions, one enforces three, and two callers of the
   same `validate` disagree on what its failure means.
+  At HEAD: `enter_quarantine` is no longer called from one place in the transport: `try_reserve` (`:1321`), `Ring::release` (`:1533`), `publish_commit` (`:2377`), and `quarantine_with` (`:1944`) all reach it, so a release-time identity mismatch is now terminal too.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

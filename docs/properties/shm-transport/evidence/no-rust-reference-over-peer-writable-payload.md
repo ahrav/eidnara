@@ -8,6 +8,7 @@ and one of them differs from the other two. `read_byte` uses `read_volatile`,
 `std::slice::from_raw_parts`. The file's own doc comment on `ReceiveLease`
 (`:88-89` (source tree; not at HEAD)) states the intent: "Raw span access avoids creating a long-lived safe
 reference to memory a trusted peer could still address." `checksum` creates one.
+At HEAD: All three readers now load through relaxed atomics whose width `AccessShape` fixes per byte, so none of them forms a Rust reference over arena memory.
 
 ## Evidence trail
 
@@ -46,8 +47,14 @@ reference to memory a trusted peer could still address." `checksum` creates one.
   ordinary writable ArrayBuffer; nothing marks it read-only.
 - `packages/shm-native/src/lib.rs:1039` and `:1121` — the same helper on the two
   produce paths, where a writable view is intended.
+  At HEAD: `read_byte` loads through `AtomicU64::from_ptr` or `AtomicU8::from_ptr` with `Ordering::Relaxed`, not `read_volatile`.
+  At HEAD: `copy_to` delegates to `copy_out` (`crates/shm-transport/src/lease.rs:186-206`), which copies through relaxed atomic loads rather than `copy_nonoverlapping`.
+  At HEAD: The SAFETY comment no longer leans on a contract term; `R19` appears nowhere in the crate, and the justification is that `AccessShape` partitions the range and no Rust reference is formed.
+  At HEAD: `checksum` forms no slice at HEAD: it sums per-byte `AtomicU8` and per-word `AtomicU64` relaxed loads partitioned by `AccessShape`, so there is no `from_raw_parts` and no fold over a `&[u8]`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Two distinct exposures share one root.
 
@@ -75,6 +82,7 @@ creation until the view is detached. Both windows are only reachable because
 (`crates/shm-transport/src/backend/sys.rs:24-25`). This is the same root decision behind
 `quarantine-authority-survives-peer-writes` and
 `reclaim-advance-bounded-by-the-producer-reservation`.
+At HEAD: Both mappings go through `sys::mmap_shared` (`crates/shm-transport/src/backend/sys.rs:86-104`), which is where `PROT_READ | PROT_WRITE` now lives.
 
 ## What a test must construct
 
@@ -117,11 +125,14 @@ second thread writes it, under `-Zsanitizer=thread`.
   read path is unsound" to "a public API method invites an unsound read, and one
   benchmark takes it". The sibling finding about `as_mut_ptr` and the writable
   receive-path ArrayBuffer is independent of this answer and is live.
+  At HEAD: The single call site is `checksum = checksum.wrapping_add(span.checksum())` in the leased-receiver peer loop, not a `black_box` call.
 
 ### Q: Does `checksum` still form a slice at HEAD? (added 2026-09-05)
 
 - Checked: `LeaseSpan::checksum` (`crates/shm-transport/src/lease.rs:96-123`) folds one `read_volatile` per byte and its comment says no `&[u8]` is formed; `copy_to` (`:85-93`) delegates to `volatile_copy`; `rg from_raw_parts crates/shm-transport/src/lease.rs` returns nothing. `LeaseSpan::as_mut_ptr` is still present.
 - Conclusion: no. The finding the trail above describes is resolved; the residual impact is `as_mut_ptr` only.
+  At HEAD: `copy_to` delegates to `copy_out`, not to a `volatile_copy` helper.
+  At HEAD: `checksum` sums relaxed `AtomicU8` and `AtomicU64` loads rather than one `read_volatile` per byte, and still forms no `&[u8]`.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

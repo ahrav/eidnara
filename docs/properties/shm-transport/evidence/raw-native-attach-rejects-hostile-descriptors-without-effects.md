@@ -38,6 +38,8 @@ native boundary's own rejection set, pinned by four suites in
 
 ## Failure scenario
 
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
+
 A validation step that reads a descriptor field twice through an accessor or
 proxy returning different values admits geometry that was never checked; an
 early return after registering a channel leaks the entry and its external

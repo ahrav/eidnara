@@ -60,8 +60,13 @@ one reclaimed sequence out of two satisfies.
   assert full recovery at `:116-120`, but only after a strictly serial
   publish-receive-release cycle where the prefix is never non-contiguous, so it never
   exercises catch-up across more than one sequence.
+  At HEAD: The test is now named `retained_oldest_lease_enforces_fifo_reclamation`; the release-validation arm named in the old title is gone, and the recovery arm additionally asserts `resident_arena_pages() == 0` (`:164-168`) while still asking for only one byte.
+  At HEAD: It is no longer the only call site: `Ring::trim` (`:2247`) runs a reclaim pass at `:2256` precisely so an idle ring can return capacity without a reserve attempt, so the bound is producer reserve attempts or explicit trims.
+  At HEAD: The advance no longer happens per sequence inside the loop: the loop only accumulates `run_len` (`:2115-2117`), and `arena_reclaimed` moves once after the loop through `advance_cursor` at `:2143`, which strengthens the one-pass claim this record makes.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. A producer publishes several frames. The receiver acquires them and releases all but
    the oldest, so `completion_sequence` is set for the newer sequences while sequence

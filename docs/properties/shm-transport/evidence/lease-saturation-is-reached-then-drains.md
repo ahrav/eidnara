@@ -58,8 +58,14 @@ state.
   cap" and "one lease held" into the same observation, so a campaign can believe it
   reached saturation while only ever having reached "a lease exists". A cap above one is
   what makes the situation distinct, and nothing today constructs one.
+  At HEAD: Release rings only the capacity doorbell; the data doorbell is deliberately left alone, so a consumer that parked on the lease limit is not woken by its own release and must poll again.
+  At HEAD: The decrement is a compare-exchange through `Self::advance_cursor`, not a relaxed `fetch_sub`.
+  At HEAD: The counter is raised by `Self::advance_cursor`, an `AcqRel` compare-exchange against this handle's own record, not by a relaxed `fetch_add`.
+  At HEAD: The gate still runs before `published` is loaded, but `consumed` and `active_leases` now arrive together from `verified_consumer_cursors` at `ring.rs:1416`, ahead of it.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 For a coverage record this section states what it means if the situation never occurs.
 
@@ -76,6 +82,7 @@ a wake path: a saturated ring is exactly the state in which `data_available`
 (`ring.rs:1501-1512`) parks a `wait_for_data` consumer, so a campaign that never
 saturates also never exercises the release-signals-parked-waiter edge
 (`:1598`) under lease pressure.
+At HEAD: Release signals only the capacity doorbell at HEAD, so there is no release-wakes-a-parked-data-waiter edge to exercise under lease pressure.
 
 A never-fired marker also carries a second, larger message worth reading rather than
 suppressing: the shipped host configuration cannot exercise lease backpressure at all.
@@ -97,6 +104,7 @@ leased set; taken too late, the cap is already cleared. Dependencies: a profile 
 frame published beyond the leased set, which requires `descriptor_depth > max_leases` so
 the extra publication has a slot. `lease_limited_profile()` satisfies the second with
 depth 2 and cap 1 but fails the first, so a new profile is required rather than a reuse.
+At HEAD: `active_leases` is loaded with `Ordering::Acquire` inside `verified_consumer_cursors` and checked against this handle's private record, not read `Relaxed`.
 
 ## What a test must construct
 

@@ -25,14 +25,19 @@ wake". Lead only; the mechanism was re-read at HEAD.
   the queue with no future edge to deliver them.
 - `RingWriteSender::drop` also signals (`:2417-2419`), so channel teardown
   cannot strand the final pass.
+  At HEAD: The check is `if wrote || pending_control.is_some() || pending_data.is_some()`, so a pass holding an unfinished write also skips the poll.
+  At HEAD: Each pass polls two lanes, control and data, into the `pending_control` and `pending_data` slots, and then sends at most one of them.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A caller enqueues a burst of writes, then goes quiet. One write is sent; the
 rest wait for the next unrelated event — an inbound frame, a capacity signal,
 or peer death. Writes complete with unbounded latency or time out at their
 deadlines (`endpoint.send(header, body, deadline)`, `:2561-2566`), reported
 as transport failures on a healthy channel.
+At HEAD: The bridge calls `endpoint.send_bounded` with a `BRIDGE_RESERVE_SLICE` reserve deadline and the frame's own commit deadline, so one pass takes one capacity slice.
 
 ## Timing windows and dependencies
 

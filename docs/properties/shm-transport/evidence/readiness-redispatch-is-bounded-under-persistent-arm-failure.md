@@ -31,6 +31,8 @@ forever.
 
 ## Failure scenario
 
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
+
 A peer dies; the client's ring quarantines; the handler runs, sees the error,
 and does not close the channel in the same tick (or ever). Every
 acknowledgement returns true and the dispatcher requeues itself as a microtask

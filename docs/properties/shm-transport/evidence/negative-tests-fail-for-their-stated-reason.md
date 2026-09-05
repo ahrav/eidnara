@@ -86,6 +86,8 @@ Three replay tests depend on this: `frame_descriptor_corpus_replays_without_pani
 
 ## Failure scenario
 
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
+
 A decoder change widens acceptance — a bounds check is dropped, or a length
 equality becomes an inequality. Every corpus seed now decodes. `valid` is still
 accepted, so lines 33-35 pass; `replayed` is unchanged, so lines 38-41 pass; no

@@ -62,8 +62,12 @@ copy, so the question is what happens when the two counters disagree.
 - `backend/iceoryx.rs:349` — `release(self)` cannot resynchronize either. It
   takes no identity and returns nothing; see
   `iceoryx-completion-is-observable-to-the-host`.
+  At HEAD: The quarantine runs through `quarantine_with` (`:1943-1946`) rather than a direct enter_quarantine call, and `try_receive` also re-checks quarantine after the lease is built (`:1404-1407`).
+  At HEAD: the comparison lives in `ReleaseIdentity::check`, called from `SamplePrefix::validate` at `crates/shm-transport/src/backend/sample.rs:82`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The clean derivation is the restart the process-local state invites. A fresh
 `IceoryxBackend::create` sets `next_receive: Cell::new(0)` (`:115`), so a

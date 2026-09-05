@@ -25,6 +25,7 @@ converge. One sets the ring's shared quarantine byte and leaves the slot claimed
 the other releases the slot and leaves the flag clear. Both end at the same
 admission-charge outcome, so the divergence is invisible in the accounting and
 visible only to the peer.
+At HEAD: The comparison is against the WIRE_V2_VERSION constant inside the shared check_wire_header helper rather than a literal 2 inside validate.
 
 ## Evidence trail
 
@@ -38,6 +39,7 @@ calls `self.enter_quarantine()` and returns `RingError::Descriptor`.
 slot stays `RECEIVER_HELD` and every later `try_receive` on that lane fails its
 CAS. The host maps this to `ReadClose::Corrupt("shared-memory receive failed")`
 (former `shm_provider.rs:558`), a reason shared with every other `RingError`.
+At HEAD: try_receive_inner returns RingError::Descriptor and the try_receive wrapper quarantines through quarantine_with (`:1399-1401`); no enter_quarantine call remains in the validation arm.
 
 **Host-caught.** `decode_header` failure gives
 `ReadClose::Corrupt("invalid shared-memory header")` (`ring_transport.rs:681-682`)
@@ -68,8 +70,12 @@ The `&'static str` is bound to `_`. `ReadClose` itself carries
 no consumer reads. The four reason strings, plus the clean-EOF case, are one
 observation at the connection engine; the corrupt-versus-clean distinction
 survives only through the separate boolean at former `shm_provider.rs:498`.
+At HEAD: Every ReadClose variant is constructed at HEAD, so there is no dead-code allowance to cite as corroboration.
+At HEAD: ReadClose::Io and ReadClose::RejectedDrainFailed no longer exist, so the arm matches only CleanEof, Corrupt(_), and Overloaded.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A peer publishes a frame whose header carries `wire_header[4] == 3`. The
 transport rejects it, sets the shared quarantine byte, and leaves the slot
@@ -155,6 +161,7 @@ and states the gap rather than proving it closed.
   transport path's ring quarantine is the intended behaviour for all header
   rejections, or an artifact of descriptor validation happening to live below the
   trust boundary, is a design question.
+  At HEAD: enter_quarantine is no longer called from a single place inside try_receive; the receive path quarantines through quarantine_with, and reserve, release, conservation, and the doorbell waits call it too.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

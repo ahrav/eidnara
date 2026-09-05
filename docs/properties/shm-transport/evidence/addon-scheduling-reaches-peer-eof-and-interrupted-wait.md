@@ -10,8 +10,11 @@ Split from `addon-scheduling-wakes-only-on-acknowledged-readiness` so the situat
 - `retry_interrupted` (`scheduling.rs:16`) treats `EINTR` as a retry and the closing flag as the only other exit.
 - `setup_socket_eof_is_reactor_readiness` (`scheduling.rs:439`) registers one end of a socket pair, drops the other, and asserts exactly one event for the registered id with a readiness or hang-up flag.
 - `interrupted_wait_retries_until_success_or_close` (`scheduling.rs:480`) constructs the `EINTR` retry and the close exit directly.
+  At HEAD: The registration takes an event_data: u64 that callers derive with setup_event(channel_id) (`:40-42`) rather than the raw channel id, and it adds EventFlags::ONESHOT beside IN, HUP, ERR, and RDHUP (`:71-81`).
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A campaign that never reaches either situation passes while a real peer death or signal leaves the JavaScript side waiting forever.
 

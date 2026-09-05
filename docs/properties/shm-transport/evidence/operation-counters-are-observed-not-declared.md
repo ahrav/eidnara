@@ -13,6 +13,9 @@
 > below describe the pre-#131 bench and need mechanism-level re-derivation; the
 > table's internal line numbers are left as pre-rewrite evidence. Citations
 > outside the table were re-verified at HEAD.
+At HEAD: The flag is named `doorbell_wake_qualified`, `OperationCounters` now has seven fields because `syscalls` split into `doorbell_syscalls` and `other_syscalls`, and the waiver applies only when `park_wakes` is nonzero.
+At HEAD: Only the producer body copy is still counted per site (`copies += 1` at `:717`); allocations are bulk arithmetic, and the syscall, park, and scheduler counters come from `Ring::syscall_counters()` and `getrusage` in both processes.
+At HEAD: `park_wakes` is now `syscalls.parks + peer_parks` at `crates/shm-transport/benches/hardware_envelope.rs:693`, with the child publishing its own `syscalls.parks` at `:785`.
 
 ## Discovery trigger
 
@@ -43,6 +46,9 @@ Every write to any of the six fields, repository-wide, is one of:
 - `benches/hardware_envelope.rs:374-382` — copied into the emitted
   `Measurement`.
 - `benches/hardware_envelope.rs:400-408` — all six zeroed in `failed()`.
+  At HEAD: `failed()` zeroes eight counter fields and sets `syscalls: None`.
+  At HEAD: Seven counters plus a synthetic `SyscallSplit` are overwritten for the gate-control arm.
+  At HEAD: Only `generic_queue_hops` is a literal here; `doorbell_syscalls`, `other_syscalls`, `park_wakes`, and `scheduler_handoffs` are taken from the measured `ArmRun` and its `SyscallSplit`.
 
 `OperationCounters` is imported by exactly two files outside its own module:
 `tests/evidence.rs:1` and `benches/hardware_envelope.rs:11`. No production
@@ -62,6 +68,7 @@ Per-counter provenance in the bench, by arm family:
 For the selectable `ring` arm, `copied_producer` and `copied_receiver` are both
 `false` (`:323`), so none of the six counters is observed at an operation site:
 four are literals and `park_wakes` is derived from the schedule label.
+At HEAD: Four of the seven counters are observed at HEAD: doorbell syscalls, other syscalls, and parks come from `Ring::syscall_counters()` in both processes, and `scheduler_handoffs` from `getrusage`, so the claim that none is observed at an operation site no longer holds.
 
 The receiver copy is `lease.to_vec()` in `ring_consumer` at `:757`, which runs
 in the child forked at `:645`. The count is added in the parent at `:686-687`,
@@ -72,13 +79,17 @@ that performed the copy exited.
 `std::thread::sleep(Duration::from_micros(50))` at `:429` (source tree; not at HEAD), reached only when
 `try_receive()` returns `Ok(None)`, so the true count is data-dependent while
 the reported count is `iterations` exactly.
+At HEAD: `park_wakes` is no longer derived from a mode label; it is the doorbell's own park count from both processes, so removing a sleep is not the relevant control.
 
 The gate control `injected_avoidable_operations` dispatches to
 `run_ring(scheduling, iterations, payload, false, false)` at `:323` — argument
 for argument the same body as the selectable `ring` arm at `:322-324` — and
 then has all six counters replaced by `1` on the strength of its arm name.
+At HEAD: The gate control, `direct_producer_leased_receiver`, and the selectable `ring` arm are literally the same match arm at HEAD, and the override sets seven counters, not six.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A body copy is added to the `ring` receive path. `syscalls`,
 `generic_queue_hops`, and `scheduler_handoffs` are literal zeros;

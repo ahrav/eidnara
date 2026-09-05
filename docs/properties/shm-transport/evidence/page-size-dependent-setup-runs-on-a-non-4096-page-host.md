@@ -21,6 +21,9 @@ The three notions, in `crates/shm-transport`:
 3. `system_page_size()` (`src/backend/ring.rs:443-449`), which reads
    `sysconf(_SC_PAGESIZE)` and falls back to `PAGE_SIZE`. Its sole caller is
    `verify_prefaulted` at `:1009` (source tree; not at HEAD).
+   At HEAD: `system_page_size` has several callers: `Layout::new` (`ring.rs:280`), `Mapping::resident_pages` (`:590`), the punch batch size (`:2160`), the reclaim page walk (`:2185`), and `removal_ranges` (`:2294`).
+   At HEAD: `system_page_size` caches its result in a `OnceLock` and reads the kernel page size through `sys::page_size()` (`backend/sys.rs:185-189`), still falling back to `PAGE_SIZE`.
+   At HEAD: `PAGE_SIZE` appears only as its own definition (`ring.rs:46`) and as the fallback inside `system_page_size` (`:446`), so no layout arithmetic is left on the constant.
 
 `verify_prefaulted` is a hard gate on creation, not a diagnostic:
 `Ring::create_in` returns `PrefaultFailed` if it reports false (`:586-588` (source tree; not at HEAD)). That
@@ -64,6 +67,8 @@ deleted the Darwin npm packages (`packages/host-darwin-*`, removed in
 the dated investigation-log entry below.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The only in-tree evidence that any page-size code is correct is a pure-function
 assertion on a 4096-page host. The end-to-end path — `Layout::new`, `ftruncate`,
@@ -164,6 +169,8 @@ executed and its own probe passed. It must not assert a page-size violation.
 
 - Checked: `rg 'verify_prefaulted|PrefaultFailed|prefault' crates/shm-transport/src crates/host-runtime/src` returns nothing. `Layout::new` (`ring.rs:279-345`), `residency_vector_len` (`backend/sys.rs:153`), and the `mincore` accounting (`:583-596`) take the page size from `system_page_size()`. CI runs Linux x86-64 only.
 - Conclusion: no. The check is re-stated against the runtime-aligned setup and reclamation path; the record stays active because no non-4096-page host executes it.
+  At HEAD: `Ring::resident_arena_pages` (`ring.rs:1894-1899`) forwards to `Mapping::resident_pages` (`:583-596`), which sizes the vector with `sys::residency_vector_len(len, system_page_size())` and calls `sys::mincore`.
+  At HEAD: The helper moved to `backend/sys.rs:153`, and its caller `Mapping::resident_pages` passes the page size in (`ring.rs:590`).
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

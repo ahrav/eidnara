@@ -13,8 +13,11 @@ U3 renamed the domain separators (`eidnara-server-v1`, `eidnara-client-v1`) and 
 - `committed_auth_proof_vectors_pin_the_construction` (`crates/host-runtime/tests/protocol_vectors.rs:33`) uses the test-local `raw_client::proof`, an HMAC written over the documented layout rather than a call into `compute_proof`; `proof_folds_every_input` (`:146`) shows every field, including `daemon_ver`, changes the digest.
 - `auth_proofs_match_committed_wire_vectors` (`packages/shm-native/src/setup.rs:626`) pins the addon side against the same literals.
 - All of the above pass under `cargo test --workspace` on Rust 1.98 (CI) and stable.
+  At HEAD: auth.rs re-exports only the domain and length constants at `:12-14`; compute_proof is a thin wrapper function that forwards to shm_transport::setup_auth::compute_proof.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A field-order, length-prefix, or domain-string change applied to both peers at once. Interoperation continues, every in-crate round-trip test passes, and only the externally computed literal disagrees.
 

@@ -60,8 +60,12 @@ inbound channel.
 - `docs/shm-transport.md:47-49` — the documented failure and close
   contract covers generation retirement and charge classification. It does not
   state a disposition for an acquired-but-undelivered frame.
+  At HEAD: Read cancellation now returns `Ok(false)` rather than `Err(ReadClose::Cancelled)`, so the acquired frame is still dropped but the generation is not retired and the writer keeps draining.
+  At HEAD: The three writes are no longer inside one `unsafe` block, and the two cursor writes are `advance_cursor` compare-exchanges followed by a local mirror at `:1455-1458`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A frame is published, `try_receive` succeeds, `consumed` advances past its
 sequence, and the ingress budget is momentarily saturated. Cancellation arrives

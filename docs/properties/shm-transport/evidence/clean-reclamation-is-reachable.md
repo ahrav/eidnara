@@ -84,6 +84,8 @@ on the shipped backend.
 
 ## Failure scenario
 
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
+
 There is no misbehaviour to trigger; the gap is that one documented outcome
 never occurs. Any suspect close on the shipped provider takes the
 `Uncertain` path: `record.quarantine()` at line 494, charges stay visible, and no
@@ -176,6 +178,7 @@ and no proof that stale resources are gone. That is neither of the two documente
 outcomes. It is strictly weaker than the quarantine path the record found to be
 the only reachable one, because charges are now returned as clean capacity even
 after an unclean close.
+At HEAD: The release is no longer unconditional: a ring that latched quarantine and whose peer has not released it moves its charges to the quarantined bucket through `admission.quarantine()` (`:353-358`), and only an otherwise clean close reaches `admission.release()`.
 
 `docs/shm-transport.md:87-90` (source tree; not at HEAD) still presents clean reclamation and
 quarantine as two distinct outcomes with distinct test experiments. As of this

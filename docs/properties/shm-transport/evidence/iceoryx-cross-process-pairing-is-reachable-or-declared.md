@@ -73,8 +73,12 @@ creates both ports itself, under a service name it never discloses.
   `crates/host-runtime/Cargo.toml:25` and `packages/shm-native/Cargo.toml:17` both
   depend with `default-features = false`, so neither the host nor the shipped
   addon contains it.
+  At HEAD: Neither dependent sets default-features = false any more, because shm-transport no longer declares any features.
+  At HEAD: the report emits only paired_process_arms with six arms, h0_metadata_cacheline_ping_pong, the four ownership ablations, and ring, and no loopback classification exists.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Nothing breaks at runtime; the loss is evidential. The iceoryx backend is
 `selectable` in the release-gate manifest

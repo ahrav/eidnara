@@ -78,8 +78,12 @@ anything else.
   `onClosed("protocol_violation", error)` (the pre-#131 poll loop was replaced by
   the eventfd reactor drain). So the gap is specifically the Rust
   drop path and the host's clean-close bool, not the transport as a whole.
+  At HEAD: There is no plugin-side frame channel above the addon here, so a reported release failure stops at the `Error` thrown by `NativeReceiveLease.release` (`packages/shm-native/index.ts:608-618`).
+  At HEAD: The failure is raised as `consumed_error("receive completion failed")`, which marks the token consumed so the wrapper releases its handle instead of offering a retry.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The drop path is reachable in the shipped host topology without any injected fault:
 
@@ -107,6 +111,8 @@ The drop path is reachable in the shipped host topology without any injected fau
    possibly a stranded charge, with no counter, no diagnostic, and no suspect record.
    The operator's only signal is that shared-memory capacity gradually stops being
    offered.
+   At HEAD: The host release is not unconditional: a ring that latched quarantine without a peer release takes `admission.quarantine()` instead (`ring_transport.rs:353-361`).
+   At HEAD: Read cancellation inside the budget wait returns `Ok(false)` so the writer keeps draining; the endpoint loop then closes the inbound channel with `ReadClose::Cancelled` (`crates/host-runtime/src/ring_transport.rs:541-543`).
 
 ## Timing windows and dependencies
 
@@ -174,6 +180,7 @@ this the cheapest of the group to make non-vacuous.
   needs human input, because the fix shape differs: returning the error is
   impossible in `Drop`, but emitting a counter is not, and choosing between them is
   a design decision rather than something the code reveals.
+  At HEAD: `release` carries a doc comment at HEAD (`crates/shm-transport/src/lease.rs:322-323`) stating that `Drop` does the same thing but discards the error.
 
 ## Refresh outcome, 2026-08-30
 
@@ -194,6 +201,7 @@ did not disappear; it is now wholly owned by
 `charge-release-never-silently-strands`, which cites the transport crate directly.
 The `recovery.report_suspect(custody)` branch named as the existing check was
 deleted with `provider_recovery.rs`, so the record's existing check is now none.
+At HEAD: The call is reached only on the non-quarantined branch (`ring_transport.rs:353-361`), so it is conditional rather than unconditional.
 
 Reachability moved to `no` because the surviving discard is on the transport-side
 lease drop path, and no shipped configuration selects the shared-memory transport.

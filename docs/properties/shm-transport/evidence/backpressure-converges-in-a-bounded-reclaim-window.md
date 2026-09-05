@@ -71,8 +71,14 @@ what it must achieve.
   `retained_oldest_lease_enforces_fifo_reclamation_and_release_validation`
   (`tests/ring.rs:151-155`) asserts `reserve_until(.., Instant::now())` returns
   `Deadline`. That pins the give-up path, not the converge path.
+  At HEAD: Nothing in the two-process test keeps the `reserve_until` from passing on a wait that never blocked; its non-vacuity now rests on the reclaimed descriptor and byte counts asserted after the child exits.
+  At HEAD: A lost slot compare-exchange no longer reports `Exhausted`: it quarantines the ring and returns `ProducerError::Ring(RingError::InvalidSharedState)`, so only descriptor-depth saturation and arena exhaustion surface as `Exhausted`.
+  At HEAD: `signal_wake` increments the wake generation and, when it swaps a nonzero `parked`, sends a one-byte token on the AF_UNIX socketpair doorbell (`ring.rs:2033-2035`, `Doorbell::signal` at `:783-798`).
+  At HEAD: `Doorbell::wait_until` runs a deadline-bounded `poll(2)` on this handle's AF_UNIX socketpair end, not on an eventfd.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. A producer offers a frame while the arena is full or the descriptor ring is at
    depth. `try_reserve` returns `Exhausted` and `reserve_until` parks a wake epoch
@@ -96,6 +102,7 @@ what it must achieve.
    suspect branch is gone.
 5. The operator-visible symptom is a retired generation attributed to a transport
    fault, on a channel where the peer was draining correctly the entire time.
+   At HEAD: `admission.release()` is not unconditional: the endpoint thread calls `admission.quarantine()` instead when either ring latched quarantine and the peer did not release it (`crates/host-runtime/src/ring_transport.rs:353-361`).
 
 ## Timing windows and dependencies
 
@@ -166,6 +173,7 @@ because descriptor saturation without receipt is trivially reachable.
   The property is worth cataloging because that bound is nowhere asserted, and the one
   test that touches convergence uses a deadline loose enough to hide a reclaimer that
   advanced one sequence at a time.
+  At HEAD: A losing compare-exchange now quarantines the ring with `RingError::InvalidSharedState` rather than returning `Exhausted`.
 
 ### 2026-08-31: re-derivation against the eventfd doorbell mechanism
 
@@ -193,6 +201,8 @@ because descriptor saturation without receipt is trivially reachable.
   `reserve_until` arm doubles as the lost-wake detector, and the inner
   cross-process bound must be a recorded wall-clock choice rather than a count of
   poll rounds.
+  At HEAD: The release is taken only on the non-quarantined branch; a quarantined ring goes to `admission.quarantine()` (`ring_transport.rs:353-361`).
+  At HEAD: The doorbell is an AF_UNIX `socketpair` with a nonblocking local end, a movable peer end, a bounded token `drain`, and a `poll(2)` wait, not an eventfd.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

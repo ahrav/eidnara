@@ -52,8 +52,11 @@ entry point that creates a usable handle should observe it.
   released. The claim is pinned indefinitely only when a detach already failed
   and left entries in `stranded`, which is the same condition that raised
   quarantine in the first place (`lib.rs:301-302`).
+  At HEAD: Attach also runs conservation_inner(true) after the quarantine gate (`:1148`), so a mapping whose cursors already disagree with its slots is refused too.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. A detach failure or a receive-validation failure sets the flag. The two
    reachable triggers are `packages/shm-native/src/lib.rs:301` and
@@ -70,6 +73,8 @@ entry point that creates a usable handle should observe it.
    `RingError::Quarantined` (`:1396-1398`), `release` returns
    `LeaseError::Quarantined` (`:1529-1531`), and `probe` returns
    `RingError::Quarantined` (`:1888-1890`).
+   At HEAD: Attach refuses a flagged object at `:1141-1143`, so this scenario stops at step 2 and never returns a usable Ring.
+   At HEAD: Descriptor validation returns RingError::Descriptor and the try_receive wrapper quarantines through quarantine_with, which is one of many quarantine_with call sites rather than a single inline enter_quarantine.
 
 The consequence is a misleading success return plus a channel that can never do
 work. If the original quarantine came from a failed detach, the surviving
@@ -87,6 +92,7 @@ PR #131: the former Linux-only `/proc`-based descriptor transfer (pre-rewrite
 already-owned descriptors with no `cfg(target_os)` gate of its own; the
 remaining platform-specific code is confined to object creation and sealing
 (`ring.rs:2109-2185` (source tree; not at HEAD) cfg arms).
+At HEAD: ring.rs has no platform-specific cfg at HEAD, so there is no remaining platform-gated code to point at.
 
 ## What a test must construct
 

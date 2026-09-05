@@ -28,6 +28,7 @@ runs host-to-transport and `FrameType`, `Flags`, and `PROTOCOL_VERSION` are
 unreachable from the validating crate. The interesting property is therefore not
 either layer's check list but the composition: which layer owes which field, and
 whether the owed check runs before anything acts on the frame.
+At HEAD: the two checks live in the shared `check_wire_header` helper (`descriptor.rs:28-42`), which `validate` calls at `:323`.
 
 ## Evidence trail
 
@@ -46,6 +47,11 @@ literal `2` in all three places mirrors `PROTOCOL_VERSION` (`wire.rs:25`) with n
 shared definition, and `MAX_FRAME_BYTES` (`arena.rs:4`) mirrors
 `MAX_FRAME_BODY_LEN` (`wire.rs:38`); both pairs are 64 MiB today and neither pair
 is cross-checked.
+At HEAD: `MAX_FRAME_BODY_LEN` is derived from `shm_transport::MAX_FRAME_BYTES` and guarded by a const assertion (`wire.rs:38-43`), so this pair is cross-checked rather than mirrored.
+At HEAD: A shared definition exists at HEAD: `check_wire_header` compares against `WIRE_V2_VERSION` (`descriptor.rs:21`), and `wire.rs` re-exports `PROTOCOL_VERSION` (`:25`) under a const assertion that the two agree (`:27-30`).
+At HEAD: The producer side is `prepare_commit` (`ring.rs:2308-2317`) calling the same `check_wire_header` helper, so the two checks exist once rather than twice.
+At HEAD: `try_receive_inner` only maps the error (`ring.rs:1445`); the quarantine happens one level up in `try_receive` (`:1399-1401`).
+At HEAD: `try_receive_inner` snapshots with `slot.read_descriptor()` (`ring.rs:1440`), whose single `read_volatile` sits in `DescriptorSlot::read_descriptor` (`:198`).
 
 Host side. `decode_header` (`crates/host-runtime/src/wire.rs:323-382`) reads the
 frozen prefix, dispatches header length on `ver` through `header_len_for_version`
@@ -89,6 +95,8 @@ descriptor metadata", and the header's own fields are not mentioned.
 
 ## Failure scenario
 
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
+
 Three drifts break the composition without breaking either layer's tests. First,
 moving the charge or the copy above `ring_transport.rs:731` gives an attacker-declared length the
 power to hold up to 64 MiB of ingress budget for a full frame deadline on a frame
@@ -110,6 +118,7 @@ above it inherits that hold time. Depends on
 on `quarantine-authority-survives-peer-writes` for the premise that a peer can
 author descriptor bytes at all — both mappings are `PROT_READ|PROT_WRITE`
 (`ring.rs:462`, `:481`).
+At HEAD: Both mapping sites call `sys::mmap_shared`, which passes `PROT_READ | PROT_WRITE` and `MAP_SHARED` (`backend/sys.rs:94-95`).
 
 ## What a test must construct
 
@@ -131,6 +140,7 @@ that test is absent from the rewritten post-#131 file, so the end-to-end arm
 must be rebuilt rather than generalised. A static counterpart is worth more than a fault harness here: assert
 that every reader of `ValidatedFrame::wire_header()` outside a test reaches
 `decode_header` and `validate_inbound_header`.
+At HEAD: The type is `RingClientEndpoint` at HEAD, and `send` delegates to `send_bounded` (`ring_transport.rs:901-933`), which hands `header.encode()` to `reserve_until` and commits `body.len()`.
 
 ## Investigation log
 

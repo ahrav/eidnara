@@ -41,8 +41,14 @@ terminal local decision.
   quarantine on a failed alias detach, which is the trigger most likely to
   matter in practice: the flag is what keeps the storage condemned while a
   JavaScript view may still be attached.
+  At HEAD: The protection and sharing flags moved out of `ring.rs`: `sys::mmap_shared` passes `libc::PROT_READ | libc::PROT_WRITE` with `libc::MAP_SHARED` at `crates/shm-transport/src/backend/sys.rs:94-95`.
+  At HEAD: The gates still re-read the flag, but `is_quarantined` latches locally, and there are thirteen production gate sites in `ring.rs` (`:1141`, `:1202`, `:1228`, `:1275`, `:1396`, `:1404`, `:1478`, `:1529`, `:1608`, `:1888`, `:2248`, `:2382`, `:2541`), not five.
+  At HEAD: `is_quarantined` returns the local latch first (`:1928-1930`) and latches any observed shared flag (`:1936-1938`), so a hostile value is fail-closed too, not only a bad pointer.
+  At HEAD: `Ring` now has fifteen fields, the two doorbells are AF_UNIX socketpairs rather than eventfds, `owned_runtime_dir` is gone, and a local mirror of the flag exists: `quarantined: Cell<bool>` at `:1009`.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. The receiver validates a peer-authored descriptor, validation fails, and
    `try_receive` calls `enter_quarantine()` at `ring.rs:1401`. The shared byte
@@ -54,6 +60,7 @@ terminal local decision.
 4. The next local `try_reserve` re-reads the flag at `ring.rs:1275`, observes
    zero, and admits a reservation into storage the local side condemned. The
    same holds for `try_receive`, `release`, `conservation`, and `probe`.
+   At HEAD: This step is unreachable at HEAD: `is_quarantined` latches the observed flag, so a peer store of zero cannot make `try_reserve` (`:1275`) admit again.
 
 The consequence is that storage whose alias state is unknown becomes reusable
 again, which is exactly what quarantine exists to prevent
@@ -72,6 +79,7 @@ Platform gating matters only for the seal check, which is Linux-only
 exposure is not narrower. This property is upstream of
 `quarantine-gates-cover-every-storage-mutation` and
 `attach-refuses-a-quarantined-object`: both assume the flag reads 1 once set.
+At HEAD: Platform gating no longer varies: the ring backend is Linux-only through `compile_error!` at `ring.rs:18-19`, `validate_seals` carries no `cfg`, and there is no macOS path.
 
 ## What a test must construct
 

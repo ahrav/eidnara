@@ -76,8 +76,11 @@ no enforcement point at all.
   `quarantine()` then `!release()` and `!quarantine()` at former `:824`, former `:828`, former `:829`,
   with per-step aggregate assertions. It is sequential and single-threaded, and
   it never involves a second incarnation. The catalog's former `:811` is exact.
+  At HEAD: the endpoint thread calls the infallible `admission.release()` at `:360`, and only when neither ring stayed quarantined; `admission.quarantine()` runs at `:358` otherwise, and no `custody.release()` or boolean result exists.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The incarnation clause fails without any race.
 
@@ -92,6 +95,7 @@ The incarnation clause fails without any race.
 4. A release carrying provider incarnation 1 has therefore succeeded after
    incarnation 2 was minted, which is exactly what
    `docs/shm-transport.md:79` (source tree; not at HEAD) says is rejected.
+   At HEAD: The call at `:360` is `admission.release()`; `custody.release()` was deleted with `provider_recovery.rs`.
 
 The consequence is a contract divergence rather than a counter corruption: the
 charges do go back exactly once, because the phase clause holds. What is lost is
@@ -107,6 +111,7 @@ so exactly one wins and the loser restores the state it found and returns
 `false`. The loser's `false` is discarded at both `ring_transport.rs:360` and
 former `provider_recovery.rs:571`, so the outcome is invisible, which is why this
 property is cataloged even though the mechanism looks correct.
+At HEAD: `Admission::release` returns `()`, so there is no `false` to discard at `:360`.
 
 ## Timing windows and dependencies
 
@@ -197,6 +202,7 @@ so the race the record describes is designed out rather than checked. The
 `Admission::drop` accounting hazard recorded in the investigation log above is
 unaffected and remains live in the transport crate; it is tracked by
 `charge-release-never-silently-strands`.
+At HEAD: The disposition is not unconditional at HEAD: the thread counts a panic and sends a `Corrupt` close at `:343-349`, then quarantines at `:358` when either ring is quarantined and releases at `:360` otherwise.
 
 The documentation half of the finding survives the refactor and is now purely a
 doc defect: `docs/shm-transport.md:79` (source tree; not at HEAD) still describes rejecting releases

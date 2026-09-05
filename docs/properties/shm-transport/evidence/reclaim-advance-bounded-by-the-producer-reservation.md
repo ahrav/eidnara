@@ -48,8 +48,13 @@ All references are to `crates/shm-transport/src/backend/ring.rs`.
   `ArenaError::InvalidCursor` on underflow, and again if `used > capacity`. An
   over-advanced `arena_reclaimed` therefore surfaces later as a cursor error, not
   as an out-of-bounds access.
+  At HEAD: It is no longer the only read: `validate_idle_window` loads `reservation_len` at `:1837` and requires it to equal the descriptor's `allocation_len` (`:1851`), so an attaching handle does cross-check the two.
+  At HEAD: It is no longer the only guard: `:2105-2108` compares the re-read `(allocation_start, allocation_len)` against the producer-private `published_allocations` shadow and returns `InvalidSharedState` on mismatch, which is the cross-check this record asked for.
+  At HEAD: The read is now `let descriptor = slot.read_descriptor();`, with the `read_volatile` encapsulated in `DescriptorSlot::read_descriptor` (`:194-199`).
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 The receiver releases sequence `n`, which stores `completion_sequence = n` and
 leaves the slot `SLOT_RELEASE_PENDING`. Before the producer's next
@@ -129,6 +134,7 @@ case is actually reached.
   producer's stored `reservation_len`. Until that exists the record is a lead
   about a missing cross-check rather than a demonstrated defect. The
   design-intent half needs human input.
+  At HEAD: It is no longer a SAFETY comment and now reads "The reservation length is assigned before any non-free state becomes visible"; the observation contract it states is the same.
 
 ### Q: Does reclamation still trust the re-read descriptor at HEAD? (added 2026-09-05)
 

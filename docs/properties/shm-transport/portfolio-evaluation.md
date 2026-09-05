@@ -701,21 +701,27 @@ corrected. Eighteen refinements were returned and all are applied:
 ### Gaps queued
 
 1. `watch`'s callback argument is honoured only for the first channel
-   (`packages/shm-native/src/lib.rs:1174-1176`); the reactor holds one
-   callback and the wrapper hides it by keying handlers in a JS map. Known to
-   `mechanism.ts:311-316`, uncatalogued. The raw-path half of
+   (`packages/shm-native/src/lib.rs:1334-1336`, inside `watch` at
+   `:1322-1347`); the reactor holds one callback and the wrapper hides it by
+   keying handlers in a JS map. Known to the acknowledgement test's later-pair
+   arm (`mechanism.ts:625-627`), uncatalogued. The raw-path half of
    `each-channel-wake`.
 2. A dropped acknowledgement parks the shared reactor for every channel:
    `readiness_handled` returns `false` without `reactor.handled()` when the
-   registry is borrowed or the reactor is absent (`lib.rs:1194-1199`). The
-   inverse of the redispatch record; no test.
+   registry is borrowed or the reactor is absent (`lib.rs:1354-1362`, inside
+   `readiness_handled` at `:1352-1385`). The inverse of the redispatch record;
+   no test.
 3. The host diagnostics report has no value-level redaction oracle
-   (`ring_transport.rs:889-900` asserts seven key names only); the join the
+   (`ring_transport.rs:1164-1175` asserts that seven secret key names are
+   absent from the encoded report, and nothing else about values); the join the
    relationship map asserts between the diagnostics and redaction records is
    checked by neither.
 4. A failed `native.close` strips readiness while leaving the channel open
-   (`index.ts:691-695`, `lib.rs:1371`, `:1378-1386`); the runtime tests
-   cover the mapping-retention half only.
+   when the native side retained the entry (`index.ts:886-898`,
+   `finish_close` at `lib.rs:1563-1576`); at HEAD the wrapper retires only the
+   handles whose tokens are confirmed absent (`:896`) and the native side reports
+   a cleanup failure with the consumed prefix once the entry is gone
+   (`lib.rs:1576`). The runtime tests cover the mapping-retention half only.
 
 ### Biases requiring human judgment
 

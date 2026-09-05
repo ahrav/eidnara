@@ -18,7 +18,7 @@ page-removal pass only, while `Ring::trim`
   reads map their error through `quarantine_with`.
 - `punch_dead_pages` (`:2169-2244`, doc comment `:2163-2168`): the dead range is `[punched, reclaimed)`
   (`:2163`); `everything` counts partially covered pages as dead once no live
-  bytes remain (`:2164`, `:2199-2204`), while the other branch bounds the range inward at
+  bytes remain (`:2164`, `:2199-2220`, boundary rounding at `:2200-2204`), while the other branch bounds the range inward at
   `:2222-2226`; the function returns early when
   `punched == reclaimed` (`:2176-2178`), so a ring with nothing released
   removes nothing. `live_end` (`:2154-2156`) returns the producer-local
@@ -49,8 +49,11 @@ page-removal pass only, while `Ring::trim`
   `:3226`, `:3230`, `:3335`) and in the `:4136` test. `crates/host-runtime/src` and
   `packages/shm-native/src` have no `Ring::trim` call; the two `.trim()` hits in
   `crates/shm-transport/src/profile.rs:273` and `:278` are string trims.
+  At HEAD: The caller list is no longer complete: `.trim()` also appears at `:4104` and `:4113` in `subpage_releases_stay_resident_until_trim` (`:4091`) and at `:4129` in `partial_page_reclaim_preserves_live_neighbor` (`:4118`).
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A trim whose upper bound is the reclaim cursor's target rather than
 `arena_write`, or whose trailing-page handling ignores a reservation that

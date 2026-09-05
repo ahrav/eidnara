@@ -32,8 +32,12 @@ still belonged to an unreleased frame. Lead only; re-verified at HEAD.
   `arena_reclaimed` is stored only after every removal succeeded
   (`:2142-2144`, "capacity becomes visible only after every removal
   succeeds").
+  At HEAD: The guard is `everything && live_end == reclaimed`, where `live_end` is `reserved_end` while a reservation is outstanding and `arena_write` otherwise (`ring.rs:2154-2156`).
+  At HEAD: The trailing partial page is removed only by `trim`, which passes `everything = true` to `punch_dead_pages` (`ring.rs:2264`); a reclaim pass always passes `false` (`:2133`), so reclamation never touches a partial page.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Frame A ends mid-page; frame B starts on the same page and is still leased.
 A is released and reclaimed. With round-down, `MADV_REMOVE` covers the shared
@@ -68,6 +72,7 @@ makes "everything before `new_reclaimed` is dead" a sound premise.
 - Not yet constructed: the trailing-partial-page exception (`:2199-2220`)
   under a *wrapped* `arena_write` — every existing case reaches it with a
   linear cursor — and any of this on a non-4096-page host (fault class F11).
+  At HEAD: Sub-page releases do not converge to whole-page removal on their own at HEAD: reclamation punches only once a quarter of the arena is dead (`ring.rs:2132-2134`, `punch_batch_bytes` at `:2159-2161`), and the rest comes back only through `trim`.
 
 ## Investigation log
 

@@ -35,8 +35,12 @@ opposite acceptance condition from the code.
   flag on both ends and still completes a bounded wait and a million signals.
 - `closed_peer_doorbell_fails_instead_of_blocking` (`:3163-3169`) drops the
   creating side and asserts `signal` and `drain` both return `DoorbellFailed`.
+  At HEAD: The gate requires SO_TYPE == SOCK_STREAM (`:745-748`) and a successful peer_addr() (`:750`), which is what proves the descriptor is a connected AF_UNIX end; no SO_DOMAIN query exists.
+  At HEAD: Doorbell::create builds the pair with UnixStream::pair() and then sets O_NONBLOCK on both ends, so no raw socketpair call with SOCK_CLOEXEC or SOCK_NONBLOCK remains in ring.rs.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A peer transfers a regular file, an eventfd, or an unconnected socket in a
 doorbell slot. Without the gate, the first `send` or `recv` fails with

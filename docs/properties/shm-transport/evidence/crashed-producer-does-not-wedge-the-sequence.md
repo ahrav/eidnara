@@ -57,8 +57,13 @@ execute.
 - Existing check: none, confirmed. The six kill-based tests in
   `crates/host-runtime/tests/shm_failure_modes.rs` (`:214`, `:226`, `:246` (source tree; not at HEAD), `:282` (source tree; not at HEAD),
   `:316` (source tree; not at HEAD), `:358` (source tree; not at HEAD)) all kill outside a reservation.
+  At HEAD: Two kill-based tests remain at HEAD, setup_active_and_idle_sigkill_each_return_exact_capacity (`:214`) and repeated_crashes_do_not_ratchet_single_connection_capacity (`:226`), and both still kill outside a reservation.
+  At HEAD: published is loaded Acquire inside verified_producer_cursors (`:1963`) and the whole cursor set must equal this handle's own record (`:1968-1970`), so a handle cannot adopt a cursor value it did not write itself.
+  At HEAD: A losing CAS is no longer Exhausted: the map_err quarantines the ring and returns ProducerError::Ring(RingError::InvalidSharedState), which the comment at `:1300-1301` and the test foreign_slot_state_on_reserve_is_a_fault_not_backpressure (`:3960`) both pin as a fault rather than backpressure.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 1. A producer calls `try_reserve`. `published` is `N-1`, so `sequence = N`, and the
    slot for `N` moves `FREE → PRODUCER_RESERVED` (`ring.rs:1302-1311`).
@@ -74,6 +79,7 @@ execute.
    `conservation()` reports `producer_reserved == 1` and conserves, so no charge is
    retained and no recovery episode starts. The only signal is a code whose plain
    meaning is "try again later", which a caller will honour indefinitely.
+   At HEAD: A CAS that loses against a stranded PRODUCER_RESERVED slot quarantines the ring and returns InvalidSharedState, so at HEAD the wedge presents as a terminal fault rather than as Exhausted.
 
 ## Timing windows and dependencies
 
@@ -94,6 +100,7 @@ Linux-only attach path. Relationship: this is the producer-side twin of
 liveness signal and no reconciliation — and it shares with
 `dead-peer-charges-are-reclaimed-or-declared` the property that the fault surfaces
 as a legal code rather than as a fault.
+At HEAD: The cursor is published by Self::advance_cursor(&producer.published, ...) (`:2368`), an AcqRel compare_exchange against this handle's recorded value, not a plain release store.
 
 One scoping note, stated because it changes what "any later producer" means. In the
 shipped two-process topology each candidate gets a fresh `DuplexRing`

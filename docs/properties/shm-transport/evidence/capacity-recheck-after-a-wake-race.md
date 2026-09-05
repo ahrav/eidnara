@@ -32,8 +32,11 @@ retries into `reserve_until`. Lead only; the loop was re-read at HEAD.
   orderings the code claims, which no tool currently validates.
 - `arm_data_wait` (`:1187-1220`) is the same protocol for the consumer
   direction, with the same recheck-after-park and recheck-after-drain shape.
+  At HEAD: The wake write is a one-byte token sent on the AF_UNIX socketpair doorbell (`Doorbell::signal`, `ring.rs:783-798`), which `wait_until` observes as `POLLIN` on that socket.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Without the post-park retries: producer sees Exhausted, reads generation G,
 parks G+1. Receiver releases, bumps to G+1, swaps `parked` to 0, writes the
@@ -95,6 +98,7 @@ Release-not-SeqCst parked resets.
 - Missing evidence: no loom or Miri model of the park/wake protocol exists
   anywhere in the repository.
 - Conclusion: unresolved, needs a loom or Miri pass over the wake protocol.
+  At HEAD: `parked` is cleared in exactly one place at HEAD, `ParkGuard::drop` (`ring.rs:653-657`), with a `Release` store, so the mixed-ordering observation concerns that single site rather than several exit arms.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

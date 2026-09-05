@@ -36,8 +36,11 @@ gate and the kick deferral. Leads only; re-verified at HEAD.
   most one readiness closure touching the channels at a time" true, and the
   max-queue-size-2 threadsafe function (`scheduling.rs:131`) relies on calls
   being acknowledged, not accumulated.
+  At HEAD: A non-Ok call now latches `failed` and breaks the reactor loop as well as clearing `pending`, so a rejected dispatch ends delivery instead of only reopening the gate.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Two unacknowledged callbacks in flight: the second `dispatchReadiness` runs
 while the first is mid-walk. Both iterate every registered channel
@@ -81,6 +84,7 @@ and a hostile double-`readinessHandled` probing the epoch pairing.
 - Missing evidence: none.
 - Conclusion: resolved with answer — bounded single-shot exception on a
   terminal path; recorded in the catalog's open questions.
+  At HEAD: `failed` is set on this branch at HEAD (`:235`), so `ensure_healthy` would report the reactor as failed once a caller consults it.
 
 ### Q: does `weak::<true>` let the callback vanish while pending?
 
@@ -90,6 +94,7 @@ and a hostile double-`readinessHandled` probing the epoch pairing.
 - Missing evidence: none.
 - Conclusion: resolved with answer — no wedge; delivery stops when the JS
   side drops the function, which is shutdown behavior.
+  At HEAD: A non-Ok call also latches `failed` and breaks the loop, so delivery stops on that path rather than merely rolling the gate back.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

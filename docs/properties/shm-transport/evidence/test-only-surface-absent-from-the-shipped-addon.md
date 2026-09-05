@@ -12,6 +12,7 @@
 > The core claim — the six named test-only exports ship unconditionally and are
 > re-exported through `index.ts` — was re-verified at HEAD. Table line numbers
 > below were re-anchored to HEAD.
+At HEAD: `lib.rs` carries 32 `#[napi]` attributes: 30 exported functions plus two `#[napi(object)]` types.
 
 ## Discovery trigger
 
@@ -119,6 +120,8 @@ holds; a `build_profile` probe (`lib.rs:501-507`) now reports the compiled
 profile at runtime.
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 Any JavaScript running in the host process — a plugin, a dependency, an injected
 script — calls `forceClose(id)`. Both rings enter quarantine, all producer

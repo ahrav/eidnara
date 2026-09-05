@@ -70,8 +70,14 @@ maps whatever the grant declares, with no step that compares the two.
   `descriptorDepth`, `arenaBytes`, `maxLeases`, and `reserved` (`geometry_mismatch`
   at `:167` (source tree; not at HEAD)), plus `totalBytes` bounded by `MAX_TOTAL_BYTES` (`:170` (source tree; not at HEAD)), which is
   `ARENA_BYTES + 1_048_576n` (`:76` (source tree; not at HEAD)).
+  At HEAD: the attaching-side geometry bounds are in Rust: `MAX_DESCRIPTOR_DEPTH` enforced by `Layout::new`, and the addon's `grant_matches_profile` check against the local profile.
+  At HEAD: Call sites now pass `(descriptors, grant)`, and the tree has more of them than this list: `packages/shm-native/src/lib.rs:772` and `:777`, plus `crates/host-runtime/src/ring_transport.rs:877` and `:879`, none of them passing a profile.
+  At HEAD: Only `max_spans` is re-checked here; backend and memory-layout agreement is enforced by `TargetProfile::new` before `Ring::create` runs.
+  At HEAD: `Ring::attach(descriptors: [OwnedFd; 3], grant: RingGrant)` takes two parameters, still none of them a profile; there is no `scheduling` argument and no prefault, and the body also sets CLOEXEC on all three descriptors, captures the cursor baselines, refuses a quarantined mapping (`:1141`), and runs `conservation_inner(true)` (`:1148`).
 
 ## Failure scenario
+
+The scenario below was derived against the source tree this record was written from; where the investigation log's post-merge entry records a changed mechanism, the sentences marked "At HEAD" above and that entry carry the current behavior, and the scenario reads as the regression this record guards against.
 
 A grant declares depth 4096 with the arena floor. `checked_layout` accepts it:
 depth is nonzero, the arena meets its floor, leases can be set to any value up to
