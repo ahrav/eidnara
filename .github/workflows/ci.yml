@@ -259,8 +259,12 @@ jobs:
 
       - name: No default features
         # `--all-features` is already covered by clippy above.
-        # storage's `sqlite` is a default feature.
-        run: cargo +1.98 check --workspace --no-default-features --locked
+        # `--no-default-features` only clears each package's own `default`
+        # set; a dependent that names `storage/sqlite` explicitly keeps it
+        # enabled workspace-wide, so storage is also checked on its own.
+        run: |
+          cargo +1.98 check --workspace --no-default-features --locked
+          cargo +1.98 check -p storage --no-default-features --locked
 
       - name: Fuzz workspace (excluded from the root workspace)
         run: >

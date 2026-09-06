@@ -3796,6 +3796,7 @@ pub struct NoteEvalReducedState {
     pub check_hash: Option<String>,
     pub check_cron: Option<String>,
     pub check_version: Option<i64>,
+    /// `None` keeps the note's current `check_status`.
     pub check_status: Option<String>,
     pub check_failure_count: i64,
     pub check_network_failure_count: i64,
@@ -14104,33 +14105,38 @@ fn write_seed_compartment_tx(
     Ok(changed != 0)
 }
 
-/// A snapshot replaces the whole workspace this project belongs to. `None` removes only this project's membership and drops a workspace once no member remains. commentlint: allow(JUDGE)
+/// A snapshot replaces the workspace it names and unlinks its members from whatever workspace they were in. `None` removes only this project's membership. Either way a workspace with no members left is dropped. commentlint: allow(JUDGE)
 fn replace_workspace_tx(
     tx: &GuardedConn<'_>,
     project_path: &str,
     workspace: Option<&ModuleWorkspaceRow>,
 ) -> rusqlite::Result<()> {
-    let Some(workspace) = workspace else {
-        tx.execute(
-            "DELETE FROM workspace_members WHERE project_path = ?1",
-            params![project_path],
-        )?;
-        tx.execute(
-            "DELETE FROM workspaces
-              WHERE NOT EXISTS (
-                  SELECT 1 FROM workspace_members WHERE workspace_id = workspaces.id
-              )",
-            [],
-        )?;
-        return Ok(());
-    };
     tx.execute(
-        "DELETE FROM workspaces
-          WHERE id IN (
-              SELECT workspace_id FROM workspace_members WHERE project_path = ?1
-          )",
+        "DELETE FROM workspace_members WHERE project_path = ?1",
         params![project_path],
     )?;
+    if let Some(workspace) = workspace {
+        for member in &workspace.members {
+            tx.execute(
+                "DELETE FROM workspace_members WHERE project_path = ?1",
+                params![&member.project_path],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM workspaces WHERE name = ?1",
+            params![&workspace.name],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM workspaces
+          WHERE NOT EXISTS (
+              SELECT 1 FROM workspace_members WHERE workspace_id = workspaces.id
+          )",
+        [],
+    )?;
+    let Some(workspace) = workspace else {
+        return Ok(());
+    };
     let share_categories = serde_json::to_string(&workspace.share_categories)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     tx.execute(
@@ -15877,7 +15883,7 @@ impl MemoryStore {
                     "UPDATE notes SET status = ?1, ready_at = ?2, ready_reason = ?3,
                     last_checked_at = ?4, updated_at_ms = ?5, compiled_check = ?6,
                     manifest_json = ?7, check_hash = ?8, check_cron = ?9, check_version = ?10,
-                    check_status = ?11, check_failure_count = ?12,
+                    check_status = COALESCE(?11, check_status), check_failure_count = ?12,
                     check_network_failure_count = ?13, check_quarantined_until = ?14,
                     check_next_due_at = ?15, check_compiled_at = ?16,
                     check_false_since_at = ?17, check_last_liveness_at = ?18,
@@ -23350,6 +23356,38 @@ mod shadow_tests {
             workspaces, 0,
             "the last member leaving drops the workspace row"
         );
+    }
+
+    #[test]
+    fn moving_a_project_to_another_workspace_keeps_its_former_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let member = |project_path: &str| ModuleWorkspaceMemberRow {
+            project_path: project_path.to_string(),
+            display_name: project_path.to_string(),
+            display_path: project_path.to_string(),
+        };
+        let shared = ModuleWorkspaceRow {
+            name: "shared".to_string(),
+            share_categories: vec!["CONSTRAINTS".to_string()],
+            members: vec![member("git:a"), member("git:b")],
+        };
+        store
+            .inner
+            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:a", Some(&shared)))
+            .unwrap();
+
+        let solo = ModuleWorkspaceRow {
+            name: "solo".to_string(),
+            share_categories: vec![],
+            members: vec![member("git:a")],
+        };
+        store
+            .inner
+            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:a", Some(&solo)))
+            .unwrap();
+        assert_eq!(workspace_members_of(&store, "shared"), ["git:b"]);
+        assert_eq!(workspace_members_of(&store, "solo"), ["git:a"]);
     }
 
     #[test]

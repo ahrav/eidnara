@@ -20,6 +20,7 @@ cargo test --workspace --all-targets --all-features --locked   # ~2.5 min warm
 cargo test --workspace --doc --all-features --locked            # --all-targets skips doctests
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo check --workspace --no-default-features --locked          # storage's `sqlite` is a default feature
+cargo check -p storage --no-default-features --locked           # memory-store names storage/sqlite, so the workspace check keeps it on
 cargo fmt   --manifest-path crates/shm-transport/fuzz/Cargo.toml --all -- --check
 cargo check --manifest-path crates/shm-transport/fuzz/Cargo.toml --locked --bins
 bun install --frozen-lockfile && bun run check:repo             # root + package typecheck
