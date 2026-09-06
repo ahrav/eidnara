@@ -197,8 +197,8 @@ jobs:
       - name: Rust format
         run: |
           cargo +1.98 fmt --all -- --check
-          cargo +1.98 fmt --all -- --check \
-            --manifest-path crates/shm-transport/fuzz/Cargo.toml
+          cargo +1.98 fmt --manifest-path crates/shm-transport/fuzz/Cargo.toml \
+            --all -- --check
 
       - name: Workspace graph has no sibling checkout or metadata stub
         run: |
