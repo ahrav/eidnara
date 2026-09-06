@@ -104,8 +104,10 @@ mod sqlite_backend {
     use super::*;
     use std::{
         ffi::c_int,
+        ops::{Deref, DerefMut},
         path::{Path, PathBuf},
-        sync::Mutex,
+        sync::{Mutex, MutexGuard},
+        thread::{self, ThreadId},
         time::Duration,
     };
 
@@ -123,12 +125,43 @@ mod sqlite_backend {
     /// A lease-guarded SQLite store. The lease remains held for the store's lifetime.
     /// A single mutexed connection preserves connection-local configuration and transaction scope.
     /// [`open_sqlite`] claims the database lease epoch before returning the store.
+    ///
+    /// Every callback runs while the connection lock is held.
+    /// Re-entry into the same store from a callback returns [`StoreError::Backend`] instead of blocking.
     pub struct SqliteStore {
         conn: Mutex<Connection>,
+        holder: Mutex<Option<ThreadId>>,
         epoch: u64,
         // Declared after `conn` so the connection closes before the lease unlocks;
         // `None` is reserved for `for_test`.
         _lease: Option<HeldFileLease>,
+    }
+
+    /// Dropping the guard clears the holder record before the connection lock releases.
+    struct ConnGuard<'a> {
+        conn: MutexGuard<'a, Connection>,
+        holder: &'a Mutex<Option<ThreadId>>,
+    }
+
+    impl Deref for ConnGuard<'_> {
+        type Target = Connection;
+
+        fn deref(&self) -> &Connection {
+            &self.conn
+        }
+    }
+
+    impl DerefMut for ConnGuard<'_> {
+        fn deref_mut(&mut self) -> &mut Connection {
+            &mut self.conn
+        }
+    }
+
+    impl Drop for ConnGuard<'_> {
+        fn drop(&mut self) {
+            // Clear `holder` while `conn` remains locked, so no other thread can set it first.
+            *self.holder.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
     }
 
     impl SqliteStore {
@@ -144,9 +177,30 @@ mod sqlite_backend {
         pub(crate) fn for_test(conn: Connection, epoch: u64) -> Self {
             SqliteStore {
                 conn: Mutex::new(conn),
+                holder: Mutex::new(None),
                 epoch,
                 _lease: None,
             }
+        }
+
+        /// `lock_conn` rejects same-thread re-entry because relocking `conn` can deadlock or panic.
+        /// `holder` is written only after `conn` is acquired and cleared only before `conn`
+        /// is released, so a thread that reads its own id in `holder` holds `conn`, and the
+        /// check cannot race with another thread taking the lock.
+        fn lock_conn(&self) -> Result<ConnGuard<'_>, StoreError> {
+            let current = thread::current().id();
+            if *self.holder.lock().unwrap_or_else(|p| p.into_inner()) == Some(current) {
+                return Err(StoreError::Backend(
+                    "store re-entered from a callback running under its connection lock"
+                        .to_string(),
+                ));
+            }
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            *self.holder.lock().unwrap_or_else(|p| p.into_inner()) = Some(current);
+            Ok(ConnGuard {
+                conn,
+                holder: &self.holder,
+            })
         }
 
         /// `with_conn` permits read-only queries and connection-local configuration.
@@ -171,7 +225,7 @@ mod sqlite_backend {
             &self,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut guard = self.lock_conn()?;
             let tx = guard
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -200,7 +254,7 @@ mod sqlite_backend {
             &self,
             f: impl FnOnce(&MaintenanceConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self.lock_conn()?;
             f(&MaintenanceConn::new(&guard)).map_err(|e| StoreError::Backend(e.to_string()))
         }
 
@@ -232,7 +286,7 @@ mod sqlite_backend {
             &self,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut guard = self.lock_conn()?;
             // A superseded writer must not touch the file at all, and the durability pin
             // rewrites the journal mode. This read-only precheck refuses it before the
             // pragmas run; the claim inside the transaction remains the authoritative check.
@@ -354,6 +408,11 @@ mod sqlite_backend {
         /// A trigger on `fence` or `format_marker` must not call the function.
         /// [`open_sqlite`] writes those tables before any maintenance handle exists, so
         /// such a trigger fails the open with `no such function`.
+        ///
+        /// The function runs on the thread executing the statement that invokes it, while
+        /// that statement's callback holds the store's connection lock. A call from the
+        /// function into the same [`SqliteStore`] returns [`StoreError::Backend`]; the
+        /// function may read only its arguments and captured state.
         ///
         /// # Errors
         ///
@@ -943,6 +1002,7 @@ mod sqlite_backend {
 
         Ok(SqliteStore {
             conn: Mutex::new(conn),
+            holder: Mutex::new(None),
             epoch,
             _lease: Some(lease),
         })
@@ -3704,6 +3764,66 @@ mod tests {
             "{r:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_callback_that_reenters_the_store_gets_an_error_instead_of_blocking() {
+        let (root, d) = tmp();
+        let store = std::sync::Arc::new(open_sqlite(&d, KV_BASELINE).expect("open"));
+        let reentered = "store re-entered from a callback";
+
+        let inner = std::sync::Arc::clone(&store);
+        store
+            .with_conn_unfenced(|c| {
+                c.create_scalar_function(
+                    "reenter",
+                    0,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                    move |_| {
+                        inner
+                            .with_conn(|g| g.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)))
+                            .map_err(user_error)
+                    },
+                )
+            })
+            .expect("register");
+        let r = store.with_conn(|g| g.query_row("SELECT reenter()", [], |r| r.get::<_, i64>(0)));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains(reentered)),
+            "scalar-function re-entry must surface as an error, got {r:?}"
+        );
+
+        let r = store.with_conn(|_| store.with_conn(|_| Ok(())).map_err(user_error));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains(reentered)),
+            "{r:?}"
+        );
+        let r = store.with_conn_fenced(|_| store.with_conn_fenced(|_| Ok(())).map_err(user_error));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains(reentered)),
+            "{r:?}"
+        );
+        let r =
+            store.with_conn_unfenced(|_| store.with_conn_unfenced(|_| Ok(())).map_err(user_error));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains(reentered)),
+            "{r:?}"
+        );
+
+        // The refusal leaves the store usable, and another thread still takes the lock.
+        store
+            .with_conn(|g| g.query_row("SELECT 1", [], |_| Ok(())))
+            .expect("store still works");
+        let other = std::sync::Arc::clone(&store);
+        std::thread::spawn(move || other.with_conn(|g| g.query_row("SELECT 1", [], |_| Ok(()))))
+            .join()
+            .expect("thread")
+            .expect("another thread is not re-entry");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn user_error(e: StoreError) -> rusqlite::Error {
+        rusqlite::Error::UserFunctionError(e.to_string().into())
     }
 
     #[test]
