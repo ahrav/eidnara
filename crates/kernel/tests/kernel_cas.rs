@@ -1625,3 +1625,66 @@ fn an_open_store_keeps_publishing_into_the_tree_it_opened() {
         .unwrap();
     assert_eq!(references, 1);
 }
+
+#[test]
+fn a_replayed_stricter_classification_reaches_the_served_surface() {
+    use kernel::{AdmissionEvent, AdmissionRequest, EventKind, SourceClass, Surface, TaintClass};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"served then tightened".to_vec();
+    let handle = store
+        .ingest_artifact(request("served", payload.clone()))
+        .unwrap();
+    // The evidence object earns labeled standing while it is classified normal.
+    store
+        .commit(intent("admit-served", b"admit"), |envelope| {
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some("evidence-object-served".to_string()),
+                source_class: Some(SourceClass::TrustedLocalCode),
+                taint_class: Some(TaintClass::CurrentCode),
+                event: AdmissionEvent {
+                    kind: EventKind::Other,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: Some(handle.evidence_id.clone()),
+                    reason: "fixture".to_string(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let served_before = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    assert!(
+        served_before
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "evidence-object-served"),
+        "the fixture must serve before the replay: {served_before:?}"
+    );
+
+    // An idempotent replay tightens the artifact to secret without a commit.
+    let mut stricter = request("served", payload);
+    stricter.asserted_sensitivity = Sensitivity::Secret;
+    let replayed = store.ingest_artifact(stricter).unwrap();
+    assert_eq!(replayed.digest, handle.digest);
+    assert_eq!(store.tip().unwrap(), tip, "a replay commits no log row");
+    assert_ne!(
+        store
+            .artifact_eligibility(&handle, ArtifactDestination::Remote)
+            .unwrap(),
+        ArtifactEligibility::Allowed
+    );
+
+    let served_after = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    assert!(
+        !served_after
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "evidence-object-served"),
+        "a secret artifact stayed served after the replay"
+    );
+}

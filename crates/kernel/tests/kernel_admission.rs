@@ -6097,3 +6097,107 @@ fn revocation_demotes_descendants_reached_through_a_deferred_dependent() {
         "a descendant of the revoked root is still served on the elevated surface"
     );
 }
+
+#[test]
+fn a_new_candidate_id_cannot_reset_a_lineage_rejection() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    // Two candidates from the same source lineage, staged in separate runs.
+    stage_in_run(&store, "run-first", "first", "shared-source");
+    stage_in_run(&store, "run-second", "second", "shared-source");
+
+    // The lineage is rejected through the first candidate.
+    store
+        .commit(intent("reject-first"), |envelope| {
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: Some("first".to_string()),
+                subject_object_id: None,
+                source_class: Some(SourceClass::TrustedLocalCode),
+                taint_class: Some(TaintClass::CurrentCode),
+                event: AdmissionEvent {
+                    kind: EventKind::ExplicitReject,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: None,
+                    reason: "source rejected".to_string(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // The second candidate carries the same lineage, so its prior is that
+    // rejection and an automatic admission cannot relax it.
+    assert_eq!(admit(&store, request("second"), "second", "second"), "deny");
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT disposition FROM admission_decisions
+             WHERE candidate_ref='second' ORDER BY commit_seq DESC LIMIT 1"
+        ),
+        "rejected"
+    );
+    // The lineage's governing decision is still a rejection, so nothing on it serves.
+    let tip = store.tip().unwrap();
+    let served = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    assert!(
+        !served
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "object-second"),
+        "a rejected lineage served its next candidate: {served:?}"
+    );
+}
+
+#[test]
+fn revoking_an_approval_demotes_a_source_scoped_decision_it_supported() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "lineage", "code_present", 1, "lineage-trigger");
+
+    // The approval promotes the candidate while it is still unmaterialized, so the
+    // promotion is a source-scoped row with no subject that governs the lineage.
+    let mut approved = request("lineage");
+    approved.event.kind = EventKind::Approve;
+    approved.event.trigger_object_id = None;
+    approved.event.approval_object_id = Some("approval".to_string());
+    store
+        .commit(intent("promote-lineage"), |envelope| {
+            let decision = envelope.record_admission(approved)?;
+            assert_eq!(decision.effective_maturity, Maturity::Approved);
+            Ok(String::new())
+        })
+        .unwrap();
+
+    store
+        .commit(intent("revoke-lineage"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "authority withdrawn")?;
+            assert_eq!(decisions.len(), 1, "the source-scoped row is a dependent");
+            assert_eq!(decisions[0].outcome, kernel::Outcome::DemoteSupport);
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // The lineage's governing decision is now the revocation, with the support
+    // clamped to what the classification earns on its own.
+    let (kind, effective): (String, String) =
+        Connection::open(directory.path().join("kernel.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT event_kind,effective_maturity FROM admission_decisions
+             WHERE candidate_ref='lineage' AND subject_object_id IS NULL
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!(kind, "approval_revoked");
+    assert_ne!(effective, "approved");
+    let payload = inspect_text(
+        directory.path(),
+        "SELECT CAST(payload AS TEXT) FROM change_event WHERE change_kind='approval_revoke'",
+    );
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["audit"]["demoted"], 1, "{payload}");
+}

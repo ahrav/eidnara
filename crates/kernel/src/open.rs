@@ -898,7 +898,14 @@ fn prepare_private_dir(path: &Path) -> Result<(), KernelError> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // Tightening the mode of a directory another user owns would hand that
+        // user, not this process, exclusive control of the store's entries, so
+        // ownership is checked before any mode change, as the artifact and backup
+        // directories already require.
+        if metadata.uid() != rustix::process::geteuid().as_raw() {
+            return Err(KernelError::Io);
+        }
         if metadata.permissions().mode() & 0o777 != 0o700 {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))
                 .map_err(|_| KernelError::Io)?;
