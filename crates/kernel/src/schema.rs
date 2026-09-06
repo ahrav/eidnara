@@ -200,8 +200,9 @@ const fn component_names() -> [&'static str; COMPONENTS.len()] {
 ///
 /// Must run outside a transaction. The busy timeout is installed before WAL
 /// mode because switching journal mode may wait for the write lock. Returns
-/// `InvalidQuery` for an active transaction, a rejected SQLite runtime, or
-/// failure to enter WAL mode. PRAGMA failures propagate.
+/// `InvalidQuery` for an active transaction, a nonpositive `busy_timeout_ms`,
+/// a rejected SQLite runtime, or failure to enter WAL mode. PRAGMA failures
+/// propagate.
 pub fn apply_kernel_connection_profile(
     conn: &mut Connection,
     busy_timeout_ms: i64,
@@ -217,6 +218,10 @@ pub fn apply_kernel_connection_profile(
     }
     // Switching journal_mode can need the write lock, so the busy handler is
     // installed first; the default handler gives up immediately.
+    // SQLite removes the busy handler for a nonpositive timeout instead of installing one, so such a value is refused rather than passed through. commentlint: allow(JUDGE)
+    if busy_timeout_ms <= 0 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     conn.pragma_update(None, "busy_timeout", busy_timeout_ms)?;
     // `PRAGMA journal_mode` returns the resulting mode; reject a mode other than WAL.
     let journal_mode: String =

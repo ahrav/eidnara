@@ -825,8 +825,9 @@ fn staging_a_candidate_cannot_revive_a_run_whose_lease_expired() {
     // Liveness is judged against the store clock, so one run gets a lease that has already
     // lapsed by the time it is reused and the other keeps a lease the clock cannot outrun.
     let origin = now_ms();
-    let mut expired_run = candidate("expired", "expired-a", origin);
-    expired_run.lease_expires_at = origin + 1;
+    // A lease that lapsed long before the store clock, so reuse cannot race the expiry.
+    let mut expired_run = candidate("expired", "expired-a", 0);
+    expired_run.lease_expires_at = HOUR_MS;
     store.stage_candidate(expired_run).unwrap();
 
     let mut live_run = candidate("live", "live-a", origin);
@@ -836,7 +837,7 @@ fn staging_a_candidate_cannot_revive_a_run_whose_lease_expired() {
     // The lapsed lease belongs to the sweep now, so its producer cannot add to it.
     assert_eq!(
         store
-            .stage_candidate(candidate("expired", "expired-b", origin))
+            .stage_candidate(candidate("expired", "expired-b", 0))
             .unwrap_err(),
         KernelError::Conflict
     );

@@ -175,6 +175,9 @@ impl KernelStore {
     /// Staging changes commit before artifact GC acquires the writer. A later artifact-GC failure
     /// does not roll back already committed staging maintenance.
     ///
+    /// Deletion runs one batch, as [`Self::delete_aged_staging_runs`] does, so one call can leave
+    /// aged runs behind. Repeat the call until `deleted_runs` is zero to drain them.
+    ///
     /// # Errors
     ///
     /// Returns [`KernelError::InvalidInput`] when `now` is negative. Any maintenance, writer,

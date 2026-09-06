@@ -46,7 +46,7 @@ fn scope(source_revision: i64) -> ScopeSpec {
                 ..ScopeTermSpec::default()
             },
             ScopeTermSpec {
-                dimension: "repository".to_string(),
+                dimension: "project".to_string(),
                 operator: "exact".to_string(),
                 exact_value: Some("eidnara".to_string()),
                 ..ScopeTermSpec::default()
@@ -173,7 +173,7 @@ fn scope_terms_read_back_in_ordinal_order_with_redacted_values_as_placeholders()
     let branch = terms[0].exact_value.as_deref().unwrap();
     assert!(!branch.contains(SECRET), "stored term leaks the secret");
     assert!(branch.starts_with("feature/"), "{branch}");
-    assert_eq!(terms[1].dimension, "repository");
+    assert_eq!(terms[1].dimension, "project");
     assert_eq!(terms[1].exact_value.as_deref(), Some("eidnara"));
     assert_eq!(
         terms[2].set_values.as_deref(),
@@ -341,4 +341,74 @@ fn a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain()
         ["scope-1", "scope-3"],
         "the filter must keep the matching branch and the redacted one, and drop the other branch"
     );
+}
+
+#[test]
+fn insert_scope_refuses_terms_the_scope_algebra_cannot_canonicalize() {
+    use kernel::CanonicalScope;
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+
+    let unknown_dimension = ScopeTermSpec {
+        dimension: "repository".to_string(),
+        operator: "exact".to_string(),
+        exact_value: Some("eidnara".to_string()),
+        ..ScopeTermSpec::default()
+    };
+    let unknown_operator = ScopeTermSpec {
+        dimension: "branch".to_string(),
+        operator: "glob".to_string(),
+        exact_value: Some("main".to_string()),
+        ..ScopeTermSpec::default()
+    };
+    let duplicate_dimension = [
+        ScopeTermSpec {
+            dimension: "branch".to_string(),
+            operator: "exact".to_string(),
+            exact_value: Some("main".to_string()),
+            ..ScopeTermSpec::default()
+        },
+        ScopeTermSpec {
+            dimension: "branch".to_string(),
+            operator: "exact".to_string(),
+            exact_value: Some("release".to_string()),
+            ..ScopeTermSpec::default()
+        },
+    ];
+    for (label, terms) in [
+        ("unknown dimension", vec![unknown_dimension]),
+        ("unknown operator", vec![unknown_operator]),
+        ("duplicate dimension", duplicate_dimension.to_vec()),
+    ] {
+        assert!(
+            CanonicalScope::from_term_specs(&terms).is_err(),
+            "{label}: the fixture must be one the algebra rejects"
+        );
+        let mut spec = scope(1);
+        spec.terms = terms;
+        let error = store
+            .commit(intent(&format!("scope-{label}"), '7'), |envelope| {
+                envelope.insert_scope(spec)?;
+                Ok(String::new())
+            })
+            .unwrap_err();
+        assert_eq!(error, KernelError::InvalidInput, "{label}");
+    }
+    assert_eq!(
+        store.scope_terms("scope").unwrap_err(),
+        KernelError::NotFound
+    );
+
+    // The redacted fixture still canonicalizes: its secret-bearing branch is
+    // stored as a placeholder the algebra reads as uncertain.
+    store
+        .commit(intent("scope", '1'), |envelope| {
+            envelope.insert_scope(scope(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let stored = store.scope_terms("scope").unwrap();
+    assert!(CanonicalScope::from_term_specs(&stored).is_ok());
 }

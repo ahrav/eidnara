@@ -2201,3 +2201,21 @@ fn a_negative_marker_timestamp_is_refused_before_any_schema_is_installed() {
     // Zero is the smallest timestamp the opener accepts, so it installs.
     apply_kernel_schema(&mut conn, INCARNATION, 0).expect("bootstrap");
 }
+
+#[test]
+fn a_nonpositive_busy_timeout_is_refused_instead_of_removing_the_busy_handler() {
+    for timeout in [0, -1] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = Connection::open(dir.path().join("kernel.sqlite")).expect("open");
+        let error = apply_kernel_connection_profile(&mut conn, timeout)
+            .expect_err("a timeout SQLite would treat as no handler must be refused");
+        assert!(matches!(error, rusqlite::Error::InvalidQuery), "{timeout}");
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert!(
+            !journal_mode.eq_ignore_ascii_case("wal"),
+            "the profile must not proceed to the WAL switch"
+        );
+    }
+}

@@ -14,6 +14,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
+use rustix::fs::{self as rfs, AtFlags};
+
 use super::{CommitIntent, RepositoryProvenance, Sensitivity};
 use crate::durable_fs::{
     StorageError, classify_io, open_or_create_secure_directory, open_secure_directory,
@@ -425,14 +427,26 @@ pub(super) fn prepare_layout(root: &Path) -> Result<PathBuf, KernelError> {
         .map_err(|_| KernelError::Io)?;
     open_or_create_secure_directory(&artifacts, "objects").map_err(|_| KernelError::Io)?;
     let tmp = open_or_create_secure_directory(&artifacts, "tmp").map_err(|_| KernelError::Io)?;
-    for entry in std::fs::read_dir(root.join("artifacts/tmp")).map_err(|_| KernelError::Io)? {
+    // Enumerated through the descriptor just opened, like every other walk of the
+    // artifact tree, so a same-UID swap of `artifacts` or `tmp` for a symlink
+    // cannot redirect the sweep.
+    for entry in rfs::Dir::read_from(&tmp).map_err(|_| KernelError::Io)? {
         let entry = entry.map_err(|_| KernelError::Io)?;
-        let file_type = entry.file_type().map_err(|_| KernelError::Io)?;
-        if file_type.is_file() || file_type.is_symlink() {
-            let Ok(name) = entry.file_name().into_string() else {
+        let name = entry.file_name();
+        if ingest::is_dot_entry(name) {
+            continue;
+        }
+        let stat = match rfs::statat(&tmp, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => continue,
+            Err(_) => return Err(KernelError::Io),
+        };
+        let kind = rfs::FileType::from_raw_mode(stat.st_mode);
+        if kind.is_file() || kind.is_symlink() {
+            let Ok(name) = name.to_str() else {
                 continue;
             };
-            crate::durable_fs::durable_unlink(&tmp, &name).map_err(|_| KernelError::Io)?;
+            crate::durable_fs::durable_unlink(&tmp, name).map_err(|_| KernelError::Io)?;
         }
     }
     Ok(root.join("artifacts"))

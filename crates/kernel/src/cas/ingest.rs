@@ -965,11 +965,14 @@ fn stat_bytes(stat: &rfs::Stat) -> u64 {
     u64::try_from(stat.st_size).unwrap_or(0)
 }
 
-fn is_dot_entry(name: &std::ffi::CStr) -> bool {
+pub(super) fn is_dot_entry(name: &std::ffi::CStr) -> bool {
     matches!(name.to_bytes(), b"." | b"..")
 }
 
-fn open_shard_nofollow(objects: &File, name: impl rustix::path::Arg) -> Result<File, StorageError> {
+pub(super) fn open_shard_nofollow(
+    objects: &File,
+    name: impl rustix::path::Arg,
+) -> Result<File, StorageError> {
     rfs::openat(
         objects,
         name,

@@ -96,6 +96,7 @@ impl Envelope<'_> {
     ///
     /// The referenced domain must exist and remain valid. Success appends a `scope_insert`
     /// pending change. Invalid fields return `InvalidInput`; a missing domain returns `NotFound`.
+    /// Terms whose redacted form [`CanonicalScope::from_term_specs`] rejects return `InvalidInput`, so the scope algebra can evaluate every stored scope. commentlint: allow(JUDGE)
     /// The surrounding envelope transaction owns commit or rollback.
     pub fn insert_scope(&mut self, spec: ScopeSpec) -> Result<ScopeWriteOutcome, KernelError> {
         self.guarded(|envelope| envelope.insert_scope_inner(spec))
@@ -211,6 +212,12 @@ impl RedactedScope {
             .into_iter()
             .map(RedactedTerm::new)
             .collect::<Result<Vec<_>, _>>()?;
+        // The stored form is what readers canonicalize, so it is the form that must decode. commentlint: allow(JUDGE)
+        let stored = terms
+            .iter()
+            .map(RedactedTerm::stored_spec)
+            .collect::<Vec<_>>();
+        CanonicalScope::from_term_specs(&stored).map_err(|_| KernelError::InvalidInput)?;
         Ok(Self {
             scope_id: identity_field(&spec.scope_id)?,
             object_id: identity_field(&spec.object_id)?,
@@ -279,6 +286,27 @@ impl RedactedTerm {
             git_end_oid: spec.git_end_oid.as_deref().map(redact).transpose()?,
             payload: spec.payload.as_deref().map(redact).transpose()?,
         })
+    }
+
+    /// The term as `scope_terms` reads it back: redacted text in every column.
+    fn stored_spec(&self) -> ScopeTermSpec {
+        let owned = |field: &Option<RedactedField>| text(field).map(str::to_owned);
+        ScopeTermSpec {
+            dimension: self.dimension.text.clone(),
+            operator: self.operator.text.clone(),
+            exact_value: owned(&self.exact_value),
+            set_values: self
+                .set_values
+                .as_ref()
+                .map(|values| values.iter().map(|value| value.text.clone()).collect()),
+            range_start: owned(&self.range_start),
+            range_end: owned(&self.range_end),
+            version_range: owned(&self.version_range),
+            git_oid: owned(&self.git_oid),
+            git_start_oid: owned(&self.git_start_oid),
+            git_end_oid: owned(&self.git_end_oid),
+            payload: owned(&self.payload),
+        }
     }
 
     fn text_fields(&self, ordinal: i64) -> Vec<(String, RedactedField)> {
