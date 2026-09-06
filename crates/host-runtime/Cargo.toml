@@ -9,8 +9,8 @@ publish.workspace = true
 description = "Directly linked host for the context, Synapse, and Broca components."
 
 [features]
-# The `test-support` feature enables the crate-root re-export of `host_status_response_json` so downstream integration tests can reconstruct sanitized `host.status` JSON. commentlint: allow(JUDGE)
-# The function itself is `pub` in-crate; only the cross-crate surface is feature-gated so it never ships in production builds.
+# `test-support` re-exports `host_status_response_json` at the crate root for downstream integration tests.
+# The function is `pub` inside the crate; the feature gates only the cross-crate re-export.
 test-support = []
 
 [dependencies]
