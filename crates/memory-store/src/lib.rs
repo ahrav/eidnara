@@ -506,6 +506,19 @@ fn normalize_authority_note_route_tx(
             )",
         params![context_store_uuid, project, route_project_root],
     )?;
+    tx.execute(
+        "UPDATE note_deliveries
+            SET project_path = ?2
+          WHERE project_path = ?3
+            AND EXISTS (
+                SELECT 1 FROM authority
+                 WHERE context_store_uuid = ?1
+                   AND project = ?2
+                   AND domain = 'notes'
+                   AND state = 'MODULE'
+            )",
+        params![context_store_uuid, project, route_project_root],
+    )?;
     Ok(())
 }
 
@@ -14294,6 +14307,12 @@ fn historian_side_channel_pending_items(
         if primer.question.trim().is_empty() {
             continue;
         }
+        if primer.session_id != request.session_id || primer.project_path != request.project_path {
+            return Err(format!(
+                "primer candidate {item_index} is scoped to {}/{} but the publish is for {}/{}",
+                primer.project_path, primer.session_id, request.project_path, request.session_id
+            ));
+        }
         items.push(HistorianSideChannelPendingItem {
             id: HistorianSideChannelOutboxId {
                 firing_seq: request.predicate.firing_seq,
@@ -14309,6 +14328,12 @@ fn historian_side_channel_pending_items(
     for (item_index, observation) in request.user_memory_candidates.iter().enumerate() {
         if observation.content.trim().is_empty() {
             continue;
+        }
+        if observation.session_id != request.session_id {
+            return Err(format!(
+                "user observation {item_index} is scoped to session {} but the publish is for {}",
+                observation.session_id, request.session_id
+            ));
         }
         items.push(HistorianSideChannelPendingItem {
             id: HistorianSideChannelOutboxId {
@@ -20050,6 +20075,67 @@ mod tests {
     }
 
     #[test]
+    fn historian_publish_rejects_side_channel_candidates_scoped_to_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .unwrap();
+        let expected = store.load("ses").unwrap().row_version;
+        let foreign_primer = HistorianPrimerCandidate {
+            project_path: "git:other".into(),
+            session_id: "ses".into(),
+            question: "Whose project is this?".into(),
+            source_compartment_start: Some(10),
+            source_compartment_end: Some(20),
+            source_start_message_id: "m10".into(),
+            source_end_message_id: "m20".into(),
+            source_message_time: 123,
+            created_at: 123,
+        };
+        let foreign_observation = HistorianUserMemoryCandidate {
+            content: "Whose session is this?".into(),
+            session_id: "other-session".into(),
+            source_compartment_start: Some(10),
+            source_compartment_end: Some(20),
+            created_at: 123,
+        };
+        for (primers, observations) in [
+            (std::slice::from_ref(&foreign_primer), &[][..]),
+            (&[][..], std::slice::from_ref(&foreign_observation)),
+        ] {
+            let error = store
+                .publish_historian_chunk(HistorianPublishRequest {
+                    session_id: "ses",
+                    expected_row_version: expected,
+                    expected_revert_epoch: 0,
+                    predicate: &publish_predicate(),
+                    project_path: "git:proj",
+                    compartments: &[publish_compartment()],
+                    events: &[],
+                    primer_candidates: primers,
+                    user_memory_candidates: observations,
+                    publication_floor_ordinal: 21,
+                    chunk_transcript: None,
+                    raw_chunk_messages: None,
+                })
+                .unwrap_err();
+            assert!(
+                matches!(error, HistorianPublishError::Serde(_)),
+                "{error:?}"
+            );
+        }
+        assert!(store.load_compartments("ses").unwrap().is_empty());
+        assert_eq!(
+            store
+                .historian_side_channel_status("ses")
+                .unwrap()
+                .pending_count,
+            0
+        );
+    }
+
+    #[test]
     fn historian_side_channel_outbox_recovers_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
@@ -23514,6 +23600,59 @@ mod shadow_tests {
             .seed_workspace_member("shared", "git:a", "[]")
             .unwrap();
         assert_eq!(workspace_members_of(&store, "shared"), ["git:a"]);
+    }
+
+    #[test]
+    fn binding_a_module_route_rekeys_pending_deliveries_with_their_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let preparing = store
+            .authority_begin_prepare("store-uuid", "project", "notes")
+            .unwrap();
+        store
+            .authority_finish_prepare(
+                "store-uuid",
+                "project",
+                "notes",
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap();
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO note_deliveries
+                         (delivery_id, note_id, session_id, delivered_pass_fingerprint, project_path)
+                     VALUES ('d1', 1, 'ses', 'pass-1', '/repo'),
+                            ('d2', 2, 'ses', 'pass-1', 'project');",
+                )
+            })
+            .unwrap();
+
+        store
+            .bind_authority_route("store-uuid", "project", "/repo")
+            .unwrap();
+
+        let keys: Vec<(String, String)> = store
+            .inner
+            .with_conn(|conn| {
+                conn.prepare(
+                    "SELECT delivery_id, project_path FROM note_deliveries ORDER BY delivery_id",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+            })
+            .unwrap();
+        assert_eq!(
+            keys,
+            [
+                ("d1".to_string(), "project".to_string()),
+                ("d2".to_string(), "project".to_string()),
+            ]
+        );
     }
 
     #[test]
