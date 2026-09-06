@@ -19,11 +19,11 @@ jobs:
         # `docs/plans/` is the only tracked path allowed to contain a predecessor name; bracketed characters prevent `TOKENS` from matching this workflow file.
         # `(^|[^0-9a-z])` and `([^0-9a-z]|$)` bound a token: `_` and `/` count as boundaries under `-i`, and a longer identifier that merely contains a name does not match.
         # `[-_[:space:]]*` lets the whole-file pass match two-word names split across a line break and indentation.
-        # `git grep` and `grep` exit 1 on no match; any other non-zero status is a tool failure. The whole-file pass runs `grep` once per file so a failing grep cannot hide behind the clean status of its neighbors.
+        # `git grep` and `grep` exit 1 on no match; any other non-zero status is a tool failure. The pathname pass reads `git ls-files -z` so a pathname containing a newline is scanned verbatim rather than C-quoted. The whole-file pass runs `grep` once per file so a failing grep cannot hide behind the clean status of its neighbors.
         env:
-          TOKENS: (^|[^0-9a-z])(c[o]rtex[-_[:space:]]*kit|magi[c][-_[:space:]]*context|claustru[m]|m[c]tx|m[c])([^0-9a-z]|$)|(^|[^0-9a-z])c[k][-_]|(^|[^0-9a-z])(primitives|host)[@][0-9a-f]{7,40}|"(source_)?repo":[[:space:]]*"(primitives|host)"
+          TOKENS: (^|[^0-9a-z])(c[o]rtex[-_[:space:]]*kit|magi[c][-_[:space:]]*context|claustru[m]|m[c]tx|m[c])([^0-9a-z]|$)|(^|[^0-9a-z])c[k][-_]|(^|[^0-9a-z])(primitives|host)[@][0-9a-f]{7,40}|"(source_)?repo"[[:space:]]*:[[:space:]]*"(primitives|host)"
         run: |
-          set -u
+          set -uo pipefail
           status=0
           git grep -n -I -i -E -e "$TOKENS" -- ':!docs/plans/' || status=$?
           if [ "$status" -eq 0 ]; then
@@ -35,7 +35,7 @@ jobs:
             exit 1
           fi
           status=0
-          git ls-files -- ':!docs/plans/' | grep -i -E -e "$TOKENS" || status=$?
+          git ls-files -z -- ':!docs/plans/' | grep -z -i -E -e "$TOKENS" | tr '\0' '\n' || status=$?
           if [ "$status" -eq 0 ]; then
             echo "predecessor tokens found in a tracked pathname"
             exit 1
