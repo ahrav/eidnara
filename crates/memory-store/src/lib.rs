@@ -206,10 +206,11 @@ impl WireMessage {
         &self.content
     }
 
-    /// Mutable content blocks. Drops the retained ingress JSON of the message and of every
-    /// block, so serialization reflects the typed fields after the edit.
+    /// Mutable content blocks. Drops the message's retained ingress JSON so serialization
+    /// walks the typed blocks; each block keeps its own retained JSON until its
+    /// [`WireBlock::kind_mut`] runs, so an edit to one block leaves its siblings byte-identical.
     pub fn content_mut(&mut self) -> &mut Vec<WireBlock> {
-        self.mark_fully_typed();
+        self.original = None;
         &mut self.content
     }
 
@@ -16270,6 +16271,28 @@ mod tests {
 
     fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
         MemoryStore::test_descriptor(dir, "eidnara-test")
+    }
+
+    /// Editing one block through the accessors re-encodes that block and leaves the
+    /// sibling's ingress bytes, including an unknown field, as they arrived.
+    #[test]
+    fn a_block_edit_leaves_its_sibling_byte_identical() {
+        let ingress = serde_json::json!({
+            "role": "user",
+            "content": [
+                { "kind": { "type": "text", "text": "first" } },
+                { "kind": { "type": "text", "text": "second" }, "sentinel_unknown_field": "kept" },
+            ],
+            "meta": {},
+        });
+        let mut message: WireMessage = serde_json::from_value(ingress).unwrap();
+        *message.content_mut()[0].kind_mut() = BlockKind::Text {
+            text: "edited".to_string(),
+        };
+        let serialized = serde_json::to_value(&message).unwrap();
+        assert_eq!(serialized["content"][0]["kind"]["text"], "edited");
+        assert_eq!(serialized["content"][1]["sentinel_unknown_field"], "kept");
+        assert_eq!(serialized["content"][1]["kind"]["text"], "second");
     }
 
     /// The value-only scanner finds nothing in `{"credential":"fixture"}`, so a receipt built
