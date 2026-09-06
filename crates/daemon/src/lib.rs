@@ -1964,7 +1964,7 @@ const _: () = assert!(
 /// The component declares every resident byte it retains through [`ResourceDeclaration::retained_resident_bytes`].
 ///
 /// `max_resident_bytes` bounds process retention only when `retained_resident_bytes` is truthful.
-/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, and staged state-import bytes from ingress accounting.
+/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, and staged page bytes from ingress accounting.
 ///
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
