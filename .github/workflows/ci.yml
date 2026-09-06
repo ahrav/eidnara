@@ -71,7 +71,7 @@ jobs:
       - name: Schema-migration identifiers
         # Version-ledger identifiers must not appear outside test files and prose. Only the auto-discovered `tests/` target of a crate or package is a test file; `src/tests/` is compiled into the crate and is scanned, as are inline `#[cfg(test)]` modules.
         # The first pass is case-insensitive and needs a `_` or `(` after the word so ordinary prose in a doc comment passes. The second pass is case-sensitive and matches `M[i]gration(s)` only where a type sits: after a declaration keyword, before `::`, `{`, `<`, `>`, or `;`, after `->`, plus `M[I]GRATIONS` and `fn m[i]grate`. A title-cased sentence such as `/// M[i]gration from v1 is unsupported.` passes.
-        # Tracked symlinks are refused outright: Cargo follows a symlinked `src/lib.rs` into an excluded directory, and `git grep` does not, so a link is the one way a compiled file could escape the scan.
+        # Cargo follows tracked symlinks but `git grep` does not; rejecting them prevents compiled files from bypassing the scan. A manifest `path`, `build`, or package entry under `tests/` would have the same effect and is rejected too.
         # `git grep` exits 1 on no match; any other non-zero status is a tool failure.
         run: |
           set -euo pipefail
@@ -85,12 +85,13 @@ jobs:
             echo "git ls-files failed with exit $status"
             exit 1
           fi
-          paths=(':(exclude,glob)crates/*/tests/**' ':(exclude,glob)packages/*/tests/**' ':!migration/' ':!docs/' ':!NOTICE' ':!*.md')
-          scan() {
+          refuse() {
+            local message=$1
+            shift
             local status=0
-            git grep -n -I "$@" -- "${paths[@]}" || status=$?
+            git grep -n -I "$@" || status=$?
             if [ "$status" -eq 0 ]; then
-              echo "schema-migration identifiers found"
+              echo "$message"
               exit 1
             fi
             if [ "$status" -ne 1 ]; then
@@ -98,8 +99,10 @@ jobs:
               exit 1
             fi
           }
-          scan -i -E 'schema[_]migrations|\bmigrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable'
-          scan -E '\bM[I]GRATIONS?\b|\b(struct|enum|trait|type|mod|impl|dyn)[[:space:]]+M[i]grations?\b|\bM[i]grations?(::|<|>|;|[[:space:]]*\{)|->[[:space:]]*M[i]grations?\b|\bfn m[i]grate\b'
+          refuse "a manifest compiles a file under tests/ into the crate or package; move the file" -E '^[[:space:]]*(path|build)[[:space:]]*=[[:space:]]*"(\.\./)*tests/|:[[:space:]]*"(\./)?tests/' -- '*Cargo.toml' '*package.json'
+          paths=(':(exclude,glob)crates/*/tests/**' ':(exclude,glob)packages/*/tests/**' ':!migration/' ':!docs/' ':!NOTICE' ':!*.md')
+          refuse "schema-migration identifiers found" -i -E 'schema[_]migrations|\bmigrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable' -- "${paths[@]}"
+          refuse "schema-migration identifiers found" -E '\bM[I]GRATIONS?\b|\b(struct|enum|trait|type|mod|impl|dyn)[[:space:]]+M[i]grations?\b|\bM[i]grations?(::|<|>|;|[[:space:]]*\{)|->[[:space:]]*M[i]grations?\b|\bfn m[i]grate\b' -- "${paths[@]}"
 
       - uses: oven-sh/setup-bun@v2
         with:
