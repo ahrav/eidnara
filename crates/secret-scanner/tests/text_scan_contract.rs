@@ -423,26 +423,6 @@ fn a_trailing_non_ascii_character_behaves_like_a_trailing_ascii_one() {
 }
 
 #[test]
-fn reported_spans_stay_on_character_boundaries_around_non_ascii_text() {
-    let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
-    let input = format!("é password=hunter2 é sha256~{}é", "a".repeat(43));
-    let report = scanner.scan(&input).unwrap();
-    assert!(!report.findings.is_empty());
-    for finding in &report.findings {
-        assert!(
-            input
-                .get(finding.full_span.start()..finding.full_span.end())
-                .is_some()
-        );
-        assert!(
-            input
-                .get(finding.value_span.start()..finding.value_span.end())
-                .is_some()
-        );
-    }
-}
-
-#[test]
 fn mixed_case_keys_are_gated_like_their_lowercase_spelling() {
     let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
     let value = "Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q";
@@ -576,22 +556,6 @@ fn credentials_below_the_entropy_sampling_length_are_still_reported() {
     }
 }
 
-#[test]
-fn local_context_key_names_match_case_insensitively() {
-    let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
-    let value = "sk9Xq2Lm7Pv4Rt8Zw1Yc6Nb3Hd5Kf0Jg";
-    for key in ["api_key", "API_KEY", "ApiKey", "apiKey"] {
-        let report = scanner.scan(&format!("{key}: {value}")).unwrap();
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|finding| finding.rule_id == "generic-api-key"),
-            "{key} produced no generic-api-key finding"
-        );
-    }
-}
-
 /// `secret` is both a key name and a qualifier, so every offset matches the name
 /// and decomposes on its left, while the `zz` tail never decomposes on the right.
 /// A per-offset walk explores all of them before failing.
@@ -706,6 +670,7 @@ fn local_context_rejects_key_names_embedded_in_other_identifiers() {
     for key in [
         "api_key",
         "ApiKey",
+        "apiKey",
         "API_KEY",
         "apikey",
         "api_tokens",

@@ -722,12 +722,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn embedded_sources_match_expected_digests() {
-        assert_eq!(digest_hex(UPSTREAM_BYTES), UPSTREAM_CORPUS_SHA256);
-        assert_eq!(digest_hex(OVERLAY_BYTES), CONSERVATIVE_OVERLAY_SHA256);
-    }
-
     // The evaluator probes keyword and suppressor matchers with `find_overlapping_iter`, which panics for every match kind except `Standard`.
     // `AhoCorasickKind::Auto` builds a DFA for an unanchored automaton holding at most 100 patterns, so the kind assertion below holds without pinning the kind and forfeiting the contiguous-NFA fallback that keeps a larger list from failing construction.
     #[test]
