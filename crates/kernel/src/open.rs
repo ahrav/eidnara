@@ -304,6 +304,16 @@ impl KernelStore {
         self.poisoned.store(true, Ordering::Release);
     }
 
+    /// Reader counterpart of [`Self::lock_writer_within`], over the whole pool:
+    /// one long-running reader does not decide the outcome.
+    pub(crate) fn lock_reader_within(
+        &self,
+        limit: &AcquireLimit,
+    ) -> Result<std::sync::MutexGuard<'_, Connection>, KernelError> {
+        let start = self.next_reader.fetch_add(1, Ordering::Relaxed);
+        self.acquire_within(&self.readers, start, limit)
+    }
+
     /// Polls `candidates` from `start` until one is free or `limit` says stop,
     /// so every bounded acquisition shares one poison-check order and one
     /// backoff.
@@ -347,6 +357,19 @@ impl KernelStore {
             return Err(KernelError::InvalidRestore);
         }
         Ok(reader)
+    }
+
+    /// Holds every reader connection for `duration`, so a deadline-bounded read
+    /// path can be observed returning at its own bound.
+    #[cfg(feature = "test-support")]
+    pub fn hold_readers_for_test(&self, duration: std::time::Duration) {
+        let guards = self
+            .readers
+            .iter()
+            .map(|reader| reader.lock().unwrap_or_else(PoisonError::into_inner))
+            .collect::<Vec<_>>();
+        std::thread::sleep(duration);
+        drop(guards);
     }
 
     #[cfg(feature = "test-support")]

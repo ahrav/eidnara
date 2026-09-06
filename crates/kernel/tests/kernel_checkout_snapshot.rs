@@ -11,7 +11,7 @@ use git_fixtures::{
     add_linked_worktree, commit_snapshot, init_repo, materialize, set_head,
     write_conflicted_index_entry, write_worktree_file,
 };
-use mc_kernel::applicability::{snapshot_checkout, EvalBudget, SnapshotError};
+use kernel::applicability::{EvalBudget, SnapshotError, snapshot_checkout};
 
 #[test]
 fn clean_repo_has_stable_fingerprint_and_content_changes_it() {
@@ -55,10 +55,12 @@ fn clean_repo_has_stable_fingerprint_and_content_changes_it() {
         untracked.dirty_fingerprint(),
         conflicted.dirty_fingerprint()
     );
-    assert!(conflicted
-        .dirty_entries()
-        .iter()
-        .any(|entry| entry.path == "src/lib.rs" && entry.status == "conflicted"));
+    assert!(
+        conflicted
+            .dirty_entries()
+            .iter()
+            .any(|entry| entry.path == "src/lib.rs" && entry.status == "conflicted")
+    );
 }
 
 #[test]
@@ -297,7 +299,7 @@ fn staged_entry_modes_distinguish_file_kinds() {
             .write(gix::index::write::Options::default())
             .expect("index writes");
     };
-    let staged_hash = |snapshot: &mc_kernel::applicability::CheckoutSnapshot| {
+    let staged_hash = |snapshot: &kernel::applicability::CheckoutSnapshot| {
         snapshot
             .dirty_entries()
             .iter()
@@ -347,10 +349,12 @@ fn assume_valid_entries_are_content_hashed() {
 
     let budget = EvalBudget::unbounded();
     let before = snapshot_checkout(dir.path(), &budget).unwrap();
-    assert!(before
-        .dirty_entries()
-        .iter()
-        .any(|entry| entry.path == "trusted.txt" && entry.status == "assume_valid"));
+    assert!(
+        before
+            .dirty_entries()
+            .iter()
+            .any(|entry| entry.path == "trusted.txt" && entry.status == "assume_valid")
+    );
 
     // The status walk trusts the flag; the content hash detects changes to
     // assume-valid files.
@@ -403,7 +407,7 @@ fn dirty_submodules_fingerprint_their_head() {
 
     let budget = EvalBudget::unbounded();
     let first = snapshot_checkout(&fixture.root, &budget).unwrap();
-    let gitlink_hash = |snapshot: &mc_kernel::applicability::CheckoutSnapshot| {
+    let gitlink_hash = |snapshot: &kernel::applicability::CheckoutSnapshot| {
         snapshot
             .dirty_entries()
             .iter()
@@ -424,9 +428,11 @@ fn dirty_submodules_fingerprint_their_head() {
     );
     materialize(&sub.repo, sub_two);
     let second = snapshot_checkout(&fixture.root, &budget).unwrap();
-    assert!(gitlink_hash(&second)
-        .expect("gitlink stays dirty")
-        .starts_with(&format!("gitlink:{sub_two}:")));
+    assert!(
+        gitlink_hash(&second)
+            .expect("gitlink stays dirty")
+            .starts_with(&format!("gitlink:{sub_two}:"))
+    );
     assert_ne!(first.dirty_fingerprint(), second.dirty_fingerprint());
 }
 
@@ -660,7 +666,7 @@ fn submodule_worktree_edits_move_the_gitlink_hash() {
         "an edit under the submodule path must move the key"
     );
 
-    let gitlink = |snapshot: &mc_kernel::applicability::CheckoutSnapshot| {
+    let gitlink = |snapshot: &kernel::applicability::CheckoutSnapshot| {
         snapshot
             .dirty_entries()
             .iter()

@@ -32,11 +32,11 @@ use applicability_fixtures::{candidate, reachable_anchor};
 use git_fixtures::{
     commit_snapshot, init_repo, materialize, set_head_detached, write_worktree_file,
 };
-use mc_kernel::applicability::{
+use kernel::applicability::{
     AppendOutcome, ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityRequest,
     ApplicabilityState, CheckSpec, EvalBudget, ObjectApplicabilitySpec,
 };
-use mc_kernel::{
+use kernel::{
     AnchorRowSpec, CommitIntent, DecisionPayload, DecisionSpec, DomainSpec, KernelStore,
     QueryContext, ScopeMatchContext, ScopeTermSpec, Sensitivity,
 };
@@ -196,7 +196,7 @@ fn acceptance_matrix_distinguishes_every_state() {
     };
 
     let query = QueryContext::default();
-    let scope = ScopeMatchContext::new().with_value(mc_kernel::Dimension::Environment, "staging");
+    let scope = ScopeMatchContext::new().with_value(kernel::Dimension::Environment, "staging");
     let candidates = [
         current,
         historical,
@@ -404,10 +404,12 @@ fn acceptance_work_stays_bounded_and_cancellable() {
             &expired,
         )
         .unwrap();
-    assert!(report
-        .objects
-        .iter()
-        .all(|object| object.state == ApplicabilityState::Uncertain));
+    assert!(
+        report
+            .objects
+            .iter()
+            .all(|object| object.state == ApplicabilityState::Uncertain)
+    );
     assert!(report.auto_injectable().next().is_none());
 }
 

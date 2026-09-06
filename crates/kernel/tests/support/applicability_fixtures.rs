@@ -3,13 +3,13 @@
 
 #![allow(dead_code)]
 
-use mc_kernel::applicability::{
-    capture_anchor_representation, snapshot_checkout, ApplicabilityCandidate, CheckoutSnapshot,
-    EvalBudget,
+use kernel::applicability::{
+    ApplicabilityCandidate, CheckoutSnapshot, EvalBudget, capture_anchor_representation,
+    snapshot_checkout,
 };
-use mc_kernel::{encode_anchor_captures, AnchorRowSpec, CommitIntent};
+use kernel::{AnchorRowSpec, CommitIntent, encode_anchor_captures};
 
-use super::git_fixtures::{materialize, set_head_detached, FixtureRepo};
+use super::git_fixtures::{FixtureRepo, materialize, set_head_detached};
 
 /// Detaches HEAD at `commit`, materializes it, and snapshots the checkout.
 pub fn checkout(fixture: &FixtureRepo, commit: gix::ObjectId) -> CheckoutSnapshot {

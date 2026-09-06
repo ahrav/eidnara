@@ -16,6 +16,8 @@ rustix = { workspace = true, features = ["fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# Checkout snapshots and fixture repositories both use gix object APIs; no git CLI, even in tests.
+gix = { workspace = true }
 semver = { workspace = true }
 thiserror = { workspace = true }
 
@@ -33,3 +35,8 @@ storage = { workspace = true }
 secret-scanner = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "anchor_resolution"
+harness = false

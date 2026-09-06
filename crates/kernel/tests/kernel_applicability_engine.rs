@@ -7,16 +7,16 @@ mod git_fixtures;
 use std::time::{Duration, Instant};
 
 use git_fixtures::{
-    commit_snapshot, init_repo, materialize, set_head_detached, write_worktree_file, FixtureRepo,
+    FixtureRepo, commit_snapshot, init_repo, materialize, set_head_detached, write_worktree_file,
 };
-use mc_kernel::applicability::{
-    capture_anchor_representation, snapshot_checkout, ApplicabilityCandidate, ApplicabilityEngine,
-    ApplicabilityState, BatchEvaluation, CheckSpec, CheckoutSnapshot, EvalBudget,
-    ObjectApplicabilitySpec, CANDIDATE_WINDOW, MAX_CONFIG_BYTES,
+use kernel::applicability::{
+    ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityState, BatchEvaluation,
+    CANDIDATE_WINDOW, CheckSpec, CheckoutSnapshot, EvalBudget, MAX_CONFIG_BYTES,
+    ObjectApplicabilitySpec, capture_anchor_representation, snapshot_checkout,
 };
-use mc_kernel::{
-    encode_anchor_captures, AnchorRowSpec, Dimension, QueryContext, ScopeMatchContext,
-    ScopeTermSpec,
+use kernel::{
+    AnchorRowSpec, Dimension, QueryContext, ScopeMatchContext, ScopeTermSpec,
+    encode_anchor_captures,
 };
 
 fn checkout(fixture: &FixtureRepo, commit: gix::ObjectId) -> CheckoutSnapshot {
@@ -200,10 +200,12 @@ fn cache_hit_performs_zero_object_database_operations() {
         &candidates,
         &EvalBudget::unbounded(),
     );
-    assert!(first
-        .objects
-        .iter()
-        .all(|object| object.state == ApplicabilityState::Current));
+    assert!(
+        first
+            .objects
+            .iter()
+            .all(|object| object.state == ApplicabilityState::Current)
+    );
     assert!(
         first.stats.graph_operations > 0,
         "first run walks the graph"
@@ -433,10 +435,12 @@ fn deadline_exhaustion_mid_batch_leaves_remaining_objects_uncertain() {
         &candidates,
         &expired,
     );
-    assert!(batch
-        .objects
-        .iter()
-        .all(|object| object.state == ApplicabilityState::Uncertain));
+    assert!(
+        batch
+            .objects
+            .iter()
+            .all(|object| object.state == ApplicabilityState::Uncertain)
+    );
 
     // The cache was not poisoned: a healthy budget re-evaluates fresh and
     // reaches current.
@@ -448,10 +452,12 @@ fn deadline_exhaustion_mid_batch_leaves_remaining_objects_uncertain() {
         &EvalBudget::unbounded(),
     );
     assert_eq!(healthy.stats.object_cache_hits, 0);
-    assert!(healthy
-        .objects
-        .iter()
-        .all(|object| object.state == ApplicabilityState::Current));
+    assert!(
+        healthy
+            .objects
+            .iter()
+            .all(|object| object.state == ApplicabilityState::Current)
+    );
 }
 
 #[test]
@@ -612,7 +618,8 @@ fn unreadable_payloads_are_uncertain_rather_than_current() {
     };
     let future_schema = ApplicabilityCandidate {
         payload: Some(
-            br#"{"schema":"mc.applicability.object.v2","affected_paths":["src/lib.rs"]}"#.to_vec(),
+            br#"{"schema":"eidnara.applicability.object.v2","affected_paths":["src/lib.rs"]}"#
+                .to_vec(),
         ),
         ..candidate("object-future-schema")
     };
@@ -627,10 +634,12 @@ fn unreadable_payloads_are_uncertain_rather_than_current() {
     assert!(batch.objects[0].evidence.contains("did not parse"));
     assert_eq!(batch.objects[1].state, ApplicabilityState::Uncertain);
     assert!(batch.objects[1].evidence.contains("schema"));
-    assert!(batch
-        .objects
-        .iter()
-        .all(|object| object.state.blocks_auto_injection()));
+    assert!(
+        batch
+            .objects
+            .iter()
+            .all(|object| object.state.blocks_auto_injection())
+    );
 }
 
 #[test]
@@ -686,7 +695,7 @@ fn unknown_check_kinds_degrade_without_voiding_the_payload() {
     // the payload still decoded.
     let with_paths = ApplicabilityCandidate {
         payload: Some(
-            br#"{"schema":"mc.applicability.object.v1","affected_paths":["src/lib.rs"],
+            br#"{"schema":"eidnara.applicability.object.v1","affected_paths":["src/lib.rs"],
                  "checks":[{"kind":"future_kind","path":"x"}]}"#
                 .to_vec(),
         ),
@@ -694,7 +703,7 @@ fn unknown_check_kinds_degrade_without_voiding_the_payload() {
     };
     let only_check = ApplicabilityCandidate {
         payload: Some(
-            br#"{"schema":"mc.applicability.object.v1","affected_paths":[],
+            br#"{"schema":"eidnara.applicability.object.v1","affected_paths":[],
                  "checks":[{"kind":"future_kind","path":"x"}]}"#
                 .to_vec(),
         ),
@@ -1302,7 +1311,7 @@ fn the_default_object_spec_round_trips() {
     let encoded = ObjectApplicabilitySpec::default().encode();
     assert_eq!(
         ObjectApplicabilitySpec::decode(Some(&encoded)),
-        mc_kernel::applicability::PayloadDecode::Present(ObjectApplicabilitySpec::default())
+        kernel::applicability::PayloadDecode::Present(ObjectApplicabilitySpec::default())
     );
 }
 
@@ -1513,10 +1522,10 @@ fn changing_sparse_patterns_invalidates_the_object_cache() {
 #[test]
 fn an_unknown_payload_field_is_undecodable_rather_than_empty() {
     let typo =
-        br#"{"schema":"mc.applicability.object.v1","cheks":[{"kind":"file_exists","path":"x"}]}"#;
+        br#"{"schema":"eidnara.applicability.object.v1","cheks":[{"kind":"file_exists","path":"x"}]}"#;
     assert!(matches!(
         ObjectApplicabilitySpec::decode(Some(typo)),
-        mc_kernel::applicability::PayloadDecode::Undecodable(_)
+        kernel::applicability::PayloadDecode::Undecodable(_)
     ));
 
     let dir = tempfile::tempdir().unwrap();
@@ -1790,16 +1799,16 @@ fn a_checked_path_that_is_a_symlink_never_reads_its_target() {
 /// must still degrade to unsupported rather than voiding the payload.
 #[test]
 fn an_unknown_field_inside_a_check_is_undecodable_but_an_unknown_kind_is_not() {
-    use mc_kernel::applicability::PayloadDecode;
+    use kernel::applicability::PayloadDecode;
 
-    let extra_constraint = br#"{"schema":"mc.applicability.object.v1","checks":[{"kind":"file_exists","path":"x","must_be_executable":true}]}"#;
+    let extra_constraint = br#"{"schema":"eidnara.applicability.object.v1","checks":[{"kind":"file_exists","path":"x","must_be_executable":true}]}"#;
     assert!(matches!(
         ObjectApplicabilitySpec::decode(Some(extra_constraint)),
         PayloadDecode::Undecodable(_)
     ));
 
     let unknown_kind =
-        br#"{"schema":"mc.applicability.object.v1","checks":[{"kind":"brand_new","path":"x"}]}"#;
+        br#"{"schema":"eidnara.applicability.object.v1","checks":[{"kind":"brand_new","path":"x"}]}"#;
     assert!(matches!(
         ObjectApplicabilitySpec::decode(Some(unknown_kind)),
         PayloadDecode::Present(_)
@@ -1847,10 +1856,12 @@ fn index_bookkeeping_entries_do_not_trip_the_dirty_gate() {
     let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
     // The entry is present for the fingerprint's sake even though nothing was
     // edited, which is precisely what must not read as dirty.
-    assert!(snapshot
-        .dirty_entries()
-        .iter()
-        .any(|entry| entry.path == "src/lib.rs" && entry.status == "assume_valid"));
+    assert!(
+        snapshot
+            .dirty_entries()
+            .iter()
+            .any(|entry| entry.path == "src/lib.rs" && entry.status == "assume_valid")
+    );
 
     let engine = ApplicabilityEngine::new();
     let batch = engine.evaluate_batch(

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 /// Schema tag for the object-side applicability payload carrying affected
 /// paths and cheap-check specifications.
-pub const OBJECT_APPLICABILITY_SCHEMA: &str = "mc.applicability.object.v1";
+pub const OBJECT_APPLICABILITY_SCHEMA: &str = "eidnara.applicability.object.v1";
 
 /// Schema tag for applicability observation payloads.
 ///
@@ -18,7 +18,7 @@ pub const OBJECT_APPLICABILITY_SCHEMA: &str = "mc.applicability.object.v1";
 /// itself. The identity is a filesystem path, and the durable-text redactor
 /// rewrites a path carrying a secret-shaped segment, which left the stored
 /// value unable to match the caller's.
-pub const OBSERVATION_APPLICABILITY_SCHEMA: &str = "mc.applicability.observation.v2";
+pub const OBSERVATION_APPLICABILITY_SCHEMA: &str = "eidnara.applicability.observation.v2";
 
 /// Observation kind vocabulary for applicability read repair. The reducer
 /// treats the latest of these per (object, checkout) as authoritative.
@@ -168,7 +168,7 @@ pub struct ApplicabilityObservationPayload {
 #[must_use]
 pub fn checkout_identity_digest(identity: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"mc-applicability-checkout-v1\0");
+    digest.update(b"eidnara-applicability-checkout-v1\0");
     digest.update(identity.as_bytes());
     format!("{:x}", digest.finalize())
 }

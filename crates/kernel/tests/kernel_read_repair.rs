@@ -9,16 +9,15 @@ mod git_fixtures;
 
 use std::time::{Duration, Instant};
 
-use git_fixtures::{commit_snapshot, init_repo, materialize, set_head_detached, FixtureRepo};
-use mc_kernel::applicability::{
-    checkout_identity_digest, commit_read_repair, snapshot_checkout, AppendOutcome,
-    ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityObservationPayload,
-    ApplicabilityRequest, ApplicabilityState, BlockState, CheckSpec, EvalBudget,
-    ObjectApplicabilitySpec, RepairIntent, DEPENDENCY_KIND_TARGET,
-    OBSERVATION_APPLICABILITY_SCHEMA, OBSERVATION_KIND_CURRENT, OBSERVATION_KIND_STALE,
-    PATCH_ID_ALGORITHM,
+use git_fixtures::{FixtureRepo, commit_snapshot, init_repo, materialize, set_head_detached};
+use kernel::applicability::{
+    AppendOutcome, ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityObservationPayload,
+    ApplicabilityRequest, ApplicabilityState, BlockState, CheckSpec, DEPENDENCY_KIND_TARGET,
+    EvalBudget, OBSERVATION_APPLICABILITY_SCHEMA, OBSERVATION_KIND_CURRENT, OBSERVATION_KIND_STALE,
+    ObjectApplicabilitySpec, PATCH_ID_ALGORITHM, RepairIntent, checkout_identity_digest,
+    commit_read_repair, snapshot_checkout,
 };
-use mc_kernel::{
+use kernel::{
     CommitIntent, DecisionPayload, DecisionSpec, DomainSpec, KernelError, KernelStore,
     ObservationDependencySpec, ObservationPayload, ObservationSpec, QueryContext,
     ScopeMatchContext, Sensitivity,
@@ -131,7 +130,7 @@ fn request<'a>(
 
 fn count(store_root: &std::path::Path, sql: &str) -> i64 {
     let connection = Connection::open_with_flags(
-        store_root.join("core.sqlite"),
+        store_root.join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -259,7 +258,7 @@ fn partial_commit_rolls_back_completely_under_fault_injection() {
     let error = store
         .commit_with_fault_after_events_for_test(intent("faulted-repair", '2'), {
             let spec = spec.clone();
-            move |envelope: &mut mc_kernel::Envelope<'_>| {
+            move |envelope: &mut kernel::Envelope<'_>| {
                 Ok(envelope.insert_observation(spec)?.result_json())
             }
         })
@@ -604,7 +603,7 @@ fn future_known_as_of_is_a_typed_error() {
 
 fn text(store_root: &std::path::Path, sql: &str) -> String {
     let connection = Connection::open_with_flags(
-        store_root.join("core.sqlite"),
+        store_root.join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -832,7 +831,7 @@ fn corrupt_latest_observation_payload_fails_the_reducer_closed() {
         )
         .unwrap();
 
-    let connection = Connection::open(store_dir.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(store_dir.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00'
@@ -1627,7 +1626,7 @@ fn an_unresolvable_oversized_check_path_still_vetoes() {
             ObjectApplicabilitySpec::new(
                 vec![],
                 vec![CheckSpec::FileExists {
-                    // Past mc_secret_scanner::MAX_INPUT_BYTES.
+                    // Past secret_scanner::MAX_INPUT_BYTES.
                     path: format!("src/{}.rs", "a".repeat(600 * 1024)),
                 }],
             )
@@ -1883,7 +1882,7 @@ fn an_unreadable_row_degrades_only_its_own_object() {
         .unwrap();
 
     // Corrupt only the first object's record.
-    let connection = Connection::open(store_dir.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(store_dir.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00'
@@ -1921,10 +1920,12 @@ fn an_unreadable_row_degrades_only_its_own_object() {
             &EvalBudget::unbounded(),
         )
         .unwrap();
-    assert!(report
-        .objects
-        .iter()
-        .all(|object| object.state.blocks_auto_injection()));
+    assert!(
+        report
+            .objects
+            .iter()
+            .all(|object| object.state.blocks_auto_injection())
+    );
 }
 
 /// A budget can carry a shared interrupt with no deadline, and that flag is then
@@ -2150,7 +2151,7 @@ fn an_older_unreadable_row_does_not_discard_a_newer_verdict() {
         .unwrap();
 
     // Only the older record becomes unreadable.
-    let connection = Connection::open(store_dir.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(store_dir.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00' WHERE object_id=?1",
@@ -2530,7 +2531,7 @@ fn a_retired_unreadable_row_is_not_authoritative() {
     );
 
     // The only record becomes undecodable and is then retired.
-    let connection = Connection::open(store_dir.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(store_dir.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00' WHERE object_id=?1",

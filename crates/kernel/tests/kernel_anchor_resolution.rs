@@ -7,14 +7,14 @@ mod git_fixtures;
 use std::collections::BTreeMap;
 
 use git_fixtures::{
-    commit_snapshot, commit_snapshot_with_modes, commit_tree, init_repo, materialize,
-    set_head_detached, FixtureRepo,
+    FixtureRepo, commit_snapshot, commit_snapshot_with_modes, commit_tree, init_repo, materialize,
+    set_head_detached,
 };
-use mc_kernel::applicability::{
-    capture_anchor_representation, compute_patch_id, snapshot_checkout, CheckoutSnapshot,
-    EvalBudget, GitConditionOutcome, ResolutionLadder, PATCH_ID_ALGORITHM,
+use kernel::applicability::{
+    CheckoutSnapshot, EvalBudget, GitConditionOutcome, PATCH_ID_ALGORITHM, ResolutionLadder,
+    capture_anchor_representation, compute_patch_id, snapshot_checkout,
 };
-use mc_kernel::{AnchorCapture, GitCondition};
+use kernel::{AnchorCapture, GitCondition};
 
 fn checkout(fixture: &FixtureRepo, commit: gix::ObjectId) -> CheckoutSnapshot {
     set_head_detached(&fixture.repo, commit);
@@ -310,7 +310,7 @@ fn true_match_outside_the_candidate_window_stays_unresolved() {
     );
     // …buried under more than CANDIDATE_WINDOW filler commits.
     let mut tip = rebased;
-    for index in 0..(mc_kernel::applicability::CANDIDATE_WINDOW as i64 + 8) {
+    for index in 0..(kernel::applicability::CANDIDATE_WINDOW as i64 + 8) {
         tip = commit_snapshot(
             repo,
             "main",
@@ -542,7 +542,7 @@ fn capture_from_another_algorithm_version_is_uncertain() {
     let mut captures = captures_for(repo, &[anchored]);
     let capture = captures.get_mut(&anchored.to_string()).unwrap();
     let patch_id = capture.patch_id.as_mut().expect("capture has a patch id");
-    patch_id.algorithm = "mc-patch-id-v0".to_string();
+    patch_id.algorithm = "eidnara-patch-id-v0".to_string();
     assert_ne!(patch_id.algorithm, PATCH_ID_ALGORITHM);
 
     let advanced = commit_snapshot(repo, "main", &[base], &[("f.txt", "two\n")], "advance", 3);
@@ -883,7 +883,7 @@ fn old_algorithm_capture_still_resolves_through_the_tree_rung() {
         .patch_id
         .as_mut()
         .expect("capture has a patch id")
-        .algorithm = "mc-patch-id-v0".to_string();
+        .algorithm = "eidnara-patch-id-v0".to_string();
 
     // The reworded commit has an identical tree but a different OID.
     let reworded = commit_snapshot(
@@ -906,7 +906,7 @@ fn old_algorithm_capture_still_resolves_through_the_tree_rung() {
 
 #[test]
 fn exhausted_budget_stops_patch_id_computation() {
-    use mc_kernel::applicability::ResolveObstacle;
+    use kernel::applicability::ResolveObstacle;
 
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
@@ -993,7 +993,7 @@ fn non_utf8_changed_paths_do_not_block_patch_resolution() {
 
 #[test]
 fn unreadable_candidate_blobs_leave_resolution_uncertain() {
-    use mc_kernel::applicability::ResolveObstacle;
+    use kernel::applicability::ResolveObstacle;
 
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
@@ -1083,7 +1083,7 @@ fn patch_id_ignores_repository_diff_configuration() {
     writeln!(config, "[diff]\n\trenames = false").expect("config writes");
     drop(config);
 
-    let reopened = mc_kernel::applicability::open_isolated(&fixture.root)
+    let reopened = kernel::applicability::open_isolated(&fixture.root)
         .expect("checkout reopens with the new config");
     let after = compute_patch_id(&reopened, renamed, &budget)
         .unwrap()
@@ -1383,7 +1383,7 @@ fn shallow_ancestry_still_reaches_the_fallback_rungs() {
 
 #[test]
 fn patchless_commits_still_honor_exhaustion() {
-    use mc_kernel::applicability::ResolveObstacle;
+    use kernel::applicability::ResolveObstacle;
 
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());

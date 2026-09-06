@@ -53,5 +53,7 @@ memchr = "2"
 serde_norway = "0.9.42"
 regex-syntax = "0.8"
 semver = "1"
+# `default-features = false` keeps credential helpers out of the dependency graph; `status` still pulls gix-filter and gix-command, and gix-protocol pulls gix-transport.
+gix = { version = "0.87", default-features = false, features = ["revision", "status", "sha1", "parallel"] }
 proptest = "1.11"
 criterion = "=0.8.2"

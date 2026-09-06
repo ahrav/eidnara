@@ -14,7 +14,7 @@ use super::super::scope::GraphOracle;
 use super::checkout::{CheckoutSnapshot, EvalBudget};
 
 /// Identities are internal fallback keys, not `git patch-id` output.
-pub const PATCH_ID_ALGORITHM: &str = "mc-patch-id-v4";
+pub const PATCH_ID_ALGORITHM: &str = "eidnara-patch-id-v4";
 
 /// `CANDIDATE_WINDOW` bounds fallback resolution cost on deep histories.
 /// A true match outside the window is unresolved at that rung.

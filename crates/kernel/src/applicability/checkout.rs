@@ -1021,7 +1021,7 @@ fn hex_digest(digest: &[u8; 32]) -> String {
 
 fn fingerprint_entries(entries: &[DirtyEntry], repository_state: &[u8; 32]) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"mc-dirty-fingerprint-v7\0");
+    hash.update(b"eidnara-dirty-fingerprint-v7\0");
     hash.update(repository_state);
     for entry in entries {
         // Length prefixes make adjacent fields unambiguous.
@@ -1221,7 +1221,7 @@ fn repository_state(
 ) -> Result<([u8; 32], bool), SnapshotError> {
     let config = repo.config_snapshot();
     let mut hash = Sha256::new();
-    hash.update(b"mc-repo-state-v1\0");
+    hash.update(b"eidnara-repo-state-v1\0");
     hash.update([
         config.boolean("core.sparseCheckout").unwrap_or(false) as u8,
         config.boolean("core.sparseCheckoutCone").unwrap_or(false) as u8,
@@ -1265,14 +1265,18 @@ mod tests {
             "a regular file stays readable"
         );
 
-        assert!(open_regular_no_follow_at(&root_fd, OsStr::new("missing"))
-            .expect("a vanished path is not a scan failure")
-            .is_none());
+        assert!(
+            open_regular_no_follow_at(&root_fd, OsStr::new("missing"))
+                .expect("a vanished path is not a scan failure")
+                .is_none()
+        );
 
         std::fs::create_dir(root.join("subdir")).unwrap();
-        assert!(open_regular_no_follow_at(&root_fd, OsStr::new("subdir"))
-            .expect("a directory is not a scan failure")
-            .is_none());
+        assert!(
+            open_regular_no_follow_at(&root_fd, OsStr::new("subdir"))
+                .expect("a directory is not a scan failure")
+                .is_none()
+        );
 
         std::os::unix::fs::symlink(root.join("regular"), root.join("link")).unwrap();
         assert!(
@@ -1384,8 +1388,10 @@ mod tests {
         let ParentDir::Opened(dir_fd, name) = resolved else {
             panic!("an execute-only ancestor is traversable");
         };
-        assert!(open_regular_no_follow_at(&dir_fd, name.as_os_str())
-            .expect("the file is not a scan failure")
-            .is_some());
+        assert!(
+            open_regular_no_follow_at(&dir_fd, name.as_os_str())
+                .expect("the file is not a scan failure")
+                .is_some()
+        );
     }
 }

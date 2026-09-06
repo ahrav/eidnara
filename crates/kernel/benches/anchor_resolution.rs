@@ -1,11 +1,9 @@
-//! Criterion benches for the mc-kernel anchor-resolution path.
+//! Criterion benches for the kernel anchor-resolution path.
 //!
-//! See `docs/perf/mc-store-anchor-resolution.md` for the estimand, corpus,
-//! cell table, and comparison protocol.
 //! Each cell asserts its intended resolution rung before timing. Fixture
 //! drift fails the benchmark instead of timing a cheaper resolution rung.
 //!
-//! Run with `cargo bench -p mc-kernel --bench anchor_resolution`.
+//! Run with `cargo bench -p kernel --bench anchor_resolution`.
 //!
 //! Setup and shape assertions run outside timed iterations. Fixture construction failures and
 //! resolution mismatches panic before Criterion records a misleading sample. Each cell fixes
@@ -18,16 +16,16 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use git_fixtures::{
-    commit_snapshot, init_repo, materialize, set_head_detached, write_worktree_file, FixtureRepo,
+    FixtureRepo, commit_snapshot, init_repo, materialize, set_head_detached, write_worktree_file,
 };
 use gix::ObjectId;
-use mc_kernel::applicability::{
-    capture_anchor_representation, snapshot_checkout, CheckoutSnapshot, EvalBudget,
-    GitConditionOutcome, ResolutionLadder, CANDIDATE_WINDOW,
+use kernel::applicability::{
+    CANDIDATE_WINDOW, CheckoutSnapshot, EvalBudget, GitConditionOutcome, ResolutionLadder,
+    capture_anchor_representation, snapshot_checkout,
 };
-use mc_kernel::{AnchorCapture, GitCondition};
+use kernel::{AnchorCapture, GitCondition};
 
 /// Tracked-file count committed by every `snapshot` cell. Only the dirty
 /// state varies across cells.

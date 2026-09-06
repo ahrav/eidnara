@@ -19,26 +19,25 @@ use super::scope::ScopeMatchContext;
 use super::{KernelError, KernelStore};
 
 pub use checkout::{
-    open_isolated, snapshot_checkout, CheckoutSnapshot, DirtyEntry, EvalBudget, PathEncoding,
-    SnapshotError,
+    CheckoutSnapshot, DirtyEntry, EvalBudget, PathEncoding, SnapshotError, open_isolated,
+    snapshot_checkout,
 };
-pub use checks::{run_cheap_check, CheckCache, CheckOutcome, MAX_CONFIG_BYTES};
+pub use checks::{CheckCache, CheckOutcome, MAX_CONFIG_BYTES, run_cheap_check};
 pub use engine::{
     ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityState, BatchEvaluation,
     ClassificationToken, EvaluationStats, FailedCheck, ObjectApplicability,
 };
 pub use payloads::{
-    checkout_identity_digest, ApplicabilityObservationPayload, CheckSpec, ObjectApplicabilitySpec,
-    PayloadDecode, DEPENDENCY_KIND_TARGET, OBJECT_APPLICABILITY_SCHEMA,
-    OBSERVATION_APPLICABILITY_SCHEMA, OBSERVATION_KIND_CURRENT,
+    ApplicabilityObservationPayload, CheckSpec, DEPENDENCY_KIND_TARGET,
+    OBJECT_APPLICABILITY_SCHEMA, OBSERVATION_APPLICABILITY_SCHEMA, OBSERVATION_KIND_CURRENT,
     OBSERVATION_KIND_DIRTY_TREE_UNCERTAIN, OBSERVATION_KIND_HISTORICAL,
     OBSERVATION_KIND_LIFECYCLE_INVALIDATED, OBSERVATION_KIND_OUT_OF_SCOPE, OBSERVATION_KIND_STALE,
-    OBSERVATION_KIND_UNCERTAIN,
+    OBSERVATION_KIND_UNCERTAIN, ObjectApplicabilitySpec, PayloadDecode, checkout_identity_digest,
 };
-pub use repair::{commit_read_repair, AppendOutcome, BlockState, InjectionBlock, RepairIntent};
+pub use repair::{AppendOutcome, BlockState, InjectionBlock, RepairIntent, commit_read_repair};
 pub use resolve::{
-    capture_anchor_representation, compute_patch_id, GitConditionOutcome, ResolutionLadder,
-    ResolveObstacle, CANDIDATE_WINDOW, PATCH_ID_ALGORITHM,
+    CANDIDATE_WINDOW, GitConditionOutcome, PATCH_ID_ALGORITHM, ResolutionLadder, ResolveObstacle,
+    capture_anchor_representation, compute_patch_id,
 };
 
 /// One batch evaluation request against a checkout path.

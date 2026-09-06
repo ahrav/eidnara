@@ -5,7 +5,7 @@
 //! cache remains process-local; the observations log is the durable record.
 
 use std::borrow::Borrow;
-use std::collections::{hash_map::RandomState, HashMap};
+use std::collections::{HashMap, hash_map::RandomState};
 use std::hash::{BuildHasher, Hash};
 
 /// Per-generation entry cap.

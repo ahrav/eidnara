@@ -7,31 +7,31 @@
 
 use std::borrow::Cow;
 use std::cell::OnceCell;
-use std::collections::{hash_map::RandomState, HashMap};
+use std::collections::{HashMap, hash_map::RandomState};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
+use super::super::QueryContext;
 use super::super::anchor::{
-    evaluate_non_git, AnchorCondition, AnchorEvaluation, AnchorKind, AnchorRowSpec,
-    ContextDependency,
+    AnchorCondition, AnchorEvaluation, AnchorKind, AnchorRowSpec, ContextDependency,
+    evaluate_non_git,
 };
 use super::super::scope::{
-    scope_matches, CanonicalScope, MatchOutcome, ScopeFormError, ScopeMatchContext, ScopeTermSpec,
+    CanonicalScope, MatchOutcome, ScopeFormError, ScopeMatchContext, ScopeTermSpec, scope_matches,
 };
-use super::super::QueryContext;
-use super::cache::{TwoGenerationCache, GENERATION_CAP};
+use super::cache::{GENERATION_CAP, TwoGenerationCache};
 use super::checkout::{CheckoutSnapshot, DirtyEntry, EvalBudget};
-use super::checks::{check_observation, run_cheap_check, CheckCache, CheckOutcome};
+use super::checks::{CheckCache, CheckOutcome, check_observation, run_cheap_check};
 use super::payloads::{
-    CheckSpec, ObjectApplicabilitySpec, PayloadDecode, OBSERVATION_KIND_CURRENT,
-    OBSERVATION_KIND_DIRTY_TREE_UNCERTAIN, OBSERVATION_KIND_HISTORICAL,
-    OBSERVATION_KIND_LIFECYCLE_INVALIDATED, OBSERVATION_KIND_OUT_OF_SCOPE, OBSERVATION_KIND_STALE,
-    OBSERVATION_KIND_UNCERTAIN,
+    CheckSpec, OBSERVATION_KIND_CURRENT, OBSERVATION_KIND_DIRTY_TREE_UNCERTAIN,
+    OBSERVATION_KIND_HISTORICAL, OBSERVATION_KIND_LIFECYCLE_INVALIDATED,
+    OBSERVATION_KIND_OUT_OF_SCOPE, OBSERVATION_KIND_STALE, OBSERVATION_KIND_UNCERTAIN,
+    ObjectApplicabilitySpec, PayloadDecode,
 };
 use super::repair::AppendOutcome;
-use super::resolve::{GitConditionOutcome, ResolutionLadder, PATCH_ID_ALGORITHM};
+use super::resolve::{GitConditionOutcome, PATCH_ID_ALGORITHM, ResolutionLadder};
 
 /// Applicability state of one object at one checkout. Everything except
 /// `Current` is blocked from auto-injection and reachable only through an
@@ -244,10 +244,10 @@ impl SnapshotCacheKey {
 
 impl PartialEq for SnapshotCacheKey {
     fn eq(&self, other: &Self) -> bool {
-        if let (Self::Shared(left), Self::Shared(right)) = (self, other) {
-            if Arc::ptr_eq(left, right) {
-                return true;
-            }
+        if let (Self::Shared(left), Self::Shared(right)) = (self, other)
+            && Arc::ptr_eq(left, right)
+        {
+            return true;
         }
         self.values() == other.values()
     }
@@ -612,13 +612,12 @@ impl ApplicabilityEngine {
                 .get_key_value(&key)
             {
                 stats.object_cache_hits += 1;
-                if let SnapshotCacheKey::Shared(context) = &key.snapshot {
-                    if cache_context
+                if let SnapshotCacheKey::Shared(context) = &key.snapshot
+                    && cache_context
                         .as_ref()
                         .is_none_or(|current| !Arc::ptr_eq(current, context))
-                    {
-                        cache_context = Some(Arc::clone(context));
-                    }
+                {
+                    cache_context = Some(Arc::clone(context));
                 }
                 let (state, evidence, failed_check) = match cached.details {
                     Some(details) => (
@@ -1335,7 +1334,7 @@ fn inputs_digest_prefix(
     kind: InputPrefixKind,
 ) -> Sha256 {
     let mut hash = Sha256::new();
-    hash.update(b"mc-applicability-inputs-v4\0");
+    hash.update(b"eidnara-applicability-inputs-v4\0");
     // Only the context fields the candidate's anchor kind reads enter the
     // digest, so an unrelated context change (a fresh query instant, say)
     // cannot evict every cached classification.

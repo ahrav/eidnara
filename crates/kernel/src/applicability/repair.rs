@@ -20,8 +20,8 @@ use super::super::{CommitIntent, Envelope, KernelError, KernelStore, Sensitivity
 use super::checkout::{CheckoutSnapshot, EvalBudget};
 use super::engine::{ApplicabilityEngine, ApplicabilityState, ObjectApplicability};
 use super::payloads::{
-    checkout_identity_digest, ApplicabilityObservationPayload, DEPENDENCY_KIND_TARGET,
-    OBSERVATION_APPLICABILITY_SCHEMA, OBSERVATION_KIND_CURRENT,
+    ApplicabilityObservationPayload, DEPENDENCY_KIND_TARGET, OBSERVATION_APPLICABILITY_SCHEMA,
+    OBSERVATION_KIND_CURRENT, checkout_identity_digest,
 };
 use super::resolve::PATCH_ID_ALGORITHM;
 
@@ -142,7 +142,7 @@ impl RepairIntent {
         // pre-clear one.
         let generation = generation_for(block, kind);
         let mut key = Sha256::new();
-        key.update(b"mc-applicability-repair-v1\0");
+        key.update(b"eidnara-applicability-repair-v1\0");
         for part in [
             &generation.to_string(),
             object.object_id.as_str(),
