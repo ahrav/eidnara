@@ -23,8 +23,7 @@ async fn subscribe(
             .expect("subscribe serializes"),
             RequestOptions {
                 timeout: BUDGET,
-                cancellation: None,
-                binary: false,
+                ..RequestOptions::default()
             },
         )
         .await
@@ -194,6 +193,7 @@ async fn real_broca_cancel_shutdown_and_full_route_handle_cleanup() {
         .await
         .expect_err("closed full handle is rejected");
     assert_eq!(old.code(), "route_not_live");
+    assert_eq!(old.outcome(), host_runtime::SendOutcome::NotSent);
     let replacement_response = request_json(&client, replacement, send_body("new route")).await;
     assert!(replacement_response["run_id"].is_string());
 

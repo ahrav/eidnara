@@ -33,7 +33,6 @@ use sha2::{Digest, Sha256};
 
 use crate::spawn::MAX_ENVELOPE_BYTES;
 
-const STORE_FILE: &str = "memory.sqlite";
 const ACTIVE_HARNESS_SELECTION: &str = "active-selection.json";
 const ACTIVE_SELECTION_CREDENTIAL_DOMAIN: &[u8] = b"eidnara-active-selection-credential-v1";
 const MAX_DESCRIPTOR_ITEMS: usize = 32;
@@ -215,7 +214,7 @@ impl LauncherEnvelope {
         data_dir: PathBuf,
         mode: SelectionMode<'_>,
     ) -> Result<PreparedLauncherEnvelope, &'static str> {
-        let closure_root = data_dir.join("eidnara").join("harness-closures");
+        let closure_root = closure_root(&data_dir);
         let store = HarnessClosureStore::open(&closure_root).ok();
         // The validator memoizes results because recorded, supplied, and merged selections can cite the same digest; each `validate` re-hashes the closure tree.
         // The recorded, supplied, and merged selections can cite the same digest.
@@ -719,7 +718,7 @@ pub fn clear_active_selection() -> Result<(), &'static str> {
     let data_dir = host_runtime::data_dir_path(None)
         .ok()
         .ok_or("active harness selection root is unavailable")?;
-    let closure_root = data_dir.join("eidnara").join("harness-closures");
+    let closure_root = closure_root(&data_dir);
     let path = closure_root.join(ACTIVE_HARNESS_SELECTION);
     match std::fs::symlink_metadata(&path) {
         Ok(_) => {}
@@ -769,12 +768,20 @@ impl LlmExecutionBackend for UnavailableBackend {
     }
 }
 
+/// `<data dir>/<managed dir>/harness-closures`, the closure store root the lifecycle
+/// launcher stages into and the daemon reads from.
+fn closure_root(data_dir: &Path) -> PathBuf {
+    data_dir
+        .join(host_runtime::MANAGED_DIR_NAME)
+        .join("harness-closures")
+}
+
 fn harness_backend(
     envelope: &StartupEnvelope,
     env: &EnvSnapshot,
     state_root: &StateRoot,
 ) -> HarnessDispatchBackend {
-    let closure_root = envelope.data_dir.join("eidnara").join("harness-closures");
+    let closure_root = closure_root(&envelope.data_dir);
     let store = HarnessClosureStore::open(&closure_root).ok();
 
     let opencode: Arc<dyn LlmExecutionBackend> =
@@ -899,14 +906,7 @@ fn storage_init(root: &Path) -> Result<HostInit, &'static str> {
         .mode(0o700)
         .create(&managed)
         .map_err(|_| "managed directory creation failed")?;
-    let descriptor = storage::StorageDescriptor {
-        module_id: "context".to_owned(),
-        storage_namespace: "memory".to_owned(),
-        isolation: storage::Isolation::Module,
-        backend: storage::StorageBackend::Sqlite {
-            path: managed.join(STORE_FILE).to_string_lossy().into_owned(),
-        },
-    };
+    let descriptor = daemon::store_descriptor_in(&managed);
     Ok(HostInit {
         host_capabilities: Vec::new(),
         storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),
@@ -983,6 +983,9 @@ pub fn run() -> Result<(), &'static str> {
     )
     .map_err(|_| "credential snapshot exceeds bounds")?;
     let synapse = synapse_component(&generation);
+    // The composition declares what it retains; an unsupported or ORT-less synapse declares zero.
+    let synapse_retained_bytes =
+        host_runtime::CompositeComponent::resources(&synapse).retained_resident_bytes;
     let broca_state =
         StateRoot::resolve(Some(&root)).map_err(|_| "broca state root is unavailable")?;
     let backend: Arc<dyn LlmExecutionBackend> =
@@ -1007,7 +1010,7 @@ pub fn run() -> Result<(), &'static str> {
         limits: host_runtime::HostLimits {
             max_resident_bytes: host_runtime::HostLimits::default().max_resident_bytes
                 + daemon::DECLARED_RETAINED_RESIDENT_BYTES
-                + host_runtime::synapse::SynapseLimits::default().max_retained_result_bytes
+                + synapse_retained_bytes
                 + host_runtime::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
             ..host_runtime::HostLimits::default()
         },
@@ -1227,7 +1230,7 @@ mod tests {
     fn fresh_prepare_ignores_a_stale_selection_and_running_prepare_refuses_it() {
         let root = tempfile::tempdir().expect("data root");
         let data_dir = root.path().to_path_buf();
-        let closure_root = data_dir.join("eidnara").join("harness-closures");
+        let closure_root = closure_root(&data_dir);
         plant_stale_selection(&closure_root);
 
         let envelope = || LauncherEnvelope {

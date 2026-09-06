@@ -9167,10 +9167,7 @@ impl Handler {
                 },
                 Err(primary) => {
                     // response.
-                    if matches!(
-                        &primary,
-                        primary if primary.code() == Some("idempotency_conflict")
-                    ) {
+                    if primary.is_idempotency_conflict() {
                         return PreparedOutcome::Error {
                             code: "dreamer_run_failed".to_string(),
                             message: primary.to_string(),
@@ -14750,6 +14747,22 @@ pub fn dev_descriptor_at(data_home: &str) -> StorageDescriptor {
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
             path: sqlite_store_path(data_home, DEFAULT_MODULE_ID),
+        },
+    }
+}
+
+/// File name of the memory store inside its directory.
+pub const STORE_FILE_NAME: &str = "memory.sqlite";
+
+/// Builds the module-isolated SQLite descriptor for a store placed directly in `dir`,
+/// the layout the `eidnara-host` binary uses under the managed data directory.
+pub fn store_descriptor_in(dir: &Path) -> StorageDescriptor {
+    StorageDescriptor {
+        module_id: DEFAULT_MODULE_ID.to_string(),
+        storage_namespace: STORAGE_NAMESPACE.to_string(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: dir.join(STORE_FILE_NAME).to_string_lossy().into_owned(),
         },
     }
 }

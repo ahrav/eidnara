@@ -5,8 +5,7 @@
 //! fixed corpus point. Arrival model: none (local operation microbenchmark).
 //! Corpus is deterministic (seed in `support/corpus.rs`); every cell is
 //! reported per-benchmark, never aggregated. Cross-change comparisons need
-//! process-level replication: `docs/perf/daemon-hot-path.md` describes the
-//! baseline workflow and its limits.
+//! process-level replication; one process's numbers are not a baseline.
 //!
 //! Run: `cargo bench -p daemon --features bench-internals`
 
@@ -32,7 +31,7 @@ const MESSAGE_COUNTS: &[usize] = &[100, 1_400, 2_500];
 /// at 512 KiB, so a 1_400-message first pass is rejected with `InputLimit`.
 const E2E_MESSAGE_COUNTS: &[usize] = &[100, 1_000];
 /// Steady-state groups use the largest count in `E2E_MESSAGE_COUNTS`.
-const E2E_STEADY_COUNT: usize = 1_000;
+const E2E_STEADY_COUNT: usize = E2E_MESSAGE_COUNTS[E2E_MESSAGE_COUNTS.len() - 1];
 const PAYLOAD_SIZES: &[usize] = &[256, 2_048, 4_096];
 const TOKENIZER_CLASSES: &[ContentClass] = &[
     ContentClass::Prose,
@@ -194,14 +193,7 @@ fn producer_ctx(dir: &str) -> ProducerContext<'_> {
 
 fn fresh_store() -> (tempfile::TempDir, MemoryStore) {
     let dir = tempfile::tempdir().expect("bench store dir");
-    let descriptor = storage::StorageDescriptor {
-        module_id: "eidnara-bench".to_string(),
-        storage_namespace: "memory".to_string(),
-        isolation: storage::Isolation::Module,
-        backend: storage::StorageBackend::Sqlite {
-            path: dir.path().join("store.db").to_string_lossy().into_owned(),
-        },
-    };
+    let descriptor = daemon::store_descriptor_in(dir.path());
     let store = MemoryStore::open(&descriptor).expect("bench store");
     (dir, store)
 }

@@ -15,7 +15,6 @@ use serde_json::{Value, json};
 
 pub const BUDGET: Duration = Duration::from_secs(20);
 pub const CONTROL_FILE: &str = "direct-host-control.sock";
-pub const STORE_FILE: &str = "memory.sqlite";
 pub const REDACTION_SENTINEL: &str = "u5-redaction-sentinel-DO-NOT-LOG";
 
 static BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -163,7 +162,7 @@ impl FixtureProcess {
     }
 
     pub fn store_path(&self) -> PathBuf {
-        self.root().join(STORE_FILE)
+        self.root().join(daemon::STORE_FILE_NAME)
     }
 
     pub fn readiness(&self) -> &Value {
@@ -367,8 +366,7 @@ pub async fn request_json(client: &Client, route: ClientRoute, body: Value) -> V
             serde_json::to_vec(&body).expect("request serializes"),
             RequestOptions {
                 timeout: BUDGET,
-                cancellation: None,
-                binary: false,
+                ..RequestOptions::default()
             },
         )
         .await
@@ -387,8 +385,7 @@ pub async fn wait_for_store(client: &Client, route: ClientRoute, session: &str) 
                 body,
                 RequestOptions {
                     timeout: BUDGET,
-                    cancellation: None,
-                    binary: false,
+                    ..RequestOptions::default()
                 },
             )
             .await
@@ -428,12 +425,5 @@ pub fn mode(path: &Path) -> u32 {
 }
 
 pub fn storage_descriptor(root: &Path) -> storage::StorageDescriptor {
-    storage::StorageDescriptor {
-        module_id: "context".to_owned(),
-        storage_namespace: "memory".to_owned(),
-        isolation: storage::Isolation::Module,
-        backend: storage::StorageBackend::Sqlite {
-            path: root.join(STORE_FILE).to_string_lossy().into_owned(),
-        },
-    }
+    daemon::store_descriptor_in(root)
 }

@@ -582,12 +582,13 @@ fn bench_read(c: &mut Criterion) {
             let request = read_request(&daemon, "explicit_search");
             let response = daemon.assert_available(request.clone());
             let served = response["rows"].as_array().unwrap().len();
-            // One seed row plus every row on the project's own scope, capped at the read row limit.
-            assert_eq!(
-                served,
-                (1 + rows.div_ceil(scope_count)).min(daemon::kernel_routes::read::MAX_READ_ROWS),
-                "{shape} {rows}"
-            );
+            // One seed row plus every row on the project's own scope, capped at the read row
+            // limit; the response flags the cap so a capped cell is distinguishable from a
+            // dropped scope filter.
+            let eligible = 1 + rows.div_ceil(scope_count);
+            let cap = daemon::kernel_routes::read::MAX_READ_ROWS;
+            assert_eq!(served, eligible.min(cap), "{shape} {rows}");
+            assert_eq!(response["truncated"], eligible > cap, "{shape} {rows}");
             if profile_or_bench(&case, || {
                 black_box(daemon.call(request.clone()));
             }) {

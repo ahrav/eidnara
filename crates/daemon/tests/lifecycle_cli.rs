@@ -229,15 +229,13 @@ fn version_and_release_info_are_side_effect_free() {
 
     let version = run(&data, &["--version"]);
     assert_eq!(version.code, 0);
-    assert!(
-        version
-            .stdout
-            .contains(daemon::release_contract::RELEASE_VERSION)
-    );
-    assert!(
-        version
-            .stdout
-            .contains(daemon::release_contract::DAEMON_VERSION)
+    assert_eq!(
+        version.stdout,
+        format!(
+            "eidnara-host {} ({})\n",
+            daemon::release_contract::RELEASE_VERSION,
+            daemon::release_contract::DAEMON_VERSION
+        )
     );
 
     let info = run(&data, &["release-info"]);
@@ -249,8 +247,8 @@ fn version_and_release_info_are_side_effect_free() {
         daemon::release_contract::RELEASE_VERSION
     );
     assert_eq!(
-        info.stdout.trim(),
-        daemon::release_contract::RELEASE_CONTRACT_JSON.trim_end()
+        info.stdout,
+        format!("{}\n", daemon::release_contract::RELEASE_CONTRACT_JSON)
     );
 
     let inputs = run(&data, &["input-lock-digest"]);
@@ -426,7 +424,7 @@ fn quarantined_record_is_classified_alike_by_every_command() {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("dir mode");
     }
     // Schema 2 decodes as an unknown schema: preserved, never repaired.
-    let record = run_dir.join("host-lifecycle.json");
+    let record = run_dir.join(host_runtime::LIFECYCLE_RECORD_NAME);
     let original = br#"{"schema":2,"unknown_future_field":true}"#;
     std::fs::write(&record, original).expect("quarantined record");
     std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).expect("record mode");
@@ -542,7 +540,10 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     assert_eq!(value["effects"], Value::Null);
     assert_eq!(value["readiness"]["shared_memory"]["state"], "ready");
     assert_eq!(value["versions"]["proof"], "current");
-    assert_eq!(value["versions"]["daemon"], "eidnara-host/0.1.0");
+    assert_eq!(
+        value["versions"]["daemon"],
+        daemon::release_contract::DAEMON_VERSION
+    );
 
     let publication = host_runtime::runtime_dir_path(Some(&data))
         .expect("runtime dir")
@@ -579,7 +580,10 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     assert_eq!(out.code, 0, "start failed: {} {}", out.stdout, out.stderr);
     let value = out.json();
     assert_result(&value, "start", true, "running", "already_running");
-    assert_eq!(value["versions"]["daemon"], "eidnara-host/0.1.0");
+    assert_eq!(
+        value["versions"]["daemon"],
+        daemon::release_contract::DAEMON_VERSION
+    );
 
     let out = run(&data, &["status"]);
     assert_eq!(out.code, 0);
@@ -636,7 +640,7 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     janitor.active = false;
 
     // `stop` completes daemon teardown before returning.
-    let log = coordination_dir(&data).join("daemon.log");
+    let log = coordination_dir(&data).join("eidnara.log");
     assert!(log.exists(), "detached daemon logged to the owner-only log");
     let mode = std::fs::metadata(&log)
         .expect("log metadata")

@@ -385,7 +385,7 @@ fn publication_path() -> Result<PathBuf, InstanceError> {
 }
 
 fn daemon_log_path() -> Result<PathBuf, InstanceError> {
-    Ok(host_runtime::coordination_dir_path(None)?.join("daemon.log"))
+    Ok(host_runtime::coordination_dir_path(None)?.join("eidnara.log"))
 }
 
 struct Runtime {
@@ -717,7 +717,9 @@ fn preflight_generation(
     match payload_dir {
         // A quarantined or insecure store fails staging before any mutation.
         Some(dir) => {
-            payload_sources(dir, payload_manifest_digest)?;
+            let payload = payload_sources(dir, payload_manifest_digest)?;
+            // A source byte mismatch must fail before the irreversible stop.
+            verify_payload_sources(&payload.sources)?;
             // No-create probe: an absent store is fine, staging creates it.
             if let Some(store) =
                 GenerationStore::open_probe(None).map_err(|e| generation_failure(&e))?
@@ -818,6 +820,7 @@ fn resolve_generation(
     match payload_dir {
         Some(dir) => {
             let payload = payload_sources(dir, payload_manifest_digest)?;
+            verify_payload_sources(&payload.sources)?;
             let store = GenerationStore::open(None).map_err(|e| generation_failure(&e))?;
             let mut protected = BTreeSet::new();
             if let Ok(host_runtime::generation::CurrentProfile::Current(current)) =
@@ -923,6 +926,48 @@ struct TrustedPayloadFile {
     size: u64,
     mode: String,
     sha256: String,
+}
+
+/// Reads every source and checks each declared size and SHA-256 against the payload manifest.
+///
+/// `stage_and_promote` re-hashes sources while copying, but for `restart` that copy runs after
+/// the incumbent is stopped; this read-only pass runs before the stop so a corrupt payload
+/// never costs a healthy daemon. Sources without a declared identity (development trees) are
+/// checked only for being regular files.
+fn verify_payload_sources(sources: &[SourceSpec]) -> Result<(), (&'static str, &'static str)> {
+    use sha2::Digest;
+
+    let invalid = ("stopped", "native_payload_invalid");
+    for spec in sources {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&spec.source)
+            .map_err(|_| invalid)?;
+        let meta = file.metadata().map_err(|_| invalid)?;
+        if !meta.is_file() {
+            return Err(invalid);
+        }
+        if spec.expected_size.is_some_and(|size| size != meta.len()) {
+            return Err(invalid);
+        }
+        let Some(expected) = spec.expected_sha256.as_deref() else {
+            continue;
+        };
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = vec![0u8; 128 * 1024];
+        loop {
+            let read = file.read(&mut buf).map_err(|_| invalid)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buf[..read]);
+        }
+        if format!("{:x}", hasher.finalize()) != expected {
+            return Err(invalid);
+        }
+    }
+    Ok(())
 }
 
 fn payload_sources(

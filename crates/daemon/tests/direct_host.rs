@@ -194,7 +194,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     assert_eq!(materialized["action"], "HARD");
     let first_m0 = materialized["messages"]
         .as_array()
-        .expect("ck messages")
+        .expect("messages")
         .iter()
         .find(|message| message["meta"]["synthetic"] == true)
         .expect("synthetic m0")["content"][0]["kind"]["text"]
@@ -220,7 +220,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     assert_eq!(replay["action"], "SOFT+");
     let replay_m0 = replay["messages"]
         .as_array()
-        .expect("ck messages")
+        .expect("messages")
         .iter()
         .find(|message| message["meta"]["synthetic"] == true)
         .expect("synthetic m0")["content"][0]["kind"]["text"]

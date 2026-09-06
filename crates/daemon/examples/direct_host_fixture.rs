@@ -33,10 +33,13 @@ mod unix {
     use tokio::sync::oneshot;
 
     const CONTROL_FILE: &str = "direct-host-control.sock";
-    const STORE_FILE: &str = "memory.sqlite";
     const MAX_CONTROL_LINE: usize = 64 * 1024;
     const READY_TIMEOUT: Duration = Duration::from_secs(30);
-    const CATALOG: [&str; 3] = ["context", "synapse", "broca"];
+    const CATALOG: [&str; 3] = [
+        daemon::DEFAULT_MODULE_ID,
+        host_runtime::synapse::SYNAPSE_MODULE_ID,
+        host_runtime::broca::BROCA_MODULE_ID,
+    ];
 
     #[derive(Debug, Clone, Copy)]
     enum NextBehavior {
@@ -572,14 +575,7 @@ mod unix {
     }
 
     fn storage_init(root: &Path) -> HostInit {
-        let descriptor = storage::StorageDescriptor {
-            module_id: "context".to_owned(),
-            storage_namespace: "memory".to_owned(),
-            isolation: storage::Isolation::Module,
-            backend: storage::StorageBackend::Sqlite {
-                path: root.join(STORE_FILE).to_string_lossy().into_owned(),
-            },
-        };
+        let descriptor = daemon::store_descriptor_in(root);
         HostInit {
             host_capabilities: Vec::new(),
             storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),
@@ -637,9 +633,12 @@ mod unix {
 
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
+        let synapse = synapse_component();
+        let synapse_retained_bytes =
+            host_runtime::CompositeComponent::resources(&synapse).retained_resident_bytes;
         let composite = StaticComposite::new(
             daemon::Handler::new_with_connection_file(Some(publication.clone())),
-            synapse_component(),
+            synapse,
             BrocaComponent::new(
                 backend,
                 host_runtime::broca::subprocess::group_registry::StateRoot::resolve(Some(&root))?,
@@ -650,12 +649,10 @@ mod unix {
             daemon_ver: "eidnara-host/direct-host-fixture".to_owned(),
             init: storage_init(&root),
             limits: host_runtime::HostLimits {
-                // The composite must account for every linked component's declared retention.
-                // The composite must size `max_resident_bytes` for every linked component.
-                // fail startup.
+                // The composite must size `max_resident_bytes` for every linked component's declared retention.
                 max_resident_bytes: host_runtime::HostLimits::default().max_resident_bytes
                     + daemon::DECLARED_RETAINED_RESIDENT_BYTES
-                    + host_runtime::synapse::SynapseLimits::default().max_retained_result_bytes
+                    + synapse_retained_bytes
                     + host_runtime::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
                 ..host_runtime::HostLimits::default()
             },
