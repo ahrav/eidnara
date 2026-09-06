@@ -339,7 +339,7 @@ fn snapshot_benches(c: &mut Criterion) {
         ("untracked-10", snapshot_fixture(10)),
         ("untracked-1000", snapshot_fixture(1_000)),
     ];
-    let mut group = c.benchmark_group("snapshot");
+    let mut group = c.benchmark_group("scope_snapshot");
     group.sample_size(20);
     for (name, (_dir, fixture)) in &fixtures {
         group.bench_function(*name, |b| {

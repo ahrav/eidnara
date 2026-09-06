@@ -358,13 +358,11 @@ fn deletion_fault_before_commit_leaves_references_live_and_no_barrier_across_res
         count_sql(&proof, "SELECT COUNT(*) FROM deletion_backfill_barriers"),
         0
     );
-    assert_eq!(
-        count_sql(
-            &proof,
-            "SELECT COUNT(*) FROM outbox WHERE source_kind='artifact_deletion'"
-        ),
-        0
-    );
+    // Re-asserted after the positive control so a drifted source_kind literal
+    // fails loudly instead of matching zero rows here. commentlint: allow(JUDGE)
+    let propagation_outbox_sql =
+        "SELECT COUNT(*) FROM outbox WHERE source_kind='artifact_deletion'";
+    assert_eq!(count_sql(&proof, propagation_outbox_sql), 0);
     // Positive control: the same request lands once the fault is gone.
     let result = proof
         .store()
@@ -377,5 +375,10 @@ fn deletion_fault_before_commit_leaves_references_live_and_no_barrier_across_res
             "SELECT COUNT(*) FROM evidence_meta WHERE invalidated_commit_seq IS NULL"
         ),
         0
+    );
+    assert_eq!(
+        count_sql(&proof, propagation_outbox_sql),
+        4,
+        "the committed deletion queues one outbox row per propagation target"
     );
 }
