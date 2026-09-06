@@ -1644,3 +1644,40 @@ fn a_short_circuited_replay_reports_the_outcome_its_own_receipt_committed() {
     assert_eq!(replayed.barrier_id, first.barrier_id);
     assert_eq!(replayed.digest, handle.digest);
 }
+
+#[test]
+fn a_secret_bearing_evidence_selector_cannot_reach_a_placeholder_named_artifact() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    // An artifact whose evidence id is the literal placeholder a redacted
+    // Anthropic key collapses to.
+    let mut placeholder = ingest_request("placeholder", b"placeholder payload");
+    placeholder.evidence_id = "evidence-<ANTHROPIC_API_KEY_REDACTED>".to_string();
+    let handle = store.ingest_artifact(placeholder).unwrap();
+    assert!(object_path(root.path(), &handle.digest).exists());
+
+    let secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
+    let mut purge = delete_request("by-secret", &handle.digest, ArtifactDeletionKind::Purge);
+    purge.identity = ArtifactDeletionIdentity::EvidenceId(format!("evidence-{secret}"));
+    assert_eq!(
+        store.delete_artifact(purge).unwrap_err().kind(),
+        ArtifactErrorKind::InvalidInput,
+        "a redacted selector reached the placeholder-named artifact"
+    );
+    assert!(object_path(root.path(), &handle.digest).exists());
+    assert_eq!(
+        inspect(root.path())
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_purge_tombstones WHERE artifact_digest=?1",
+                [&handle.digest],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store.read_artifact(&handle).unwrap(),
+        b"placeholder payload"
+    );
+}

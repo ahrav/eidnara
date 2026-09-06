@@ -1497,3 +1497,415 @@ fn a_restore_completes_the_purge_unlink_the_backup_recorded_as_pending() {
         0
     );
 }
+
+#[test]
+fn a_destination_swapped_before_the_copy_receives_no_database_pages() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+
+    // The hook runs after the temporary file exists in the verified directory and
+    // before SQLite opens it by pathname. A same-UID process swapping the
+    // directory here presents a replacement holding the observed temporary name.
+    let original = destination.path().to_path_buf();
+    let displaced = original.with_file_name("displaced-destination");
+    let decoy_file = Cell::new(None);
+    let error = store
+        .backup_with_hook_for_test(request(&original), || {
+            let entries = destination_entries(&original);
+            assert_eq!(entries.len(), 1);
+            let temp_name = entries[0].file_name().unwrap().to_os_string();
+            fs::rename(&original, &displaced).unwrap();
+            fs::create_dir(&original).unwrap();
+            fs::set_permissions(&original, fs::Permissions::from_mode(0o700)).unwrap();
+            let decoy = original.join(&temp_name);
+            fs::write(&decoy, b"").unwrap();
+            decoy_file.set(Some(decoy));
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::InvalidBackup);
+
+    let decoy = decoy_file.into_inner().expect("the hook ran");
+    let decoy_bytes = fs::read(&decoy).unwrap_or_default();
+    assert!(
+        decoy_bytes.is_empty(),
+        "the swapped-in destination received {} bytes of database copy",
+        decoy_bytes.len()
+    );
+    assert!(
+        !decoy_bytes.starts_with(b"SQLite format 3"),
+        "the swapped-in destination holds a database"
+    );
+    assert!(
+        destination_entries(&displaced).is_empty(),
+        "cleanup left the temporary file in the verified directory"
+    );
+    // Restore the directory so the tempdir guard can remove it.
+    fs::remove_dir_all(&original).unwrap();
+    fs::rename(&displaced, &original).unwrap();
+}
+
+#[test]
+fn a_recovery_directory_swapped_for_a_symlink_fails_closed_on_reopen() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let backup = store.backup(request(destination.path())).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+    // `RecoveryFailure` abandons the family in `.restore-<n>` with the marker
+    // still published, matching a process killed mid-replacement.
+    assert_eq!(
+        store
+            .restore_with_fault_for_test(&backup.destination_path, RestoreFault::RecoveryFailure)
+            .unwrap_err(),
+        KernelError::InvalidRestore
+    );
+    drop(store);
+
+    let recovery = fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".restore-")
+                && path.is_dir()
+        })
+        .expect("an interrupted restore leaves its recovery directory");
+    let displaced_family = fs::read_dir(&recovery).unwrap().count();
+    assert!(displaced_family > 0);
+
+    // A same-UID process moves the real directory aside and points the marker's
+    // recovery path at a decoy holding a `kernel.sqlite` of its choosing.
+    let stashed = root.path().join("stashed-recovery");
+    fs::rename(&recovery, &stashed).unwrap();
+    let decoy = private_dir();
+    fs::write(decoy.path().join("kernel.sqlite"), b"not a kernel database").unwrap();
+    std::os::unix::fs::symlink(decoy.path(), &recovery).unwrap();
+
+    assert_eq!(
+        KernelStore::open(root.path()).unwrap_err(),
+        KernelError::Inconclusive,
+        "a symlinked recovery directory was followed"
+    );
+    assert!(
+        !root.path().join("kernel.sqlite").exists(),
+        "the decoy database was moved into the store root"
+    );
+    assert!(
+        decoy.path().join("kernel.sqlite").exists(),
+        "the decoy's file was moved out of its directory"
+    );
+    assert_eq!(
+        fs::read_dir(&stashed).unwrap().count(),
+        displaced_family,
+        "the real displaced family was touched"
+    );
+    assert!(root.path().join("kernel.sqlite.restore").exists());
+
+    // Putting the real directory back lets the next open roll the family back.
+    fs::remove_file(&recovery).unwrap();
+    fs::rename(&stashed, &recovery).unwrap();
+    let reopened = KernelStore::open(root.path()).unwrap();
+    assert_eq!(reopened.facts(1).unwrap().commit_seq, 2);
+}
+
+#[test]
+fn a_restore_removes_bytes_the_restored_history_recorded_as_purged() {
+    use kernel::{
+        ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactErrorKind,
+        ArtifactIngestRequest, ProviderEgress,
+    };
+
+    fn ingest_request(key: &str) -> ArtifactIngestRequest {
+        ArtifactIngestRequest {
+            intent: intent(key),
+            payload: b"shared secret payload".to_vec(),
+            evidence_id: format!("evidence-{key}"),
+            object_id: format!("evidence-object-{key}"),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain-1".to_string(),
+            source_kind: "repository".to_string(),
+            source_id: format!("src/{key}"),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        }
+    }
+
+    // Store A ingests the payload and purges it completely: tombstone recorded,
+    // bytes unlinked, no pending unlink left behind.
+    let source_root = private_dir();
+    let destination = private_dir();
+    let source = KernelStore::open(source_root.path()).unwrap();
+    insert_domain(&source, 1, Sensitivity::Normal);
+    let handle = source.ingest_artifact(ingest_request("source")).unwrap();
+    source
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge"),
+            identity: ArtifactDeletionIdentity::Digest(handle.digest.clone()),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator-1".to_string()),
+            target_locator: Some("incident://secret-1".to_string()),
+            reason: Some("secret".to_string()),
+            deleted_at: 42,
+        })
+        .unwrap();
+    let backup = source.backup(request(destination.path())).unwrap();
+    assert_eq!(
+        inspect(source_root.path())
+            .query_row("SELECT COUNT(*) FROM artifact_pending_unlinks", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+            .unwrap(),
+        0,
+        "the purge completed, so the backup carries no pending unlink"
+    );
+
+    // Store B holds the same bytes live, then takes A's history.
+    let target_root = private_dir();
+    let target = KernelStore::open(target_root.path()).unwrap();
+    insert_domain(&target, 1, Sensitivity::Normal);
+    let live = target.ingest_artifact(ingest_request("target")).unwrap();
+    assert_eq!(live.digest, handle.digest);
+    let object_path = target_root
+        .path()
+        .join("artifacts/objects")
+        .join(&handle.digest[..2])
+        .join(&handle.digest[2..]);
+    assert!(object_path.exists());
+
+    target.restore(&backup.destination_path).unwrap();
+
+    assert!(
+        !object_path.exists(),
+        "bytes the restored history recorded as purged stayed readable"
+    );
+    assert_eq!(
+        target.read_artifact(&handle).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceUnavailable
+    );
+    assert_eq!(
+        inspect(target_root.path())
+            .query_row("SELECT COUNT(*) FROM artifact_pending_unlinks", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+            .unwrap(),
+        0,
+        "the re-armed unlink was not cleared after completing"
+    );
+}
+
+#[test]
+fn a_staged_restore_file_swapped_after_verification_is_not_installed() {
+    // Two backups that both verify, share a commit sequence of 1, and differ in
+    // the domain they hold.
+    let verified_root = private_dir();
+    let verified_destination = private_dir();
+    let verified_store = KernelStore::open(verified_root.path()).unwrap();
+    insert_domain(&verified_store, 1, Sensitivity::Normal);
+    let verified = verified_store
+        .backup(request(verified_destination.path()))
+        .unwrap();
+    let decoy_root = private_dir();
+    let decoy_destination = private_dir();
+    let decoy_store = KernelStore::open(decoy_root.path()).unwrap();
+    insert_domain(&decoy_store, 7, Sensitivity::Normal);
+    let decoy = decoy_store
+        .backup(request(decoy_destination.path()))
+        .unwrap();
+    assert_eq!(verified.captured_commit_seq, decoy.captured_commit_seq);
+
+    let root = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+    insert_domain(&store, 3, Sensitivity::Normal);
+    let live_oracle = digest(root.path(), Profile::SameRoot);
+
+    // The hook runs after the live family is displaced and before the staged file
+    // is renamed into place. A same-UID process swaps the verified staged copy for
+    // the decoy here.
+    let swapped = Cell::new(false);
+    let error = store
+        .restore_with_hook_for_test(&verified.destination_path, || {
+            let staged = fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+                .expect("the staged copy is present while the hook runs");
+            fs::remove_file(&staged).unwrap();
+            fs::copy(&decoy.destination_path, &staged).unwrap();
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o600)).unwrap();
+            swapped.set(true);
+        })
+        .unwrap_err();
+    assert!(swapped.get());
+    assert_eq!(
+        error,
+        KernelError::InvalidRestore,
+        "a staged file swapped after verification was installed"
+    );
+
+    // The displaced family came back and the decoy's domain never appeared.
+    digest(root.path(), Profile::SameRoot).assert_same(&live_oracle, "live state");
+    let known = store.known_as_of(store.tip().unwrap()).unwrap();
+    let mut domains = known
+        .objects
+        .iter()
+        .filter(|object| object.object_kind == "domain")
+        .map(|object| object.object_id.as_str())
+        .collect::<Vec<_>>();
+    domains.sort_unstable();
+    assert_eq!(domains, ["object-2", "object-3"]);
+    assert_eq!(insert_domain(&store, 4, Sensitivity::Normal), 3);
+}
+
+#[test]
+fn a_store_root_swapped_during_a_restore_is_not_adopted() {
+    // A decoy store whose database is a valid kernel family at commit 1.
+    let decoy_root = private_dir();
+    let decoy_store = KernelStore::open(decoy_root.path()).unwrap();
+    insert_domain(&decoy_store, 7, Sensitivity::Normal);
+    drop(decoy_store);
+
+    let parent = private_dir();
+    let root = parent.path().join("store");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let destination = private_dir();
+    let store = KernelStore::open(&root).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let backup = store.backup(request(destination.path())).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+
+    // After the live family is displaced and before the verified copy is
+    // installed, the whole root is renamed away and the decoy root takes its path.
+    let moved = parent.path().join("moved-store");
+    let swapped = Cell::new(false);
+    let error = store
+        .restore_with_hook_for_test(&backup.destination_path, || {
+            fs::rename(&root, &moved).unwrap();
+            fs::rename(decoy_root.path(), &root).unwrap();
+            swapped.set(true);
+        })
+        .unwrap_err();
+    assert!(swapped.get());
+    assert_eq!(
+        error,
+        KernelError::InvalidRestore,
+        "the connections were switched to a database the held root never received"
+    );
+
+    // The decoy's database was never installed over or adopted in place of the
+    // store's own family, which still sits in the moved root.
+    let decoy_domains: i64 = Connection::open(root.join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM domains WHERE domain_id='domain-7'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(decoy_domains, 1, "the decoy database was replaced");
+    assert!(
+        moved.join("kernel.sqlite").exists() || {
+            fs::read_dir(&moved).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".restore-")
+            })
+        }
+    );
+    // Put the root back so the tempdir guards can clean up.
+    fs::rename(&root, decoy_root.path()).unwrap();
+    fs::rename(&moved, &root).unwrap();
+}
+
+#[test]
+fn a_restore_reports_a_purge_unlink_it_could_not_complete() {
+    use kernel::{
+        ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind,
+        ArtifactDeletionRequest, ArtifactErrorKind, ArtifactIngestRequest, ProviderEgress,
+    };
+
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let handle = store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("ingest"),
+            payload: b"purged but stuck".to_vec(),
+            evidence_id: "evidence".to_string(),
+            object_id: "evidence-object".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain-1".to_string(),
+            source_kind: "repository".to_string(),
+            source_id: "src/evidence".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    let shard = root
+        .path()
+        .join("artifacts/objects")
+        .join(&handle.digest[..2]);
+    let object_path = shard.join(&handle.digest[2..]);
+    let error = store
+        .delete_artifact_with_fault_for_test(
+            ArtifactDeletionRequest {
+                intent: intent("purge"),
+                identity: ArtifactDeletionIdentity::Digest(handle.digest.clone()),
+                kind: ArtifactDeletionKind::Purge,
+                operator_id: Some("operator-1".to_string()),
+                target_locator: Some("incident://secret-1".to_string()),
+                reason: Some("secret".to_string()),
+                deleted_at: 42,
+            },
+            ArtifactDeletionFault::AfterCommit,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::PurgeUnlinkPending);
+    let backup = store.backup(request(destination.path())).unwrap();
+
+    // The shard loses its owner-only mode, so the unlink the restored history
+    // still owes cannot open it.
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o500)).unwrap();
+    let restored = store.restore(&backup.destination_path);
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(
+        restored.unwrap_err(),
+        KernelError::Io,
+        "a restore whose purge unlink failed reported success"
+    );
+    assert!(
+        object_path.exists(),
+        "the bytes were removed despite the error"
+    );
+    assert_eq!(
+        inspect(root.path())
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_pending_unlinks WHERE artifact_digest=?1",
+                [&handle.digest],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "the pending unlink must stay recorded for the next recovery"
+    );
+}

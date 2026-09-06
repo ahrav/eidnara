@@ -137,7 +137,12 @@ pub struct KernelStore {
     poisoned: AtomicBool,
     pub(super) cas_failed: AtomicBool,
     pub(super) artifact_cap: u64,
-    pub(super) artifacts_path: PathBuf,
+    /// The store root and its `artifacts` child, opened `NOFOLLOW` when the
+    /// store opened and held for its lifetime. Every later directory open
+    /// resolves below one of them rather than re-resolving a pathname a
+    /// same-UID process could have swapped.
+    pub(super) root_directory: File,
+    pub(super) artifacts_directory: File,
     lease_epoch: u64,
     /// Advances when an artifact's stored classification changes without a
     /// commit-log row, so a reader keyed on the tip alone can still tell that
@@ -215,17 +220,35 @@ impl KernelStore {
 
     fn open_supported(root: impl AsRef<Path>, artifact_cap: u64) -> Result<Self, KernelError> {
         let root = prepare_root(root.as_ref())?;
+        // The lease, the layout, and every SQLite connection below resolve `root` by
+        // pathname. Holding the directory open from before the lease is taken lets
+        // the end of the open prove that all of them resolved the same directory.
+        let root_directory = open_root_directory(&root)?;
         let db_path = root.join("kernel.sqlite");
         let lease_store = FileLeaseStore::new(root.join("leases")).map_err(|_| KernelError::Io)?;
         let lease_key = LeaseKey::new("eidnara-kernel", "sqlite", "kernel");
         let lease = lease_store.acquire(&lease_key).map_err(map_lease_error)?;
         let lease_epoch = lease.epoch();
-        let artifacts_path = super::cas::prepare_layout(&root)?;
+        let artifacts_directory = super::cas::prepare_layout(&root_directory)?;
 
-        if entry_exists(&restore_marker_path(&db_path))? {
-            super::backup::resume_restore(&db_path)?;
+        let marker_name = restore_marker_path(&db_path)
+            .file_name()
+            .ok_or(KernelError::Io)?
+            .to_os_string();
+        let marker_present = match rustix::fs::statat(
+            &root_directory,
+            &marker_name,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(_) => true,
+            Err(rustix::io::Errno::NOENT) => false,
+            Err(_) => return Err(KernelError::Io),
+        };
+        if marker_present {
+            let root = root_directory.try_clone().map_err(|_| KernelError::Io)?;
+            super::backup::resume_restore(&db_path, root)?;
         } else {
-            super::backup::reap_orphan_restore_recovery(&db_path)?;
+            super::backup::reap_orphan_restore_recovery(&db_path, &root_directory)?;
         }
 
         let header = inspect_header(&db_path)?;
@@ -255,10 +278,15 @@ impl KernelStore {
         harden_family(&db_path)?;
         let readers = open_read_pool(&db_path)?;
         harden_family(&db_path)?;
-        let root_directory = File::open(&root).map_err(|_| KernelError::Io)?;
         let purge_intent_log =
             super::durable_fs::open_or_create_append_file(&root_directory, "purge-intent.jsonl")
                 .map_err(|_| KernelError::Io)?;
+        // A root renamed away and replaced after the lease was acquired would leave
+        // the connections above inside the replacement while the held lease still
+        // fences the original, so a second opener could take the replacement's
+        // lease and write the same database under another epoch. Refusing the open
+        // when the root no longer resolves to the held directory closes that window.
+        assert_root_unchanged(&root_directory, &root)?;
 
         let store = Self {
             writer: Mutex::new(writer),
@@ -268,12 +296,16 @@ impl KernelStore {
             poisoned: AtomicBool::new(false),
             cas_failed: AtomicBool::new(false),
             artifact_cap,
-            artifacts_path,
+            root_directory,
+            artifacts_directory,
             lease_epoch,
             classification_generation: AtomicU64::new(0),
             db_path,
             _lease: lease,
         };
+        // A purge unlink that cannot complete keeps its pending row for maintenance
+        // to retry; refusing to open over it would take the whole store offline
+        // for one object, so the count is not an open failure.
         store.recover_interrupted_work()?;
         Ok(store)
     }
@@ -282,11 +314,12 @@ impl KernelStore {
     /// now serves: expired staging leases, abandoned ingestion reservations, and
     /// purges that committed but never unlinked their bytes. Runs when a store
     /// opens and again after a restore installs a different database, since the
-    /// restored history carries its own interrupted work.
+    /// restored history carries its own interrupted work. Returns how many
+    /// pending purge unlinks could not be completed.
     ///
     /// Reclaiming an expired lease keeps every row; deleting aged runs is left to an
     /// explicit call, so opening a store is not a destructive act.
-    pub(super) fn recover_interrupted_work(&self) -> Result<(), KernelError> {
+    pub(super) fn recover_interrupted_work(&self) -> Result<usize, KernelError> {
         self.abandon_expired_staging_runs(crate::current_time_ms())?;
         self.run_artifact_recovery(crate::current_time_ms())
     }
@@ -846,6 +879,31 @@ fn prepare_root(root: &Path) -> Result<PathBuf, KernelError> {
     fs::canonicalize(root).map_err(|_| KernelError::Io)
 }
 
+/// Opens the canonical store root with `DIRECTORY | NOFOLLOW`.
+fn open_root_directory(root: &Path) -> Result<File, KernelError> {
+    rustix::fs::open(
+        root,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|_| KernelError::Io)
+}
+
+/// Fails with `Io` unless `root` still names the directory `held` is open on.
+fn assert_root_unchanged(held: &File, root: &Path) -> Result<(), KernelError> {
+    use std::os::unix::fs::MetadataExt;
+    let held = held.metadata().map_err(|_| KernelError::Io)?;
+    let current = fs::symlink_metadata(root).map_err(|_| KernelError::Io)?;
+    if held.dev() != current.dev() || held.ino() != current.ino() {
+        return Err(KernelError::Io);
+    }
+    Ok(())
+}
+
 fn prepare_private_dir(path: &Path) -> Result<(), KernelError> {
     // The umask would leave a readable window between `create_dir` and `chmod`.
     #[cfg(unix)]
@@ -866,35 +924,20 @@ fn prepare_private_dir(path: &Path) -> Result<(), KernelError> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // Tightening the mode of a directory another user owns would hand that
+        // user, not this process, exclusive control of the store's entries, so
+        // ownership is checked before any mode change, as the artifact and backup
+        // directories already require.
+        if metadata.uid() != rustix::process::geteuid().as_raw() {
+            return Err(KernelError::Io);
+        }
         if metadata.permissions().mode() & 0o777 != 0o700 {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))
                 .map_err(|_| KernelError::Io)?;
         }
     }
     Ok(())
-}
-
-pub(super) fn sync_parent(path: &Path) -> Result<(), KernelError> {
-    let parent = path.parent().ok_or(KernelError::Io)?;
-    sync_directory(parent)
-}
-
-/// Flushes directory metadata so preceding renames survive a crash.
-///
-/// `DIRECTORY | NOFOLLOW` refuses a regular file and a symlink at `path`;
-/// `File::open` would accept either and `sync_all` the wrong object.
-pub(super) fn sync_directory(path: &Path) -> Result<(), KernelError> {
-    let descriptor = rustix::fs::open(
-        path,
-        rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|_| KernelError::Io)?;
-    super::durable_fs::sync_directory(&File::from(descriptor)).map_err(|_| KernelError::Io)
 }
 
 fn map_lease_error(error: LeaseError) -> KernelError {
@@ -1075,20 +1118,29 @@ mod tests {
     }
 
     #[test]
-    fn sync_directory_refuses_a_regular_file_or_a_symlink() {
+    fn a_root_replaced_while_open_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("regular");
-        fs::write(&file, b"x").unwrap();
-        assert_eq!(sync_directory(&file).unwrap_err(), KernelError::Io);
+        let root = dir.path().join("store");
+        fs::create_dir(&root).unwrap();
+        let held = open_root_directory(&root).unwrap();
+        assert_root_unchanged(&held, &root).unwrap();
 
-        let real = dir.path().join("real");
-        fs::create_dir(&real).unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        assert_eq!(sync_directory(&link).unwrap_err(), KernelError::Io);
+        // The same pathname now names a different directory.
+        fs::rename(&root, dir.path().join("moved-away")).unwrap();
+        fs::create_dir(&root).unwrap();
+        assert_eq!(
+            assert_root_unchanged(&held, &root).unwrap_err(),
+            KernelError::Io
+        );
 
-        sync_directory(&real).unwrap();
-        sync_parent(&file).unwrap();
+        // A symlink at the pathname is not the held directory either.
+        fs::remove_dir(&root).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("moved-away"), &root).unwrap();
+        assert_eq!(
+            assert_root_unchanged(&held, &root).unwrap_err(),
+            KernelError::Io
+        );
+        assert_eq!(open_root_directory(&root).unwrap_err(), KernelError::Io);
     }
 }
 

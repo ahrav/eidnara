@@ -155,13 +155,27 @@ pub(super) fn open_or_create_secure_directory(
     }
 }
 
-/// Exclusively creates a non-followed file with mode `0600`.
+/// Exclusively creates a non-followed file with mode `0600`, opened for writing.
 pub(super) fn create_new_file(directory: &File, name: &str) -> Result<File, StorageError> {
+    create_new_file_with(directory, name, OFlags::WRONLY)
+}
+
+/// [`create_new_file`] opened for reading and writing, for a file the caller
+/// also inspects through the same descriptor.
+pub(super) fn create_new_file_rw(directory: &File, name: &str) -> Result<File, StorageError> {
+    create_new_file_with(directory, name, OFlags::RDWR)
+}
+
+fn create_new_file_with(
+    directory: &File,
+    name: &str,
+    access: OFlags,
+) -> Result<File, StorageError> {
     validate_name(name)?;
     let descriptor = rfs::openat(
         directory,
         name,
-        OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::CREATE | OFlags::EXCL | access | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(0o600),
     )
     .map_err(classify_errno)?;

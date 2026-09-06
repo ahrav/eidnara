@@ -710,7 +710,9 @@ fn load_artifact_state(
             if evidence_id.len() > MAX_TEXT_FIELD_BYTES {
                 return Err(ArtifactError::new(ArtifactErrorKind::InvalidInput));
             }
-            let evidence_id = redact_lossy(evidence_id).text;
+            // Ingest admits an evidence id only as an identity, so a selector carrying a detected secret cannot name a stored row; redacting it would alias it onto whichever row holds the placeholder. commentlint: allow(JUDGE)
+            let evidence_id = crate::redaction::identity(evidence_id)
+                .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
             let stored: String = connection
                 .query_row(
                     "SELECT artifact_digest FROM evidence_meta WHERE evidence_id=?1",

@@ -51,7 +51,7 @@ impl KernelStore {
     ///
     /// # Errors
     ///
-    /// - Returns [`KernelError::InvalidInput`] when the id is empty, a timestamp is negative, or the lease falls outside `heartbeat_at+1 ..= heartbeat_at + 1h`.
+    /// - Returns [`KernelError::InvalidInput`] when the id is empty, a timestamp is negative, `heartbeat_at` leads the store clock by more than the staging skew bound, or the lease falls outside `heartbeat_at+1 ..= heartbeat_at + 1h`.
     /// - Returns [`KernelError::NotFound`] when no run has the id.
     /// - Returns [`KernelError::Conflict`] when the run is terminal, its lease has expired, or `heartbeat_at` moves the heartbeat backwards.
     pub fn renew_staging_run(
@@ -329,13 +329,18 @@ pub(super) fn begin_fenced_write(
     Ok(tx)
 }
 
+// The lease cap is relative to the heartbeat, so the heartbeat itself is held to the same store-clock skew bound as an initial staging; a renewal cannot otherwise walk the expiry forward an hour at a time by heartbeating just under the stored expiry. commentlint: allow(JUDGE)
 fn validate_lease(
     extraction_run_id: &str,
     heartbeat_at: i64,
     lease_expires_at: i64,
 ) -> Result<(), KernelError> {
+    let skew_ceiling = crate::current_time_ms()
+        .checked_add(super::envelope::MAX_STAGING_CLOCK_SKEW_MS)
+        .ok_or(KernelError::InvalidInput)?;
     if extraction_run_id.trim().is_empty()
         || heartbeat_at < 0
+        || heartbeat_at > skew_ceiling
         || lease_expires_at <= heartbeat_at
         || lease_expires_at > heartbeat_at.saturating_add(super::envelope::MAX_STAGING_LEASE_MS)
     {

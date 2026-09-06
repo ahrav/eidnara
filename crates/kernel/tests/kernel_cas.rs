@@ -1578,3 +1578,113 @@ fn a_secret_longer_than_the_match_bound_rejects_the_payload_instead_of_storing_i
             .any(|window| window == body_line.as_bytes())
     );
 }
+
+#[test]
+fn an_open_store_keeps_publishing_into_the_tree_it_opened() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let store = KernelStore::open(&root).unwrap();
+    seed_domain(&store);
+
+    // A same-UID process moves the store root aside and puts another owner-only
+    // tree at the same pathname after the store is open.
+    let moved = parent.path().join("moved-store");
+    fs::rename(&root, &moved).unwrap();
+    for directory in [
+        root.clone(),
+        root.join("artifacts"),
+        root.join("artifacts/objects"),
+        root.join("artifacts/tmp"),
+    ] {
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let handle = store
+        .ingest_artifact(request("anchored", b"anchored payload".to_vec()))
+        .unwrap();
+
+    assert_eq!(
+        published_objects(&root),
+        Vec::<String>::new(),
+        "an ingest published bytes into a directory swapped in after the open"
+    );
+    assert_eq!(
+        published_objects(&moved),
+        vec![handle.digest[2..].to_string()]
+    );
+    // The evidence row committed to the database the store opened, which moved
+    // with the tree that received the bytes.
+    let references: i64 = Connection::open(moved.join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM evidence_meta WHERE artifact_digest=?1",
+            [&handle.digest],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(references, 1);
+}
+
+#[test]
+fn a_replayed_stricter_classification_reaches_the_served_surface() {
+    use kernel::{AdmissionEvent, AdmissionRequest, EventKind, SourceClass, Surface, TaintClass};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"served then tightened".to_vec();
+    let handle = store
+        .ingest_artifact(request("served", payload.clone()))
+        .unwrap();
+    // The evidence object earns labeled standing while it is classified normal.
+    store
+        .commit(intent("admit-served", b"admit"), |envelope| {
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some("evidence-object-served".to_string()),
+                source_class: Some(SourceClass::TrustedLocalCode),
+                taint_class: Some(TaintClass::CurrentCode),
+                event: AdmissionEvent {
+                    kind: EventKind::Other,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: Some(handle.evidence_id.clone()),
+                    reason: "fixture".to_string(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let served_before = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    assert!(
+        served_before
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "evidence-object-served"),
+        "the fixture must serve before the replay: {served_before:?}"
+    );
+
+    // An idempotent replay tightens the artifact to secret without a commit.
+    let mut stricter = request("served", payload);
+    stricter.asserted_sensitivity = Sensitivity::Secret;
+    let replayed = store.ingest_artifact(stricter).unwrap();
+    assert_eq!(replayed.digest, handle.digest);
+    assert_eq!(store.tip().unwrap(), tip, "a replay commits no log row");
+    assert_ne!(
+        store
+            .artifact_eligibility(&handle, ArtifactDestination::Remote)
+            .unwrap(),
+        ArtifactEligibility::Allowed
+    );
+
+    let served_after = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    assert!(
+        !served_after
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "evidence-object-served"),
+        "a secret artifact stayed served after the replay"
+    );
+}

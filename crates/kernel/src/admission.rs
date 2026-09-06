@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "e12c7a76b5ac76f2ca20cae5ce2c3c1b62905157073068879354ec7ec0e0b17b";
+    "2df488666abb6fef9f7e1fceb2ee40932e9595adf6b6b55274ef27e433cc5d9f";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -394,6 +394,14 @@ struct SubjectFacts {
 pub(super) enum AdmissionKey {
     Candidate(String),
     Object(String),
+    /// The prior-decision key for every candidate on one source lineage: a
+    /// candidate-scoped decision names no subject, so the lineage, not the
+    /// candidate id, is what later decisions and serving are keyed by.
+    Lineage {
+        source_kind: String,
+        source_id: String,
+        source_revision: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -603,6 +611,26 @@ const MAX_AUTHORITY_DEMOTIONS: usize = 4_096;
 const LATEST_SUBJECT_DECISION_PREDICATE: &str = "NOT EXISTS (
     SELECT 1 FROM admission_decisions newer
     WHERE newer.subject_object_id=a.subject_object_id
+      AND newer.commit_seq IS NOT NULL
+      AND (
+          newer.commit_seq>a.commit_seq
+          OR (
+              newer.commit_seq=a.commit_seq
+              AND newer.admission_decision_id>a.admission_decision_id
+          )
+      )
+)";
+
+/// Selects rows of `admission_decisions a` that are the latest committed
+/// source-scoped decision on their lineage. `load_prior_decision` expresses this
+/// same rule as an ordered single-row seek for candidate subjects; the two
+/// formulations must stay equivalent.
+const LATEST_LINEAGE_DECISION_PREDICATE: &str = "NOT EXISTS (
+    SELECT 1 FROM admission_decisions newer
+    WHERE newer.subject_object_id IS NULL
+      AND newer.source_kind=a.source_kind
+      AND newer.source_id=a.source_id
+      AND newer.source_revision=a.source_revision
       AND newer.commit_seq IS NOT NULL
       AND (
           newer.commit_seq>a.commit_seq
@@ -942,6 +970,16 @@ impl Envelope<'_> {
         self.write_admission(prepared, None)
     }
 
+    /// [`Self::apply_admission`] for a revocation cascade, which may demote a
+    /// candidate-scoped decision whose run has since gone terminal or lapsed.
+    fn apply_revocation(
+        &mut self,
+        request: AdmissionRequest,
+    ) -> Result<AdmissionDecision, KernelError> {
+        let prepared = self.prepare_admission_with(request, CandidateLiveness::AnyPresent)?;
+        self.write_admission(prepared, None)
+    }
+
     pub fn admit_domain_candidate(
         &mut self,
         request: AdmissionRequest,
@@ -1188,15 +1226,20 @@ impl Envelope<'_> {
     /// that are themselves approvals until no live authority remains.
     ///
     /// `validate_approval` derives authority from the whole chain, so an unvisited
-    /// descendant of a revoked root already grants nothing. This walk therefore only
-    /// restores visibility, and may stop early without leaving live authority behind.
+    /// descendant of a revoked root already grants nothing. Served visibility is
+    /// another matter: `decided_row` reads the stored decision and accepts elevated
+    /// support on any row that names an approval, so a descendant this walk never
+    /// reaches stays surfaced. The walk is what repairs visibility.
     ///
     /// No *policy* outcome fails it. Failing would roll back the invalidation that
     /// prompted it, leaving the root active and every identical retry failing on the
     /// same graph — a permanently unrevokable approval. So the two conditions that
     /// would otherwise abort are deferred and counted instead: dependents past
     /// [`MAX_AUTHORITY_DEMOTIONS`], and dependents whose latest decision was written
-    /// under a superseded policy revision and so cannot be re-evaluated.
+    /// under a superseded policy revision and so cannot be re-evaluated. A dependent
+    /// deferred for its policy revision is still traversed: the authority it granted
+    /// onward descends from the revoked root, so its current-policy descendants are
+    /// demoted even though its own row is left for re-evaluation.
     ///
     /// An I/O error or a stored source/taint class outside the current vocabulary
     /// still propagates, because neither leaves a coherent transaction to commit.
@@ -1217,21 +1260,43 @@ impl Envelope<'_> {
         let mut visited = std::collections::HashSet::new();
         let mut frontier = vec![authority_object_id.to_string()];
         let mut deferred = 0usize;
-        visited.insert(authority_object_id.to_string());
+        visited.insert(format!("object:{authority_object_id}"));
         while let Some(authority) = frontier.pop() {
             for dependent in load_approval_dependents(self, &authority)? {
-                if !visited.insert(dependent.0.clone()) {
+                if !visited.insert(dependent.visit_key()) {
                     continue;
                 }
-                if decisions.len() >= MAX_AUTHORITY_DEMOTIONS || dependent.3 != POLICY_REVISION {
+                if decisions.len() >= MAX_AUTHORITY_DEMOTIONS {
                     deferred += 1;
                     continue;
                 }
-                let subject = dependent.0.clone();
+                let object_id = match &dependent.subject {
+                    AdmissionKey::Object(object_id) => Some(object_id.clone()),
+                    // A candidate-scoped row holds no authority of its own, so it
+                    // has no dependents to follow. Once its candidate has
+                    // materialized, the row can no longer be re-evaluated through
+                    // the candidate; the object's own decision carries the cascade.
+                    AdmissionKey::Candidate(candidate_id) => {
+                        if candidate_is_materialized(self, candidate_id)? {
+                            continue;
+                        }
+                        None
+                    }
+                    AdmissionKey::Lineage { .. } => None,
+                };
+                if dependent.policy_revision != POLICY_REVISION {
+                    deferred += 1;
+                    if let Some(object_id) = object_id {
+                        frontier.push(object_id);
+                    }
+                    continue;
+                }
                 self.demote_one_dependent(dependent, reason, &mut decisions)?;
                 // Any dependent may itself have granted authority; a non-approval
                 // simply has no dependents of its own.
-                frontier.push(subject);
+                if let Some(object_id) = object_id {
+                    frontier.push(object_id);
+                }
             }
         }
         Ok((decisions, deferred))
@@ -1239,14 +1304,24 @@ impl Envelope<'_> {
 
     fn demote_one_dependent(
         &mut self,
-        dependent: (String, String, String, i64),
+        dependent: ApprovalDependent,
         reason: &str,
         decisions: &mut Vec<AdmissionDecision>,
     ) -> Result<(), KernelError> {
-        let (subject_object_id, source_class, taint_class, _) = dependent;
+        let ApprovalDependent {
+            subject,
+            source_class,
+            taint_class,
+            ..
+        } = dependent;
+        let (candidate_id, subject_object_id) = match subject {
+            AdmissionKey::Object(object_id) => (None, Some(object_id)),
+            AdmissionKey::Candidate(candidate_id) => (Some(candidate_id), None),
+            AdmissionKey::Lineage { .. } => return Err(KernelError::AdmissionPolicy),
+        };
         let request = AdmissionRequest {
-            candidate_id: None,
-            subject_object_id: Some(subject_object_id),
+            candidate_id,
+            subject_object_id,
             source_class: Some(SourceClass::try_from(source_class.as_str())?),
             taint_class: Some(TaintClass::try_from(taint_class.as_str())?),
             event: AdmissionEvent {
@@ -1257,13 +1332,21 @@ impl Envelope<'_> {
                 reason: reason.to_string(),
             },
         };
-        decisions.push(self.apply_admission(request)?);
+        decisions.push(self.apply_revocation(request)?);
         Ok(())
     }
 
     fn prepare_admission(
         &self,
+        request: AdmissionRequest,
+    ) -> Result<PreparedDecision, KernelError> {
+        self.prepare_admission_with(request, CandidateLiveness::Admissible)
+    }
+
+    fn prepare_admission_with(
+        &self,
         mut request: AdmissionRequest,
+        liveness: CandidateLiveness,
     ) -> Result<PreparedDecision, KernelError> {
         let source_class = request.source_class.ok_or(KernelError::AdmissionPolicy)?;
         let taint_class = request.taint_class.ok_or(KernelError::AdmissionPolicy)?;
@@ -1279,7 +1362,7 @@ impl Envelope<'_> {
             if candidate_is_materialized(self, candidate_id)? {
                 return Err(KernelError::AdmissionPolicy);
             }
-            load_candidate_facts(self, candidate_id)?
+            load_candidate_facts_with(self, candidate_id, liveness)?
         } else {
             load_subject_facts(
                 self,
@@ -1445,7 +1528,12 @@ impl Envelope<'_> {
         let elevated_support = prepared.evaluation.effective_maturity.get().rank()
             > automatic_ceiling(prepared.source_class, prepared.taint_class).rank();
         if elevated_support && let Some(approval) = approval_object_id.as_deref() {
-            enforce_approval_dependent_cap(self, approval, subject_object_id.as_deref())?;
+            enforce_approval_dependent_cap(
+                self,
+                approval,
+                subject_object_id.as_deref(),
+                &prepared.facts,
+            )?;
         }
         let candidate_payload_digest = prepared
             .facts
@@ -1538,13 +1626,17 @@ impl Envelope<'_> {
             redactions: vec![("reason".to_string(), reason)],
             audit: Some(audit),
         });
-        if let Some(object) = materialized.as_ref() {
-            self.admission_latest.insert(
-                AdmissionKey::Object(object.object_id.clone()),
-                latest.clone(),
-            );
+        // A materializing decision is object-scoped: it names the new object, not
+        // the lineage, so it is the object's prior and never the lineage's.
+        match materialized.as_ref() {
+            Some(object) => {
+                self.admission_latest
+                    .insert(AdmissionKey::Object(object.object_id.clone()), latest);
+            }
+            None => {
+                self.admission_latest.insert(latest_key, latest);
+            }
         }
-        self.admission_latest.insert(latest_key, latest);
         Ok(AdmissionDecision {
             admission_decision_id,
             historical_maturity: prepared.evaluation.historical_maturity,
@@ -1558,20 +1650,28 @@ impl Envelope<'_> {
 }
 
 impl SubjectFacts {
+    /// The key a prior decision is looked up and cached under.
     fn key(&self) -> AdmissionKey {
-        self.subject.clone()
+        match &self.subject {
+            AdmissionKey::Candidate(_) => AdmissionKey::Lineage {
+                source_kind: self.source_kind.clone(),
+                source_id: self.source_id.clone(),
+                source_revision: self.source_revision,
+            },
+            other => other.clone(),
+        }
     }
 
     fn candidate_id(&self) -> Option<&str> {
         match &self.subject {
             AdmissionKey::Candidate(candidate_id) => Some(candidate_id),
-            AdmissionKey::Object(_) => None,
+            AdmissionKey::Object(_) | AdmissionKey::Lineage { .. } => None,
         }
     }
 
     fn subject_object_id(&self) -> Option<&str> {
         match &self.subject {
-            AdmissionKey::Candidate(_) => None,
+            AdmissionKey::Candidate(_) | AdmissionKey::Lineage { .. } => None,
             AdmissionKey::Object(object_id) => Some(object_id),
         }
     }
@@ -1600,13 +1700,40 @@ fn candidate_is_materialized(
         .map_err(map_sqlite)
 }
 
+/// Which staged candidates a decision may be recorded against.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CandidateLiveness {
+    /// Only a candidate whose run and lease still admit decisions.
+    Admissible,
+    /// Any candidate row still present, whatever its lifecycle state. A
+    /// revocation withdraws support already recorded for the lineage, so a run
+    /// that has since failed, been canceled, or lapsed cannot block it.
+    AnyPresent,
+}
+
 /// Maps failed, canceled, abandoned, and lease-expired active staging rows to
 /// [`KernelError::NotFound`] because none can promote a candidate to canonical state.
 fn load_candidate_facts(
     envelope: &Envelope<'_>,
     candidate_id: &str,
 ) -> Result<SubjectFacts, KernelError> {
+    load_candidate_facts_with(envelope, candidate_id, CandidateLiveness::Admissible)
+}
+
+/// [`load_candidate_facts`] under an explicit liveness filter. A candidate row
+/// that is absent altogether is [`KernelError::NotFound`] under either filter.
+fn load_candidate_facts_with(
+    envelope: &Envelope<'_>,
+    candidate_id: &str,
+    liveness: CandidateLiveness,
+) -> Result<SubjectFacts, KernelError> {
     let candidate_id = identity(candidate_id)?;
+    // `?2` is the admissibility instant; `AnyPresent` passes NULL, and the
+    // `?2 IS NULL` arm then accepts any candidate row still present.
+    let now = match liveness {
+        CandidateLiveness::Admissible => Some(current_time_ms()),
+        CandidateLiveness::AnyPresent => None,
+    };
     let (source_kind, source_id, source_revision, sensitivity, provenance, candidate_kind, payload) =
         envelope
             .tx
@@ -1616,11 +1743,12 @@ fn load_candidate_facts(
              FROM candidates c
              JOIN extraction_runs r USING(extraction_run_id)
              WHERE c.candidate_id=?1
-               AND (c.terminal_state IS NULL OR c.terminal_state='completed')
-               AND (r.terminal_state IS NULL OR r.terminal_state='completed')
-               AND (c.terminal_state IS NOT NULL OR c.lease_expires_at>?2)
-               AND (r.terminal_state IS NOT NULL OR r.lease_expires_at>?2)",
-                params![candidate_id.as_str(), current_time_ms()],
+               AND (?2 IS NULL OR (
+                   (c.terminal_state IS NULL OR c.terminal_state='completed')
+                   AND (r.terminal_state IS NULL OR r.terminal_state='completed')
+                   AND (c.terminal_state IS NOT NULL OR c.lease_expires_at>?2)
+                   AND (r.terminal_state IS NOT NULL OR r.lease_expires_at>?2)))",
+                params![candidate_id.as_str(), now],
                 |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
@@ -1663,18 +1791,28 @@ fn load_subject_facts(
     envelope
         .tx
         .query_row_cached(
-            "SELECT domain_id,source_kind,source_id,source_revision,sensitivity_class
-             FROM object_registry
-             WHERE object_id=?1 AND invalidated_commit_seq IS NULL",
+            "SELECT o.domain_id,o.source_kind,o.source_id,o.source_revision,o.sensitivity_class,
+                    ev.sensitivity_class
+             FROM object_registry o
+             LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id
+             WHERE o.object_id=?1 AND o.invalidated_commit_seq IS NULL",
             [subject_object_id.as_str()],
             |row| {
+                // The registry row is append-only, so a classification tightened by an
+                // ingest replay lives on `evidence_meta`; the stricter of the two governs.
+                let registry = Sensitivity::from_stored(&row.get::<_, String>(4)?);
+                let evidence = row
+                    .get::<_, Option<String>>(5)?
+                    .map_or(Sensitivity::Normal, |class| {
+                        Sensitivity::from_stored(&class)
+                    });
                 Ok(SubjectFacts {
                     subject: AdmissionKey::Object(subject_object_id.clone()),
                     domain_id: row.get(0)?,
                     source_kind: row.get(1)?,
                     source_id: row.get(2)?,
                     source_revision: row.get(3)?,
-                    sensitivity: Sensitivity::from_stored(&row.get::<_, String>(4)?),
+                    sensitivity: registry.restrictive(evidence),
                     provenance_kind: None,
                     candidate_kind: None,
                     candidate_payload: None,
@@ -1686,9 +1824,15 @@ fn load_subject_facts(
         .ok_or(KernelError::NotFound)
 }
 
-/// Object subjects include source history because `visible_as_of` evaluates both
-/// histories. Skipping source history lets a later object decision override a
-/// newer source rejection and restore visibility.
+/// An object subject's prior is its own latest decision; `visible_as_of` folds
+/// the lineage's latest decision in separately, so a later object decision
+/// cannot override a newer source rejection there.
+///
+/// A candidate subject's prior is the lineage's latest source-scoped decision,
+/// whichever candidate recorded it. That row is what serving selects for every
+/// object on the lineage, so a new candidate id must not start from a clean
+/// slate: a rejection or quarantine recorded through one candidate binds the
+/// next candidate on the same source until an approval relaxes it.
 fn load_prior_decision(
     envelope: &Envelope<'_>,
     facts: &SubjectFacts,
@@ -1697,37 +1841,53 @@ fn load_prior_decision(
     if let Some(prior) = envelope.admission_latest.get(&key) {
         return Ok(Some(prior.clone()));
     }
-    let (filter, key_value) = match &key {
-        AdmissionKey::Candidate(candidate_id) => ("candidate_id=?1", candidate_id.as_str()),
-        AdmissionKey::Object(object_id) => ("subject_object_id=?1", object_id.as_str()),
+    let columns = "maturity,effective_maturity,disposition,outcome,source_class,
+                        taint_class,sensitivity_class,policy_revision,approval_object_id";
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<String>>(8)?,
+        ))
     };
-    let row = envelope
-        .tx
-        .query_row_cached(
-            &format!(
-                "SELECT maturity,effective_maturity,disposition,outcome,source_class,
-                        taint_class,sensitivity_class,policy_revision,approval_object_id
-                 FROM admission_decisions
-                 WHERE {filter} AND commit_seq IS NOT NULL
-                 ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
-            ),
-            [key_value],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(map_sqlite)?;
+    let row = match &key {
+        AdmissionKey::Object(object_id) => envelope
+            .tx
+            .query_row_cached(
+                &format!(
+                    "SELECT {columns}
+                     FROM admission_decisions
+                     WHERE subject_object_id=?1 AND commit_seq IS NOT NULL
+                     ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+                ),
+                [object_id.as_str()],
+                map_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?,
+        AdmissionKey::Candidate(_) | AdmissionKey::Lineage { .. } => envelope
+            .tx
+            .query_row_cached(
+                &format!(
+                    "SELECT {columns}
+                     FROM admission_decisions
+                     WHERE subject_object_id IS NULL
+                       AND source_kind=?1 AND source_id=?2 AND source_revision=?3
+                       AND commit_seq IS NOT NULL
+                     ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+                ),
+                params![facts.source_kind, facts.source_id, facts.source_revision],
+                map_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?,
+    };
     let Some((
         maturity,
         effective_maturity,
@@ -1772,28 +1932,55 @@ fn sensitivity_from_ledger(value: &str) -> Result<Sensitivity, KernelError> {
     }
 }
 
-/// Enforces [`MAX_APPROVAL_DEPENDENTS`] distinct dependent subjects per approval object.
-/// Excluding `subject_object_id` keeps repeat decisions for an existing dependent admissible.
-/// Counting only latest decisions releases capacity when a subject moves to another approval.
+/// Enforces [`MAX_APPROVAL_DEPENDENTS`] dependents per approval object, counting
+/// object subjects and staged lineages exactly as `load_approval_dependents`
+/// collects them, so a revocation can always load what admissions were allowed
+/// to create. The row this write supersedes is not a competing dependent: an
+/// object decision excludes its own object, and a source-scoped decision
+/// excludes its own lineage. A materializing decision supersedes nothing; the
+/// lineage's row stays a dependent beside the new object, so both count.
 fn enforce_approval_dependent_cap(
     envelope: &Envelope<'_>,
     approval_object_id: &str,
     subject_object_id: Option<&str>,
+    facts: &SubjectFacts,
 ) -> Result<(), KernelError> {
+    let own_lineage = subject_object_id.is_none();
     let dependents: i64 = envelope
         .tx
         .query_row_cached(
             &format!(
-                "SELECT COUNT(DISTINCT a.subject_object_id) FROM admission_decisions a
-                 JOIN object_registry o ON o.object_id=a.subject_object_id
-                 WHERE a.approval_object_id=?1 AND a.subject_object_id IS NOT NULL
-                   AND o.invalidated_commit_seq IS NULL
-                   AND a.subject_object_id IS NOT ?2
-                   AND a.elevated_support=1
-                   AND a.commit_seq IS NOT NULL
-                   AND {LATEST_SUBJECT_DECISION_PREDICATE}"
+                "SELECT (
+                    SELECT COUNT(DISTINCT a.subject_object_id) FROM admission_decisions a
+                    JOIN object_registry o ON o.object_id=a.subject_object_id
+                    WHERE a.approval_object_id=?1 AND a.subject_object_id IS NOT NULL
+                      AND o.invalidated_commit_seq IS NULL
+                      AND a.subject_object_id IS NOT ?2
+                      AND a.elevated_support=1
+                      AND a.commit_seq IS NOT NULL
+                      AND {LATEST_SUBJECT_DECISION_PREDICATE}
+                 ) + (
+                    SELECT COUNT(*) FROM (
+                        SELECT DISTINCT a.source_kind,a.source_id,a.source_revision
+                        FROM admission_decisions a
+                        WHERE a.approval_object_id=?1 AND a.subject_object_id IS NULL
+                          AND a.candidate_id IS NOT NULL
+                          AND NOT (?3 AND a.source_kind=?4 AND a.source_id=?5
+                                   AND a.source_revision=?6)
+                          AND a.elevated_support=1
+                          AND a.commit_seq IS NOT NULL
+                          AND {LATEST_LINEAGE_DECISION_PREDICATE}
+                    )
+                 )"
             ),
-            params![approval_object_id, subject_object_id],
+            params![
+                approval_object_id,
+                subject_object_id,
+                own_lineage,
+                facts.source_kind,
+                facts.source_id,
+                facts.source_revision
+            ],
             |row| row.get(0),
         )
         .map_err(map_sqlite)?;
@@ -1834,35 +2021,76 @@ fn subject_is_accepted_decision(
 ///
 /// `LIMIT` exceeds [`MAX_APPROVAL_DEPENDENTS`] by one so the caller can distinguish
 /// a set at the cap from one over it, while bounding the allocation.
+/// One decision that currently takes elevated support from an approval: either
+/// an object's own latest decision or a lineage's latest source-scoped decision,
+/// which names the candidate it was recorded through.
+struct ApprovalDependent {
+    subject: AdmissionKey,
+    source_class: String,
+    taint_class: String,
+    policy_revision: i64,
+}
+
+impl ApprovalDependent {
+    /// The key the cascade dedups on. A candidate and an object never share one.
+    fn visit_key(&self) -> String {
+        match &self.subject {
+            AdmissionKey::Object(object_id) => format!("object:{object_id}"),
+            AdmissionKey::Candidate(candidate_id) => format!("candidate:{candidate_id}"),
+            AdmissionKey::Lineage { .. } => unreachable!("dependents are loaded by subject"),
+        }
+    }
+}
+
+/// Source-scoped rows are included when they still name a staged candidate: the
+/// candidate's row is the lineage's governing decision at serving time, so its
+/// elevated support has to fall with the approval like an object's does. A row
+/// whose candidate was swept, or was materialized, is left to the object's own
+/// decision, which is in the cascade in its own right.
 fn load_approval_dependents(
     envelope: &Envelope<'_>,
     approval_object_id: &str,
-) -> Result<Vec<(String, String, String, i64)>, KernelError> {
+) -> Result<Vec<ApprovalDependent>, KernelError> {
     let mut statement = envelope
         .tx
         .prepare_cached(&format!(
-            "SELECT a.subject_object_id,a.source_class,a.taint_class,a.policy_revision
+            "SELECT a.subject_object_id,a.candidate_id,a.source_class,a.taint_class,
+                    a.policy_revision
              FROM admission_decisions a
-             JOIN object_registry o ON o.object_id=a.subject_object_id
+             LEFT JOIN object_registry o ON o.object_id=a.subject_object_id
              WHERE a.approval_object_id=?1
-               AND a.subject_object_id IS NOT NULL
-               AND o.invalidated_commit_seq IS NULL
                AND a.elevated_support=1
                AND a.commit_seq IS NOT NULL
-               AND {LATEST_SUBJECT_DECISION_PREDICATE}
-             ORDER BY a.subject_object_id
+               AND (
+                   (a.subject_object_id IS NOT NULL
+                    AND o.invalidated_commit_seq IS NULL
+                    AND {LATEST_SUBJECT_DECISION_PREDICATE})
+                   OR (a.subject_object_id IS NULL
+                       AND a.candidate_id IS NOT NULL
+                       AND {LATEST_LINEAGE_DECISION_PREDICATE})
+               )
+             ORDER BY a.subject_object_id,a.candidate_id
              LIMIT {limit}",
             limit = MAX_APPROVAL_DEPENDENTS + 1
         ))
         .map_err(map_sqlite)?;
     let dependents = statement
         .query_map([approval_object_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
+            let subject_object_id = row.get::<_, Option<String>>(0)?;
+            let candidate_id = row.get::<_, Option<String>>(1)?;
+            let subject = match (subject_object_id, candidate_id) {
+                (Some(object_id), _) => AdmissionKey::Object(object_id),
+                (None, Some(candidate_id)) => AdmissionKey::Candidate(candidate_id),
+                (None, None) => {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+            };
+            Ok(ApprovalDependent {
+                subject,
+                source_class: row.get(2)?,
+                taint_class: row.get(3)?,
+                policy_revision: row.get(4)?,
+            })
         })
         .map_err(map_sqlite)?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -2056,6 +2284,10 @@ const ACCEPTED_DECISION_COLUMN: usize = 28;
 const HISTORY_SENSITIVITY_COLUMN: usize = 29;
 const OWN_HISTORY_INCONSISTENT_COLUMN: usize = 30;
 const SCOPE_ID_COLUMN: usize = 31;
+/// An idempotent ingest replay can tighten an artifact's classification on
+/// `evidence_meta` without a commit-log row or a registry change, so the
+/// served class folds that column in for evidence objects.
+const EVIDENCE_SENSITIVITY_COLUMN: usize = 32;
 
 /// A text column borrowed from the row, `None` for SQL NULL.
 fn text_column<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<&'r str>> {
@@ -2158,12 +2390,12 @@ impl KernelStore {
         self.visible_as_of_in_scope(surface, requested, None, None)
     }
 
-    /// [`Self::visible_as_of`] restricted to rows whose scope carries a term
-    /// on `scope.dimension` that can match `scope.value`, so a caller serving
-    /// one value of that dimension never materializes rows that name another.
-    /// The restriction is a superset of the scope algebra's verdict: a term
-    /// on the dimension whose operator the query cannot evaluate is kept for
-    /// the caller to judge.
+    /// [`Self::visible_as_of`] restricted to rows whose scope can match
+    /// `scope.value` on `scope.dimension`, so a caller serving one value of
+    /// that dimension never materializes rows that name another. The
+    /// restriction is a superset of the scope algebra's verdict: a scope with
+    /// no term on the dimension, a term whose operator the query cannot
+    /// evaluate, and a redacted term are all kept for the caller to judge.
     ///
     /// `ids` narrows the read to the named objects before any row leaves SQL, so a targeted lookup stays cheap in a large scope. commentlint: allow(JUDGE)
     pub fn visible_as_of_in_scope(
@@ -2358,6 +2590,7 @@ fn served_rows(
         let own_history_inconsistent =
             own_history_inconsistent_sql("d", "AND p.commit_seq<=:governing_as_of");
         // A redacted exact or set value decodes to `MatchOutcome::Uncertain` in the scope algebra, so the filter keeps that row for the caller exactly as it keeps a row whose operator is not `exact` or `set`. commentlint: allow(JUDGE)
+        // A scope with no term on the requested dimension matches every value of it in `scope_matches`, so the filter keeps that row too. commentlint: allow(JUDGE)
         let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
         let set_redacted = crate::redaction::sql_contains_redaction_placeholder("value");
         format!(
@@ -2388,7 +2621,8 @@ fn served_rows(
                     ) AS accepted_decision,
                     {history} AS history_sensitivity_class,
                     {own_history_inconsistent} AS own_history_inconsistent,
-                    COALESCE(dec.scope_id,obs.scope_id) AS scope_id
+                    COALESCE(dec.scope_id,obs.scope_id) AS scope_id,
+                    ev.sensitivity_class AS evidence_sensitivity_class
              FROM object_registry o
              JOIN admission_decisions d
                ON d.admission_decision_id={own}
@@ -2396,12 +2630,17 @@ fn served_rows(
                ON s.admission_decision_id={lineage}
              LEFT JOIN decisions dec ON dec.object_id=o.object_id
              LEFT JOIN observations obs ON obs.object_id=o.object_id
+             LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id
              WHERE o.created_commit_seq<=:governing_as_of
                AND (o.invalidated_commit_seq IS NULL
                     OR :governing_as_of<o.invalidated_commit_seq)
                AND (:ids IS NULL
                     OR o.object_id IN (SELECT value FROM json_each(:ids)))
                AND (:scope_dimension IS NULL
+                    OR NOT EXISTS(
+                        SELECT 1 FROM scope_term t
+                        WHERE t.scope_id=COALESCE(dec.scope_id,obs.scope_id)
+                          AND t.dimension=:scope_dimension)
                     OR COALESCE(dec.scope_id,obs.scope_id) IN (
                         SELECT t.scope_id FROM scope_term t
                         WHERE t.dimension=:scope_dimension
@@ -2448,6 +2687,9 @@ fn served_rows(
                 sensitivity = sensitivity.restrictive(Sensitivity::from_stored(
                     text_column(row, HISTORY_SENSITIVITY_COLUMN)?.unwrap_or_default(),
                 ));
+                if let Some(evidence_class) = text_column(row, EVIDENCE_SENSITIVITY_COLUMN)? {
+                    sensitivity = sensitivity.restrictive(Sensitivity::from_stored(evidence_class));
+                }
                 object.sensitivity = object.sensitivity.restrictive(sensitivity);
                 let visibility =
                     surface_visibility(visibility_row_value, surface, object.sensitivity);
@@ -2514,12 +2756,13 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
         (HISTORY_SENSITIVITY_COLUMN, "history_sensitivity_class"),
         (OWN_HISTORY_INCONSISTENT_COLUMN, "own_history_inconsistent"),
         (SCOPE_ID_COLUMN, "scope_id"),
+        (EVIDENCE_SENSITIVITY_COLUMN, "evidence_sensitivity_class"),
     ];
     assert_eq!(
         statement.column_count(),
-        SCOPE_ID_COLUMN + 1,
+        EVIDENCE_SENSITIVITY_COLUMN + 1,
         "served_rows must select exactly {} columns",
-        SCOPE_ID_COLUMN + 1
+        EVIDENCE_SENSITIVITY_COLUMN + 1
     );
     for (index, alias) in expected {
         assert_eq!(
