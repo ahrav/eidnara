@@ -414,6 +414,10 @@ mod sqlite_backend {
         /// function into the same [`SqliteStore`] returns [`StoreError::Backend`]; the
         /// function may read only its arguments and captured state.
         ///
+        /// The connection owns the function for the rest of the store's lifetime. A function
+        /// that captures an `Arc` of its own store therefore keeps the connection open and
+        /// the lease held after every other handle drops; capture a `Weak` instead.
+        ///
         /// # Errors
         ///
         /// Returns the SQLite error from registering the function.
@@ -3823,7 +3827,8 @@ mod tests {
         let store = std::sync::Arc::new(open_sqlite(&d, KV_BASELINE).expect("open"));
         let reentered = "store re-entered from a callback";
 
-        let inner = std::sync::Arc::clone(&store);
+        // A `Weak` keeps the connection from owning the store that owns the connection.
+        let inner = std::sync::Arc::downgrade(&store);
         store
             .with_conn_unfenced(|c| {
                 c.create_scalar_function(
@@ -3831,7 +3836,10 @@ mod tests {
                     0,
                     rusqlite::functions::FunctionFlags::SQLITE_UTF8,
                     move |_| {
-                        inner
+                        let store = inner.upgrade().ok_or_else(|| {
+                            rusqlite::Error::UserFunctionError("store dropped".into())
+                        })?;
+                        store
                             .with_conn(|g| g.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)))
                             .map_err(user_error)
                     },
@@ -3870,6 +3878,11 @@ mod tests {
             .join()
             .expect("thread")
             .expect("another thread is not re-entry");
+
+        // The registered function holds no strong reference, so the last handle closes the
+        // connection and releases the lease.
+        drop(store);
+        open_sqlite(&d, KV_BASELINE).expect("the lease is released once the last handle drops");
         let _ = std::fs::remove_dir_all(&root);
     }
 
