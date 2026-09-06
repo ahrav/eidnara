@@ -99,7 +99,7 @@ jobs:
               exit 1
             fi
           }
-          refuse "a manifest compiles a file under tests/ or docs/ into the crate, or spells a path with an escape or a multi-line string; write it plainly" -E "(^|[^A-Za-z_])(path|build)[[:space:]]*=[[:space:]]*(['\"]((\.\./)*(tests|docs)/|[^'\"]*\.md['\"])|\"[^\"]*\\\\|\"\"\"|''')|['\"][^'\"]*/tests/" -- '*Cargo.toml'
+          refuse "a manifest compiles a file under tests/ or docs/ into the crate, or spells a path with an escape or a multi-line string; write it plainly" -E "(^|[^A-Za-z_])['\"]?(path|build)['\"]?[[:space:]]*=[[:space:]]*(['\"]((\.\./)*(tests|docs)/|[^'\"]*\.md['\"])|\"[^\"]*\\\\|\"\"\"|''')|['\"][^'\"]*/tests/" -- '*Cargo.toml'
           refuse "a src/ module or build script pulls an excluded file into the crate; move the file" -E 'include!\([^)]*(tests/|docs/|\.md)|#\[path[[:space:]]*=[[:space:]]*r?#*"[^"]*(tests/|docs/|\.md")' -- ':(glob)**/src/**' ':(glob)**/build.rs'
           paths=(':(exclude,glob)crates/*/tests/**' ':!docs/' ':!NOTICE' ':!*.md')
           refuse "schema-migration identifiers found" -i -E 'schema[_]migrations|migrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable' -- "${paths[@]}"
