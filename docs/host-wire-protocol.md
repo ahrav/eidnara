@@ -589,6 +589,38 @@ or unequal epoch as a hard compatibility failure, so a host that omits
 `epochs` fails every managed lifecycle gate; adding a sixth epoch is a
 breaking change on both sides, never an additive one.
 
+The `context` component MAY also carry a sanitized `metrics.kernel` object
+describing the kernel store. Unlike `epochs`, the kernel block is sanitized
+field by field: the block survives when `kernel_state` is valid, and every
+other field is kept or dropped on its own. A missing `kernel` object means the
+kernel is unknown, not healthy.
+
+| field | type | rule |
+| --- | --- | --- |
+| `kernel_state` | `"ready" \| "starting" \| "unavailable"` | required; any other value, a non-string, or a non-object block drops `kernel` whole |
+| `unavailable_reason` | `"store_unavailable" \| "store_unsupported"` | present only when `kernel_state` is `unavailable`; any other value or any other state drops the field |
+| `sampled_at_ms` | unsigned integer or `null` | `null` means no sample yet |
+| `core_file_bytes` | unsigned integer | |
+| `artifact_usage_bytes` | unsigned integer | |
+| `artifact_cap_bytes` | unsigned integer | |
+| `outbox_position_lag` | unsigned integer or `null` | `null` means no consumer position |
+| `oldest_unconsumed_age_ms` | unsigned integer or `null` | `null` means nothing unconsumed |
+| `retained_outbox_rows` | unsigned integer | |
+| `required_consumer_count` | unsigned integer | |
+| `core_file_warn` | boolean | |
+| `artifact_warn` | boolean | |
+| `lag_threshold_tripped` | boolean | |
+
+Every integer field MUST be no greater than 2^53 so it stays exact in an IEEE
+754 double; a larger, negative, or non-integer value drops that field. `null`
+is a declared value only on the three fields marked nullable; on any other
+field it is a type error and the field is dropped. A dropped field is absent,
+never `null`, so a consumer that tests a field numerically never reads `null`
+in its place. Unknown fields are dropped. Fields are additive: a consumer MUST
+tolerate a missing optional field and MUST NOT fail on a new one. While
+`kernel_state` is `starting` the host treats activation as still in progress
+and polls health on the bounded 50 ms cadence described above.
+
 `host.shutdown` is the authenticated host-global stop. Request and success response are both compact tagged objects; unknown request fields are ignored under the Section 7.1 bounds:
 
 ```json

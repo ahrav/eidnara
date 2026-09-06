@@ -8,6 +8,11 @@ repository.workspace = true
 publish.workspace = true
 description = "Directly linked host for the context, Synapse, and Broca components."
 
+[features]
+# `test-support` re-exports `host_status_response_json` at the crate root for downstream integration tests.
+# The function is `pub` inside the crate; the feature gates only the cross-crate re-export.
+test-support = []
+
 [dependencies]
 serde = { workspace = true }
 hmac = { workspace = true }

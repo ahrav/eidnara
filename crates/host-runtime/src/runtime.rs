@@ -955,33 +955,33 @@ async fn accept_loop<H: HostHandler>(shared: &Arc<HostShared<H>>, listener: Unix
     }
 }
 
-/// Internal health probes are neither routed requests nor client JSON operations (§9.3); callback failure is host-fatal.
-fn spawn_health_task<H: HostHandler>(shared: &Arc<HostShared<H>>) {
-    fn activation_in_progress(report: &HealthReport) -> bool {
-        let components = report
-            .metrics
-            .as_ref()
-            .and_then(|metrics| metrics.get("components"))
-            .and_then(serde_json::Value::as_object);
-        components.is_some_and(|components| {
-            components.values().any(|component| {
-                let metrics = component
-                    .get("metrics")
-                    .and_then(serde_json::Value::as_object);
-                metrics.is_some_and(|metrics| {
-                    metrics
-                        .get("storage_state")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("starting")
-                        || metrics
-                            .get("synapse_state")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("starting")
-                })
+fn activation_in_progress(report: &HealthReport) -> bool {
+    use crate::control::{
+        KERNEL_KEY, KERNEL_STATE_KEY, STATE_STARTING, STORAGE_STATE_KEY, SYNAPSE_STATE_KEY,
+    };
+    fn is_starting(metrics: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
+        metrics.get(key).and_then(serde_json::Value::as_str) == Some(STATE_STARTING)
+    }
+    crate::control::components(report).is_some_and(|components| {
+        components.values().any(|component| {
+            let metrics = component
+                .get("metrics")
+                .and_then(serde_json::Value::as_object);
+            metrics.is_some_and(|metrics| {
+                // A `starting` kernel block counts from any component here, while `host.status` reports the block only for `CONTEXT_COMPONENT`.
+                is_starting(metrics, STORAGE_STATE_KEY)
+                    || is_starting(metrics, SYNAPSE_STATE_KEY)
+                    || metrics
+                        .get(KERNEL_KEY)
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|kernel| is_starting(kernel, KERNEL_STATE_KEY))
             })
         })
-    }
+    })
+}
 
+/// Internal health probes are neither routed requests nor client JSON operations (§9.3); callback failure is host-fatal.
+fn spawn_health_task<H: HostHandler>(shared: &Arc<HostShared<H>>) {
     let shared = Arc::clone(shared);
     let shared_outer = Arc::clone(&shared);
     shared_outer.spawn_tracked(async move {
@@ -1229,5 +1229,84 @@ mod tests {
             let frame = queue.try_recv().expect("Goodbye was queued concurrently");
             assert_eq!(frame.bytes[5], crate::wire::FrameType::Goodbye as u8);
         }
+    }
+
+    #[test]
+    fn activation_stays_in_progress_while_any_component_starts() {
+        let report = |components: serde_json::Value| HealthReport {
+            status: crate::handler::HealthStatus::Ok,
+            detail: None,
+            metrics: Some(serde_json::json!({ "components": components })),
+        };
+        let context = |metrics: serde_json::Value| {
+            report(serde_json::json!({ "context": { "status": "ok", "metrics": metrics } }))
+        };
+        assert!(activation_in_progress(&context(
+            serde_json::json!({ "storage_state": "starting" })
+        )));
+        assert!(activation_in_progress(&report(serde_json::json!({
+            "synapse": { "status": "ok", "metrics": { "synapse_state": "starting" } }
+        }))));
+        // The kernel store opens after the cache store reports ready.
+        assert!(activation_in_progress(&context(serde_json::json!({
+            "storage_state": "ready",
+            "kernel": { "kernel_state": "starting" },
+        }))));
+        assert!(!activation_in_progress(&context(serde_json::json!({
+            "storage_state": "ready",
+            "kernel": { "kernel_state": "ready" },
+        }))));
+        assert!(!activation_in_progress(&context(serde_json::json!({
+            "storage_state": "unavailable",
+            "kernel": { "kernel_state": "unavailable" },
+        }))));
+        assert!(
+            !activation_in_progress(&context(serde_json::json!({
+                "storage_state": "ready",
+                "kernel": { "core_file_bytes": 4096 },
+            }))),
+            "a kernel block without `kernel_state` is not starting"
+        );
+        assert!(
+            !activation_in_progress(&context(serde_json::json!({
+                "storage_state": "ready",
+                "kernel": "starting",
+            }))),
+            "a non-object kernel value is not a kernel block"
+        );
+
+        // One starting component keeps activation in progress while its siblings are ready.
+        assert!(activation_in_progress(&report(serde_json::json!({
+            "context": {
+                "status": "ok",
+                "metrics": { "storage_state": "ready", "kernel": { "kernel_state": "ready" } }
+            },
+            "synapse": { "status": "ok", "metrics": { "synapse_state": "starting" } },
+        }))));
+        assert!(!activation_in_progress(&report(serde_json::json!({
+            "context": {
+                "status": "ok",
+                "metrics": { "storage_state": "ready", "kernel": { "kernel_state": "ready" } }
+            },
+            "synapse": { "status": "ok", "metrics": { "synapse_state": "ready" } },
+        }))));
+        // The scan is component-agnostic: a starting kernel block counts wherever the
+        // handler reports it, even though `host.status` publishes the block only for `context`.
+        assert!(
+            activation_in_progress(&report(serde_json::json!({
+                "context": { "status": "ok", "metrics": { "storage_state": "ready" } },
+                "synapse": {
+                    "status": "ok",
+                    "metrics": { "kernel": { "kernel_state": "starting" } }
+                },
+            }))),
+            "a starting kernel block on a non-context component still counts"
+        );
+
+        assert!(!activation_in_progress(&HealthReport {
+            status: crate::handler::HealthStatus::Ok,
+            detail: None,
+            metrics: None,
+        }));
     }
 }
