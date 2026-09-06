@@ -688,10 +688,6 @@ mod sqlite_backend {
         list.iter().any(|pragma| name.eq_ignore_ascii_case(pragma))
     }
 
-    fn is_schema_introspection_pragma(pragma_name: &str) -> bool {
-        pragma_in(pragma_name, SCHEMA_INTROSPECTION_PRAGMAS)
-    }
-
     /// A pragma denylist is never complete, so every value-carrying pragma is denied
     /// unless allowlisted.
     /// `ignore_check_constraints` disables CHECK constraint enforcement.
@@ -706,7 +702,7 @@ mod sqlite_backend {
             // Both `PRAGMA table_info(t)` and `pragma_table_info('t')` are read-only.
             // Both forms report the table name as the pragma value.
             // The statement form reports the pragma name as the caller spelled it.
-            Some(_) if is_schema_introspection_pragma(pragma_name) => Authorization::Allow,
+            Some(_) if pragma_in(pragma_name, SCHEMA_INTROSPECTION_PRAGMAS) => Authorization::Allow,
             Some(_) => Authorization::Deny,
             None if is_side_effecting_pragma(pragma_name) => Authorization::Deny,
             None => Authorization::Allow,
