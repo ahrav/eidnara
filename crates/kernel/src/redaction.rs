@@ -13,6 +13,20 @@ pub(crate) fn contains_redaction_placeholder(value: &str) -> bool {
         || value.contains(crate::envelope::OPERATOR_REDACTION_PLACEHOLDER)
 }
 
+/// Builds SQL equivalent to [`contains_redaction_placeholder`] for `column`, from the same marker constants so the two cannot drift. commentlint: allow(JUDGE)
+/// `column` must be a trusted SQL expression.
+pub(crate) fn sql_contains_redaction_placeholder(column: &str) -> String {
+    context_core::redaction::REDACTION_TOKEN_MARKERS
+        .iter()
+        .copied()
+        .chain(std::iter::once(
+            crate::envelope::OPERATOR_REDACTION_PLACEHOLDER,
+        ))
+        .map(|marker| format!("instr({column},'{marker}')>0"))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 /// Redacted durable text and its detection metadata.
 #[derive(Clone)]
 pub(super) struct RedactedField {
@@ -71,6 +85,14 @@ pub(super) fn identity(value: &str) -> Result<String, KernelError> {
     } else {
         Err(KernelError::InvalidInput)
     }
+}
+
+/// Returns an [`identity`] in a `RedactedField` so callers can store it beside redacted text without recording redaction rows.
+pub(super) fn identity_field(value: &str) -> Result<RedactedField, KernelError> {
+    Ok(RedactedField {
+        text: identity(value)?,
+        detections: Vec::new(),
+    })
 }
 
 /// Inserts one metadata row per detection in ordinal order.

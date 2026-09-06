@@ -18,6 +18,7 @@ pub const MAX_CONFIG_BYTES: u64 = 1 << 20;
 pub const MAX_CHECK_CACHE_BYTES: u64 = 16 * MAX_CONFIG_BYTES;
 
 /// The evaluator maps `Unsupported` to uncertain rather than pass or fail.
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckOutcome {
     Passed,
@@ -172,7 +173,7 @@ impl CheckCache {
 
 /// Digest material for the worktree state `check` reads, or `None` for a check
 /// whose verdict does not depend on the filesystem.
-pub fn check_observation(
+pub(super) fn check_observation(
     cache: &mut CheckCache,
     snapshot: &CheckoutSnapshot,
     check: &CheckSpec,

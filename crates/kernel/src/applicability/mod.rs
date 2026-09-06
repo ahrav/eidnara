@@ -19,8 +19,7 @@ use super::scope::ScopeMatchContext;
 use super::{KernelError, KernelStore};
 
 pub use checkout::{
-    CheckoutSnapshot, DirtyEntry, EvalBudget, PathEncoding, SnapshotError, open_isolated,
-    snapshot_checkout,
+    CheckoutSnapshot, DirtyEntry, EvalBudget, PathEncoding, SnapshotError, snapshot_checkout,
 };
 pub use checks::{
     CheckCache, CheckOutcome, MAX_CHECK_CACHE_BYTES, MAX_CONFIG_BYTES, run_cheap_check,
@@ -80,9 +79,7 @@ impl ApplicabilityReport {
                 .map(|append| (object.object_id.as_str(), append))
         })
     }
-}
 
-impl ApplicabilityReport {
     /// The auto-injection view: current objects only.
     pub fn auto_injectable(&self) -> impl Iterator<Item = &ObjectApplicability> {
         self.objects
@@ -129,6 +126,10 @@ impl ApplicabilityEngine {
         request: &ApplicabilityRequest<'_>,
         budget: &EvalBudget,
     ) -> Result<ApplicabilityReport, KernelError> {
+        // Only some batches reach the append that also rejects this.
+        if request.observed_at < 0 {
+            return Err(KernelError::InvalidInput);
+        }
         let snapshot = match snapshot_checkout(request.checkout_path, budget) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -154,12 +155,7 @@ impl ApplicabilityEngine {
         let repair_indices: Vec<usize> = objects
             .iter()
             .enumerate()
-            .filter(|(_, object)| {
-                matches!(
-                    object.state,
-                    ApplicabilityState::Stale | ApplicabilityState::Current
-                )
-            })
+            .filter(|(_, object)| object.state.records_observation())
             .map(|(index, _)| index)
             .collect();
         if repair_indices.is_empty() {
@@ -171,10 +167,7 @@ impl ApplicabilityEngine {
         // Reducing per object took the reader lock and re-derived the committed
         // tip once per object, and deriving that tip walks the live registry.
         let reduced = match store.applicability_block_states_as_of_tip(
-            &repair_indices
-                .iter()
-                .map(|index| objects[*index].object_id.as_str())
-                .collect::<Vec<_>>(),
+            &object_ids(&objects, &repair_indices),
             snapshot.identity(),
             budget,
         ) {
@@ -185,10 +178,7 @@ impl ApplicabilityEngine {
             Err(KernelError::Deadline) => {
                 for index in &repair_indices {
                     if objects[*index].state == ApplicabilityState::Current {
-                        objects[*index].state = ApplicabilityState::Uncertain;
-                        objects[*index].evidence =
-                            "durable applicability block unread: evaluation deadline expired"
-                                .to_string();
+                        demote_current(&mut objects[*index], "evaluation deadline expired");
                     }
                 }
                 return Ok(ApplicabilityReport {
@@ -259,11 +249,11 @@ impl ApplicabilityEngine {
             // invalidated. Appending a clear over any of those writes durably to
             // lift a block that is not there.
             if object.state == ApplicabilityState::Current
-                && !block.is_some_and(|block| block.blocked)
+                && !block.is_some_and(|block| block.blocked())
             {
                 continue;
             }
-            let outcome = commit_read_repair(store, self, &snapshot, object, &intent, budget)?;
+            let outcome = commit_read_repair(store, &snapshot, &intent, budget)?;
             let unresolved = match outcome {
                 AppendOutcome::Landed { .. } => None,
                 AppendOutcome::Discarded => Some("checkout moved before the clearing append"),
@@ -281,9 +271,16 @@ impl ApplicabilityEngine {
                     // verdicts not demoted here.
                     objects[index].append_pending = true;
                 }
-                // `append_pending` marks an append still owed. This one landed,
-                // so a consumer reading the report has nothing to retry.
-                None => objects[index].append_pending = false,
+                None => {
+                    // A dropped confirmation is safe: an evicted entry misses on
+                    // the next evaluation, which re-derives the verdict and
+                    // re-appends.
+                    let _ = self.confirm_durable_append(&objects[index].token);
+                    // `append_pending` marks an append still owed. This one
+                    // landed, so a consumer reading the report has nothing to
+                    // retry.
+                    objects[index].append_pending = false;
+                }
             }
             objects[index].append = Some(outcome);
         }
@@ -318,10 +315,7 @@ impl ApplicabilityEngine {
                 break;
             }
             let refreshed = store.applicability_block_states_as_of_tip(
-                &injectable
-                    .iter()
-                    .map(|index| objects[*index].object_id.as_str())
-                    .collect::<Vec<_>>(),
+                &object_ids(&objects, &injectable),
                 snapshot.identity(),
                 budget,
             );
@@ -350,6 +344,13 @@ impl ApplicabilityEngine {
     }
 }
 
+fn object_ids<'o>(objects: &'o [ObjectApplicability], indices: &[usize]) -> Vec<&'o str> {
+    indices
+        .iter()
+        .map(|index| objects[*index].object_id.as_str())
+        .collect()
+}
+
 /// Every verdict that would auto-inject reports uncertain, for a bound reached
 /// before the durable state could be rechecked. Without that recheck no current
 /// verdict can be shown unblocked.
@@ -363,11 +364,9 @@ fn demote_unfenced(objects: &mut [ObjectApplicability], reason: &str) {
 
 /// A current classification whose durable block still stands cannot be
 /// auto-injected: the block applies to every reader, not just this request.
-/// Demotion also marks the clearing append as owed, so every site that demotes
-/// reports the same outstanding work. commentlint: allow(JUDGE)
 fn demote_if_blocked(object: &mut ObjectApplicability, state: Option<&BlockState>, reason: &str) {
     let blocked = match state {
-        Some(BlockState::Recorded(block)) => block.blocked,
+        Some(BlockState::Recorded(block)) => block.blocked(),
         // Freshness that cannot be read cannot be shown clear.
         Some(BlockState::Unreadable) => true,
         None => false,
@@ -376,12 +375,15 @@ fn demote_if_blocked(object: &mut ObjectApplicability, state: Option<&BlockState
         return;
     }
     demote_current(object, reason);
-    object.append_pending = true;
 }
 
+/// The one Current-to-Uncertain transition. Demotion marks the clearing append
+/// as owed, so every site that demotes reports the same outstanding work.
+/// commentlint: allow(JUDGE)
 fn demote_current(object: &mut ObjectApplicability, reason: &str) {
     object.state = ApplicabilityState::Uncertain;
     object.evidence = format!("durable applicability block not cleared: {reason}");
+    object.append_pending = true;
 }
 
 fn uncertain_batch(

@@ -197,7 +197,7 @@ fn failed_check_appends_observation_event_and_job_in_one_commit() {
         )
         .unwrap()
         .expect("block recorded");
-    assert!(block.blocked);
+    assert!(block.blocked());
     assert_eq!(block.observation_kind, OBSERVATION_KIND_STALE);
 }
 
@@ -233,7 +233,7 @@ fn recorded_block_survives_daemon_restart() {
         )
         .unwrap()
         .expect("block persisted");
-    assert!(block.blocked);
+    assert!(block.blocked());
 }
 
 #[test]
@@ -308,15 +308,8 @@ fn duplicate_repair_replays_the_receipt_without_new_rows() {
     // which is what two racing repairs each hold.
     let intent_record =
         RepairIntent::for_classification(&snapshot, &batch.objects[0], None, "test", 42).unwrap();
-    let first = commit_read_repair(
-        &store,
-        &engine,
-        &snapshot,
-        &batch.objects[0],
-        &intent_record,
-        &EvalBudget::unbounded(),
-    )
-    .unwrap();
+    let first =
+        commit_read_repair(&store, &snapshot, &intent_record, &EvalBudget::unbounded()).unwrap();
     assert!(matches!(
         first,
         AppendOutcome::Landed {
@@ -324,18 +317,17 @@ fn duplicate_repair_replays_the_receipt_without_new_rows() {
             ..
         }
     ));
-    let second = commit_read_repair(
-        &store,
-        &engine,
-        &snapshot,
-        &batch.objects[0],
-        &intent_record,
-        &EvalBudget::unbounded(),
-    )
-    .unwrap();
+    let tip_after_first = store.known_as_of(0).unwrap().tip;
+    let second =
+        commit_read_repair(&store, &snapshot, &intent_record, &EvalBudget::unbounded()).unwrap();
     assert!(
         matches!(second, AppendOutcome::Landed { replayed: true, .. }),
         "the second attempt replays the receipt, got {second:?}"
+    );
+    assert_eq!(
+        store.known_as_of(0).unwrap().tip,
+        tip_after_first,
+        "a replayed receipt commits nothing"
     );
     assert_eq!(
         count(
@@ -443,15 +435,7 @@ fn deadline_missed_append_retries_on_the_next_evaluation() {
         Some(Instant::now() - Duration::from_millis(1)),
         Default::default(),
     );
-    let outcome = commit_read_repair(
-        &store,
-        &engine,
-        &snapshot,
-        &batch.objects[0],
-        &intent_record,
-        &expired,
-    )
-    .unwrap();
+    let outcome = commit_read_repair(&store, &snapshot, &intent_record, &expired).unwrap();
     assert_eq!(outcome, AppendOutcome::DeadlineMissed);
     assert_eq!(
         count(
@@ -513,15 +497,8 @@ fn moved_head_between_snapshot_and_commit_discards_the_repair() {
     );
     set_head_detached(&fixture.repo, moved);
 
-    let outcome = commit_read_repair(
-        &store,
-        &engine,
-        &snapshot,
-        &batch.objects[0],
-        &intent_record,
-        &EvalBudget::unbounded(),
-    )
-    .unwrap();
+    let outcome =
+        commit_read_repair(&store, &snapshot, &intent_record, &EvalBudget::unbounded()).unwrap();
     assert_eq!(outcome, AppendOutcome::Discarded);
     assert_eq!(
         count(
@@ -530,6 +507,124 @@ fn moved_head_between_snapshot_and_commit_discards_the_repair() {
         ),
         0,
         "nothing durable written for a moved checkout"
+    );
+}
+
+/// A replayed receipt skips the writer closure and with it the live-HEAD check
+/// that discards a repair for a moved checkout. The replay path has to make the
+/// same check, or the racing evaluation reports its verdict as durable against
+/// a checkout that is no longer the one it observed.
+#[test]
+fn moved_head_before_a_replayed_receipt_discards_the_repair() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    let store = seed_store(store_dir.path());
+    let (fixture, tip) = seeded_checkout(repo_dir.path());
+    let engine = ApplicabilityEngine::new();
+    let query = QueryContext::default();
+    let scope = ScopeMatchContext::new();
+    let candidates = [failing_candidate()];
+
+    let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &query,
+        &scope,
+        &candidates,
+        &EvalBudget::unbounded(),
+    );
+    let intent_record =
+        RepairIntent::for_classification(&snapshot, &batch.objects[0], None, "test", 42).unwrap();
+    let first =
+        commit_read_repair(&store, &snapshot, &intent_record, &EvalBudget::unbounded()).unwrap();
+    assert!(matches!(
+        first,
+        AppendOutcome::Landed {
+            replayed: false,
+            ..
+        }
+    ));
+
+    // The checkout moves after the first repair landed and before the racing
+    // one reaches its commit.
+    let moved = commit_snapshot(
+        &fixture.repo,
+        "moved",
+        &[tip],
+        &[("src/lib.rs", "pub fn a() {}\n"), ("new.rs", "moved\n")],
+        "moved",
+        2,
+    );
+    set_head_detached(&fixture.repo, moved);
+
+    let second =
+        commit_read_repair(&store, &snapshot, &intent_record, &EvalBudget::unbounded()).unwrap();
+    assert_eq!(
+        second,
+        AppendOutcome::Discarded,
+        "a replay must not report a moved checkout's verdict as landed"
+    );
+}
+
+/// Stale at A, stale at B (a different dirty tree, same kind), then back to A:
+/// A's deterministic key replays its receipt while B's record is the latest. A's
+/// row is still live and B expresses the same block, so the replay is landed
+/// work, not a receipt without a record that would leave `append_pending`
+/// set on every later evaluation of A.
+#[test]
+fn a_replay_behind_a_newer_same_kind_record_counts_as_landed() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    let store = seed_store(store_dir.path());
+    let (fixture, _tip) = seeded_checkout(repo_dir.path());
+    let engine = ApplicabilityEngine::new();
+    let query = QueryContext::default();
+    let scope = ScopeMatchContext::new();
+    let candidates = [failing_candidate()];
+    let budget = EvalBudget::unbounded();
+
+    let repair_at = |snapshot: &kernel::applicability::CheckoutSnapshot| {
+        let batch = engine.evaluate_batch(snapshot, &query, &scope, &candidates, &budget);
+        assert_eq!(batch.objects[0].state, ApplicabilityState::Stale);
+        let intent =
+            RepairIntent::for_classification(snapshot, &batch.objects[0], None, "test", 42)
+                .unwrap();
+        commit_read_repair(&store, snapshot, &intent, &budget).unwrap()
+    };
+
+    // State A: the clean checkout.
+    let state_a = snapshot_checkout(repo_dir.path(), &budget).unwrap();
+    assert!(matches!(
+        repair_at(&state_a),
+        AppendOutcome::Landed {
+            replayed: false,
+            ..
+        }
+    ));
+
+    // State B: an unrelated edit moves the dirty fingerprint; same kind.
+    git_fixtures::write_worktree_file(&fixture.repo, "notes.txt", "scratch\n");
+    let state_b = snapshot_checkout(repo_dir.path(), &budget).unwrap();
+    assert_ne!(state_a.dirty_fingerprint(), state_b.dirty_fingerprint());
+    assert!(matches!(
+        repair_at(&state_b),
+        AppendOutcome::Landed {
+            replayed: false,
+            ..
+        }
+    ));
+
+    // Back to A: the key repeats and the receipt replays behind B's record.
+    std::fs::remove_file(fixture.repo.workdir().unwrap().join("notes.txt")).unwrap();
+    let state_a_again = snapshot_checkout(repo_dir.path(), &budget).unwrap();
+    assert_eq!(
+        state_a.dirty_fingerprint(),
+        state_a_again.dirty_fingerprint()
+    );
+    let outcome = repair_at(&state_a_again);
+    assert!(
+        matches!(outcome, AppendOutcome::Landed { replayed: true, .. }),
+        "a live record behind a same-kind successor is landed work, got {outcome:?}"
     );
 }
 
@@ -597,7 +692,7 @@ fn passing_reevaluation_clears_the_block_bitemporally() {
         )
         .unwrap()
         .expect("historical block visible");
-    assert!(earlier.blocked);
+    assert!(earlier.blocked());
     let later = store
         .applicability_block_state(
             TARGET_OBJECT,
@@ -607,7 +702,7 @@ fn passing_reevaluation_clears_the_block_bitemporally() {
         )
         .unwrap()
         .expect("clearing observation visible");
-    assert!(!later.blocked);
+    assert!(!later.blocked());
     assert_eq!(later.observation_kind, OBSERVATION_KIND_CURRENT);
 }
 
@@ -704,7 +799,7 @@ fn refailure_after_a_clear_appends_instead_of_replaying_the_pre_clear_receipt() 
             )
             .unwrap()
             .expect("clearing observation recorded")
-            .blocked
+            .blocked()
     );
 
     // Back to state A, in a process whose classification cache is empty.
@@ -738,7 +833,10 @@ fn refailure_after_a_clear_appends_instead_of_replaying_the_pre_clear_receipt() 
         )
         .unwrap()
         .expect("block recorded again");
-    assert!(block.blocked, "the durable block returns with the failure");
+    assert!(
+        block.blocked(),
+        "the durable block returns with the failure"
+    );
     assert_eq!(block.observation_kind, OBSERVATION_KIND_STALE);
     assert_eq!(
         count(
@@ -907,6 +1005,17 @@ fn hold_writer<'scope>(
             })
             .unwrap();
     });
+    held.wait();
+}
+
+/// Holds every reader connection, and returns once the pool is actually held.
+fn hold_readers<'scope>(
+    threads: &'scope std::thread::Scope<'scope, '_>,
+    store: &'scope KernelStore,
+    held: &'scope std::sync::Barrier,
+    duration: Duration,
+) {
+    threads.spawn(move || store.hold_readers_for_test(held, duration));
     held.wait();
 }
 
@@ -1079,15 +1188,8 @@ fn a_worktree_edit_after_the_snapshot_is_superseded_by_the_next_evaluation() {
     git_fixtures::write_worktree_file(&fixture.repo, "src/feature.rs", "pub fn f() {}\n");
     let intent_record =
         RepairIntent::for_classification(&snapshot, &batch.objects[0], None, "test", 42).unwrap();
-    let outcome = commit_read_repair(
-        &store,
-        &engine,
-        &snapshot,
-        &batch.objects[0],
-        &intent_record,
-        &EvalBudget::unbounded(),
-    )
-    .unwrap();
+    let outcome =
+        commit_read_repair(&store, &snapshot, &intent_record, &EvalBudget::unbounded()).unwrap();
     assert!(matches!(outcome, AppendOutcome::Landed { .. }));
     let stale_as_of = store.known_as_of(0).unwrap().tip;
 
@@ -1111,7 +1213,7 @@ fn a_worktree_edit_after_the_snapshot_is_superseded_by_the_next_evaluation() {
             )
             .unwrap()
             .expect("the snapshot-time record is visible at its own commit")
-            .blocked
+            .blocked()
     );
     assert!(
         !store
@@ -1123,7 +1225,7 @@ fn a_worktree_edit_after_the_snapshot_is_superseded_by_the_next_evaluation() {
             )
             .unwrap()
             .expect("the superseding record is visible at the tip")
-            .blocked
+            .blocked()
     );
 }
 
@@ -1198,7 +1300,7 @@ fn a_confirmed_cache_entry_still_repairs_after_a_clear() {
             )
             .unwrap()
             .expect("the block is recorded again")
-            .blocked,
+            .blocked(),
         "the durable block returns with the failure"
     );
 }
@@ -1345,7 +1447,7 @@ fn a_secret_shaped_check_path_leaves_the_stored_payload_decodable() {
         )
         .unwrap()
         .expect("the stored payload still decodes");
-    assert!(block.blocked);
+    assert!(block.blocked());
 }
 
 #[test]
@@ -1358,9 +1460,9 @@ fn an_empty_batch_does_not_wait_for_the_store() {
     let scope = ScopeMatchContext::new();
 
     let started = Instant::now();
+    let held = std::sync::Barrier::new(2);
     let (report, elapsed) = std::thread::scope(|threads| {
-        threads.spawn(|| store.hold_readers_for_test(Duration::from_millis(1_500)));
-        std::thread::sleep(Duration::from_millis(50));
+        hold_readers(threads, &store, &held, Duration::from_millis(1_500));
         let budget = EvalBudget::new(
             Some(Instant::now() + Duration::from_secs(1)),
             Default::default(),
@@ -1399,10 +1501,9 @@ fn a_held_reader_pool_does_not_outlast_the_evaluation_deadline() {
     let candidates = [feature_candidate(TARGET_OBJECT)];
 
     let started = Instant::now();
+    let held = std::sync::Barrier::new(2);
     let (report, elapsed) = std::thread::scope(|threads| {
-        threads.spawn(|| store.hold_readers_for_test(Duration::from_millis(1_500)));
-        // Give the holder the whole pool before the bounded evaluation starts.
-        std::thread::sleep(Duration::from_millis(50));
+        hold_readers(threads, &store, &held, Duration::from_millis(1_500));
         let budget = EvalBudget::new(
             Some(Instant::now() + Duration::from_millis(200)),
             Default::default(),
@@ -1442,9 +1543,9 @@ fn a_held_reader_pool_does_not_outlast_the_single_object_reducer_deadline() {
     let known_as_of = store.known_as_of(0).unwrap().tip;
 
     let started = Instant::now();
+    let held = std::sync::Barrier::new(2);
     let (outcome, elapsed) = std::thread::scope(|threads| {
-        threads.spawn(|| store.hold_readers_for_test(Duration::from_millis(1_500)));
-        std::thread::sleep(Duration::from_millis(50));
+        hold_readers(threads, &store, &held, Duration::from_millis(1_500));
         let budget = EvalBudget::new(
             Some(Instant::now() + Duration::from_millis(200)),
             Default::default(),
@@ -1601,7 +1702,7 @@ fn a_secret_shaped_checkout_path_still_matches_its_own_block() {
         )
         .unwrap()
         .expect("the block matches the checkout that recorded it");
-    assert!(block.blocked);
+    assert!(block.blocked());
 }
 
 /// A checkout that moves while the same check keeps failing is new evidence for
@@ -1839,15 +1940,8 @@ fn a_retired_domain_discards_the_repair_instead_of_failing_the_evaluation() {
         })
         .unwrap();
 
-    let outcome = commit_read_repair(
-        &store,
-        &engine,
-        &snapshot,
-        &batch.objects[0],
-        &intent_record,
-        &EvalBudget::unbounded(),
-    )
-    .unwrap();
+    let outcome =
+        commit_read_repair(&store, &snapshot, &intent_record, &EvalBudget::unbounded()).unwrap();
     assert_eq!(outcome, AppendOutcome::Discarded);
     assert_eq!(
         count(
@@ -1895,7 +1989,8 @@ fn an_interrupted_budget_stops_the_reducer_before_it_reads() {
         std::sync::Arc::clone(&interrupt),
     );
     let error = store
-        .applicability_block_states_at_tip(&[TARGET_OBJECT], snapshot.identity(), &budget)
+        .applicability_block_states_as_of_tip(&[TARGET_OBJECT], snapshot.identity(), &budget)
+        .map(|(_, states)| states)
         .unwrap_err();
     assert_eq!(error, KernelError::Deadline);
 
@@ -1909,7 +2004,7 @@ fn an_interrupted_budget_stops_the_reducer_before_it_reads() {
         )
         .unwrap()
         .expect("the block is still readable");
-    assert!(block.blocked);
+    assert!(block.blocked());
 }
 
 /// One unreadable row degrades its own object rather than failing the read for
@@ -1976,18 +2071,19 @@ fn an_unreadable_row_degrades_only_its_own_object() {
 
     let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
     let states = store
-        .applicability_block_states_at_tip(
+        .applicability_block_states_as_of_tip(
             &[TARGET_OBJECT, "neighbour-object"],
             snapshot.identity(),
             &EvalBudget::unbounded(),
         )
+        .map(|(_, states)| states)
         .expect("the batch still reads");
     assert_eq!(states.get(TARGET_OBJECT), Some(&BlockState::Unreadable));
     let neighbour = states
         .get("neighbour-object")
         .expect("the untouched object still reduces");
     assert!(
-        matches!(neighbour, BlockState::Recorded(block) if block.blocked),
+        matches!(neighbour, BlockState::Recorded(block) if block.blocked()),
         "got {neighbour:?}"
     );
 
@@ -2020,9 +2116,9 @@ fn an_interrupt_only_budget_stops_a_blocked_reader_acquisition() {
     let interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let budget = EvalBudget::new(None, std::sync::Arc::clone(&interrupt));
     let started = Instant::now();
+    let held = std::sync::Barrier::new(2);
     let (error, elapsed) = std::thread::scope(|threads| {
-        threads.spawn(|| store.hold_readers_for_test(Duration::from_millis(1_500)));
-        std::thread::sleep(Duration::from_millis(50));
+        hold_readers(threads, &store, &held, Duration::from_millis(1_500));
         // Cancellation is raised while every reader is occupied.
         let raiser = threads.spawn({
             let interrupt = std::sync::Arc::clone(&interrupt);
@@ -2032,7 +2128,8 @@ fn an_interrupt_only_budget_stops_a_blocked_reader_acquisition() {
             }
         });
         let error = store
-            .applicability_block_states_at_tip(&[TARGET_OBJECT], snapshot.identity(), &budget)
+            .applicability_block_states_as_of_tip(&[TARGET_OBJECT], snapshot.identity(), &budget)
+            .map(|(_, states)| states)
             .unwrap_err();
         raiser.join().unwrap();
         (error, started.elapsed())
@@ -2086,15 +2183,7 @@ fn an_interrupt_only_budget_stops_a_blocked_writer_acquisition() {
                 interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         });
-        let outcome = commit_read_repair(
-            &store,
-            &engine,
-            &snapshot,
-            &batch.objects[0],
-            &intent_record,
-            &budget,
-        )
-        .unwrap();
+        let outcome = commit_read_repair(&store, &snapshot, &intent_record, &budget).unwrap();
         (outcome, started.elapsed())
     });
     assert_eq!(outcome, AppendOutcome::DeadlineMissed);
@@ -2157,7 +2246,7 @@ fn retiring_a_clearing_record_lets_the_next_clear_land() {
             )
             .unwrap()
             .expect("the stale record is exposed again")
-            .blocked,
+            .blocked(),
         "retiring the clear restores the older block"
     );
 
@@ -2189,7 +2278,7 @@ fn retiring_a_clearing_record_lets_the_next_clear_land() {
             )
             .unwrap()
             .expect("the replacement is visible")
-            .blocked,
+            .blocked(),
         "the block is genuinely cleared, not just reported clear"
     );
 }
@@ -2252,7 +2341,7 @@ fn an_older_unreadable_row_does_not_discard_a_newer_verdict() {
         .unwrap()
         .expect("the newer clearing record still reduces");
     assert!(
-        !block.blocked,
+        !block.blocked(),
         "the valid latest record stands over an unreadable older one"
     );
     assert_eq!(block.observation_kind, OBSERVATION_KIND_CURRENT);
@@ -2335,15 +2424,8 @@ fn a_repair_built_against_a_superseded_reduction_is_discarded() {
     );
 
     // Now the held clearing repair reaches the writer.
-    let outcome = commit_read_repair(
-        &store,
-        &engine,
-        &snapshot,
-        &batch.objects[0],
-        &stale_intent,
-        &EvalBudget::unbounded(),
-    )
-    .unwrap();
+    let outcome =
+        commit_read_repair(&store, &snapshot, &stale_intent, &EvalBudget::unbounded()).unwrap();
     assert_eq!(
         outcome,
         AppendOutcome::Discarded,
@@ -2365,7 +2447,7 @@ fn a_repair_built_against_a_superseded_reduction_is_discarded() {
             )
             .unwrap()
             .expect("the newer block stands")
-            .blocked,
+            .blocked(),
         "the newer stale block survives the older clearing repair"
     );
 }
@@ -2442,7 +2524,7 @@ fn same_commit_observations_reduce_in_insertion_order() {
         block.observation_kind, OBSERVATION_KIND_STALE,
         "the row written last is authoritative"
     );
-    assert!(block.blocked);
+    assert!(block.blocked());
 }
 
 /// A history whose records were all invalidated blocks nothing, so a current
@@ -2488,7 +2570,7 @@ fn a_fully_invalidated_history_needs_no_clearing_append() {
                 &EvalBudget::unbounded()
             )
             .unwrap()
-            .is_none_or(|block| !block.blocked),
+            .is_none_or(|block| !block.blocked()),
         "a retired record blocks nothing"
     );
 
@@ -2644,15 +2726,16 @@ fn a_retired_unreadable_row_is_not_authoritative() {
 
     let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
     let states = store
-        .applicability_block_states_at_tip(
+        .applicability_block_states_as_of_tip(
             &[TARGET_OBJECT],
             snapshot.identity(),
             &EvalBudget::unbounded(),
         )
+        .map(|(_, states)| states)
         .expect("the reduction still reads");
     match states.get(TARGET_OBJECT) {
         Some(BlockState::Recorded(block)) => {
-            assert!(!block.blocked, "a retired record blocks nothing");
+            assert!(!block.blocked(), "a retired record blocks nothing");
             assert_eq!(
                 block.invalidated_commit_seq, retired_at,
                 "its invalidation still moves the generation"

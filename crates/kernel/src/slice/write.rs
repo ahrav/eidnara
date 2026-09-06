@@ -16,7 +16,7 @@ use crate::object_write::{
     insert_registry, invalidate, map_write_error, record_fields, record_registry_fields,
     set_successor,
 };
-use crate::redaction::{RedactedField, identity, redact, redact_lossy};
+use crate::redaction::{RedactedField, identity_field, redact};
 use crate::{KernelError, Sensitivity};
 
 struct RedactedDecision {
@@ -105,6 +105,13 @@ impl Envelope<'_> {
         &mut self,
         spec: DecisionSpec,
     ) -> Result<DecisionWriteOutcome, KernelError> {
+        self.guarded(|envelope| envelope.insert_decision_inner(spec))
+    }
+
+    fn insert_decision_inner(
+        &mut self,
+        spec: DecisionSpec,
+    ) -> Result<DecisionWriteOutcome, KernelError> {
         let spec = RedactedDecision::new(spec)?;
         insert_decision(self.tx, self.commit_seq, &spec)?;
         let outcome = spec.outcome();
@@ -123,6 +130,13 @@ impl Envelope<'_> {
     /// Alignment dependencies must reference live decisions; other dependencies may reference
     /// any live registered object. Validation finishes before registry insertion.
     pub fn insert_observation(
+        &mut self,
+        spec: ObservationSpec,
+    ) -> Result<ObservationWriteOutcome, KernelError> {
+        self.guarded(|envelope| envelope.insert_observation_inner(spec))
+    }
+
+    fn insert_observation_inner(
         &mut self,
         spec: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
@@ -149,7 +163,15 @@ impl Envelope<'_> {
         decision_id: &str,
         spec: DecisionEventSpec,
     ) -> Result<DecisionEventOutcome, KernelError> {
-        let decision_id = redact_lossy(decision_id);
+        self.guarded(|envelope| envelope.append_decision_event_inner(decision_id, spec))
+    }
+
+    fn append_decision_event_inner(
+        &mut self,
+        decision_id: &str,
+        spec: DecisionEventSpec,
+    ) -> Result<DecisionEventOutcome, KernelError> {
+        let decision_id = identity_field(decision_id)?;
         let spec = RedactedEvent::new(spec)?;
         require_optional_live(
             self.tx,
@@ -228,19 +250,23 @@ impl Envelope<'_> {
         replaced_object_id: &str,
         replacement: DecisionSpec,
     ) -> Result<DecisionWriteOutcome, KernelError> {
-        let replaced_object_id = redact_lossy(replaced_object_id);
+        self.guarded(|envelope| envelope.correct_decision_inner(replaced_object_id, replacement))
+    }
+
+    fn correct_decision_inner(
+        &mut self,
+        replaced_object_id: &str,
+        replacement: DecisionSpec,
+    ) -> Result<DecisionWriteOutcome, KernelError> {
+        let replaced_object_id = identity_field(replaced_object_id)?;
         let old = load_live_typed_object(self.tx, &replaced_object_id.text, "decision")?;
         let granted_before = self.subject_grants_authority(Some(&replaced_object_id.text))?;
-        // The replacement's id selects a survivor, so it is an identity: a
-        // detected secret is refused rather than redacted, since the shared
-        // placeholder would alias it onto whichever live decision holds it.
-        let replacement_object_id = identity(&replacement.object_id)?;
         let replacement = RedactedDecision::new(replacement)?;
         // A replacement naming a decision that is already live folds the
         // predecessor into that survivor: the survivor's stored row, not the
         // spec, is what the predecessor's lineage is checked against, and no
         // row is written for it.
-        let survivor = load_live_decision_by_object(self.tx, &replacement_object_id)?;
+        let survivor = load_live_decision_by_object(self.tx, &replacement.object_id.text)?;
         if let Some((survivor, _)) = &survivor {
             if survivor.object_id == old.object_id {
                 return Err(KernelError::InvalidInput);
@@ -317,7 +343,15 @@ impl Envelope<'_> {
         replaced_object_id: &str,
         replacement: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
-        let replaced_object_id = redact_lossy(replaced_object_id);
+        self.guarded(|envelope| envelope.correct_observation_inner(replaced_object_id, replacement))
+    }
+
+    fn correct_observation_inner(
+        &mut self,
+        replaced_object_id: &str,
+        replacement: ObservationSpec,
+    ) -> Result<ObservationWriteOutcome, KernelError> {
+        let replaced_object_id = identity_field(replaced_object_id)?;
         let old = load_live_typed_object(self.tx, &replaced_object_id.text, "observation")?;
         let replacement = RedactedObservation::new(replacement)?;
         validate_successor(
@@ -355,7 +389,7 @@ impl Envelope<'_> {
 
     /// Invalidates a live decision and demotes dependents if its authority is lost.
     pub fn retire_decision(&mut self, object_id: &str) -> Result<RetirementOutcome, KernelError> {
-        self.retire_slice_object(object_id, "decision", "decisions")
+        self.guarded(|envelope| envelope.retire_slice_object(object_id, "decision", "decisions"))
     }
 
     /// Invalidates a live observation without deleting its historical row.
@@ -363,7 +397,9 @@ impl Envelope<'_> {
         &mut self,
         object_id: &str,
     ) -> Result<RetirementOutcome, KernelError> {
-        self.retire_slice_object(object_id, "observation", "observations")
+        self.guarded(|envelope| {
+            envelope.retire_slice_object(object_id, "observation", "observations")
+        })
     }
 
     fn retire_slice_object(
@@ -372,7 +408,7 @@ impl Envelope<'_> {
         object_kind: &'static str,
         table: &'static str,
     ) -> Result<RetirementOutcome, KernelError> {
-        let object_id = redact_lossy(object_id);
+        let object_id = identity_field(object_id)?;
         let mut object = load_live_typed_object(self.tx, &object_id.text, object_kind)?;
         // Retiring an accepted decision withdraws any authority it granted, so its
         // dependents follow exactly as they do for an explicit revocation. Sampled
@@ -414,20 +450,28 @@ impl RedactedDecision {
             spec.source_revision,
         )?;
         Ok(Self {
-            decision_id: redact(&spec.decision_id)?,
-            object_id: redact(&spec.object_id)?,
-            domain_id: redact(&spec.domain_id)?,
-            proposition_id: spec.proposition_id.as_deref().map(redact).transpose()?,
-            scope_id: spec.scope_id.as_deref().map(redact).transpose()?,
-            anchor_id: spec.anchor_id.as_deref().map(redact).transpose()?,
-            evidence_id: spec.evidence_id.as_deref().map(redact).transpose()?,
+            decision_id: identity_field(&spec.decision_id)?,
+            object_id: identity_field(&spec.object_id)?,
+            domain_id: identity_field(&spec.domain_id)?,
+            proposition_id: spec
+                .proposition_id
+                .as_deref()
+                .map(identity_field)
+                .transpose()?,
+            scope_id: spec.scope_id.as_deref().map(identity_field).transpose()?,
+            anchor_id: spec.anchor_id.as_deref().map(identity_field).transpose()?,
+            evidence_id: spec
+                .evidence_id
+                .as_deref()
+                .map(identity_field)
+                .transpose()?,
             decision_kind: redact(&spec.decision_kind)?,
             payload: RedactedDecisionPayload {
                 summary: redact(&spec.payload.summary)?,
                 rationale: redact(&spec.payload.rationale)?,
             },
-            source_kind: redact(&spec.source_kind)?,
-            source_id: redact(&spec.source_id)?,
+            source_kind: identity_field(&spec.source_kind)?,
+            source_id: identity_field(&spec.source_id)?,
             source_revision: spec.source_revision,
             sensitivity: spec.sensitivity,
         })
@@ -502,13 +546,21 @@ impl RedactedObservation {
             .map(RedactedDependency::new)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            observation_id: redact(&spec.observation_id)?,
-            object_id: redact(&spec.object_id)?,
-            domain_id: redact(&spec.domain_id)?,
-            proposition_id: spec.proposition_id.as_deref().map(redact).transpose()?,
-            scope_id: spec.scope_id.as_deref().map(redact).transpose()?,
-            anchor_id: spec.anchor_id.as_deref().map(redact).transpose()?,
-            evidence_id: spec.evidence_id.as_deref().map(redact).transpose()?,
+            observation_id: identity_field(&spec.observation_id)?,
+            object_id: identity_field(&spec.object_id)?,
+            domain_id: identity_field(&spec.domain_id)?,
+            proposition_id: spec
+                .proposition_id
+                .as_deref()
+                .map(identity_field)
+                .transpose()?,
+            scope_id: spec.scope_id.as_deref().map(identity_field).transpose()?,
+            anchor_id: spec.anchor_id.as_deref().map(identity_field).transpose()?,
+            evidence_id: spec
+                .evidence_id
+                .as_deref()
+                .map(identity_field)
+                .transpose()?,
             observation_kind: redact(&spec.observation_kind)?,
             payload: RedactedObservationPayload {
                 summary: redact(&spec.payload.summary)?,
@@ -517,8 +569,8 @@ impl RedactedObservation {
             },
             observed_at: spec.observed_at,
             dependencies,
-            source_kind: redact(&spec.source_kind)?,
-            source_id: redact(&spec.source_id)?,
+            source_kind: identity_field(&spec.source_kind)?,
+            source_id: identity_field(&spec.source_id)?,
             source_revision: spec.source_revision,
             sensitivity: spec.sensitivity,
         })
@@ -600,7 +652,7 @@ impl RedactedDependency {
             return Err(KernelError::InvalidInput);
         }
         Ok(Self {
-            object_id: redact(&spec.dependency_object_id)?,
+            object_id: identity_field(&spec.dependency_object_id)?,
             kind: redact(&spec.dependency_kind)?,
             payload: spec.dependency_payload.as_deref().map(redact).transpose()?,
         })
@@ -615,7 +667,11 @@ impl RedactedEvent {
         Ok(Self {
             kind: redact(&spec.event_kind)?,
             summary: redact(&spec.payload.summary)?,
-            evidence_id: spec.evidence_id.as_deref().map(redact).transpose()?,
+            evidence_id: spec
+                .evidence_id
+                .as_deref()
+                .map(identity_field)
+                .transpose()?,
             recorded_at: spec.recorded_at,
         })
     }

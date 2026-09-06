@@ -158,6 +158,17 @@ impl fmt::Debug for KernelStore {
     }
 }
 
+#[must_use = "dropping the guard immediately closes the window before the change runs"]
+pub(super) struct ClassificationChange<'a> {
+    generation: &'a AtomicU64,
+}
+
+impl Drop for ClassificationChange<'_> {
+    fn drop(&mut self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 impl KernelStore {
     /// Opens, validates, or bootstraps the kernel store below `root`.
     ///
@@ -263,11 +274,21 @@ impl KernelStore {
             db_path,
             _lease: lease,
         };
-        // Reclaiming an expired lease keeps every row; deleting aged runs is left to an
-        // explicit call, so opening a store is not a destructive act.
-        store.abandon_expired_staging_runs(crate::current_time_ms())?;
-        store.run_artifact_recovery(crate::current_time_ms())?;
+        store.recover_interrupted_work()?;
         Ok(store)
+    }
+
+    /// Finishes work an earlier process left behind in the database this store
+    /// now serves: expired staging leases, abandoned ingestion reservations, and
+    /// purges that committed but never unlinked their bytes. Runs when a store
+    /// opens and again after a restore installs a different database, since the
+    /// restored history carries its own interrupted work.
+    ///
+    /// Reclaiming an expired lease keeps every row; deleting aged runs is left to an
+    /// explicit call, so opening a store is not a destructive act.
+    pub(super) fn recover_interrupted_work(&self) -> Result<(), KernelError> {
+        self.abandon_expired_staging_runs(crate::current_time_ms())?;
+        self.run_artifact_recovery(crate::current_time_ms())
     }
 
     /// Returns the lease epoch stamped into writer-fence transactions.
@@ -312,6 +333,20 @@ impl KernelStore {
     ) -> Result<std::sync::MutexGuard<'_, Connection>, KernelError> {
         let start = self.next_reader.fetch_add(1, Ordering::Relaxed);
         self.acquire_within(&self.readers, start, limit)
+    }
+
+    /// Opens a window in which stored artifact classification may change.
+    ///
+    /// The generation is odd while the returned guard lives and even again
+    /// once it drops, whether or not the change succeeded, so a reader that
+    /// observed the same even value on both sides of its snapshot knows the
+    /// classification it read was not changing underneath it.
+    pub(super) fn begin_classification_change(&self) -> ClassificationChange<'_> {
+        self.classification_generation
+            .fetch_add(1, Ordering::SeqCst);
+        ClassificationChange {
+            generation: &self.classification_generation,
+        }
     }
 
     /// Polls `candidates` from `start` until one is free or `limit` says stop,
@@ -360,14 +395,17 @@ impl KernelStore {
     }
 
     /// Holds every reader connection for `duration`, so a deadline-bounded read
-    /// path can be observed returning at its own bound.
+    /// path can be observed returning at its own bound. `held` is passed once
+    /// every reader is locked, so the caller waiting on it starts the bounded
+    /// read against a fully occupied pool.
     #[cfg(feature = "test-support")]
-    pub fn hold_readers_for_test(&self, duration: std::time::Duration) {
+    pub fn hold_readers_for_test(&self, held: &std::sync::Barrier, duration: std::time::Duration) {
         let guards = self
             .readers
             .iter()
             .map(|reader| reader.lock().unwrap_or_else(PoisonError::into_inner))
             .collect::<Vec<_>>();
+        held.wait();
         std::thread::sleep(duration);
         drop(guards);
     }
@@ -1081,6 +1119,19 @@ impl AcquireLimit {
         Self::new(Some(deadline), None)
     }
 
+    /// Pooled connections outlive one scan; the guard clears the handler on
+    /// every exit path. commentlint: allow(JUDGE)
+    pub(crate) fn install_progress_handler(
+        self,
+        connection: &Connection,
+        steps: i32,
+    ) -> Result<ProgressInterrupt<'_>, KernelError> {
+        connection
+            .progress_handler(steps, Some(move || self.should_stop()))
+            .map_err(|_| KernelError::Io)?;
+        Ok(ProgressInterrupt { connection })
+    }
+
     /// Raises the interrupt when the deadline passes, so one crossing stops
     /// every waiter sharing the flag rather than only the one that noticed.
     pub(crate) fn should_stop(&self) -> bool {
@@ -1101,5 +1152,17 @@ impl AcquireLimit {
             return true;
         }
         false
+    }
+}
+
+/// Clears the progress handler `AcquireLimit::install_progress_handler` set
+/// when dropped.
+pub(crate) struct ProgressInterrupt<'c> {
+    connection: &'c Connection,
+}
+
+impl Drop for ProgressInterrupt<'_> {
+    fn drop(&mut self) {
+        let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
     }
 }

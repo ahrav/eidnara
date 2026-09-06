@@ -13,12 +13,13 @@ use git_fixtures::{
     FixtureRepo, commit_snapshot, init_repo, materialize, set_head_detached, write_worktree_file,
 };
 use kernel::applicability::{
-    ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityState, BatchEvaluation,
-    CANDIDATE_WINDOW, CheckSpec, CheckoutSnapshot, EvalBudget, MAX_CHECK_CACHE_BYTES,
-    MAX_CONFIG_BYTES, ObjectApplicabilitySpec, capture_anchor_representation, snapshot_checkout,
+    ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityRequest, ApplicabilityState,
+    BatchEvaluation, CANDIDATE_WINDOW, CheckSpec, CheckoutSnapshot, EvalBudget,
+    MAX_CHECK_CACHE_BYTES, MAX_CONFIG_BYTES, ObjectApplicabilitySpec,
+    capture_anchor_representation, snapshot_checkout,
 };
 use kernel::{
-    AnchorRowSpec, Dimension, QueryContext, ScopeMatchContext, ScopeTermSpec,
+    AnchorRowSpec, Dimension, KernelStore, QueryContext, ScopeMatchContext, ScopeTermSpec,
     encode_anchor_captures,
 };
 
@@ -383,8 +384,11 @@ fn lifecycle_invalidated_objects_skip_evaluation() {
     assert_eq!(batch.stats.graph_operations, 0);
 }
 
+/// The budget is spent before the batch starts, so every candidate takes the
+/// uncertain path without any resolution work, and nothing transient lands in
+/// the cache.
 #[test]
-fn deadline_exhaustion_mid_batch_leaves_remaining_objects_uncertain() {
+fn an_expired_budget_classifies_the_whole_batch_uncertain_without_poisoning_the_cache() {
     let dir = tempfile::tempdir().unwrap();
     let (fixture, base, tip) = seeded_repo(dir.path());
     let snapshot = checkout(&fixture, tip);
@@ -395,8 +399,6 @@ fn deadline_exhaustion_mid_batch_leaves_remaining_objects_uncertain() {
             ..candidate(&format!("object-{index}"))
         })
         .collect();
-    // A budget that expires immediately: every candidate classifies
-    // uncertain, nothing panics, and nothing transient enters the cache.
     let expired = EvalBudget::new(
         Some(Instant::now() - Duration::from_millis(1)),
         Default::default(),
@@ -431,6 +433,50 @@ fn deadline_exhaustion_mid_batch_leaves_remaining_objects_uncertain() {
             .iter()
             .all(|object| object.state == ApplicabilityState::Current)
     );
+}
+
+/// A repository with no commit has no HEAD to classify against, so the
+/// request-level entry point reports every candidate uncertain with the
+/// snapshot failure as evidence.
+#[test]
+fn an_unborn_repository_leaves_every_candidate_uncertain() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    init_repo(repo_dir.path());
+    let store = KernelStore::open(store_dir.path()).unwrap();
+    let candidates = [candidate("object-a"), candidate("object-b")];
+    let query = QueryContext::default();
+    let scope = ScopeMatchContext::new();
+    let report = ApplicabilityEngine::new()
+        .evaluate(
+            &store,
+            &ApplicabilityRequest {
+                checkout_path: repo_dir.path(),
+                query: &query,
+                scope_context: &scope,
+                candidates: &candidates,
+                actor: "test",
+                observed_at: 42,
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(report.objects.len(), candidates.len());
+    for object in &report.objects {
+        assert_eq!(
+            object.state,
+            ApplicabilityState::Uncertain,
+            "{}",
+            object.object_id
+        );
+        assert!(
+            object.evidence.starts_with("checkout snapshot unavailable"),
+            "{}: {}",
+            object.object_id,
+            object.evidence
+        );
+    }
+    assert!(report.auto_injectable().next().is_none());
 }
 
 #[test]
@@ -791,28 +837,6 @@ fn unconstrained_objects_do_not_claim_an_anchor_held() {
     );
     assert_eq!(cached.stats.object_cache_hits, 1);
     assert!(!cached.objects[0].evidence.contains("anchor holds"));
-}
-
-#[test]
-fn every_state_maps_to_a_distinct_observation_kind() {
-    let states = [
-        ApplicabilityState::Current,
-        ApplicabilityState::Historical,
-        ApplicabilityState::OutOfScope,
-        ApplicabilityState::Uncertain,
-        ApplicabilityState::DirtyTreeUncertain,
-        ApplicabilityState::Stale,
-        ApplicabilityState::LifecycleInvalidated,
-    ];
-    let mut kinds: Vec<&str> = states
-        .iter()
-        .map(|state| state.observation_kind())
-        .collect();
-    kinds.sort_unstable();
-    let total = kinds.len();
-    kinds.dedup();
-    assert_eq!(kinds.len(), total, "observation kinds collide");
-    assert!(kinds.iter().all(|kind| kind.starts_with("applicability.")));
 }
 
 #[test]
@@ -1288,10 +1312,11 @@ fn the_default_object_spec_round_trips() {
     );
 }
 
-/// Read repair confirms an append once. A later evaluation of the same key
-/// must not report the append pending again.
+/// Read repair appends observations only for stale and current verdicts, so a
+/// cached uncertain verdict must not advertise an append that no repair pass
+/// will attempt, on the miss or on the later hit.
 #[test]
-fn a_confirmed_append_stays_confirmed_across_evaluations() {
+fn a_cached_uncertain_verdict_claims_no_pending_append() {
     let dir = tempfile::tempdir().unwrap();
     let (fixture, _base, tip) = seeded_repo(dir.path());
     let snapshot = checkout(&fixture, tip);
@@ -1313,8 +1338,7 @@ fn a_confirmed_append_stays_confirmed_across_evaluations() {
         &EvalBudget::unbounded(),
     );
     assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
-    assert!(batch.objects[0].append_pending);
-    assert!(engine.confirm_durable_append(&batch.objects[0].token));
+    assert!(!batch.objects[0].append_pending);
 
     let batch = engine.evaluate_batch(
         &snapshot,
@@ -1326,7 +1350,7 @@ fn a_confirmed_append_stays_confirmed_across_evaluations() {
     assert_eq!(batch.stats.object_cache_hits, 1);
     assert!(
         !batch.objects[0].append_pending,
-        "a confirmed append was reported pending again"
+        "a cached uncertain verdict advertised an append repair never attempts"
     );
 }
 
@@ -1707,9 +1731,9 @@ fn anchor_rows_sharing_an_id_and_payload_do_not_share_a_cache_entry() {
     );
 }
 
-/// `worktree_path` clears a path's ancestors but leaves the final component
-/// unresolved, so a checked path that is itself a symlink would otherwise let a
-/// check read host state outside the checkout and report `Current`.
+/// Ancestor pinning leaves the final component unresolved, so a checked path
+/// that is itself a symlink would otherwise let a check read host state outside
+/// the checkout and report `Current`.
 #[cfg(unix)]
 #[test]
 fn a_checked_path_that_is_a_symlink_never_reads_its_target() {
@@ -1882,6 +1906,55 @@ fn a_real_uncommitted_edit_still_trips_the_dirty_gate() {
     );
 }
 
+/// An assume-valid index entry suppresses Git's worktree check; modified bytes still make dependent objects DirtyTreeUncertain. commentlint: allow(JUDGE)
+#[test]
+fn an_edited_assume_valid_file_still_trips_the_dirty_gate() {
+    use gix::index::entry::Flags;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let position = index
+        .entry_index_by_path("src/lib.rs".into())
+        .expect("entry exists");
+    index.entries_mut()[position].flags |= Flags::ASSUME_VALID;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+    write_worktree_file(&fixture.repo, "src/lib.rs", "pub fn a() { /* dirty */ }\n");
+
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(
+        snapshot
+            .dirty_entries()
+            .iter()
+            .any(|entry| entry.path == "src/lib.rs" && entry.status == "assume_valid_modified"),
+        "{:?}",
+        snapshot.dirty_entries()
+    );
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(vec!["src/lib.rs".to_string()], vec![]).encode(),
+            ),
+            ..candidate("object-trusted")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain
+    );
+}
+
 /// An anchor naming a commit the object database does not hold is uncertain,
 /// and a fetch can supply that commit without moving HEAD, the worktree, sparse
 /// configuration, or the shallow file. Object availability is deliberately
@@ -2040,8 +2113,9 @@ fn a_query_local_exclusion_claims_no_durable_append() {
         );
     }
 
-    // A checkout-derived block still records: the dirty tree is the same for
-    // every query against this checkout.
+    // A checkout-derived veto is cached across queries, but a dirty tree is
+    // recomputable from the checkout and never appends, so it claims no
+    // pending append either.
     write_worktree_file(&fixture.repo, "src/lib.rs", "pub fn a() { /* dirty */ }\n");
     let dirty = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
     let batch = engine.evaluate_batch(
@@ -2061,7 +2135,7 @@ fn a_query_local_exclusion_claims_no_durable_append() {
         batch.objects[0].state,
         ApplicabilityState::DirtyTreeUncertain
     );
-    assert!(batch.objects[0].append_pending);
+    assert!(!batch.objects[0].append_pending);
 }
 
 /// An ancestor directory swapped for a symlink after containment validation

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust workspace (`crates/*`, `packages/shm-native`) plus thin Bun/TypeScript layer. Rust 1.98 pinned by `rust-toolchain.toml`. CI run clippy + tests on both 1.98 and `stable` (stable lane skips itself when `rustc +stable --version` equals the pin), so code must build warning-free on both. Bun 1.3.14 in CI. Edition 2024, `rustfmt` style edition 2024.
+Rust workspace (`crates/*`, `packages/shm-native`) plus thin Bun/TypeScript layer. Rust 1.98 pinned by `rust-toolchain.toml`. CI run clippy + tests on both 1.98 and `stable`, so code must build warning-free on both. Bun 1.3.14 in CI. Edition 2024, `rustfmt` style edition 2024.
 
 ## Layout
 
@@ -11,47 +11,30 @@ Rust workspace (`crates/*`, `packages/shm-native`) plus thin Bun/TypeScript laye
 - `crates/tokenizer` = Claude byte-BPE port, checked against `ai-tokenizer`.
 - `crates/shm-transport/fuzz` = separate workspace (excluded from root), own `Cargo.lock`.
 
-## Commands (mirror CI exactly; always pass `--locked`)
+## Local verification (fast and scoped; CI runs the full matrix)
+
+Scope every local run to the crate you touched. Do not run workspace-wide tests locally; CI does that on 1.98 and `stable`, plus a `cargo update` re-check, Miri, valgrind, the fuzz workspace, and the Bun suite.
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked   # ~2.5 min warm
-cargo test --workspace --doc --all-features --locked            # --all-targets skips doctests
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
-cargo check --workspace --no-default-features --locked          # storage's `sqlite` is a default feature
-cargo check -p storage --no-default-features --locked           # memory-store names storage/sqlite, so the workspace check keeps it on
-cargo fmt   --manifest-path crates/shm-transport/fuzz/Cargo.toml --all -- --check
-cargo check --manifest-path crates/shm-transport/fuzz/Cargo.toml --locked --bins
-bun install --frozen-lockfile && bun run check:repo             # root + package typecheck
+cargo fmt --all
+cargo clippy -p <crate> --all-targets --all-features --locked -- -D warnings
+cargo test -p <crate> --test <file> <filter>      # one integration test file
+cargo test -p <crate> --lib <filter>               # unit tests
+cargo test -p <crate> --all-targets --all-features --locked   # whole crate, only when the change spans it
 ```
 
-Single test: `cargo test -p <crate> --test <file> <name>`. Unit tests: `cargo test -p <crate> --lib <name>`. Tokenizer unit tests take ~20 s (proptest).
-
-CI also run `cargo update` in scratch copy and re-check, so code must compile against newest semver-compatible dependencies, not just lock.
-
-## Gates you must run after touching `shm-transport` unsafe code
-
-Files: `crates/shm-transport/src/lease.rs`, `src/backend/ring.rs`.
-
-```sh
-# Miri, ~3.5 min. CI greps for ">=1 passed", so keep tests under these module paths.
-cargo +nightly-2026-07-27 miri test -p shm-transport --lib --locked -- lease:: backend::ring::miri
-
-# valgrind. CI sets the X86_64 runner; use the triple of your machine.
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="valgrind --tool=memcheck --leak-check=full --errors-for-leak-kinds=definite --trace-children=yes --error-exitcode=1" \
-EIDNARA_SHM_SKIP_TWO_PROCESS=1 cargo test -p shm-transport --test ring --locked
-```
+Before pushing, add the cheap whole-workspace checks: `cargo check --workspace --no-default-features --locked`, `cargo check -p storage --no-default-features --locked` (memory-store names `storage/sqlite`, so the workspace check keeps it on), and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked`. Everything else is CI's job; use `--locked` so lockfile drift shows up locally.
 
 ## Test quirks
 
+- Tokenizer unit tests take ~20 s (proptest).
+- `shm-transport` unsafe code (`src/lease.rs`, `src/backend/ring.rs`) has Miri and valgrind gates in CI. Run them locally only when you change those files: `cargo +nightly-2026-07-27 miri test -p shm-transport --lib --locked -- lease:: backend::ring::miri`, and the ring test under valgrind with `EIDNARA_SHM_SKIP_TWO_PROCESS=1` (see `.github/workflows` for the runner env).
 - `crates/host-runtime/tests/broca_subprocess.rs` has `harness = false`. Re-executes itself as fake OpenCode/Pi harness via `EIDNARA_BROCA_FIXTURE_MODE`. New test there must be added to `tests` array in `main`; `#[test]` alone does nothing. Accepts substring filter and `--exact`.
 - `#[ignore]`d tests are two kinds. Do not un-ignore either:
   - Need external inputs: `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY` (ONNX Runtime `.so`), `EIDNARA_SYNAPSE_PRODUCTION_BUNDLE`, `EIDNARA_SHM_SOAK_SECONDS`, U9 closure roots. Run with `-- --ignored` when you have them.
   - Child-process roles (`shm_role_client`, `ring_child_exchange`) that parent test spawns. Not skipped tests.
 - `host-runtime`'s `test-support` feature only gates cross-crate re-export for downstream tests. CI runs `--all-features`, so keep it compiling.
 - Set `EIDNARA_SHM_SKIP_TWO_PROCESS=1` to skip two-process ring exchange (its 5 s deadlines meaningless under valgrind).
-- Criterion benches with heavy fixtures (`kernel/benches/scope_algebra.rs`, `context-core/benches/windowed.rs`) return early unless `--bench` is in argv, so `cargo test --all-targets` only compiles them. `cargo bench -- --test` still runs every cell once. Copy that `main` for any new bench whose setup takes more than a few seconds.
 
 ## Native addon (`packages/shm-native`) is Linux x86_64 only
 

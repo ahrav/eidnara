@@ -43,11 +43,7 @@ impl Envelope<'_> {
         consumer_id: &str,
         recorded_at: i64,
     ) -> Result<i64, KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let outcome = self.register_outbox_consumer_inner(consumer_id, recorded_at);
-        self.poison(outcome)
+        self.guarded(|envelope| envelope.register_outbox_consumer_inner(consumer_id, recorded_at))
     }
 
     fn register_outbox_consumer_inner(
@@ -101,11 +97,7 @@ impl Envelope<'_> {
         consumer_id: &str,
         recorded_at: i64,
     ) -> Result<(), KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let outcome = self.deregister_outbox_consumer_inner(consumer_id, recorded_at);
-        self.poison(outcome)
+        self.guarded(|envelope| envelope.deregister_outbox_consumer_inner(consumer_id, recorded_at))
     }
 
     fn deregister_outbox_consumer_inner(
@@ -149,11 +141,7 @@ impl Envelope<'_> {
         consumer_id: &str,
         abandonment: ConsumerAbandonment,
     ) -> Result<(), KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let outcome = self.abandon_outbox_consumer_inner(consumer_id, &abandonment);
-        self.poison(outcome)
+        self.guarded(|envelope| envelope.abandon_outbox_consumer_inner(consumer_id, &abandonment))
     }
 
     fn abandon_outbox_consumer_inner(
@@ -282,12 +270,9 @@ impl Envelope<'_> {
         reason: &str,
         abandoned_at: i64,
     ) -> Result<(), KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let outcome =
-            self.abandon_deletion_barrier_inner(barrier_id, operator_id, reason, abandoned_at);
-        self.poison(outcome)
+        self.guarded(|envelope| {
+            envelope.abandon_deletion_barrier_inner(barrier_id, operator_id, reason, abandoned_at)
+        })
     }
 
     fn abandon_deletion_barrier_inner(

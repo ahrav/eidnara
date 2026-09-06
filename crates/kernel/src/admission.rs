@@ -746,18 +746,16 @@ impl Envelope<'_> {
         source_id: &str,
         source_revision: i64,
     ) -> Result<(), KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let result = self.insert_admission_observation_for_test_inner(
-            object_id,
-            observation_kind,
-            domain_id,
-            source_kind,
-            source_id,
-            source_revision,
-        );
-        self.poison(result)
+        self.guarded(|envelope| {
+            envelope.insert_admission_observation_for_test_inner(
+                object_id,
+                observation_kind,
+                domain_id,
+                source_kind,
+                source_id,
+                source_revision,
+            )
+        })
     }
 
     #[cfg(feature = "test-support")]
@@ -809,11 +807,7 @@ impl Envelope<'_> {
         &mut self,
         request: AdmissionRequest,
     ) -> Result<AdmissionDecision, KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let result = self.record_admission_inner(request);
-        self.poison(result)
+        self.guarded(|envelope| envelope.record_admission_inner(request))
     }
 
     fn record_admission_inner(
@@ -953,11 +947,7 @@ impl Envelope<'_> {
         request: AdmissionRequest,
         domain: AdmissionDomainSpec,
     ) -> Result<AdmissionDecision, KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let result = self.admit_domain_candidate_inner(request, domain);
-        self.poison(result)
+        self.guarded(|envelope| envelope.admit_domain_candidate_inner(request, domain))
     }
 
     fn admit_domain_candidate_inner(
@@ -1033,11 +1023,7 @@ impl Envelope<'_> {
         request: AdmissionRequest,
         replacement: AdmissionDomainSpec,
     ) -> Result<AdmissionDecision, KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let result = self.supersede_domain_inner(request, replacement);
-        self.poison(result)
+        self.guarded(|envelope| envelope.supersede_domain_inner(request, replacement))
     }
 
     fn supersede_domain_inner(
@@ -1097,11 +1083,7 @@ impl Envelope<'_> {
         replaced_object_id: &str,
         replacement: DecisionSpec,
     ) -> Result<DecisionWriteOutcome, KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let result = self.supersede_decision_inner(replaced_object_id, replacement);
-        self.poison(result)
+        self.guarded(|envelope| envelope.supersede_decision_inner(replaced_object_id, replacement))
     }
 
     fn supersede_decision_inner(
@@ -1140,11 +1122,7 @@ impl Envelope<'_> {
         approval_object_id: &str,
         reason: &str,
     ) -> Result<Vec<AdmissionDecision>, KernelError> {
-        if let Some(error) = self.already_poisoned() {
-            return Err(error);
-        }
-        let result = self.revoke_approval_inner(approval_object_id, reason);
-        self.poison(result)
+        self.guarded(|envelope| envelope.revoke_approval_inner(approval_object_id, reason))
     }
 
     fn revoke_approval_inner(
@@ -2379,6 +2357,9 @@ fn served_rows(
         let history = strictest_sensitivity_sql("AND h.commit_seq<=:governing_as_of");
         let own_history_inconsistent =
             own_history_inconsistent_sql("d", "AND p.commit_seq<=:governing_as_of");
+        // A redacted exact or set value decodes to `MatchOutcome::Uncertain` in the scope algebra, so the filter keeps that row for the caller exactly as it keeps a row whose operator is not `exact` or `set`. commentlint: allow(JUDGE)
+        let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
+        let set_redacted = crate::redaction::sql_contains_redaction_placeholder("value");
         format!(
             "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
                     o.source_revision,o.created_commit_seq,NULL,NULL,o.sensitivity_class,
@@ -2426,8 +2407,10 @@ fn served_rows(
                         WHERE t.dimension=:scope_dimension
                           AND (t.operator NOT IN ('exact','set')
                                OR t.exact_value=:scope_value
+                               OR {exact_redacted}
                                OR EXISTS(SELECT 1 FROM json_each(t.set_values)
-                                         WHERE value=:scope_value))))
+                                         WHERE value=:scope_value
+                                            OR {set_redacted}))))
              ORDER BY o.object_id"
         )
     });

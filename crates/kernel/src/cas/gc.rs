@@ -6,12 +6,12 @@
 //! receive a 14-day grace period; unreferenced filesystem orphans receive one hour.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::time::UNIX_EPOCH;
+use std::fs::File;
 
 use rusqlite::{TransactionBehavior, params};
 use rustix::fs::{self as rfs, AtFlags};
 
+use super::ingest::{is_dot_entry, open_shard_nofollow};
 use super::is_artifact_digest;
 use crate::durable_fs::{StorageError, durable_unlink, open_secure_directory};
 use crate::envelope::check_fence;
@@ -308,7 +308,8 @@ impl KernelStore {
         for candidate in reclaim_state {
             candidates.insert(candidate.digest.clone(), candidate);
         }
-        for object in scan_objects(&self.artifacts_path.join("objects"))? {
+        let objects = self.open_objects_directory().map_err(|_| KernelError::Io)?;
+        for object in scan_objects(&objects)? {
             candidates
                 .entry(object.digest.clone())
                 .and_modify(|candidate| candidate.modified_at = object.modified_at)
@@ -510,45 +511,60 @@ fn elapsed(now: i64, since: i64, duration: i64) -> bool {
     now.checked_sub(since).is_some_and(|age| age >= duration)
 }
 
-fn scan_objects(root: &std::path::Path) -> Result<Vec<Candidate>, KernelError> {
-    let mut objects = Vec::new();
-    for shard in fs::read_dir(root).map_err(|_| KernelError::Io)? {
+/// Enumerates stored objects through the `objects` descriptor, so a same-UID
+/// swap of a path component cannot inject candidates. Entries that vanish or
+/// fail to stat mid-scan are skipped: reclamation can unlink concurrently, and
+/// `prepare_reclaim` rechecks every candidate it acts on.
+fn scan_objects(objects: &File) -> Result<Vec<Candidate>, KernelError> {
+    let mut found = Vec::new();
+    for shard in rfs::Dir::read_from(objects).map_err(|_| KernelError::Io)? {
         let Ok(shard) = shard else { continue };
-        let Ok(shard_type) = shard.file_type() else {
-            continue;
-        };
-        let Some(prefix) = shard.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if !shard_type.is_dir() || prefix.len() != 2 {
+        let shard_name = shard.file_name();
+        if is_dot_entry(shard_name) {
             continue;
         }
-        let Ok(entries) = fs::read_dir(shard.path()) else {
+        let Some(prefix) = shard_name.to_str().ok().map(str::to_owned) else {
+            continue;
+        };
+        if prefix.len() != 2 {
+            continue;
+        }
+        let Ok(shard) = open_shard_nofollow(objects, shard_name) else {
+            continue;
+        };
+        let Ok(entries) = rfs::Dir::read_from(&shard) else {
             continue;
         };
         for entry in entries {
             let Ok(entry) = entry else { continue };
-            let Ok(metadata) = entry.metadata() else {
+            let name = entry.file_name();
+            if is_dot_entry(name) {
+                continue;
+            }
+            let Ok(stat) = rfs::statat(&shard, name, AtFlags::SYMLINK_NOFOLLOW) else {
                 continue;
             };
-            let Some(suffix) = entry.file_name().to_str().map(str::to_owned) else {
+            let Some(suffix) = name.to_str().ok() else {
                 continue;
             };
             let digest = format!("{prefix}{suffix}");
-            if metadata.file_type().is_file() && is_artifact_digest(&digest) {
-                let modified_at = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                    .and_then(|duration| i64::try_from(duration.as_millis()).ok());
-                objects.push(Candidate {
+            if rfs::FileType::from_raw_mode(stat.st_mode).is_file() && is_artifact_digest(&digest) {
+                found.push(Candidate {
                     digest,
-                    modified_at,
+                    modified_at: stat_modified_ms(&stat),
                 });
             }
         }
     }
-    Ok(objects)
+    Ok(found)
+}
+
+/// Milliseconds since the Unix epoch of the file's last modification, or `None` when the timestamp does not fit.
+fn stat_modified_ms(stat: &rfs::Stat) -> Option<i64> {
+    // The field widths differ across Linux targets, so both widen into `i128`.
+    let seconds = i128::from(stat.st_mtime);
+    let nanos = i128::from(stat.st_mtime_nsec);
+    i64::try_from(seconds * 1_000 + nanos / 1_000_000).ok()
 }
 
 /// Returns total bytes occupied by regular files under the artifact object

@@ -200,8 +200,9 @@ const fn component_names() -> [&'static str; COMPONENTS.len()] {
 ///
 /// Must run outside a transaction. The busy timeout is installed before WAL
 /// mode because switching journal mode may wait for the write lock. Returns
-/// `InvalidQuery` for an active transaction, a rejected SQLite runtime, or
-/// failure to enter WAL mode. PRAGMA failures propagate.
+/// `InvalidQuery` for an active transaction, a nonpositive `busy_timeout_ms`,
+/// a rejected SQLite runtime, or failure to enter WAL mode. PRAGMA failures
+/// propagate.
 pub fn apply_kernel_connection_profile(
     conn: &mut Connection,
     busy_timeout_ms: i64,
@@ -217,6 +218,10 @@ pub fn apply_kernel_connection_profile(
     }
     // Switching journal_mode can need the write lock, so the busy handler is
     // installed first; the default handler gives up immediately.
+    // SQLite removes the busy handler for a nonpositive timeout instead of installing one, so such a value is refused rather than passed through. commentlint: allow(JUDGE)
+    if busy_timeout_ms <= 0 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     conn.pragma_update(None, "busy_timeout", busy_timeout_ms)?;
     // `PRAGMA journal_mode` returns the resulting mode; reject a mode other than WAL.
     let journal_mode: String =
@@ -270,10 +275,11 @@ fn is_well_formed_incarnation_id(incarnation: &str) -> bool {
 
 /// Atomically installs a fresh kernel schema and immutable format marker.
 ///
-/// `incarnation` must be 32 lowercase hexadecimal characters. `created_at` is
-/// stored unchanged in the marker. The database must contain no user schema
-/// objects and have zero application and user version stamps. Any validation,
-/// SQL, digest, or commit failure rolls back the transaction.
+/// `incarnation` must be 32 lowercase hexadecimal characters.
+/// `created_at` must be nonnegative.
+/// The marker stores both values unchanged. The database must contain no user
+/// schema objects and have zero application and user version stamps. Any
+/// validation, SQL, digest, or commit failure rolls back the transaction.
 pub fn apply_kernel_schema(
     conn: &mut Connection,
     incarnation: &str,
@@ -291,7 +297,8 @@ fn apply_schema<F: FnOnce() -> rusqlite::Result<()>>(
     // `BEGIN IMMEDIATE` acquires the write lock before later statements run.
     // A DEFERRED bootstrap holds a shared read lock and fails `SQLITE_BUSY` on
     // upgrade instead of waiting out `busy_timeout`.
-    if !is_well_formed_incarnation_id(incarnation) {
+    // `read_valid_marker` rejects a negative `created_at`, so refusing it here keeps every committed marker reopenable. commentlint: allow(JUDGE)
+    if !is_well_formed_incarnation_id(incarnation) || created_at < 0 {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

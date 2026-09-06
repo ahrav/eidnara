@@ -103,21 +103,31 @@ mod tests {
 
     #[test]
     fn rotation_preserves_one_generation_and_hits_promote() {
+        fn keys(generation: HashMap<&str, i32>) -> Vec<&str> {
+            let mut keys: Vec<&str> = generation.into_keys().collect();
+            keys.sort_unstable();
+            keys
+        }
+
         let mut cache = TwoGenerationCache::new(2);
-        drop(cache.insert("a", 1));
-        drop(cache.insert("b", 2));
+        assert_eq!(cache.insert("a", 1), None);
+        assert_eq!(cache.insert("b", 2), None);
         // Third distinct insert rotates: {a, b} becomes the previous
-        // generation.
-        drop(cache.insert("c", 3));
+        // generation. The displaced generation is empty, so insert returns an
+        // empty map.
+        let evicted = cache.insert("c", 3).expect("a full generation rotates");
+        assert!(evicted.is_empty());
         // A previous-generation hit promotes the entry back into current.
         assert_eq!(cache.get(&"a"), Some(1));
         // Updates reach values still parked in the previous generation.
         cache.update(&"b", |value| *value = 20);
         assert_eq!(cache.get(&"b"), Some(20));
-        // Three more distinct inserts push the oldest generation out entirely.
-        drop(cache.insert("d", 4));
-        drop(cache.insert("e", 5));
-        drop(cache.insert("f", 6));
+        // `d` rotates current `{a, c}`, evicting previous `{b}`.
+        let evicted = cache.insert("d", 4).expect("a full generation rotates");
+        assert_eq!(keys(evicted), ["b"]);
+        assert_eq!(cache.insert("e", 5), None);
+        let evicted = cache.insert("f", 6).expect("a full generation rotates");
+        assert_eq!(keys(evicted), ["a", "c"]);
         assert_eq!(cache.get(&"c"), None);
     }
 

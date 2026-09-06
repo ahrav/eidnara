@@ -6,7 +6,6 @@
 //! Storage-integrity failures latch CAS ingestion closed.
 
 use std::fs::File;
-use std::sync::atomic::Ordering;
 
 use context_core::redaction::{Detection, RedactionError, RedactionErrorKind};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -602,21 +601,13 @@ impl KernelStore {
         Ok(())
     }
 
-    /// The classification generation is odd for the duration of the merge and
-    /// even again afterwards, whether or not the commit succeeded, so a reader
-    /// that saw the same even value on both sides of its snapshot knows the
-    /// facts it read were not changing underneath it.
     fn merge_replayed_classification(
         &self,
         writer: &mut Connection,
         prepared: &PreparedArtifact,
     ) -> Result<(), ArtifactError> {
-        self.classification_generation
-            .fetch_add(1, Ordering::SeqCst);
-        let merged = self.merge_replayed_classification_inner(writer, prepared);
-        self.classification_generation
-            .fetch_add(1, Ordering::SeqCst);
-        merged
+        let _change = self.begin_classification_change();
+        self.merge_replayed_classification_inner(writer, prepared)
     }
 
     fn merge_replayed_classification_inner(
@@ -974,11 +965,14 @@ fn stat_bytes(stat: &rfs::Stat) -> u64 {
     u64::try_from(stat.st_size).unwrap_or(0)
 }
 
-fn is_dot_entry(name: &std::ffi::CStr) -> bool {
+pub(super) fn is_dot_entry(name: &std::ffi::CStr) -> bool {
     matches!(name.to_bytes(), b"." | b"..")
 }
 
-fn open_shard_nofollow(objects: &File, name: impl rustix::path::Arg) -> Result<File, StorageError> {
+pub(super) fn open_shard_nofollow(
+    objects: &File,
+    name: impl rustix::path::Arg,
+) -> Result<File, StorageError> {
     rfs::openat(
         objects,
         name,
