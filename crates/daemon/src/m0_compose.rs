@@ -13,7 +13,7 @@ use context_core::claim_operation::SnapshotVector;
 use memory_store::{MemoryStore, MemoryStoreError};
 use sha2::{Digest, Sha256};
 
-use crate::compartment_coverage::{CoverageGap, resolve_coverage};
+use crate::compartment_coverage::{CoverageError, resolve_coverage};
 use crate::decay_render::{DecayRenderCompartment, extract_m0_block};
 use crate::memory_render::{
     M0Inputs, MirroredClaimMemory, is_positive_memory_category, render_claim_memory_block,
@@ -30,7 +30,7 @@ pub enum M0ComposeError {
     Store(MemoryStoreError),
     /// The stored compartment ranges overlap or otherwise fail strict ordering.
     #[error("{0}")]
-    CoverageGap(CoverageGap),
+    CoverageGap(CoverageError),
 }
 impl From<MemoryStoreError> for M0ComposeError {
     fn from(e: MemoryStoreError) -> Self {

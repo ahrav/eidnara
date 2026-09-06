@@ -130,7 +130,7 @@ pub(crate) fn count_with_digest(digest: [u8; 32], content: &str) -> usize {
 }
 
 /// Clears both shared generations.
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-internals"))]
 pub fn clear() {
     let mut guard = lock_cache();
     *guard = Some(Generations::default());

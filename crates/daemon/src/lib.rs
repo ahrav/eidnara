@@ -10806,7 +10806,7 @@ impl Handler {
                                             .and_then(|c| c.compile_status),
                                         now_ms: now,
                                     })
-                                    .map_err(|error| error.to_string())?;
+                                    ?;
                                 facade_text_response(
                                     format!(
                                         "Created smart note #{}. Dreamer will evaluate the condition during nightly runs:\n- Content: {}\n- Condition: {}",
@@ -10829,19 +10829,17 @@ impl Handler {
                             action,
                             command_id.as_deref(),
                             |tx| {
-                                let note = tx
-                                    .insert_note(NoteInput {
-                                        project_path: project,
-                                        route_project_root: Some(
-                                            facade_scope.route_project_root.as_str(),
-                                        ),
-                                        session_id: session,
-                                        content,
-                                        surface_condition: None,
-                                        anchor_block_id: anchor.as_deref(),
-                                        now_ms: now,
-                                    })
-                                    .map_err(|error| error.to_string())?;
+                                let note = tx.insert_note(NoteInput {
+                                    project_path: project,
+                                    route_project_root: Some(
+                                        facade_scope.route_project_root.as_str(),
+                                    ),
+                                    session_id: session,
+                                    content,
+                                    surface_condition: None,
+                                    anchor_block_id: anchor.as_deref(),
+                                    now_ms: now,
+                                })?;
                                 facade_text_response(
                                     format!("Saved session note #{}.", note.id),
                                     false,
@@ -11007,7 +11005,7 @@ impl Handler {
                                     condition_compile,
                                     now,
                                 )
-                                .map_err(|error| error.to_string())?
+                                ?
                             {
                                 NoteCasOutcome::Applied(note) => facade_text_response(
                                     format!("Updated note #{}: {}", note.id, note.content),
@@ -11044,7 +11042,7 @@ impl Handler {
                         |tx| {
                             let dismissed = tx
                                 .dismiss_note(project, session, note_id, resolution, now)
-                                .map_err(|error| error.to_string())?;
+                                ?;
                             match dismissed {
                                 Some(_) => facade_text_response(
                                     format!("Note #{note_id} dismissed."),
@@ -13580,7 +13578,7 @@ fn render_cached_message_expand(message: &wire::IngressMessage) -> String {
     };
     let parts = message
         .ck
-        .content
+        .content()
         .iter()
         .filter_map(render_cached_expand_part)
         .collect::<Vec<_>>();
@@ -13599,7 +13597,7 @@ fn render_cached_message_expand(message: &wire::IngressMessage) -> String {
 }
 
 fn render_cached_expand_part(part: &wire::WireBlock) -> Option<String> {
-    match &part.kind {
+    match part.kind() {
         wire::BlockKind::Text { text } if !text.trim().is_empty() => {
             Some(format!("  [text]\n{text}"))
         }
@@ -13765,7 +13763,7 @@ fn render_durable_range_message(message: &wire::IngressMessage) -> String {
     };
     let parts = message
         .ck
-        .content
+        .content()
         .iter()
         .filter_map(render_durable_range_part)
         .collect::<Vec<_>>();
@@ -13777,7 +13775,7 @@ fn render_durable_range_message(message: &wire::IngressMessage) -> String {
 }
 
 fn render_durable_range_part(part: &wire::WireBlock) -> Option<String> {
-    match &part.kind {
+    match part.kind() {
         wire::BlockKind::Text { text } => {
             (!text.trim().is_empty()).then(|| text.trim().to_string())
         }
@@ -13901,7 +13899,7 @@ fn render_verbose_expand_message(message: &wire::IngressMessage) -> String {
     };
     let previews = message
         .ck
-        .content
+        .content()
         .iter()
         .filter_map(render_verbose_expand_part)
         .collect::<Vec<_>>();
@@ -13913,7 +13911,7 @@ fn render_verbose_expand_message(message: &wire::IngressMessage) -> String {
 }
 
 fn render_verbose_expand_part(part: &wire::WireBlock) -> Option<String> {
-    match &part.kind {
+    match part.kind() {
         wire::BlockKind::Text { text } => {
             let preview = truncate_expand_preview(text, CTX_EXPAND_VERBOSE_TEXT_PREVIEW_CHARS);
             (!preview.is_empty()).then(|| format!("    • {preview}"))
@@ -14290,12 +14288,15 @@ fn command_id_from_facade_request(
     Ok(Some(command_id.to_string()))
 }
 
-fn facade_text_response(text: impl Into<String>, is_error: bool) -> Result<Vec<u8>, String> {
+fn facade_text_response(
+    text: impl Into<String>,
+    is_error: bool,
+) -> Result<Vec<u8>, MemoryStoreError> {
     serde_json::to_vec(&json!({
         "content": [{ "type": "text", "text": text.into() }],
         "isError": is_error,
     }))
-    .map_err(|error| error.to_string())
+    .map_err(|error| MemoryStoreError::Serde(error.to_string()))
 }
 
 fn facade_command_outcome(
@@ -18458,7 +18459,7 @@ mod tests {
             .iter()
             .map(|message| message.ck.clone())
             .collect::<Vec<_>>();
-        if let BlockKind::Text { text } = &mut served[2].content[0].kind {
+        if let BlockKind::Text { text } = served[2].content_mut()[0].kind_mut() {
             *text = "changed response tail".to_string();
         }
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
@@ -18942,7 +18943,7 @@ mod tests {
                     served.remove(0);
                 }
                 "reduction" => {
-                    served[2].content[0] = WireBlock::bare(BlockKind::Text {
+                    served[2].content_mut()[0] = WireBlock::bare(BlockKind::Text {
                         text: "[dropped]".to_string(),
                     });
                     served[2].mark_modified();
@@ -19026,13 +19027,14 @@ mod tests {
             let mut changed = baseline.clone();
             match class_set {
                 "poisoned_reasoning" => {
-                    changed[0].content[0] = WireBlock::bare(BlockKind::Text {
+                    changed[0].content_mut()[0] = WireBlock::bare(BlockKind::Text {
                         text: String::new(),
                     });
                     changed[0].mark_modified();
                 }
                 "unmatched_pair" => {
-                    if let BlockKind::ToolResult { id, .. } = &mut changed[2].content[0].kind {
+                    if let BlockKind::ToolResult { id, .. } = changed[2].content_mut()[0].kind_mut()
+                    {
                         *id = "call-transition-unmatched".to_string();
                     }
                     changed[2].mark_modified();
@@ -19047,7 +19049,7 @@ mod tests {
                     changed.insert(4, result);
                 }
                 "poisoned_reasoning+synthetic_anchor_split" => {
-                    changed[0].content[0] = WireBlock::bare(BlockKind::Text {
+                    changed[0].content_mut()[0] = WireBlock::bare(BlockKind::Text {
                         text: String::new(),
                     });
                     changed[0].mark_modified();
@@ -19077,10 +19079,10 @@ mod tests {
     fn rewrite_first_tool_result(messages: &mut [WireMessage], text: &str) {
         let block = messages
             .iter_mut()
-            .flat_map(|message| message.content.iter_mut())
-            .find(|block| matches!(block.kind, BlockKind::ToolResult { .. }))
+            .flat_map(|message| message.content_mut().iter_mut())
+            .find(|block| matches!(block.kind(), BlockKind::ToolResult { .. }))
             .expect("tool result block");
-        let BlockKind::ToolResult { output, .. } = &mut block.kind else {
+        let BlockKind::ToolResult { output, .. } = block.kind_mut() else {
             unreachable!()
         };
         *output = ToolOutput::bare(OutputKind::Text {
@@ -26256,14 +26258,14 @@ mod tests {
                 Err(HistorianProducerError::Call(
                     historian_producer::HistorianCallFailure::untagged(
                         historian_producer::HistorianSendOutcome::Terminal,
-                        "unknown_module",
+                        "host.unknown_module",
                         "runner module broca is unavailable",
                     ),
                 )),
                 Err(HistorianProducerError::Call(
                     historian_producer::HistorianCallFailure::untagged(
                         historian_producer::HistorianSendOutcome::Terminal,
-                        "unknown_module",
+                        "host.unknown_module",
                         "runner module broca is unavailable",
                     ),
                 )),

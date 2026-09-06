@@ -234,7 +234,7 @@ mod tests {
         })];
         let opencode_decoded = decode_opencode(&opencode_raw);
         let mut opencode_message = opencode_decoded.messages[0].ck.clone();
-        opencode_message.content.remove(0);
+        opencode_message.content_mut().remove(0);
         assert_eq!(
             encode_opencode(&[opencode_message], &opencode_decoded.sidecar, None,)[0]["parts"],
             json!([{ "type": "text", "text": "survivor" }])
@@ -250,7 +250,7 @@ mod tests {
         })];
         let pi_decoded = decode_pi(&pi_raw);
         let mut pi_message = pi_decoded.messages[0].ck.clone();
-        pi_message.content.remove(0);
+        pi_message.content_mut().remove(0);
         assert_eq!(
             encode_pi(&[pi_message], &pi_decoded.sidecar)[0]["content"],
             json!([{ "type": "text", "text": "survivor" }])

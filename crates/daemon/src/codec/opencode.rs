@@ -713,22 +713,16 @@ fn encode_with_meta(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let matched_metas = match_block_metas(&msg.content, &meta.blocks, block_matches_meta);
+    let matched_metas = match_block_metas(msg.content(), &meta.blocks, block_matches_meta);
 
     let mut block_index = 0;
-    while block_index < msg.content.len() {
-        let block = &msg.content[block_index];
+    while block_index < msg.content().len() {
+        let block = &msg.content()[block_index];
         let block_meta = matched_metas.by_block[block_index];
 
-        if let (
-            BlockKind::ToolCall { id, .. },
-            Some(
-                result @ WireBlock {
-                    kind: BlockKind::ToolResult { id: result_id, .. },
-                    ..
-                },
-            ),
-        ) = (&block.kind, msg.content.get(block_index + 1))
+        if let BlockKind::ToolCall { id, .. } = block.kind()
+            && let Some(result) = msg.content().get(block_index + 1)
+            && let BlockKind::ToolResult { id: result_id, .. } = result.kind()
             && id == result_id
         {
             let result_meta = matched_metas.by_block[block_index + 1];
@@ -771,7 +765,7 @@ fn encode_with_meta(
             // The encoder preserves matched native reasoning parts exactly because provider signatures may require their original bytes.
             // The converter applies updates only to separately mapped sibling parts.
             if !matches!(
-                &block.kind,
+                block.kind(),
                 BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
             ) {
                 update_part_from_block(part, block);
@@ -811,7 +805,7 @@ fn encode_with_meta(
 }
 
 fn block_matches_meta(block: &WireBlock, meta: &BlockMeta) -> bool {
-    match &block.kind {
+    match block.kind() {
         BlockKind::Text { text } => {
             meta.kind == "text"
                 || (text.is_empty()
@@ -834,7 +828,7 @@ fn block_matches_meta(block: &WireBlock, meta: &BlockMeta) -> bool {
 }
 
 fn update_part_from_block(part: &mut Value, block: &WireBlock) {
-    match &block.kind {
+    match block.kind() {
         BlockKind::Text { text } => {
             set_string(part, "type", "text");
             set_string(part, "text", text);
@@ -900,16 +894,16 @@ fn render_adjacent_tool_pair(call: &WireMessage, result: &WireMessage) -> Option
     if call.role != "assistant" || result.role != "tool" {
         return None;
     }
-    let [call_block] = call.content.as_slice() else {
+    let [call_block] = call.content() else {
         return None;
     };
-    let [result_block] = result.content.as_slice() else {
+    let [result_block] = result.content() else {
         return None;
     };
-    let BlockKind::ToolCall { id: call_id, .. } = &call_block.kind else {
+    let BlockKind::ToolCall { id: call_id, .. } = call_block.kind() else {
         return None;
     };
-    let BlockKind::ToolResult { id: result_id, .. } = &result_block.kind else {
+    let BlockKind::ToolResult { id: result_id, .. } = result_block.kind() else {
         return None;
     };
     (call_id == result_id).then(|| render_tool_pair_as_part(call_block, result_block))
@@ -923,14 +917,14 @@ fn render_synthetic_todo_pair(call: &WireMessage, result: &WireMessage) -> Optio
     {
         return None;
     }
-    let BlockKind::ToolCall { id, name, .. } = call.content.first()?.kind.clone() else {
+    let BlockKind::ToolCall { id, name, .. } = call.content().first()?.kind().clone() else {
         return None;
     };
     let BlockKind::ToolResult {
         id: result_id,
         output,
         ..
-    } = result.content.first()?.kind.clone()
+    } = result.content().first()?.kind().clone()
     else {
         return None;
     };
@@ -975,11 +969,11 @@ fn encode_new_message(msg: &WireMessage, session_id: Option<&str>) -> Value {
         .unwrap_or_else(|| format!("opencode-{}", stable_hash_prefix(&json!(msg.role), 12)));
     let mut parts = Vec::new();
     let mut index = 0;
-    while index < msg.content.len() {
-        let block = &msg.content[index];
-        if let BlockKind::ToolCall { id, .. } = &block.kind
-            && let Some(next) = msg.content.get(index + 1)
-            && matches!(&next.kind, BlockKind::ToolResult { id: result_id, .. } if result_id == id)
+    while index < msg.content().len() {
+        let block = &msg.content()[index];
+        if let BlockKind::ToolCall { id, .. } = block.kind()
+            && let Some(next) = msg.content().get(index + 1)
+            && matches!(next.kind(), BlockKind::ToolResult { id: result_id, .. } if result_id == id)
         {
             parts.push(render_tool_pair_as_part(block, next));
             index += 2;
@@ -1018,7 +1012,7 @@ fn encode_new_message(msg: &WireMessage, session_id: Option<&str>) -> Value {
 }
 
 fn render_block_as_part(block: &WireBlock) -> Value {
-    match &block.kind {
+    match block.kind() {
         BlockKind::Text { text } => json!({ "type": "text", "text": text }),
         BlockKind::Reasoning { text, signature } => {
             let mut part = json!({ "type": "reasoning", "text": text });
@@ -1076,7 +1070,7 @@ fn render_block_as_part(block: &WireBlock) -> Value {
 
 fn render_tool_pair_as_part(call: &WireBlock, result: &WireBlock) -> Value {
     let mut part = render_block_as_part(call);
-    let BlockKind::ToolResult { output, .. } = &result.kind else {
+    let BlockKind::ToolResult { output, .. } = result.kind() else {
         update_part_from_block(&mut part, result);
         return part;
     };
@@ -1495,7 +1489,7 @@ mod tests {
         })];
         let decoded = decode_opencode(&raw);
         let mut message = decoded.messages[0].ck.clone();
-        message.content.remove(1);
+        message.content_mut().remove(1);
 
         let encoded = encode_opencode(&[message], &decoded.sidecar, None);
         assert_eq!(
@@ -1524,9 +1518,9 @@ mod tests {
         })];
         let decoded = decode_opencode(&raw);
         let mut message = decoded.messages[0].ck.clone();
-        message.content.remove(1);
-        let survivor = &mut message.content[1];
-        survivor.kind = BlockKind::Text {
+        message.content_mut().remove(1);
+        let survivor = &mut message.content_mut()[1];
+        *survivor.kind_mut() = BlockKind::Text {
             text: "§3§ SURVIVE".to_string(),
         };
         survivor.mark_modified();
@@ -1563,11 +1557,11 @@ mod tests {
         })];
         let decoded = decode_opencode(&raw);
         let mut message = decoded.messages[0].ck.clone();
-        let first_id = match &message.content[0].kind {
+        let first_id = match message.content()[0].kind() {
             BlockKind::ToolCall { id, .. } => id.clone(),
             _ => panic!("expected first tool call"),
         };
-        let second_id = match &message.content[1].kind {
+        let second_id = match message.content()[1].kind() {
             BlockKind::ToolCall { id, .. } => id.clone(),
             _ => panic!("expected second tool call"),
         };
@@ -1578,7 +1572,7 @@ mod tests {
                 .as_deref(),
             Some(second_id.as_str())
         );
-        message.content.remove(0);
+        message.content_mut().remove(0);
 
         let encoded = encode_opencode(&[message], &decoded.sidecar, None);
         assert_eq!(encoded[0]["parts"], json!([raw[0]["parts"][1].clone()]));
@@ -1630,11 +1624,11 @@ mod tests {
             }),
         ];
         let decoded = decode_opencode(&raw);
-        let completed_output = match &decoded.messages[0].ck.content[1].kind {
+        let completed_output = match decoded.messages[0].ck.content()[1].kind() {
             BlockKind::ToolResult { output, .. } => output,
             _ => panic!("expected completed tool result"),
         };
-        let error_output = match &decoded.messages[1].ck.content[1].kind {
+        let error_output = match decoded.messages[1].ck.content()[1].kind() {
             BlockKind::ToolResult { output, .. } => output,
             _ => panic!("expected error tool result"),
         };
@@ -1654,8 +1648,8 @@ mod tests {
         );
 
         let mut error_message = decoded.messages[1].ck.clone();
-        let result = &mut error_message.content[1];
-        let BlockKind::ToolResult { output, .. } = &mut result.kind else {
+        let result = &mut error_message.content_mut()[1];
+        let BlockKind::ToolResult { output, .. } = result.kind_mut() else {
             panic!("expected error tool result");
         };
         let OutputKind::ErrorContent { blocks } = &mut output.kind else {
@@ -1741,11 +1735,11 @@ mod tests {
         let decoded = decode_opencode(&raw);
         let mut message = decoded.messages[0].ck.clone();
         let result = message
-            .content
+            .content_mut()
             .iter_mut()
-            .find(|block| matches!(&block.kind, BlockKind::ToolResult { .. }))
+            .find(|block| matches!(block.kind(), BlockKind::ToolResult { .. }))
             .unwrap();
-        if let BlockKind::ToolResult { output, .. } = &mut result.kind {
+        if let BlockKind::ToolResult { output, .. } = result.kind_mut() {
             output.kind = OutputKind::Text {
                 text: "§1§ tagged output".to_string(),
             };
@@ -1774,10 +1768,10 @@ mod tests {
             ]
         })];
         let decoded = decode_opencode(&raw);
-        assert_eq!(decoded.messages[0].ck.content.len(), 1);
+        assert_eq!(decoded.messages[0].ck.content().len(), 1);
         assert!(matches!(
-            decoded.messages[0].ck.content[0].kind,
-            BlockKind::Text { ref text } if text.is_empty()
+            decoded.messages[0].ck.content()[0].kind(),
+            BlockKind::Text { text } if text.is_empty()
         ));
         assert_eq!(
             encode_opencode(&[decoded.messages[0].ck.clone()], &decoded.sidecar, None),
@@ -1821,7 +1815,7 @@ mod tests {
             ]
         })];
         let decoded = decode_opencode(&raw);
-        assert_eq!(decoded.messages[0].ck.content.len(), 1);
+        assert_eq!(decoded.messages[0].ck.content().len(), 1);
         assert_eq!(
             decoded.boundary.as_ref().unwrap().message_id,
             "msg_boundary"
@@ -1876,11 +1870,11 @@ mod tests {
         );
 
         let latest_text = output[1]
-            .content
+            .content_mut()
             .iter_mut()
-            .find(|block| matches!(&block.kind, BlockKind::Text { .. }))
+            .find(|block| matches!(block.kind(), BlockKind::Text { .. }))
             .unwrap();
-        latest_text.kind = BlockKind::Text {
+        *latest_text.kind_mut() = BlockKind::Text {
             text: "§7§ mutated latest answer".to_string(),
         };
         let served =
@@ -1915,10 +1909,10 @@ mod tests {
             .iter()
             .map(|message| message.ck.clone())
             .collect::<Vec<_>>();
-        output[0].content[1].kind = BlockKind::Text {
+        *output[0].content_mut()[1].kind_mut() = BlockKind::Text {
             text: "overlay must not escape".to_string(),
         };
-        output[1].content[1].kind = BlockKind::Text {
+        *output[1].content_mut()[1].kind_mut() = BlockKind::Text {
             text: "strip must not escape".to_string(),
         };
 
@@ -1958,28 +1952,28 @@ mod tests {
         })];
         let decoded = decode_opencode(&raw);
         assert!(matches!(
-            decoded.messages[0].ck.content[2].kind,
-            BlockKind::ToolCall { ref id, .. } if id == "call_uRXFDXYYs6UiMIkmAVDWZDzX"
+            decoded.messages[0].ck.content()[2].kind(),
+            BlockKind::ToolCall { id, .. } if id == "call_uRXFDXYYs6UiMIkmAVDWZDzX"
         ));
         assert!(matches!(
-            decoded.messages[0].ck.content[3].kind,
-            BlockKind::ToolResult { ref id, .. } if id == "call_uRXFDXYYs6UiMIkmAVDWZDzX"
+            decoded.messages[0].ck.content()[3].kind(),
+            BlockKind::ToolResult { id, .. } if id == "call_uRXFDXYYs6UiMIkmAVDWZDzX"
         ));
         let mut reduced_tail = decoded.messages[0].ck.clone();
-        reduced_tail.content = reduced_tail
-            .content
-            .into_iter()
+        *reduced_tail.content_mut() = reduced_tail
+            .content()
+            .iter()
             .map(|block| {
-                let reduced = match &block.kind {
+                let reduced = match block.kind() {
                     BlockKind::ToolCall { .. } => {
-                        crate::wire::reduced_block(&block, "reduced call skeleton", None)
+                        crate::wire::reduced_block(block, "reduced call skeleton", None)
                     }
                     BlockKind::ToolResult { .. } => {
-                        crate::wire::reduced_block(&block, "[dropped]", None)
+                        crate::wire::reduced_block(block, "[dropped]", None)
                     }
-                    _ => block,
+                    _ => block.clone(),
                 };
-                WireBlock::bare(reduced.kind)
+                WireBlock::bare(reduced.kind().clone())
             })
             .collect();
         reduced_tail.mark_modified();
@@ -2123,10 +2117,10 @@ mod tests {
             .map(|message| message.ck.clone())
             .collect::<Vec<_>>();
 
-        output[0].content[1].kind = BlockKind::Text {
+        *output[0].content_mut()[1].kind_mut() = BlockKind::Text {
             text: "§18240§ answer".to_string(),
         };
-        output[0].content[2].kind = BlockKind::Text {
+        *output[0].content_mut()[2].kind_mut() = BlockKind::Text {
             text: String::new(),
         };
 

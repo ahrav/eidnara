@@ -5,7 +5,7 @@ use std::time::Instant;
 use context_core::claim_operation::{SnapshotVector, canonical_snapshot_vector};
 use memory_store::{MemoryStore, MemoryStoreError, ModuleMeta, NoteDelivery, StoredNote};
 
-use crate::compartment_coverage::{CoverageGap, partition_by_folded_seq, resolve_coverage};
+use crate::compartment_coverage::{CoverageError, partition_by_folded_seq, resolve_coverage};
 use crate::decay_render::DecayRenderCompartment;
 use crate::m0_compose::trim_user_profile_to_budget;
 use crate::memory_render::{
@@ -18,7 +18,7 @@ pub enum M1ComposeError {
     #[error("store: {0}")]
     Store(MemoryStoreError),
     #[error("{0}")]
-    CoverageGap(CoverageGap),
+    CoverageGap(CoverageError),
 }
 
 impl From<MemoryStoreError> for M1ComposeError {

@@ -877,11 +877,11 @@ mod tests {
         assert!(first.assistant_msg.meta.synthetic);
         assert!(first.tool_msg.meta.synthetic);
         assert!(matches!(
-            first.assistant_msg.content.first().map(|block| &block.kind),
+            first.assistant_msg.content().first().map(|block| block.kind()),
             Some(BlockKind::ToolCall { name, provider_executed: false, .. }) if name == TODO_TOOL_NAME
         ));
         assert!(matches!(
-            first.tool_msg.content.first().map(|block| &block.kind),
+            first.tool_msg.content().first().map(|block| block.kind()),
             Some(BlockKind::ToolResult { tool_name, output, provider_executed: false, .. })
                 if tool_name == TODO_TOOL_NAME && matches!(output.kind, OutputKind::Json { .. })
         ));

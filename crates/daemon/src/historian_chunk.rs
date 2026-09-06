@@ -855,7 +855,7 @@ fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
     message
         .blocks
         .iter()
-        .filter_map(|block| match &block.wire.kind {
+        .filter_map(|block| match block.wire.kind() {
             BlockKind::Text { text } => {
                 let cleaned = if message.role == "user" {
                     clean_user_text(text)
@@ -898,7 +898,7 @@ fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
 fn extract_tool_call_summaries(message: &FlatMessage<'_>) -> Vec<String> {
     let mut summaries = Vec::new();
     for block in &message.blocks {
-        let BlockKind::ToolCall { name, input, .. } = &block.wire.kind else {
+        let BlockKind::ToolCall { name, input, .. } = block.wire.kind() else {
             continue;
         };
         summaries.push(format_tool_summary(name, input));
@@ -912,7 +912,7 @@ fn extract_tool_result_summaries(
 ) -> Vec<String> {
     let mut summaries = Vec::new();
     for block in &message.blocks {
-        let BlockKind::ToolResult { tool_name, .. } = &block.wire.kind else {
+        let BlockKind::ToolResult { tool_name, .. } = block.wire.kind() else {
             continue;
         };
         summaries.push(
@@ -930,7 +930,7 @@ fn extract_tool_result_summaries(
 fn build_tool_call_summary_lookup(blocks: &[FlatBlock]) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for block in blocks.iter().filter(|block| !block.synthetic) {
-        let BlockKind::ToolCall { name, input, .. } = &block.wire.kind else {
+        let BlockKind::ToolCall { name, input, .. } = block.wire.kind() else {
             continue;
         };
         out.insert(block.id.clone(), format_tool_summary(name, input));

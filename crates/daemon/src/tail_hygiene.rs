@@ -496,7 +496,7 @@ pub(crate) fn measure_tail_hygiene(
         .blocks
         .iter()
         .filter_map(|block| {
-            let memory_store::BlockKind::ToolResult { output, .. } = &block.wire.kind else {
+            let memory_store::BlockKind::ToolResult { output, .. } = block.wire.kind() else {
                 return None;
             };
             if is_drop_sentinel(&tool_output_content(&output.kind)) {
@@ -533,7 +533,7 @@ pub(crate) fn measure_tail_hygiene(
             protected_block_ids,
             &protected_arc_ids,
         );
-        let measured = match &block.wire.kind {
+        let measured = match block.wire.kind() {
             memory_store::BlockKind::Text { text }
                 if block.role == "user" || block.role == "assistant" =>
             {
@@ -1211,7 +1211,7 @@ mod tests {
             &HashSet::new(),
         );
         let mut reasoning_mutant = base.clone();
-        reasoning_mutant[1].ck.content[0].kind = BlockKind::Reasoning {
+        *reasoning_mutant[1].ck.content_mut()[0].kind_mut() = BlockKind::Reasoning {
             text: "different private".repeat(20_000),
             signature: Some("different signature".repeat(2_000)),
         };

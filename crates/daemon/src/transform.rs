@@ -169,7 +169,7 @@ impl ServedMessage {
         let canonical_bytes =
             serde_json::to_vec(&canonical).expect("CK wire message values must always serialize");
         let block_fingerprints = message
-            .content
+            .content()
             .iter()
             .enumerate()
             .map(|(served_index, block)| {
@@ -2137,7 +2137,7 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
     let mut fingerprints = Vec::new();
     for (message_index, message) in messages.iter().enumerate() {
         let message_id = if message.meta.synthetic {
-            let id = match message.content.first().map(|block| &block.kind) {
+            let id = match message.content().first().map(|block| block.kind()) {
                 Some(wire::BlockKind::ToolCall { id, .. }) => {
                     format!("eidnara_todo:{id}:call")
                 }
@@ -2180,7 +2180,7 @@ fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> Option<TransformR
     let mut normalized = None;
     for (index, message) in req.messages.iter().enumerate() {
         if message.ck.meta.synthetic
-            || !message.ck.content.iter().any(|block| match &block.kind {
+            || !message.ck.content().iter().any(|block| match block.kind() {
                 wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
                     is_synthetic_todo_id(id)
                 }
@@ -2217,21 +2217,20 @@ fn continuation_summary_anchor(
     }
     let last_text_index = first
         .ck
-        .content
+        .content()
         .iter()
-        .rposition(|block| matches!(block.kind, wire::BlockKind::Text { .. }))?;
-    let matching_index =
-        first
-            .ck
-            .content
-            .iter()
-            .enumerate()
-            .find_map(|(index, block)| match &block.kind {
-                wire::BlockKind::Text { text } if text.starts_with(CONTINUATION_SUMMARY_PREFIX) => {
-                    Some(index)
-                }
-                _ => None,
-            })?;
+        .rposition(|block| matches!(block.kind(), wire::BlockKind::Text { .. }))?;
+    let matching_index = first
+        .ck
+        .content()
+        .iter()
+        .enumerate()
+        .find_map(|(index, block)| match block.kind() {
+            wire::BlockKind::Text { text } if text.starts_with(CONTINUATION_SUMMARY_PREFIX) => {
+                Some(index)
+            }
+            _ => None,
+        })?;
     if matching_index != last_text_index {
         return None;
     }
@@ -2295,9 +2294,9 @@ fn validate_lineage_anchor(
     }
     let last_text_index = first
         .ck
-        .content
+        .content()
         .iter()
-        .rposition(|candidate| matches!(candidate.kind, wire::BlockKind::Text { .. }))
+        .rposition(|candidate| matches!(candidate.kind(), wire::BlockKind::Text { .. }))
         .ok_or_else(|| "anchor message has no text blocks".to_string())?;
     if block.block_index != last_text_index {
         return Err(format!(
@@ -5096,6 +5095,17 @@ fn apply_once(
     }
     let commit_required =
         state_changed || !consumed_drop_ids.is_empty() || !pending_overlays.is_empty();
+    // The store assigns tag numbers and timestamps; it takes the mint inputs alone.
+    let tag_mint_inputs: Vec<TagMintInput> = tag_rows[pending_overlays.tag_mint_start
+        ..pending_overlays.tag_mint_start + pending_overlays.tag_mint_count]
+        .iter()
+        .map(|row| TagMintInput {
+            block_id: row.block_id.clone(),
+            kind: row.kind.clone(),
+            token_count: row.token_count,
+            source_bytes: row.source_bytes.clone(),
+        })
+        .collect();
     let store_commit_started_at = Instant::now();
     let row_version = if commit_required {
         #[cfg(test)]
@@ -5126,8 +5136,7 @@ fn apply_once(
                 scheduler_applied_reductions,
                 overlays: TransformOverlayBatch {
                     max_seen_ordinal: pending_overlays.max_seen_ordinal,
-                    tag_mints: &tag_rows[pending_overlays.tag_mint_start
-                        ..pending_overlays.tag_mint_start + pending_overlays.tag_mint_count],
+                    tag_mints: &tag_mint_inputs,
                     temporal_marks: &pending_overlays.temporal_marks,
                     user_hint: pending_overlays.user_hint.as_ref(),
                     channel1_append: pending_overlays.channel1_append.as_ref(),
@@ -5839,7 +5848,7 @@ fn new_caveman_units(
                 || !is_tail(block.ordinal, coverage)
                 || frozen_red.contains(&block.id)
                 || !matches!(block.role.as_str(), "user" | "assistant")
-                || !matches!(&block.wire.kind, wire::BlockKind::Text { .. })
+                || !matches!(block.wire.kind(), wire::BlockKind::Text { .. })
             {
                 return None;
             }
@@ -6114,12 +6123,12 @@ fn meta_coverage_compartment_seq(meta: &ModuleMeta) -> i64 {
 }
 
 fn system_content_for_m0(message: &WireMessage) -> String {
-    if message.content.len() == 1
-        && let wire::BlockKind::Text { text } = &message.content[0].kind
+    if message.content().len() == 1
+        && let wire::BlockKind::Text { text } = message.content()[0].kind()
     {
         return text.clone();
     }
-    serde_json::to_string(&message.content).unwrap_or_default()
+    serde_json::to_string(message.content()).unwrap_or_default()
 }
 
 fn covered_system_messages_for_coverage(
@@ -6470,7 +6479,7 @@ fn synth_region(key: &str, payload: String) -> FrozenUnit {
 }
 
 fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usize>) -> SelItem {
-    let kind = match &block.wire.kind {
+    let kind = match block.wire.kind() {
         wire::BlockKind::ToolCall { name, input, .. } => SelKind::ToolCall {
             name: name.clone(),
             input: input.clone(),
@@ -7449,7 +7458,7 @@ fn taggable_source(block: &FlatBlock) -> Option<(TaggableKind, &str)> {
     if block.synthetic || block.role == "system" {
         return None;
     }
-    match &block.wire.kind {
+    match block.wire.kind() {
         wire::BlockKind::Text { text } if block.role == "user" || block.role == "assistant" => {
             Some((TaggableKind::Message, text))
         }
@@ -7625,33 +7634,43 @@ fn apply_tag_overlay_to_message(
     }
     let mut modified = false;
     for block in blocks {
-        if block.block_index >= message.content.len() {
+        if block.block_index >= message.content().len() {
             continue;
         }
-        if !is_reduced(block) {
-            let target = &mut message.content[block.block_index];
-            let mut block_changed = false;
-            // A boundary-lineage alarm forces raw pass-through; only tags stored before the request remain available.
-            if let Some(kind) = taggable_kind(block)
-                && let Some(tag_number) = overlay.tag_by_block_id.get(&block.id)
-            {
-                block_changed |=
-                    apply_tag_prefix_to_block(ingress.ck.role.as_str(), target, kind, *tag_number);
-            }
-            if let Some(prefix) = overlay.temporal_by_block_id.get(&block.id) {
-                block_changed |= prepend_temporal_to_block(target, prefix);
-            }
-            if let Some(hint) = overlay.user_hint_by_block_id.get(&block.id) {
-                block_changed |= append_user_hint_to_block(target, hint);
-            }
-            if let Some(reminder) = overlay.channel1_by_block_id.get(&block.id) {
-                block_changed |= append_channel1_to_block(target, reminder);
-            }
-            if block_changed {
-                // Overlay mutations must clear retained ingress bytes; otherwise `Serialize` emits the pre-mutation bytes.
-                target.mark_modified();
-                modified = true;
-            }
+        if is_reduced(block) {
+            continue;
+        }
+        // Each overlay decides against the current payload and clones only when it changes
+        // something, so an untouched block keeps its retained ingress bytes and an
+        // idempotent re-application writes nothing.
+        let current = message.content()[block.block_index].kind();
+        let mut working: Option<wire::BlockKind> = None;
+        // A boundary-lineage alarm forces raw pass-through; only tags stored before the request remain available.
+        if let Some(kind) = taggable_kind(block)
+            && let Some(tag_number) = overlay.tag_by_block_id.get(&block.id)
+        {
+            working = tagged_block_kind(
+                ingress.ck.role.as_str(),
+                working.as_ref().unwrap_or(current),
+                kind,
+                *tag_number,
+            )
+            .or(working);
+        }
+        if let Some(prefix) = overlay.temporal_by_block_id.get(&block.id) {
+            working = temporal_block_kind(working.as_ref().unwrap_or(current), prefix).or(working);
+        }
+        if let Some(hint) = overlay.user_hint_by_block_id.get(&block.id) {
+            working = user_hint_block_kind(working.as_ref().unwrap_or(current), hint).or(working);
+        }
+        if let Some(reminder) = overlay.channel1_by_block_id.get(&block.id) {
+            working =
+                channel1_block_kind(working.as_ref().unwrap_or(current), reminder).or(working);
+        }
+        if let Some(next) = working {
+            // `kind_mut` clears the block's retained ingress bytes; otherwise `Serialize` emits the pre-mutation bytes.
+            *message.content_mut()[block.block_index].kind_mut() = next;
+            modified = true;
         }
     }
     if modified {
@@ -7659,13 +7678,14 @@ fn apply_tag_overlay_to_message(
     }
 }
 
-fn apply_tag_prefix_to_block(
+/// The tagged payload, or `None` when the tag is already applied or the block takes no tag.
+fn tagged_block_kind(
     role: &str,
-    block: &mut WireBlock,
+    current: &wire::BlockKind,
     kind: TaggableKind,
     tag_number: i64,
-) -> bool {
-    match (&mut block.kind, kind) {
+) -> Option<wire::BlockKind> {
+    match (current, kind) {
         (wire::BlockKind::Text { text }, TaggableKind::Message)
             if role == "user" || role == "assistant" =>
         {
@@ -7677,17 +7697,38 @@ fn apply_tag_prefix_to_block(
                 text.clone()
             };
             let next = prepend_tag(tag_number, &base);
-            if *text != next {
-                *text = next;
-                return true;
-            }
+            (*text != next).then_some(wire::BlockKind::Text { text: next })
         }
         (wire::BlockKind::ToolResult { output, .. }, TaggableKind::ToolResult) => {
-            return prepend_tag_to_tool_output(output, tag_number);
+            let target = tool_output_text(output)?;
+            if prepend_tag(tag_number, target) == *target {
+                return None;
+            }
+            let mut next = current.clone();
+            if let wire::BlockKind::ToolResult { output, .. } = &mut next {
+                prepend_tag_to_tool_output(output, tag_number);
+            }
+            Some(next)
         }
-        _ => {}
+        _ => None,
     }
-    false
+}
+
+/// The text a tool output's tag and reminder edits address: the whole text for a text
+/// output, the first text block for a content output, nothing otherwise.
+fn tool_output_text(output: &wire::ToolOutput) -> Option<&String> {
+    match &output.kind {
+        wire::OutputKind::Text { text } | wire::OutputKind::ErrorText { text } => Some(text),
+        wire::OutputKind::Content { blocks } | wire::OutputKind::ErrorContent { blocks } => {
+            blocks.iter().find_map(|block| match &block.kind {
+                wire::ResultBlockKind::Text { text } => Some(text),
+                _ => None,
+            })
+        }
+        wire::OutputKind::Json { .. }
+        | wire::OutputKind::ErrorJson { .. }
+        | wire::OutputKind::ExecutionDenied { .. } => None,
+    }
 }
 
 fn prepend_tag_to_tool_output(output: &mut wire::ToolOutput, tag_number: i64) -> bool {
@@ -7718,33 +7759,42 @@ fn prepend_tag_to_tool_output(output: &mut wire::ToolOutput, tag_number: i64) ->
     false
 }
 
-fn prepend_temporal_to_block(block: &mut WireBlock, prefix: &str) -> bool {
-    let wire::BlockKind::Text { text } = &mut block.kind else {
-        return false;
+fn temporal_block_kind(current: &wire::BlockKind, prefix: &str) -> Option<wire::BlockKind> {
+    let wire::BlockKind::Text { text } = current else {
+        return None;
     };
     if text.starts_with(prefix) {
-        return false;
+        return None;
     }
-    text.insert_str(0, prefix);
-    true
+    Some(wire::BlockKind::Text {
+        text: format!("{prefix}{text}"),
+    })
 }
 
-fn append_user_hint_to_block(block: &mut WireBlock, hint: &str) -> bool {
-    let wire::BlockKind::Text { text } = &mut block.kind else {
-        return false;
+fn user_hint_block_kind(current: &wire::BlockKind, hint: &str) -> Option<wire::BlockKind> {
+    let wire::BlockKind::Text { text } = current else {
+        return None;
     };
     if text.ends_with(hint) {
-        return false;
+        return None;
     }
-    text.push_str(hint);
-    true
+    Some(wire::BlockKind::Text {
+        text: format!("{text}{hint}"),
+    })
 }
 
-fn append_channel1_to_block(block: &mut WireBlock, reminder: &str) -> bool {
-    match &mut block.kind {
-        wire::BlockKind::ToolResult { output, .. } => append_channel1_to_output(output, reminder),
-        _ => false,
+fn channel1_block_kind(current: &wire::BlockKind, reminder: &str) -> Option<wire::BlockKind> {
+    let wire::BlockKind::ToolResult { output, .. } = current else {
+        return None;
+    };
+    if tool_output_text(output)?.ends_with(reminder) {
+        return None;
     }
+    let mut next = current.clone();
+    if let wire::BlockKind::ToolResult { output, .. } = &mut next {
+        append_channel1_to_output(output, reminder);
+    }
+    Some(next)
 }
 
 fn append_channel1_to_output(output: &mut wire::ToolOutput, reminder: &str) -> bool {
@@ -7900,15 +7950,15 @@ fn is_entire_system_reminder_wrapped(text: &str) -> bool {
 }
 
 fn is_system_reminder_transport_message(message: &IngressMessage) -> bool {
-    if message.ck.role != "user" || message.ck.meta.synthetic || message.ck.content.is_empty() {
+    if message.ck.role != "user" || message.ck.meta.synthetic || message.ck.content().is_empty() {
         return false;
     }
     // CK has no transport-origin field for this Claude Code shape.
     // The decoder preserves each reminder as an ordinary user text block.
     // The decoder treats a message as a reminder only when balanced reminder wrappers cover the entire message.
     let mut saw_text = false;
-    for block in &message.ck.content {
-        let wire::BlockKind::Text { text } = &block.kind else {
+    for block in message.ck.content() {
+        let wire::BlockKind::Text { text } = block.kind() else {
             return false;
         };
         saw_text = true;
@@ -7924,9 +7974,9 @@ fn is_authored_user_message(message: &IngressMessage) -> bool {
         && !message.ck.meta.synthetic
         && message
             .ck
-            .content
+            .content()
             .iter()
-            .any(|block| matches!(&block.kind, wire::BlockKind::Text { .. }))
+            .any(|block| matches!(block.kind(), wire::BlockKind::Text { .. }))
         && !is_system_reminder_transport_message(message)
 }
 
@@ -8035,7 +8085,7 @@ fn compute_active_overlay_decisions(
             .iter()
             .filter(|block| block.mid == message.mid)
             .find_map(|block| {
-                matches!(&block.wire.kind, wire::BlockKind::Text { .. })
+                matches!(block.wire.kind(), wire::BlockKind::Text { .. })
                     .then(|| {
                         mint_by_block
                             .get(block.id.as_str())
@@ -8108,7 +8158,7 @@ fn compute_active_overlay_decisions(
             continue;
         }
         let Some(block_id) = projection.blocks.iter().find_map(|block| {
-            (block.mid == message.mid && matches!(&block.wire.kind, wire::BlockKind::Text { .. }))
+            (block.mid == message.mid && matches!(block.wire.kind(), wire::BlockKind::Text { .. }))
                 .then_some(block.id.as_str())
         }) else {
             break;
@@ -8163,7 +8213,7 @@ fn maybe_decide_live_user_hint(
     let Some(block) = projection.blocks.iter().find(|block| {
         block.mid == message.mid
             && block.role == "user"
-            && matches!(block.wire.kind, wire::BlockKind::Text { .. })
+            && matches!(block.wire.kind(), wire::BlockKind::Text { .. })
     }) else {
         return Ok(None);
     };
@@ -8350,9 +8400,9 @@ fn user_hint_raw_prompt(message: &IngressMessage) -> String {
 fn user_hint_message_text(message: &IngressMessage) -> String {
     message
         .ck
-        .content
+        .content()
         .iter()
-        .filter_map(|block| match &block.kind {
+        .filter_map(|block| match block.kind() {
             wire::BlockKind::Text { text } => Some(text.as_str()),
             _ => None,
         })
@@ -9176,7 +9226,7 @@ fn newest_tool_result_for_channel1(
 }
 
 fn tool_result_can_carry_channel1(block: &WireBlock) -> bool {
-    match &block.kind {
+    match block.kind() {
         wire::BlockKind::ToolResult { output, .. } => match &output.kind {
             wire::OutputKind::Text { .. } | wire::OutputKind::ErrorText { .. } => true,
             wire::OutputKind::Content { blocks } | wire::OutputKind::ErrorContent { blocks } => {
@@ -9264,7 +9314,7 @@ fn provider_sentinel_text(req: &TransformRequest) -> String {
 }
 
 fn is_metadata_block(block: &WireBlock) -> bool {
-    match &block.kind {
+    match block.kind() {
         wire::BlockKind::Opaque(opaque) => matches!(
             opaque.kind.as_str(),
             "meta"
@@ -9283,7 +9333,7 @@ fn is_metadata_block(block: &WireBlock) -> bool {
 
 fn is_ignored_block(block: &WireBlock) -> bool {
     matches!(
-        &block.kind,
+        block.kind(),
         wire::BlockKind::Opaque(opaque)
             if opaque.raw.get("ignored").and_then(Value::as_bool) == Some(true)
     )
@@ -9407,7 +9457,7 @@ fn strip_system_injection(text: &str) -> Option<String> {
 
 fn is_dropped_placeholder_block(block: &WireBlock) -> bool {
     matches!(
-        &block.kind,
+        block.kind(),
         wire::BlockKind::Text { text } | wire::BlockKind::Reasoning { text, .. }
             if is_dropped_placeholder_text(text)
     )
@@ -9415,7 +9465,7 @@ fn is_dropped_placeholder_block(block: &WireBlock) -> bool {
 
 fn has_text_or_reasoning_block(block: &WireBlock) -> bool {
     matches!(
-        &block.kind,
+        block.kind(),
         wire::BlockKind::Text { .. } | wire::BlockKind::Reasoning { .. }
     )
 }
@@ -9426,7 +9476,7 @@ fn whole_system_injected(blocks: &[WireBlock]) -> bool {
         if is_ignored_block(block) || is_metadata_block(block) {
             continue;
         }
-        let wire::BlockKind::Text { text } = &block.kind else {
+        let wire::BlockKind::Text { text } = block.kind() else {
             return false;
         };
         has_content = true;
@@ -9441,7 +9491,7 @@ fn has_meaningful_content(block: &WireBlock) -> bool {
     if is_ignored_block(block) || is_metadata_block(block) {
         return false;
     }
-    match &block.kind {
+    match block.kind() {
         wire::BlockKind::Text { text } => !text.is_empty(),
         wire::BlockKind::Reasoning { .. } | wire::BlockKind::RedactedReasoning { .. } => false,
         _ => true,
@@ -9450,16 +9500,16 @@ fn has_meaningful_content(block: &WireBlock) -> bool {
 
 fn is_reduce_block(block: &WireBlock) -> bool {
     matches!(
-        &block.kind,
+        block.kind(),
         wire::BlockKind::ToolCall { name, .. } if name == "ctx_reduce"
     ) || matches!(
-        &block.kind,
+        block.kind(),
         wire::BlockKind::ToolResult { tool_name, .. } if tool_name == "ctx_reduce"
     )
 }
 
 fn is_structural_noise(block: &WireBlock) -> bool {
-    match &block.kind {
+    match block.kind() {
         wire::BlockKind::Opaque(opaque) => {
             matches!(opaque.kind.as_str(), "meta" | "step-start" | "step-finish")
         }
@@ -9469,7 +9519,7 @@ fn is_structural_noise(block: &WireBlock) -> bool {
 }
 
 fn image_block_is_large(block: &WireBlock) -> bool {
-    let wire::BlockKind::Media(media) = &block.kind else {
+    let wire::BlockKind::Media(media) = block.kind() else {
         return false;
     };
     if media.kind != wire::MediaKind::Image || !media.media_type.starts_with("image/") {
@@ -9489,7 +9539,7 @@ fn image_block_is_large(block: &WireBlock) -> bool {
 }
 
 fn replace_with_sentinel(block: &mut WireBlock, text: &str) {
-    block.kind = wire::BlockKind::Text {
+    *block.kind_mut() = wire::BlockKind::Text {
         text: text.to_string(),
     };
     block.mark_modified();
@@ -9582,7 +9632,7 @@ fn new_frozen_strip_units(
         {
             continue;
         }
-        let blocks = message.ck.content.as_slice();
+        let blocks = message.ck.content();
         if message.ck.role == "assistant" {
             has_assistant_response = true;
         }
@@ -9594,7 +9644,7 @@ fn new_frozen_strip_units(
                 }
             } else {
                 for (block_index, block) in blocks.iter().enumerate() {
-                    let wire::BlockKind::Text { text } = &block.kind else {
+                    let wire::BlockKind::Text { text } = block.kind() else {
                         continue;
                     };
                     let Some(cleaned) = strip_system_injection(text) else {
@@ -9700,9 +9750,14 @@ fn remove_frozen_historical_reasoning(
         return 0;
     }
 
-    let before = rebuilt.content.len();
-    rebuilt.content.retain(|block| !is_reasoning_block(block));
-    let removed = before.saturating_sub(rebuilt.content.len());
+    let before = rebuilt.content().len();
+    if !rebuilt.content().iter().any(is_reasoning_block) {
+        return 0;
+    }
+    rebuilt
+        .content_mut()
+        .retain(|block| !is_reasoning_block(block));
+    let removed = before.saturating_sub(rebuilt.content().len());
     if removed > 0 {
         rebuilt.mark_modified();
     }
@@ -9726,7 +9781,7 @@ fn apply_surface_strips(
         })
         .flatten();
     if whole_strip.is_some() {
-        rebuilt.content = vec![WireBlock::bare(wire::BlockKind::Text { text: sentinel })];
+        *rebuilt.content_mut() = vec![WireBlock::bare(wire::BlockKind::Text { text: sentinel })];
         rebuilt.mark_modified();
         return;
     }
@@ -9738,16 +9793,16 @@ fn apply_surface_strips(
     let mut touched = false;
     for block in blocks {
         let index = block.block_index;
-        if index >= rebuilt.content.len() {
+        if index >= rebuilt.content().len() {
             continue;
         }
         if !reasoning_policy.exempt
             && let Some(unit) = block_strip_unit(core, "system_injected_block", block.id())
         {
-            rebuilt.content[index].kind = wire::BlockKind::Text {
+            *rebuilt.content_mut()[index].kind_mut() = wire::BlockKind::Text {
                 text: unit.frozen_payload.clone(),
             };
-            rebuilt.content[index].mark_modified();
+            rebuilt.content_mut()[index].mark_modified();
             touched = true;
             continue;
         }
@@ -9755,13 +9810,13 @@ fn apply_surface_strips(
             && message.ck.role == "assistant"
             && aged
             && request_accepts_empty_content(req)
-            && matches!(&block.wire.kind, wire::BlockKind::Reasoning { .. });
+            && matches!(block.wire.kind(), wire::BlockKind::Reasoning { .. });
         if clear_typed_reasoning {
-            rebuilt.content[index].kind = wire::BlockKind::Reasoning {
+            *rebuilt.content_mut()[index].kind_mut() = wire::BlockKind::Reasoning {
                 text: String::new(),
                 signature: None,
             };
-            rebuilt.content[index].mark_modified();
+            rebuilt.content_mut()[index].mark_modified();
             touched = true;
             continue;
         }
@@ -9777,25 +9832,26 @@ fn apply_surface_strips(
                         })))
                 || (request_accepts_empty_content(req) && is_structural_noise(&block.wire));
         if should_strip {
-            replace_with_sentinel(&mut rebuilt.content[index], &sentinel);
+            replace_with_sentinel(&mut rebuilt.content_mut()[index], &sentinel);
             touched = true;
             continue;
         }
         if !reasoning_policy.exempt
             && message.ck.role == "assistant"
             && aged
-            && let wire::BlockKind::Text { text } = &block.wire.kind
+            && let wire::BlockKind::Text { text } = block.wire.kind()
         {
             let replacement = inline_thinking_replacement(text);
             if replacement != *text {
-                rebuilt.content[index].kind = wire::BlockKind::Text { text: replacement };
-                rebuilt.content[index].mark_modified();
+                *rebuilt.content_mut()[index].kind_mut() =
+                    wire::BlockKind::Text { text: replacement };
+                rebuilt.content_mut()[index].mark_modified();
                 touched = true;
             }
         }
     }
-    if stale_reduce && touched && !rebuilt.content.iter().any(has_meaningful_content) {
-        rebuilt.content = vec![WireBlock::bare(wire::BlockKind::Text { text: sentinel })];
+    if stale_reduce && touched && !rebuilt.content().iter().any(has_meaningful_content) {
+        *rebuilt.content_mut() = vec![WireBlock::bare(wire::BlockKind::Text { text: sentinel })];
         rebuilt.mark_modified();
     }
 }
@@ -9810,7 +9866,7 @@ fn surviving_strip_units(core: &CoreState, req: &TransformRequest) -> Vec<Frozen
         .messages
         .iter()
         .flat_map(|message| {
-            (0..message.ck.content.len()).map(|index| format!("{}#{index}", message.mid))
+            (0..message.ck.content().len()).map(|index| format!("{}#{index}", message.mid))
         })
         .collect::<HashSet<_>>();
     core.frozen_units
@@ -9849,7 +9905,7 @@ fn projection_reasoning_ineligible_arc_ids(projection: &FlatProjection) -> HashS
         .filter(|block| block.role == "assistant")
     {
         let message = messages.entry(block.mid.as_str()).or_default();
-        match &block.wire.kind {
+        match block.wire.kind() {
             wire::BlockKind::Reasoning { .. } | wire::BlockKind::RedactedReasoning { .. } => {
                 message.has_reasoning = true;
             }
@@ -10084,7 +10140,7 @@ fn renderer_transition_shapes(
             let (
                 wire::BlockKind::ToolCall { id: call_id, .. },
                 wire::BlockKind::ToolResult { id: result_id, .. },
-            ) = (&call.wire.kind, &result.wire.kind)
+            ) = (call.wire.kind(), result.wire.kind())
             else {
                 return None;
             };
@@ -10184,7 +10240,7 @@ fn full_drop_tool_ids(
     };
     let mut call_kind_by_id = HashMap::new();
     for block in &projection.blocks {
-        let wire::BlockKind::ToolCall { id, .. } = &block.wire.kind else {
+        let wire::BlockKind::ToolCall { id, .. } = block.wire.kind() else {
             continue;
         };
         call_kind_by_id
@@ -10195,7 +10251,7 @@ fn full_drop_tool_ids(
     let mut remove = HashSet::new();
     for block in &projection.blocks {
         let (wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. }) =
-            &block.wire.kind
+            block.wire.kind()
         else {
             continue;
         };
@@ -10209,7 +10265,7 @@ fn full_drop_tool_ids(
         if frozen_kind(block.id()) != Some("drop") {
             continue;
         }
-        if matches!(&block.wire.kind, wire::BlockKind::ToolCall { .. }) {
+        if matches!(block.wire.kind(), wire::BlockKind::ToolCall { .. }) {
             remove.insert(id.clone());
             continue;
         }
@@ -10415,7 +10471,7 @@ fn message_output_identity(
         ] {
             digest_field(&mut hasher, value.as_deref().unwrap_or_default().as_bytes());
         }
-        let full_drop = match &block.wire.kind {
+        let full_drop = match block.wire.kind() {
             wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
                 full_drop_ids.contains(id)
             }
@@ -10488,8 +10544,8 @@ fn duplicate_tool_use_locations(messages: &[ServedMessage]) -> Vec<(String, usiz
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
     for (message_index, message) in messages.iter().enumerate() {
-        for (block_index, block) in message.content.iter().enumerate() {
-            if let wire::BlockKind::ToolCall { id, .. } = &block.kind
+        for (block_index, block) in message.content().iter().enumerate() {
+            if let wire::BlockKind::ToolCall { id, .. } = block.kind()
                 && !seen.insert(id.clone())
             {
                 duplicates.push((id.clone(), message_index, block_index));
@@ -10503,9 +10559,9 @@ fn duplicate_tool_use_locations(messages: &[ServedMessage]) -> Vec<(String, usiz
 fn assert_no_orphaned_tool_arcs(messages: &[ServedMessage]) {
     let external_calls = |message: &ServedMessage| {
         message
-            .content
+            .content()
             .iter()
-            .filter_map(|block| match &block.kind {
+            .filter_map(|block| match block.kind() {
                 wire::BlockKind::ToolCall {
                     id,
                     provider_executed: false,
@@ -10517,9 +10573,9 @@ fn assert_no_orphaned_tool_arcs(messages: &[ServedMessage]) {
     };
     let external_results = |message: &ServedMessage| {
         message
-            .content
+            .content()
             .iter()
-            .filter_map(|block| match &block.kind {
+            .filter_map(|block| match block.kind() {
                 wire::BlockKind::ToolResult { id, .. } => Some(id.clone()),
                 _ => None,
             })
@@ -10731,25 +10787,25 @@ fn apply_frozen_trailing_blank_decision(
 
     let canonical_blank = canonical_blank_block();
     let Some(last_meaningful_index) = message
-        .content
+        .content()
         .iter()
         .rposition(|block| !is_sentinel_invisible_text_block(block))
     else {
-        if message.content.len() == 1 && message.content.first() == Some(&canonical_blank) {
+        if message.content().len() == 1 && message.content().first() == Some(&canonical_blank) {
             return 0;
         }
-        let mutations = message.content.len().max(1);
-        message.content = vec![canonical_blank];
+        let mutations = message.content().len().max(1);
+        *message.content_mut() = vec![canonical_blank];
         message.mark_modified();
         return mutations;
     };
 
-    let trailing_count = message.content.len() - last_meaningful_index - 1;
+    let trailing_count = message.content().len() - last_meaningful_index - 1;
     let keep_count = if decision == FrozenTrailingBlankDecision::Keep {
         frozen_trailing_blank_keep_count(core, mid).unwrap_or(1)
     } else if !newest_assistant_exempt
         && trailing_count > 0
-        && is_reasoning_block(&message.content[last_meaningful_index])
+        && is_reasoning_block(&message.content()[last_meaningful_index])
     {
         1
     } else {
@@ -10758,16 +10814,16 @@ fn apply_frozen_trailing_blank_decision(
     if keep_count > 0 {
         let blank_index = last_meaningful_index + 1;
         let suffix_is_canonical = trailing_count == keep_count
-            && message.content[blank_index..]
+            && message.content()[blank_index..]
                 .iter()
                 .all(|block| block == &canonical_blank);
         if suffix_is_canonical {
             return 0;
         }
         let mutations = trailing_count.max(keep_count).max(1);
-        message.content.truncate(blank_index);
+        message.content_mut().truncate(blank_index);
         message
-            .content
+            .content_mut()
             .extend((0..keep_count).map(|_| canonical_blank.clone()));
         message.mark_modified();
         return mutations;
@@ -10776,7 +10832,7 @@ fn apply_frozen_trailing_blank_decision(
     if newest_assistant_exempt || trailing_count == 0 {
         return 0;
     }
-    message.content.truncate(last_meaningful_index + 1);
+    message.content_mut().truncate(last_meaningful_index + 1);
     message.mark_modified();
     trailing_count
 }
@@ -10803,13 +10859,13 @@ fn refresh_trailing_blank_decisions(
             continue;
         }
         let trailing_count = rendered
-            .content
+            .content()
             .iter()
             .rev()
             .take_while(|block| is_sentinel_invisible_text_block(block))
             .count();
         let (decision, keep_count) =
-            if rendered.content.is_empty() || trailing_count == rendered.content.len() {
+            if rendered.content().is_empty() || trailing_count == rendered.content().len() {
                 (FrozenTrailingBlankDecision::Keep, 1)
             } else if trailing_count == 0 {
                 (FrozenTrailingBlankDecision::Strip, 0)
@@ -10874,26 +10930,32 @@ fn apply_serializer_residual_to_message(
     }
     let keep_index = first_assistant_in_run.then(|| {
         message
-            .content
+            .content()
             .iter()
             .enumerate()
             .find(|(_, block)| !is_reasoning_ignored_block(block))
             .and_then(|(index, block)| is_mutable_merged_reasoning_block(block).then_some(index))
     });
     let keep_index = keep_index.flatten();
-    let mut stripped = 0;
-    for (index, block) in message.content.iter_mut().enumerate() {
-        if !is_mutable_merged_reasoning_block(block) || Some(index) == keep_index {
-            continue;
-        }
-        *block = WireBlock::bare(wire::BlockKind::Text {
+    let strip_indexes: Vec<usize> = message
+        .content()
+        .iter()
+        .enumerate()
+        .filter(|(index, block)| {
+            is_mutable_merged_reasoning_block(block) && Some(*index) != keep_index
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let stripped = strip_indexes.len();
+    if stripped == 0 {
+        return 0;
+    }
+    for index in strip_indexes {
+        message.content_mut()[index] = WireBlock::bare(wire::BlockKind::Text {
             text: String::new(),
         });
-        stripped += 1;
     }
-    if stripped > 0 {
-        message.mark_modified();
-    }
+    message.mark_modified();
     stripped
 }
 
@@ -11213,7 +11275,7 @@ fn build_output_with_tags(
                                         .map(|tag_number| format!("[dropped §{tag_number}§]"))
                                 })
                                 .flatten();
-                            rebuilt.content[block.block_index] = reduced_block(
+                            rebuilt.content_mut()[block.block_index] = reduced_block(
                                 &block.wire,
                                 display_payload
                                     .as_deref()
@@ -11237,13 +11299,14 @@ fn build_output_with_tags(
                         let Some(unit) = frozen_units.by_key(&unit_key) else {
                             continue;
                         };
-                        if !matches!(&block.wire.kind, wire::BlockKind::Text { .. }) {
+                        if !matches!(block.wire.kind(), wire::BlockKind::Text { .. }) {
                             continue;
                         }
-                        rebuilt.content[block.block_index].kind = wire::BlockKind::Text {
-                            text: unit.frozen_payload.clone(),
-                        };
-                        rebuilt.content[block.block_index].mark_modified();
+                        *rebuilt.content_mut()[block.block_index].kind_mut() =
+                            wire::BlockKind::Text {
+                                text: unit.frozen_payload.clone(),
+                            };
+                        rebuilt.content_mut()[block.block_index].mark_modified();
                         rebuilt.mark_modified();
                     }
                 }
@@ -11262,7 +11325,7 @@ fn build_output_with_tags(
                     );
                     let drop_indexes: HashSet<usize> = blocks
                         .iter()
-                        .filter(|block| match &block.wire.kind {
+                        .filter(|block| match block.wire.kind() {
                             wire::BlockKind::ToolCall { id, .. }
                             | wire::BlockKind::ToolResult { id, .. } => full_drop_ids.contains(id),
                             _ => false,
@@ -11270,12 +11333,12 @@ fn build_output_with_tags(
                         .map(|block| block.block_index)
                         .collect();
                     if !drop_indexes.is_empty() {
-                        rebuilt.content = rebuilt
-                            .content
-                            .into_iter()
+                        *rebuilt.content_mut() = rebuilt
+                            .content()
+                            .iter()
                             .enumerate()
                             .filter_map(|(index, block)| {
-                                (!drop_indexes.contains(&index)).then_some(block)
+                                (!drop_indexes.contains(&index)).then_some(block.clone())
                             })
                             .collect();
                         rebuilt.mark_modified();
@@ -11293,7 +11356,7 @@ fn build_output_with_tags(
             };
             remove_frozen_historical_reasoning(core, msg, reasoning_mutation_exempt, &mut rendered);
 
-            let present = !rendered.content.is_empty()
+            let present = !rendered.content().is_empty()
                 || rendered.meta.synthetic
                 || !blocks_by_mid.contains_key(msg.mid.as_str());
             let output = if present {
@@ -11459,7 +11522,7 @@ fn strip_reasoning_from_merged_assistants_with_exemption(
 
 fn is_reasoning_block(block: &WireBlock) -> bool {
     matches!(
-        &block.kind,
+        block.kind(),
         wire::BlockKind::Reasoning { .. } | wire::BlockKind::RedactedReasoning { .. }
     )
 }
@@ -11501,7 +11564,7 @@ fn latest_assistant_message_mutation_exempt_mid(
         .filter(|message| {
             message
                 .ck
-                .content
+                .content()
                 .iter()
                 .find(|block| !is_reasoning_ignored_block(block))
                 .is_some_and(is_reasoning_block)
@@ -11728,7 +11791,7 @@ fn is_empty_reasoning_sentinel(part: &Value) -> bool {
 }
 
 fn is_sentinel_invisible_text_block(block: &WireBlock) -> bool {
-    matches!(&block.kind, wire::BlockKind::Text { text } if text.trim().is_empty())
+    matches!(block.kind(), wire::BlockKind::Text { text } if text.trim().is_empty())
 }
 
 fn is_reasoning_ignored_block(block: &WireBlock) -> bool {
@@ -11736,7 +11799,7 @@ fn is_reasoning_ignored_block(block: &WireBlock) -> bool {
         return true;
     }
     matches!(
-        &block.kind,
+        block.kind(),
         wire::BlockKind::Opaque(opaque)
             if matches!(
                 opaque.kind.as_str(),
@@ -13097,7 +13160,7 @@ pub(crate) mod tests {
         mut messages: Vec<IngressMessage>,
     ) -> Vec<IngressMessage> {
         for message in &mut messages {
-            for block in &mut message.ck.content {
+            for block in message.ck.content_mut() {
                 block.provider_extras.clear();
             }
         }
@@ -13623,11 +13686,11 @@ pub(crate) mod tests {
         });
         let decoded = crate::codec::decode_opencode(&[native_message]);
         let mut projected = decoded.messages.into_iter().next().unwrap();
-        projected.ck.content = projected
+        *projected.ck.content_mut() = projected
             .ck
-            .content
-            .into_iter()
-            .map(|block| wire::WireBlock::bare(block.kind))
+            .content()
+            .iter()
+            .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
         projected.ck.mark_modified();
         projected
@@ -13840,10 +13903,10 @@ pub(crate) mod tests {
         let multi_blocks: Vec<&FlatBlock> = multi_proj.blocks.iter().collect();
         let mut multi_rendered = multi.ck.clone();
         // The test overlays only the second text block so the first remains projection-identical.
-        if let wire::BlockKind::Text { text } = &mut multi_rendered.content[1].kind {
+        if let wire::BlockKind::Text { text } = multi_rendered.content_mut()[1].kind_mut() {
             *text = format!("\u{a7}2\u{a7} {text}");
         }
-        multi_rendered.content[1].mark_modified();
+        multi_rendered.content_mut()[1].mark_modified();
         multi_rendered.mark_modified();
 
         let reused =
@@ -14079,9 +14142,10 @@ pub(crate) mod tests {
 
     fn edit_result(mid: &str, ordinal: u64, call_id: &str, text: &str) -> IngressMessage {
         let mut result = tool_result(mid, ordinal, call_id, text);
-        if let wire::BlockKind::ToolResult { tool_name, .. } = &mut result.ck.content[0].kind {
+        if let wire::BlockKind::ToolResult { tool_name, .. } = result.ck.content_mut()[0].kind_mut()
+        {
             *tool_name = "edit".to_string();
-            result.ck.content[0].mark_modified();
+            result.ck.content_mut()[0].mark_modified();
         }
         result
     }
@@ -14196,7 +14260,7 @@ pub(crate) mod tests {
         let mut message = open_todowrite_call(mid, ordinal, todos);
         message
             .ck
-            .content
+            .content_mut()
             .push(wire::WireBlock::bare(wire::BlockKind::ToolResult {
                 id: format!("call_{mid}"),
                 tool_name: "todowrite".to_string(),
@@ -14238,7 +14302,7 @@ pub(crate) mod tests {
             .position(|m| {
                 m.meta.synthetic
                     && matches!(
-                        m.content.first().map(|block| &block.kind),
+                        m.content().first().map(|block| block.kind()),
                         Some(wire::BlockKind::ToolCall { name, .. }) if name == "todowrite"
                     )
             })
@@ -14247,7 +14311,7 @@ pub(crate) mod tests {
 
     fn synthetic_todo_call_id(r: &TransformResponse) -> String {
         let msg = &r.messages()[synthetic_todo_index(r)];
-        match &msg.content[0].kind {
+        match msg.content()[0].kind() {
             wire::BlockKind::ToolCall { id, .. } => id.clone(),
             other => panic!("expected synthetic todowrite ToolCall, got {other:?}"),
         }
@@ -15447,8 +15511,8 @@ pub(crate) mod tests {
         assert_eq!(first.action, "HARD");
         assert!(m0_bytes(&first).contains("<memory-mural>"));
         assert!(!m0_bytes(&first).contains("historian rows stay hidden"));
-        assert_eq!(first.messages()[0].content.len(), 2);
-        match &first.messages()[0].content[1].kind {
+        assert_eq!(first.messages()[0].content().len(), 2);
+        match first.messages()[0].content()[1].kind() {
             wire::BlockKind::Media(media) => {
                 assert_eq!(media.source["url"], json!("data:image/png;base64,YQ=="));
             }
@@ -15478,7 +15542,7 @@ pub(crate) mod tests {
             mural_request("off-mural", "cfg1", "mural-b", "data:image/png;base64,Yg==");
         let folded = transform(&s, &folded_request, &ctx).unwrap();
         assert_eq!(folded.action, "HARD");
-        match &folded.messages()[0].content[1].kind {
+        match folded.messages()[0].content()[1].kind() {
             wire::BlockKind::Media(media) => {
                 assert_eq!(media.source["url"], json!("data:image/png;base64,Yg=="));
             }
@@ -15668,7 +15732,7 @@ pub(crate) mod tests {
         assert!(bust.messages().iter().all(|message| {
             !message.meta.synthetic
                 || !matches!(
-                    message.content.first().map(|block| &block.kind),
+                    message.content().first().map(|block| block.kind()),
                     Some(wire::BlockKind::ToolCall { name, .. }) if name == "todowrite"
                 )
         }));
@@ -16340,12 +16404,12 @@ pub(crate) mod tests {
         assert_eq!(first.action, "HARD");
         assert!(m0_bytes(&first).contains("<memory-mural>"));
         let first_m0 = &first.messages()[0];
-        assert_eq!(first_m0.content.len(), 2);
+        assert_eq!(first_m0.content().len(), 2);
         assert!(matches!(
-            first_m0.content[0].kind,
+            first_m0.content()[0].kind(),
             wire::BlockKind::Text { .. }
         ));
-        match &first_m0.content[1].kind {
+        match first_m0.content()[1].kind() {
             wire::BlockKind::Media(media) => {
                 assert_eq!(media.kind, wire::MediaKind::Image);
                 assert_eq!(media.source["url"], json!("data:image/png;base64,YQ=="));
@@ -16402,7 +16466,7 @@ pub(crate) mod tests {
         let identity_b = store.load("mural-replay").unwrap().meta.last_render_config;
         assert_ne!(identity_b, identity_a);
         assert!(identity_b.contains("mural-hash-b"));
-        match &folded.messages()[0].content[1].kind {
+        match folded.messages()[0].content()[1].kind() {
             wire::BlockKind::Media(media) => {
                 assert_eq!(media.source["url"], json!("data:image/png;base64,Yg=="));
             }
@@ -16478,7 +16542,7 @@ pub(crate) mod tests {
             let mut messages = base.clone();
             assert_eq!(apply_serializer_residuals(profile, &mut messages), 0);
             assert!(matches!(
-                &messages[1].content[0].kind,
+                messages[1].content()[0].kind(),
                 wire::BlockKind::Reasoning { .. }
             ));
         }
@@ -16493,11 +16557,11 @@ pub(crate) mod tests {
             1
         );
         assert!(matches!(
-            &messages[0].content[0].kind,
+            messages[0].content()[0].kind(),
             wire::BlockKind::Reasoning { .. }
         ));
         assert!(matches!(
-            &messages[1].content[0].kind,
+            messages[1].content()[0].kind(),
             wire::BlockKind::Text { text } if text.is_empty()
         ));
     }
@@ -16532,7 +16596,7 @@ pub(crate) mod tests {
             0
         );
         assert!(matches!(
-            &absent_provider.content[0].kind,
+            absent_provider.content()[0].kind(),
             wire::BlockKind::Reasoning { .. }
         ));
 
@@ -16548,7 +16612,7 @@ pub(crate) mod tests {
             1
         );
         assert!(matches!(
-            &anthropic.content[0].kind,
+            anthropic.content()[0].kind(),
             wire::BlockKind::Text { text } if text.is_empty()
         ));
     }
@@ -16608,7 +16672,7 @@ pub(crate) mod tests {
                 })
                 .unwrap_or_else(|| panic!("missing adapter target for {}", fixture.name));
             let stripped = matches!(
-                &target.content[0].kind,
+                target.content()[0].kind(),
                 wire::BlockKind::Text { text } if text.is_empty()
             );
             assert_eq!(
@@ -16672,7 +16736,7 @@ pub(crate) mod tests {
             0
         );
         assert!(matches!(
-            &messages[0].content[1].kind,
+            messages[0].content()[1].kind(),
             wire::BlockKind::Reasoning { text, .. } if text == "signed thinking"
         ));
     }
@@ -16773,7 +16837,7 @@ pub(crate) mod tests {
             newest_with_trailing_bytes
         );
         assert!(matches!(
-            &historical_with_trailing.content.last().unwrap().kind,
+            historical_with_trailing.content().last().unwrap().kind(),
             wire::BlockKind::Text { text } if text.is_empty()
         ));
 
@@ -16795,9 +16859,9 @@ pub(crate) mod tests {
                 "target",
                 &mut reasoning_terminal,
             );
-            assert_eq!(reasoning_terminal.content.len(), 2);
+            assert_eq!(reasoning_terminal.content().len(), 2);
             assert_eq!(
-                reasoning_terminal.content.last(),
+                reasoning_terminal.content().last(),
                 Some(&canonical_blank_block())
             );
         }
@@ -16823,9 +16887,9 @@ pub(crate) mod tests {
             "target",
             &mut adjacent_reasoning,
         );
-        assert_eq!(adjacent_reasoning.content.len(), 3);
+        assert_eq!(adjacent_reasoning.content().len(), 3);
         assert_eq!(
-            adjacent_reasoning.content.last(),
+            adjacent_reasoning.content().last(),
             Some(&canonical_blank_block())
         );
 
@@ -16843,7 +16907,7 @@ pub(crate) mod tests {
             "target",
             &mut wholly_blank,
         );
-        assert_eq!(wholly_blank.content, vec![canonical_blank_block()]);
+        assert_eq!(wholly_blank.content(), vec![canonical_blank_block()]);
 
         let mut newest_strip_exempt = assistant(stable_content(true));
         assert_eq!(
@@ -16870,7 +16934,7 @@ pub(crate) mod tests {
             ),
             0
         );
-        assert_eq!(pi_replay.content.len(), 4);
+        assert_eq!(pi_replay.content().len(), 4);
         let mut non_anthropic = assistant(stable_content(true));
         assert_eq!(
             apply_frozen_trailing_blank_decision(
@@ -17016,7 +17080,7 @@ pub(crate) mod tests {
                 .iter()
                 .find(|message| message.meta.harness_id.as_deref() == Some("blank"))
                 .unwrap();
-            assert_eq!(blank.content, vec![canonical_blank_block()]);
+            assert_eq!(blank.content(), vec![canonical_blank_block()]);
             message_bytes(&first, "blank")
         };
         let restarted = store(blank_dir.path());
@@ -17213,7 +17277,7 @@ pub(crate) mod tests {
         let mut structural_target = assistant("structural", 2, false);
         structural_target
             .ck
-            .content
+            .content_mut()
             .extend([canonical_blank_block(), canonical_blank_block()]);
         let first_structural = run(
             &structural_store,
@@ -17236,7 +17300,10 @@ pub(crate) mod tests {
             Some(2)
         );
 
-        structural_target.ck.content.push(canonical_blank_block());
+        structural_target
+            .ck
+            .content_mut()
+            .push(canonical_blank_block());
         let structural_replay = run(
             &structural_store,
             &request(
@@ -17357,8 +17424,8 @@ pub(crate) mod tests {
                         message.meta.harness_id.as_deref() == Some("transition")
                     })
                     .unwrap()
-                    .content[0]
-                    .kind,
+                    .content()[0]
+                    .kind(),
                 wire::BlockKind::Text { text } if text.is_empty()
             ));
             let frozen_keys = store
@@ -17421,9 +17488,9 @@ pub(crate) mod tests {
                 .find(|message| message.meta.harness_id.as_deref() == Some("older"))
                 .expect("older assistant must be served");
             !target
-                .content
+                .content()
                 .iter()
-                .any(|block| matches!(block.kind, wire::BlockKind::Reasoning { .. }))
+                .any(|block| matches!(block.kind(), wire::BlockKind::Reasoning { .. }))
         }
 
         let older = assistant(
@@ -17778,9 +17845,9 @@ pub(crate) mod tests {
             .find(|message| message.meta.harness_id.as_deref() == Some("assistant-reasoning"))
             .unwrap();
         let wire_text = wire_assistant
-            .content
+            .content()
             .iter()
-            .find_map(|block| match &block.kind {
+            .find_map(|block| match block.kind() {
                 wire::BlockKind::Text { text } => Some(text.as_str()),
                 _ => None,
             })
@@ -17880,17 +17947,17 @@ pub(crate) mod tests {
             .iter()
             .find(|message| message.meta.harness_id.as_deref() == Some("assistant-tool"))
             .unwrap();
-        assert_eq!(wire_assistant.content.len(), 3);
+        assert_eq!(wire_assistant.content().len(), 3);
         assert!(matches!(
-            wire_assistant.content[0].kind,
+            wire_assistant.content()[0].kind(),
             wire::BlockKind::Reasoning { .. }
         ));
         assert!(matches!(
-            wire_assistant.content[1].kind,
+            wire_assistant.content()[1].kind(),
             wire::BlockKind::ToolCall { .. }
         ));
         assert!(matches!(
-            wire_assistant.content[2].kind,
+            wire_assistant.content()[2].kind(),
             wire::BlockKind::ToolResult { .. }
         ));
         let native = crate::codec::encode_opencode_with_session(
@@ -17944,7 +18011,9 @@ pub(crate) mod tests {
             for message in messages {
                 if let Some(previous) = merged.last_mut().filter(|prior| prior.role == message.role)
                 {
-                    previous.content.extend(message.content.clone());
+                    previous
+                        .content_mut()
+                        .extend(message.content().iter().cloned());
                 } else {
                     merged.push(message.clone());
                 }
@@ -17954,7 +18023,7 @@ pub(crate) mod tests {
 
         fn reasoning_count(message: &WireMessage) -> usize {
             message
-                .content
+                .content()
                 .iter()
                 .filter(|block| is_reasoning_block(block))
                 .count()
@@ -17963,8 +18032,8 @@ pub(crate) mod tests {
         fn has_reasoning_only_assistant(messages: &[WireMessage]) -> bool {
             messages.iter().any(|message| {
                 message.role == "assistant"
-                    && !message.content.is_empty()
-                    && message.content.iter().all(is_reasoning_block)
+                    && !message.content().is_empty()
+                    && message.content().iter().all(is_reasoning_block)
             })
         }
 
@@ -17993,7 +18062,7 @@ pub(crate) mod tests {
 
         // Arm A fully removes the message, leaving a reasoning-only assistant before the next reasoning-bearing assistant.
         let mut lone_reasoning = source[0].ck.clone();
-        lone_reasoning.content.truncate(1);
+        lone_reasoning.content_mut().truncate(1);
         let arm_a = vec![
             lone_reasoning.clone(),
             source[2].ck.clone(),
@@ -18023,9 +18092,9 @@ pub(crate) mod tests {
         assert!(
             arm_d.iter().any(|message| {
                 message
-                    .content
+                    .content()
                     .iter()
-                    .any(|block| matches!(block.kind, wire::BlockKind::ToolResult { .. }))
+                    .any(|block| matches!(block.kind(), wire::BlockKind::ToolResult { .. }))
             }),
             "the different-removal arm must retain its separate tool-result violation"
         );
@@ -18156,10 +18225,13 @@ pub(crate) mod tests {
                 .iter()
                 .find(|message| message.meta.harness_id.as_deref() == Some(mid))
                 .and_then(|message| {
-                    message.content.iter().find_map(|block| match &block.kind {
-                        wire::BlockKind::Reasoning { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
+                    message
+                        .content()
+                        .iter()
+                        .find_map(|block| match block.kind() {
+                            wire::BlockKind::Reasoning { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
                 })
                 .unwrap_or_else(|| panic!("missing reasoning for {mid}"))
         }
@@ -18316,7 +18388,7 @@ pub(crate) mod tests {
                 .iter()
                 .find(|message| message.meta.harness_id.as_deref() == Some(mid))
                 .unwrap_or_else(|| panic!("missing assistant {mid}"))
-                .content
+                .content()
                 .iter()
                 .filter(|block| is_reasoning_block(block))
                 .count()
@@ -18715,17 +18787,17 @@ pub(crate) mod tests {
             4
         );
         assert!(matches!(
-            &served[61].content[0].kind,
+            served[61].content()[0].kind(),
             wire::BlockKind::Reasoning { .. }
         ));
         for message in &served[62..66] {
             assert!(matches!(
-                &message.content[0].kind,
+                message.content()[0].kind(),
                 wire::BlockKind::Text { text } if text.is_empty()
             ));
         }
         assert!(matches!(
-            &served[66].content[0].kind,
+            served[66].content()[0].kind(),
             wire::BlockKind::Reasoning { text, .. } if text == "latest"
         ));
     }
@@ -18764,7 +18836,7 @@ pub(crate) mod tests {
             0
         );
         assert!(matches!(
-            &messages[0].content[1].kind,
+            messages[0].content()[1].kind(),
             wire::BlockKind::Reasoning { .. }
         ));
     }
@@ -19467,11 +19539,11 @@ pub(crate) mod tests {
         let decoded = crate::codec::decode_opencode(std::slice::from_ref(&native_tool_message));
         let mut tool_message = decoded.messages[0].clone();
         // The host projects live CK ingress independently of the native sidecar, so it does not carry Rust decoder block-origin stamps.
-        tool_message.ck.content = tool_message
+        *tool_message.ck.content_mut() = tool_message
             .ck
-            .content
-            .into_iter()
-            .map(|block| wire::WireBlock::bare(block.kind))
+            .content()
+            .iter()
+            .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
         tool_message.ck.mark_modified();
 
@@ -19957,8 +20029,11 @@ pub(crate) mod tests {
         let store = store(dir.path());
         let mut request = astro_request("astro-missing-floor", 2_402);
         for message in &mut request.messages {
-            if let Some(wire::BlockKind::Text { text }) =
-                message.ck.content.first_mut().map(|block| &mut block.kind)
+            if let Some(wire::BlockKind::Text { text }) = message
+                .ck
+                .content_mut()
+                .first_mut()
+                .map(|block| block.kind_mut())
             {
                 text.push_str(&" realistic raw history".repeat(512));
             }
@@ -20629,10 +20704,10 @@ pub(crate) mod tests {
         let output = build_output(&core, &meta, &projection, &request, None, true, None).unwrap();
         let count = output
             .iter()
-            .flat_map(|message| message.content.iter())
+            .flat_map(|message| message.content().iter())
             .filter(|block| {
                 matches!(
-                    &block.kind,
+                    block.kind(),
                     wire::BlockKind::ToolCall { id, .. } if id == &pair.call_id
                 )
             })
@@ -21148,7 +21223,7 @@ pub(crate) mod tests {
         assert_eq!(cleared.action, "HARD");
         assert!(cleared.messages().iter().all(|m| {
             !matches!(
-                m.content.first().map(|block| &block.kind),
+                m.content().first().map(|block| block.kind()),
                 Some(wire::BlockKind::ToolCall { name, .. }) if name == "todowrite"
             ) || !m.meta.synthetic
         }));
@@ -21311,9 +21386,9 @@ pub(crate) mod tests {
         .expect("missing persisted anchors are skipped like TypeScript");
 
         assert!(response.messages().iter().all(|message| {
-            message.content.iter().all(|block| {
+            message.content().iter().all(|block| {
                 !matches!(
-                    &block.kind,
+                    block.kind(),
                     wire::BlockKind::ToolCall { id, .. } if id.starts_with("synthetic_todo_")
                 )
             })
@@ -21385,7 +21460,7 @@ pub(crate) mod tests {
         rs
     }
     fn first_block_text(block: &wire::WireBlock) -> Option<&str> {
-        match &block.kind {
+        match block.kind() {
             wire::BlockKind::Text { text } => Some(text.as_str()),
             wire::BlockKind::ToolResult { output, .. } => match &output.kind {
                 wire::OutputKind::Text { text } | wire::OutputKind::ErrorText { text } => {
@@ -21410,7 +21485,7 @@ pub(crate) mod tests {
             .iter()
             .find(|m| !m.meta.synthetic && m.meta.harness_id.as_deref() == Some(id))
             .unwrap_or_else(|| panic!("no tail item {id}"));
-        first_block_text(msg.content.first().unwrap()).unwrap()
+        first_block_text(msg.content().first().unwrap()).unwrap()
     }
 
     /// m0 coverage through ordinal 1 makes boundary `a` available and tail items at ordinal 2 or later reducible.
@@ -23917,7 +23992,7 @@ pub(crate) mod tests {
         assert!(response.messages().iter().all(|message| {
             !message.meta.synthetic
                 || !matches!(
-                    message.content.first().map(|block| &block.kind),
+                    message.content().first().map(|block| block.kind()),
                     Some(wire::BlockKind::ToolCall { name, .. }) if name == "todowrite"
                 )
         }));
@@ -24527,9 +24602,9 @@ pub(crate) mod tests {
                 .unwrap()
                 .last()
                 .unwrap()
-                .content[0]
-                .kind,
-            wire::BlockKind::Text {
+                .content()[0]
+                .kind(),
+            &wire::BlockKind::Text {
                 text: "[dropped]".to_string(),
             }
         );
@@ -24611,7 +24686,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        let replayed = match &output.last().unwrap().content[0].kind {
+        let replayed = match output.last().unwrap().content()[0].kind() {
             wire::BlockKind::Text { text } => text,
             other => panic!("unexpected replay block: {other:?}"),
         };
@@ -24652,7 +24727,7 @@ pub(crate) mod tests {
             output
                 .last()
                 .unwrap()
-                .content
+                .content()
                 .iter()
                 .map(|block| first_block_text(block).unwrap().to_string())
                 .collect::<Vec<_>>()
@@ -24728,11 +24803,11 @@ pub(crate) mod tests {
             .find(|message| !message.meta.synthetic)
             .unwrap();
         assert_eq!(
-            first_block_text(&target.content[0]),
+            first_block_text(&target.content()[0]),
             Some("[dropped target-first]")
         );
         assert_eq!(
-            first_block_text(&target.content[1]),
+            first_block_text(&target.content()[1]),
             Some(sibling_payload.as_str())
         );
         let reduced_bytes = serde_json::to_vec(reduced.messages()).unwrap();
@@ -24825,7 +24900,7 @@ pub(crate) mod tests {
         let mut reasoning = req("caveman-reasoning", "cfg", vec![item("m1", 1, &source)]);
         reasoning.caveman_enabled = true;
         reasoning.caveman_min_chars = 1;
-        reasoning.messages[0].ck.content[0].kind = wire::BlockKind::Reasoning {
+        *reasoning.messages[0].ck.content_mut()[0].kind_mut() = wire::BlockKind::Reasoning {
             text: source.clone(),
             signature: None,
         };
@@ -26121,9 +26196,9 @@ pub(crate) mod tests {
     }
 
     fn message_has_reasoning(message: &WireMessage) -> bool {
-        message.content.iter().any(|block| {
+        message.content().iter().any(|block| {
             matches!(
-                block.kind,
+                block.kind(),
                 wire::BlockKind::Reasoning { .. } | wire::BlockKind::RedactedReasoning { .. }
             )
         })
@@ -26212,7 +26287,7 @@ pub(crate) mod tests {
             .iter_mut()
             .find(|message| message.mid == "reasoning-adjacency-right")
             .expect("fixture has the right assistant");
-        right.ck.content.insert(
+        right.ck.content_mut().insert(
             0,
             WireBlock::bare(wire::BlockKind::RedactedReasoning {
                 data: "redacted-reasoning-adjacency".to_string(),
@@ -26476,14 +26551,14 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(hypothetical_old.len(), 3);
         assert!(matches!(
-            hypothetical_old[2].content[0].kind,
+            hypothetical_old[2].content()[0].kind(),
             wire::BlockKind::ToolResult { .. }
         ));
         assert!(hypothetical_old[..2].iter().all(|message| {
             message
-                .content
+                .content()
                 .iter()
-                .all(|block| !matches!(block.kind, wire::BlockKind::ToolCall { .. }))
+                .all(|block| !matches!(block.kind(), wire::BlockKind::ToolCall { .. }))
         }));
 
         let pre_resalt_row = append_historical_frozen_reductions(
@@ -26921,11 +26996,11 @@ pub(crate) mod tests {
         });
         let decoded = crate::codec::decode_opencode(std::slice::from_ref(&native_message));
         let mut projected = decoded.messages[0].clone();
-        projected.ck.content = projected
+        *projected.ck.content_mut() = projected
             .ck
-            .content
-            .into_iter()
-            .map(|block| wire::WireBlock::bare(block.kind))
+            .content()
+            .iter()
+            .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
         projected.ck.mark_modified();
 
@@ -27061,11 +27136,11 @@ pub(crate) mod tests {
         });
         let decoded = crate::codec::decode_opencode(&[native_message]);
         let mut projected = decoded.messages[0].clone();
-        projected.ck.content = projected
+        *projected.ck.content_mut() = projected
             .ck
-            .content
-            .into_iter()
-            .map(|block| wire::WireBlock::bare(block.kind))
+            .content()
+            .iter()
+            .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
         projected.ck.mark_modified();
 
@@ -27168,21 +27243,21 @@ pub(crate) mod tests {
             .unwrap();
         assert!(
             assistant
-                .content
+                .content()
                 .iter()
-                .any(|block| matches!(block.kind, wire::BlockKind::Reasoning { .. }))
+                .any(|block| matches!(block.kind(), wire::BlockKind::Reasoning { .. }))
         );
         assert!(
             assistant
-                .content
+                .content()
                 .iter()
-                .any(|block| matches!(block.kind, wire::BlockKind::ToolCall { .. }))
+                .any(|block| matches!(block.kind(), wire::BlockKind::ToolCall { .. }))
         );
         assert!(
             assistant
-                .content
+                .content()
                 .iter()
-                .any(|block| matches!(block.kind, wire::BlockKind::ToolResult { .. }))
+                .any(|block| matches!(block.kind(), wire::BlockKind::ToolResult { .. }))
         );
 
         let folded_ck = folded
@@ -27401,7 +27476,9 @@ pub(crate) mod tests {
 
         // OpenCode represents the pair as one tool part; replay preserves CK's synthetic bit to prevent an ID collision with the durable pair.
         let mut collapsed = pair.assistant_msg.clone();
-        collapsed.content.extend(pair.tool_msg.content.clone());
+        collapsed
+            .content_mut()
+            .extend(pair.tool_msg.content().iter().cloned());
         collapsed.meta = wire::HarnessMeta {
             harness_id: Some("collapsed-todo-replay".to_string()),
             ordinal: Some(5),
@@ -27474,8 +27551,8 @@ pub(crate) mod tests {
             .response
             .messages()
             .iter()
-            .flat_map(|message| message.content.iter())
-            .filter_map(|block| match &block.kind {
+            .flat_map(|message| message.content().iter())
+            .filter_map(|block| match block.kind() {
                 wire::BlockKind::ToolCall { id, .. } => Some(id.as_str()),
                 _ => None,
             })
@@ -27516,7 +27593,7 @@ pub(crate) mod tests {
         let changed = changed_messages
             .last_mut()
             .expect("large timing fixture has a tail message");
-        let wire::BlockKind::Text { text } = &mut changed.ck.content[0].kind else {
+        let wire::BlockKind::Text { text } = changed.ck.content_mut()[0].kind_mut() else {
             panic!("large timing fixture tail must be text");
         };
         text.push_str(" changed");
@@ -27886,12 +27963,12 @@ pub(crate) mod tests {
         let message: WireMessage =
             serde_json::from_value(serde_json::to_value(constructed).unwrap()).unwrap();
         let served = ServedMessage::from_message(message);
-        let block = &served.message.content[0];
+        let block = &served.message.content()[0];
         let block_json = serde_json::to_value(block).unwrap();
         let message_json = serde_json::to_value(served.message.as_ref()).unwrap();
         let wire::BlockKind::ToolCall {
             id, name, input, ..
-        } = &block.kind
+        } = block.kind()
         else {
             panic!("fixture must retain a tool call");
         };
@@ -27905,8 +27982,8 @@ pub(crate) mod tests {
             .saturating_add(
                 served
                     .message
-                    .content
-                    .capacity()
+                    .content()
+                    .len()
                     .saturating_mul(size_of::<WireBlock>()),
             )
             .saturating_add(block_extra)
@@ -28110,8 +28187,8 @@ pub(crate) mod tests {
                 .all(|message| message.role != "system")
         );
         assert_eq!(
-            first.messages()[2].content[1].kind,
-            wire::BlockKind::Text {
+            first.messages()[2].content()[1].kind(),
+            &wire::BlockKind::Text {
                 text: summary.clone()
             }
         );
@@ -28159,10 +28236,10 @@ pub(crate) mod tests {
 
         let mut edited = request.clone();
         edited.render_config = "anchor-edited".to_string();
-        edited.messages[0].ck.content[1].kind = wire::BlockKind::Text {
+        *edited.messages[0].ck.content_mut()[1].kind_mut() = wire::BlockKind::Text {
             text: continuation_summary("EDITED"),
         };
-        edited.messages[0].ck.content[1].mark_modified();
+        edited.messages[0].ck.content_mut()[1].mark_modified();
         let edited_response = run(&store, &edited, &spine());
         assert_eq!(edited_response.action, "SOFT+");
         assert!(edited_response.reconcile_pending);
@@ -28194,8 +28271,8 @@ pub(crate) mod tests {
         assert_eq!(rollover_response.action, "HARD");
         assert!(!rollover_response.reconcile_pending);
         assert_eq!(
-            rollover_response.messages()[2].content[1].kind,
-            request.messages[0].ck.content[1].kind
+            rollover_response.messages()[2].content()[1].kind(),
+            request.messages[0].ck.content()[1].kind()
         );
 
         let mut active_surface = rollover.clone();
@@ -28208,8 +28285,8 @@ pub(crate) mod tests {
         assert_eq!(active_response.action, "HARD");
         assert!(!active_response.reconcile_pending);
         assert_eq!(
-            active_response.messages()[2].content,
-            active_surface.messages[0].ck.content,
+            active_response.messages()[2].content(),
+            active_surface.messages[0].ck.content(),
             "the anchor message is exempt from both overlays and production strips"
         );
     }
@@ -28262,7 +28339,7 @@ pub(crate) mod tests {
         assert!(store.load_compartments("rewind").unwrap().is_empty());
 
         let mut wrong_position_messages = fake_compaction_messages("2026-08-06", &summary);
-        wrong_position_messages[0].ck.content.swap(0, 1);
+        wrong_position_messages[0].ck.content_mut().swap(0, 1);
         let wrong_position =
             fake_compaction_request("wrong-position", "A", 2, 303, true, wrong_position_messages);
         run(&store, &wrong_position, &spine());
@@ -28411,10 +28488,10 @@ pub(crate) mod tests {
         assert!(!intact.reconcile_pending);
 
         let mut mutated = follow_up.clone();
-        mutated.messages[0].ck.content[1].kind = wire::BlockKind::Text {
+        *mutated.messages[0].ck.content_mut()[1].kind_mut() = wire::BlockKind::Text {
             text: continuation_summary("MUTATED"),
         };
-        mutated.messages[0].ck.content[1].mark_modified();
+        mutated.messages[0].ck.content_mut()[1].mark_modified();
         let refused = run(&store, &mutated, &spine());
         assert_eq!(refused.action, "SOFT+");
         assert!(refused.reconcile_pending);
