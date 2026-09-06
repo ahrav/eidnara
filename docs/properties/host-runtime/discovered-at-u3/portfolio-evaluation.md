@@ -53,10 +53,10 @@ of them; the "Disposition applied" section at the end of this file records what
 landed and the recomputed distribution, and supersedes the counts and verdict
 below where they differ.
 
-Mechanical state, checked for this pass: 16 records, 16 entries in
-`../index.json`, 16 files in `../evidence/`, slugs equal across all three,
-every evidence link resolves. `../index.json`'s `source_sha256` matches
-`../catalog.md`'s current digest. Evidence files run 131 to 158 lines, below
+Mechanical state, checked by hand for this pass: 16 records in `../catalog.md`,
+16 files in `../evidence/`, slugs equal across both, every evidence link
+resolves. The catalog is the only authority; nothing generates or validates it.
+Evidence files run 131 to 158 lines, below
 the rest of the part's median of 167, so METHOD.md's 60-to-120 target is
 exceeded by the whole part and not by this set in particular.
 
@@ -80,7 +80,7 @@ corrected `Reachability:` note or `Exercised:` line, and two gain a corrected
 
 ## Distribution, this set against the other 133 records in the part
 
-Computed from `../index.json`, which carries all 149 records.
+Computed by hand from `../catalog.md`, which carries all 149 records.
 
 | Field | Discovered at U3 (16) | Rest of the part (133) |
 | --- | --- | --- |
@@ -564,8 +564,8 @@ Four further triggers, each firing independently.
 
 ## Disposition applied
 
-Recorded against the merged catalog at the commit that adds this section, from
-`../index.json`.
+Recorded against the merged catalog (`../catalog.md`) at the commit that adds
+this section.
 
 What landed from this evaluation: R1, R2, R3, and R7 as the catalog's U3 preamble
 states; the Broca and Synapse records reclassified `test-only` (no in-tree

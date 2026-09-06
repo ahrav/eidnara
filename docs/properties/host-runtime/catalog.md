@@ -1,8 +1,8 @@
 # Host runtime property catalog
 
 Records for `crates/host-runtime`, merged from six source catalogs (host lifecycle, ring datapath, setup identity,
-client peer, request path, runtime config) in the host repo at `39e823037`. `index.json` is generated from this file; the
-record contract is [`../METHOD.md`](../METHOD.md). Each area keeps its existing-check inventory, fault map, and
+client peer, request path, runtime config) in the host repo at `39e823037`. This file is the only authority for its
+records; nothing generates or validates it. The record contract is [`../METHOD.md`](../METHOD.md). Each area keeps its existing-check inventory, fault map, and
 portfolio evaluation under its own directory; every per-record evidence file lives in [`evidence/`](evidence/).
 
 ## Provenance and scope
@@ -25,8 +25,8 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   file's length as `(source-catalog line, not present at HEAD)`; a citation without that mark is still not a
   verified anchor unless the record says so, and a campaign must re-verify it before instrumenting it. Test names
   are the stable anchors in those fields. This tree has no `migration/waves/U3/` ledger: each record's `Status`
-  and `Reachability` fields are the coverage authority for this catalog, and the wave-level
-  `core`/`carried-forward`/`invalidated` classification is recorded when the U3 `property-impact.json` lands.
+  and `Reachability` fields are the coverage authority for this catalog, and no wave-level
+  `core`/`carried-forward`/`invalidated` classification exists outside them.
 - `default-production` in this catalog means "on the default path of `host_runtime::run`
   with no composition-dependent or configuration-dependent state". In this tree `run` itself is
   reached only from `crates/host-runtime/examples/` and a bench; the daemon that will call it in

@@ -488,38 +488,19 @@ fn canonical_manifest_digest_is_pinned() {
     );
 }
 
-/// Sorts every object's keys so the text matches the canonical form's key order. Under the
-/// default `serde_json` (`Map` is a `BTreeMap`) this is an identity; it stays as insurance
-/// against a future `preserve_order` unification changing the key order.
-fn json_with_sorted_keys(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            serde_json::Value::Object(
-                keys.into_iter()
-                    .map(|key| (key.clone(), json_with_sorted_keys(&map[key])))
-                    .collect(),
-            )
-        }
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.iter().map(json_with_sorted_keys).collect())
-        }
-        scalar => scalar.clone(),
-    }
-}
-
 /// The digest is reproduced from the fixture's own JSON text, never from the crate's
 /// `Serialize` impl, so a field the impl dropped (a node path, a dependency edge) would
 /// leave the two digests different even though every in-crate mutation still moved it.
-/// The formatter (`to_vec_pretty`) is shared with production, so the independence is
-/// scoped to the `Serialize` impl, not to the text layout.
+/// The external canonicalization is the parse-to-`Value` then `to_vec_pretty` round trip;
+/// the default `serde_json` map is a `BTreeMap`, so that round trip sorts object keys.
+/// The formatter is shared with production, so the independence is scoped to the
+/// `Serialize` impl, not to the text layout.
 #[test]
 fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
     let text = pi_valid_text();
     let manifest: ClosureManifest = serde_json::from_str(&text).expect("decode closure fixture");
     let raw: serde_json::Value = serde_json::from_str(&text).expect("parse fixture text");
-    let canonical = serde_json::to_vec_pretty(&json_with_sorted_keys(&raw)).expect("pretty");
+    let canonical = serde_json::to_vec_pretty(&raw).expect("pretty");
     let external = format!("{:x}", Sha256::digest(&canonical));
     assert_eq!(manifest_digest(&manifest).expect("digest"), external);
     // A multibyte identifier: the canonical form must carry its UTF-8 bytes rather than a
@@ -537,8 +518,7 @@ fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
     let edited: ClosureManifest = serde_json::from_str(&edited_text).expect("decode edited");
     assert_eq!(edited.harness, multibyte);
     let edited_raw: serde_json::Value = serde_json::from_str(&edited_text).expect("parse");
-    let edited_canonical =
-        serde_json::to_vec_pretty(&json_with_sorted_keys(&edited_raw)).expect("pretty");
+    let edited_canonical = serde_json::to_vec_pretty(&edited_raw).expect("pretty");
     assert!(
         edited_canonical
             .windows(multibyte.len())
