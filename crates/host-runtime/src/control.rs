@@ -500,24 +500,34 @@ pub fn route_open_response_json(channel: u16, epoch: u32) -> Vec<u8> {
     .expect("route response serialization cannot fail")
 }
 
+/// Component key whose metrics carry the render epochs and the kernel health block.
+pub(crate) const CONTEXT_COMPONENT: &str = "context";
+pub(crate) const KERNEL_KEY: &str = "kernel";
+pub(crate) const KERNEL_STATE_KEY: &str = "kernel_state";
+/// State reported by `storage_state`, `synapse_state`, and `kernel_state` while a store is still opening.
+pub(crate) const STATE_STARTING: &str = "starting";
+/// States a store reports through `storage_state` and `kernel_state`.
+const STORE_STATES: [&str; 3] = ["ready", STATE_STARTING, "unavailable"];
+
 /// Retains only kernel health fields with declared types and ranges.
 ///
-/// An invalid field is dropped independently.
-/// A block without a recognized `kernel_state` is dropped whole.
+/// An invalid field is dropped independently while the rest of the block survives.
+/// A block without a recognized `kernel_state` is dropped whole so a consumer renders the kernel as unknown rather than reading a half-valid block.
+/// An invalid numeric or boolean field is dropped to absent rather than replaced by `null` so a consumer's numeric test never sees a `null` in its place.
 /// `unavailable_reason` is permitted only when `kernel_state` is `unavailable`.
 fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
-    // Largest integer exactly representable by an IEEE 754 double.
+    // 2^53 is the largest N such that every integer in [0, N] is exactly representable as an IEEE 754 double.
     const MAX_COUNTER: u64 = 1 << 53;
     let raw = raw.as_object()?;
     let state = raw
-        .get("kernel_state")
+        .get(KERNEL_STATE_KEY)
         .and_then(serde_json::Value::as_str)?;
-    if !matches!(state, "ready" | "starting" | "unavailable") {
+    if !STORE_STATES.contains(&state) {
         return None;
     }
     let mut block = serde_json::Map::new();
     block.insert(
-        "kernel_state".to_owned(),
+        KERNEL_STATE_KEY.to_owned(),
         serde_json::Value::String(state.to_owned()),
     );
     if let Some(reason) = raw
@@ -564,6 +574,48 @@ fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(block))
 }
 
+/// The epoch set is all-or-nothing: an unexpected key or an out-of-range value drops the whole `epochs` object so a consumer never compares a partial epoch vector.
+fn sanitize_context_metrics(
+    metrics: Option<&serde_json::Value>,
+    sanitized_metrics: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let epoch_names = [
+        "memory_render_epoch",
+        "compartment_render_epoch",
+        "profile_epoch",
+        "tagger_epoch",
+        "state_sync_epoch",
+    ];
+    if let Some(raw_epochs) = metrics
+        .and_then(|metrics| metrics.get("epochs"))
+        .and_then(serde_json::Value::as_object)
+    {
+        let keys_valid = raw_epochs.len() == epoch_names.len()
+            && raw_epochs
+                .keys()
+                .all(|key| epoch_names.contains(&key.as_str()));
+        let values = epoch_names
+            .iter()
+            .map(|name| {
+                raw_epochs
+                    .get(*name)
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|value| *value <= u32::MAX as u64)
+                    .map(|value| ((*name).to_owned(), serde_json::Value::from(value)))
+            })
+            .collect::<Option<serde_json::Map<String, serde_json::Value>>>();
+        if keys_valid && let Some(values) = values {
+            sanitized_metrics.insert("epochs".to_owned(), serde_json::Value::Object(values));
+        }
+    }
+    if let Some(kernel) = metrics
+        .and_then(|metrics| metrics.get(KERNEL_KEY))
+        .and_then(sanitize_kernel_block)
+    {
+        sanitized_metrics.insert(KERNEL_KEY.to_owned(), kernel);
+    }
+}
+
 pub fn host_shutdown_response_json() -> Vec<u8> {
     br#"{"op":"host.shutdown"}"#.to_vec()
 }
@@ -583,11 +635,7 @@ pub fn host_status_response_json(
         .and_then(|metrics| metrics.get("components"))
         .and_then(serde_json::Value::as_object);
     for (module, state_key, allowed) in [
-        (
-            "context",
-            "storage_state",
-            &["ready", "starting", "unavailable"][..],
-        ),
+        (CONTEXT_COMPONENT, "storage_state", &STORE_STATES[..]),
         (
             "synapse",
             "synapse_state",
@@ -617,45 +665,8 @@ pub fn host_status_response_json(
                 serde_json::Value::String(state.to_owned()),
             );
         }
-        if module == "context" {
-            let epoch_names = [
-                "memory_render_epoch",
-                "compartment_render_epoch",
-                "profile_epoch",
-                "tagger_epoch",
-                "state_sync_epoch",
-            ];
-            if let Some(raw_epochs) = component
-                .get("metrics")
-                .and_then(|metrics| metrics.get("epochs"))
-                .and_then(serde_json::Value::as_object)
-            {
-                let keys_valid = raw_epochs.len() == epoch_names.len()
-                    && raw_epochs
-                        .keys()
-                        .all(|key| epoch_names.contains(&key.as_str()));
-                let values = epoch_names
-                    .iter()
-                    .map(|name| {
-                        raw_epochs
-                            .get(*name)
-                            .and_then(serde_json::Value::as_u64)
-                            .filter(|value| *value <= u32::MAX as u64)
-                            .map(|value| ((*name).to_owned(), serde_json::Value::from(value)))
-                    })
-                    .collect::<Option<serde_json::Map<String, serde_json::Value>>>();
-                if keys_valid && let Some(values) = values {
-                    sanitized_metrics
-                        .insert("epochs".to_owned(), serde_json::Value::Object(values));
-                }
-            }
-            if let Some(kernel) = component
-                .get("metrics")
-                .and_then(|metrics| metrics.get("kernel"))
-                .and_then(sanitize_kernel_block)
-            {
-                sanitized_metrics.insert("kernel".to_owned(), kernel);
-            }
+        if module == CONTEXT_COMPONENT {
+            sanitize_context_metrics(component.get("metrics"), &mut sanitized_metrics);
         }
         components.insert(
             module.to_owned(),
@@ -1273,12 +1284,24 @@ mod tests {
             "lag_threshold_tripped": true,
             "extra_field": "dropped",
         })));
-        assert_eq!(full["kernel_state"], "ready");
-        assert_eq!(full["outbox_position_lag"], 3);
-        assert_eq!(full["oldest_unconsumed_age_ms"], serde_json::Value::Null);
-        assert_eq!(full["lag_threshold_tripped"], true);
-        assert!(full.get("extra_field").is_none());
-        assert!(full.get("unavailable_reason").is_none());
+        assert_eq!(
+            full,
+            serde_json::json!({
+                "kernel_state": "ready",
+                "sampled_at_ms": 1_700_000_000_000_u64,
+                "core_file_bytes": 4096,
+                "core_file_warn": false,
+                "artifact_usage_bytes": 10,
+                "artifact_cap_bytes": 100,
+                "artifact_warn": false,
+                "outbox_position_lag": 3,
+                "oldest_unconsumed_age_ms": null,
+                "retained_outbox_rows": 8,
+                "required_consumer_count": 1,
+                "lag_threshold_tripped": true,
+            }),
+            "every allowlisted field passes and only the unknown field is dropped"
+        );
 
         // Out-of-range and mistyped fields vanish; the block and its state stay.
         let partial = kernel_of(&report(serde_json::json!({
@@ -1328,6 +1351,32 @@ mod tests {
         assert!(missing.is_null());
         let absent = kernel_of(&report(serde_json::json!(7)));
         assert!(absent.is_null());
+        let no_state = kernel_of(&report(serde_json::json!({ "core_file_bytes": 4096 })));
+        assert!(
+            no_state.is_null(),
+            "an object without `kernel_state` is dropped whole, not passed half-valid"
+        );
+        let non_string_state = kernel_of(&report(serde_json::json!({ "kernel_state": 5 })));
+        assert!(non_string_state.is_null());
+
+        // An unknown `unavailable_reason` is dropped while the `unavailable` state is kept.
+        let unknown_reason = kernel_of(&report(serde_json::json!({
+            "kernel_state": "unavailable",
+            "unavailable_reason": "nope",
+        })));
+        assert_eq!(
+            unknown_reason,
+            serde_json::json!({ "kernel_state": "unavailable" })
+        );
+
+        // Counters pass at exactly 2^53 and drop one above it.
+        let boundary = kernel_of(&report(serde_json::json!({
+            "kernel_state": "ready",
+            "core_file_bytes": 1_u64 << 53,
+            "artifact_usage_bytes": (1_u64 << 53) + 1,
+        })));
+        assert_eq!(boundary["core_file_bytes"], 1_u64 << 53);
+        assert!(boundary.get("artifact_usage_bytes").is_none());
     }
 
     #[test]

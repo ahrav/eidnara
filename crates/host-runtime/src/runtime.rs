@@ -956,8 +956,9 @@ async fn accept_loop<H: HostHandler>(shared: &Arc<HostShared<H>>, listener: Unix
 }
 
 fn activation_in_progress(report: &HealthReport) -> bool {
+    use crate::control::{KERNEL_KEY, KERNEL_STATE_KEY, STATE_STARTING};
     fn is_starting(metrics: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
-        metrics.get(key).and_then(serde_json::Value::as_str) == Some("starting")
+        metrics.get(key).and_then(serde_json::Value::as_str) == Some(STATE_STARTING)
     }
     let components = report
         .metrics
@@ -970,12 +971,13 @@ fn activation_in_progress(report: &HealthReport) -> bool {
                 .get("metrics")
                 .and_then(serde_json::Value::as_object);
             metrics.is_some_and(|metrics| {
+                // A `starting` kernel block counts from any component here, while `host.status` reports the block only for `CONTEXT_COMPONENT`.
                 is_starting(metrics, "storage_state")
                     || is_starting(metrics, "synapse_state")
                     || metrics
-                        .get("kernel")
+                        .get(KERNEL_KEY)
                         .and_then(serde_json::Value::as_object)
-                        .is_some_and(|kernel| is_starting(kernel, "kernel_state"))
+                        .is_some_and(|kernel| is_starting(kernel, KERNEL_STATE_KEY))
             })
         })
     })
@@ -1260,6 +1262,20 @@ mod tests {
             "storage_state": "unavailable",
             "kernel": { "kernel_state": "unavailable" },
         }))));
+        assert!(
+            !activation_in_progress(&report(serde_json::json!({
+                "storage_state": "ready",
+                "kernel": { "core_file_bytes": 4096 },
+            }))),
+            "a kernel block without `kernel_state` is not starting"
+        );
+        assert!(
+            !activation_in_progress(&report(serde_json::json!({
+                "storage_state": "ready",
+                "kernel": "starting",
+            }))),
+            "a non-object kernel value is not a kernel block"
+        );
         assert!(!activation_in_progress(&HealthReport {
             status: crate::handler::HealthStatus::Ok,
             detail: None,
