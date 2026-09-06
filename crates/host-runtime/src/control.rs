@@ -1314,13 +1314,19 @@ mod tests {
                 }
             })),
         };
-        let kernel_of = |report: &crate::handler::HealthReport| -> serde_json::Value {
+        // `Option` distinguishes an omitted `kernel` key from a present `null`: indexing a
+        // missing key with `[]` also yields `Value::Null`, so `is_null()` alone cannot tell them apart.
+        let kernel_of = |report: &crate::handler::HealthReport| -> Option<serde_json::Value> {
             let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
                 report,
                 serde_json::json!({"state": "healthy"}),
             ))
             .expect("status JSON");
-            response["metrics"]["components"]["context"]["metrics"]["kernel"].clone()
+            let metrics = response["metrics"]["components"]["context"]["metrics"]
+                .as_object()
+                .expect("context metrics object");
+            assert_eq!(metrics["storage_state"], "ready", "sibling field survives");
+            metrics.get("kernel").cloned()
         };
 
         let full = kernel_of(&report(serde_json::json!({
@@ -1337,7 +1343,8 @@ mod tests {
             "required_consumer_count": 1,
             "lag_threshold_tripped": true,
             "extra_field": "dropped",
-        })));
+        })))
+        .expect("kernel block kept");
         assert_eq!(
             full,
             serde_json::json!({
@@ -1365,7 +1372,8 @@ mod tests {
             "artifact_usage_bytes": "many",
             "retained_outbox_rows": 1_u64 << 60,
             "lag_threshold_tripped": "yes",
-        })));
+        })))
+        .expect("kernel block kept");
         assert_eq!(partial["kernel_state"], "unavailable");
         assert_eq!(partial["unavailable_reason"], "store_unsupported");
         assert!(partial.get("core_file_bytes").is_none());
@@ -1381,7 +1389,8 @@ mod tests {
             "oldest_unconsumed_age_ms": null,
             "core_file_bytes": null,
             "required_consumer_count": null,
-        })));
+        })))
+        .expect("kernel block kept");
         // Whole-object comparison: indexing a missing key also yields `Null`, so a per-key
         // `nulls["k"] == Null` check cannot tell a kept `null` from a dropped field.
         assert_eq!(
@@ -1401,24 +1410,46 @@ mod tests {
                 "kernel_state": state,
                 "unavailable_reason": "store_unavailable",
                 "retained_outbox_rows": 2,
-            })));
+            })))
+            .expect("kernel block kept");
             assert_eq!(contradictory["kernel_state"], state);
             assert!(contradictory.get("unavailable_reason").is_none());
             assert_eq!(contradictory["retained_outbox_rows"], 2);
         }
 
-        // An unrecognized `kernel_state` omits the kernel block.
+        // An unrecognized `kernel_state` omits the kernel key entirely; it is never `null`.
         let missing = kernel_of(&report(serde_json::json!({ "kernel_state": "broken" })));
-        assert!(missing.is_null());
+        assert!(missing.is_none());
         let absent = kernel_of(&report(serde_json::json!(7)));
-        assert!(absent.is_null());
+        assert!(absent.is_none());
         let no_state = kernel_of(&report(serde_json::json!({ "core_file_bytes": 4096 })));
         assert!(
-            no_state.is_null(),
+            no_state.is_none(),
             "an object without `kernel_state` is dropped whole, not passed half-valid"
         );
         let non_string_state = kernel_of(&report(serde_json::json!({ "kernel_state": 5 })));
-        assert!(non_string_state.is_null());
+        assert!(non_string_state.is_none());
+        let null_block = kernel_of(&report(serde_json::Value::Null));
+        assert!(
+            null_block.is_none(),
+            "a `null` kernel value is dropped, not echoed"
+        );
+
+        // Both allowlisted reasons survive alongside the `unavailable` state.
+        for reason in ["store_unavailable", "store_unsupported"] {
+            let unavailable = kernel_of(&report(serde_json::json!({
+                "kernel_state": "unavailable",
+                "unavailable_reason": reason,
+            })));
+            assert_eq!(
+                unavailable,
+                Some(serde_json::json!({
+                    "kernel_state": "unavailable",
+                    "unavailable_reason": reason,
+                })),
+                "`{reason}` is an allowlisted reason for the `unavailable` state"
+            );
+        }
 
         // An unknown `unavailable_reason` is dropped while the `unavailable` state is kept.
         let unknown_reason = kernel_of(&report(serde_json::json!({
@@ -1427,7 +1458,7 @@ mod tests {
         })));
         assert_eq!(
             unknown_reason,
-            serde_json::json!({ "kernel_state": "unavailable" })
+            Some(serde_json::json!({ "kernel_state": "unavailable" }))
         );
 
         // Counters pass at exactly 2^53 and drop one above it.
@@ -1435,7 +1466,8 @@ mod tests {
             "kernel_state": "ready",
             "core_file_bytes": 1_u64 << 53,
             "artifact_usage_bytes": (1_u64 << 53) + 1,
-        })));
+        })))
+        .expect("kernel block kept");
         assert_eq!(boundary["core_file_bytes"], 1_u64 << 53);
         assert!(boundary.get("artifact_usage_bytes").is_none());
     }

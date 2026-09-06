@@ -1233,46 +1233,76 @@ mod tests {
 
     #[test]
     fn activation_stays_in_progress_while_any_component_starts() {
-        let report = |metrics: serde_json::Value| HealthReport {
+        let report = |components: serde_json::Value| HealthReport {
             status: crate::handler::HealthStatus::Ok,
             detail: None,
-            metrics: Some(serde_json::json!({
-                "components": { "context": { "status": "ok", "metrics": metrics } }
-            })),
+            metrics: Some(serde_json::json!({ "components": components })),
         };
-        assert!(activation_in_progress(&report(
+        let context = |metrics: serde_json::Value| {
+            report(serde_json::json!({ "context": { "status": "ok", "metrics": metrics } }))
+        };
+        assert!(activation_in_progress(&context(
             serde_json::json!({ "storage_state": "starting" })
         )));
-        assert!(activation_in_progress(&report(
-            serde_json::json!({ "synapse_state": "starting" })
-        )));
-        // The kernel store opens after the cache store reports ready.
         assert!(activation_in_progress(&report(serde_json::json!({
+            "synapse": { "status": "ok", "metrics": { "synapse_state": "starting" } }
+        }))));
+        // The kernel store opens after the cache store reports ready.
+        assert!(activation_in_progress(&context(serde_json::json!({
             "storage_state": "ready",
             "kernel": { "kernel_state": "starting" },
         }))));
-        assert!(!activation_in_progress(&report(serde_json::json!({
+        assert!(!activation_in_progress(&context(serde_json::json!({
             "storage_state": "ready",
             "kernel": { "kernel_state": "ready" },
         }))));
-        assert!(!activation_in_progress(&report(serde_json::json!({
+        assert!(!activation_in_progress(&context(serde_json::json!({
             "storage_state": "unavailable",
             "kernel": { "kernel_state": "unavailable" },
         }))));
         assert!(
-            !activation_in_progress(&report(serde_json::json!({
+            !activation_in_progress(&context(serde_json::json!({
                 "storage_state": "ready",
                 "kernel": { "core_file_bytes": 4096 },
             }))),
             "a kernel block without `kernel_state` is not starting"
         );
         assert!(
-            !activation_in_progress(&report(serde_json::json!({
+            !activation_in_progress(&context(serde_json::json!({
                 "storage_state": "ready",
                 "kernel": "starting",
             }))),
             "a non-object kernel value is not a kernel block"
         );
+
+        // One starting component keeps activation in progress while its siblings are ready.
+        assert!(activation_in_progress(&report(serde_json::json!({
+            "context": {
+                "status": "ok",
+                "metrics": { "storage_state": "ready", "kernel": { "kernel_state": "ready" } }
+            },
+            "synapse": { "status": "ok", "metrics": { "synapse_state": "starting" } },
+        }))));
+        assert!(!activation_in_progress(&report(serde_json::json!({
+            "context": {
+                "status": "ok",
+                "metrics": { "storage_state": "ready", "kernel": { "kernel_state": "ready" } }
+            },
+            "synapse": { "status": "ok", "metrics": { "synapse_state": "ready" } },
+        }))));
+        // The scan is component-agnostic: a starting kernel block counts wherever the
+        // handler reports it, even though `host.status` publishes the block only for `context`.
+        assert!(
+            activation_in_progress(&report(serde_json::json!({
+                "context": { "status": "ok", "metrics": { "storage_state": "ready" } },
+                "synapse": {
+                    "status": "ok",
+                    "metrics": { "kernel": { "kernel_state": "starting" } }
+                },
+            }))),
+            "a starting kernel block on a non-context component still counts"
+        );
+
         assert!(!activation_in_progress(&HealthReport {
             status: crate::handler::HealthStatus::Ok,
             detail: None,

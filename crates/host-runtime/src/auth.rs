@@ -601,38 +601,64 @@ mod tests {
 
     #[test]
     fn only_variants_with_a_named_source_field_report_a_source() {
-        let io = AuthError::Io {
-            stage: AuthStage::ClientHello,
-            source: io::Error::other("io"),
-        };
-        assert!(
-            std::error::Error::source(&io).is_some(),
-            "Io names its wrapped error `source`, so it must stay in the chain"
-        );
+        let stage = AuthStage::ClientHello;
+        let json_error = || serde_json::from_str::<u8>("{").expect_err("malformed json");
 
-        let decode = AuthError::JsonDecode {
-            stage: AuthStage::ClientHello,
-            source: serde_json::from_str::<u8>("{").expect_err("malformed json"),
-        };
-        assert!(
-            std::error::Error::source(&decode).is_some(),
-            "JsonDecode names its wrapped error `source`, so it must stay in the chain"
-        );
+        // Every variant appears in exactly one list, so a variant that gains or loses a
+        // `source` field fails here rather than silently changing the error chain.
+        let with_source = [
+            AuthError::Io {
+                stage,
+                source: io::Error::other("io"),
+            },
+            AuthError::JsonEncode {
+                stage,
+                source: json_error(),
+            },
+            AuthError::JsonDecode {
+                stage,
+                source: json_error(),
+            },
+        ];
+        for error in &with_source {
+            assert!(
+                Error::source(error).is_some(),
+                "{error:?} names its wrapped error `source`, so it must stay in the chain"
+            );
+        }
 
-        let timeout = AuthError::Timeout {
-            stage: AuthStage::ClientHello,
-            deadline: Duration::from_secs(1),
-        };
-        assert!(
-            std::error::Error::source(&timeout).is_none(),
-            "Timeout wraps nothing and must report no source"
-        );
-
-        let random = AuthError::Random(getrandom::Error::UNSUPPORTED);
-        assert!(
-            std::error::Error::source(&random).is_none(),
-            "Random renders the getrandom error through Display and reports no source"
-        );
+        let without_source = [
+            AuthError::Timeout {
+                stage,
+                deadline: Duration::from_secs(1),
+            },
+            AuthError::UnexpectedEof {
+                stage,
+                expected: 4,
+                actual: 1,
+            },
+            AuthError::MessageTooLarge {
+                stage,
+                len: 2,
+                max: 1,
+            },
+            AuthError::InvalidDeadline {
+                total: Duration::MAX,
+            },
+            // Random renders the getrandom error through Display and reports no source.
+            AuthError::Random(getrandom::Error::UNSUPPORTED),
+            AuthError::KeyTooShort { len: 1, min: 2 },
+            AuthError::InvalidServerProof,
+            AuthError::DaemonIdMismatch,
+            AuthError::DaemonVerMismatch,
+            AuthError::InvalidClientAuth,
+        ];
+        for error in &without_source {
+            assert!(
+                Error::source(error).is_none(),
+                "{error:?} wraps nothing and must report no source"
+            );
+        }
     }
 
     #[test]
