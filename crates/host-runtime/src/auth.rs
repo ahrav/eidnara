@@ -627,6 +627,12 @@ mod tests {
             std::error::Error::source(&timeout).is_none(),
             "Timeout wraps nothing and must report no source"
         );
+
+        let random = AuthError::Random(getrandom::Error::UNSUPPORTED);
+        assert!(
+            std::error::Error::source(&random).is_none(),
+            "Random renders the getrandom error through Display and reports no source"
+        );
     }
 
     #[test]

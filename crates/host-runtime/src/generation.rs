@@ -1176,13 +1176,20 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
-    fn wrapping_an_instance_error_reports_no_source() {
-        let wrapped = GenerationError::Instance(InstanceError::AlreadyRunning);
-        assert!(
-            std::error::Error::source(&wrapped).is_none(),
-            "Instance renders the inner error through Display and reports no source, \
-             so callers must not depend on the chain to reach it"
-        );
+    fn no_generation_error_variant_reports_a_source() {
+        let variants = [
+            GenerationError::InsufficientStorage,
+            GenerationError::NativePayloadInvalid { detail: "detail" },
+            GenerationError::UnsupportedStateSchema,
+            GenerationError::Instance(InstanceError::AlreadyRunning),
+        ];
+        for variant in &variants {
+            assert!(
+                std::error::Error::source(variant).is_none(),
+                "{variant:?} renders any inner error through Display and reports no source, \
+                 so callers must not depend on the chain to reach it"
+            );
+        }
     }
 
     fn store_at(root: &Path) -> GenerationStore {
