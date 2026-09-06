@@ -80,26 +80,6 @@ CREATE TABLE pending_agent_drops (
 CREATE INDEX idx_pending_agent_drops_session
             ON pending_agent_drops(session_id, queued_at, id);
 
-CREATE TABLE shadow_divergences (
-            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id           TEXT NOT NULL,
-            pass_seq             INTEGER NOT NULL,
-            class                TEXT NOT NULL,
-            first_mid            TEXT,
-            first_block          TEXT,
-            first_field          TEXT,
-            ts_prefix            TEXT NOT NULL,
-            rs_prefix            TEXT NOT NULL,
-            normalizations       TEXT NOT NULL,
-            ts_decision          TEXT NOT NULL,
-            rs_decision          TEXT NOT NULL,
-            state_hash           TEXT NOT NULL,
-            created_at           INTEGER NOT NULL DEFAULT 0
-        , first_diff_offset INTEGER, ts_window TEXT NOT NULL DEFAULT '', rs_window TEXT NOT NULL DEFAULT '');
-
-CREATE INDEX idx_shadow_divergences_session
-            ON shadow_divergences(session_id, pass_seq, id);
-
 CREATE TABLE pass_trace (
             session_id             TEXT PRIMARY KEY,
             last_received_at_ms    INTEGER NOT NULL,
@@ -196,13 +176,6 @@ CREATE TABLE wrapup_commands (
 
 CREATE INDEX idx_wrapup_commands_session_created
             ON wrapup_commands(session_id, created_at, command_id);
-
-CREATE TABLE shadow_user_profile (
-            shadow_project_path  TEXT NOT NULL,
-            profile_index        INTEGER NOT NULL,
-            content              TEXT NOT NULL,
-            PRIMARY KEY (shadow_project_path, profile_index)
-        );
 
 CREATE INDEX idx_pending_agent_drops_command
             ON pending_agent_drops(session_id, command_id, id);

@@ -1093,6 +1093,51 @@ fn active_note_writes_redact_before_persistence() {
 }
 
 #[test]
+fn a_provider_rule_detection_persists_its_label_in_scan_detections() {
+    let temp = tempfile::tempdir().unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-provider-label");
+    let store = MemoryStore::open(&descriptor).unwrap();
+    // Assembled at runtime so the fixture carries no credential-shaped literal for a
+    // repository secret scanner to flag; the value the redactor sees is unchanged.
+    let credential = format!(
+        "xoxb-{}-{}-{}",
+        "123456789012", "1234567890123", "abcdefghijklmnopqrstuvwx"
+    );
+    let content = format!("deploy token {credential} rotated");
+
+    store
+        .insert_note(NoteInput {
+            project_path: "project",
+            route_project_root: None,
+            session_id: "session",
+            content: &content,
+            surface_condition: None,
+            anchor_block_id: None,
+            now_ms: 1,
+        })
+        .unwrap();
+
+    let notes = store.read_notes("project", "session", 10, 0).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(
+        !notes[0].content.contains(&credential),
+        "the credential must not persist: {}",
+        notes[0].content
+    );
+    assert!(notes[0].content.contains("<SLACK_TOKEN_REDACTED>"));
+
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
+    let labels = connection
+        .prepare("SELECT DISTINCT label_id FROM scan_detections ORDER BY label_id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(labels, vec!["slack_token".to_string()]);
+}
+
+#[test]
 fn transaction_produced_facade_text_is_redacted_and_bounded() {
     let temp = tempfile::tempdir().unwrap();
     let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-facade");

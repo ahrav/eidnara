@@ -2374,6 +2374,17 @@ impl ActiveWriteTransaction<'_> {
                 ])?;
             }
         }
+        let mut insert_link = self.tx.prepare_cached(
+            // The id expression sits inside the SELECT so it evaluates per row;
+            // a bound parameter evaluates once for the whole statement.
+            "INSERT INTO scan_owner_copies(
+                 owner_copy_id,scan_id,domain_owner_id,owner_kind,field_id
+             )
+             SELECT lower(hex(randomblob(16))),scan_id,?1,?2,field_id
+               FROM scan_owner_copies
+              WHERE scan_id=?3
+              GROUP BY scan_id,field_id",
+        )?;
         for link in &prepared.existing_scan_links {
             let domain_owner_id = domain_owner_ids
                 .iter()
@@ -2383,18 +2394,7 @@ impl ActiveWriteTransaction<'_> {
                         "existing scan link references an unregistered durable owner".to_string(),
                     )))
                 })?;
-            // The id expression sits inside the SELECT so it evaluates per row;
-            // a bound parameter evaluates once for the whole statement.
-            self.tx.execute(
-                "INSERT INTO scan_owner_copies(
-                     owner_copy_id,scan_id,domain_owner_id,owner_kind,field_id
-                 )
-                 SELECT lower(hex(randomblob(16))),scan_id,?1,?2,field_id
-                   FROM scan_owner_copies
-                  WHERE scan_id=?3
-                  GROUP BY scan_id,field_id",
-                params![domain_owner_id, prepared.owner_kind, link.scan_id],
-            )?;
+            insert_link.execute(params![domain_owner_id, prepared.owner_kind, link.scan_id])?;
         }
         Ok(())
     }
@@ -5719,24 +5719,30 @@ impl MemoryStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let identity_scope = identity_scope.to_string();
-        let _note_scope_guard =
-            FacadeNoteScopeGuard::install(&self.note_caller_project, caller_project.to_string());
-        {
-            let mut scope = self
-                .facade_authority_scope
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *scope = Some(FacadeAuthorityScope {
-                owner: std::thread::current().id(),
-                route_project_root: route_project_root.to_string(),
-                domain,
-            });
-        }
-        let _scope_guard = FacadeMutationScopeGuard {
-            scope: &self.facade_authority_scope,
-        };
         let redaction_failure = std::cell::Cell::new(None);
         let outcome = write.execute(&self.inner, |coordinated| {
+                // Both UDF scopes are single slots shared by every writer on the store.
+                // Installing them here, under the connection lock the callback holds,
+                // keeps a waiting facade command from evicting the scope of a note
+                // writer whose statements are still running on the connection.
+                let _note_scope_guard = FacadeNoteScopeGuard::install(
+                    &self.note_caller_project,
+                    caller_project.to_string(),
+                );
+                {
+                    let mut scope = self
+                        .facade_authority_scope
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    *scope = Some(FacadeAuthorityScope {
+                        owner: std::thread::current().id(),
+                        route_project_root: route_project_root.to_string(),
+                        domain,
+                    });
+                }
+                let _scope_guard = FacadeMutationScopeGuard {
+                    scope: &self.facade_authority_scope,
+                };
                 let tx = coordinated.tx();
                 if let Some(command_id) = command_id {
                     let stored = tx
@@ -10780,6 +10786,15 @@ impl MemoryStore {
                 JsonScanPolicy::DurableRejectProtected,
             )?;
         }
+        // Deflate runs here, before the fenced callback takes the store's connection lock;
+        // the redacted inputs are final, so the callback only binds the blobs.
+        let chunk_transcript_blobs = prepare_chunk_transcript_blobs(
+            chunk_transcript.as_deref(),
+            raw_chunk_messages.as_deref(),
+        )
+        .map_err(|error| {
+            MemoryStoreError::Serde(format!("chunk transcript compression failed: {error}"))
+        })?;
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx;
             let outcome = (|| -> rusqlite::Result<PublishTxnOutcome> {
@@ -10894,14 +10909,13 @@ impl MemoryStore {
                     });
                 }
             }
-            if chunk_transcript.is_some() || raw_chunk_messages.is_some() {
+            if let Some(blobs) = &chunk_transcript_blobs {
                 insert_chunk_transcripts_tx(
                     tx,
                     session_id,
                     first_appended_sequence,
                     &compartments,
-                    chunk_transcript.as_deref(),
-                    raw_chunk_messages.as_deref(),
+                    blobs,
                 )?;
             }
             enqueue_historian_side_channels_tx(tx, session_id, &side_channel_items)?;
@@ -14422,50 +14436,66 @@ fn next_compartment_sequence_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusql
     )
 }
 
-fn insert_chunk_transcripts_tx(
-    tx: &GuardedConn<'_>,
-    session_id: &str,
-    first_sequence: i64,
-    compartments: &[StoredCompartment],
+/// Deflated `chunk_transcripts` payloads.
+struct ChunkTranscriptBlobs {
+    transcript_deflate: Vec<u8>,
+    raw_messages_deflate: Option<Vec<u8>>,
+}
+
+/// Returns `None` when neither payload is storable: nothing was supplied, or the only
+/// transcript deflates past `MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES`.
+fn prepare_chunk_transcript_blobs(
     transcript: Option<&str>,
     raw_messages: Option<&str>,
-) -> rusqlite::Result<()> {
-    if compartments.is_empty() {
-        return Ok(());
-    }
+) -> std::io::Result<Option<ChunkTranscriptBlobs>> {
     let compressed = transcript.and_then(|transcript| {
         compress_transcript(transcript)
             .ok()
             .filter(|compressed| compressed.len() <= MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES)
     });
-    let raw_messages_compressed = raw_messages
-        .map(compress_raw_messages)
-        .transpose()
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    if compressed.is_none() && raw_messages_compressed.is_none() {
-        return Ok(());
+    let raw_messages_deflate = raw_messages.map(compress_raw_messages).transpose()?;
+    if compressed.is_none() && raw_messages_deflate.is_none() {
+        return Ok(None);
     }
-    // The original schema keeps transcript_deflate NOT NULL. A raw-only row still needs a
+    // The schema keeps transcript_deflate NOT NULL. A raw-only row still needs a
     // harmless condensed payload so durable raw recovery is not discarded with an oversized
     // historian transcript.
-    let compressed = compressed.unwrap_or_else(|| compress_transcript("").unwrap_or_default());
-    for (idx, compartment) in compartments.iter().enumerate() {
-        tx.execute(
-            "INSERT OR REPLACE INTO chunk_transcripts
-               (session_id, compartment_seq, start_ordinal, end_ordinal,
-                transcript_deflate, raw_messages_deflate, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                session_id,
-                first_sequence + idx as i64,
-                compartment.start_message,
-                compartment.end_message,
-                &compressed,
-                raw_messages_compressed.as_deref(),
-                compartment.created_at,
-            ],
-        )?;
+    let transcript_deflate =
+        compressed.unwrap_or_else(|| compress_transcript("").unwrap_or_default());
+    Ok(Some(ChunkTranscriptBlobs {
+        transcript_deflate,
+        raw_messages_deflate,
+    }))
+}
+
+fn insert_chunk_transcripts_tx(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    first_sequence: i64,
+    compartments: &[StoredCompartment],
+    blobs: &ChunkTranscriptBlobs,
+) -> rusqlite::Result<()> {
+    if compartments.is_empty() {
+        return Ok(());
     }
+    let mut insert = tx.prepare_cached(
+        "INSERT OR REPLACE INTO chunk_transcripts
+           (session_id, compartment_seq, start_ordinal, end_ordinal,
+            transcript_deflate, raw_messages_deflate, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for (idx, compartment) in compartments.iter().enumerate() {
+        insert.execute(params![
+            session_id,
+            first_sequence + idx as i64,
+            compartment.start_message,
+            compartment.end_message,
+            &blobs.transcript_deflate,
+            blobs.raw_messages_deflate.as_deref(),
+            compartment.created_at,
+        ])?;
+    }
+    drop(insert);
     evict_chunk_transcripts_tx(tx, session_id)
 }
 
@@ -16805,11 +16835,6 @@ mod tests {
             "INSERT INTO reduce_command_ledger(session_id, command_id, queued_at_ms) VALUES (?1, 'c', 1)",
         ),
         (
-            "shadow_divergences",
-            "INSERT INTO shadow_divergences(session_id, pass_seq, class, ts_prefix, rs_prefix, normalizations, ts_decision, rs_decision, state_hash)
-             VALUES (?1, 1, 'c', '', '', '[]', 'd', 'd', 'h')",
-        ),
-        (
             "tag_cache_generations",
             "INSERT INTO tag_cache_generations(session_id) VALUES (?1)",
         ),
@@ -17033,6 +17058,73 @@ mod tests {
             .unwrap();
         assert_eq!(note.project_path, "proj-b");
         assert_eq!(installed_scope(), None);
+    }
+
+    #[test]
+    fn a_facade_command_waiting_for_the_connection_leaves_a_note_writer_in_flight_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::open(&descriptor(dir.path())).unwrap());
+        let facade_may_start = Arc::new(std::sync::Barrier::new(2));
+
+        let note_store = Arc::clone(&store);
+        let note_gate = Arc::clone(&facade_may_start);
+        let note_writer = std::thread::spawn(move || {
+            note_store.with_note_conn_fenced("proj-note", |tx| {
+                note_gate.wait();
+                // `with_facade_command` takes the mutation lock immediately before requesting
+                // the connection this callback holds.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while note_store.facade_mutation_lock.try_lock().is_ok() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the facade command never took the mutation lock"
+                    );
+                    std::thread::yield_now();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                tx.execute(
+                    RAW_NOTE_INSERT,
+                    params!["proj-note", "written while a facade command waits"],
+                )?;
+                Ok(tx.last_insert_rowid())
+            })
+        });
+
+        facade_may_start.wait();
+        let facade = store.with_facade_command(
+            "route",
+            "proj-facade",
+            "notes",
+            "facade-session",
+            "ctx_note",
+            "noop",
+            None,
+            |_txn| Ok(b"{}".to_vec()),
+        );
+
+        let note_id = note_writer.join().unwrap().expect(
+            "a note write inside its own project must not be aborted by a waiting facade command",
+        );
+        assert!(matches!(facade.unwrap(), FacadeMutationOutcome::Applied(_)));
+        let project: String = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT project_path FROM notes WHERE id = ?1",
+                    params![note_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(project, "proj-note");
+        assert!(
+            store
+                .note_caller_project
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none(),
+            "both writers must leave the scope uninstalled"
+        );
     }
 
     const RAW_NOTE_INSERT: &str = "INSERT INTO notes(type, project_path, session_id, content)
