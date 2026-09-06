@@ -956,24 +956,21 @@ async fn accept_loop<H: HostHandler>(shared: &Arc<HostShared<H>>, listener: Unix
 }
 
 fn activation_in_progress(report: &HealthReport) -> bool {
-    use crate::control::{KERNEL_KEY, KERNEL_STATE_KEY, STATE_STARTING};
+    use crate::control::{
+        KERNEL_KEY, KERNEL_STATE_KEY, STATE_STARTING, STORAGE_STATE_KEY, SYNAPSE_STATE_KEY,
+    };
     fn is_starting(metrics: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
         metrics.get(key).and_then(serde_json::Value::as_str) == Some(STATE_STARTING)
     }
-    let components = report
-        .metrics
-        .as_ref()
-        .and_then(|metrics| metrics.get("components"))
-        .and_then(serde_json::Value::as_object);
-    components.is_some_and(|components| {
+    crate::control::components(report).is_some_and(|components| {
         components.values().any(|component| {
             let metrics = component
                 .get("metrics")
                 .and_then(serde_json::Value::as_object);
             metrics.is_some_and(|metrics| {
                 // A `starting` kernel block counts from any component here, while `host.status` reports the block only for `CONTEXT_COMPONENT`.
-                is_starting(metrics, "storage_state")
-                    || is_starting(metrics, "synapse_state")
+                is_starting(metrics, STORAGE_STATE_KEY)
+                    || is_starting(metrics, SYNAPSE_STATE_KEY)
                     || metrics
                         .get(KERNEL_KEY)
                         .and_then(serde_json::Value::as_object)

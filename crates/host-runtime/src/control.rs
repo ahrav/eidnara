@@ -504,10 +504,24 @@ pub fn route_open_response_json(channel: u16, epoch: u32) -> Vec<u8> {
 pub(crate) const CONTEXT_COMPONENT: &str = "context";
 pub(crate) const KERNEL_KEY: &str = "kernel";
 pub(crate) const KERNEL_STATE_KEY: &str = "kernel_state";
+pub(crate) const STORAGE_STATE_KEY: &str = "storage_state";
+pub(crate) const SYNAPSE_STATE_KEY: &str = "synapse_state";
 /// State reported by `storage_state`, `synapse_state`, and `kernel_state` while a store is still opening.
 pub(crate) const STATE_STARTING: &str = "starting";
+/// State reported by `storage_state`, `kernel_state`, and `broca_state` when the subsystem cannot serve.
+const STATE_UNAVAILABLE: &str = "unavailable";
 /// States a store reports through `storage_state` and `kernel_state`.
-const STORE_STATES: [&str; 3] = ["ready", STATE_STARTING, "unavailable"];
+const STORE_STATES: [&str; 3] = ["ready", STATE_STARTING, STATE_UNAVAILABLE];
+
+pub(crate) fn components(
+    report: &crate::handler::HealthReport,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    report
+        .metrics
+        .as_ref()
+        .and_then(|metrics| metrics.get("components"))
+        .and_then(serde_json::Value::as_object)
+}
 
 /// Retains only kernel health fields with declared types and ranges.
 ///
@@ -534,7 +548,8 @@ fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
         .get("unavailable_reason")
         .and_then(serde_json::Value::as_str)
         .filter(|reason| {
-            state == "unavailable" && matches!(*reason, "store_unavailable" | "store_unsupported")
+            state == STATE_UNAVAILABLE
+                && matches!(*reason, "store_unavailable" | "store_unsupported")
         })
     {
         block.insert(
@@ -576,7 +591,7 @@ fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
 
 /// The epoch set is all-or-nothing: an unexpected key or an out-of-range value drops the whole `epochs` object so a consumer never compares a partial epoch vector.
 fn sanitize_context_metrics(
-    metrics: Option<&serde_json::Value>,
+    metrics: Option<&serde_json::Map<String, serde_json::Value>>,
     sanitized_metrics: &mut serde_json::Map<String, serde_json::Value>,
 ) {
     let epoch_names = [
@@ -594,18 +609,20 @@ fn sanitize_context_metrics(
             && raw_epochs
                 .keys()
                 .all(|key| epoch_names.contains(&key.as_str()));
-        let values = epoch_names
-            .iter()
-            .map(|name| {
-                raw_epochs
-                    .get(*name)
-                    .and_then(serde_json::Value::as_u64)
-                    .filter(|value| *value <= u32::MAX as u64)
-                    .map(|value| ((*name).to_owned(), serde_json::Value::from(value)))
-            })
-            .collect::<Option<serde_json::Map<String, serde_json::Value>>>();
-        if keys_valid && let Some(values) = values {
-            sanitized_metrics.insert("epochs".to_owned(), serde_json::Value::Object(values));
+        if keys_valid {
+            let values = epoch_names
+                .iter()
+                .map(|name| {
+                    raw_epochs
+                        .get(*name)
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|value| *value <= u32::MAX as u64)
+                        .map(|value| ((*name).to_owned(), serde_json::Value::from(value)))
+                })
+                .collect::<Option<serde_json::Map<String, serde_json::Value>>>();
+            if let Some(values) = values {
+                sanitized_metrics.insert("epochs".to_owned(), serde_json::Value::Object(values));
+            }
         }
     }
     if let Some(kernel) = metrics
@@ -629,19 +646,15 @@ pub fn host_status_response_json(
 ) -> Vec<u8> {
     let health = report.status.as_str();
     let mut components = serde_json::Map::new();
-    let raw_components = report
-        .metrics
-        .as_ref()
-        .and_then(|metrics| metrics.get("components"))
-        .and_then(serde_json::Value::as_object);
+    let raw_components = self::components(report);
     for (module, state_key, allowed) in [
-        (CONTEXT_COMPONENT, "storage_state", &STORE_STATES[..]),
+        (CONTEXT_COMPONENT, STORAGE_STATE_KEY, &STORE_STATES[..]),
         (
             "synapse",
-            "synapse_state",
-            &["ready", "starting", "degraded", "unsupported"][..],
+            SYNAPSE_STATE_KEY,
+            &["ready", STATE_STARTING, "degraded", "unsupported"][..],
         ),
-        ("broca", "broca_state", &["ready", "unavailable"][..]),
+        ("broca", "broca_state", &["ready", STATE_UNAVAILABLE][..]),
     ] {
         let Some(component) = raw_components.and_then(|all| all.get(module)) else {
             continue;
@@ -654,8 +667,10 @@ pub fn host_status_response_json(
         }
         // A component whose health check panicked reports no metrics; its allowlisted status still names it in the response so a failing subsystem is never hidden. commentlint: allow(JUDGE)
         let mut sanitized_metrics = serde_json::Map::new();
-        if let Some(state) = component
+        let metrics = component
             .get("metrics")
+            .and_then(serde_json::Value::as_object);
+        if let Some(state) = metrics
             .and_then(|metrics| metrics.get(state_key))
             .and_then(serde_json::Value::as_str)
             .filter(|state| allowed.contains(state))
@@ -666,7 +681,7 @@ pub fn host_status_response_json(
             );
         }
         if module == CONTEXT_COMPONENT {
-            sanitize_context_metrics(component.get("metrics"), &mut sanitized_metrics);
+            sanitize_context_metrics(metrics, &mut sanitized_metrics);
         }
         components.insert(
             module.to_owned(),
