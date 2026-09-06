@@ -510,8 +510,11 @@ pub(crate) const SYNAPSE_STATE_KEY: &str = "synapse_state";
 pub(crate) const STATE_STARTING: &str = "starting";
 /// State reported by `storage_state`, `kernel_state`, and `broca_state` when the subsystem cannot serve.
 const STATE_UNAVAILABLE: &str = "unavailable";
-/// States a store reports through `storage_state` and `kernel_state`.
-const STORE_STATES: [&str; 3] = ["ready", STATE_STARTING, STATE_UNAVAILABLE];
+/// `storage_state` values, fixed by the wire protocol (`docs/host-wire-protocol.md`, `host.status`).
+const STORAGE_STATES: [&str; 3] = ["ready", STATE_STARTING, STATE_UNAVAILABLE];
+/// `kernel_state` values. Kept separate from `STORAGE_STATES` because the kernel sampler owns this
+/// set and may grow it without widening the spec-frozen `storage_state` set.
+const KERNEL_STATES: [&str; 3] = ["ready", STATE_STARTING, STATE_UNAVAILABLE];
 
 pub(crate) fn components(
     report: &crate::handler::HealthReport,
@@ -536,7 +539,7 @@ fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
     let state = raw
         .get(KERNEL_STATE_KEY)
         .and_then(serde_json::Value::as_str)?;
-    if !STORE_STATES.contains(&state) {
+    if !KERNEL_STATES.contains(&state) {
         return None;
     }
     let mut block = serde_json::Map::new();
@@ -648,7 +651,7 @@ pub fn host_status_response_json(
     let mut components = serde_json::Map::new();
     let raw_components = self::components(report);
     for (module, state_key, allowed) in [
-        (CONTEXT_COMPONENT, STORAGE_STATE_KEY, &STORE_STATES[..]),
+        (CONTEXT_COMPONENT, STORAGE_STATE_KEY, &STORAGE_STATES[..]),
         (
             "synapse",
             SYNAPSE_STATE_KEY,
@@ -1262,6 +1265,42 @@ mod tests {
     }
 
     #[test]
+    fn status_drops_a_storage_state_outside_the_wire_protocol_set() {
+        let context_of = |state: &str| -> serde_json::Value {
+            let report = crate::handler::HealthReport {
+                status: crate::handler::HealthStatus::Ok,
+                detail: None,
+                metrics: Some(serde_json::json!({
+                    "components": {
+                        "context": {"status": "ok", "metrics": {"storage_state": state}}
+                    }
+                })),
+            };
+            let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
+                &report,
+                serde_json::json!({"state": "healthy"}),
+            ))
+            .expect("status JSON");
+            response["metrics"]["components"]["context"].clone()
+        };
+        for state in ["ready", "starting", "unavailable"] {
+            assert_eq!(
+                context_of(state),
+                serde_json::json!({"status": "ok", "metrics": {"storage_state": state}}),
+                "`{state}` is in the wire protocol's `storage_state` set"
+            );
+        }
+        // Includes states admitted by another component's allowlist to verify `storage_state` drops them.
+        for state in ["degraded", "unsupported", "broken"] {
+            assert_eq!(
+                context_of(state),
+                serde_json::json!({"status": "ok", "metrics": {}}),
+                "`{state}` is outside the `storage_state` set and is dropped"
+            );
+        }
+    }
+
+    #[test]
     fn status_passes_valid_kernel_fields_and_drops_invalid_ones() {
         let report = |kernel: serde_json::Value| crate::handler::HealthReport {
             status: crate::handler::HealthStatus::Ok,
@@ -1343,11 +1382,18 @@ mod tests {
             "core_file_bytes": null,
             "required_consumer_count": null,
         })));
-        assert_eq!(nulls["sampled_at_ms"], serde_json::Value::Null);
-        assert_eq!(nulls["outbox_position_lag"], serde_json::Value::Null);
-        assert_eq!(nulls["oldest_unconsumed_age_ms"], serde_json::Value::Null);
-        assert!(nulls.get("core_file_bytes").is_none());
-        assert!(nulls.get("required_consumer_count").is_none());
+        // Whole-object comparison: indexing a missing key also yields `Null`, so a per-key
+        // `nulls["k"] == Null` check cannot tell a kept `null` from a dropped field.
+        assert_eq!(
+            nulls,
+            serde_json::json!({
+                "kernel_state": "ready",
+                "sampled_at_ms": null,
+                "outbox_position_lag": null,
+                "oldest_unconsumed_age_ms": null,
+            }),
+            "null survives only on the three nullable fields; the two non-nullable nulls are dropped"
+        );
 
         // A contradictory `unavailable_reason` is dropped; other fields remain.
         for state in ["ready", "starting"] {
