@@ -55,7 +55,13 @@ impl Tier {
 fn z_value(compartment_index: u32, importance: i32, budget_pressure: f64) -> f64 {
     let a = (compartment_index.max(1) - 1) as f64;
     let imp = importance.clamp(1, 100) as f64;
-    let p = budget_pressure.max(P_FLOOR);
+    // `f64::clamp` preserves NaN, so `p` maps NaN to `P_FLOOR`.
+    // An infinite pressure gives `h == 0.0`, and `0.0 / 0.0` matches no tier boundary.
+    let p = if budget_pressure.is_nan() {
+        P_FLOOR
+    } else {
+        budget_pressure.clamp(P_FLOOR, f64::MAX)
+    };
     let f = 2f64.powf((imp - 50.0) / D);
     let h = (H50 * f) / p;
     a / h
@@ -83,9 +89,14 @@ fn tier_for_z(z: f64) -> Tier {
 ///
 /// Anchor overlap clamps to 0 through 1 and raises the boundary by up to
 /// [`G`] half-lives, so `archives_at(z, 0.0) == (tier_for_z(z) == Tier::P5)`.
+/// `f64::clamp` preserves NaN, so a NaN overlap maps to 0 first.
 #[inline]
 fn archives_at(z: f64, anchor_overlap: f64) -> bool {
-    let o = anchor_overlap.clamp(0.0, 1.0);
+    let o = if anchor_overlap.is_nan() {
+        0.0
+    } else {
+        anchor_overlap.clamp(0.0, 1.0)
+    };
     z >= Z4 + G * o
 }
 
@@ -93,7 +104,9 @@ fn archives_at(z: f64, anchor_overlap: f64) -> bool {
 ///
 /// `compartment_index` is one-based from newest and clamps upward to 1.
 /// `importance` clamps to 1 through 100. `budget_pressure` has a floor of
-/// [`P_FLOOR`]. Boundaries are lower-inclusive for the older tier: a value
+/// [`P_FLOOR`] and a ceiling of `f64::MAX`; NaN reads as [`P_FLOOR`].
+///
+/// Boundaries are lower-inclusive for the older tier: a value
 /// exactly equal to [`Z1`], [`Z2`], [`Z3`], or [`Z4`] enters the next tier.
 pub fn tier(compartment_index: u32, importance: i32, budget_pressure: f64) -> Tier {
     tier_for_z(z_value(compartment_index, importance, budget_pressure))
@@ -206,6 +219,26 @@ mod tests {
     fn finite_demotion_at_max_importance() {
         // Importance 100 reaches the archive threshold at a finite compartment index.
         assert!(should_archive(100_000, 100, 1.0, 0.0));
+    }
+
+    #[test]
+    fn non_finite_pressure_keeps_the_newest_compartment_in_tier_1() {
+        assert_eq!(tier(1, 50, f64::INFINITY), Tier::P1);
+        assert_eq!(tier(1, 50, f64::MAX), Tier::P1);
+        assert_eq!(tier(2, 50, f64::INFINITY), Tier::P5);
+        assert_eq!(tier(2, 50, f64::MAX), Tier::P5);
+        for idx in [1u32, 2, 50] {
+            assert_eq!(tier(idx, 50, f64::NAN), tier(idx, 50, P_FLOOR));
+        }
+    }
+
+    #[test]
+    fn nan_anchor_overlap_reads_as_zero() {
+        let (idx, imp, p) = (BOUNDARY_INDEX, 50, 3.0);
+        assert!(should_archive(idx, imp, p, f64::NAN));
+        assert_eq!(rendered_tier(idx, imp, p, f64::NAN), Tier::P5);
+        assert!(should_archive(idx, imp, p, f64::NEG_INFINITY));
+        assert!(!should_archive(idx, imp, p, f64::INFINITY));
     }
 
     /// Importance 50 at index 25 has `a = 24 = H50`, so `z == pressure` exactly.

@@ -88,6 +88,10 @@ const LABEL_AFFIXES: &[&str] = &[
     "b64", "base64", "data", "env", "file", "hash", "hex", "id", "name", "path", "plain", "prefix",
     "ref", "string", "text", "value",
 ];
+/// Segments that mark a key as public, mirroring `secret_scanner`'s `NON_SECRET_KEY_MARKERS`.
+/// The scanner reports no keyed finding for these markers, so `key_names_a_secret` treats
+/// `public_token` as structural. Otherwise the key gate refuses a value the scanner stores.
+const NON_SECRET_KEY_MARKERS: &[&str] = &["public", "pubkey", "publishable"];
 /// Longest word in the three vocabularies plus a plural suffix bounds cover-scan spans.
 const MAX_VOCABULARY_WORD_BYTES: usize = "authorization".len() + 1;
 
@@ -485,6 +489,7 @@ pub fn redact_transaction_durable_text(input: &str) -> Redaction {
 /// Windowed redaction for content that is stored as itself, so no placeholder may stand in for the input on failure; callers must refuse the write on `Err`.
 ///
 /// Input length is unbounded on this path; only the merged detection count is capped, at `max_detections`.
+/// A match longer than [`WINDOW_OVERLAP_BYTES`] that straddles two windows is seen whole by neither and goes unreported.
 pub fn redact_windowed_durable_text(
     input: &str,
     max_detections: usize,
@@ -495,6 +500,7 @@ pub fn redact_windowed_durable_text(
 /// Windowed detection verdict; `Err` means the scan could not prove the input secret-free.
 ///
 /// Input length is unbounded on this path; the walk stops at the first finding.
+/// `Ok(false)` carries the [`WINDOW_OVERLAP_BYTES`] caveat: a match longer than the overlap that straddles two windows is not seen.
 pub fn detect_windowed_durable_text(input: &str) -> Result<bool, RedactionError> {
     redactor()?.detect_windowed(input)
 }
@@ -554,7 +560,8 @@ fn reject(redaction: Redaction) -> Result<(), RedactionError> {
 
 /// Label for a key whose name alone marks its value secret, so a value
 /// written under it is replaced even when the scanner finds nothing in it.
-/// `None` when the name carries no secret word.
+/// `None` when the name carries no secret word or carries one of
+/// `NON_SECRET_KEY_MARKERS`, as in `public_token`.
 pub fn secret_key_label(key: &str) -> Option<String> {
     key_names_a_secret(key).then(|| redaction_type_for_key(key))
 }
@@ -695,13 +702,18 @@ fn plural_stem(word: &str) -> &str {
 }
 
 fn key_names_a_secret(key: &str) -> bool {
-    separate_words(key)
-        .to_lowercase()
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|segment| {
-            let stem = segment.strip_suffix('s').unwrap_or(segment);
-            LABEL_WORDS.contains(&stem)
-        })
+    let lowered = separate_words(key).to_lowercase();
+    let mut segments = lowered.split(|character: char| !character.is_ascii_alphanumeric());
+    if segments
+        .clone()
+        .any(|segment| NON_SECRET_KEY_MARKERS.contains(&segment))
+    {
+        return false;
+    }
+    segments.any(|segment| {
+        let stem = segment.strip_suffix('s').unwrap_or(segment);
+        LABEL_WORDS.contains(&stem)
+    })
 }
 
 /// Recognizes both supported redaction marker shapes without validating labels.
@@ -1107,12 +1119,37 @@ mod qualifier_chain_tests {
             ("file_key", "filekey"),
             ("data_key", "datakey"),
             ("public_key", "publickey"),
+            ("public_token", "publictoken"),
+            ("publishable_key", "publishablekey"),
         ] {
             assert_eq!(
                 secret_shaped_json_key(delimited),
                 secret_shaped_json_key(undelimited),
                 "{delimited} and {undelimited} name the same field"
             );
+        }
+    }
+
+    /// The scanner's `NON_SECRET_KEY_MARKERS` exclude a key from keyed findings, so the key
+    /// gates must not read it as a credential either.
+    #[test]
+    fn public_marked_keys_are_structural_in_every_gate() {
+        for key in [
+            "public_token",
+            "publicToken",
+            "PUBLIC_SECRET",
+            "publishable_key",
+            "stripe_publishable_key",
+            "pubkey_token",
+        ] {
+            assert!(!secret_shaped_json_key(key), "{key}");
+            assert_eq!(secret_key_label(key), None, "{key}");
+            assert_eq!(qualified_secret_key_label(key), None, "{key}");
+            assert_eq!(protected_json_key_label(key), None, "{key}");
+        }
+        for key in ["api_token", "client_secret", "publicity_token"] {
+            assert!(secret_shaped_json_key(key), "{key}");
+            assert!(secret_key_label(key).is_some(), "{key}");
         }
     }
 
