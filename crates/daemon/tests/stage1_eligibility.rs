@@ -1,6 +1,6 @@
 //! One admission policy answers both read lanes with the automatic lane the
 //! stricter, `kernel.eligibility.batch` judges object id plus revision, and a
-//! stale projection cannot grant what the policy denies.
+//! verdict cached before a retirement is not served after it. commentlint: allow(JUDGE)
 
 mod support;
 
@@ -88,15 +88,16 @@ async fn one_policy_answers_both_lanes_and_the_automatic_lane_is_stricter() {
     let daemon = KernelDaemon::start().await;
     // A route-asserted decision materializes the project scope the verified one joins.
     let asserted = daemon.commit("create", vec![insert_decision(1)]).await;
+    assert_eq!(asserted["state"]["kind"], "available");
     let scope_id = daemon.read("explicit_search", None, None).await["rows"][0]["scope_id"]
         .as_str()
         .unwrap()
         .to_string();
     commit_verified_decision(&daemon.store(), &scope_id);
-    assert_eq!(asserted["state"]["kind"], "available");
+    let snapshot = daemon.tip();
 
-    let explicit = daemon.read("explicit_search", None, None).await;
-    let automatic = daemon.read("auto_inject", None, None).await;
+    let explicit = daemon.read("explicit_search", Some(snapshot), None).await;
+    let automatic = daemon.read("auto_inject", Some(snapshot), None).await;
     let explicit_ids = object_ids(&explicit);
     let automatic_ids = object_ids(&automatic);
     assert_eq!(
@@ -104,10 +105,6 @@ async fn one_policy_answers_both_lanes_and_the_automatic_lane_is_stricter() {
         ["decision-object-1", "decision-object-verified"]
     );
     assert_eq!(automatic_ids, ["decision-object-verified"]);
-    assert!(
-        automatic_ids.iter().all(|id| explicit_ids.contains(id)),
-        "the automatic lane serves a proper subset of the explicit lane"
-    );
     // The same policy labels the asserted decision on the explicit lane and withholds
     // it from injection; the verified one is visible on both.
     let visibility = |read: &serde_json::Value, id: &str| {
@@ -131,7 +128,8 @@ async fn one_policy_answers_both_lanes_and_the_automatic_lane_is_stricter() {
         Some("visible")
     );
     assert_eq!(visibility(&automatic, "decision-object-1"), None);
-    assert_eq!(explicit["known_as_of"], automatic["known_as_of"]);
+    assert_eq!(explicit["known_as_of"], json!(snapshot));
+    assert_eq!(automatic["known_as_of"], json!(snapshot));
     daemon.shutdown().await;
 }
 
@@ -185,7 +183,7 @@ async fn a_batch_check_judges_each_candidate_by_object_id_and_revision() {
 }
 
 #[tokio::test]
-async fn a_stale_projection_cannot_grant_what_the_policy_denies() {
+async fn a_verdict_cached_at_one_tip_is_rejudged_after_a_retirement() {
     let daemon = KernelDaemon::start().await;
     daemon.commit("create", vec![insert_decision(1)]).await;
     let projected_at = daemon.tip();
@@ -209,8 +207,8 @@ async fn a_stale_projection_cannot_grant_what_the_policy_denies() {
     assert_eq!(object_ids(&stale), ["decision-object-1"]);
     assert_eq!(stale["known_as_of"], json!(projected_at));
 
-    // The policy judges at the tip: the cached grant is keyed to the old tip and misses,
-    // and the same candidate is denied.
+    // `kernel.eligibility.batch` takes no `as_of`: it judges at the tip, where the
+    // cached grant misses and the candidate is denied. commentlint: allow(JUDGE)
     let denied = daemon
         .eligibility("local", vec![candidate("decision-object-1", 1)])
         .await;

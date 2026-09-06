@@ -38,11 +38,9 @@ async fn a_commit_retried_with_the_same_intent_yields_one_receipt() {
 }
 
 #[tokio::test]
-async fn a_commit_whose_response_was_lost_leaves_no_duplicate_when_retried() {
+async fn a_commit_retried_after_its_response_is_discarded_rebuilds_the_receipt_from_the_store() {
     let daemon = KernelDaemon::start().await;
-    // The first response is dropped unread, as a caller whose transport lost it would;
-    // everything the retry must reconstruct is taken from the store instead.
-    let _lost = daemon.commit("create-2", vec![insert_decision(2)]).await;
+    let _discarded = daemon.commit("create-2", vec![insert_decision(2)]).await;
     let tip_after_first = daemon.tip();
     let (_, states) = daemon
         .store()
@@ -70,7 +68,7 @@ async fn a_commit_whose_response_was_lost_leaves_no_duplicate_when_retried() {
     let again = daemon
         .commit("create-2-again", vec![insert_decision(2)])
         .await;
-    assert_ne!(state_kind(&again), "available");
+    assert_eq!(state_kind(&again), "invalid");
     assert_eq!(state_reason(&again), Some("already_exists"));
     assert_eq!(daemon.tip(), tip_after_first);
     let renamed = daemon.commit("create-3", vec![insert_decision(3)]).await;
@@ -117,15 +115,23 @@ async fn a_read_answers_a_batch_of_object_ids_in_one_call() {
         "the batch holds exactly the requested live objects; a retired or unknown id yields no row"
     );
     let rows = batch["rows"].as_array().unwrap();
-    for row in rows {
-        let id = row["object"]["object_id"].as_str().unwrap();
-        let index = id.strip_prefix("decision-object-").unwrap();
-        assert_eq!(
-            row["decision"]["payload"]["summary"],
-            json!(format!("decision {index}")),
-            "each row carries its own decision body"
-        );
-    }
+    let summaries: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["object"]["object_id"].as_str().unwrap(),
+                row["decision"]["payload"]["summary"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summaries,
+        [
+            ("decision-object-1", "decision 1"),
+            ("decision-object-3", "decision 3"),
+        ],
+        "each row carries its own decision body"
+    );
     assert_eq!(batch["truncated"], json!(false));
 
     let whole = daemon.read("explicit_search", None, None).await;

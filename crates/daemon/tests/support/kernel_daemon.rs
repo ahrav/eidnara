@@ -19,10 +19,12 @@ const SESSION: &str = "stage1-session";
 pub const DOMAIN: &str = "stage1-domain";
 
 pub struct KernelDaemon {
-    _data: tempfile::TempDir,
     handler: Handler,
     route: RouteHandle,
     project: PathBuf,
+    // Fields drop in declaration order; the directory must outlive the handler
+    // that holds files inside it. commentlint: allow(JUDGE)
+    _data: tempfile::TempDir,
 }
 
 impl KernelDaemon {
@@ -39,6 +41,12 @@ impl KernelDaemon {
         PrimaryComponent::activate(&handler).await.unwrap();
         let started = Instant::now();
         while handler.kernel_state() != KernelState::Ready {
+            assert_ne!(
+                handler.kernel_state(),
+                KernelState::Unavailable,
+                "kernel store unavailable: {:?}",
+                handler.kernel_unavailable_reason_for_test()
+            );
             assert!(
                 started.elapsed() < Duration::from_secs(20),
                 "kernel state stayed {:?}",
@@ -67,10 +75,10 @@ impl KernelDaemon {
             BindOutcome::Accept
         ));
         Self {
-            _data: data,
             handler,
             route,
             project,
+            _data: data,
         }
     }
 

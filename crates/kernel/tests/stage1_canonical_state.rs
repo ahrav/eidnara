@@ -62,9 +62,14 @@ fn live_domains(store: &KernelStore) -> BTreeMap<String, ObjectRow> {
         .collect()
 }
 
+/// Every open acquires a fresh lease, so an advanced epoch proves
+/// `KernelStore::open` built a new store rather than handing back the old one.
 fn reopen(root: &Path, store: KernelStore) -> KernelStore {
+    let epoch_before = store.lease_epoch();
     drop(store);
-    KernelStore::open(root).unwrap()
+    let reopened = KernelStore::open(root).unwrap();
+    assert!(reopened.lease_epoch() > epoch_before);
+    reopened
 }
 
 #[test]
@@ -170,7 +175,7 @@ fn a_superseded_domain_shows_its_successor_after_close_and_reopen() {
 fn a_deleted_domain_stays_absent_after_close_and_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
-    store
+    let created = store
         .commit(intent("create"), |envelope| {
             envelope.insert_domain(domain(1))?;
             envelope.insert_domain(domain(2))?;
@@ -195,8 +200,8 @@ fn a_deleted_domain_stays_absent_after_close_and_reopen() {
         .unwrap();
     assert_eq!(retired.invalidated_commit_seq, Some(deleted.commit_seq));
     assert_eq!(retired.superseded_by, None);
-    // The delete appended a commit; the snapshot before it still lists the object.
-    let before = store.known_as_of(deleted.commit_seq - 1).unwrap();
+    // The delete appended a commit; the snapshot at the create still lists the object.
+    let before = store.known_as_of(created.commit_seq).unwrap();
     assert!(
         before
             .objects
@@ -205,7 +210,6 @@ fn a_deleted_domain_stays_absent_after_close_and_reopen() {
     );
 }
 
-/// One outbox row as a consumer with an empty checkpoint reads it.
 #[derive(serde::Deserialize)]
 struct ReplayedChange {
     change_kind: String,
@@ -213,7 +217,6 @@ struct ReplayedChange {
     replaced_object_id: Option<String>,
 }
 
-/// Every column of an `ObjectRow`, as the payload serializes it.
 #[derive(serde::Deserialize, Debug, PartialEq, Eq)]
 struct ReplayedObject {
     object_id: String,
@@ -244,7 +247,7 @@ fn replayed_object(object: ObjectRow) -> ReplayedObject {
 }
 
 #[test]
-fn outbox_events_replayed_from_an_empty_checkpoint_rebuild_the_live_registry() {
+fn outbox_events_replayed_from_the_first_position_rebuild_the_live_registry() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
     store
@@ -297,14 +300,13 @@ fn outbox_events_replayed_from_an_empty_checkpoint_rebuild_the_live_registry() {
         })
         .unwrap();
 
-    // Replay from position zero, in position order, folding each change into a registry.
     let connection = Connection::open_with_flags(
         directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
     let mut statement = connection
-        .prepare("SELECT payload FROM outbox WHERE outbox_position > 0 ORDER BY outbox_position")
+        .prepare("SELECT payload FROM outbox ORDER BY outbox_position")
         .unwrap();
     let payloads: Vec<Vec<u8>> = statement
         .query_map([], |row| row.get(0))
@@ -328,9 +330,14 @@ fn outbox_events_replayed_from_an_empty_checkpoint_rebuild_the_live_registry() {
             "retire" => {
                 replayed.remove(&change.object.object_id);
             }
-            // A remediation redacts a field in place; the row stays live.
+            // Remediation can update invalidated rows; replay removes rows with
+            // `invalidated_commit_seq` set. commentlint: allow(JUDGE)
             "operator_remediation" => {
-                replayed.insert(change.object.object_id.clone(), change.object);
+                if change.object.invalidated_commit_seq.is_some() {
+                    replayed.remove(&change.object.object_id);
+                } else {
+                    replayed.insert(change.object.object_id.clone(), change.object);
+                }
             }
             other => panic!("unexpected domain change kind {other}"),
         }
